@@ -18,6 +18,7 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.tmp_tests/
 
 # Runtime outputs
 runs/
@@ -25,8 +26,7 @@ artifacts/
 .researchclaw_cache/
 
 # Local planning notes
-MINI_AUTORESEARCH_DESIGN.md
-SIMPLE_AUTORESEARCH_STUDY_AND_BUILD_PLAN.md
+MDfiles/
 
 # Reference project; keep it locally for study, but do not vendor it into this repo.
 AutoResearchClaw/

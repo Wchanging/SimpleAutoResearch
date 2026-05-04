@@ -29,6 +29,21 @@ This project is inspired by [AutoResearchClaw](https://github.com/aiming-lab/Aut
 
 This repository is in early development. The first milestone is a minimal V1 that can run one complete topic-to-report workflow in about one week of focused implementation.
 
+## Quickstart
+
+The current implementation is a Day 2 skeleton: it creates the staged run directory and writes placeholder artifacts so the pipeline contract can be tested end to end.
+
+```bash
+uv run simple-ar run --topic "toy topic" --to-stage report
+uv run simple-ar status runs/<run-id>
+```
+
+Run tests:
+
+```bash
+uv run python -m unittest discover -s tests
+```
+
 ## Reference
 
 The main reference project is [aiming-lab/AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw). SimpleAutoResearch borrows the core idea of a staged research pipeline, but keeps the first version intentionally compact.
