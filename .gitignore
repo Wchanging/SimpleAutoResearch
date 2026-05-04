@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime outputs
+runs/
+artifacts/
+.researchclaw_cache/
+
+# Local planning notes
+MINI_AUTORESEARCH_DESIGN.md
+SIMPLE_AUTORESEARCH_STUDY_AND_BUILD_PLAN.md
+
+# Reference project; keep it locally for study, but do not vendor it into this repo.
+AutoResearchClaw/

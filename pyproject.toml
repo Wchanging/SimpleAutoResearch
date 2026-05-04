@@ -1,0 +1,7 @@
+[project]
+name = "simpleautoresearch"
+version = "0.1.0"
+description = "A teaching-first lightweight auto-research pipeline inspired by AutoResearchClaw."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
