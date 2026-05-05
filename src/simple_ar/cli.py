@@ -21,11 +21,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--output-root", default="runs")
     run_parser.add_argument("--from-stage", default="plan")
     run_parser.add_argument("--to-stage", default="report")
+    run_parser.add_argument("--model", default=None)
+    run_parser.add_argument("--no-llm", action="store_true")
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
     resume_parser.add_argument("run_dir")
     resume_parser.add_argument("--from-stage", default=None)
     resume_parser.add_argument("--to-stage", default="report")
+    resume_parser.add_argument("--model", default=None)
+    resume_parser.add_argument("--no-llm", action="store_true")
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
@@ -45,7 +49,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             config={
                 "from_stage": args.from_stage,
                 "to_stage": args.to_stage,
-                "mode": "day2_stub",
+                "mode": "day3_llm",
+                "model": args.model,
+                "use_llm": not args.no_llm,
             },
         )
         executions = PipelineRunner(_stage_handlers()).run(
@@ -67,7 +73,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             config={
                 "from_stage": from_stage,
                 "to_stage": args.to_stage,
-                "mode": "resume_day2_stub",
+                "mode": "resume_day3_llm",
+                "model": args.model,
+                "use_llm": not args.no_llm,
             },
         )
         executions = PipelineRunner(_stage_handlers()).run(
@@ -88,21 +96,25 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _stage_handlers():
+    """Return the mapping of stages to their respective handler functions."""
     return {Stage(number): handler for number, handler in HANDLERS.items()}
 
 
 def _new_run_dir(output_root: Path, topic: str) -> Path:
+    """Generate a unique timestamped directory path for a new run."""
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = _slugify(topic)
     return output_root / f"{timestamp}-{slug}"
 
 
 def _slugify(text: str) -> str:
+    """Convert text into a URL and folder-friendly slug string."""
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.lower()).strip("-")
     return slug[:50] or "research"
 
 
 def _read_topic(run_dir: Path) -> str:
+    """Read the original research topic from the run directory."""
     topic_path = run_dir / "topic.txt"
     if not topic_path.exists():
         raise SystemExit(f"Missing topic.txt in {run_dir}")
@@ -110,6 +122,7 @@ def _read_topic(run_dir: Path) -> str:
 
 
 def _next_stage_from_state(run_dir: Path) -> str | None:
+    """Read the pipeline_state.json to determine which stage needs to run next."""
     state_path = run_dir / "pipeline_state.json"
     if not state_path.exists():
         return None

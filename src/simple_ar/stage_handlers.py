@@ -1,10 +1,34 @@
 from __future__ import annotations
 
+import json
+
 from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
+from simple_ar.llm import LLMClient, LLMError
 from simple_ar.pipeline import Context
+from simple_ar.prompts import (
+    PLAN_SYSTEM,
+    READ_SYSTEM,
+    SYNTHESIZE_SYSTEM,
+    plan_user_prompt,
+    read_user_prompt,
+    synthesize_user_prompt,
+)
 
 
 def execute_plan(ctx: Context) -> None:
+    client = _llm_client(ctx)
+    if client is not None:
+        try:
+            response = client.ask_json(PLAN_SYSTEM, plan_user_prompt(ctx.topic))
+            goal = _text_field(response, "goal_markdown")
+            problem = _text_field(response, "problem_markdown")
+            if goal and problem:
+                write_text(ctx.artifact_path("goal.md"), _ensure_heading(goal, "Research Goal"))
+                write_text(ctx.artifact_path("problem.md"), _ensure_heading(problem, "Research Problem"))
+                return
+        except LLMError:
+            pass
+
     write_text(
         ctx.artifact_path("goal.md"),
         (
@@ -31,7 +55,7 @@ def execute_search(ctx: Context) -> None:
             "id": "stub-001",
             "title": "Placeholder Paper for Pipeline Testing",
             "authors": ["SimpleAutoResearch"],
-            "abstract": "This placeholder record lets Day 2 validate JSONL artifacts.",
+            "abstract": "This placeholder record lets the pipeline validate JSONL artifacts.",
             "url": "https://example.com/stub-001",
             "source": "stub",
             "problem_excerpt": problem[:160],
@@ -42,6 +66,22 @@ def execute_search(ctx: Context) -> None:
 
 def execute_read(ctx: Context) -> None:
     papers = read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
+    client = _llm_client(ctx)
+    if client is not None:
+        try:
+            response = client.ask_json(
+                READ_SYSTEM,
+                read_user_prompt(json.dumps(papers, indent=2, ensure_ascii=False)),
+            )
+            notes_markdown = _text_field(response, "notes_markdown")
+            paper_notes = response.get("paper_notes")
+            if notes_markdown and isinstance(paper_notes, list):
+                write_json(ctx.artifact_path("paper_notes.json"), paper_notes)
+                write_text(ctx.artifact_path("notes.md"), _ensure_heading(notes_markdown, "Literature Notes"))
+                return
+        except LLMError:
+            pass
+
     notes = [
         {
             "paper_id": paper["id"],
@@ -62,10 +102,28 @@ def execute_read(ctx: Context) -> None:
 
 def execute_synthesize(ctx: Context) -> None:
     notes = read_text(ctx.find_artifact("notes.md") or ctx.artifact_path("notes.md"))
+    paper_notes_path = ctx.find_artifact("paper_notes.json") or ctx.artifact_path("paper_notes.json")
+    paper_notes = read_text(paper_notes_path)
+    client = _llm_client(ctx)
+    if client is not None:
+        try:
+            response = client.ask_json(
+                SYNTHESIZE_SYSTEM,
+                synthesize_user_prompt(notes, paper_notes),
+            )
+            synthesis = _text_field(response, "synthesis_markdown")
+            hypothesis = _text_field(response, "hypothesis_markdown")
+            if synthesis and hypothesis:
+                write_text(ctx.artifact_path("synthesis.md"), _ensure_heading(synthesis, "Synthesis"))
+                write_text(ctx.artifact_path("hypothesis.md"), _ensure_heading(hypothesis, "Hypothesis"))
+                return
+        except LLMError:
+            pass
+
     write_text(
         ctx.artifact_path("synthesis.md"),
         "# Synthesis\n\n"
-        "The current Day 2 stub confirms that stage outputs can become later inputs.\n\n"
+        "The current skeleton confirms that stage outputs can become later inputs.\n\n"
         f"Notes excerpt:\n\n{notes[:500]}\n",
     )
     write_text(
@@ -81,7 +139,7 @@ def execute_design(ctx: Context) -> None:
     write_json(
         ctx.artifact_path("experiment_plan.json"),
         {
-            "name": "day2_pipeline_stub",
+            "name": "pipeline_stub",
             "hypothesis": hypothesis.strip(),
             "dataset": "built_in_stub",
             "baseline": "manual_artifact_check",
@@ -94,7 +152,7 @@ def execute_design(ctx: Context) -> None:
 def execute_code(ctx: Context) -> None:
     plan = read_json(ctx.find_artifact("experiment_plan.json") or ctx.artifact_path("experiment_plan.json"))
     code = (
-        '"""Generated Day 2 placeholder experiment."""\n\n'
+        '"""Generated placeholder experiment."""\n\n'
         "def main() -> None:\n"
         f"    print('experiment: {plan['name']}')\n"
         "    print('completed_stages: 8')\n\n"
@@ -107,7 +165,7 @@ def execute_code(ctx: Context) -> None:
 def execute_run(ctx: Context) -> None:
     experiment_path = ctx.find_artifact("experiment.py")
     write_text(ctx.artifact_path("stdout.txt"), f"validated: {experiment_path}\ncompleted_stages: 8\n")
-    write_text(ctx.artifact_path("stderr.txt"), "No subprocess execution in Day 2 stub.\n")
+    write_text(ctx.artifact_path("stderr.txt"), "No subprocess execution in skeleton mode.\n")
     write_json(
         ctx.artifact_path("results.json"),
         {
@@ -123,15 +181,16 @@ def execute_report(ctx: Context) -> None:
     synthesis = read_text(ctx.find_artifact("synthesis.md") or ctx.artifact_path("synthesis.md"))
     results = read_json(ctx.find_artifact("results.json") or ctx.artifact_path("results.json"))
     papers = read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
+    results_json = json.dumps(results, indent=2, ensure_ascii=False)
     write_text(
         ctx.artifact_path("report.md"),
         (
             f"# SimpleAutoResearch Stub Report\n\n"
             f"## Topic\n\n{ctx.topic}\n\n"
             f"## Synthesis\n\n{synthesis}\n\n"
-            f"## Results\n\n```json\n{results}\n```\n\n"
+            f"## Results\n\n```json\n{results_json}\n```\n\n"
             "## Limitations\n\n"
-            "This is a Day 2 skeleton report. Literature, LLM, experiment execution, "
+            "This is a skeleton report. Literature search, experiment execution, "
             "and citation verification will be implemented in later days.\n"
         ),
     )
@@ -159,3 +218,26 @@ HANDLERS = {
     7: execute_run,
     8: execute_report,
 }
+
+
+def _llm_client(ctx: Context) -> LLMClient | None:
+    if ctx.config.get("use_llm") is not True:
+        return None
+    model_value = ctx.config.get("model")
+    model = str(model_value) if model_value else None
+    try:
+        return LLMClient.from_env(model=model)
+    except LLMError:
+        return None
+
+
+def _text_field(data: dict[str, object], key: str) -> str:
+    value = data.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _ensure_heading(markdown: str, heading: str) -> str:
+    stripped = markdown.strip()
+    if stripped.startswith("#"):
+        return stripped + "\n"
+    return f"# {heading}\n\n{stripped}\n"

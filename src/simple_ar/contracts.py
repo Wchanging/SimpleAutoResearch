@@ -7,6 +7,7 @@ from simple_ar.stages import Stage
 
 @dataclass(frozen=True)
 class StageContract:
+    """Defines the I/O requirements for a stage, acting as a mandatory physical constraint."""
     stage: Stage
     inputs: tuple[str, ...]
     outputs: tuple[str, ...]

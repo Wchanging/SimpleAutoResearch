@@ -27,23 +27,28 @@ StageHandler = Callable[["Context"], None]
 
 
 def utcnow_iso() -> str:
+    """Return the current UTC time in ISO 8601 format."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 @dataclass
 class Context:
+    """Runtime context for the pipeline, managing run directory, config, and artifact resolution."""
     run_dir: Path
     topic: str
     config: dict[str, object] = field(default_factory=dict)
     current_stage: Stage = Stage.PLAN
 
     def stage_dir(self, stage: Stage | None = None) -> Path:
+        """Get the directory path for a specific stage (or current stage if not provided)."""
         return self.run_dir / stage_dir_name(stage or self.current_stage)
 
     def artifact_path(self, filename: str, stage: Stage | None = None) -> Path:
+        """Get the absolute path to a specific artifact within a stage's directory."""
         return self.stage_dir(stage) / filename
 
     def find_artifact(self, filename: str) -> Path | None:
+        """Search backwards through all completed stages to find a specific artifact."""
         for stage in reversed(STAGE_SEQUENCE):
             candidate = self.artifact_path(filename, stage)
             if candidate.exists():
@@ -64,6 +69,8 @@ class StageExecution:
 
 
 class PipelineRunner:
+    """Manages the full lifecycle of pipeline execution, including iteration, validation, and error handling."""
+
     def __init__(self, handlers: dict[Stage, StageHandler]) -> None:
         self.handlers = handlers
 
@@ -74,6 +81,7 @@ class PipelineRunner:
         from_stage: Stage | str | int = Stage.PLAN,
         to_stage: Stage | str | int = Stage.REPORT,
     ) -> list[StageExecution]:
+        """Execute pipeline stages sequentially, applying I/O contracts and saving progress."""
         start = parse_stage(from_stage)
         end = parse_stage(to_stage)
         executions: list[StageExecution] = []

@@ -31,11 +31,25 @@ This repository is in early development. The first milestone is a minimal V1 tha
 
 ## Quickstart
 
-The current implementation is a Day 2 skeleton: it creates the staged run directory and writes placeholder artifacts so the pipeline contract can be tested end to end.
+The current implementation is a Day 3 skeleton: it creates the staged run directory, writes placeholder artifacts for the later stages, and can optionally use the OpenAI SDK for the plan/read/synthesize stages.
+
+Create a local environment file:
 
 ```bash
-uv run simple-ar run --topic "toy topic" --to-stage report
+cp .env.example .env
+```
+
+Then set `OPENAI_API_KEY` in `.env`. You can also set `SIMPLE_AR_MODEL`, which defaults to `gpt-4o-mini`.
+
+```bash
+uv run simple-ar run --topic "toy topic" --to-stage report --model gpt-4o-mini
 uv run simple-ar status runs/<run-id>
+```
+
+Offline mode is available for contract and pipeline testing:
+
+```bash
+uv run simple-ar run --topic "toy topic" --to-stage report --no-llm
 ```
 
 Run tests:

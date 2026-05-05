@@ -29,10 +29,12 @@ STAGE_SLUGS: dict[Stage, str] = {
 
 
 def stage_dir_name(stage: Stage) -> str:
+    """Return the formatted directory name for a stage, e.g., '01-plan'."""
     return f"{int(stage):02d}-{STAGE_SLUGS[stage]}"
 
 
 def parse_stage(value: str | int | Stage) -> Stage:
+    """Parse a flexible input (enum, int, or string) into a Stage enum."""
     if isinstance(value, Stage):
         return value
     if isinstance(value, int):
@@ -51,6 +53,7 @@ def parse_stage(value: str | int | Stage) -> Stage:
 
 
 def stage_range(from_stage: Stage, to_stage: Stage) -> tuple[Stage, ...]:
+    """Return a tuple of stages from from_stage to to_stage inclusive."""
     if int(from_stage) > int(to_stage):
         raise ValueError(
             f"from_stage must be <= to_stage, got {from_stage.name} > {to_stage.name}"
