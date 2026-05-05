@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
-from simple_ar.llm import LLMClient, LLMError
+from simple_ar.llm import LLMClient, LLMError, LLMRequest
 from simple_ar.pipeline import Context
 from simple_ar.prompts import (
     PLAN_SYSTEM,
     READ_SYSTEM,
     SYNTHESIZE_SYSTEM,
+    paper_note_user_prompt,
     plan_user_prompt,
-    read_user_prompt,
     synthesize_user_prompt,
 )
 
@@ -19,6 +20,7 @@ def execute_plan(ctx: Context) -> None:
     client = _llm_client(ctx)
     if client is not None:
         try:
+            ctx.emit("stage_message", "Calling LLM for research planning.")
             response = client.ask_json(PLAN_SYSTEM, plan_user_prompt(ctx.topic))
             goal = _text_field(response, "goal_markdown")
             problem = _text_field(response, "problem_markdown")
@@ -26,7 +28,8 @@ def execute_plan(ctx: Context) -> None:
                 write_text(ctx.artifact_path("goal.md"), _ensure_heading(goal, "Research Goal"))
                 write_text(ctx.artifact_path("problem.md"), _ensure_heading(problem, "Research Problem"))
                 return
-        except LLMError:
+        except LLMError as exc:
+            ctx.emit("stage_message", f"LLM planning failed; using offline fallback. {exc}")
             pass
 
     write_text(
@@ -67,37 +70,29 @@ def execute_search(ctx: Context) -> None:
 def execute_read(ctx: Context) -> None:
     papers = read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
     client = _llm_client(ctx)
-    if client is not None:
+    if client is not None and papers:
         try:
-            response = client.ask_json(
-                READ_SYSTEM,
-                read_user_prompt(json.dumps(papers, indent=2, ensure_ascii=False)),
-            )
-            notes_markdown = _text_field(response, "notes_markdown")
-            paper_notes = response.get("paper_notes")
-            if notes_markdown and isinstance(paper_notes, list):
-                write_json(ctx.artifact_path("paper_notes.json"), paper_notes)
-                write_text(ctx.artifact_path("notes.md"), _ensure_heading(notes_markdown, "Literature Notes"))
-                return
-        except LLMError:
+            notes = _read_paper_notes_with_llm(ctx, client, papers)
+            write_json(ctx.artifact_path("paper_notes.json"), notes)
+            write_text(ctx.artifact_path("notes.md"), _notes_markdown(notes))
+            return
+        except LLMError as exc:
+            ctx.emit("stage_message", f"LLM reading failed; using offline fallback. {exc}")
             pass
 
     notes = [
         {
             "paper_id": paper["id"],
+            "title": paper.get("title", ""),
             "problem": "Pipeline validation",
             "method": "Placeholder metadata",
+            "limitation": "No real literature search has been implemented yet.",
             "relevance": "Confirms artifact passing between stages.",
         }
         for paper in papers
     ]
     write_json(ctx.artifact_path("paper_notes.json"), notes)
-    write_text(
-        ctx.artifact_path("notes.md"),
-        "# Literature Notes\n\n"
-        + "\n".join(f"- `{note['paper_id']}`: {note['relevance']}" for note in notes)
-        + "\n",
-    )
+    write_text(ctx.artifact_path("notes.md"), _notes_markdown(notes))
 
 
 def execute_synthesize(ctx: Context) -> None:
@@ -107,6 +102,7 @@ def execute_synthesize(ctx: Context) -> None:
     client = _llm_client(ctx)
     if client is not None:
         try:
+            ctx.emit("stage_message", "Calling LLM for synthesis.")
             response = client.ask_json(
                 SYNTHESIZE_SYSTEM,
                 synthesize_user_prompt(notes, paper_notes),
@@ -117,7 +113,8 @@ def execute_synthesize(ctx: Context) -> None:
                 write_text(ctx.artifact_path("synthesis.md"), _ensure_heading(synthesis, "Synthesis"))
                 write_text(ctx.artifact_path("hypothesis.md"), _ensure_heading(hypothesis, "Hypothesis"))
                 return
-        except LLMError:
+        except LLMError as exc:
+            ctx.emit("stage_message", f"LLM synthesis failed; using offline fallback. {exc}")
             pass
 
     write_text(
@@ -221,14 +218,109 @@ HANDLERS = {
 
 
 def _llm_client(ctx: Context) -> LLMClient | None:
+    """Create an LLM client for a stage when LLM mode is enabled.
+
+    Args:
+        ctx: Current pipeline context containing runtime configuration.
+
+    Returns:
+        Configured client, or ``None`` when offline fallback should be used.
+    """
     if ctx.config.get("use_llm") is not True:
         return None
     model_value = ctx.config.get("model")
     model = str(model_value) if model_value else None
     try:
         return LLMClient.from_env(model=model)
-    except LLMError:
+    except LLMError as exc:
+        ctx.emit("stage_message", f"LLM unavailable; using offline fallback. {exc}")
         return None
+
+
+def _read_paper_notes_with_llm(
+    ctx: Context,
+    client: LLMClient,
+    papers: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Create one structured note per paper using concurrent LLM requests.
+
+    Args:
+        ctx: Current pipeline context.
+        client: Configured LLM client.
+        papers: Paper metadata loaded from ``papers.jsonl``.
+
+    Returns:
+        Normalized paper notes suitable for ``paper_notes.json``.
+    """
+    requests = [
+        LLMRequest(
+            system=READ_SYSTEM,
+            user=paper_note_user_prompt(json.dumps(paper, indent=2, ensure_ascii=False)),
+            label=_paper_id(paper, index),
+        )
+        for index, paper in enumerate(papers, start=1)
+    ]
+    workers = min(_llm_max_workers(ctx), len(requests))
+    ctx.emit(
+        "stage_message",
+        f"Calling LLM for {len(requests)} paper note(s) with {workers} worker(s).",
+    )
+    responses = client.ask_json_many(requests, max_workers=workers)
+    return [
+        _normalize_paper_note(paper, response, index)
+        for index, (paper, response) in enumerate(zip(papers, responses), start=1)
+    ]
+
+
+def _normalize_paper_note(
+    paper: dict[str, Any],
+    response: dict[str, Any],
+    index: int,
+) -> dict[str, str]:
+    """Merge model output with source metadata into a stable note schema."""
+    return {
+        "paper_id": _text_field(response, "paper_id") or _paper_id(paper, index),
+        "title": str(paper.get("title", "")),
+        "problem": _text_field(response, "problem") or "Not specified.",
+        "method": _text_field(response, "method") or "Not specified.",
+        "limitation": _text_field(response, "limitation") or "Not specified.",
+        "relevance": _text_field(response, "relevance") or "Not specified.",
+    }
+
+
+def _notes_markdown(notes: list[dict[str, str]]) -> str:
+    """Render structured paper notes as inspectable Markdown."""
+    lines = ["# Literature Notes", ""]
+    for note in notes:
+        lines.append(f"## {note['paper_id']}")
+        if note.get("title"):
+            lines.append(f"Title: {note['title']}")
+        lines.extend(
+            [
+                f"- Problem: {note['problem']}",
+                f"- Method: {note['method']}",
+                f"- Limitation: {note['limitation']}",
+                f"- Relevance: {note['relevance']}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _paper_id(paper: dict[str, Any], index: int) -> str:
+    """Return a stable paper identifier for prompts and generated notes."""
+    value = paper.get("id")
+    return str(value) if value else f"paper-{index:03d}"
+
+
+def _llm_max_workers(ctx: Context) -> int:
+    """Read the configured LLM worker limit, falling back to a safe default."""
+    value = ctx.config.get("llm_max_workers", 4)
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        workers = 4
+    return max(1, workers)
 
 
 def _text_field(data: dict[str, object], key: str) -> str:

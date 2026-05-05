@@ -31,7 +31,7 @@ This repository is in early development. The first milestone is a minimal V1 tha
 
 ## Quickstart
 
-The current implementation is a Day 3 skeleton: it creates the staged run directory, writes placeholder artifacts for the later stages, and can optionally use the OpenAI SDK for the plan/read/synthesize stages.
+The current implementation creates the staged run directory, writes placeholder artifacts for the later stages, and can optionally use the OpenAI SDK for the plan/read/synthesize stages. Command-line runs show stage progress by default so the workflow remains inspectable while it is running.
 
 Create a local environment file:
 
@@ -39,11 +39,17 @@ Create a local environment file:
 cp .env.example .env
 ```
 
-Then set `OPENAI_API_KEY` in `.env`. You can also set `SIMPLE_AR_MODEL`, which defaults to `gpt-4o-mini`.
+Then set `OPENAI_API_KEY` in `.env`. For third-party OpenAI-compatible APIs, also set `OPENAI_BASE_URL`, for example `https://api.example.com/v1`. You can set `SIMPLE_AR_MODEL`, which defaults to `gpt-4o-mini`.
 
 ```bash
 uv run simple-ar run --topic "toy topic" --to-stage report --model gpt-4o-mini
 uv run simple-ar status runs/<run-id>
+```
+
+Use `--llm-workers` to control concurrent LLM requests in stages that can batch work, and `--quiet` when you only want the final summary:
+
+```bash
+uv run simple-ar run --topic "toy topic" --to-stage report --llm-workers 4
 ```
 
 Offline mode is available for contract and pipeline testing:

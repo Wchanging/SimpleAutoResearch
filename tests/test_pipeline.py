@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from simple_ar.pipeline import Context, MissingInputError, PipelineRunner
+from simple_ar.pipeline import Context, MissingInputError, PipelineEvent, PipelineRunner
 from simple_ar.stage_handlers import HANDLERS
 from simple_ar.stages import Stage
 
@@ -47,6 +47,20 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len(executions), 8)
             self.assertTrue((ctx.run_dir / "08-report" / "report.md").is_file())
             self.assertTrue((ctx.run_dir / "manifest.json").is_file())
+
+    def test_reporter_receives_stage_progress_events(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            events: list[PipelineEvent] = []
+            ctx = Context(Path(tmp) / "run", "toy topic")
+
+            PipelineRunner(handlers(), reporter=events.append).run(ctx, to_stage=Stage.PLAN)
+
+            event_names = [event.name for event in events]
+            self.assertIn("pipeline_start", event_names)
+            self.assertIn("stage_start", event_names)
+            self.assertIn("stage_done", event_names)
+            self.assertIn("pipeline_done", event_names)
 
 
 if __name__ == "__main__":

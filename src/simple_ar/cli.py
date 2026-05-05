@@ -8,8 +8,9 @@ from typing import Sequence
 
 from simple_ar.artifacts import read_json, read_text
 from simple_ar.pipeline import Context, PipelineRunner
+from simple_ar.reporting import ConsoleReporter
 from simple_ar.stage_handlers import HANDLERS
-from simple_ar.stages import Stage, parse_stage
+from simple_ar.stages import Stage
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,14 +23,18 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--from-stage", default="plan")
     run_parser.add_argument("--to-stage", default="report")
     run_parser.add_argument("--model", default=None)
+    run_parser.add_argument("--llm-workers", type=int, default=4)
     run_parser.add_argument("--no-llm", action="store_true")
+    run_parser.add_argument("--quiet", action="store_true")
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
     resume_parser.add_argument("run_dir")
     resume_parser.add_argument("--from-stage", default=None)
     resume_parser.add_argument("--to-stage", default="report")
     resume_parser.add_argument("--model", default=None)
+    resume_parser.add_argument("--llm-workers", type=int, default=4)
     resume_parser.add_argument("--no-llm", action="store_true")
+    resume_parser.add_argument("--quiet", action="store_true")
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
@@ -43,23 +48,26 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "run":
         run_dir = _new_run_dir(Path(args.output_root), args.topic)
+        reporter = ConsoleReporter(enabled=not args.quiet)
         ctx = Context(
             run_dir=run_dir,
             topic=args.topic,
             config={
                 "from_stage": args.from_stage,
                 "to_stage": args.to_stage,
-                "mode": "day3_llm",
+                "mode": "offline" if args.no_llm else "llm",
                 "model": args.model,
+                "llm_max_workers": args.llm_workers,
                 "use_llm": not args.no_llm,
             },
         )
-        executions = PipelineRunner(_stage_handlers()).run(
+        executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
             ctx,
             from_stage=args.from_stage,
             to_stage=args.to_stage,
         )
-        print(f"Run directory: {run_dir}")
+        if args.quiet:
+            print(f"Run directory: {run_dir}")
         print(f"Stages completed: {len(executions)}")
         return
 
@@ -67,23 +75,26 @@ def main(argv: Sequence[str] | None = None) -> None:
         run_dir = Path(args.run_dir)
         topic = _read_topic(run_dir)
         from_stage = args.from_stage or _next_stage_from_state(run_dir) or "plan"
+        reporter = ConsoleReporter(enabled=not args.quiet)
         ctx = Context(
             run_dir=run_dir,
             topic=topic,
             config={
                 "from_stage": from_stage,
                 "to_stage": args.to_stage,
-                "mode": "resume_day3_llm",
+                "mode": "offline" if args.no_llm else "llm",
                 "model": args.model,
+                "llm_max_workers": args.llm_workers,
                 "use_llm": not args.no_llm,
             },
         )
-        executions = PipelineRunner(_stage_handlers()).run(
+        executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
             ctx,
             from_stage=from_stage,
             to_stage=args.to_stage,
         )
-        print(f"Run directory: {run_dir}")
+        if args.quiet:
+            print(f"Run directory: {run_dir}")
         print(f"Resumed from: {from_stage}")
         print(f"Stages completed: {len(executions)}")
         return

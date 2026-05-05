@@ -23,6 +23,24 @@ class MissingOutputError(PipelineError):
     pass
 
 
+@dataclass(frozen=True)
+class PipelineEvent:
+    """Progress event emitted by the pipeline runner and stage handlers.
+
+    Args:
+        name: Stable event name used by reporters, such as ``stage_start``.
+        message: Human-readable summary of the event.
+        stage: Pipeline stage related to the event, if any.
+        data: Additional structured fields for logs or console rendering.
+    """
+
+    name: str
+    message: str
+    stage: Stage | None = None
+    data: dict[str, object] = field(default_factory=dict)
+
+
+ProgressReporter = Callable[[PipelineEvent], None]
 StageHandler = Callable[["Context"], None]
 
 
@@ -33,11 +51,21 @@ def utcnow_iso() -> str:
 
 @dataclass
 class Context:
-    """Runtime context for the pipeline, managing run directory, config, and artifact resolution."""
+    """Runtime context for one research run.
+
+    Args:
+        run_dir: Directory where stage artifacts and metadata are written.
+        topic: User-provided research topic.
+        config: JSON-serializable runtime options captured with the run.
+        current_stage: Stage currently being executed.
+        reporter: Optional callback used to surface progress events.
+    """
+
     run_dir: Path
     topic: str
     config: dict[str, object] = field(default_factory=dict)
     current_stage: Stage = Stage.PLAN
+    reporter: ProgressReporter | None = field(default=None, repr=False, compare=False)
 
     def stage_dir(self, stage: Stage | None = None) -> Path:
         """Get the directory path for a specific stage (or current stage if not provided)."""
@@ -55,6 +83,33 @@ class Context:
                 return candidate
         return None
 
+    def emit(
+        self,
+        name: str,
+        message: str,
+        *,
+        stage: Stage | None = None,
+        **data: object,
+    ) -> None:
+        """Send a progress event to the configured reporter.
+
+        Args:
+            name: Stable event name for programmatic handling.
+            message: Human-readable event summary.
+            stage: Stage associated with the event. Defaults to ``current_stage``.
+            **data: Additional structured event fields.
+        """
+        if self.reporter is None:
+            return
+        self.reporter(
+            PipelineEvent(
+                name=name,
+                message=message,
+                stage=stage or self.current_stage,
+                data=data,
+            )
+        )
+
 
 @dataclass(frozen=True)
 class StageExecution:
@@ -71,8 +126,14 @@ class StageExecution:
 class PipelineRunner:
     """Manages the full lifecycle of pipeline execution, including iteration, validation, and error handling."""
 
-    def __init__(self, handlers: dict[Stage, StageHandler]) -> None:
+    def __init__(
+        self,
+        handlers: dict[Stage, StageHandler],
+        *,
+        reporter: ProgressReporter | None = None,
+    ) -> None:
         self.handlers = handlers
+        self.reporter = reporter
 
     def run(
         self,
@@ -82,20 +143,56 @@ class PipelineRunner:
         to_stage: Stage | str | int = Stage.REPORT,
     ) -> list[StageExecution]:
         """Execute pipeline stages sequentially, applying I/O contracts and saving progress."""
+        if self.reporter is not None:
+            ctx.reporter = self.reporter
         start = parse_stage(from_stage)
         end = parse_stage(to_stage)
+        stages = stage_range(start, end)
         executions: list[StageExecution] = []
 
         self._ensure_run_scaffold(ctx)
-        for stage in stage_range(start, end):
+        ctx.emit(
+            "pipeline_start",
+            "Pipeline run started.",
+            stage=start,
+            run_dir=str(ctx.run_dir),
+            topic=ctx.topic,
+            from_stage=start.name.lower(),
+            to_stage=end.name.lower(),
+            total_stages=len(stages),
+        )
+
+        for stage_index, stage in enumerate(stages, start=1):
             ctx.current_stage = stage
             contract = CONTRACTS[stage]
-            self._check_inputs(ctx, contract)
-
             stage_dir = ctx.stage_dir(stage)
             stage_dir.mkdir(parents=True, exist_ok=True)
             started_at = utcnow_iso()
             t0 = time.monotonic()
+            ctx.emit(
+                "stage_start",
+                f"{stage.name.lower()} stage started.",
+                stage=stage,
+                stage_index=stage_index,
+                total_stages=len(stages),
+                inputs=list(contract.inputs),
+                outputs=list(contract.outputs),
+            )
+
+            try:
+                self._check_inputs(ctx, contract)
+            except Exception as exc:
+                ctx.emit(
+                    "stage_failed",
+                    f"{stage.name.lower()} stage failed input validation.",
+                    stage=stage,
+                    stage_index=stage_index,
+                    total_stages=len(stages),
+                    duration_sec=round(time.monotonic() - t0, 3),
+                    error=str(exc),
+                )
+                raise
+
             self._write_stage_meta(
                 stage_dir,
                 StageExecution(
@@ -107,6 +204,13 @@ class PipelineRunner:
                     inputs=contract.inputs,
                     outputs=contract.outputs,
                 ),
+            )
+            ctx.emit(
+                "stage_inputs_ok",
+                f"{stage.name.lower()} inputs are ready.",
+                stage=stage,
+                stage_index=stage_index,
+                total_stages=len(stages),
             )
 
             try:
@@ -126,6 +230,15 @@ class PipelineRunner:
                 )
                 self._write_stage_meta(stage_dir, execution)
                 self._write_pipeline_state(ctx, stage, "failed")
+                ctx.emit(
+                    "stage_failed",
+                    f"{stage.name.lower()} stage failed.",
+                    stage=stage,
+                    stage_index=stage_index,
+                    total_stages=len(stages),
+                    duration_sec=execution.duration_sec,
+                    error=str(exc),
+                )
                 raise
 
             ended_at = utcnow_iso()
@@ -140,9 +253,25 @@ class PipelineRunner:
             )
             self._write_stage_meta(stage_dir, execution)
             self._write_pipeline_state(ctx, stage, "done")
+            ctx.emit(
+                "stage_done",
+                f"{stage.name.lower()} stage completed.",
+                stage=stage,
+                stage_index=stage_index,
+                total_stages=len(stages),
+                duration_sec=execution.duration_sec,
+                outputs=list(contract.outputs),
+            )
             executions.append(execution)
 
         self._write_manifest(ctx)
+        ctx.emit(
+            "pipeline_done",
+            "Pipeline run completed.",
+            stage=end,
+            run_dir=str(ctx.run_dir),
+            completed_stages=len(executions),
+        )
         return executions
 
     def _ensure_run_scaffold(self, ctx: Context) -> None:
