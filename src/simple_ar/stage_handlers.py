@@ -4,6 +4,10 @@ import json
 from typing import Any
 
 from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
+from simple_ar.literature.arxiv_client import ArxivSearchClient, LiteratureSearchError
+from simple_ar.literature.bibtex import papers_to_bibtex
+from simple_ar.literature.models import Paper
+from simple_ar.literature.verify import validate_citations
 from simple_ar.llm import LLMClient, LLMError, LLMRequest
 from simple_ar.pipeline import Context
 from simple_ar.prompts import (
@@ -14,6 +18,7 @@ from simple_ar.prompts import (
     plan_user_prompt,
     synthesize_user_prompt,
 )
+from simple_ar.usage import record_llm_usage
 
 
 def execute_plan(ctx: Context) -> None:
@@ -21,7 +26,11 @@ def execute_plan(ctx: Context) -> None:
     if client is not None:
         try:
             ctx.emit("stage_message", "Calling LLM for research planning.")
-            response = client.ask_json(PLAN_SYSTEM, plan_user_prompt(ctx.topic))
+            response = client.ask_json(
+                PLAN_SYSTEM,
+                plan_user_prompt(ctx.topic),
+                label="plan",
+            )
             goal = _text_field(response, "goal_markdown")
             problem = _text_field(response, "problem_markdown")
             if goal and problem:
@@ -53,18 +62,36 @@ def execute_plan(ctx: Context) -> None:
 
 def execute_search(ctx: Context) -> None:
     problem = read_text(ctx.find_artifact("problem.md") or ctx.artifact_path("problem.md"))
-    rows = [
-        {
-            "id": "stub-001",
-            "title": "Placeholder Paper for Pipeline Testing",
-            "authors": ["SimpleAutoResearch"],
-            "abstract": "This placeholder record lets the pipeline validate JSONL artifacts.",
-            "url": "https://example.com/stub-001",
-            "source": "stub",
-            "problem_excerpt": problem[:160],
-        }
-    ]
-    write_jsonl(ctx.artifact_path("papers.jsonl"), rows)
+    query = _search_query(ctx, problem)
+    max_papers = _max_papers(ctx)
+
+    papers: list[Paper]
+    meta: dict[str, object] = {
+        "query": query,
+        "max_papers": max_papers,
+        "source": "fixture",
+        "status": "fallback",
+    }
+    if ctx.config.get("use_arxiv") is True:
+        try:
+            ctx.emit("stage_message", f"Searching arXiv for up to {max_papers} paper(s).")
+            papers = ArxivSearchClient(page_size=max_papers).search(query, max_results=max_papers)
+            if not papers:
+                raise LiteratureSearchError("arXiv returned no results")
+            meta.update({"source": "arxiv", "status": "ok", "returned": len(papers)})
+        except LiteratureSearchError as exc:
+            if ctx.config.get("strict_search") is True:
+                raise
+            ctx.emit("stage_message", f"arXiv search failed; using fixture metadata. {exc}")
+            papers = _fixture_papers(problem)
+            meta.update({"fallback_reason": str(exc), "returned": len(papers)})
+    else:
+        ctx.emit("stage_message", "Using fixture paper metadata.")
+        papers = _fixture_papers(problem)
+        meta.update({"returned": len(papers)})
+
+    write_jsonl(ctx.artifact_path("papers.jsonl"), [paper.to_row() for paper in papers])
+    write_json(ctx.artifact_path("search_meta.json"), meta)
 
 
 def execute_read(ctx: Context) -> None:
@@ -106,6 +133,7 @@ def execute_synthesize(ctx: Context) -> None:
             response = client.ask_json(
                 SYNTHESIZE_SYSTEM,
                 synthesize_user_prompt(notes, paper_notes),
+                label="synthesize",
             )
             synthesis = _text_field(response, "synthesis_markdown")
             hypothesis = _text_field(response, "hypothesis_markdown")
@@ -177,32 +205,28 @@ def execute_run(ctx: Context) -> None:
 def execute_report(ctx: Context) -> None:
     synthesis = read_text(ctx.find_artifact("synthesis.md") or ctx.artifact_path("synthesis.md"))
     results = read_json(ctx.find_artifact("results.json") or ctx.artifact_path("results.json"))
-    papers = read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
+    papers = [
+        Paper.from_row(row)
+        for row in read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
+    ]
     results_json = json.dumps(results, indent=2, ensure_ascii=False)
-    write_text(
-        ctx.artifact_path("report.md"),
-        (
-            f"# SimpleAutoResearch Stub Report\n\n"
-            f"## Topic\n\n{ctx.topic}\n\n"
-            f"## Synthesis\n\n{synthesis}\n\n"
-            f"## Results\n\n```json\n{results_json}\n```\n\n"
-            "## Limitations\n\n"
-            "This is a skeleton report. Literature search, experiment execution, "
-            "and citation verification will be implemented in later days.\n"
-        ),
+    report = (
+        "# SimpleAutoResearch Report\n\n"
+        f"## Topic\n\n{ctx.topic}\n\n"
+        f"## Related Work\n\n{_related_work_markdown(papers)}\n\n"
+        f"## Synthesis\n\n{synthesis}\n\n"
+        f"## Results\n\n```json\n{results_json}\n```\n\n"
+        "## Citation Safety\n\n"
+        "All citations in this report are generated from `papers.jsonl`; "
+        "`references.bib` is built from the same metadata.\n\n"
+        "## Limitations\n\n"
+        "The report is generated from staged artifacts. Literature coverage is "
+        "limited by the configured search query and paper limit, and the current "
+        "experiment runner is still a teaching scaffold.\n"
     )
-    bib_entries = []
-    for paper in papers:
-        bib_entries.append(
-            "@misc{"
-            + str(paper["id"]).replace("-", "_")
-            + ",\n"
-            + f"  title = {{{paper['title']}}},\n"
-            + f"  author = {{{' and '.join(paper['authors'])}}},\n"
-            + f"  url = {{{paper['url']}}}\n"
-            + "}"
-        )
-    write_text(ctx.artifact_path("references.bib"), "\n\n".join(bib_entries) + "\n")
+    validate_citations(report, {paper.id for paper in papers})
+    write_text(ctx.artifact_path("report.md"), report)
+    write_text(ctx.artifact_path("references.bib"), papers_to_bibtex(papers))
 
 
 HANDLERS = {
@@ -215,6 +239,67 @@ HANDLERS = {
     7: execute_run,
     8: execute_report,
 }
+
+
+def _search_query(ctx: Context, problem: str) -> str:
+    """Build the literature search query for the current run.
+
+    Args:
+        ctx: Current pipeline context.
+        problem: Research problem Markdown from the plan stage.
+
+    Returns:
+        User-provided search query when configured, otherwise a compact query
+        derived from the original topic.
+    """
+    configured = ctx.config.get("search_query")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    topic = ctx.topic.strip()
+    if topic:
+        return topic[:240]
+    return " ".join(problem.split())[:240]
+
+
+def _max_papers(ctx: Context) -> int:
+    """Read the configured paper limit with a conservative default."""
+    value = ctx.config.get("max_papers", 5)
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = 5
+    return min(max(1, limit), 20)
+
+
+def _fixture_papers(problem: str) -> list[Paper]:
+    """Return deterministic paper metadata for offline tests and demos."""
+    return [
+        Paper(
+            id="fixture-001",
+            title="Placeholder Paper for Pipeline Testing",
+            authors=["SimpleAutoResearch"],
+            abstract="This placeholder record lets the pipeline validate JSONL artifacts.",
+            url="https://example.com/fixture-001",
+            published="2026-01-01",
+            categories=["cs.CL"],
+            source="fixture",
+            source_id="fixture-001",
+        )
+    ]
+
+
+def _related_work_markdown(papers: list[Paper]) -> str:
+    """Render a short related-work section using only known paper ids."""
+    if not papers:
+        return "No paper metadata was available."
+    lines = []
+    for paper in papers:
+        author_text = ", ".join(paper.authors[:3]) if paper.authors else "Unknown authors"
+        if len(paper.authors) > 3:
+            author_text += ", et al."
+        published = f" ({paper.published[:4]})" if paper.published else ""
+        lines.append(f"- {paper.title} by {author_text}{published} [@{paper.id}].")
+    return "\n".join(lines)
 
 
 def _llm_client(ctx: Context) -> LLMClient | None:
@@ -231,7 +316,10 @@ def _llm_client(ctx: Context) -> LLMClient | None:
     model_value = ctx.config.get("model")
     model = str(model_value) if model_value else None
     try:
-        return LLMClient.from_env(model=model)
+        return LLMClient.from_env(
+            model=model,
+            usage_callback=lambda usage: record_llm_usage(ctx, usage),
+        )
     except LLMError as exc:
         ctx.emit("stage_message", f"LLM unavailable; using offline fallback. {exc}")
         return None

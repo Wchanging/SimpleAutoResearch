@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from simple_ar.llm import LLMClient, LLMError, LLMRequest, parse_json_object
+from simple_ar.llm import LLMClient, LLMError, LLMRequest, estimate_tokens, parse_json_object
 
 
 class LLMParsingTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class LLMParsingTests(unittest.TestCase):
     def test_ask_json_many_preserves_input_order(self) -> None:
         client = object.__new__(LLMClient)
 
-        def fake_ask_json(system: str, user: str) -> dict[str, str]:
+        def fake_ask_json(system: str, user: str, *, label: str = "") -> dict[str, str]:
             return {"system": system, "user": user}
 
         client.ask_json = fake_ask_json
@@ -43,6 +43,10 @@ class LLMParsingTests(unittest.TestCase):
 
         with self.assertRaises(LLMError):
             LLMClient.ask_many(client, requests, max_workers=0)
+
+    def test_estimate_tokens_is_deterministic_and_nonzero_for_text(self) -> None:
+        self.assertEqual(estimate_tokens(""), 0)
+        self.assertGreaterEqual(estimate_tokens("hello"), 1)
 
 
 if __name__ == "__main__":

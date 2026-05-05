@@ -27,6 +27,18 @@ def write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     write_text(path, text)
 
 
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    """Append one JSON object as a JSONL row.
+
+    Args:
+        path: Destination JSONL file.
+        row: JSON-serializable mapping to append.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in read_text(path).splitlines():

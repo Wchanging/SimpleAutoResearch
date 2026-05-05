@@ -45,7 +45,9 @@ class PipelineTests(unittest.TestCase):
             executions = PipelineRunner(handlers()).run(ctx)
 
             self.assertEqual(len(executions), 8)
+            self.assertTrue((ctx.run_dir / "02-search" / "search_meta.json").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "report.md").is_file())
+            self.assertTrue((ctx.run_dir / "08-report" / "references.bib").is_file())
             self.assertTrue((ctx.run_dir / "manifest.json").is_file())
 
     def test_reporter_receives_stage_progress_events(self) -> None:

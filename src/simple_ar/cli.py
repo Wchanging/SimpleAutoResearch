@@ -24,7 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--to-stage", default="report")
     run_parser.add_argument("--model", default=None)
     run_parser.add_argument("--llm-workers", type=int, default=4)
+    run_parser.add_argument("--max-papers", type=int, default=5)
+    run_parser.add_argument("--search-query", default=None)
     run_parser.add_argument("--no-llm", action="store_true")
+    run_parser.add_argument("--offline-search", action="store_true")
+    run_parser.add_argument("--strict-search", action="store_true")
     run_parser.add_argument("--quiet", action="store_true")
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
@@ -33,7 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--to-stage", default="report")
     resume_parser.add_argument("--model", default=None)
     resume_parser.add_argument("--llm-workers", type=int, default=4)
+    resume_parser.add_argument("--max-papers", type=int, default=5)
+    resume_parser.add_argument("--search-query", default=None)
     resume_parser.add_argument("--no-llm", action="store_true")
+    resume_parser.add_argument("--offline-search", action="store_true")
+    resume_parser.add_argument("--strict-search", action="store_true")
     resume_parser.add_argument("--quiet", action="store_true")
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
@@ -58,7 +66,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "mode": "offline" if args.no_llm else "llm",
                 "model": args.model,
                 "llm_max_workers": args.llm_workers,
+                "max_papers": args.max_papers,
+                "search_query": args.search_query,
                 "use_llm": not args.no_llm,
+                "use_arxiv": not args.offline_search,
+                "strict_search": args.strict_search,
             },
         )
         executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
@@ -85,7 +97,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "mode": "offline" if args.no_llm else "llm",
                 "model": args.model,
                 "llm_max_workers": args.llm_workers,
+                "max_papers": args.max_papers,
+                "search_query": args.search_query,
                 "use_llm": not args.no_llm,
+                "use_arxiv": not args.offline_search,
+                "strict_search": args.strict_search,
             },
         )
         executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(

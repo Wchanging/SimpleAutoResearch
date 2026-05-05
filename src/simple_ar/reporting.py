@@ -36,6 +36,10 @@ class ConsoleReporter:
             print(f"  - {event.message}", flush=True)
             return
 
+        if event.name == "llm_usage":
+            print(f"  - {event.message}", flush=True)
+            return
+
         if event.name == "stage_done":
             outputs = event.data.get("outputs", [])
             output_text = ", ".join(str(item) for item in outputs) if isinstance(outputs, list) else ""

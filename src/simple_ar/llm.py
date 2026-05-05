@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence, TypeVar
 
@@ -12,6 +13,7 @@ from openai import OpenAI
 
 
 T = TypeVar("T")
+UsageCallback = Callable[["LLMUsage"], None]
 
 
 class LLMError(RuntimeError):
@@ -26,11 +28,53 @@ class LLMSettings:
         model: Model name passed to the provider.
         api_key: API key used for authentication.
         base_url: Optional OpenAI-compatible API base URL.
+        input_price_per_million: Optional input-token price used for local cost
+            estimates.
+        output_price_per_million: Optional output-token price used for local
+            cost estimates.
     """
 
     model: str = "gpt-4o-mini"
     api_key: str = ""
     base_url: str = ""
+    input_price_per_million: float | None = None
+    output_price_per_million: float | None = None
+
+
+@dataclass(frozen=True)
+class LLMUsage:
+    """Token usage for one LLM request.
+
+    Args:
+        model: Model used for the request.
+        label: Optional caller-supplied request label.
+        prompt_tokens: Input token count.
+        completion_tokens: Output token count.
+        total_tokens: Total token count.
+        source: ``provider`` when usage came from the API, otherwise
+            ``estimated``.
+        estimated_cost_usd: Estimated USD cost when pricing is configured.
+    """
+
+    model: str
+    label: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    source: str
+    estimated_cost_usd: float | None = None
+
+    def to_row(self) -> dict[str, Any]:
+        """Convert usage into a JSON-serializable record."""
+        return {
+            "model": self.model,
+            "label": self.label,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "source": self.source,
+            "estimated_cost_usd": self.estimated_cost_usd,
+        }
 
 
 @dataclass(frozen=True)
@@ -55,11 +99,18 @@ class LLMClient:
     out. Batch helpers only add bounded concurrency and preserve result order.
     """
 
-    def __init__(self, settings: LLMSettings) -> None:
+    def __init__(
+        self,
+        settings: LLMSettings,
+        *,
+        usage_callback: UsageCallback | None = None,
+    ) -> None:
         """Create a client from validated LLM settings.
 
         Args:
             settings: Provider connection settings.
+            usage_callback: Optional callback invoked after each successful
+                request with token usage metadata.
 
         Raises:
             LLMError: If the API key is missing.
@@ -71,14 +122,23 @@ class LLMClient:
             kwargs["base_url"] = settings.base_url
         self._client = OpenAI(**kwargs)
         self.model = settings.model
+        self._settings = settings
+        self._usage_callback = usage_callback
+        self._usage_lock = threading.Lock()
 
     @classmethod
-    def from_env(cls, model: str | None = None) -> "LLMClient":
+    def from_env(
+        cls,
+        model: str | None = None,
+        *,
+        usage_callback: UsageCallback | None = None,
+    ) -> "LLMClient":
         """Load provider settings from ``.env`` and environment variables.
 
         Args:
             model: Optional model override. When omitted, ``SIMPLE_AR_MODEL`` is
                 used, falling back to ``gpt-4o-mini``.
+            usage_callback: Optional usage callback for token accounting.
 
         Returns:
             Configured ``LLMClient`` instance.
@@ -88,15 +148,18 @@ class LLMClient:
             model=model or os.environ.get("SIMPLE_AR_MODEL", "gpt-4o-mini"),
             api_key=os.environ.get("OPENAI_API_KEY", ""),
             base_url=os.environ.get("OPENAI_BASE_URL", ""),
+            input_price_per_million=_optional_float("SIMPLE_AR_INPUT_PRICE_PER_1M"),
+            output_price_per_million=_optional_float("SIMPLE_AR_OUTPUT_PRICE_PER_1M"),
         )
-        return cls(settings)
+        return cls(settings, usage_callback=usage_callback)
 
-    def ask(self, system: str, user: str) -> str:
+    def ask(self, system: str, user: str, *, label: str = "") -> str:
         """Send one text request to the model.
 
         Args:
             system: System instruction.
             user: User prompt.
+            label: Optional label used in usage records.
 
         Returns:
             Model output with surrounding whitespace removed.
@@ -115,7 +178,9 @@ class LLMClient:
             )
             text = getattr(response, "output_text", "")
             if text:
-                return str(text).strip()
+                output = str(text).strip()
+                self._record_usage(response, system, user, output, label=label)
+                return output
         except Exception:
             # Some OpenAI-compatible endpoints support chat completions but not
             # the Responses API. Fall through to the compatibility path.
@@ -130,16 +195,19 @@ class LLMClient:
                 ],
             )
             content = response.choices[0].message.content or ""
-            return content.strip()
+            output = content.strip()
+            self._record_usage(response, system, user, output, label=label)
+            return output
         except Exception as exc:
             raise LLMError(f"LLM request failed: {exc}") from exc
 
-    def ask_json(self, system: str, user: str) -> dict[str, Any]:
+    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, Any]:
         """Send one request and parse the response as a JSON object.
 
         Args:
             system: System instruction.
             user: User prompt. A JSON-only instruction is appended internally.
+            label: Optional label used in usage records.
 
         Returns:
             Parsed JSON object.
@@ -151,6 +219,7 @@ class LLMClient:
             system,
             user
             + "\n\nReturn valid JSON only. Do not include markdown or extra text.",
+            label=label,
         )
         parsed = parse_json_object(raw)
         if parsed is None:
@@ -177,7 +246,7 @@ class LLMClient:
         """
         return self._run_many(
             requests,
-            lambda request: self.ask(request.system, request.user),
+            lambda request: self.ask(request.system, request.user, label=request.label),
             max_workers=max_workers,
         )
 
@@ -201,7 +270,7 @@ class LLMClient:
         """
         return self._run_many(
             requests,
-            lambda request: self.ask_json(request.system, request.user),
+            lambda request: self.ask_json(request.system, request.user, label=request.label),
             max_workers=max_workers,
         )
 
@@ -229,6 +298,52 @@ class LLMClient:
                     label = f" for {request.label}" if request.label else ""
                     raise LLMError(f"LLM batch request failed{label}: {exc}") from exc
             return results
+
+    def _record_usage(
+        self,
+        response: object,
+        system: str,
+        user: str,
+        output: str,
+        *,
+        label: str,
+    ) -> None:
+        """Record provider usage, falling back to local token estimates."""
+        usage = _usage_from_response(response)
+        if usage is None:
+            prompt_tokens = estimate_tokens(system) + estimate_tokens(user)
+            completion_tokens = estimate_tokens(output)
+            total_tokens = prompt_tokens + completion_tokens
+            source = "estimated"
+        else:
+            prompt_tokens, completion_tokens, total_tokens = usage
+            source = "provider"
+            if total_tokens < prompt_tokens + completion_tokens:
+                total_tokens = prompt_tokens + completion_tokens
+
+        record = LLMUsage(
+            model=self.model,
+            label=label,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            source=source,
+            estimated_cost_usd=self._estimated_cost(prompt_tokens, completion_tokens),
+        )
+        if self._usage_callback is not None:
+            with self._usage_lock:
+                self._usage_callback(record)
+
+    def _estimated_cost(self, prompt_tokens: int, completion_tokens: int) -> float | None:
+        """Estimate request cost when caller has configured model pricing."""
+        input_price = self._settings.input_price_per_million
+        output_price = self._settings.output_price_per_million
+        if input_price is None or output_price is None:
+            return None
+        cost = (prompt_tokens / 1_000_000 * input_price) + (
+            completion_tokens / 1_000_000 * output_price
+        )
+        return round(cost, 8)
 
 
 def parse_json_object(text: str) -> dict[str, Any] | None:
@@ -279,3 +394,58 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             continue
     return None
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count from text using a conservative character heuristic.
+
+    Args:
+        text: Prompt or response text.
+
+    Returns:
+        Estimated token count. This is not model-tokenizer exact, but it is
+        deterministic and dependency-free.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return 0
+    return max(1, (len(stripped) + 3) // 4)
+
+
+def _usage_from_response(response: object) -> tuple[int, int, int] | None:
+    """Extract token usage from Responses or chat-completions response objects."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+
+    prompt_tokens = _int_attr(usage, "input_tokens")
+    if prompt_tokens is None:
+        prompt_tokens = _int_attr(usage, "prompt_tokens")
+
+    completion_tokens = _int_attr(usage, "output_tokens")
+    if completion_tokens is None:
+        completion_tokens = _int_attr(usage, "completion_tokens")
+
+    total_tokens = _int_attr(usage, "total_tokens")
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    if total_tokens is None:
+        total_tokens = prompt_tokens + completion_tokens
+    return prompt_tokens, completion_tokens, total_tokens
+
+
+def _int_attr(obj: object, name: str) -> int | None:
+    value = getattr(obj, name, None)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _optional_float(env_name: str) -> float | None:
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
