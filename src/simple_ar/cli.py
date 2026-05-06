@@ -26,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--llm-workers", type=int, default=4)
     run_parser.add_argument("--max-papers", type=int, default=5)
     run_parser.add_argument("--search-query", default=None)
+    run_parser.add_argument("--experiment-template", default="toy_text_classification")
+    run_parser.add_argument("--experiment-timeout", type=int, default=30)
     run_parser.add_argument("--no-llm", action="store_true")
     run_parser.add_argument("--offline-search", action="store_true")
     run_parser.add_argument("--strict-search", action="store_true")
@@ -39,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--llm-workers", type=int, default=4)
     resume_parser.add_argument("--max-papers", type=int, default=5)
     resume_parser.add_argument("--search-query", default=None)
+    resume_parser.add_argument("--experiment-template", default="toy_text_classification")
+    resume_parser.add_argument("--experiment-timeout", type=int, default=30)
     resume_parser.add_argument("--no-llm", action="store_true")
     resume_parser.add_argument("--offline-search", action="store_true")
     resume_parser.add_argument("--strict-search", action="store_true")
@@ -68,6 +72,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "llm_max_workers": args.llm_workers,
                 "max_papers": args.max_papers,
                 "search_query": args.search_query,
+                "experiment_template": args.experiment_template,
+                "experiment_timeout_sec": args.experiment_timeout,
                 "use_llm": not args.no_llm,
                 "use_arxiv": not args.offline_search,
                 "strict_search": args.strict_search,
@@ -99,6 +105,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "llm_max_workers": args.llm_workers,
                 "max_papers": args.max_papers,
                 "search_query": args.search_query,
+                "experiment_template": args.experiment_template,
+                "experiment_timeout_sec": args.experiment_timeout,
                 "use_llm": not args.no_llm,
                 "use_arxiv": not args.offline_search,
                 "strict_search": args.strict_search,

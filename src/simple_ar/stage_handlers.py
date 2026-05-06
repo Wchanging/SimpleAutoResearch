@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
+from simple_ar.experiment.runner import run_experiment
+from simple_ar.experiment.templates import build_experiment_code
 from simple_ar.literature.arxiv_client import ArxivSearchClient, LiteratureSearchError
 from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.models import Paper
@@ -164,42 +166,35 @@ def execute_design(ctx: Context) -> None:
     write_json(
         ctx.artifact_path("experiment_plan.json"),
         {
-            "name": "pipeline_stub",
+            "name": "toy_text_classification",
+            "template": _experiment_template(ctx),
             "hypothesis": hypothesis.strip(),
-            "dataset": "built_in_stub",
-            "baseline": "manual_artifact_check",
-            "method": "stage_contract_runner",
-            "metrics": ["completed_stages"],
+            "dataset": "built_in_toy_spam",
+            "baseline": "keyword_rules",
+            "method": "bag_of_words_logistic_regression",
+            "metrics": ["accuracy", "precision", "recall"],
+            "timeout_sec": _experiment_timeout(ctx),
         },
     )
 
 
 def execute_code(ctx: Context) -> None:
     plan = read_json(ctx.find_artifact("experiment_plan.json") or ctx.artifact_path("experiment_plan.json"))
-    code = (
-        '"""Generated placeholder experiment."""\n\n'
-        "def main() -> None:\n"
-        f"    print('experiment: {plan['name']}')\n"
-        "    print('completed_stages: 8')\n\n"
-        "if __name__ == '__main__':\n"
-        "    main()\n"
-    )
+    ctx.emit("stage_message", f"Generating experiment from template `{plan.get('template', '')}`.")
+    code = build_experiment_code(plan)
     write_text(ctx.artifact_path("experiment.py"), code)
 
 
 def execute_run(ctx: Context) -> None:
     experiment_path = ctx.find_artifact("experiment.py")
-    write_text(ctx.artifact_path("stdout.txt"), f"validated: {experiment_path}\ncompleted_stages: 8\n")
-    write_text(ctx.artifact_path("stderr.txt"), "No subprocess execution in skeleton mode.\n")
-    write_json(
-        ctx.artifact_path("results.json"),
-        {
-            "returncode": 0,
-            "timed_out": False,
-            "metrics": {"completed_stages": 8.0},
-            "mode": "stub",
-        },
-    )
+    if experiment_path is None:
+        raise FileNotFoundError("experiment.py was not found")
+    timeout_sec = _experiment_timeout(ctx)
+    ctx.emit("stage_message", f"Running experiment subprocess with {timeout_sec}s timeout.")
+    result = run_experiment(experiment_path, timeout_sec=timeout_sec)
+    write_text(ctx.artifact_path("stdout.txt"), result.stdout or "No stdout output.\n")
+    write_text(ctx.artifact_path("stderr.txt"), result.stderr or "No stderr output.\n")
+    write_json(ctx.artifact_path("results.json"), result.to_json())
 
 
 def execute_report(ctx: Context) -> None:
@@ -221,8 +216,9 @@ def execute_report(ctx: Context) -> None:
         "`references.bib` is built from the same metadata.\n\n"
         "## Limitations\n\n"
         "The report is generated from staged artifacts. Literature coverage is "
-        "limited by the configured search query and paper limit, and the current "
-        "experiment runner is still a teaching scaffold.\n"
+        "limited by the configured search query and paper limit. The experiment "
+        "uses a tiny built-in teaching dataset, so its metrics demonstrate the "
+        "pipeline mechanics rather than real-world model quality.\n"
     )
     validate_citations(report, {paper.id for paper in papers})
     write_text(ctx.artifact_path("report.md"), report)
@@ -300,6 +296,23 @@ def _related_work_markdown(papers: list[Paper]) -> str:
         published = f" ({paper.published[:4]})" if paper.published else ""
         lines.append(f"- {paper.title} by {author_text}{published} [@{paper.id}].")
     return "\n".join(lines)
+
+
+def _experiment_template(ctx: Context) -> str:
+    """Read the configured experiment template name."""
+    value = ctx.config.get("experiment_template", "toy_text_classification")
+    template = str(value).strip()
+    return template or "toy_text_classification"
+
+
+def _experiment_timeout(ctx: Context) -> int:
+    """Read the experiment subprocess timeout with a safe default."""
+    value = ctx.config.get("experiment_timeout_sec", 30)
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        timeout = 30
+    return min(max(1, timeout), 300)
 
 
 def _llm_client(ctx: Context) -> LLMClient | None:
