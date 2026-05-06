@@ -19,6 +19,7 @@ wheels/
 .ruff_cache/
 .mypy_cache/
 .tmp_tests/
+.simple_ar_cache/
 
 # Runtime outputs
 runs/

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from simple_ar.artifacts import read_json, read_text
 from simple_ar.pipeline import Context, MissingInputError, PipelineEvent, PipelineRunner
 from simple_ar.stage_handlers import HANDLERS
 from simple_ar.stages import Stage
@@ -48,7 +49,22 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue((ctx.run_dir / "02-search" / "search_meta.json").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "report.md").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "references.bib").is_file())
+            self.assertTrue((ctx.run_dir / "08-report" / "manifest.json").is_file())
             self.assertTrue((ctx.run_dir / "manifest.json").is_file())
+
+            manifest = read_json(ctx.run_dir / "manifest.json")
+            self.assertTrue(all(item["status"] == "done" for item in manifest["stages"]))
+
+            report_manifest = read_json(ctx.run_dir / "08-report" / "manifest.json")
+            self.assertEqual(report_manifest["experiment"]["template"], "toy_text_classification")
+            self.assertIn("results.json", report_manifest["source_artifacts"])
+
+            report = read_text(ctx.run_dir / "08-report" / "report.md")
+            self.assertIn("## Abstract", report)
+            self.assertIn("## Literature Search", report)
+            self.assertIn("## Limitations", report)
+            self.assertIn("fixture metadata", report)
+            self.assertIn("## References", report)
 
     def test_reporter_receives_stage_progress_events(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

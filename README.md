@@ -76,15 +76,34 @@ Offline mode is available for contract and pipeline testing. `--no-llm` disables
 uv run simple-ar run --topic "toy topic" --to-stage report --no-llm --offline-search
 ```
 
+Successful arXiv searches are cached locally in `.simple_ar_cache/literature` for short-term reuse. If arXiv returns HTTP 429 or another provider error, SimpleAutoResearch first tries that cache, then falls back to fixture metadata so the pipeline remains runnable for demos and tests. A small circuit breaker also pauses live arXiv attempts briefly after rate limits. Use `--strict-search` when you want a failed arXiv search to stop the run instead of producing a cache-backed or fixture-backed report:
+
+```bash
+uv run simple-ar run --topic "agent simulation" --to-stage search --strict-search
+```
+
+Resume a run from the next recorded stage, or explicitly choose where to restart:
+
+```bash
+uv run simple-ar resume runs/<run-id>
+uv run simple-ar resume runs/<run-id> --from-stage run --to-stage report
+```
+
 Each run may include:
 
+- `manifest.json`: root run manifest with stage statuses and declared outputs.
+- `pipeline_state.json`: last completed stage and next stage for resume.
 - `02-search/papers.jsonl`: normalized paper metadata.
 - `02-search/search_meta.json`: query, source, status, and result count.
 - `llm_usage.jsonl`: one row per successful LLM request.
 - `llm_usage_summary.json`: aggregate token counts and optional cost estimate.
 - `06-code/experiment.py`: generated from the fixed `toy_text_classification` template.
 - `07-run/results.json`: subprocess return code, timeout flag, command, and parsed metrics.
+- `08-report/report.md`: final Markdown report assembled from staged artifacts.
 - `08-report/references.bib`: BibTeX generated only from `papers.jsonl`.
+- `08-report/manifest.json`: report package manifest listing source artifacts, report artifacts, experiment metadata, metrics, and rerun commands.
+
+When LLM mode is enabled, the report stage asks the model to write a more paper-like Markdown report from the staged artifacts. The prompt is evidence-bounded: it may only use known paper ids, staged literature metadata, and numbers from `results.json`. The system still strips any model-written references section and appends verified references from `papers.jsonl`.
 
 ## Experiment Templates
 

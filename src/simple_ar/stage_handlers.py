@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
 from simple_ar.experiment.runner import run_experiment
 from simple_ar.experiment.templates import build_experiment_code
-from simple_ar.literature.arxiv_client import ArxivSearchClient, LiteratureSearchError
+from simple_ar.literature.arxiv_client import ArxivRateLimitError, ArxivSearchClient, LiteratureSearchError
 from simple_ar.literature.bibtex import papers_to_bibtex
+from simple_ar.literature.cache import get_cached, put_cache
 from simple_ar.literature.models import Paper
-from simple_ar.literature.verify import validate_citations
+from simple_ar.literature.verify import CitationError, validate_citations
 from simple_ar.llm import LLMClient, LLMError, LLMRequest
-from simple_ar.pipeline import Context
+from simple_ar.pipeline import Context, utcnow_iso
 from simple_ar.prompts import (
     PLAN_SYSTEM,
     READ_SYSTEM,
+    REPORT_SYSTEM,
     SYNTHESIZE_SYSTEM,
     paper_note_user_prompt,
     plan_user_prompt,
+    report_user_prompt,
     synthesize_user_prompt,
 )
 from simple_ar.usage import record_llm_usage
@@ -80,13 +84,20 @@ def execute_search(ctx: Context) -> None:
             papers = ArxivSearchClient(page_size=max_papers).search(query, max_results=max_papers)
             if not papers:
                 raise LiteratureSearchError("arXiv returned no results")
+            put_cache(query, "arxiv", max_papers, [paper.to_row() for paper in papers])
             meta.update({"source": "arxiv", "status": "ok", "returned": len(papers)})
+        except ArxivRateLimitError as exc:
+            if ctx.config.get("strict_search") is True:
+                raise
+            ctx.emit("stage_message", "arXiv rate limit hit; checking local cache.")
+            papers, cache_hit = _cached_or_fixture_papers(ctx, query, max_papers, problem)
+            meta.update(_fallback_meta("rate_limited", str(exc), papers, cache_hit))
         except LiteratureSearchError as exc:
             if ctx.config.get("strict_search") is True:
                 raise
-            ctx.emit("stage_message", f"arXiv search failed; using fixture metadata. {exc}")
-            papers = _fixture_papers(problem)
-            meta.update({"fallback_reason": str(exc), "returned": len(papers)})
+            ctx.emit("stage_message", f"arXiv search failed. {exc}")
+            papers, cache_hit = _cached_or_fixture_papers(ctx, query, max_papers, problem)
+            meta.update(_fallback_meta("provider_error", str(exc), papers, cache_hit))
     else:
         ctx.emit("stage_message", "Using fixture paper metadata.")
         papers = _fixture_papers(problem)
@@ -94,6 +105,66 @@ def execute_search(ctx: Context) -> None:
 
     write_jsonl(ctx.artifact_path("papers.jsonl"), [paper.to_row() for paper in papers])
     write_json(ctx.artifact_path("search_meta.json"), meta)
+
+
+def _cached_or_fixture_papers(
+    ctx: Context,
+    query: str,
+    max_papers: int,
+    problem: str,
+) -> tuple[list[Paper], bool]:
+    """Return cached arXiv papers after failure, or deterministic fixture rows.
+
+    Args:
+        ctx: Current pipeline context for progress messages.
+        query: arXiv query used for the live search attempt.
+        max_papers: Search result limit.
+        problem: Problem artifact used to build fixture metadata if needed.
+
+    Returns:
+        ``(papers, cache_hit)`` where ``cache_hit`` tells the caller whether the
+        papers came from the local literature cache.
+    """
+    cached_rows = get_cached(query, "arxiv", max_papers)
+    if cached_rows:
+        ctx.emit(
+            "stage_message",
+            f"Using {len(cached_rows)} cached arXiv paper(s) after live search failed.",
+        )
+        return [Paper.from_row(row) for row in cached_rows], True
+
+    ctx.emit(
+        "stage_message",
+        "No cached arXiv metadata available; using fixture metadata. "
+        "Use --strict-search when this should fail the run.",
+    )
+    return _fixture_papers(problem), False
+
+
+def _fallback_meta(
+    failure_type: str,
+    reason: str,
+    papers: list[Paper],
+    cache_hit: bool,
+) -> dict[str, object]:
+    """Build search metadata for cache or fixture fallback paths."""
+    if cache_hit:
+        return {
+            "source": "arxiv_cache",
+            "status": "cache",
+            "cache_hit": True,
+            "failure_type": failure_type,
+            "fallback_reason": reason,
+            "returned": len(papers),
+        }
+    return {
+        "source": "fixture",
+        "status": "fallback",
+        "cache_hit": False,
+        "failure_type": failure_type,
+        "fallback_reason": reason,
+        "returned": len(papers),
+    }
 
 
 def execute_read(ctx: Context) -> None:
@@ -198,31 +269,40 @@ def execute_run(ctx: Context) -> None:
 
 
 def execute_report(ctx: Context) -> None:
+    goal = _safe_read_artifact(ctx, "goal.md")
+    problem = _safe_read_artifact(ctx, "problem.md")
+    search_meta = _safe_read_json_artifact(ctx, "search_meta.json")
     synthesis = read_text(ctx.find_artifact("synthesis.md") or ctx.artifact_path("synthesis.md"))
+    hypothesis = _safe_read_artifact(ctx, "hypothesis.md")
+    plan = _safe_read_json_artifact(ctx, "experiment_plan.json")
     results = read_json(ctx.find_artifact("results.json") or ctx.artifact_path("results.json"))
+    paper_rows = read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
     papers = [
         Paper.from_row(row)
-        for row in read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
+        for row in paper_rows
     ]
-    results_json = json.dumps(results, indent=2, ensure_ascii=False)
-    report = (
-        "# SimpleAutoResearch Report\n\n"
-        f"## Topic\n\n{ctx.topic}\n\n"
-        f"## Related Work\n\n{_related_work_markdown(papers)}\n\n"
-        f"## Synthesis\n\n{synthesis}\n\n"
-        f"## Results\n\n```json\n{results_json}\n```\n\n"
-        "## Citation Safety\n\n"
-        "All citations in this report are generated from `papers.jsonl`; "
-        "`references.bib` is built from the same metadata.\n\n"
-        "## Limitations\n\n"
-        "The report is generated from staged artifacts. Literature coverage is "
-        "limited by the configured search query and paper limit. The experiment "
-        "uses a tiny built-in teaching dataset, so its metrics demonstrate the "
-        "pipeline mechanics rather than real-world model quality.\n"
+    report = _report_with_llm(
+        ctx,
+        goal=goal,
+        problem=problem,
+        search_meta=search_meta,
+        synthesis=synthesis,
+        hypothesis=hypothesis,
+        plan=plan,
+        results=results,
+        paper_rows=paper_rows,
+        papers=papers,
     )
+    if report is None:
+        report = _build_report(ctx, goal, problem, search_meta, synthesis, hypothesis, plan, results, papers)
+    report = _append_references_section(_strip_references_section(report), papers)
     validate_citations(report, {paper.id for paper in papers})
     write_text(ctx.artifact_path("report.md"), report)
     write_text(ctx.artifact_path("references.bib"), papers_to_bibtex(papers))
+    write_json(
+        ctx.artifact_path("manifest.json"),
+        _report_manifest(ctx, search_meta, plan, results, papers),
+    )
 
 
 HANDLERS = {
@@ -296,6 +376,452 @@ def _related_work_markdown(papers: list[Paper]) -> str:
         published = f" ({paper.published[:4]})" if paper.published else ""
         lines.append(f"- {paper.title} by {author_text}{published} [@{paper.id}].")
     return "\n".join(lines)
+
+
+def _report_with_llm(
+    ctx: Context,
+    *,
+    goal: str,
+    problem: str,
+    search_meta: dict[str, Any],
+    synthesis: str,
+    hypothesis: str,
+    plan: dict[str, Any],
+    results: dict[str, Any],
+    paper_rows: list[dict[str, Any]],
+    papers: list[Paper],
+) -> str | None:
+    """Generate the final report with an evidence-bounded LLM prompt.
+
+    Args:
+        ctx: Current pipeline context.
+        goal: Goal Markdown produced by the plan stage.
+        problem: Problem Markdown produced by the plan stage.
+        search_meta: Search metadata produced by the search stage.
+        synthesis: Synthesis Markdown produced by the synthesize stage.
+        hypothesis: Hypothesis Markdown produced by the synthesize stage.
+        plan: Experiment plan JSON from the design stage.
+        results: Experiment run result JSON from the run stage.
+        paper_rows: Raw paper rows loaded from ``papers.jsonl``.
+        papers: Normalized paper metadata.
+
+    Returns:
+        Model-written report Markdown, or ``None`` if LLM mode is disabled or
+        the output fails validation.
+    """
+    client = _llm_client(ctx)
+    if client is None:
+        return None
+
+    try:
+        ctx.emit("stage_message", "Calling LLM for polished report drafting.")
+        response = client.ask_json(
+            REPORT_SYSTEM,
+            report_user_prompt(
+                topic=ctx.topic,
+                goal_markdown=goal,
+                problem_markdown=problem,
+                search_meta_json=json.dumps(search_meta, indent=2, ensure_ascii=False),
+                papers_json=json.dumps(paper_rows, indent=2, ensure_ascii=False),
+                synthesis_markdown=synthesis,
+                hypothesis_markdown=hypothesis,
+                experiment_plan_json=json.dumps(plan, indent=2, ensure_ascii=False),
+                results_json=json.dumps(results, indent=2, ensure_ascii=False),
+            ),
+            label="report",
+        )
+        report = _text_field(response, "report_markdown")
+        if not report:
+            raise LLMError("report_markdown was empty")
+        report = _strip_references_section(report)
+        validate_citations(report, {paper.id for paper in papers})
+        return report.strip() + "\n"
+    except (LLMError, CitationError) as exc:
+        ctx.emit("stage_message", f"LLM report drafting failed; using structured fallback. {exc}")
+        return None
+
+
+def _build_report(
+    ctx: Context,
+    goal: str,
+    problem: str,
+    search_meta: dict[str, Any],
+    synthesis: str,
+    hypothesis: str,
+    plan: dict[str, Any],
+    results: dict[str, Any],
+    papers: list[Paper],
+) -> str:
+    """Build the final Markdown report strictly from staged artifacts.
+
+    Args:
+        ctx: Current pipeline context.
+        goal: Goal Markdown produced by the plan stage.
+        problem: Problem Markdown produced by the plan stage.
+        search_meta: Search metadata produced by the search stage.
+        synthesis: Synthesis Markdown produced by the synthesize stage.
+        hypothesis: Hypothesis Markdown produced by the synthesize stage.
+        plan: Experiment plan JSON from the design stage.
+        results: Experiment run result JSON from the run stage.
+        papers: Paper metadata loaded from ``papers.jsonl``.
+
+    Returns:
+        A complete Markdown report with citation ids limited to known papers.
+    """
+    return (
+        f"# {_report_title(ctx, plan)}\n\n"
+        "## Abstract\n\n"
+        f"{_abstract_markdown(ctx, results)}\n\n"
+        "## Introduction\n\n"
+        f"{_introduction_markdown(ctx, goal, problem, search_meta)}\n\n"
+        "## Related Work\n\n"
+        f"{_related_work_markdown(papers)}\n\n"
+        "## Method\n\n"
+        f"{_method_markdown(plan)}\n\n"
+        "## Experiments\n\n"
+        f"{_experiment_markdown(results)}\n\n"
+        "## Results\n\n"
+        f"{_results_markdown(results)}\n\n"
+        "## Literature Search\n\n"
+        f"{_search_markdown(search_meta)}\n\n"
+        "## Discussion\n\n"
+        f"{_discussion_markdown(synthesis, hypothesis)}\n\n"
+        "## Limitations\n\n"
+        f"{_limitations_markdown(ctx, search_meta, results)}\n\n"
+        "## Conclusion\n\n"
+        f"{_conclusion_markdown(results)}\n"
+    )
+
+
+def _abstract_markdown(ctx: Context, results: dict[str, Any]) -> str:
+    """Summarize the run without introducing unstaged research claims."""
+    status = "timed out" if results.get("timed_out") is True else "completed"
+    metrics = results.get("metrics")
+    metric_count = len(metrics) if isinstance(metrics, dict) else 0
+    return (
+        f"This short report studies `{ctx.topic}` through the deliberately narrow "
+        "lens of SimpleAutoResearch, a staged and file-based auto-research "
+        "workflow. The run combines literature metadata, artifact-level synthesis, "
+        "a controlled template experiment, and a reproducible report package. "
+        f"The experiment {status} and produced {metric_count} parsed metric(s), "
+        "which are treated as evidence about the pipeline and its toy task rather "
+        "than as broad scientific proof."
+    )
+
+
+def _report_title(ctx: Context, plan: dict[str, Any]) -> str:
+    """Create a conservative paper-style title for fallback reports."""
+    template = str(plan.get("template", "template experiment"))
+    return f"A Reproducible Mini Auto-Research Study of {ctx.topic} with {template}"
+
+
+def _introduction_markdown(
+    ctx: Context,
+    goal: str,
+    problem: str,
+    search_meta: dict[str, Any],
+) -> str:
+    """Render a prose introduction from planning and search artifacts."""
+    research_question = _markdown_body(problem) or _markdown_body(goal) or ctx.topic
+    source = search_meta.get("source", "unknown") if search_meta else "unknown"
+    status = search_meta.get("status", "unknown") if search_meta else "unknown"
+    return (
+        f"The starting point for this run is the question of how to study "
+        f"`{ctx.topic}` with a workflow whose intermediate reasoning remains "
+        "visible. Rather than asking a single opaque agent call to produce a final "
+        "answer, SimpleAutoResearch decomposes the work into explicit stages: "
+        "planning, literature search, reading, synthesis, experiment design, code "
+        "generation, execution, and reporting. This design makes the research "
+        "process easier to inspect because every transition is represented by a "
+        "concrete file artifact.\n\n"
+        f"The planned research question was: {research_question} The literature "
+        f"stage recorded search source `{source}` with status `{status}`, so the "
+        "strength of the resulting narrative depends directly on that provenance. "
+        "The report therefore treats the experiment and the literature notes as "
+        "bounded evidence rather than as a general claim about the entire topic."
+    )
+
+
+def _method_markdown(plan: dict[str, Any]) -> str:
+    """Render the experiment plan into a compact method section."""
+    if not plan:
+        return "No experiment plan artifact was available."
+    metrics = plan.get("metrics", [])
+    metric_text = ", ".join(str(item) for item in metrics) if isinstance(metrics, list) else str(metrics)
+    return (
+        f"The experiment is generated from the `{plan.get('template', 'unknown')}` "
+        f"template, which fixes the dataset, baseline, method, and metric set before "
+        "execution. This restriction is intentional: the current system favors a "
+        "small, auditable experiment over unconstrained code generation. The dataset "
+        f"is `{plan.get('dataset', 'unknown')}`, the baseline is "
+        f"`{plan.get('baseline', 'unknown')}`, and the comparison method is "
+        f"`{plan.get('method', 'unknown')}`. The recorded metrics are "
+        f"{metric_text or 'not specified'}, and they are parsed from stdout rather "
+        "than handwritten into the report."
+    )
+
+
+def _experiment_markdown(results: dict[str, Any]) -> str:
+    """Describe how the generated experiment was executed."""
+    command = results.get("command", [])
+    command_text = " ".join(str(item) for item in command) if isinstance(command, list) else str(command)
+    return (
+        "The generated script is saved at `06-code/experiment.py`. It was run "
+        "as a subprocess with stdout and stderr captured into `07-run/stdout.txt` "
+        "and `07-run/stderr.txt`, while structured execution metadata is stored in "
+        "`07-run/results.json`. The command was "
+        f"`{command_text or 'not recorded'}`. The process returned "
+        f"`{results.get('returncode')}` and the timeout flag was "
+        f"`{results.get('timed_out')}`."
+    )
+
+
+def _results_markdown(results: dict[str, Any]) -> str:
+    """Render parsed metrics and raw result metadata."""
+    metrics = results.get("metrics", {})
+    if isinstance(metrics, dict) and metrics:
+        rows = ["| Metric | Value |", "|---|---:|"]
+        rows.extend(f"| `{name}` | {_format_metric(value)} |" for name, value in sorted(metrics.items()))
+        return (
+            "The subprocess output yielded the following parsed metrics. The table "
+            "reports only values found in `results.json`, preserving the distinction "
+            "between measured output and narrative interpretation.\n\n"
+            + "\n".join(rows)
+        )
+    return "No numeric metrics were parsed from stdout, so the report cannot make quantitative claims."
+
+
+def _search_markdown(search_meta: dict[str, Any]) -> str:
+    """Render search provenance so fallback runs are visible in the report."""
+    if not search_meta:
+        return "No search metadata was available."
+    text = (
+        f"The literature stage searched for `{search_meta.get('query', '')}` and "
+        f"recorded source `{search_meta.get('source', 'unknown')}` with status "
+        f"`{search_meta.get('status', 'unknown')}`. It returned "
+        f"`{search_meta.get('returned', 0)}` paper record(s)."
+    )
+    failure_type = search_meta.get("failure_type")
+    extras: list[str] = []
+    if failure_type:
+        extras.append(f"failure type `{failure_type}`")
+    fallback_reason = search_meta.get("fallback_reason")
+    if fallback_reason:
+        extras.append(f"fallback reason: {fallback_reason}")
+    if extras:
+        text += " The recorded fallback details are " + "; ".join(extras) + "."
+    return text
+
+
+def _discussion_markdown(synthesis: str, hypothesis: str) -> str:
+    """Integrate synthesis and hypothesis artifacts into paper-style discussion."""
+    synthesis_body = _clean_discussion_artifact(_markdown_body(synthesis))
+    hypothesis_body = _clean_discussion_artifact(_markdown_body(hypothesis))
+    if not synthesis_body and not hypothesis_body:
+        return "No synthesis or hypothesis artifacts were available for discussion."
+    if not synthesis_body:
+        return f"The run produced the following testable framing: {hypothesis_body}"
+    if not hypothesis_body:
+        return synthesis_body
+    return (
+        f"The synthesis stage framed the available evidence as follows: {synthesis_body} "
+        f"Building on that synthesis, the run proposed this hypothesis: {hypothesis_body}"
+    )
+
+
+def _clean_discussion_artifact(text: str) -> str:
+    """Remove debug-style excerpts from synthesis artifacts before reporting."""
+    cleaned = text.split("Notes excerpt:", maxsplit=1)[0].strip()
+    return " ".join(cleaned.split())
+
+
+def _limitations_markdown(
+    ctx: Context,
+    search_meta: dict[str, Any],
+    results: dict[str, Any],
+) -> str:
+    """Explain scope limits using only runtime configuration and result state."""
+    max_papers = ctx.config.get("max_papers", "unknown")
+    timeout = ctx.config.get("experiment_timeout_sec", "unknown")
+    lines = [
+        "This report is generated from staged artifacts rather than an external human review.",
+        f"Literature coverage is limited by the configured search query and paper limit ({max_papers}).",
+        "The current experiment uses a tiny built-in teaching dataset, so the metrics demonstrate pipeline mechanics rather than real-world model quality.",
+        f"The experiment timeout was configured as {timeout} second(s).",
+    ]
+    if search_meta.get("status") == "fallback" or search_meta.get("source") == "fixture":
+        lines.append(
+            "The literature stage used fixture metadata, so the report should not be treated as a real literature-backed review."
+        )
+    if results.get("timed_out") is True:
+        lines.append("The experiment timed out, so any partial metrics should be treated as incomplete.")
+    elif results.get("returncode") not in {0, "0"}:
+        lines.append("The experiment returned a non-zero code, so the run should be inspected before drawing conclusions.")
+    lines.append(
+        "All citations are restricted to ids present in `02-search/papers.jsonl`, and `references.bib` is generated from the same metadata."
+    )
+    return " ".join(lines)
+
+
+def _conclusion_markdown(results: dict[str, Any]) -> str:
+    """Close the report with a conservative conclusion tied to run status."""
+    if results.get("timed_out") is True:
+        return "The workflow produced a report package, but the experiment timed out and should be rerun or debugged."
+    if results.get("returncode") not in {0, "0"}:
+        return "The workflow produced a report package, but the experiment did not exit cleanly."
+    return (
+        "The workflow produced a complete, inspectable report package from the "
+        "available staged artifacts. The result is best read as a reproducibility "
+        "demo for SimpleAutoResearch rather than a standalone scientific claim."
+    )
+
+
+def _references_markdown(papers: list[Paper]) -> str:
+    """Render a reader-friendly reference list with known citation keys."""
+    if not papers:
+        return "No references were available."
+    lines = []
+    for paper in papers:
+        url = f" {paper.url}" if paper.url else ""
+        lines.append(f"- [@{paper.id}] {paper.title}.{url}")
+    return "\n".join(lines)
+
+
+def _strip_references_section(markdown: str) -> str:
+    """Remove a model-written References section before appending verified refs."""
+    lines = markdown.strip().splitlines()
+    kept: list[str] = []
+    for line in lines:
+        if line.strip().lower().lstrip("#").strip() == "references":
+            break
+        kept.append(line)
+    return "\n".join(kept).strip() + "\n"
+
+
+def _append_references_section(markdown: str, papers: list[Paper]) -> str:
+    """Append deterministic references generated from known paper metadata."""
+    body = markdown.strip()
+    return f"{body}\n\n## References\n\n{_references_markdown(papers)}\n"
+
+
+def _report_manifest(
+    ctx: Context,
+    search_meta: dict[str, Any],
+    plan: dict[str, Any],
+    results: dict[str, Any],
+    papers: list[Paper],
+) -> dict[str, Any]:
+    """Create a reproducibility manifest for the final report directory."""
+    return {
+        "schema_version": 1,
+        "generated_at": utcnow_iso(),
+        "topic": ctx.topic,
+        "run_dir": str(ctx.run_dir),
+        "source_artifacts": _source_artifacts(ctx),
+        "literature_search": search_meta,
+        "report_artifacts": {
+            "report.md": _relative_artifact(ctx, ctx.artifact_path("report.md")),
+            "references.bib": _relative_artifact(ctx, ctx.artifact_path("references.bib")),
+            "manifest.json": _relative_artifact(ctx, ctx.artifact_path("manifest.json")),
+        },
+        "experiment": {
+            "template": plan.get("template"),
+            "dataset": plan.get("dataset"),
+            "baseline": plan.get("baseline"),
+            "method": plan.get("method"),
+            "timeout_sec": plan.get("timeout_sec"),
+            "command": results.get("command", []),
+            "returncode": results.get("returncode"),
+            "timed_out": results.get("timed_out"),
+            "metrics": results.get("metrics", {}),
+        },
+        "papers": [
+            {
+                "id": paper.id,
+                "title": paper.title,
+                "url": paper.url,
+                "source": paper.source,
+                "source_id": paper.source_id,
+            }
+            for paper in papers
+        ],
+        "reproduce": {
+            "rerun_report": f"uv run simple-ar resume {ctx.run_dir} --from-stage report",
+            "rerun_experiment_and_report": f"uv run simple-ar resume {ctx.run_dir} --from-stage run",
+        },
+    }
+
+
+def _source_artifacts(ctx: Context) -> dict[str, str]:
+    """List the source artifacts used by the report package."""
+    artifacts: dict[str, str] = {}
+    for name in (
+        "goal.md",
+        "problem.md",
+        "papers.jsonl",
+        "search_meta.json",
+        "paper_notes.json",
+        "notes.md",
+        "synthesis.md",
+        "hypothesis.md",
+        "experiment_plan.json",
+        "experiment.py",
+        "stdout.txt",
+        "stderr.txt",
+        "results.json",
+    ):
+        ref = _artifact_ref(ctx, name)
+        if ref is not None:
+            artifacts[name] = ref
+    return artifacts
+
+
+def _safe_read_artifact(ctx: Context, filename: str) -> str:
+    """Read an artifact when present, otherwise return an empty string."""
+    path = ctx.find_artifact(filename)
+    return read_text(path) if path is not None else ""
+
+
+def _safe_read_json_artifact(ctx: Context, filename: str) -> dict[str, Any]:
+    """Read a JSON artifact as a dictionary when present."""
+    path = ctx.find_artifact(filename)
+    if path is None:
+        return {}
+    data = read_json(path)
+    return data if isinstance(data, dict) else {}
+
+
+def _markdown_body(markdown: str) -> str:
+    """Remove one leading Markdown heading to avoid nested report sections."""
+    lines = markdown.strip().splitlines()
+    if lines and lines[0].lstrip().startswith("#"):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _format_metric(value: object) -> str:
+    """Format metric values consistently for Markdown."""
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def _artifact_ref(ctx: Context, filename: str) -> str | None:
+    """Return a run-relative artifact path for an existing artifact."""
+    path = ctx.find_artifact(filename)
+    if path is None:
+        return None
+    return _relative_artifact(ctx, path)
+
+
+def _relative_artifact(ctx: Context, path: Path) -> str:
+    """Render a path relative to the run directory when possible."""
+    try:
+        return str(path.relative_to(ctx.run_dir)).replace("\\", "/")
+    except ValueError:
+        return str(path).replace("\\", "/")
 
 
 def _experiment_template(ctx: Context) -> str:

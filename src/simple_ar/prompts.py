@@ -12,6 +12,14 @@ SYNTHESIZE_SYSTEM = (
     "You synthesize literature notes into modest research themes and testable hypotheses."
 )
 
+REPORT_SYSTEM = (
+    "You are an academic paper author writing a concise, evidence-bound research "
+    "report. Write in flowing scholarly prose rather than engineering-log style. "
+    "Use only the supplied artifacts, paper ids, and metrics. Do not invent "
+    "citations, datasets, statistical tests, p-values, confidence intervals, or "
+    "experimental results."
+)
+
 
 def plan_user_prompt(topic: str) -> str:
     """Build the planning prompt for a user-provided research topic.
@@ -81,4 +89,76 @@ def synthesize_user_prompt(notes_markdown: str, paper_notes_json: str) -> str:
         "small enough for a local toy experiment.\n\n"
         f"Notes Markdown:\n{notes_markdown}\n\n"
         f"Structured Notes JSON:\n{paper_notes_json}"
+    )
+
+
+def report_user_prompt(
+    *,
+    topic: str,
+    goal_markdown: str,
+    problem_markdown: str,
+    search_meta_json: str,
+    papers_json: str,
+    synthesis_markdown: str,
+    hypothesis_markdown: str,
+    experiment_plan_json: str,
+    results_json: str,
+) -> str:
+    """Build the final report prompt from staged artifacts.
+
+    Args:
+        topic: Original research topic.
+        goal_markdown: Goal artifact from the plan stage.
+        problem_markdown: Problem artifact from the plan stage.
+        search_meta_json: Search provenance from the search stage.
+        papers_json: Paper metadata rows from ``papers.jsonl``.
+        synthesis_markdown: Synthesis artifact from the synthesize stage.
+        hypothesis_markdown: Hypothesis artifact from the synthesize stage.
+        experiment_plan_json: Experiment plan from the design stage.
+        results_json: Captured experiment results from the run stage.
+
+    Returns:
+        Prompt requesting a polished Markdown paper draft as JSON.
+    """
+    return (
+        "Write JSON with one string field: `report_markdown`.\n\n"
+        "The value must be a polished Markdown research report, not a run log. "
+        "Use this structure exactly:\n"
+        "# <paper title>\n"
+        "## Abstract\n"
+        "## Introduction\n"
+        "## Related Work\n"
+        "## Method\n"
+        "## Experiments\n"
+        "## Results\n"
+        "## Limitations\n"
+        "## Conclusion\n\n"
+        "Writing style rules adapted from AutoResearchClaw:\n"
+        "- Write flowing academic paragraphs. Avoid bullet lists except compact "
+        "metric tables in Results.\n"
+        "- The paper should read like a short workshop paper, not a technical "
+        "artifact inventory.\n"
+        "- Every claim about results must be supported by numbers in `results_json`.\n"
+        "- Do not report p-values, confidence intervals, multiple seeds, or "
+        "statistical significance unless those values appear in `results_json`.\n"
+        "- Do not repeat caveats throughout the paper. Put caveats in Limitations.\n"
+        "- If the literature search used fixture metadata or cache fallback, state "
+        "that provenance honestly in Limitations and avoid claiming a full review.\n"
+        "- If the experiment template is a tiny teaching experiment, frame the "
+        "results as a reproducibility/pipeline demonstration rather than a broad "
+        "scientific claim.\n"
+        "- Use only citations from `papers_json`, in Pandoc style like `[@paper_id]`.\n"
+        "- Never invent a citation key, paper title, arXiv id, DOI, dataset, or method.\n"
+        "- Do not write a References section; the system appends it from "
+        "`papers.jsonl`.\n\n"
+        "Artifacts:\n\n"
+        f"Topic:\n{topic}\n\n"
+        f"Goal Markdown:\n{goal_markdown}\n\n"
+        f"Problem Markdown:\n{problem_markdown}\n\n"
+        f"Search Metadata JSON:\n{search_meta_json}\n\n"
+        f"Papers JSON:\n{papers_json}\n\n"
+        f"Synthesis Markdown:\n{synthesis_markdown}\n\n"
+        f"Hypothesis Markdown:\n{hypothesis_markdown}\n\n"
+        f"Experiment Plan JSON:\n{experiment_plan_json}\n\n"
+        f"Results JSON:\n{results_json}\n"
     )

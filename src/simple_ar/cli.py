@@ -171,11 +171,43 @@ def _print_status(run_dir: Path) -> None:
     if not manifest_path.exists():
         raise SystemExit(f"Missing manifest.json in {run_dir}")
     manifest = read_json(manifest_path)
+    state_path = run_dir / "pipeline_state.json"
+    state = read_json(state_path) if state_path.exists() else {}
+
     print(f"Run: {run_dir}")
     print(f"Topic: {manifest.get('topic', '')}")
+    if state:
+        print(
+            "Pipeline: "
+            f"{state.get('status', 'unknown')} "
+            f"(last={state.get('last_stage', 'none')}, next={state.get('next_stage', 'none')})"
+        )
+
+    print("Stages:")
     for item in manifest.get("stages", []):
-        marker = "done" if item.get("completed") else "pending"
-        print(f"- {item['stage_number']:02d} {item['stage']}: {marker}")
+        marker = _stage_status(item)
+        outputs = item.get("outputs", [])
+        output_text = ", ".join(str(name) for name in outputs) if isinstance(outputs, list) else ""
+        suffix = f" -> {output_text}" if output_text else ""
+        print(f"- {item['stage_number']:02d} {item['stage']}: {marker}{suffix}")
+
+    report_dir = run_dir / "08-report"
+    report_path = report_dir / "report.md"
+    report_manifest_path = report_dir / "manifest.json"
+    if report_path.exists() or report_manifest_path.exists():
+        print("Report:")
+        if report_path.exists():
+            print(f"- report.md: {report_path}")
+        if report_manifest_path.exists():
+            print(f"- manifest.json: {report_manifest_path}")
+
+
+def _stage_status(item: dict[str, object]) -> str:
+    """Return a readable stage status for old and new manifests."""
+    value = item.get("status")
+    if isinstance(value, str) and value:
+        return value
+    return "done" if item.get("completed") else "pending"
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from simple_ar.artifacts import write_json, write_text
+from simple_ar.artifacts import read_json, write_json, write_text
 from simple_ar.contracts import CONTRACTS, StageContract
 from simple_ar.stages import STAGE_SEQUENCE, Stage, parse_stage, stage_dir_name, stage_range
 
@@ -344,17 +344,24 @@ class PipelineRunner:
         stages: list[dict[str, object]] = []
         for stage in STAGE_SEQUENCE:
             meta_path = ctx.artifact_path("stage_meta.json", stage)
+            meta = read_json(meta_path) if meta_path.exists() else {}
+            status = str(meta.get("status", "pending"))
+            contract = CONTRACTS[stage]
             stages.append(
                 {
                     "stage": stage.name.lower(),
                     "stage_number": int(stage),
                     "dir": stage_dir_name(stage),
-                    "completed": meta_path.exists(),
+                    "description": contract.description,
+                    "status": status,
+                    "completed": status == "done",
+                    "outputs": list(contract.outputs),
                 }
             )
         write_json(
             ctx.run_dir / "manifest.json",
             {
+                "schema_version": 1,
                 "topic": ctx.topic,
                 "run_dir": str(ctx.run_dir),
                 "generated_at": utcnow_iso(),
