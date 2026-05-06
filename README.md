@@ -116,11 +116,106 @@ This design deliberately keeps the experiment surface narrow:
 - stdout, stderr, return code, timeout state, and parsed metrics are saved;
 - unsupported template names fail early instead of producing unknown code.
 
+## Why Stage Contracts
+
+The main teaching idea in this repository is that "agentic" behavior becomes easier to understand when every step has a small contract. A stage contract names the files a stage requires and the files it must produce. The runner checks those files before and after each stage, writes `stage_meta.json`, and records pipeline state for resume.
+
+This keeps the first version simple:
+
+- stages communicate through files, not hidden Python objects;
+- failed stages say which input or output is missing;
+- a run can be inspected with a normal file explorer;
+- later agent abstractions can wrap stages without changing the artifact model.
+
+## Run Directory Explained
+
+A completed run looks like this:
+
+```text
+runs/<run-id>/
+  manifest.json
+  pipeline_state.json
+  config_snapshot.json
+  topic.txt
+  llm_usage.jsonl
+  llm_usage_summary.json
+  01-plan/
+  02-search/
+  03-read/
+  04-synthesize/
+  05-design/
+  06-code/
+  07-run/
+  08-report/
+```
+
+The root `manifest.json` is the quick index for the run. `pipeline_state.json` stores the last stage and next stage for resume. Each numbered stage directory contains its own outputs plus `stage_meta.json`, which records status, duration, declared inputs, declared outputs, and any error message.
+
+## Pipeline Stages
+
+| Stage | Main outputs | Purpose |
+|---|---|---|
+| `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question. |
+| `search` | `papers.jsonl`, `search_meta.json` | Collect normalized arXiv paper metadata or explicit fallback metadata. |
+| `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes. |
+| `synthesize` | `synthesis.md`, `hypothesis.md` | Produce a bounded synthesis and testable hypothesis. |
+| `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
+| `code` | `experiment.py` | Generate code from the selected template. |
+| `run` | `results.json`, `stdout.txt`, `stderr.txt` | Execute the experiment and parse numeric metrics. |
+| `report` | `report.md`, `references.bib`, `manifest.json` | Write a paper-like report and reproducibility package. |
+
+## Citation Safety
+
+Reports may only cite paper ids that appear in `02-search/papers.jsonl`. The report stage validates citations before writing the final artifact. If an LLM writes a reference section, SimpleAutoResearch strips it and appends a deterministic reference list generated from the same paper metadata used for validation.
+
+This is intentionally conservative. It does not prove that every cited paper is relevant, but it prevents the most common failure mode: invented citation keys or fabricated bibliography entries.
+
+## Adding a Stage
+
+To add a stage, update these places together:
+
+1. Add the enum value in `src/simple_ar/stages.py`.
+2. Add a `StageContract` in `src/simple_ar/contracts.py`.
+3. Implement a handler function in `src/simple_ar/stage_handlers.py`.
+4. Register the handler in `HANDLERS`.
+5. Add a focused test that checks the new files are produced and validated.
+
+Keep the first version file-first. A new stage should read existing artifacts with `ctx.find_artifact(...)` and write its own outputs with `ctx.artifact_path(...)`.
+
+## Adding an Experiment Template
+
+Experiment templates live in `src/simple_ar/experiment/templates.py`. A new template should:
+
+- be added to `SUPPORTED_TEMPLATES`;
+- generate a complete standalone `experiment.py`;
+- use only dependencies declared in `pyproject.toml`;
+- print machine-parseable metric lines like `metric_name: 0.123`;
+- avoid network access and uncontrolled downloads;
+- have a test in `tests/test_experiment_runner.py`.
+
+The current template system is deliberately not free-form code generation. That boundary is what makes V1 useful for learning and safe enough to run repeatedly.
+
+## Development
+
 Run tests:
 
 ```bash
 uv run python -m unittest discover -s tests
 ```
+
+Useful local smoke run:
+
+```bash
+uv run simple-ar run --topic "keyword rules versus bag-of-words logistic regression for toy spam classification" --to-stage report --no-llm --offline-search
+```
+
+## Roadmap
+
+- More experiment templates with the same safe template boundary.
+- Optional OpenAlex or Semantic Scholar search as a fallback before fixture metadata.
+- Lightweight human-in-the-loop checkpoints before `design` and `report`.
+- More report quality checks, including citation relevance and unsupported numerical claims.
+- Optional Docker sandboxing once the subprocess runner and template model are stable.
 
 ## Reference
 
