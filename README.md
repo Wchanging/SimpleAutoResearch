@@ -12,7 +12,7 @@ This project is inspired by [AutoResearchClaw](https://github.com/aiming-lab/Aut
 - Prefer small reproducible experiments over unconstrained code generation.
 - Produce learning-friendly code that can grow into more capable versions.
 
-## Planned V1 Pipeline
+## V1 Pipeline
 
 ```text
 01 plan        Scope the topic and research question
@@ -27,7 +27,19 @@ This project is inspired by [AutoResearchClaw](https://github.com/aiming-lab/Aut
 
 ## Status
 
-This repository is in early development. The first milestone is a minimal V1 that can run one complete topic-to-report workflow in about one week of focused implementation.
+V1 is published on `main` as a compact, runnable topic-to-report teaching pipeline. Active V2 work lives on the `feat/v2-retrieval-codegen` branch, where the project is exploring retrieval, local artifact analysis, code-task workflows, and cleaner human-in-the-loop checkpoints.
+
+## V2 Direction
+
+V2 is not just an incremental feature pass over V1. It is a chance to re-examine the architecture and keep the project useful as a learning reference instead of letting every new feature become tightly coupled to one full pipeline.
+
+The main design shift is workflow decoupling:
+
+- `research-run`: the current staged research workflow, upgraded with better retrieval, evidence tracking, and report quality checks.
+- `code-task`: a focused workflow for analyzing and improving an existing codebase, benchmark, or experiment script. It should copy the target into an isolated run workspace, build a lightweight code index, ask the model for an edit plan, support human approval before risky changes, run validation commands, and preserve failure evidence.
+- `review` or `survey`: a no-code workflow for literature review and report drafting, where search, reading, synthesis, and reporting can run without experiment design, code generation, or benchmark execution.
+
+V2 will stay local-first and inspectable. Local retrieval should start with metadata, snippets, notes, and small indexes rather than blindly storing every full paper. Code execution should prefer isolated run directories, explicit commands, timeouts, and human approval points before moving toward stronger sandboxing.
 
 ## What It Is
 
@@ -211,11 +223,12 @@ uv run simple-ar run --topic "keyword rules versus bag-of-words logistic regress
 
 ## Roadmap
 
-- More experiment templates with the same safe template boundary.
-- Optional OpenAlex or Semantic Scholar search as a fallback before fixture metadata.
-- Lightweight human-in-the-loop checkpoints before `design` and `report`.
-- More report quality checks, including citation relevance and unsupported numerical claims.
-- Optional Docker sandboxing once the subprocess runner and template model are stable.
+- Artifact retrieval over local run outputs, paper metadata, notes, and optional user-provided files.
+- Decoupled `code-task` workflow for codebase analysis, patch planning, validation, and benchmark-oriented iteration.
+- No-code `review` or `survey` workflow for literature analysis and report generation.
+- Human-in-the-loop checkpoints before patch application, expensive runs, and final report acceptance.
+- More report quality checks, including citation relevance, unsupported numerical claims, and evidence coverage.
+- Optional Docker or virtual-environment sandboxing once the local subprocess runner is stable.
 
 ## Reference
 
