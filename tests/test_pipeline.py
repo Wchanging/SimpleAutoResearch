@@ -51,6 +51,9 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue((ctx.run_dir / "08-report" / "references.bib").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "manifest.json").is_file())
             self.assertTrue((ctx.run_dir / "manifest.json").is_file())
+            self.assertTrue((ctx.run_dir / "source_plan.json").is_file())
+            self.assertTrue((ctx.run_dir / "activity_log.jsonl").is_file())
+            self.assertTrue((ctx.run_dir / "evidence_ledger.jsonl").is_file())
 
             manifest = read_json(ctx.run_dir / "manifest.json")
             self.assertTrue(all(item["status"] == "done" for item in manifest["stages"]))
@@ -58,6 +61,9 @@ class PipelineTests(unittest.TestCase):
             report_manifest = read_json(ctx.run_dir / "08-report" / "manifest.json")
             self.assertEqual(report_manifest["experiment"]["template"], "toy_text_classification")
             self.assertIn("results.json", report_manifest["source_artifacts"])
+            self.assertIn("evidence_ledger.jsonl", report_manifest["source_artifacts"])
+            self.assertGreaterEqual(len(report_manifest["cited_papers"]), 1)
+            self.assertLessEqual(len(report_manifest["cited_papers"]), len(report_manifest["papers"]))
 
             report = read_text(ctx.run_dir / "08-report" / "report.md")
             self.assertIn("## Abstract", report)

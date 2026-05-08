@@ -55,6 +55,8 @@ class RetrievalTests(unittest.TestCase):
                 run_dir / "02-search" / "papers.jsonl",
                 [{"id": "fixture-001", "title": "Toy paper"}],
             )
+            write_json(run_dir / "01-plan" / "stage_meta.json", {"status": "done"})
+            write_json(run_dir / "manifest.json", {"stages": ["plan"]})
 
             index = build_artifact_index(run_dir)
             chunks = build_artifact_chunks(run_dir, index=index)
@@ -65,7 +67,12 @@ class RetrievalTests(unittest.TestCase):
             self.assertTrue(any(row["chunk_kind"] == "markdown-section" for row in rows))
             self.assertTrue(any(row["chunk_kind"] == "python-function" for row in rows))
             self.assertTrue(any(row["chunk_kind"] == "jsonl-row" for row in rows))
+            self.assertFalse(any(row["path"].endswith("stage_meta.json") for row in rows))
+            self.assertFalse(any(row["path"] == "manifest.json" for row in rows))
             self.assertTrue(all(row["line_start"] <= row["line_end"] for row in rows))
+
+            operational = build_artifact_chunks(run_dir, index=index, write=False, include_operational=True)
+            self.assertTrue(any(chunk.path.endswith("stage_meta.json") for chunk in operational))
 
     def test_artifact_search_returns_source_snippets(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -79,6 +86,7 @@ class RetrievalTests(unittest.TestCase):
             self.assertTrue((run_dir / "artifact_search_results.json").is_file())
             saved = read_json(run_dir / "artifact_search_results.json")
             self.assertEqual(saved["query"], "accuracy")
+            self.assertFalse(saved["include_operational"])
             self.assertGreaterEqual(results["match_count"], 1)
             first = results["matches"][0]
             self.assertIn("path", first)
@@ -86,6 +94,27 @@ class RetrievalTests(unittest.TestCase):
             self.assertIn("line_end", first)
             self.assertIn("snippet", first)
             self.assertIn("accuracy", first["snippet"].lower())
+
+    def test_artifact_search_can_include_operational_metadata_when_requested(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            write_text(run_dir / "01-plan" / "goal.md", "# Goal\n\nMeasure accuracy.\n")
+            write_json(run_dir / "01-plan" / "stage_meta.json", {"status": "done"})
+
+            default = search_artifacts(run_dir, "status", top_k=5, write=False)
+            with_operational = search_artifacts(
+                run_dir,
+                "status",
+                top_k=5,
+                write=False,
+                include_operational=True,
+            )
+
+            self.assertFalse(any(match["path"].endswith("stage_meta.json") for match in default["matches"]))
+            self.assertTrue(
+                any(match["path"].endswith("stage_meta.json") for match in with_operational["matches"])
+            )
 
 
 def _artifact(index: dict[str, object], path: str) -> dict[str, object]:

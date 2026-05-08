@@ -43,7 +43,7 @@ V2 will stay local-first and inspectable. Local retrieval should start with meta
 
 ## V2 Retrieval Utilities
 
-The V2 branch starts with standalone local artifact tools. They do not change the V1 pipeline yet; they let you inspect and search an existing run without rerunning earlier stages:
+The V2 branch starts with local artifact tools that can be used standalone and are also wired into the `read`, `synthesize`, and `report` stages. They let you inspect and search an existing run without rerunning earlier stages:
 
 ```bash
 uv run simple-ar inspect runs/<run-id>
@@ -52,7 +52,16 @@ uv run simple-ar search-artifacts runs/<run-id> "accuracy"
 
 `inspect` writes `artifact_index.json` with relative paths, file kinds, inferred stages, sizes, hashes, timestamps, summaries, and tags. It skips hidden directories, cache directories, bytecode, and retrieval-generated files.
 
-`search-artifacts` writes `artifact_chunks.jsonl` and `artifact_search_results.json`. The chunker supports Markdown sections, JSON keys/items, JSONL rows, Python imports/classes/functions, and plain text windows. Search is lexical and deterministic for now, which keeps it cheap, testable, and provider-independent.
+`search-artifacts` writes `artifact_chunks.jsonl` and `artifact_search_results.json`. The chunker supports Markdown sections, JSON keys/items, JSONL rows, Python imports/classes/functions, and plain text windows. To keep retrieval lean, chunks default to source artifacts and skip runner bookkeeping such as `stage_meta.json`, root manifests, pipeline state, usage logs, and generated retrieval files. Use `--include-operational` when you explicitly want to search those files for debugging. Search is lexical and deterministic for now, which keeps it cheap, testable, and provider-independent.
+
+During normal pipeline runs, retrieval is enabled by default. The read, synthesize, and report stages create a deterministic `source_plan.json`, log retrieval activity to `activity_log.jsonl`, and append source-labelled snippets to `evidence_ledger.jsonl`. LLM prompts can then receive compact evidence snippets with paths and line ranges instead of a single unlabelled blob of context.
+
+You can tune or disable this behavior:
+
+```bash
+uv run simple-ar run --topic "toy topic" --to-stage report --retrieval-top-k 4
+uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
+```
 
 ## What It Is
 
@@ -72,7 +81,7 @@ SimpleAutoResearch is not a fully autonomous paper factory. In the current V1 pa
 
 ## Quickstart
 
-The current implementation creates the staged run directory, can search arXiv metadata, generates a template-based toy text-classification experiment, runs it in a subprocess, parses metrics, and can optionally use the OpenAI SDK for the plan/read/synthesize stages. Command-line runs show stage progress and LLM token usage by default so the workflow remains inspectable while it is running.
+The current implementation creates the staged run directory, can search live literature metadata, generates a template-based toy text-classification experiment, runs it in a subprocess, parses metrics, and can optionally use the OpenAI SDK for the plan/read/synthesize stages. Command-line runs show stage progress and LLM token usage by default so the workflow remains inspectable while it is running.
 
 Create a local environment file:
 
@@ -89,7 +98,7 @@ uv run simple-ar run --topic "toy topic" --to-stage report --model gpt-4o-mini
 uv run simple-ar status runs/<run-id>
 ```
 
-Use `--max-papers` to control arXiv result count, `--llm-workers` to control concurrent LLM requests in stages that can batch work, and `--quiet` when you only want the final summary:
+Use `--max-papers` to control live literature result count, `--llm-workers` to control concurrent LLM requests in stages that can batch work, and `--quiet` when you only want the final summary. Use `--retrieval-top-k` to control how many local snippets each evidence query returns, and `--no-retrieval` to disable V2 source planning and evidence logging for a run.
 
 ```bash
 uv run simple-ar run --topic "toy topic" --to-stage report --max-papers 5 --llm-workers 4 --experiment-timeout 30
@@ -101,10 +110,11 @@ Offline mode is available for contract and pipeline testing. `--no-llm` disables
 uv run simple-ar run --topic "toy topic" --to-stage report --no-llm --offline-search
 ```
 
-Successful arXiv searches are cached locally in `.simple_ar_cache/literature` for short-term reuse. If arXiv returns HTTP 429 or another provider error, SimpleAutoResearch first tries that cache, then falls back to fixture metadata so the pipeline remains runnable for demos and tests. A small circuit breaker also pauses live arXiv attempts briefly after rate limits. Use `--strict-search` when you want a failed arXiv search to stop the run instead of producing a cache-backed or fixture-backed report:
+Successful OpenAlex and arXiv searches are cached locally in `.simple_ar_cache/literature` for short-term reuse. Live search tries OpenAlex first, then arXiv, following the same broad idea used by AutoResearchClaw: prefer more generous scholarly APIs before hitting arXiv's stricter endpoint. If live providers fail, SimpleAutoResearch tries provider-specific cache entries. When no cache exists, the default behavior is to fail clearly rather than silently replacing real literature with fixture metadata. Use `--allow-fixture-fallback` only for demos where continuing with placeholder paper metadata is acceptable. Use `--strict-search` when you also want to disable cache fallback and require a live provider response.
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage search --strict-search
+uv run simple-ar run --topic "agent simulation" --to-stage report --allow-fixture-fallback
 ```
 
 Resume a run from the next recorded stage, or explicitly choose where to restart:
@@ -125,13 +135,16 @@ Each run may include:
 - `artifact_index.json`: V2 local artifact index generated by `inspect` or `search-artifacts`.
 - `artifact_chunks.jsonl`: V2 line-addressable chunks generated for local artifact retrieval.
 - `artifact_search_results.json`: Last V2 artifact search result with scored snippets.
+- `source_plan.json`: V2 local source plan describing which artifacts each stage should consult.
+- `activity_log.jsonl`: V2 structured activity log for source planning and retrieval actions.
+- `evidence_ledger.jsonl`: V2 ledger of snippets used by stages, each with path and line range.
 - `06-code/experiment.py`: generated from the fixed `toy_text_classification` template.
 - `07-run/results.json`: subprocess return code, timeout flag, command, and parsed metrics.
 - `08-report/report.md`: final Markdown report assembled from staged artifacts.
-- `08-report/references.bib`: BibTeX generated only from `papers.jsonl`.
+- `08-report/references.bib`: BibTeX generated from the body-cited subset of `papers.jsonl`.
 - `08-report/manifest.json`: report package manifest listing source artifacts, report artifacts, experiment metadata, metrics, and rerun commands.
 
-When LLM mode is enabled, the report stage asks the model to write a more paper-like Markdown report from the staged artifacts. The prompt is evidence-bounded: it may only use known paper ids, staged literature metadata, and numbers from `results.json`. The system still strips any model-written references section and appends verified references from `papers.jsonl`.
+When LLM mode is enabled, the report stage asks the model to write a more paper-like Markdown report from the staged artifacts. The prompt is evidence-bounded: it may only use known paper ids, staged literature metadata, source-labelled retrieval snippets, and numbers from `results.json`. The report prompt includes an explicit allowed citation-key list, and the system rejects model reports that omit body citations when paper metadata exists. The system still strips any model-written references section, keeps only papers cited in the report body, and appends verified references from that cited subset of `papers.jsonl`.
 
 ## Experiment Templates
 
@@ -184,7 +197,7 @@ The root `manifest.json` is the quick index for the run. `pipeline_state.json` s
 | Stage | Main outputs | Purpose |
 |---|---|---|
 | `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question. |
-| `search` | `papers.jsonl`, `search_meta.json` | Collect normalized arXiv paper metadata or explicit fallback metadata. |
+| `search` | `papers.jsonl`, `search_meta.json` | Collect normalized OpenAlex/arXiv paper metadata or explicit offline fixture metadata. |
 | `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes. |
 | `synthesize` | `synthesis.md`, `hypothesis.md` | Produce a bounded synthesis and testable hypothesis. |
 | `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
@@ -194,7 +207,7 @@ The root `manifest.json` is the quick index for the run. `pipeline_state.json` s
 
 ## Citation Safety
 
-Reports may only cite paper ids that appear in `02-search/papers.jsonl`. The report stage validates citations before writing the final artifact. If an LLM writes a reference section, SimpleAutoResearch strips it and appends a deterministic reference list generated from the same paper metadata used for validation.
+Reports may only cite paper ids that appear in `02-search/papers.jsonl`. The report stage validates citations before writing the final artifact. If an LLM writes a reference section, SimpleAutoResearch strips it and appends a deterministic reference list generated from the papers that are actually cited in the report body. The full retrieved metadata remains in `02-search/papers.jsonl` and the report manifest.
 
 This is intentionally conservative. It does not prove that every cited paper is relevant, but it prevents the most common failure mode: invented citation keys or fabricated bibliography entries.
 

@@ -32,7 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--experiment-timeout", type=int, default=30)
     run_parser.add_argument("--no-llm", action="store_true")
     run_parser.add_argument("--offline-search", action="store_true")
+    run_parser.add_argument("--allow-fixture-fallback", action="store_true")
     run_parser.add_argument("--strict-search", action="store_true")
+    run_parser.add_argument("--no-retrieval", action="store_true")
+    run_parser.add_argument("--retrieval-top-k", type=int, default=4)
     run_parser.add_argument("--quiet", action="store_true")
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
@@ -47,7 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--experiment-timeout", type=int, default=30)
     resume_parser.add_argument("--no-llm", action="store_true")
     resume_parser.add_argument("--offline-search", action="store_true")
+    resume_parser.add_argument("--allow-fixture-fallback", action="store_true")
     resume_parser.add_argument("--strict-search", action="store_true")
+    resume_parser.add_argument("--no-retrieval", action="store_true")
+    resume_parser.add_argument("--retrieval-top-k", type=int, default=4)
     resume_parser.add_argument("--quiet", action="store_true")
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
@@ -63,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("run_dir")
     search_parser.add_argument("query")
     search_parser.add_argument("--top-k", type=int, default=8)
+    search_parser.add_argument(
+        "--include-operational",
+        action="store_true",
+        help="Also search runner metadata such as manifests and stage_meta.json.",
+    )
 
     return parser
 
@@ -89,7 +100,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "experiment_timeout_sec": args.experiment_timeout,
                 "use_llm": not args.no_llm,
                 "use_arxiv": not args.offline_search,
+                "allow_fixture_fallback": args.allow_fixture_fallback,
                 "strict_search": args.strict_search,
+                "use_retrieval": not args.no_retrieval,
+                "retrieval_top_k": args.retrieval_top_k,
             },
         )
         executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
@@ -122,7 +136,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "experiment_timeout_sec": args.experiment_timeout,
                 "use_llm": not args.no_llm,
                 "use_arxiv": not args.offline_search,
+                "allow_fixture_fallback": args.allow_fixture_fallback,
                 "strict_search": args.strict_search,
+                "use_retrieval": not args.no_retrieval,
+                "retrieval_top_k": args.retrieval_top_k,
             },
         )
         executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
@@ -145,7 +162,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "search-artifacts":
-        _print_artifact_search(Path(args.run_dir), args.query, top_k=args.top_k)
+        _print_artifact_search(
+            Path(args.run_dir),
+            args.query,
+            top_k=args.top_k,
+            include_operational=args.include_operational,
+        )
         return
 
     parser.error(f"Unknown command: {args.command}")
@@ -253,14 +275,26 @@ def _print_inspect(run_dir: Path) -> None:
             )
 
 
-def _print_artifact_search(run_dir: Path, query: str, *, top_k: int) -> None:
+def _print_artifact_search(
+    run_dir: Path,
+    query: str,
+    *,
+    top_k: int,
+    include_operational: bool = False,
+) -> None:
     """Search run artifacts and print top snippets with source provenance."""
-    results = search_artifacts(run_dir, query, top_k=top_k)
+    results = search_artifacts(
+        run_dir,
+        query,
+        top_k=top_k,
+        include_operational=include_operational,
+    )
     matches = results.get("matches", [])
     print(f"Run: {run_dir}")
     print(f"Query: {query}")
     print(f"Chunks searched: {results.get('chunk_count', 0)}")
     print(f"Matches: {len(matches)}")
+    print(f"Operational metadata included: {include_operational}")
     print(f"Results: {run_dir / 'artifact_search_results.json'}")
     for match in matches:
         path = match.get("path", "")

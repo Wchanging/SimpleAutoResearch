@@ -20,6 +20,7 @@ def search_artifacts(
     *,
     top_k: int = 8,
     write: bool = True,
+    include_operational: bool = False,
 ) -> dict[str, Any]:
     """Build retrieval artifacts and run lexical search over local chunks.
 
@@ -29,18 +30,26 @@ def search_artifacts(
         top_k: Maximum number of matches to return.
         write: When true, save ``artifact_index.json``,
             ``artifact_chunks.jsonl``, and ``artifact_search_results.json``.
+        include_operational: Include runner metadata chunks such as
+            ``stage_meta.json`` and manifests.
 
     Returns:
         A JSON-serializable search result with scored snippets and provenance.
     """
     root = Path(run_dir)
     index = build_artifact_index(root, write=write)
-    chunks = build_artifact_chunks(root, index=index, write=write)
+    chunks = build_artifact_chunks(
+        root,
+        index=index,
+        write=write,
+        include_operational=include_operational,
+    )
     matches = search_chunks(chunks, query, top_k=top_k)
     results = {
         "schema_version": 1,
         "query": query,
         "top_k": top_k,
+        "include_operational": include_operational,
         "generated_at": _utcnow_iso(),
         "chunk_count": len(chunks),
         "match_count": len(matches),

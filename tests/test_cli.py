@@ -101,6 +101,7 @@ class CliTests(unittest.TestCase):
                 main(["search-artifacts", str(run_dir), "research", "--top-k", "2"])
 
             self.assertIn("Matches:", search_stdout.getvalue())
+            self.assertIn("Operational metadata included: False", search_stdout.getvalue())
             self.assertTrue((run_dir / "artifact_chunks.jsonl").is_file())
             self.assertTrue((run_dir / "artifact_search_results.json").is_file())
 

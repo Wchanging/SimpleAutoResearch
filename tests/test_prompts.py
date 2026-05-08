@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from simple_ar.prompts import report_user_prompt
+from simple_ar.prompts import paper_note_user_prompt, report_user_prompt, synthesize_user_prompt
 
 
 class PromptTests(unittest.TestCase):
@@ -17,6 +17,8 @@ class PromptTests(unittest.TestCase):
             hypothesis_markdown="# Hypothesis\nA testable claim.",
             experiment_plan_json='{"template": "toy_text_classification"}',
             results_json='{"metrics": {"accuracy": 0.75}}',
+            evidence_snippets="[ev-1 | 07-run/results.json:1-3 | query=accuracy]\naccuracy: 0.75",
+            citation_instruction="- [@paper-1] TITLE: \"Known Paper\"",
         )
 
         self.assertIn("report_markdown", prompt)
@@ -24,6 +26,25 @@ class PromptTests(unittest.TestCase):
         self.assertIn("[@paper_id]", prompt)
         self.assertIn("Do not report p-values", prompt)
         self.assertIn("Never invent", prompt)
+        self.assertIn("Retrieved Evidence Snippets", prompt)
+        self.assertIn("07-run/results.json:1-3", prompt)
+        self.assertIn("Available Citation Keys", prompt)
+        self.assertIn("[@paper-1]", prompt)
+
+    def test_read_and_synthesis_prompts_accept_source_labelled_evidence(self) -> None:
+        evidence = "[ev-1 | 02-search/papers.jsonl:1-1 | query=metadata]\nKnown paper row"
+
+        read_prompt = paper_note_user_prompt('{"id": "paper-1"}', evidence_snippets=evidence)
+        synth_prompt = synthesize_user_prompt(
+            "# Notes\nKnown evidence.",
+            '[{"paper_id": "paper-1"}]',
+            evidence_snippets=evidence,
+        )
+
+        self.assertIn("Retrieved Evidence Snippets", read_prompt)
+        self.assertIn("02-search/papers.jsonl:1-1", read_prompt)
+        self.assertIn("Retrieved Evidence Snippets", synth_prompt)
+        self.assertIn("trace", synth_prompt)
 
 
 if __name__ == "__main__":

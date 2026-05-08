@@ -9,6 +9,8 @@ from simple_ar.pipeline import Context
 from simple_ar.stage_handlers import (
     _append_references_section,
     _build_report,
+    _body_citation_ids,
+    _cited_papers,
     _strip_references_section,
 )
 
@@ -84,8 +86,45 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIn("## Literature Search", report)
         self.assertIn("fixture metadata", report)
         self.assertIn("| `accuracy` | 0.75 |", report)
+        self.assertIn("[@fixture-001]", report.split("## References", maxsplit=1)[0])
         self.assertNotIn("Raw result metadata", report)
         validate_citations(report, {"fixture-001"})
+
+    def test_body_citation_ids_ignore_reference_list_only_citations(self) -> None:
+        markdown = (
+            "# Draft\n\n"
+            "## Abstract\n\n"
+            "No body citation.\n\n"
+            "## References\n\n"
+            "- [@paper-1] Known Paper.\n"
+        )
+
+        self.assertEqual(_body_citation_ids(markdown, {"paper-1"}), set())
+
+    def test_cited_papers_prunes_uncited_references(self) -> None:
+        papers = [
+            Paper(
+                id="paper-1",
+                title="Cited Paper",
+                authors=[],
+                abstract="",
+                url="https://example.com/1",
+            ),
+            Paper(
+                id="paper-2",
+                title="Uncited Paper",
+                authors=[],
+                abstract="",
+                url="https://example.com/2",
+            ),
+        ]
+
+        cited = _cited_papers("# Draft\n\nKnown prior work [@paper-1].", papers)
+        report = _append_references_section("# Draft\n\nKnown prior work [@paper-1].", cited)
+
+        self.assertEqual([paper.id for paper in cited], ["paper-1"])
+        self.assertIn("[@paper-1]", report)
+        self.assertNotIn("[@paper-2]", report)
 
 
 if __name__ == "__main__":

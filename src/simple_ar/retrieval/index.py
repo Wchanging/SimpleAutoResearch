@@ -27,9 +27,12 @@ IGNORED_DIR_NAMES = {
 }
 
 IGNORED_FILE_NAMES = {
+    "activity_log.jsonl",
     "artifact_chunks.jsonl",
     "artifact_index.json",
     "artifact_search_results.json",
+    "evidence_ledger.jsonl",
+    "source_plan.json",
 }
 
 IGNORED_SUFFIXES = {".pyc", ".pyo", ".pyd"}

@@ -14,6 +14,20 @@ from simple_ar.retrieval.index import build_artifact_index
 MAX_CHUNK_CHARS = 4000
 TEXT_WINDOW_LINES = 40
 HEADING_RE = re.compile(r"^(?P<marks>#{1,6})\s+(?P<title>.+?)\s*$")
+OPERATIONAL_FILENAMES = {
+    "activity_log.jsonl",
+    "artifact_chunks.jsonl",
+    "artifact_index.json",
+    "artifact_search_results.json",
+    "config_snapshot.json",
+    "evidence_ledger.jsonl",
+    "llm_usage.jsonl",
+    "llm_usage_summary.json",
+    "manifest.json",
+    "pipeline_state.json",
+    "source_plan.json",
+    "stage_meta.json",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +70,7 @@ def build_artifact_chunks(
     *,
     index: dict[str, Any] | None = None,
     write: bool = True,
+    include_operational: bool = False,
 ) -> list[ArtifactChunk]:
     """Chunk indexed artifacts into line-addressable searchable spans.
 
@@ -64,9 +79,11 @@ def build_artifact_chunks(
         index: Optional prebuilt artifact index. When omitted, a fresh index is
             created and saved first.
         write: When true, save chunks to ``artifact_chunks.jsonl``.
+        include_operational: Include runner metadata such as manifests and
+            ``stage_meta.json``. Keep this false for evidence retrieval.
 
     Returns:
-        Ordered chunks for all supported text-like artifacts.
+        Ordered chunks for supported source artifacts.
     """
     root = Path(run_dir)
     artifact_index = index or build_artifact_index(root)
@@ -78,6 +95,8 @@ def build_artifact_chunks(
         kind = str(artifact.get("kind", "other"))
         if not rel_path or kind == "other":
             continue
+        if not include_operational and is_operational_artifact(rel_path):
+            continue
         path = root / rel_path
         if not path.is_file():
             continue
@@ -86,6 +105,16 @@ def build_artifact_chunks(
     if write:
         write_jsonl(root / "artifact_chunks.jsonl", [chunk.to_row() for chunk in chunks])
     return chunks
+
+
+def is_operational_artifact(relative_path: str) -> bool:
+    """Return whether a run artifact is pipeline bookkeeping, not source evidence."""
+    name = Path(relative_path).name
+    if name in OPERATIONAL_FILENAMES:
+        return True
+    if relative_path.startswith(".simple_ar_cache/"):
+        return True
+    return False
 
 
 def chunk_file(path: Path, *, rel_path: str, kind: str) -> list[ArtifactChunk]:

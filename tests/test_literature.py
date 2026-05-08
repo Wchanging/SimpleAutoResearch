@@ -8,6 +8,7 @@ from simple_ar.literature.arxiv_client import is_rate_limit_message
 from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.cache import get_cached, put_cache
 from simple_ar.literature.models import Paper, normalize_paper_id
+from simple_ar.literature.openalex_client import _paper_from_work
 from simple_ar.literature.verify import CitationError, validate_citations
 
 
@@ -50,6 +51,25 @@ class LiteratureTests(unittest.TestCase):
             cached = get_cached("agent simulation", "arxiv", 5, cache_dir=cache_dir)
 
             self.assertEqual(cached, rows)
+
+    def test_openalex_work_parses_to_project_paper_schema(self) -> None:
+        paper = _paper_from_work(
+            {
+                "id": "https://openalex.org/W123",
+                "title": "A Small Retrieval Paper",
+                "authorships": [{"author": {"display_name": "Ada Lovelace"}}],
+                "publication_date": "2024-01-01",
+                "doi": "https://doi.org/10.1234/example",
+                "abstract_inverted_index": {"Retrieval": [0], "works": [1]},
+                "ids": {"openalex": "https://openalex.org/W123"},
+            }
+        )
+
+        self.assertEqual(paper.id, "openalex-W123")
+        self.assertEqual(paper.source, "openalex")
+        self.assertEqual(paper.authors, ["Ada Lovelace"])
+        self.assertEqual(paper.abstract, "Retrieval works")
+        self.assertEqual(paper.doi, "10.1234/example")
 
 
 if __name__ == "__main__":

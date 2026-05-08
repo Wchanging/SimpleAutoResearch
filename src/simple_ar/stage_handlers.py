@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from simple_ar.literature.arxiv_client import ArxivRateLimitError, ArxivSearchCl
 from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.cache import get_cached, put_cache
 from simple_ar.literature.models import Paper
+from simple_ar.literature.openalex_client import OpenAlexSearchClient, OpenAlexSearchError
 from simple_ar.literature.verify import CitationError, validate_citations
 from simple_ar.llm import LLMClient, LLMError, LLMRequest
 from simple_ar.pipeline import Context, utcnow_iso
@@ -24,6 +26,7 @@ from simple_ar.prompts import (
     report_user_prompt,
     synthesize_user_prompt,
 )
+from simple_ar.retrieval.evidence import collect_stage_evidence, format_evidence_snippets
 from simple_ar.usage import record_llm_usage
 
 
@@ -75,104 +78,201 @@ def execute_search(ctx: Context) -> None:
     meta: dict[str, object] = {
         "query": query,
         "max_papers": max_papers,
-        "source": "fixture",
-        "status": "fallback",
+        "source": "arxiv" if ctx.config.get("use_arxiv") is True else "fixture",
+        "status": "pending",
     }
     if ctx.config.get("use_arxiv") is True:
-        try:
-            ctx.emit("stage_message", f"Searching arXiv for up to {max_papers} paper(s).")
-            papers = ArxivSearchClient(page_size=max_papers).search(query, max_results=max_papers)
-            if not papers:
-                raise LiteratureSearchError("arXiv returned no results")
-            put_cache(query, "arxiv", max_papers, [paper.to_row() for paper in papers])
-            meta.update({"source": "arxiv", "status": "ok", "returned": len(papers)})
-        except ArxivRateLimitError as exc:
-            if ctx.config.get("strict_search") is True:
-                raise
-            ctx.emit("stage_message", "arXiv rate limit hit; checking local cache.")
-            papers, cache_hit = _cached_or_fixture_papers(ctx, query, max_papers, problem)
-            meta.update(_fallback_meta("rate_limited", str(exc), papers, cache_hit))
-        except LiteratureSearchError as exc:
-            if ctx.config.get("strict_search") is True:
-                raise
-            ctx.emit("stage_message", f"arXiv search failed. {exc}")
-            papers, cache_hit = _cached_or_fixture_papers(ctx, query, max_papers, problem)
-            meta.update(_fallback_meta("provider_error", str(exc), papers, cache_hit))
+        papers, meta_update = _live_literature_search(ctx, query, max_papers, problem)
+        meta.update(meta_update)
     else:
-        ctx.emit("stage_message", "Using fixture paper metadata.")
+        ctx.emit("stage_message", "Using fixture paper metadata because --offline-search is enabled.")
         papers = _fixture_papers(problem)
-        meta.update({"returned": len(papers)})
+        meta.update({"source": "fixture", "status": "offline_fixture", "returned": len(papers)})
 
     write_jsonl(ctx.artifact_path("papers.jsonl"), [paper.to_row() for paper in papers])
     write_json(ctx.artifact_path("search_meta.json"), meta)
 
 
-def _cached_or_fixture_papers(
+def _live_literature_search(
     ctx: Context,
     query: str,
     max_papers: int,
     problem: str,
-) -> tuple[list[Paper], bool]:
-    """Return cached arXiv papers after failure, or deterministic fixture rows.
+) -> tuple[list[Paper], dict[str, object]]:
+    """Search real literature sources before considering explicit fixture fallback.
+
+    Args:
+        ctx: Current pipeline context.
+        query: Literature query.
+        max_papers: Result limit per provider.
+        problem: Problem artifact used only for explicit fixture fallback.
+
+    Returns:
+        ``(papers, metadata_update)`` for the selected source.
+
+    Raises:
+        LiteratureSearchError: If no live or cached metadata is available and
+            fixture fallback has not been explicitly enabled.
+    """
+    attempts: list[dict[str, object]] = []
+
+    openalex_result = _try_openalex(ctx, query, max_papers, attempts)
+    if openalex_result is not None:
+        papers, source = openalex_result
+        return papers, {
+            "source": source,
+            "status": "ok" if source == "openalex" else "cache",
+            "returned": len(papers),
+            "attempts": attempts,
+        }
+
+    arxiv_result = _try_arxiv(ctx, query, max_papers, attempts)
+    if arxiv_result is not None:
+        papers, source = arxiv_result
+        return papers, {
+            "source": source,
+            "status": "ok" if source == "arxiv" else "cache",
+            "returned": len(papers),
+            "attempts": attempts,
+        }
+
+    if _allow_fixture_fallback(ctx):
+        ctx.emit(
+            "stage_message",
+            "No live or cached literature metadata available; using fixture metadata because "
+            "--allow-fixture-fallback is enabled.",
+        )
+        papers = _fixture_papers(problem)
+        return papers, {
+            "source": "fixture",
+            "status": "fixture_fallback",
+            "allow_fixture_fallback": True,
+            "returned": len(papers),
+            "attempts": attempts,
+        }
+
+    raise LiteratureSearchError(_live_search_failure_message(attempts))
+
+
+def _try_openalex(
+    ctx: Context,
+    query: str,
+    max_papers: int,
+    attempts: list[dict[str, object]],
+) -> tuple[list[Paper], str] | None:
+    """Try OpenAlex live search and, if allowed, its cache."""
+    try:
+        ctx.emit("stage_message", f"Searching OpenAlex for up to {max_papers} paper(s).")
+        papers = OpenAlexSearchClient().search(query, max_results=max_papers)
+        if papers:
+            put_cache(query, "openalex", max_papers, [paper.to_row() for paper in papers])
+            attempts.append({"source": "openalex", "status": "ok", "returned": len(papers)})
+            return papers, "openalex"
+        attempts.append({"source": "openalex", "status": "empty", "returned": 0})
+    except OpenAlexSearchError as exc:
+        attempts.append({"source": "openalex", "status": "error", "error": str(exc)})
+        ctx.emit("stage_message", f"OpenAlex search failed. {exc}")
+
+    if ctx.config.get("strict_search") is True:
+        return None
+    cached = _cached_papers(ctx, query, max_papers, source="openalex")
+    if cached is not None:
+        attempts.append({"source": "openalex_cache", "status": "cache", "returned": len(cached)})
+        return cached, "openalex_cache"
+    return None
+
+
+def _try_arxiv(
+    ctx: Context,
+    query: str,
+    max_papers: int,
+    attempts: list[dict[str, object]],
+) -> tuple[list[Paper], str] | None:
+    """Try arXiv live search and, if allowed, its cache."""
+    try:
+        ctx.emit("stage_message", f"Searching arXiv for up to {max_papers} paper(s).")
+        papers = ArxivSearchClient(page_size=max_papers).search(query, max_results=max_papers)
+        if papers:
+            put_cache(query, "arxiv", max_papers, [paper.to_row() for paper in papers])
+            attempts.append({"source": "arxiv", "status": "ok", "returned": len(papers)})
+            return papers, "arxiv"
+        attempts.append({"source": "arxiv", "status": "empty", "returned": 0})
+    except ArxivRateLimitError as exc:
+        attempts.append({"source": "arxiv", "status": "rate_limited", "error": str(exc)})
+        ctx.emit("stage_message", "arXiv rate limit hit; checking local cache.")
+    except LiteratureSearchError as exc:
+        attempts.append({"source": "arxiv", "status": "error", "error": str(exc)})
+        ctx.emit("stage_message", f"arXiv search failed. {exc}")
+
+    if ctx.config.get("strict_search") is True:
+        return None
+    cached = _cached_papers(ctx, query, max_papers, source="arxiv")
+    if cached is not None:
+        attempts.append({"source": "arxiv_cache", "status": "cache", "returned": len(cached)})
+        return cached, "arxiv_cache"
+    return None
+
+
+def _cached_papers(
+    ctx: Context,
+    query: str,
+    max_papers: int,
+    *,
+    source: str,
+) -> list[Paper] | None:
+    """Return cached papers after live search failure.
 
     Args:
         ctx: Current pipeline context for progress messages.
-        query: arXiv query used for the live search attempt.
+        query: Query used for the live search attempt.
         max_papers: Search result limit.
-        problem: Problem artifact used to build fixture metadata if needed.
+        source: Cache namespace, such as ``openalex`` or ``arxiv``.
 
     Returns:
-        ``(papers, cache_hit)`` where ``cache_hit`` tells the caller whether the
-        papers came from the local literature cache.
+        Cached papers, or ``None`` when no cache entry is available.
     """
-    cached_rows = get_cached(query, "arxiv", max_papers)
+    cached_rows = get_cached(query, source, max_papers)
     if cached_rows:
         ctx.emit(
             "stage_message",
-            f"Using {len(cached_rows)} cached arXiv paper(s) after live search failed.",
+            f"Using {len(cached_rows)} cached {source} paper(s) after live search failed.",
         )
-        return [Paper.from_row(row) for row in cached_rows], True
+        return [Paper.from_row(row) for row in cached_rows]
 
     ctx.emit(
         "stage_message",
-        "No cached arXiv metadata available; using fixture metadata. "
-        "Use --strict-search when this should fail the run.",
+        f"No cached {source} metadata available.",
     )
-    return _fixture_papers(problem), False
+    return None
 
 
-def _fallback_meta(
-    failure_type: str,
-    reason: str,
-    papers: list[Paper],
-    cache_hit: bool,
-) -> dict[str, object]:
-    """Build search metadata for cache or fixture fallback paths."""
-    if cache_hit:
-        return {
-            "source": "arxiv_cache",
-            "status": "cache",
-            "cache_hit": True,
-            "failure_type": failure_type,
-            "fallback_reason": reason,
-            "returned": len(papers),
-        }
-    return {
-        "source": "fixture",
-        "status": "fallback",
-        "cache_hit": False,
-        "failure_type": failure_type,
-        "fallback_reason": reason,
-        "returned": len(papers),
-    }
+def _allow_fixture_fallback(ctx: Context) -> bool:
+    """Return whether live search failures may fall back to fixture metadata."""
+    return ctx.config.get("allow_fixture_fallback") is True
+
+
+def _live_search_failure_message(attempts: list[dict[str, object]]) -> str:
+    """Explain why live search failed without silently substituting fixture rows."""
+    attempt_summary = "; ".join(
+        f"{item.get('source')}={item.get('status')}" for item in attempts
+    ) or "no provider attempts recorded"
+    return (
+        "No live or cached literature metadata is available. Default runs do not "
+        "use fixture metadata because that would make the report look literature-backed "
+        "when it is not. Retry later, lower --max-papers, run with --offline-search "
+        "for tests, or add --allow-fixture-fallback for demos. "
+        f"Provider attempts: {attempt_summary}"
+    )
 
 
 def execute_read(ctx: Context) -> None:
     papers = read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
+    evidence = _stage_evidence(ctx, "read")
+    evidence_snippets = format_evidence_snippets(evidence)
     client = _llm_client(ctx)
     if client is not None and papers:
         try:
-            notes = _read_paper_notes_with_llm(ctx, client, papers)
+            notes = _read_paper_notes_with_llm(ctx, client, papers, evidence_snippets)
             write_json(ctx.artifact_path("paper_notes.json"), notes)
             write_text(ctx.artifact_path("notes.md"), _notes_markdown(notes))
             return
@@ -199,13 +299,15 @@ def execute_synthesize(ctx: Context) -> None:
     notes = read_text(ctx.find_artifact("notes.md") or ctx.artifact_path("notes.md"))
     paper_notes_path = ctx.find_artifact("paper_notes.json") or ctx.artifact_path("paper_notes.json")
     paper_notes = read_text(paper_notes_path)
+    evidence = _stage_evidence(ctx, "synthesize")
+    evidence_snippets = format_evidence_snippets(evidence)
     client = _llm_client(ctx)
     if client is not None:
         try:
             ctx.emit("stage_message", "Calling LLM for synthesis.")
             response = client.ask_json(
                 SYNTHESIZE_SYSTEM,
-                synthesize_user_prompt(notes, paper_notes),
+                synthesize_user_prompt(notes, paper_notes, evidence_snippets=evidence_snippets),
                 label="synthesize",
             )
             synthesis = _text_field(response, "synthesis_markdown")
@@ -281,6 +383,8 @@ def execute_report(ctx: Context) -> None:
         Paper.from_row(row)
         for row in paper_rows
     ]
+    evidence = _stage_evidence(ctx, "report")
+    evidence_snippets = format_evidence_snippets(evidence)
     report = _report_with_llm(
         ctx,
         goal=goal,
@@ -292,16 +396,21 @@ def execute_report(ctx: Context) -> None:
         results=results,
         paper_rows=paper_rows,
         papers=papers,
+        evidence_snippets=evidence_snippets,
     )
     if report is None:
         report = _build_report(ctx, goal, problem, search_meta, synthesis, hypothesis, plan, results, papers)
-    report = _append_references_section(_strip_references_section(report), papers)
+    report_body = _strip_references_section(report)
+    cited_papers = _cited_papers(report_body, papers)
+    if papers and not cited_papers:
+        raise CitationError("Report body did not cite any paper from papers.jsonl")
+    report = _append_references_section(report_body, cited_papers)
     validate_citations(report, {paper.id for paper in papers})
     write_text(ctx.artifact_path("report.md"), report)
-    write_text(ctx.artifact_path("references.bib"), papers_to_bibtex(papers))
+    write_text(ctx.artifact_path("references.bib"), papers_to_bibtex(cited_papers))
     write_json(
         ctx.artifact_path("manifest.json"),
-        _report_manifest(ctx, search_meta, plan, results, papers),
+        _report_manifest(ctx, search_meta, plan, results, papers, cited_papers),
     )
 
 
@@ -390,6 +499,7 @@ def _report_with_llm(
     results: dict[str, Any],
     paper_rows: list[dict[str, Any]],
     papers: list[Paper],
+    evidence_snippets: str,
 ) -> str | None:
     """Generate the final report with an evidence-bounded LLM prompt.
 
@@ -404,6 +514,8 @@ def _report_with_llm(
         results: Experiment run result JSON from the run stage.
         paper_rows: Raw paper rows loaded from ``papers.jsonl``.
         papers: Normalized paper metadata.
+        evidence_snippets: Source-labelled retrieval snippets selected for the
+            report stage.
 
     Returns:
         Model-written report Markdown, or ``None`` if LLM mode is disabled or
@@ -427,6 +539,8 @@ def _report_with_llm(
                 hypothesis_markdown=hypothesis,
                 experiment_plan_json=json.dumps(plan, indent=2, ensure_ascii=False),
                 results_json=json.dumps(results, indent=2, ensure_ascii=False),
+                evidence_snippets=evidence_snippets,
+                citation_instruction=_citation_instruction(papers),
             ),
             label="report",
         )
@@ -435,6 +549,8 @@ def _report_with_llm(
             raise LLMError("report_markdown was empty")
         report = _strip_references_section(report)
         validate_citations(report, {paper.id for paper in papers})
+        if papers and not _body_citation_ids(report, {paper.id for paper in papers}):
+            raise LLMError("report_markdown did not cite any known paper in the body")
         return report.strip() + "\n"
     except (LLMError, CitationError) as exc:
         ctx.emit("stage_message", f"LLM report drafting failed; using structured fallback. {exc}")
@@ -473,7 +589,7 @@ def _build_report(
         "## Abstract\n\n"
         f"{_abstract_markdown(ctx, results)}\n\n"
         "## Introduction\n\n"
-        f"{_introduction_markdown(ctx, goal, problem, search_meta)}\n\n"
+        f"{_introduction_markdown(ctx, goal, problem, search_meta, papers)}\n\n"
         "## Related Work\n\n"
         f"{_related_work_markdown(papers)}\n\n"
         "## Method\n\n"
@@ -520,11 +636,13 @@ def _introduction_markdown(
     goal: str,
     problem: str,
     search_meta: dict[str, Any],
+    papers: list[Paper],
 ) -> str:
     """Render a prose introduction from planning and search artifacts."""
     research_question = _markdown_body(problem) or _markdown_body(goal) or ctx.topic
     source = search_meta.get("source", "unknown") if search_meta else "unknown"
     status = search_meta.get("status", "unknown") if search_meta else "unknown"
+    literature_sentence = _literature_citation_sentence(papers)
     return (
         f"The starting point for this run is the question of how to study "
         f"`{ctx.topic}` with a workflow whose intermediate reasoning remains "
@@ -537,6 +655,7 @@ def _introduction_markdown(
         f"The planned research question was: {research_question} The literature "
         f"stage recorded search source `{source}` with status `{status}`, so the "
         "strength of the resulting narrative depends directly on that provenance. "
+        f"{literature_sentence} "
         "The report therefore treats the experiment and the literature notes as "
         "bounded evidence rather than as a general claim about the entire topic."
     )
@@ -649,7 +768,7 @@ def _limitations_markdown(
         "The current experiment uses a tiny built-in teaching dataset, so the metrics demonstrate pipeline mechanics rather than real-world model quality.",
         f"The experiment timeout was configured as {timeout} second(s).",
     ]
-    if search_meta.get("status") == "fallback" or search_meta.get("source") == "fixture":
+    if search_meta.get("status") in {"fallback", "fixture_fallback", "offline_fixture"} or search_meta.get("source") == "fixture":
         lines.append(
             "The literature stage used fixture metadata, so the report should not be treated as a real literature-backed review."
         )
@@ -658,7 +777,7 @@ def _limitations_markdown(
     elif results.get("returncode") not in {0, "0"}:
         lines.append("The experiment returned a non-zero code, so the run should be inspected before drawing conclusions.")
     lines.append(
-        "All citations are restricted to ids present in `02-search/papers.jsonl`, and `references.bib` is generated from the same metadata."
+        "All citations are restricted to ids present in `02-search/papers.jsonl`, and `references.bib` is generated from the subset cited in the report body."
     )
     return " ".join(lines)
 
@@ -704,12 +823,72 @@ def _append_references_section(markdown: str, papers: list[Paper]) -> str:
     return f"{body}\n\n## References\n\n{_references_markdown(papers)}\n"
 
 
+def _cited_papers(markdown_body: str, papers: list[Paper]) -> list[Paper]:
+    """Return papers cited in the report body, preserving metadata order.
+
+    Args:
+        markdown_body: Report Markdown before the generated References section.
+        papers: Papers loaded from ``papers.jsonl``.
+
+    Returns:
+        Subset of ``papers`` whose ids appear in body citations.
+    """
+    cited_ids = _body_citation_ids(markdown_body, {paper.id for paper in papers})
+    return [paper for paper in papers if paper.id in cited_ids]
+
+
+def _citation_instruction(papers: list[Paper]) -> str:
+    """Build AutoResearchClaw-style guidance from known paper metadata.
+
+    Args:
+        papers: Papers loaded from ``papers.jsonl``.
+
+    Returns:
+        A compact prompt block that lists allowed citation keys and reminds the
+        model to cite papers only when the local metadata supports the claim.
+    """
+    if not papers:
+        return ""
+    lines = [
+        "Use only these citation keys in body text, in Pandoc form `[@key]`:",
+    ]
+    for paper in papers:
+        abstract = f" Abstract: {paper.abstract[:220]}" if paper.abstract else ""
+        source = f" Source: {paper.source}" if paper.source else ""
+        lines.append(f"- [@{paper.id}] TITLE: \"{paper.title}\".{source}{abstract}")
+    lines.extend(
+        [
+            "Do not cite a paper unless the sentence discusses that paper or its listed metadata.",
+            "If no listed paper supports a claim, write the claim without a citation or weaken it.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _literature_citation_sentence(papers: list[Paper]) -> str:
+    """Create one conservative citation sentence for fallback introductions."""
+    real_papers = [paper for paper in papers if paper.source != "fixture"]
+    selected = real_papers or papers
+    if not selected:
+        return ""
+    keys = " ".join(f"[@{paper.id}]" for paper in selected[:3])
+    return f"The retrieved metadata is cited in the body using known keys such as {keys}."
+
+
+def _body_citation_ids(markdown: str, allowed_ids: set[str]) -> set[str]:
+    """Return allowed citation ids that appear before the References section."""
+    body = _strip_references_section(markdown)
+    found = set(re.findall(r"@([A-Za-z0-9_.:-]+)", body))
+    return found & allowed_ids
+
+
 def _report_manifest(
     ctx: Context,
     search_meta: dict[str, Any],
     plan: dict[str, Any],
     results: dict[str, Any],
     papers: list[Paper],
+    cited_papers: list[Paper],
 ) -> dict[str, Any]:
     """Create a reproducibility manifest for the final report directory."""
     return {
@@ -745,6 +924,20 @@ def _report_manifest(
             }
             for paper in papers
         ],
+        "cited_papers": [
+            {
+                "id": paper.id,
+                "title": paper.title,
+                "url": paper.url,
+                "source": paper.source,
+                "source_id": paper.source_id,
+            }
+            for paper in cited_papers
+        ],
+        "citation_policy": {
+            "references_bib": "contains only papers cited in the report body",
+            "papers_jsonl": "contains all retrieved paper metadata",
+        },
         "reproduce": {
             "rerun_report": f"uv run simple-ar resume {ctx.run_dir} --from-stage report",
             "rerun_experiment_and_report": f"uv run simple-ar resume {ctx.run_dir} --from-stage run",
@@ -760,6 +953,11 @@ def _source_artifacts(ctx: Context) -> dict[str, str]:
         "problem.md",
         "papers.jsonl",
         "search_meta.json",
+        "source_plan.json",
+        "activity_log.jsonl",
+        "evidence_ledger.jsonl",
+        "artifact_index.json",
+        "artifact_chunks.jsonl",
         "paper_notes.json",
         "notes.md",
         "synthesis.md",
@@ -812,8 +1010,49 @@ def _artifact_ref(ctx: Context, filename: str) -> str | None:
     """Return a run-relative artifact path for an existing artifact."""
     path = ctx.find_artifact(filename)
     if path is None:
+        candidate = ctx.run_dir / filename
+        if candidate.exists():
+            path = candidate
+    if path is None:
         return None
     return _relative_artifact(ctx, path)
+
+
+def _stage_evidence(ctx: Context, stage: str) -> list[dict[str, Any]]:
+    """Collect local retrieval evidence for a stage when enabled.
+
+    Args:
+        ctx: Current pipeline context.
+        stage: Logical stage name used in ``source_plan.json``.
+
+    Returns:
+        Evidence rows with source paths and line ranges. Empty when retrieval is
+        explicitly disabled.
+    """
+    if ctx.config.get("use_retrieval", True) is False:
+        return []
+    top_k = _retrieval_top_k(ctx)
+    try:
+        rows = collect_stage_evidence(ctx.run_dir, ctx.topic, stage, top_k=top_k)
+        if rows:
+            ctx.emit(
+                "stage_message",
+                f"Retrieved {len(rows)} source snippet(s) for {stage} evidence.",
+            )
+        return rows
+    except Exception as exc:
+        ctx.emit("stage_message", f"Retrieval evidence failed for {stage}; continuing. {exc}")
+        return []
+
+
+def _retrieval_top_k(ctx: Context) -> int:
+    """Read the per-query retrieval result limit with a conservative default."""
+    value = ctx.config.get("retrieval_top_k", 4)
+    try:
+        top_k = int(value)
+    except (TypeError, ValueError):
+        top_k = 4
+    return min(max(1, top_k), 20)
 
 
 def _relative_artifact(ctx: Context, path: Path) -> str:
@@ -868,6 +1107,7 @@ def _read_paper_notes_with_llm(
     ctx: Context,
     client: LLMClient,
     papers: list[dict[str, Any]],
+    evidence_snippets: str = "",
 ) -> list[dict[str, str]]:
     """Create one structured note per paper using concurrent LLM requests.
 
@@ -875,6 +1115,8 @@ def _read_paper_notes_with_llm(
         ctx: Current pipeline context.
         client: Configured LLM client.
         papers: Paper metadata loaded from ``papers.jsonl``.
+        evidence_snippets: Source-labelled retrieval snippets selected for the
+            read stage.
 
     Returns:
         Normalized paper notes suitable for ``paper_notes.json``.
@@ -882,7 +1124,10 @@ def _read_paper_notes_with_llm(
     requests = [
         LLMRequest(
             system=READ_SYSTEM,
-            user=paper_note_user_prompt(json.dumps(paper, indent=2, ensure_ascii=False)),
+            user=paper_note_user_prompt(
+                json.dumps(paper, indent=2, ensure_ascii=False),
+                evidence_snippets=evidence_snippets,
+            ),
             label=_paper_id(paper, index),
         )
         for index, paper in enumerate(papers, start=1)
