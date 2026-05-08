@@ -9,6 +9,8 @@ from typing import Sequence
 from simple_ar.artifacts import read_json, read_text
 from simple_ar.pipeline import Context, PipelineRunner
 from simple_ar.reporting import ConsoleReporter
+from simple_ar.retrieval.index import build_artifact_index
+from simple_ar.retrieval.search import search_artifacts
 from simple_ar.stage_handlers import HANDLERS
 from simple_ar.stages import Stage
 
@@ -50,6 +52,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
+
+    inspect_parser = subparsers.add_parser("inspect", help="Index and summarize run artifacts.")
+    inspect_parser.add_argument("run_dir")
+
+    search_parser = subparsers.add_parser(
+        "search-artifacts",
+        help="Search indexed run artifacts with lexical retrieval.",
+    )
+    search_parser.add_argument("run_dir")
+    search_parser.add_argument("query")
+    search_parser.add_argument("--top-k", type=int, default=8)
 
     return parser
 
@@ -127,6 +140,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         _print_status(Path(args.run_dir))
         return
 
+    if args.command == "inspect":
+        _print_inspect(Path(args.run_dir))
+        return
+
+    if args.command == "search-artifacts":
+        _print_artifact_search(Path(args.run_dir), args.query, top_k=args.top_k)
+        return
+
     parser.error(f"Unknown command: {args.command}")
 
 
@@ -200,6 +221,80 @@ def _print_status(run_dir: Path) -> None:
             print(f"- report.md: {report_path}")
         if report_manifest_path.exists():
             print(f"- manifest.json: {report_manifest_path}")
+
+
+def _print_inspect(run_dir: Path) -> None:
+    """Build an artifact index and print a compact run summary."""
+    index = build_artifact_index(run_dir)
+    artifacts = _artifact_rows(index)
+    print(f"Run: {run_dir}")
+    print(f"Artifacts: {len(artifacts)}")
+    print(f"Index: {run_dir / 'artifact_index.json'}")
+
+    by_kind = _count_by(artifacts, "kind")
+    if by_kind:
+        print("Kinds:")
+        for name, count in by_kind.items():
+            print(f"- {name}: {count}")
+
+    by_stage = _count_by(artifacts, "stage")
+    if by_stage:
+        print("Stages:")
+        for name, count in by_stage.items():
+            print(f"- {name}: {count}")
+
+    if artifacts:
+        print("Largest artifacts:")
+        for artifact in sorted(artifacts, key=lambda item: int(item.get("bytes", 0)), reverse=True)[:5]:
+            size = _format_bytes(int(artifact.get("bytes", 0)))
+            print(
+                f"- {artifact.get('path', '')} "
+                f"({artifact.get('kind', 'unknown')}, {size})"
+            )
+
+
+def _print_artifact_search(run_dir: Path, query: str, *, top_k: int) -> None:
+    """Search run artifacts and print top snippets with source provenance."""
+    results = search_artifacts(run_dir, query, top_k=top_k)
+    matches = results.get("matches", [])
+    print(f"Run: {run_dir}")
+    print(f"Query: {query}")
+    print(f"Chunks searched: {results.get('chunk_count', 0)}")
+    print(f"Matches: {len(matches)}")
+    print(f"Results: {run_dir / 'artifact_search_results.json'}")
+    for match in matches:
+        path = match.get("path", "")
+        line_start = match.get("line_start", "")
+        line_end = match.get("line_end", "")
+        score = match.get("score", "")
+        snippet = str(match.get("snippet", "")).strip()
+        print(f"- {path}:{line_start}-{line_end} score={score}")
+        if snippet:
+            print(f"  {snippet}")
+
+
+def _artifact_rows(index: dict[str, object]) -> list[dict[str, object]]:
+    rows = index.get("artifacts", [])
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _count_by(rows: list[dict[str, object]], field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(field)
+        key = str(value) if value else "root"
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[0]))
+
+
+def _format_bytes(value: int) -> str:
+    if value < 1024:
+        return f"{value} B"
+    if value < 1024 * 1024:
+        return f"{value / 1024:.1f} KiB"
+    return f"{value / (1024 * 1024):.1f} MiB"
 
 
 def _stage_status(item: dict[str, object]) -> str:

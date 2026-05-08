@@ -66,6 +66,44 @@ class CliTests(unittest.TestCase):
             self.assertIn("02 search: done", status_text)
             self.assertIn("03 read: pending", status_text)
 
+    def test_inspect_and_search_artifacts_commands_write_retrieval_files(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            output_root = Path(tmp) / "runs"
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "run",
+                        "--topic",
+                        "toy topic",
+                        "--to-stage",
+                        "plan",
+                        "--output-root",
+                        str(output_root),
+                        "--no-llm",
+                        "--offline-search",
+                        "--quiet",
+                    ]
+                )
+
+            run_dir = next(output_root.iterdir())
+
+            inspect_stdout = io.StringIO()
+            with contextlib.redirect_stdout(inspect_stdout):
+                main(["inspect", str(run_dir)])
+
+            self.assertIn("Artifacts:", inspect_stdout.getvalue())
+            self.assertTrue((run_dir / "artifact_index.json").is_file())
+
+            search_stdout = io.StringIO()
+            with contextlib.redirect_stdout(search_stdout):
+                main(["search-artifacts", str(run_dir), "research", "--top-k", "2"])
+
+            self.assertIn("Matches:", search_stdout.getvalue())
+            self.assertTrue((run_dir / "artifact_chunks.jsonl").is_file())
+            self.assertTrue((run_dir / "artifact_search_results.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()
