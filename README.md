@@ -12,7 +12,7 @@ This project is inspired by [AutoResearchClaw](https://github.com/aiming-lab/Aut
 - Prefer small reproducible experiments over unconstrained code generation.
 - Produce learning-friendly code that can grow into more capable versions.
 
-## V1 Pipeline
+## Core Pipeline
 
 ```text
 01 plan        Scope the topic and research question
@@ -27,41 +27,7 @@ This project is inspired by [AutoResearchClaw](https://github.com/aiming-lab/Aut
 
 ## Status
 
-V1 is published on `main` as a compact, runnable topic-to-report teaching pipeline. Active V2 work lives on the `feat/v2-retrieval-codegen` branch, where the project is exploring retrieval, local artifact analysis, code-task workflows, and cleaner human-in-the-loop checkpoints.
-
-## V2 Direction
-
-V2 is not just an incremental feature pass over V1. It is a chance to re-examine the architecture and keep the project useful as a learning reference instead of letting every new feature become tightly coupled to one full pipeline.
-
-The main design shift is workflow decoupling:
-
-- `research-run`: the current staged research workflow, upgraded with better retrieval, evidence tracking, and report quality checks.
-- `code-task`: a focused workflow for analyzing and improving an existing codebase, benchmark, or experiment script. It should copy the target into an isolated run workspace, build a lightweight code index, ask the model for an edit plan, support human approval before risky changes, run validation commands, and preserve failure evidence.
-- `review` or `survey`: a no-code workflow for literature review and report drafting, where search, reading, synthesis, and reporting can run without experiment design, code generation, or benchmark execution.
-
-V2 will stay local-first and inspectable. Local retrieval should start with metadata, snippets, notes, and small indexes rather than blindly storing every full paper. Code execution should prefer isolated run directories, explicit commands, timeouts, and human approval points before moving toward stronger sandboxing.
-
-## V2 Retrieval Utilities
-
-The V2 branch starts with local artifact tools that can be used standalone and are also wired into the `read`, `synthesize`, and `report` stages. They let you inspect and search an existing run without rerunning earlier stages:
-
-```bash
-uv run simple-ar inspect runs/<run-id>
-uv run simple-ar search-artifacts runs/<run-id> "accuracy"
-```
-
-`inspect` writes `artifact_index.json` with relative paths, file kinds, inferred stages, sizes, hashes, timestamps, summaries, and tags. It skips hidden directories, cache directories, bytecode, and retrieval-generated files.
-
-`search-artifacts` writes `artifact_chunks.jsonl` and `artifact_search_results.json`. The chunker supports Markdown sections, JSON keys/items, JSONL rows, Python imports/classes/functions, and plain text windows. To keep retrieval lean, chunks default to source artifacts and skip runner bookkeeping such as `stage_meta.json`, root manifests, pipeline state, usage logs, and generated retrieval files. Use `--include-operational` when you explicitly want to search those files for debugging. Search is lexical and deterministic for now, which keeps it cheap, testable, and provider-independent.
-
-During normal pipeline runs, retrieval is enabled by default. The read, synthesize, and report stages create a deterministic `source_plan.json`, log retrieval activity to `activity_log.jsonl`, and append source-labelled snippets to `evidence_ledger.jsonl`. LLM prompts can then receive compact evidence snippets with paths and line ranges instead of a single unlabelled blob of context.
-
-You can tune or disable this behavior:
-
-```bash
-uv run simple-ar run --topic "toy topic" --to-stage report --retrieval-top-k 4
-uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
-```
+The repository currently provides a runnable topic-to-report pipeline plus local artifact inspection and retrieval tools. This README focuses on project overview, setup, configuration, and day-to-day usage. Version-by-version learning notes, V1/V2 changes, new commands, and planned work live in [CHANGELOG.md](CHANGELOG.md).
 
 ## What It Is
 
@@ -77,7 +43,7 @@ It is useful for studying:
 
 ## What It Is Not
 
-SimpleAutoResearch is not a fully autonomous paper factory. In the current V1 path, the LLM helps with planning, reading notes, and synthesis, but it does not freely edit or invent experiment code. Experiment scripts are generated from a small whitelist of templates so the first version stays inspectable, reproducible, and safe enough for teaching.
+SimpleAutoResearch is not a fully autonomous paper factory. In the default research pipeline, the LLM helps with planning, reading notes, synthesis, and report drafting, but it does not freely edit or invent experiment code. Experiment scripts are generated from a small whitelist of templates so the workflow stays inspectable, reproducible, and safe enough for teaching.
 
 ## Quickstart
 
@@ -132,12 +98,12 @@ Each run may include:
 - `02-search/search_meta.json`: query, source, status, and result count.
 - `llm_usage.jsonl`: one row per successful LLM request.
 - `llm_usage_summary.json`: aggregate token counts and optional cost estimate.
-- `artifact_index.json`: V2 local artifact index generated by `inspect` or `search-artifacts`.
-- `artifact_chunks.jsonl`: V2 line-addressable chunks generated for local artifact retrieval.
-- `artifact_search_results.json`: Last V2 artifact search result with scored snippets.
-- `source_plan.json`: V2 local source plan describing which artifacts each stage should consult.
-- `activity_log.jsonl`: V2 structured activity log for source planning and retrieval actions.
-- `evidence_ledger.jsonl`: V2 ledger of snippets used by stages, each with path and line range.
+- `artifact_index.json`: local artifact index generated by `inspect` or `search-artifacts`.
+- `artifact_chunks.jsonl`: line-addressable chunks generated for local artifact retrieval.
+- `artifact_search_results.json`: last artifact search result with scored snippets.
+- `source_plan.json`: local source plan describing which artifacts each stage should consult.
+- `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
+- `evidence_ledger.jsonl`: ledger of snippets used by stages, each with path and line range.
 - `06-code/experiment.py`: generated from the fixed `toy_text_classification` template.
 - `07-run/results.json`: subprocess return code, timeout flag, command, and parsed metrics.
 - `08-report/report.md`: final Markdown report assembled from staged artifacts.
@@ -145,6 +111,46 @@ Each run may include:
 - `08-report/manifest.json`: report package manifest listing source artifacts, report artifacts, experiment metadata, metrics, and rerun commands.
 
 When LLM mode is enabled, the report stage asks the model to write a more paper-like Markdown report from the staged artifacts. The prompt is evidence-bounded: it may only use known paper ids, staged literature metadata, source-labelled retrieval snippets, and numbers from `results.json`. The report prompt includes an explicit allowed citation-key list, and the system rejects model reports that omit body citations when paper metadata exists. The system still strips any model-written references section, keeps only papers cited in the report body, and appends verified references from that cited subset of `papers.jsonl`.
+
+## Artifact Tools
+
+Existing run directories can be inspected and searched without rerunning earlier stages:
+
+```bash
+uv run simple-ar inspect runs/<run-id>
+uv run simple-ar search-artifacts runs/<run-id> "accuracy"
+```
+
+`inspect` writes `artifact_index.json` with relative paths, file kinds, inferred stages, sizes, hashes, timestamps, summaries, and tags. It skips hidden directories, cache directories, bytecode, and retrieval-generated files.
+
+`search-artifacts` writes `artifact_chunks.jsonl` and `artifact_search_results.json`. The chunker supports Markdown sections, JSON keys/items, JSONL rows, Python imports/classes/functions, and plain text windows. To keep retrieval lean, chunks default to source artifacts and skip runner bookkeeping such as `stage_meta.json`, root manifests, pipeline state, usage logs, and generated retrieval files. Use `--include-operational` when you explicitly want to search those files for debugging. Search is lexical and deterministic, which keeps it cheap, testable, and provider-independent.
+
+During normal pipeline runs, retrieval is enabled by default. The read, synthesize, and report stages create a deterministic `source_plan.json`, log retrieval activity to `activity_log.jsonl`, and append source-labelled snippets to `evidence_ledger.jsonl`. LLM prompts can then receive compact evidence snippets with paths and line ranges instead of a single unlabelled blob of context.
+
+You can tune or disable this behavior:
+
+```bash
+uv run simple-ar run --topic "toy topic" --to-stage report --retrieval-top-k 4
+uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
+```
+
+## Code Task Workspace
+
+`code-task init` starts a separate workflow for existing codebases or benchmarks. It copies the source project into an isolated run workspace and builds a Python-aware code index, but it does not call an LLM, apply patches, or run benchmarks.
+
+`code-task plan` then turns the task, code index, and selected source snippets into a human-reviewable `patch_plan.md`. It may use the configured OpenAI-compatible LLM, or `--no-llm` for a deterministic offline plan. Planning never edits files.
+
+```bash
+uv run simple-ar code-task init \
+  --code-root path/to/project \
+  --task-file path/to/task.md \
+  --benchmark-command "python -m unittest discover -s tests"
+
+uv run simple-ar code-task plan runs/<run-id>
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
+```
+
+The original `--code-root` is not modified. Generated files are kept under `runs/<run-id>/code_task/`, with the editable copy in `workspace/`, `patch_plan.md` at the workflow root, and metadata such as `codebase_index.json` and `hitl_decisions.jsonl` in `meta/`. By default, the copier skips common cache/build directories, symlinks, `.env` secrets, bytecode, and files larger than 2 MB. Use `--max-file-bytes 0` only when you explicitly want to disable the size guard.
 
 ## Experiment Templates
 
@@ -195,7 +201,7 @@ The root `manifest.json` is the quick index for the run. `pipeline_state.json` s
 ## Pipeline Stages
 
 | Stage | Main outputs | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question. |
 | `search` | `papers.jsonl`, `search_meta.json` | Collect normalized OpenAlex/arXiv paper metadata or explicit offline fixture metadata. |
 | `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes. |
@@ -234,7 +240,7 @@ Experiment templates live in `src/simple_ar/experiment/templates.py`. A new temp
 - avoid network access and uncontrolled downloads;
 - have a test in `tests/test_experiment_runner.py`.
 
-The current template system is deliberately not free-form code generation. That boundary is what makes V1 useful for learning and safe enough to run repeatedly.
+The current template system is deliberately not free-form code generation. That boundary is what makes the project useful for learning and safe enough to run repeatedly.
 
 ## Development
 
@@ -252,12 +258,7 @@ uv run simple-ar run --topic "keyword rules versus bag-of-words logistic regress
 
 ## Roadmap
 
-- Artifact retrieval over local run outputs, paper metadata, notes, and optional user-provided files.
-- Decoupled `code-task` workflow for codebase analysis, patch planning, validation, and benchmark-oriented iteration.
-- No-code `review` or `survey` workflow for literature analysis and report generation.
-- Human-in-the-loop checkpoints before patch application, expensive runs, and final report acceptance.
-- More report quality checks, including citation relevance, unsupported numerical claims, and evidence coverage.
-- Optional Docker or virtual-environment sandboxing once the local subprocess runner is stable.
+See [CHANGELOG.md](CHANGELOG.md) for version history, active V2 work, and planned next steps.
 
 ## Reference
 

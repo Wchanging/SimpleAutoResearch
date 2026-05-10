@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+import contextlib
+import io
+import tempfile
+import unittest
+from pathlib import Path
+
+from simple_ar.artifacts import read_json, read_jsonl, read_text, write_text
+from simple_ar.cli import main
+from simple_ar.code_task import generate_patch_plan, initialize_code_task
+
+
+TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
+
+
+class CodeTaskTests(unittest.TestCase):
+    def test_init_copies_workspace_and_indexes_python_ast(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove the spam classifier without changing the API.\n")
+
+            run_dir = root / "runs" / "code-task-run"
+            result = initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+                max_file_bytes=10_000,
+            )
+
+            workspace = result.workspace_dir
+            self.assertTrue((workspace / "spam_model.py").is_file())
+            self.assertTrue((workspace / "tests" / "test_spam_model.py").is_file())
+            self.assertFalse((workspace / ".env").exists())
+            self.assertFalse((workspace / ".git" / "config").exists())
+            self.assertEqual(
+                read_text(code_root / "spam_model.py"),
+                read_text(workspace / "spam_model.py"),
+            )
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["workflow"], "code_task")
+            self.assertEqual(manifest["layout"]["workspace"], "code_task/workspace")
+            self.assertEqual(manifest["benchmark"]["executed"], False)
+            self.assertGreaterEqual(manifest["copy"]["skipped_count"], 2)
+
+            index = read_json(result.codebase_index_path)
+            self.assertEqual(index["project"]["python_file_count"], 2)
+            self.assertEqual(index["project"]["test_file_count"], 1)
+            spam_model = _indexed_file(index, "spam_model.py")
+            self.assertIn("source", spam_model["role_tags"])
+            self.assertEqual(spam_model["python"]["syntax_ok"], True)
+            self.assertIn("math", spam_model["python"]["imports"])
+            self.assertEqual(
+                [item["name"] for item in spam_model["python"]["classes"]],
+                ["SpamModel"],
+            )
+            self.assertEqual(
+                [item["name"] for item in spam_model["python"]["functions"]],
+                ["predict"],
+            )
+            self.assertEqual(spam_model["python"]["has_main_guard"], True)
+
+    def test_code_task_init_cli_prints_summary(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove tests.\n")
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                        "--name",
+                        "demo-code-task",
+                    ]
+                )
+
+            output = stdout.getvalue()
+            self.assertIn("Code task run:", output)
+            self.assertIn("Workspace:", output)
+            self.assertIn("Indexed:", output)
+            run_dir = next(output_root.iterdir())
+            self.assertTrue((run_dir / "code_task" / "workspace" / "spam_model.py").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "codebase_index.json").is_file())
+
+            status_stdout = io.StringIO()
+            with contextlib.redirect_stdout(status_stdout):
+                main(["status", str(run_dir)])
+
+            status_text = status_stdout.getvalue()
+            self.assertIn("Workflow: code_task", status_text)
+            self.assertIn("python files: 2", status_text)
+
+    def test_patch_plan_offline_writes_reviewable_plan_and_updates_manifest(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(
+                task_file,
+                "# Task\n\nImprove spam keyword handling and keep the public predict API stable.\n",
+            )
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            result = generate_patch_plan(run_dir, use_llm=False)
+
+            self.assertEqual(result.mode, "offline")
+            self.assertTrue(result.pending_approval)
+            self.assertTrue((run_dir / "code_task" / "patch_plan.md").is_file())
+            plan_text = read_text(run_dir / "code_task" / "patch_plan.md")
+            self.assertIn("# Patch Plan", plan_text)
+            self.assertIn("## Files To Modify", plan_text)
+            self.assertIn("spam_model.py", plan_text)
+            self.assertIn("python -m unittest discover -s tests", plan_text)
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "planned")
+            self.assertEqual(manifest["plan"]["status"], "pending_approval")
+            self.assertEqual(manifest["layout"]["patch_plan"], "code_task/patch_plan.md")
+
+    def test_code_task_plan_and_decide_cli(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove spam classifier accuracy.\n")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                    ]
+                )
+            run_dir = next(output_root.iterdir())
+
+            plan_stdout = io.StringIO()
+            with contextlib.redirect_stdout(plan_stdout):
+                main(["code-task", "plan", str(run_dir), "--no-llm"])
+
+            self.assertIn("Patch plan:", plan_stdout.getvalue())
+            self.assertTrue((run_dir / "code_task" / "patch_plan.md").is_file())
+
+            decide_stdout = io.StringIO()
+            with contextlib.redirect_stdout(decide_stdout):
+                main(
+                    [
+                        "code-task",
+                        "decide-plan",
+                        str(run_dir),
+                        "--decision",
+                        "approve",
+                        "--note",
+                        "Looks small enough.",
+                    ]
+                )
+
+            self.assertIn("Decision: approve", decide_stdout.getvalue())
+            decisions = read_jsonl(run_dir / "code_task" / "meta" / "hitl_decisions.jsonl")
+            self.assertEqual(decisions[-1]["decision"], "approve")
+            self.assertEqual(decisions[-1]["note"], "Looks small enough.")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "plan_approved")
+            self.assertEqual(manifest["plan"]["status"], "approved")
+
+            status_stdout = io.StringIO()
+            with contextlib.redirect_stdout(status_stdout):
+                main(["status", str(run_dir)])
+            self.assertIn("Plan:", status_stdout.getvalue())
+            self.assertIn("status: approved", status_stdout.getvalue())
+
+
+def _write_toy_project(code_root: Path) -> None:
+    write_text(
+        code_root / "spam_model.py",
+        (
+            "import math\n\n\n"
+            "class SpamModel:\n"
+            "    def score(self, text):\n"
+            "        return math.log(len(text) + 1)\n\n\n"
+            "def predict(text):\n"
+            "    return 'spam' if 'win' in text.lower() else 'ham'\n\n\n"
+            "if __name__ == \"__main__\":\n"
+            "    print(predict('win a prize'))\n"
+        ),
+    )
+    write_text(
+        code_root / "tests" / "test_spam_model.py",
+        (
+            "import unittest\n\n"
+            "from spam_model import predict\n\n\n"
+            "class SpamModelTests(unittest.TestCase):\n"
+            "    def test_predicts_spam_keyword(self):\n"
+            "        self.assertEqual(predict('win now'), 'spam')\n"
+        ),
+    )
+    write_text(code_root / ".git" / "config", "[core]\nrepositoryformatversion = 0\n")
+    write_text(code_root / ".env", "TOKEN=secret\n")
+
+
+def _indexed_file(index: dict[str, object], path: str) -> dict[str, object]:
+    files = index.get("files", [])
+    if isinstance(files, list):
+        for item in files:
+            if isinstance(item, dict) and item.get("path") == path:
+                return item
+    raise AssertionError(f"Missing indexed file: {path}")
+
+
+if __name__ == "__main__":
+    unittest.main()

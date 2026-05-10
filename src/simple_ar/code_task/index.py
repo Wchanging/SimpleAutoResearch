@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import os
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from simple_ar.artifacts import write_json
+from simple_ar.retrieval.index import kind_for_path
+
+
+def build_codebase_index(
+    workspace_dir: Path,
+    *,
+    output_path: Path | None = None,
+) -> dict[str, Any]:
+    """Build a compact, source-oriented index for a code-task workspace.
+
+    Args:
+        workspace_dir: Copied workspace that may be edited by later code-task
+            stages. The original source directory is not read after init.
+        output_path: Optional JSON destination for the generated index.
+
+    Returns:
+        JSON-serializable index with file inventory, hashes, role tags, and
+        Python AST summaries.
+
+    Raises:
+        FileNotFoundError: If ``workspace_dir`` does not exist.
+        NotADirectoryError: If ``workspace_dir`` is not a directory.
+    """
+    workspace = Path(workspace_dir)
+    if not workspace.exists():
+        raise FileNotFoundError(f"Workspace does not exist: {workspace}")
+    if not workspace.is_dir():
+        raise NotADirectoryError(f"Workspace path is not a directory: {workspace}")
+
+    files = [_index_file(workspace, path) for path in _iter_files(workspace)]
+    files.sort(key=lambda item: item["path"])
+
+    python_files = [item for item in files if item["kind"] == "python"]
+    test_files = [item for item in files if "test" in item["role_tags"]]
+    import_counter: Counter[str] = Counter()
+    entrypoints: list[str] = []
+    for item in python_files:
+        python = item.get("python")
+        if not isinstance(python, dict):
+            continue
+        for name in python.get("imports", []):
+            import_counter[str(name)] += 1
+        if python.get("has_main_guard") is True:
+            entrypoints.append(str(item["path"]))
+
+    top_level_entries = sorted({Path(str(item["path"])).parts[0] for item in files})
+    index = {
+        "schema_version": 1,
+        "generated_at": _utcnow_iso(),
+        "workspace": str(workspace),
+        "project": {
+            "file_count": len(files),
+            "python_file_count": len(python_files),
+            "test_file_count": len(test_files),
+            "total_bytes": sum(int(item["bytes"]) for item in files),
+            "top_level_entries": top_level_entries,
+            "entrypoint_candidates": entrypoints,
+            "common_imports": [
+                {"name": name, "count": count}
+                for name, count in import_counter.most_common(20)
+            ],
+        },
+        "files": files,
+    }
+    if output_path is not None:
+        write_json(output_path, index)
+    return index
+
+
+def _iter_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for current, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if dirname not in {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+        ]
+        current_path = Path(current)
+        for filename in filenames:
+            path = current_path / filename
+            if path.is_file():
+                files.append(path)
+    return files
+
+
+def _index_file(root: Path, path: Path) -> dict[str, Any]:
+    rel_path = path.relative_to(root).as_posix()
+    stat = path.stat()
+    kind = kind_for_path(path)
+    python_summary = _python_summary(path) if kind == "python" else None
+    item: dict[str, Any] = {
+        "path": rel_path,
+        "kind": kind,
+        "bytes": stat.st_size,
+        "sha256": _sha256(path),
+        "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+        "role_tags": _role_tags(rel_path, kind),
+        "summary": _summary_for_file(path, kind, python_summary=python_summary),
+    }
+    if python_summary is not None:
+        item["python"] = python_summary
+    return item
+
+
+def _python_summary(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        return {
+            "syntax_ok": False,
+            "syntax_error": {
+                "message": exc.msg,
+                "line": exc.lineno,
+                "offset": exc.offset,
+            },
+            "imports": [],
+            "functions": [],
+            "classes": [],
+            "has_main_guard": False,
+        }
+
+    imports = sorted(_imports(tree))
+    functions = [_function_row(node) for node in tree.body if _is_function(node)]
+    classes = [_class_row(node) for node in tree.body if isinstance(node, ast.ClassDef)]
+    return {
+        "syntax_ok": True,
+        "imports": imports,
+        "functions": functions,
+        "classes": classes,
+        "has_main_guard": _has_main_guard(tree),
+    }
+
+
+def _imports(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module.split(".", 1)[0])
+    return names
+
+
+def _function_row(node: ast.AST) -> dict[str, Any]:
+    name = getattr(node, "name", "")
+    args = getattr(node, "args", None)
+    arg_names = [arg.arg for arg in getattr(args, "args", [])] if args is not None else []
+    return {
+        "name": name,
+        "line_start": getattr(node, "lineno", None),
+        "line_end": getattr(node, "end_lineno", getattr(node, "lineno", None)),
+        "args": arg_names,
+        "is_async": isinstance(node, ast.AsyncFunctionDef),
+        "is_test": name.startswith("test_"),
+    }
+
+
+def _class_row(node: ast.ClassDef) -> dict[str, Any]:
+    methods = [_function_row(child) for child in node.body if _is_function(child)]
+    return {
+        "name": node.name,
+        "line_start": node.lineno,
+        "line_end": getattr(node, "end_lineno", node.lineno),
+        "methods": methods,
+    }
+
+
+def _is_function(node: ast.AST) -> bool:
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+
+
+def _has_main_guard(tree: ast.Module) -> bool:
+    for node in tree.body:
+        if isinstance(node, ast.If) and _is_main_guard(node.test):
+            return True
+    return False
+
+
+def _is_main_guard(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Compare):
+        return False
+    left = node.left
+    if not (isinstance(left, ast.Name) and left.id == "__name__"):
+        return False
+    if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq):
+        return False
+    if len(node.comparators) != 1:
+        return False
+    comparator = node.comparators[0]
+    return isinstance(comparator, ast.Constant) and comparator.value == "__main__"
+
+
+def _role_tags(relative_path: str, kind: str) -> list[str]:
+    path = Path(relative_path)
+    parts = {part.lower() for part in path.parts}
+    name = path.name.lower()
+    tags = {kind}
+    if kind == "python":
+        tags.add("source")
+    if "tests" in parts or name.startswith("test_") or name.endswith("_test.py"):
+        tags.add("test")
+    if name in {"pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "uv.lock"}:
+        tags.add("config")
+    if kind == "markdown" or name in {"readme", "readme.md"}:
+        tags.add("docs")
+    if name in {"main.py", "cli.py", "__main__.py"}:
+        tags.add("entrypoint")
+    return sorted(tags)
+
+
+def _summary_for_file(
+    path: Path,
+    kind: str,
+    *,
+    python_summary: dict[str, Any] | None = None,
+) -> str:
+    if kind == "other":
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if kind == "json":
+        summary = _json_summary(text[:8192])
+        if summary:
+            return summary
+    if kind == "python":
+        python = python_summary or _python_summary(path)
+        if python.get("syntax_ok") is not True:
+            return "python syntax error"
+        pieces: list[str] = []
+        functions = python.get("functions", [])
+        classes = python.get("classes", [])
+        imports = python.get("imports", [])
+        if classes:
+            pieces.append(
+                "classes: "
+                + ", ".join(str(item.get("name", "")) for item in classes[:5] if isinstance(item, dict))
+            )
+        if functions:
+            pieces.append(
+                "functions: "
+                + ", ".join(str(item.get("name", "")) for item in functions[:5] if isinstance(item, dict))
+            )
+        if imports:
+            pieces.append("imports: " + ", ".join(str(name) for name in imports[:5]))
+        if pieces:
+            return _truncate("; ".join(pieces), 180)
+    for line in text.splitlines():
+        stripped = " ".join(line.strip().split())
+        if stripped:
+            return _truncate(stripped, 180)
+    return ""
+
+
+def _json_summary(text: str) -> str:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return ""
+    if isinstance(data, dict):
+        keys = ", ".join(str(key) for key in list(data)[:8])
+        suffix = "..." if len(data) > 8 else ""
+        return f"json object keys: {keys}{suffix}"
+    if isinstance(data, list):
+        return f"json list with {len(data)} item(s)"
+    return f"json {type(data).__name__}"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3].rstrip() + "..."
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")

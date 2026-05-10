@@ -1,0 +1,765 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from simple_ar.artifacts import (
+    append_jsonl,
+    read_json,
+    read_jsonl,
+    read_text,
+    write_json,
+    write_text,
+)
+from simple_ar.llm import LLMClient, LLMError, LLMUsage
+from simple_ar.usage import summarize_usage
+
+
+CODE_TASK_PLAN_SYSTEM = (
+    "You are a careful senior engineer planning a small, reviewable code change. "
+    "You must analyze the supplied task, codebase index, and source snippets, "
+    "then produce a conservative patch plan. Do not write code. Do not invent "
+    "files or behavior that is not supported by the supplied context."
+)
+
+MessageCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class PatchPlanResult:
+    """Result returned after generating a code-task patch plan.
+
+    Args:
+        run_dir: Code-task run directory.
+        patch_plan_path: Markdown plan written for human review.
+        manifest_path: Root manifest updated with plan state.
+        mode: ``llm`` when model output was used, otherwise ``offline``.
+        selected_files: Workspace-relative files included in prompt context.
+        pending_approval: Whether the plan still requires human approval.
+    """
+
+    run_dir: Path
+    patch_plan_path: Path
+    manifest_path: Path
+    mode: str
+    selected_files: tuple[str, ...]
+    pending_approval: bool
+
+
+def generate_patch_plan(
+    run_dir: Path,
+    *,
+    model: str | None = None,
+    use_llm: bool = True,
+    force: bool = False,
+    max_files: int = 8,
+    max_source_chars_per_file: int = 2500,
+    message_callback: MessageCallback | None = None,
+) -> PatchPlanResult:
+    """Generate a reviewable patch plan for an initialized code-task run.
+
+    Args:
+        run_dir: Code-task run directory created by ``code-task init``.
+        model: Optional OpenAI-compatible model override.
+        use_llm: Whether to call the configured LLM provider. If the provider
+            is unavailable, the function falls back to a deterministic plan.
+        force: Overwrite an existing ``patch_plan.md`` when true.
+        max_files: Maximum number of relevant source files to include in the
+            planning context.
+        max_source_chars_per_file: Per-file source snippet character budget.
+        message_callback: Optional callback for progress messages.
+
+    Returns:
+        Paths, mode, and selected context files for the generated plan.
+
+    Raises:
+        FileNotFoundError: If required code-task artifacts are missing.
+        RuntimeError: If ``run_dir`` is not a code-task run.
+        FileExistsError: If ``patch_plan.md`` already exists and ``force`` is
+            false.
+    """
+    root = Path(run_dir)
+    task_dir = root / "code_task"
+    meta_dir = task_dir / "meta"
+    workspace_dir = task_dir / "workspace"
+    patch_plan_path = task_dir / "patch_plan.md"
+    manifest_path = root / "manifest.json"
+    if patch_plan_path.exists() and not force:
+        raise FileExistsError(f"Patch plan already exists: {patch_plan_path}")
+
+    manifest = _load_code_task_manifest(manifest_path)
+    task_text = _read_required_text(task_dir / "task.md")
+    index = _read_required_json(meta_dir / "codebase_index.json")
+    selected = select_relevant_files(index, task_text, max_files=max_files)
+    snippets = _source_snippets(
+        workspace_dir,
+        selected,
+        max_chars_per_file=max_source_chars_per_file,
+    )
+
+    mode = "offline"
+    plan_data: dict[str, Any] | None = None
+    if use_llm:
+        try:
+            _emit(message_callback, "Calling LLM for code-task patch planning.")
+            client = LLMClient.from_env(
+                model=model,
+                usage_callback=lambda usage: _record_code_task_usage(
+                    meta_dir,
+                    usage,
+                    message_callback=message_callback,
+                ),
+            )
+            plan_data = _ask_llm_for_plan(
+                client,
+                task_text=task_text,
+                index=index,
+                snippets=snippets,
+                benchmark_command=_benchmark_command(manifest),
+            )
+            mode = "llm"
+        except LLMError as exc:
+            _emit(message_callback, f"LLM planning failed; using offline fallback. {exc}")
+
+    if plan_data is None:
+        plan_data = _offline_plan(
+            task_text=task_text,
+            index=index,
+            selected_files=selected,
+            benchmark_command=_benchmark_command(manifest),
+        )
+
+    markdown = _render_patch_plan(
+        plan_data,
+        task_text=task_text,
+        selected_files=selected,
+        mode=mode,
+    )
+    write_text(patch_plan_path, markdown)
+    _update_manifest_after_plan(
+        manifest_path,
+        manifest,
+        selected_files=selected,
+        mode=mode,
+    )
+    return PatchPlanResult(
+        run_dir=root,
+        patch_plan_path=patch_plan_path,
+        manifest_path=manifest_path,
+        mode=mode,
+        selected_files=tuple(selected),
+        pending_approval=True,
+    )
+
+
+def record_plan_decision(
+    run_dir: Path,
+    *,
+    decision: str,
+    note: str = "",
+    reviewer: str = "user",
+) -> dict[str, Any]:
+    """Record a human decision for the current ``patch_plan.md``.
+
+    Args:
+        run_dir: Code-task run directory.
+        decision: One of ``approve``, ``reject``, or ``revise``.
+        note: Optional human-readable reason or follow-up instruction.
+        reviewer: Name recorded in the HITL decision log.
+
+    Returns:
+        JSON row appended to ``hitl_decisions.jsonl``.
+
+    Raises:
+        FileNotFoundError: If no patch plan exists.
+        ValueError: If ``decision`` is unsupported.
+    """
+    normalized = decision.strip().lower()
+    if normalized not in {"approve", "reject", "revise"}:
+        raise ValueError("decision must be one of: approve, reject, revise")
+
+    root = Path(run_dir)
+    task_dir = root / "code_task"
+    meta_dir = task_dir / "meta"
+    patch_plan_path = task_dir / "patch_plan.md"
+    if not patch_plan_path.exists():
+        raise FileNotFoundError(f"Missing patch plan: {patch_plan_path}")
+
+    manifest_path = root / "manifest.json"
+    manifest = _load_code_task_manifest(manifest_path)
+    row = {
+        "schema_version": 1,
+        "created_at": _utcnow_iso(),
+        "kind": "patch_plan_decision",
+        "decision": normalized,
+        "reviewer": reviewer,
+        "note": note,
+        "patch_plan": "code_task/patch_plan.md",
+    }
+    append_jsonl(meta_dir / "hitl_decisions.jsonl", row)
+
+    status_by_decision = {
+        "approve": "approved",
+        "reject": "rejected",
+        "revise": "revision_requested",
+    }
+    plan = _dict_value(manifest, "plan")
+    plan["status"] = status_by_decision[normalized]
+    plan["last_decision"] = row
+    manifest["plan"] = plan
+    manifest["status"] = "plan_" + status_by_decision[normalized]
+    write_json(manifest_path, manifest)
+    return row
+
+
+def select_relevant_files(
+    index: dict[str, Any],
+    task_text: str,
+    *,
+    max_files: int = 8,
+) -> list[str]:
+    """Select a compact source context for patch planning.
+
+    The selector is deterministic and intentionally simple. It favors files
+    whose path, summary, functions, classes, imports, or role tags overlap with
+    the task, while also keeping likely entrypoints and tests visible.
+    """
+    terms = _terms(task_text)
+    files = _index_files(index)
+    scored: list[tuple[int, str]] = []
+    for item in files:
+        path = str(item.get("path", ""))
+        if not path:
+            continue
+        haystack = _file_haystack(item)
+        score = sum(3 for term in terms if term in haystack)
+        role_tags = [str(tag) for tag in item.get("role_tags", []) if isinstance(tag, str)]
+        if "entrypoint" in role_tags:
+            score += 4
+        if "test" in role_tags:
+            score += 3
+        if "source" in role_tags:
+            score += 2
+        if "config" in role_tags:
+            score += 1
+        if score > 0:
+            scored.append((score, path))
+
+    if not scored:
+        for item in files:
+            path = str(item.get("path", ""))
+            if path and str(item.get("kind", "")) in {"python", "markdown", "text"}:
+                scored.append((1, path))
+
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    selected: list[str] = []
+    for _, path in scored:
+        if path not in selected:
+            selected.append(path)
+        if len(selected) >= max(1, max_files):
+            break
+    return selected
+
+
+def _ask_llm_for_plan(
+    client: LLMClient,
+    *,
+    task_text: str,
+    index: dict[str, Any],
+    snippets: list[dict[str, str]],
+    benchmark_command: str,
+) -> dict[str, Any]:
+    prompt = _plan_user_prompt(
+        task_text=task_text,
+        index=index,
+        snippets=snippets,
+        benchmark_command=benchmark_command,
+    )
+    response = client.ask_json(CODE_TASK_PLAN_SYSTEM, prompt, label="code-task-plan")
+    return _normalize_plan_data(response, index)
+
+
+def _plan_user_prompt(
+    *,
+    task_text: str,
+    index: dict[str, Any],
+    snippets: list[dict[str, str]],
+    benchmark_command: str,
+) -> str:
+    compact_index = _compact_codebase_index(index)
+    snippet_text = "\n\n".join(
+        f"### {item['path']}\n```text\n{item['text']}\n```"
+        for item in snippets
+    )
+    return (
+        "Create a code modification plan for this existing workspace. "
+        "Return JSON with these fields exactly: "
+        "`summary` string, `goals` list of strings, `files_to_modify` list of "
+        "objects with `path`, `reason`, and `change_type`, `new_files` list of "
+        "objects with `path` and `reason`, `proposed_steps` list of strings, "
+        "`validation` list of strings, `risks` list of strings, `rollback` list "
+        "of strings, `open_questions` list of strings, and "
+        "`requires_approval_before_patch` boolean.\n\n"
+        "Rules adapted from AutoResearchClaw-style code planning:\n"
+        "- Analyze first; do not write or apply code.\n"
+        "- Prefer modifying existing code over generating unrelated new modules.\n"
+        "- Mention only workspace-relative paths from the index in "
+        "`files_to_modify`. Put truly new files in `new_files`.\n"
+        "- Keep the plan small enough for one reviewable patch.\n"
+        "- Include the benchmark or validation command when available.\n"
+        "- Name risks, rollback steps, and any missing information.\n"
+        "- Require human approval before patch application.\n\n"
+        f"Task:\n{task_text}\n\n"
+        f"Benchmark command recorded for later validation:\n{benchmark_command or 'None'}\n\n"
+        f"Codebase index summary JSON:\n{json.dumps(compact_index, indent=2, ensure_ascii=False)}\n\n"
+        f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
+    )
+
+
+def _offline_plan(
+    *,
+    task_text: str,
+    index: dict[str, Any],
+    selected_files: list[str],
+    benchmark_command: str,
+) -> dict[str, Any]:
+    files_to_modify = [
+        {
+            "path": path,
+            "reason": "Selected as likely relevant to the task based on path, role tags, or code summary.",
+            "change_type": "inspect_then_edit",
+        }
+        for path in selected_files[:5]
+    ]
+    validation = [benchmark_command] if benchmark_command else [
+        "Run the project's existing tests or benchmark command after applying a patch."
+    ]
+    return {
+        "summary": "Offline fallback plan generated from the task text and codebase index.",
+        "goals": [
+            _first_sentence(task_text) or "Clarify the requested code improvement.",
+            "Keep the change small, reviewable, and limited to the copied workspace.",
+        ],
+        "files_to_modify": files_to_modify,
+        "new_files": [],
+        "proposed_steps": [
+            "Inspect the selected files and confirm which functions/classes implement the target behavior.",
+            "Prepare a minimal patch that changes only the behavior required by the task.",
+            "Update or add focused tests when the current test coverage does not exercise the requested behavior.",
+            "Run validation and preserve stdout/stderr in the code-task run artifacts.",
+        ],
+        "validation": validation,
+        "risks": [
+            "The offline plan is based on summaries and selected snippets, so it may miss hidden coupling in unselected files.",
+            "Changing benchmark logic can invalidate comparisons if the validation command is not representative.",
+        ],
+        "rollback": [
+            "Discard changes inside code_task/workspace and rerun code-task init from the original code root.",
+            "Use the file hashes in codebase_index.json to compare the initial workspace state with later edits.",
+        ],
+        "open_questions": [
+            "Should the patch optimize implementation quality, benchmark score, test coverage, or all of them?",
+            "Are there external constraints not visible in the copied workspace?",
+        ],
+        "requires_approval_before_patch": True,
+    }
+
+
+def _normalize_plan_data(data: dict[str, Any], index: dict[str, Any]) -> dict[str, Any]:
+    known_paths = {str(item.get("path", "")) for item in _index_files(index)}
+    normalized = {
+        "summary": _string(data.get("summary")) or "Patch plan generated by LLM.",
+        "goals": _string_list(data.get("goals")),
+        "files_to_modify": _file_plan_list(data.get("files_to_modify"), known_paths),
+        "new_files": _new_file_plan_list(data.get("new_files")),
+        "proposed_steps": _string_list(data.get("proposed_steps")),
+        "validation": _string_list(data.get("validation")),
+        "risks": _string_list(data.get("risks")),
+        "rollback": _string_list(data.get("rollback")),
+        "open_questions": _string_list(data.get("open_questions")),
+        "requires_approval_before_patch": data.get("requires_approval_before_patch") is not False,
+    }
+    if not normalized["goals"]:
+        normalized["goals"] = ["Implement the requested change in a small, reviewable patch."]
+    if not normalized["proposed_steps"]:
+        normalized["proposed_steps"] = ["Inspect relevant files before preparing a patch."]
+    if not normalized["validation"]:
+        normalized["validation"] = ["Run the recorded benchmark or project test command."]
+    if not normalized["rollback"]:
+        normalized["rollback"] = ["Discard workspace edits and rerun code-task init."]
+    return normalized
+
+
+def _render_patch_plan(
+    plan: dict[str, Any],
+    *,
+    task_text: str,
+    selected_files: list[str],
+    mode: str,
+) -> str:
+    sections = [
+        "# Patch Plan",
+        "",
+        f"Generated mode: `{mode}`",
+        "",
+        "## Task",
+        "",
+        task_text.strip() or "No task text was provided.",
+        "",
+        "## Summary",
+        "",
+        _string(plan.get("summary")) or "No summary was generated.",
+        "",
+        "## Goals",
+        "",
+        _bullet_list(_string_list(plan.get("goals"))),
+        "",
+        "## Context Used",
+        "",
+        _bullet_list([f"`{path}`" for path in selected_files]) or "- No files selected.",
+        "",
+        "## Files To Modify",
+        "",
+        _file_plan_markdown(plan.get("files_to_modify")),
+        "",
+        "## New Files",
+        "",
+        _new_file_plan_markdown(plan.get("new_files")),
+        "",
+        "## Proposed Steps",
+        "",
+        _bullet_list(_string_list(plan.get("proposed_steps"))),
+        "",
+        "## Validation",
+        "",
+        _bullet_list(_string_list(plan.get("validation"))),
+        "",
+        "## Risks",
+        "",
+        _bullet_list(_string_list(plan.get("risks"))),
+        "",
+        "## Rollback",
+        "",
+        _bullet_list(_string_list(plan.get("rollback"))),
+        "",
+        "## Open Questions",
+        "",
+        _bullet_list(_string_list(plan.get("open_questions"))) or "- None recorded.",
+        "",
+        "## Human Approval",
+        "",
+        "Patch application is blocked until this plan is reviewed. Record a decision with:",
+        "",
+        "```bash",
+        "uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note \"reviewed\"",
+        "```",
+        "",
+    ]
+    return "\n".join(sections)
+
+
+def _file_plan_markdown(value: object) -> str:
+    rows = value if isinstance(value, list) else []
+    lines: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        path = _string(item.get("path"))
+        if not path:
+            continue
+        reason = _string(item.get("reason")) or "No reason provided."
+        change_type = _string(item.get("change_type")) or "edit"
+        lines.append(f"- `{path}` ({change_type}): {reason}")
+    return "\n".join(lines) if lines else "- No existing files selected."
+
+
+def _new_file_plan_markdown(value: object) -> str:
+    rows = value if isinstance(value, list) else []
+    lines: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        path = _string(item.get("path"))
+        reason = _string(item.get("reason")) or "No reason provided."
+        if path:
+            lines.append(f"- `{path}`: {reason}")
+    return "\n".join(lines) if lines else "- No new files proposed."
+
+
+def _update_manifest_after_plan(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    *,
+    selected_files: list[str],
+    mode: str,
+) -> None:
+    plan = _dict_value(manifest, "plan")
+    plan.update(
+        {
+            "status": "pending_approval",
+            "mode": mode,
+            "generated_at": _utcnow_iso(),
+            "patch_plan": "code_task/patch_plan.md",
+            "selected_files": selected_files,
+        }
+    )
+    layout = _dict_value(manifest, "layout")
+    layout["patch_plan"] = "code_task/patch_plan.md"
+    manifest["layout"] = layout
+    manifest["plan"] = plan
+    manifest["status"] = "planned"
+    write_json(manifest_path, manifest)
+
+
+def _record_code_task_usage(
+    meta_dir: Path,
+    usage: LLMUsage,
+    *,
+    message_callback: MessageCallback | None,
+) -> None:
+    usage_path = meta_dir / "llm_usage.jsonl"
+    row = usage.to_row()
+    row["stage"] = "code_task.plan"
+    append_jsonl(usage_path, row)
+    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
+    cost = row.get("estimated_cost_usd")
+    cost_text = f", est cost ${cost:.6f}" if isinstance(cost, (int, float)) else ""
+    _emit(
+        message_callback,
+        f"LLM usage {row.get('label', '')}: "
+        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
+        f"{row['total_tokens']} tokens ({row['source']}{cost_text}).",
+    )
+
+
+def _source_snippets(
+    workspace_dir: Path,
+    selected_files: list[str],
+    *,
+    max_chars_per_file: int,
+) -> list[dict[str, str]]:
+    snippets: list[dict[str, str]] = []
+    workspace = workspace_dir.resolve()
+    for rel_path in selected_files:
+        path = (workspace / rel_path).resolve()
+        if not _is_relative_to(path, workspace) or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        snippets.append(
+            {
+                "path": rel_path,
+                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
+            }
+        )
+    return snippets
+
+
+def _compact_codebase_index(index: dict[str, Any]) -> dict[str, Any]:
+    files: list[dict[str, Any]] = []
+    for item in _index_files(index):
+        row: dict[str, Any] = {
+            "path": item.get("path"),
+            "kind": item.get("kind"),
+            "role_tags": item.get("role_tags", []),
+            "summary": item.get("summary", ""),
+        }
+        python = item.get("python")
+        if isinstance(python, dict):
+            row["python"] = {
+                "syntax_ok": python.get("syntax_ok"),
+                "imports": python.get("imports", []),
+                "functions": _signature_rows(python.get("functions", [])),
+                "classes": _class_signature_rows(python.get("classes", [])),
+                "has_main_guard": python.get("has_main_guard", False),
+            }
+        files.append(row)
+    return {
+        "project": index.get("project", {}),
+        "files": files,
+    }
+
+
+def _signature_rows(value: object) -> list[dict[str, Any]]:
+    rows = value if isinstance(value, list) else []
+    result: list[dict[str, Any]] = []
+    for item in rows:
+        if isinstance(item, dict):
+            result.append(
+                {
+                    "name": item.get("name"),
+                    "line_start": item.get("line_start"),
+                    "line_end": item.get("line_end"),
+                    "args": item.get("args", []),
+                }
+            )
+    return result
+
+
+def _class_signature_rows(value: object) -> list[dict[str, Any]]:
+    rows = value if isinstance(value, list) else []
+    result: list[dict[str, Any]] = []
+    for item in rows:
+        if isinstance(item, dict):
+            result.append(
+                {
+                    "name": item.get("name"),
+                    "line_start": item.get("line_start"),
+                    "line_end": item.get("line_end"),
+                    "methods": _signature_rows(item.get("methods", [])),
+                }
+            )
+    return result
+
+
+def _load_code_task_manifest(path: Path) -> dict[str, Any]:
+    data = _read_required_json(path)
+    if data.get("workflow") != "code_task":
+        raise RuntimeError(f"Run is not a code-task workflow: {path.parent}")
+    return data
+
+
+def _read_required_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing required artifact: {path}")
+    data = read_json(path)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Expected JSON object in {path}")
+    return data
+
+
+def _read_required_text(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing required artifact: {path}")
+    return read_text(path)
+
+
+def _index_files(index: dict[str, Any]) -> list[dict[str, Any]]:
+    files = index.get("files", [])
+    if not isinstance(files, list):
+        return []
+    return [item for item in files if isinstance(item, dict)]
+
+
+def _file_haystack(item: dict[str, Any]) -> str:
+    pieces = [
+        str(item.get("path", "")),
+        str(item.get("summary", "")),
+        " ".join(str(tag) for tag in item.get("role_tags", []) if isinstance(tag, str)),
+    ]
+    python = item.get("python")
+    if isinstance(python, dict):
+        pieces.extend(str(name) for name in python.get("imports", []) if isinstance(name, str))
+        for function in python.get("functions", []):
+            if isinstance(function, dict):
+                pieces.append(str(function.get("name", "")))
+        for klass in python.get("classes", []):
+            if isinstance(klass, dict):
+                pieces.append(str(klass.get("name", "")))
+                for method in klass.get("methods", []):
+                    if isinstance(method, dict):
+                        pieces.append(str(method.get("name", "")))
+    return " ".join(pieces).lower()
+
+
+def _file_plan_list(value: object, known_paths: set[str]) -> list[dict[str, str]]:
+    rows = value if isinstance(value, list) else []
+    result: list[dict[str, str]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        path = _string(item.get("path"))
+        if not path or path not in known_paths:
+            continue
+        result.append(
+            {
+                "path": path,
+                "reason": _string(item.get("reason")),
+                "change_type": _string(item.get("change_type")) or "edit",
+            }
+        )
+    return result
+
+
+def _new_file_plan_list(value: object) -> list[dict[str, str]]:
+    rows = value if isinstance(value, list) else []
+    result: list[dict[str, str]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        path = _string(item.get("path"))
+        if not path or path.startswith("/") or ".." in Path(path).parts:
+            continue
+        result.append({"path": path, "reason": _string(item.get("reason"))})
+    return result
+
+
+def _benchmark_command(manifest: dict[str, Any]) -> str:
+    benchmark = manifest.get("benchmark", {})
+    if isinstance(benchmark, dict):
+        command = benchmark.get("command")
+        return str(command) if command else ""
+    return ""
+
+
+def _dict_value(data: dict[str, Any], key: str) -> dict[str, Any]:
+    value = data.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _string(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_string(item) for item in value if _string(item)]
+
+
+def _bullet_list(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _terms(text: str) -> set[str]:
+    return {
+        term.lower()
+        for term in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
+        if term.lower() not in {"the", "and", "for", "with", "this", "that"}
+    }
+
+
+def _first_sentence(text: str) -> str:
+    normalized = " ".join(text.strip().split())
+    if not normalized:
+        return ""
+    return re.split(r"(?<=[.!?])\s+", normalized, maxsplit=1)[0]
+
+
+def _clip_text(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n... [truncated]"
+
+
+def _emit(callback: MessageCallback | None, message: str) -> None:
+    if callback is not None:
+        callback(message)
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")

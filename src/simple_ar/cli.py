@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Sequence
 
 from simple_ar.artifacts import read_json, read_text
+from simple_ar.code_task import (
+    generate_patch_plan,
+    initialize_code_task,
+    record_plan_decision,
+)
 from simple_ar.pipeline import Context, PipelineRunner
 from simple_ar.reporting import ConsoleReporter
 from simple_ar.retrieval.index import build_artifact_index
@@ -58,6 +63,53 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
+
+    code_task_parser = subparsers.add_parser(
+        "code-task",
+        help="Work with an existing codebase in an isolated run workspace.",
+    )
+    code_task_subparsers = code_task_parser.add_subparsers(
+        dest="code_task_command",
+        required=True,
+    )
+    code_task_init = code_task_subparsers.add_parser(
+        "init",
+        help="Copy a codebase into a code-task workspace and build a code index.",
+    )
+    code_task_init.add_argument("--code-root", required=True)
+    code_task_init.add_argument("--task-file", required=True)
+    code_task_init.add_argument("--output-root", default="runs")
+    code_task_init.add_argument("--name", default=None)
+    code_task_init.add_argument("--benchmark-command", default=None)
+    code_task_init.add_argument(
+        "--max-file-bytes",
+        type=int,
+        default=2_000_000,
+        help="Maximum file size copied into the workspace. Use 0 to disable.",
+    )
+    code_task_plan = code_task_subparsers.add_parser(
+        "plan",
+        help="Generate a human-reviewable patch plan for a code-task run.",
+    )
+    code_task_plan.add_argument("run_dir")
+    code_task_plan.add_argument("--model", default=None)
+    code_task_plan.add_argument("--no-llm", action="store_true")
+    code_task_plan.add_argument("--force", action="store_true")
+    code_task_plan.add_argument("--max-files", type=int, default=8)
+    code_task_plan.add_argument("--max-source-chars-per-file", type=int, default=2500)
+
+    code_task_decide = code_task_subparsers.add_parser(
+        "decide-plan",
+        help="Record a human decision for the current code-task patch plan.",
+    )
+    code_task_decide.add_argument("run_dir")
+    code_task_decide.add_argument(
+        "--decision",
+        required=True,
+        choices=("approve", "reject", "revise"),
+    )
+    code_task_decide.add_argument("--note", default="")
+    code_task_decide.add_argument("--reviewer", default="user")
 
     inspect_parser = subparsers.add_parser("inspect", help="Index and summarize run artifacts.")
     inspect_parser.add_argument("run_dir")
@@ -157,6 +209,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         _print_status(Path(args.run_dir))
         return
 
+    if args.command == "code-task":
+        if args.code_task_command == "init":
+            _print_code_task_init(args)
+            return
+        if args.code_task_command == "plan":
+            _print_code_task_plan(args)
+            return
+        if args.code_task_command == "decide-plan":
+            _print_code_task_decision(args)
+            return
+        parser.error(f"Unknown code-task command: {args.code_task_command}")
+
     if args.command == "inspect":
         _print_inspect(Path(args.run_dir))
         return
@@ -214,6 +278,10 @@ def _print_status(run_dir: Path) -> None:
     if not manifest_path.exists():
         raise SystemExit(f"Missing manifest.json in {run_dir}")
     manifest = read_json(manifest_path)
+    if manifest.get("workflow") == "code_task":
+        _print_code_task_status(run_dir, manifest)
+        return
+
     state_path = run_dir / "pipeline_state.json"
     state = read_json(state_path) if state_path.exists() else {}
 
@@ -243,6 +311,42 @@ def _print_status(run_dir: Path) -> None:
             print(f"- report.md: {report_path}")
         if report_manifest_path.exists():
             print(f"- manifest.json: {report_manifest_path}")
+
+
+def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
+    """Print status for a code-task workflow manifest."""
+    print(f"Run: {run_dir}")
+    print(f"Workflow: {manifest.get('workflow', 'code_task')}")
+    print(f"Status: {manifest.get('status', 'unknown')}")
+
+    layout = manifest.get("layout", {})
+    if isinstance(layout, dict):
+        print("Layout:")
+        for key in ("task", "workspace", "meta", "codebase_index"):
+            value = layout.get(key)
+            if value:
+                print(f"- {key}: {run_dir / str(value)}")
+
+    codebase = manifest.get("codebase", {})
+    if isinstance(codebase, dict):
+        print("Codebase:")
+        print(f"- files: {codebase.get('file_count', 0)}")
+        print(f"- python files: {codebase.get('python_file_count', 0)}")
+        print(f"- test files: {codebase.get('test_file_count', 0)}")
+
+    plan = manifest.get("plan", {})
+    if isinstance(plan, dict) and plan:
+        print("Plan:")
+        print(f"- status: {plan.get('status', 'unknown')}")
+        print(f"- mode: {plan.get('mode', 'unknown')}")
+        if plan.get("patch_plan"):
+            print(f"- patch plan: {run_dir / str(plan.get('patch_plan'))}")
+
+    benchmark = manifest.get("benchmark", {})
+    if isinstance(benchmark, dict) and benchmark.get("command"):
+        print("Benchmark:")
+        print(f"- command: {benchmark.get('command')}")
+        print(f"- executed: {benchmark.get('executed', False)}")
 
 
 def _print_inspect(run_dir: Path) -> None:
@@ -305,6 +409,72 @@ def _print_artifact_search(
         print(f"- {path}:{line_start}-{line_end} score={score}")
         if snippet:
             print(f"  {snippet}")
+
+
+def _print_code_task_init(args: argparse.Namespace) -> None:
+    """Initialize a code-task run and print the resulting workspace summary."""
+    code_root = Path(args.code_root)
+    task_file = Path(args.task_file)
+    name = args.name or f"code-task-{code_root.resolve().name}"
+    run_dir = _new_run_dir(Path(args.output_root), name)
+    result = initialize_code_task(
+        run_dir=run_dir,
+        code_root=code_root,
+        task_file=task_file,
+        benchmark_command=args.benchmark_command,
+        max_file_bytes=args.max_file_bytes,
+    )
+    project = result.codebase_index.get("project", {})
+    print(f"Code task run: {result.run_dir}")
+    print(f"Workspace: {result.workspace_dir}")
+    print(f"Task: {result.task_dir / 'task.md'}")
+    print(f"Index: {result.codebase_index_path}")
+    print(
+        "Files copied: "
+        f"{result.copy_report.files_copied} "
+        f"({result.copy_report.skipped_count} skipped)"
+    )
+    print(
+        "Indexed: "
+        f"{project.get('file_count', 0)} file(s), "
+        f"{project.get('python_file_count', 0)} Python file(s), "
+        f"{project.get('test_file_count', 0)} test file(s)"
+    )
+    if args.benchmark_command:
+        print(f"Benchmark command recorded: {args.benchmark_command}")
+
+
+def _print_code_task_plan(args: argparse.Namespace) -> None:
+    """Generate a code-task patch plan and print a compact summary."""
+    result = generate_patch_plan(
+        Path(args.run_dir),
+        model=args.model,
+        use_llm=not args.no_llm,
+        force=args.force,
+        max_files=args.max_files,
+        max_source_chars_per_file=args.max_source_chars_per_file,
+        message_callback=lambda message: print(f"  - {message}"),
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Patch plan: {result.patch_plan_path}")
+    print(f"Mode: {result.mode}")
+    print(f"Pending approval: {result.pending_approval}")
+    print(f"Context files: {len(result.selected_files)}")
+    for path in result.selected_files:
+        print(f"- {path}")
+
+
+def _print_code_task_decision(args: argparse.Namespace) -> None:
+    """Record and print the human decision for a patch plan."""
+    row = record_plan_decision(
+        Path(args.run_dir),
+        decision=args.decision,
+        note=args.note,
+        reviewer=args.reviewer,
+    )
+    print(f"Code task run: {args.run_dir}")
+    print(f"Decision: {row['decision']}")
+    print("Decision log: code_task/meta/hitl_decisions.jsonl")
 
 
 def _artifact_rows(index: dict[str, object]) -> list[dict[str, object]]:
