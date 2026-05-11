@@ -10,10 +10,14 @@ from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, wr
 from simple_ar.cli import main
 from simple_ar.code_task import (
     PatchValidationError,
+    analyze_code_task_failure,
     apply_patch_edits,
     generate_patch_plan,
     initialize_code_task,
+    propose_repair_edits,
     record_plan_decision,
+    run_code_task_benchmark,
+    validate_code_task,
 )
 
 
@@ -323,6 +327,137 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("Patch:", status_stdout.getvalue())
             self.assertIn("status: applied", status_stdout.getvalue())
 
+    def test_validate_code_task_reports_warnings_and_strict_errors(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(
+                code_root / "danger.py",
+                "import os\n\n\ndef run():\n    os.system('echo unsafe')\n",
+            )
+            write_text(task_file, "# Task\n\nValidate risky code.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file)
+
+            result = validate_code_task(run_dir)
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.error_count, 0)
+            self.assertGreaterEqual(result.warning_count, 1)
+            report = read_json(run_dir / "code_task" / "meta" / "validation_report.json")
+            self.assertTrue(any(item["code"] == "risky_call" for item in report["issues"]))
+
+            strict = validate_code_task(run_dir, strict=True)
+            self.assertEqual(strict.status, "failed")
+            self.assertGreaterEqual(strict.error_count, 1)
+
+    def test_run_code_task_benchmark_captures_outputs_and_updates_status(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nRun existing tests.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            result = run_code_task_benchmark(run_dir, timeout_sec=10)
+
+            self.assertEqual(result.status, "passed")
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue((run_dir / "code_task" / "run" / "execution_report.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "run" / "stdout.txt").is_file())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["benchmark"]["last_status"], "passed")
+            self.assertEqual(manifest["status"], "benchmark_passed")
+
+    def test_analyze_failure_and_offline_repair_proposal(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nBreak then diagnose the spam classifier.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            apply_patch_edits(run_dir, edits_file=_write_failing_edit_proposal(run_dir))
+            failed = run_code_task_benchmark(run_dir, timeout_sec=10)
+            self.assertEqual(failed.status, "failed")
+
+            analysis = analyze_code_task_failure(run_dir)
+
+            self.assertEqual(analysis.status, "needs_repair")
+            analysis_text = read_text(analysis.analysis_path)
+            self.assertIn("# Failure Analysis", analysis_text)
+            self.assertIn("AssertionError", analysis_text)
+
+            repair = propose_repair_edits(run_dir, use_llm=False)
+            self.assertEqual(repair.mode, "offline")
+            self.assertEqual(repair.edit_count, 0)
+            self.assertTrue((repair.repair_dir / "proposed_edits.json").is_file())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["repair"]["status"], "repair_proposed")
+
+    def test_code_task_validate_run_and_failure_cli(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nRun CLI validation and tests.\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                        "--benchmark-command",
+                        "python -m unittest discover -s tests",
+                    ]
+                )
+            run_dir = next(output_root.iterdir())
+
+            validate_stdout = io.StringIO()
+            with contextlib.redirect_stdout(validate_stdout):
+                main(["code-task", "validate", str(run_dir)])
+            self.assertIn("Status: passed", validate_stdout.getvalue())
+
+            run_stdout = io.StringIO()
+            with contextlib.redirect_stdout(run_stdout):
+                main(["code-task", "run", str(run_dir), "--timeout", "10"])
+            self.assertIn("Status: passed", run_stdout.getvalue())
+            self.assertTrue((run_dir / "code_task" / "run" / "execution_report.json").is_file())
+
+            status_stdout = io.StringIO()
+            with contextlib.redirect_stdout(status_stdout):
+                main(["status", str(run_dir)])
+            self.assertIn("Validation:", status_stdout.getvalue())
+            self.assertIn("last status: passed", status_stdout.getvalue())
+
 
 def _write_toy_project(code_root: Path) -> None:
     write_text(
@@ -371,6 +506,31 @@ def _write_valid_edit_proposal(run_dir: Path, path: Path | None = None) -> Path:
                         "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize')) else 'ham'\n"
                     ),
                     "reason": "Extend the keyword baseline while preserving the public API.",
+                }
+            ],
+        },
+    )
+    return proposal_path
+
+
+def _write_failing_edit_proposal(run_dir: Path) -> Path:
+    proposal_path = run_dir / "code_task" / "meta" / "proposed_edits.json"
+    write_json(
+        proposal_path,
+        {
+            "schema_version": 1,
+            "edits": [
+                {
+                    "path": "spam_model.py",
+                    "old": (
+                        "def predict(text):\n"
+                        "    return 'spam' if 'win' in text.lower() else 'ham'\n"
+                    ),
+                    "new": (
+                        "def predict(text):\n"
+                        "    return 'ham'\n"
+                    ),
+                    "reason": "Deliberately break the classifier for failure-analysis coverage.",
                 }
             ],
         },

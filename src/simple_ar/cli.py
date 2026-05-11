@@ -8,11 +8,15 @@ from typing import Sequence
 
 from simple_ar.artifacts import read_json, read_text
 from simple_ar.code_task import (
+    analyze_code_task_failure,
     apply_patch_edits,
     generate_patch_plan,
     initialize_code_task,
     propose_patch_edits,
+    propose_repair_edits,
     record_plan_decision,
+    run_code_task_benchmark,
+    validate_code_task,
 )
 from simple_ar.pipeline import Context, PipelineRunner
 from simple_ar.reporting import ConsoleReporter
@@ -136,6 +140,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bypass the human approval gate. Intended only for local experiments/tests.",
     )
 
+    code_task_validate = code_task_subparsers.add_parser(
+        "validate",
+        help="Run lightweight static validation over the code-task workspace.",
+    )
+    code_task_validate.add_argument("run_dir")
+    code_task_validate.add_argument("--strict", action="store_true")
+    code_task_validate.add_argument("--max-file-bytes", type=int, default=500_000)
+
+    code_task_run = code_task_subparsers.add_parser(
+        "run",
+        help="Run the recorded benchmark command in the code-task workspace.",
+    )
+    code_task_run.add_argument("run_dir")
+    code_task_run.add_argument("--command", dest="benchmark_command", default=None)
+    code_task_run.add_argument("--timeout", type=int, default=60)
+    code_task_run.add_argument("--skip-validation", action="store_true")
+
+    code_task_analyze = code_task_subparsers.add_parser(
+        "analyze-failure",
+        help="Write a deterministic failure analysis from the latest benchmark run.",
+    )
+    code_task_analyze.add_argument("run_dir")
+
+    code_task_repair = code_task_subparsers.add_parser(
+        "repair",
+        help="Propose bounded repair edits from the latest failure analysis.",
+    )
+    code_task_repair.add_argument("run_dir")
+    code_task_repair.add_argument("--model", default=None)
+    code_task_repair.add_argument("--no-llm", action="store_true")
+    code_task_repair.add_argument("--max-files", type=int, default=8)
+    code_task_repair.add_argument("--max-source-chars-per-file", type=int, default=4000)
+
     inspect_parser = subparsers.add_parser("inspect", help="Index and summarize run artifacts.")
     inspect_parser.add_argument("run_dir")
 
@@ -249,6 +286,18 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.code_task_command == "apply-edits":
             _print_code_task_apply_edits(args)
+            return
+        if args.code_task_command == "validate":
+            _print_code_task_validate(args)
+            return
+        if args.code_task_command == "run":
+            _print_code_task_run(args)
+            return
+        if args.code_task_command == "analyze-failure":
+            _print_code_task_analyze_failure(args)
+            return
+        if args.code_task_command == "repair":
+            _print_code_task_repair(args)
             return
         parser.error(f"Unknown code-task command: {args.code_task_command}")
 
@@ -385,11 +434,39 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
         if isinstance(changed_files, list) and changed_files:
             print(f"- changed files: {', '.join(str(path) for path in changed_files)}")
 
+    validation = manifest.get("validation", {})
+    if isinstance(validation, dict) and validation:
+        print("Validation:")
+        print(f"- status: {validation.get('status', 'unknown')}")
+        print(f"- errors: {validation.get('error_count', 0)}")
+        print(f"- warnings: {validation.get('warning_count', 0)}")
+        if validation.get("report"):
+            print(f"- report: {run_dir / str(validation.get('report'))}")
+
     benchmark = manifest.get("benchmark", {})
     if isinstance(benchmark, dict) and benchmark.get("command"):
         print("Benchmark:")
         print(f"- command: {benchmark.get('command')}")
         print(f"- executed: {benchmark.get('executed', False)}")
+        if benchmark.get("last_status"):
+            print(f"- last status: {benchmark.get('last_status')}")
+        if benchmark.get("execution_report"):
+            print(f"- execution report: {run_dir / str(benchmark.get('execution_report'))}")
+
+    failure = manifest.get("failure_analysis", {})
+    if isinstance(failure, dict) and failure:
+        print("Failure Analysis:")
+        print(f"- status: {failure.get('status', 'unknown')}")
+        if failure.get("analysis"):
+            print(f"- analysis: {run_dir / str(failure.get('analysis'))}")
+
+    repair = manifest.get("repair", {})
+    if isinstance(repair, dict) and repair:
+        print("Repair:")
+        print(f"- status: {repair.get('status', 'unknown')}")
+        print(f"- attempts: {repair.get('repair_count', 0)}")
+        if repair.get("latest_proposed_edits"):
+            print(f"- latest proposal: {run_dir / str(repair.get('latest_proposed_edits'))}")
 
 
 def _print_inspect(run_dir: Path) -> None:
@@ -552,6 +629,72 @@ def _print_code_task_apply_edits(args: argparse.Namespace) -> None:
     print(f"Applied edits: {result.applied_edits_path}")
     print(f"Changed files: {len(result.changed_files)}")
     for path in result.changed_files:
+        print(f"- {path}")
+
+
+def _print_code_task_validate(args: argparse.Namespace) -> None:
+    """Run static validation and print a compact issue summary."""
+    result = validate_code_task(
+        Path(args.run_dir),
+        strict=args.strict,
+        max_file_bytes=args.max_file_bytes,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Validation report: {result.report_path}")
+    print(f"Status: {result.status}")
+    print(f"Errors: {result.error_count}")
+    print(f"Warnings: {result.warning_count}")
+
+
+def _print_code_task_run(args: argparse.Namespace) -> None:
+    """Run a code-task benchmark and print execution artifacts."""
+    result = run_code_task_benchmark(
+        Path(args.run_dir),
+        command=args.benchmark_command,
+        timeout_sec=args.timeout,
+        skip_validation=args.skip_validation,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Execution report: {result.report_path}")
+    print(f"Status: {result.status}")
+    print(f"Return code: {result.returncode}")
+    print(f"Timed out: {result.timed_out}")
+    print(f"Stdout: {result.stdout_path}")
+    print(f"Stderr: {result.stderr_path}")
+    if result.metrics:
+        print("Metrics:")
+        for key, value in result.metrics.items():
+            print(f"- {key}: {value}")
+
+
+def _print_code_task_analyze_failure(args: argparse.Namespace) -> None:
+    """Write failure analysis and print the implicated files."""
+    result = analyze_code_task_failure(Path(args.run_dir))
+    print(f"Code task run: {result.run_dir}")
+    print(f"Failure analysis: {result.analysis_path}")
+    print(f"Status: {result.status}")
+    print(f"Implicated files: {len(result.implicated_files)}")
+    for path in result.implicated_files:
+        print(f"- {path}")
+
+
+def _print_code_task_repair(args: argparse.Namespace) -> None:
+    """Generate a bounded repair proposal and print the review path."""
+    result = propose_repair_edits(
+        Path(args.run_dir),
+        model=args.model,
+        use_llm=not args.no_llm,
+        max_files=args.max_files,
+        max_source_chars_per_file=args.max_source_chars_per_file,
+        message_callback=lambda message: print(f"  - {message}"),
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Repair directory: {result.repair_dir}")
+    print(f"Proposed edits: {result.proposal_path}")
+    print(f"Mode: {result.mode}")
+    print(f"Edit count: {result.edit_count}")
+    print(f"Context files: {len(result.selected_files)}")
+    for path in result.selected_files:
         print(f"- {path}")
 
 

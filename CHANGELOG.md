@@ -1,97 +1,131 @@
 # Changelog
 
-This file tracks SimpleAutoResearch's learning and development iterations. The README is intentionally kept focused on project overview, setup, configuration, and current usage.
+This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
-## Unreleased - V2 Retrieval And Code-Task Branch
+## 2026-05-12
 
-Branch: `feat/v2-retrieval-codegen`
+### Changed
 
-Status: active development.
+- Reworked `README.md` into a cleaner open-source project entry page with setup, environment configuration, quickstart commands, preset workflows, documentation links, reference, and community notes.
+- Consolidated detailed documentation into three primary docs:
+  - `docs/USAGE.md` for installation, environment variables, CLI commands, examples, and future config shape.
+  - `docs/WORKFLOWS.md` for preset workflows, the default 8-stage pipeline, stage outputs, and artifact layout.
+  - `docs/DEVELOPMENT.md` for contributor guidance, stage extension, experiment templates, code-task modules, and testing.
+- Removed overlapping docs that made the documentation tree harder to navigate:
+  - `docs/CODE_TASK.md`
+  - `docs/RUN_ARTIFACTS.md`
+  - `docs/CLI_AND_CONFIG.md`
+  - `docs/EXTENDING.md`
 
-### Direction
+### Notes
 
-V2 is not only an incremental feature pass over V1. It is a chance to keep the architecture understandable while adding more realistic research-assistant behavior.
+- `CHANGELOG.md` is now kept as a chronological development log rather than a version-planning document.
+- Planning-heavy notes remain in `MDfiles/` and are separate from public-facing docs.
 
-The main design shift is workflow decoupling:
-
-- `research-run`: the current staged topic-to-report workflow, upgraded with better retrieval, evidence tracking, and report quality checks.
-- `code-task`: a focused workflow for analyzing and improving an existing codebase, benchmark, or experiment script. It should copy the target into an isolated run workspace, build a lightweight code index, ask the model for an edit plan, support human approval before risky changes, run validation commands, and preserve failure evidence.
-- `review` or `survey`: a no-code workflow for literature review and report drafting, where search, reading, synthesis, and reporting can run without experiment design, code generation, or benchmark execution.
-
-V2 should stay local-first and inspectable. Local retrieval starts with metadata, notes, snippets, and compact indexes rather than blindly storing every full paper. Code execution should prefer isolated run directories, explicit commands, timeouts, and human approval points before moving toward stronger sandboxing.
+## 2026-05-11
 
 ### Added
 
-- Local artifact inspection with `simple-ar inspect`.
-- Local lexical artifact search with `simple-ar search-artifacts`.
-- Source-only chunking by default, with `--include-operational` for debugging runner metadata.
-- Evidence-aware run artifacts: `source_plan.json`, `activity_log.jsonl`, and `evidence_ledger.jsonl`.
-- Retrieval wiring for `read`, `synthesize`, and `report` stages through compact source-labelled snippets.
-- Configurable retrieval controls on `run`: `--retrieval-top-k` and `--no-retrieval`.
-- More explicit fixture handling with `--allow-fixture-fallback`.
-- Live literature search order that tries OpenAlex before arXiv, then falls back to provider-specific cache entries.
-- Report citation checks that keep body citations aligned with the generated `references.bib`.
-- Initial `code-task init` workflow for copying an existing codebase into an isolated run workspace.
-- Python-aware `codebase_index.json` with file hashes, role tags, imports, functions, classes, tests, and entrypoint candidates.
-- Tidy code-task artifact layout under `code_task/workspace` and `code_task/meta` instead of adding many files to the run root.
-- `code-task plan` for generating a human-reviewable `patch_plan.md` from the task, codebase index, and selected source snippets.
-- `code-task decide-plan` for recording human approval, rejection, or revision requests in `code_task/meta/hitl_decisions.jsonl`.
-- `code-task propose-edits` for asking the model to produce controlled JSON old/new text replacements after planning.
-- `code-task apply-edits` for safely applying controlled replacements inside `code_task/workspace` after approval.
-- Patch application artifacts: `patch.diff`, `applied_edits.json`, `pre_patch_manifest.json`, and `post_patch_manifest.json`.
+- Added `code-task validate` for lightweight Python syntax checks, risky import/call warnings, missing import warnings, and strict-mode execution hazard errors.
+- Added `code-task run` for executing the recorded benchmark command inside the copied workspace with timeout, captured stdout/stderr, return code, and parsed metrics.
+- Added `code-task analyze-failure` for turning the latest failed benchmark run into a compact Markdown diagnosis.
+- Added `code-task repair` for generating a bounded repair edit proposal from failure analysis without applying it automatically.
+- Added `src/simple_ar/code_task/state.py` to centralize code-task path, manifest, and safe workspace path helpers.
+- Added a realistic code-task smoke example under `examples/code_tasks/toy_spam_project` with package layout, tests, and a task file.
+- Added `tests/test_code_task_examples.py` to verify that the example benchmark fails first, passes after a workspace patch, and does not mutate the original source project.
+- Added initial detailed docs for code-task usage, artifact layout, CLI/config direction, workflow composition, and extension guidance.
 
-### Commands
+### Changed
 
-```bash
-uv run simple-ar inspect runs/<run-id>
-uv run simple-ar search-artifacts runs/<run-id> "accuracy"
-uv run simple-ar search-artifacts runs/<run-id> "timeout" --include-operational
-uv run simple-ar run --topic "toy topic" --to-stage report --retrieval-top-k 4
-uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
-uv run simple-ar run --topic "agent simulation" --to-stage report --allow-fixture-fallback
-uv run simple-ar code-task init --code-root path/to/project --task-file path/to/task.md
-uv run simple-ar code-task plan runs/<run-id>
-uv run simple-ar code-task plan runs/<run-id> --no-llm
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
-uv run simple-ar code-task propose-edits runs/<run-id>
-uv run simple-ar code-task apply-edits runs/<run-id>
-```
+- Moved long command and artifact explanations out of `README.md` into dedicated docs.
+- Kept `README.md` focused on project overview, setup, quickstart, and documentation entry points.
+- Grouped code-task execution artifacts under `code_task/run` and repair attempts under `code_task/repairs`.
+- Documented the future CLI/config direction: keep primitive commands for learning, then add config-driven convenience workflows after the underlying steps stabilize.
 
-### Planned Next
+### Verified
 
-- Add a code validator for syntax, risky imports/calls, and obvious execution hazards.
-- Add an isolated benchmark runner for the copied workspace.
-- Preserve validation evidence, including commands, stdout, stderr, return codes, and changed files.
-- Add minimal failure analysis and one bounded repair attempt.
-- Improve report quality checks without turning the project into a rigid paper generator.
+- `uv run python -m unittest tests.test_code_task_examples`
+- `uv run python -m unittest discover -s tests`
 
-## V1 - Runnable Teaching Pipeline
+## 2026-05-10
 
-Branch: `main`
+### Added
 
-Status: published baseline.
+- Added controlled `code-task propose-edits` for model-generated JSON old/new replacements.
+- Added controlled `code-task apply-edits` for safely applying approved replacements inside `code_task/workspace`.
+- Added patch artifacts:
+  - `code_task/patch.diff`
+  - `code_task/meta/proposed_edits.json`
+  - `code_task/meta/applied_edits.json`
+  - `code_task/meta/pre_patch_manifest.json`
+  - `code_task/meta/post_patch_manifest.json`
 
-V1 established the compact topic-to-report workflow:
+### Changed
 
-```text
-01 plan        Scope the topic and research question
-02 search      Collect paper metadata
-03 read        Create literature notes from paper metadata
-04 synthesize  Summarize themes and propose a testable hypothesis
-05 design      Create a small experiment plan
-06 code        Generate experiment code from templates
-07 run         Execute the experiment and parse metrics
-08 report      Write a final Markdown report with references
-```
+- Updated code-task status output to include patch state and changed files.
+- Updated README code-task quick usage before the detailed docs were split out.
 
-### Included
+### Verified
 
-- File-based stage contracts and resumable runs.
-- OpenAI-compatible LLM calls with visible progress and usage logging.
-- `.env` configuration for API key, base URL, model name, and optional cost estimates.
-- OpenAlex/arXiv-backed paper metadata with local cache support.
-- Offline fixture mode for deterministic tests and demos.
-- Template-based experiment generation through `toy_text_classification`.
-- Subprocess experiment execution with timeout, stdout, stderr, return code, and parsed metrics.
-- Deterministic BibTeX generation from known paper metadata.
+- `uv run python -m unittest discover -s tests`
+
+## 2026-05-09
+
+### Added
+
+- Added initial `code-task init` workflow for copying an existing codebase into an isolated run workspace.
+- Added Python-aware `codebase_index.json` with file hashes, role tags, imports, functions, classes, tests, and entrypoint candidates.
+- Added `code-task plan` for generating a human-reviewable patch plan from the task, codebase index, and selected snippets.
+- Added `code-task decide-plan` for recording human approval, rejection, or revision requests.
+
+### Changed
+
+- Kept code-task artifacts under `code_task/workspace` and `code_task/meta` instead of adding more files to the run root.
+
+## 2026-05-08
+
+### Added
+
+- Added local artifact inspection with `simple-ar inspect`.
+- Added local lexical artifact search with `simple-ar search-artifacts`.
+- Added source-only chunking by default, with `--include-operational` for debugging runner metadata.
+- Added evidence-aware run artifacts:
+  - `source_plan.json`
+  - `activity_log.jsonl`
+  - `evidence_ledger.jsonl`
+- Wired retrieval snippets into `read`, `synthesize`, and `report` stages.
+- Added configurable retrieval controls:
+  - `--retrieval-top-k`
+  - `--no-retrieval`
+
+### Changed
+
+- Improved report citation checks so body citations stay aligned with generated `references.bib`.
+- Made fixture fallback explicit with `--allow-fixture-fallback`.
+- Updated live literature search order to try OpenAlex before arXiv, then provider-specific cache.
+
+## 2026-05-06
+
+### Added
+
+- Published the V1 teaching pipeline baseline:
+  - `01 plan`
+  - `02 search`
+  - `03 read`
+  - `04 synthesize`
+  - `05 design`
+  - `06 code`
+  - `07 run`
+  - `08 report`
+- Added file-based stage contracts and resumable runs.
+- Added OpenAI-compatible LLM calls with visible progress and usage logging.
+- Added `.env` configuration for API key, base URL, model name, and optional cost estimates.
+- Added OpenAlex/arXiv-backed paper metadata with local cache support.
+- Added offline fixture mode for deterministic tests and demos.
+- Added template-based experiment generation through `toy_text_classification`.
+- Added subprocess experiment execution with timeout, stdout, stderr, return code, and parsed metrics.
+- Added deterministic BibTeX generation from known paper metadata.
+
+### Verified
+
 - Unit tests for contracts, pipeline behavior, literature parsing, LLM adapters, report packaging, and experiment execution.
