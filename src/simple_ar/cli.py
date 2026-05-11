@@ -8,8 +8,10 @@ from typing import Sequence
 
 from simple_ar.artifacts import read_json, read_text
 from simple_ar.code_task import (
+    apply_patch_edits,
     generate_patch_plan,
     initialize_code_task,
+    propose_patch_edits,
     record_plan_decision,
 )
 from simple_ar.pipeline import Context, PipelineRunner
@@ -110,6 +112,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     code_task_decide.add_argument("--note", default="")
     code_task_decide.add_argument("--reviewer", default="user")
+
+    code_task_propose = code_task_subparsers.add_parser(
+        "propose-edits",
+        help="Ask the model to propose controlled old/new text edits.",
+    )
+    code_task_propose.add_argument("run_dir")
+    code_task_propose.add_argument("--model", default=None)
+    code_task_propose.add_argument("--no-llm", action="store_true")
+    code_task_propose.add_argument("--force", action="store_true")
+    code_task_propose.add_argument("--max-files", type=int, default=8)
+    code_task_propose.add_argument("--max-source-chars-per-file", type=int, default=4000)
+
+    code_task_apply = code_task_subparsers.add_parser(
+        "apply-edits",
+        help="Safely apply controlled old/new text edits to the workspace.",
+    )
+    code_task_apply.add_argument("run_dir")
+    code_task_apply.add_argument("--edits-file", default=None)
+    code_task_apply.add_argument(
+        "--allow-unapproved-plan",
+        action="store_true",
+        help="Bypass the human approval gate. Intended only for local experiments/tests.",
+    )
 
     inspect_parser = subparsers.add_parser("inspect", help="Index and summarize run artifacts.")
     inspect_parser.add_argument("run_dir")
@@ -218,6 +243,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.code_task_command == "decide-plan":
             _print_code_task_decision(args)
+            return
+        if args.code_task_command == "propose-edits":
+            _print_code_task_propose_edits(args)
+            return
+        if args.code_task_command == "apply-edits":
+            _print_code_task_apply_edits(args)
             return
         parser.error(f"Unknown code-task command: {args.code_task_command}")
 
@@ -341,6 +372,18 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
         print(f"- mode: {plan.get('mode', 'unknown')}")
         if plan.get("patch_plan"):
             print(f"- patch plan: {run_dir / str(plan.get('patch_plan'))}")
+
+    patch = manifest.get("patch", {})
+    if isinstance(patch, dict) and patch:
+        print("Patch:")
+        print(f"- status: {patch.get('status', 'unknown')}")
+        if patch.get("proposed_edits"):
+            print(f"- proposed edits: {run_dir / str(patch.get('proposed_edits'))}")
+        if patch.get("patch_diff"):
+            print(f"- patch diff: {run_dir / str(patch.get('patch_diff'))}")
+        changed_files = patch.get("changed_files")
+        if isinstance(changed_files, list) and changed_files:
+            print(f"- changed files: {', '.join(str(path) for path in changed_files)}")
 
     benchmark = manifest.get("benchmark", {})
     if isinstance(benchmark, dict) and benchmark.get("command"):
@@ -475,6 +518,41 @@ def _print_code_task_decision(args: argparse.Namespace) -> None:
     print(f"Code task run: {args.run_dir}")
     print(f"Decision: {row['decision']}")
     print("Decision log: code_task/meta/hitl_decisions.jsonl")
+
+
+def _print_code_task_propose_edits(args: argparse.Namespace) -> None:
+    """Generate controlled edits and print a compact proposal summary."""
+    result = propose_patch_edits(
+        Path(args.run_dir),
+        model=args.model,
+        use_llm=not args.no_llm,
+        force=args.force,
+        max_files=args.max_files,
+        max_source_chars_per_file=args.max_source_chars_per_file,
+        message_callback=lambda message: print(f"  - {message}"),
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Proposed edits: {result.proposal_path}")
+    print(f"Mode: {result.mode}")
+    print(f"Edit count: {result.edit_count}")
+    print(f"Context files: {len(result.selected_files)}")
+    for path in result.selected_files:
+        print(f"- {path}")
+
+
+def _print_code_task_apply_edits(args: argparse.Namespace) -> None:
+    """Safely apply controlled edits and print changed files."""
+    result = apply_patch_edits(
+        Path(args.run_dir),
+        edits_file=Path(args.edits_file) if args.edits_file else None,
+        allow_unapproved_plan=args.allow_unapproved_plan,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Patch diff: {result.patch_diff_path}")
+    print(f"Applied edits: {result.applied_edits_path}")
+    print(f"Changed files: {len(result.changed_files)}")
+    for path in result.changed_files:
+        print(f"- {path}")
 
 
 def _artifact_rows(index: dict[str, object]) -> list[dict[str, object]]:

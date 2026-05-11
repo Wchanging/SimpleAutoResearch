@@ -140,6 +140,8 @@ uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 
 `code-task plan` then turns the task, code index, and selected source snippets into a human-reviewable `patch_plan.md`. It may use the configured OpenAI-compatible LLM, or `--no-llm` for a deterministic offline plan. Planning never edits files.
 
+After the plan is approved, `code-task propose-edits` asks the model for controlled old/new text replacements, and `code-task apply-edits` validates and applies them to the copied workspace. Patch application checks that every path stays inside `workspace/`, every `old` block matches exactly once, and the plan has been approved.
+
 ```bash
 uv run simple-ar code-task init \
   --code-root path/to/project \
@@ -148,9 +150,11 @@ uv run simple-ar code-task init \
 
 uv run simple-ar code-task plan runs/<run-id>
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
+uv run simple-ar code-task propose-edits runs/<run-id>
+uv run simple-ar code-task apply-edits runs/<run-id>
 ```
 
-The original `--code-root` is not modified. Generated files are kept under `runs/<run-id>/code_task/`, with the editable copy in `workspace/`, `patch_plan.md` at the workflow root, and metadata such as `codebase_index.json` and `hitl_decisions.jsonl` in `meta/`. By default, the copier skips common cache/build directories, symlinks, `.env` secrets, bytecode, and files larger than 2 MB. Use `--max-file-bytes 0` only when you explicitly want to disable the size guard.
+The original `--code-root` is not modified. Generated files are kept under `runs/<run-id>/code_task/`, with the editable copy in `workspace/`, `patch_plan.md` and `patch.diff` at the workflow root, and metadata such as `codebase_index.json`, `hitl_decisions.jsonl`, `proposed_edits.json`, `applied_edits.json`, and pre/post patch manifests in `meta/`. By default, the copier skips common cache/build directories, symlinks, `.env` secrets, bytecode, and files larger than 2 MB. Use `--max-file-bytes 0` only when you explicitly want to disable the size guard.
 
 ## Experiment Templates
 

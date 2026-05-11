@@ -36,6 +36,9 @@ V2 should stay local-first and inspectable. Local retrieval starts with metadata
 - Tidy code-task artifact layout under `code_task/workspace` and `code_task/meta` instead of adding many files to the run root.
 - `code-task plan` for generating a human-reviewable `patch_plan.md` from the task, codebase index, and selected source snippets.
 - `code-task decide-plan` for recording human approval, rejection, or revision requests in `code_task/meta/hitl_decisions.jsonl`.
+- `code-task propose-edits` for asking the model to produce controlled JSON old/new text replacements after planning.
+- `code-task apply-edits` for safely applying controlled replacements inside `code_task/workspace` after approval.
+- Patch application artifacts: `patch.diff`, `applied_edits.json`, `pre_patch_manifest.json`, and `post_patch_manifest.json`.
 
 ### Commands
 
@@ -50,15 +53,16 @@ uv run simple-ar code-task init --code-root path/to/project --task-file path/to/
 uv run simple-ar code-task plan runs/<run-id>
 uv run simple-ar code-task plan runs/<run-id> --no-llm
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
+uv run simple-ar code-task propose-edits runs/<run-id>
+uv run simple-ar code-task apply-edits runs/<run-id>
 ```
 
 ### Planned Next
 
-- Add a decoupled `code-task` command for existing codebase or benchmark improvement.
-- Build a lightweight code index over selected source files.
-- Generate model-written edit plans before applying any patch.
-- Add human-in-the-loop approval before risky file edits or expensive validation runs.
+- Add a code validator for syntax, risky imports/calls, and obvious execution hazards.
+- Add an isolated benchmark runner for the copied workspace.
 - Preserve validation evidence, including commands, stdout, stderr, return codes, and changed files.
+- Add minimal failure analysis and one bounded repair attempt.
 - Improve report quality checks without turning the project into a rigid paper generator.
 
 ## V1 - Runnable Teaching Pipeline

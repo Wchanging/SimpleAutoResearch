@@ -6,9 +6,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from simple_ar.artifacts import read_json, read_jsonl, read_text, write_text
+from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_text
 from simple_ar.cli import main
-from simple_ar.code_task import generate_patch_plan, initialize_code_task
+from simple_ar.code_task import (
+    PatchValidationError,
+    apply_patch_edits,
+    generate_patch_plan,
+    initialize_code_task,
+    record_plan_decision,
+)
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
@@ -204,6 +210,119 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("Plan:", status_stdout.getvalue())
             self.assertIn("status: approved", status_stdout.getvalue())
 
+    def test_apply_edits_requires_approved_plan_and_then_patches_workspace(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nAlso detect prize as spam.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file)
+            generate_patch_plan(run_dir, use_llm=False)
+            proposal_path = _write_valid_edit_proposal(run_dir)
+
+            with self.assertRaises(PermissionError):
+                apply_patch_edits(run_dir, edits_file=proposal_path)
+
+            record_plan_decision(run_dir, decision="approve", note="Small targeted edit.")
+            result = apply_patch_edits(run_dir, edits_file=proposal_path)
+
+            workspace_model = run_dir / "code_task" / "workspace" / "spam_model.py"
+            self.assertIn("'prize'", read_text(workspace_model))
+            self.assertNotIn("'prize'", read_text(code_root / "spam_model.py"))
+            self.assertEqual(result.changed_files, ("spam_model.py",))
+            self.assertTrue((run_dir / "code_task" / "patch.diff").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "applied_edits.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "pre_patch_manifest.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "post_patch_manifest.json").is_file())
+            diff_text = read_text(run_dir / "code_task" / "patch.diff")
+            self.assertIn("+    lowered = text.lower()", diff_text)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "patched")
+            self.assertEqual(manifest["patch"]["status"], "applied")
+
+    def test_apply_edits_rejects_path_traversal_without_modifying_workspace(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nTry an unsafe edit.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file)
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            proposal_path = root / "bad_edits.json"
+            write_json(
+                proposal_path,
+                {
+                    "edits": [
+                        {
+                            "path": "../outside.py",
+                            "old": "x",
+                            "new": "y",
+                            "reason": "unsafe",
+                        }
+                    ]
+                },
+            )
+            before = read_text(run_dir / "code_task" / "workspace" / "spam_model.py")
+
+            with self.assertRaises(PatchValidationError):
+                apply_patch_edits(run_dir, edits_file=proposal_path)
+
+            after = read_text(run_dir / "code_task" / "workspace" / "spam_model.py")
+            self.assertEqual(before, after)
+            self.assertFalse((run_dir / "code_task" / "patch.diff").exists())
+
+    def test_code_task_propose_and_apply_cli_with_manual_edits_file(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nDetect prize messages as spam.\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                    ]
+                )
+            run_dir = next(output_root.iterdir())
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["code-task", "plan", str(run_dir), "--no-llm"])
+                main(["code-task", "decide-plan", str(run_dir), "--decision", "approve"])
+
+            propose_stdout = io.StringIO()
+            with contextlib.redirect_stdout(propose_stdout):
+                main(["code-task", "propose-edits", str(run_dir), "--no-llm"])
+            self.assertIn("Edit count: 0", propose_stdout.getvalue())
+            self.assertTrue((run_dir / "code_task" / "meta" / "proposed_edits.json").is_file())
+
+            edits_file = _write_valid_edit_proposal(run_dir, path=root / "manual_edits.json")
+            apply_stdout = io.StringIO()
+            with contextlib.redirect_stdout(apply_stdout):
+                main(["code-task", "apply-edits", str(run_dir), "--edits-file", str(edits_file)])
+
+            self.assertIn("Changed files: 1", apply_stdout.getvalue())
+            status_stdout = io.StringIO()
+            with contextlib.redirect_stdout(status_stdout):
+                main(["status", str(run_dir)])
+            self.assertIn("Patch:", status_stdout.getvalue())
+            self.assertIn("status: applied", status_stdout.getvalue())
+
 
 def _write_toy_project(code_root: Path) -> None:
     write_text(
@@ -231,6 +350,32 @@ def _write_toy_project(code_root: Path) -> None:
     )
     write_text(code_root / ".git" / "config", "[core]\nrepositoryformatversion = 0\n")
     write_text(code_root / ".env", "TOKEN=secret\n")
+
+
+def _write_valid_edit_proposal(run_dir: Path, path: Path | None = None) -> Path:
+    proposal_path = path or run_dir / "code_task" / "meta" / "proposed_edits.json"
+    write_json(
+        proposal_path,
+        {
+            "schema_version": 1,
+            "edits": [
+                {
+                    "path": "spam_model.py",
+                    "old": (
+                        "def predict(text):\n"
+                        "    return 'spam' if 'win' in text.lower() else 'ham'\n"
+                    ),
+                    "new": (
+                        "def predict(text):\n"
+                        "    lowered = text.lower()\n"
+                        "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize')) else 'ham'\n"
+                    ),
+                    "reason": "Extend the keyword baseline while preserving the public API.",
+                }
+            ],
+        },
+    )
+    return proposal_path
 
 
 def _indexed_file(index: dict[str, object], path: str) -> dict[str, object]:
