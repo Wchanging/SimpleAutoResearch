@@ -97,6 +97,23 @@ uv run simple-ar run \
   --offline-search
 ```
 
+Run the experimental 8-stage LLM code-task demo:
+
+```bash
+uv run simple-ar run \
+  --topic "LLM-guided improvement of a toy spam baseline" \
+  --to-stage report \
+  --experiment-template llm_code_task_toy_spam \
+  --offline-search \
+  --experiment-timeout 60
+```
+
+This still runs the normal 8 stages, but `06-code` copies the bundled toy spam
+project into an isolated code-task workspace, asks the LLM for a patch plan and
+old/new edit proposal, applies the approved demo patch, and writes
+`06-code/code_task_experiment.json`. `07-run` then executes the benchmark
+harness and `08-report` includes the parsed benchmark metrics.
+
 Search behavior:
 
 ```bash

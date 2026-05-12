@@ -12,6 +12,7 @@ from simple_ar.stage_handlers import (
     _build_report,
     _body_citation_ids,
     _cited_papers,
+    _report_bound_errors,
     _strip_references_section,
 )
 
@@ -160,6 +161,43 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(quality["status"], "passed")
         self.assertEqual(quality["summary"]["metric_count"], 1)
         self.assertEqual(quality["body_citation_ids"], ["paper-1"])
+
+    def test_report_bounds_reject_fixture_overclaims(self) -> None:
+        report = (
+            "# Draft\n\n"
+            "## Related Work\n\n"
+            "Prior research has established groundwork for practical solutions "
+            "in spam filtering [@fixture-001].\n\n"
+            "## Limitations\n\n"
+            "The run used fixture metadata."
+        )
+
+        errors = _report_bound_errors(
+            report,
+            search_meta={"source": "fixture", "status": "offline_fixture"},
+            plan={"template": "llm_code_task_toy_spam"},
+        )
+
+        self.assertTrue(any("overclaims" in error for error in errors))
+
+    def test_report_bounds_accept_conservative_fixture_disclosure(self) -> None:
+        report = (
+            "# Draft\n\n"
+            "## Related Work\n\n"
+            "The only available citation is fixture metadata used to keep the "
+            "pipeline deterministic [@fixture-001].\n\n"
+            "## Results\n\n"
+            "The benchmark passed after one source-file patch."
+        )
+
+        self.assertEqual(
+            _report_bound_errors(
+                report,
+                search_meta={"source": "fixture", "status": "offline_fixture"},
+                plan={"template": "llm_code_task_toy_spam"},
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

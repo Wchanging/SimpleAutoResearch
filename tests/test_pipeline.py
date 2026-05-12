@@ -3,10 +3,15 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from simple_ar.artifacts import read_json, read_text
+from simple_ar.experiment.code_task_demo import (
+    CODE_TASK_TOY_SPAM_TEMPLATE,
+    CodeTaskExperimentResult,
+)
 from simple_ar.pipeline import Context, MissingInputError, PipelineEvent, PipelineRunner
-from simple_ar.stage_handlers import HANDLERS
+from simple_ar.stage_handlers import HANDLERS, execute_code, execute_design
 from simple_ar.stages import Stage
 
 
@@ -90,6 +95,69 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("stage_start", event_names)
             self.assertIn("stage_done", event_names)
             self.assertIn("pipeline_done", event_names)
+
+    def test_code_task_experiment_template_writes_harness_artifacts(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            ctx = Context(
+                run_dir,
+                "LLM code task demo",
+                config={
+                    "experiment_template": CODE_TASK_TOY_SPAM_TEMPLATE,
+                    "experiment_timeout_sec": 45,
+                    "use_llm": True,
+                },
+            )
+            synth_dir = run_dir / "04-synthesize"
+            synth_dir.mkdir(parents=True)
+            (synth_dir / "hypothesis.md").write_text(
+                "# Hypothesis\n\nPatch an existing baseline.\n",
+                encoding="utf-8",
+            )
+
+            ctx.current_stage = Stage.DESIGN
+            ctx.stage_dir().mkdir(parents=True)
+            execute_design(ctx)
+
+            plan = read_json(run_dir / "05-design" / "experiment_plan.json")
+            self.assertEqual(plan["template"], CODE_TASK_TOY_SPAM_TEMPLATE)
+            self.assertEqual(plan["mode"], "embedded_code_task")
+            self.assertEqual(plan["method"], "llm_planned_controlled_patch")
+
+            code_dir = run_dir / "06-code"
+            fake_result = CodeTaskExperimentResult(
+                code_task_run_dir=code_dir / "code_task_run",
+                workspace_dir=code_dir / "code_task_run" / "code_task" / "workspace",
+                patch_plan_path=code_dir / "code_task_run" / "code_task" / "patch_plan.md",
+                proposed_edits_path=(
+                    code_dir / "code_task_run" / "code_task" / "meta" / "proposed_edits.json"
+                ),
+                patch_diff_path=code_dir / "code_task_run" / "code_task" / "patch.diff",
+                validation_report_path=(
+                    code_dir / "code_task_run" / "code_task" / "meta" / "validation_report.json"
+                ),
+                plan_mode="llm",
+                edit_mode="llm",
+                edit_count=1,
+                changed_files=("spamfilter/rules.py",),
+                validation_status="passed",
+            )
+
+            ctx.current_stage = Stage.CODE
+            ctx.stage_dir().mkdir(parents=True)
+            with patch(
+                "simple_ar.stage_handlers.prepare_code_task_demo_experiment",
+                return_value=fake_result,
+            ):
+                execute_code(ctx)
+
+            script = read_text(run_dir / "06-code" / "experiment.py")
+            self.assertIn("run_code_task_benchmark", script)
+            self.assertIn("spamfilter/rules.py", script)
+            meta = read_json(run_dir / "06-code" / "code_task_experiment.json")
+            self.assertEqual(meta["template"], CODE_TASK_TOY_SPAM_TEMPLATE)
+            self.assertEqual(meta["changed_files"], ["spamfilter/rules.py"])
 
 
 if __name__ == "__main__":

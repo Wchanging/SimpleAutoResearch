@@ -73,10 +73,14 @@ Examples:
 
 Current status:
 
-- Supported only in a narrow teaching form through the default 8-stage pipeline.
-- `06-code` currently generates a whitelisted template experiment.
-- It does not yet hand off to the richer standalone `code-task` workflow.
-- A future version should let the design stage choose between fixed template code, existing-code code-task, and approved generated code.
+- Supported in a narrow teaching form through the default 8-stage pipeline.
+- `06-code` normally generates a whitelisted template experiment.
+- `--experiment-template llm_code_task_toy_spam` is an experimental embedded
+  handoff into `code-task`: it copies the bundled toy spam project, asks the LLM
+  for a patch plan and controlled edits, applies them inside the isolated run
+  workspace, and lets `07-run` execute the benchmark harness.
+- Future versions should generalize this from one bundled demo into
+  user-provided code roots and config-driven experiment presets.
 
 ## Default 8-Stage Pipeline
 
@@ -86,7 +90,7 @@ Current status:
 03 read        Create literature notes from paper metadata
 04 synthesize  Summarize themes and propose a testable hypothesis
 05 design      Create a small experiment plan
-06 code        Generate experiment code from templates
+06 code        Generate experiment code or prepare an embedded code task
 07 run         Execute the experiment and parse metrics
 08 report      Write a final Markdown report with references
 ```
@@ -98,7 +102,7 @@ Current status:
 | `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes. |
 | `synthesize` | `synthesis.md`, `hypothesis.md` | Produce a bounded synthesis and testable hypothesis. |
 | `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
-| `code` | `experiment.py` | Generate code from the selected template. |
+| `code` | `experiment.py` | Generate code from the selected template or prepare an embedded code-task harness. |
 | `run` | `results.json`, `stdout.txt`, `stderr.txt` | Execute the experiment and parse numeric metrics. |
 | `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json` | Write a paper-like report and reproducibility package. |
 
@@ -126,6 +130,8 @@ runs/<run-id>/
   04-synthesize/
   05-design/
   06-code/
+    code_task_experiment.json
+    code_task_run/
   07-run/
   08-report/
 ```
@@ -143,6 +149,8 @@ Root-level files:
 - `source_plan.json`: source plan describing which artifacts each stage should consult.
 - `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
+- `06-code/code_task_experiment.json`: present only for the embedded
+  `llm_code_task_toy_spam` template; summarizes the nested code-task patch.
 
 Report-stage files:
 

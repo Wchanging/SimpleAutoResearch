@@ -7,6 +7,14 @@ from typing import Any
 
 from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
 from simple_ar.experiment.runner import run_experiment
+from simple_ar.experiment.code_task_demo import (
+    CODE_TASK_TOY_SPAM_TEMPLATE,
+    build_code_task_experiment_script,
+    code_task_demo_spec,
+    is_code_task_demo_template,
+    prepare_code_task_demo_experiment,
+    write_code_task_experiment_meta,
+)
 from simple_ar.experiment.templates import build_experiment_code
 from simple_ar.literature.arxiv_client import ArxivRateLimitError, ArxivSearchClient, LiteratureSearchError
 from simple_ar.literature.bibtex import papers_to_bibtex
@@ -337,11 +345,42 @@ def execute_synthesize(ctx: Context) -> None:
 
 def execute_design(ctx: Context) -> None:
     hypothesis = read_text(ctx.find_artifact("hypothesis.md") or ctx.artifact_path("hypothesis.md"))
+    template = _experiment_template(ctx)
+    if is_code_task_demo_template(template):
+        spec = code_task_demo_spec(_repo_root())
+        write_json(
+            ctx.artifact_path("experiment_plan.json"),
+            {
+                "name": "llm_code_task_toy_spam",
+                "template": CODE_TASK_TOY_SPAM_TEMPLATE,
+                "mode": "embedded_code_task",
+                "hypothesis": hypothesis.strip(),
+                "dataset": "examples/code_tasks/toy_spam_project",
+                "baseline": "existing_keyword_rules",
+                "method": "llm_planned_controlled_patch",
+                "metrics": [
+                    "benchmark_passed",
+                    "benchmark_returncode",
+                    "benchmark_timed_out",
+                    "changed_files",
+                    "llm_patch_applied",
+                ],
+                "timeout_sec": _experiment_timeout(ctx),
+                "code_task": {
+                    "code_root": str(spec.code_root),
+                    "task_file": str(spec.task_file),
+                    "benchmark_command": spec.benchmark_command,
+                    "approval": "auto_approved_inside_isolated_demo_workspace",
+                },
+            },
+        )
+        return
+
     write_json(
         ctx.artifact_path("experiment_plan.json"),
         {
             "name": "toy_text_classification",
-            "template": _experiment_template(ctx),
+            "template": template,
             "hypothesis": hypothesis.strip(),
             "dataset": "built_in_toy_spam",
             "baseline": "keyword_rules",
@@ -354,9 +393,33 @@ def execute_design(ctx: Context) -> None:
 
 def execute_code(ctx: Context) -> None:
     plan = read_json(ctx.find_artifact("experiment_plan.json") or ctx.artifact_path("experiment_plan.json"))
+    if is_code_task_demo_template(plan.get("template")):
+        _execute_code_task_experiment_code(ctx, plan)
+        return
+
     ctx.emit("stage_message", f"Generating experiment from template `{plan.get('template', '')}`.")
     code = build_experiment_code(plan)
     write_text(ctx.artifact_path("experiment.py"), code)
+
+
+def _execute_code_task_experiment_code(ctx: Context, plan: dict[str, Any]) -> None:
+    """Prepare an embedded code-task experiment and write its run harness."""
+    ctx.emit("stage_message", "Preparing embedded LLM code-task experiment.")
+    result = prepare_code_task_demo_experiment(
+        code_task_run_dir=ctx.stage_dir() / "code_task_run",
+        repo_root=_repo_root(),
+        model=_model(ctx),
+        use_llm=ctx.config.get("use_llm") is True,
+        message_callback=lambda message: ctx.emit("stage_message", message),
+    )
+    write_text(
+        ctx.artifact_path("experiment.py"),
+        build_code_task_experiment_script(
+            changed_files=result.changed_files,
+            timeout_sec=int(plan.get("timeout_sec") or _experiment_timeout(ctx)),
+        ),
+    )
+    write_code_task_experiment_meta(ctx.artifact_path("code_task_experiment.json"), result)
 
 
 def execute_run(ctx: Context) -> None:
@@ -554,6 +617,9 @@ def _report_with_llm(
         validate_citations(report, {paper.id for paper in papers})
         if papers and not _body_citation_ids(report, {paper.id for paper in papers}):
             raise LLMError("report_markdown did not cite any known paper in the body")
+        bound_errors = _report_bound_errors(report, search_meta, plan)
+        if bound_errors:
+            raise LLMError("report_markdown exceeded artifact bounds: " + "; ".join(bound_errors))
         return report.strip() + "\n"
     except (LLMError, CitationError) as exc:
         ctx.emit("stage_message", f"LLM report drafting failed; using structured fallback. {exc}")
@@ -606,7 +672,7 @@ def _build_report(
         "## Discussion\n\n"
         f"{_discussion_markdown(synthesis, hypothesis)}\n\n"
         "## Limitations\n\n"
-        f"{_limitations_markdown(ctx, search_meta, results)}\n\n"
+        f"{_limitations_markdown(ctx, search_meta, results, plan)}\n\n"
         "## Conclusion\n\n"
         f"{_conclusion_markdown(results)}\n"
     )
@@ -621,7 +687,7 @@ def _abstract_markdown(ctx: Context, results: dict[str, Any]) -> str:
         f"This short report studies `{ctx.topic}` through the deliberately narrow "
         "lens of SimpleAutoResearch, a staged and file-based auto-research "
         "workflow. The run combines literature metadata, artifact-level synthesis, "
-        "a controlled template experiment, and a reproducible report package. "
+        "a controlled experiment, and a reproducible report package. "
         f"The experiment {status} and produced {metric_count} parsed metric(s), "
         "which are treated as evidence about the pipeline and its toy task rather "
         "than as broad scientific proof."
@@ -664,10 +730,87 @@ def _introduction_markdown(
     )
 
 
+def _report_bound_errors(
+    report: str,
+    search_meta: dict[str, Any],
+    plan: dict[str, Any],
+) -> list[str]:
+    """Return issues where an LLM report overstates weak staged evidence."""
+    lower = report.lower()
+    errors: list[str] = []
+    if _uses_fixture_metadata(search_meta):
+        fixture_disclosure_terms = (
+            "fixture metadata",
+            "offline fixture",
+            "placeholder metadata",
+            "placeholder paper",
+        )
+        if not any(term in lower for term in fixture_disclosure_terms):
+            errors.append("fixture metadata was not disclosed in plain language")
+        fixture_overclaims = (
+            "prior research has",
+            "prior research shows",
+            "papers such as",
+            "establishing groundwork",
+            "real-world",
+            "practical solution",
+            "practical solutions",
+            "transformative",
+            "significantly",
+            "substantially",
+            "compelling case",
+        )
+        if any(term in lower for term in fixture_overclaims):
+            errors.append("fixture metadata was used with literature-style overclaims")
+
+    if is_code_task_demo_template(plan.get("template")):
+        demo_overclaims = (
+            "significantly enhanced",
+            "significant improvement",
+            "substantial improvement",
+            "transformative potential",
+            "real-world",
+            "practical solution",
+            "practical solutions",
+            "general applicability",
+            "improved accuracy",
+            "improved robustness",
+        )
+        if any(term in lower for term in demo_overclaims):
+            errors.append("toy code-task benchmark was described beyond measured evidence")
+    return errors
+
+
+def _uses_fixture_metadata(search_meta: dict[str, Any]) -> bool:
+    """Return true when literature rows are placeholders rather than live papers."""
+    return (
+        search_meta.get("source") == "fixture"
+        or search_meta.get("status") in {"fallback", "fixture_fallback", "offline_fixture"}
+    )
+
+
 def _method_markdown(plan: dict[str, Any]) -> str:
     """Render the experiment plan into a compact method section."""
     if not plan:
         return "No experiment plan artifact was available."
+    if is_code_task_demo_template(plan.get("template")):
+        code_task = plan.get("code_task", {})
+        benchmark = ""
+        if isinstance(code_task, dict):
+            benchmark = str(code_task.get("benchmark_command", ""))
+        metrics = plan.get("metrics", [])
+        metric_text = ", ".join(str(item) for item in metrics) if isinstance(metrics, list) else str(metrics)
+        return (
+            f"The experiment uses the `{plan.get('template')}` embedded code-task "
+            "template. Instead of generating a script from scratch, the code stage "
+            "copies an existing toy spam-filter project into an isolated workspace, "
+            "asks the LLM for a reviewable patch plan, auto-approves that plan only "
+            "inside this demo workspace, asks the LLM for controlled old/new edits, "
+            "and applies the patch after validation. The recorded benchmark command "
+            f"is `{benchmark or 'not specified'}`. Parsed metrics are "
+            f"{metric_text or 'not specified'}, and they come from the run-stage "
+            "harness rather than from handwritten report text."
+        )
     metrics = plan.get("metrics", [])
     metric_text = ", ".join(str(item) for item in metrics) if isinstance(metrics, list) else str(metrics)
     return (
@@ -761,6 +904,7 @@ def _limitations_markdown(
     ctx: Context,
     search_meta: dict[str, Any],
     results: dict[str, Any],
+    plan: dict[str, Any],
 ) -> str:
     """Explain scope limits using only runtime configuration and result state."""
     max_papers = ctx.config.get("max_papers", "unknown")
@@ -768,9 +912,18 @@ def _limitations_markdown(
     lines = [
         "This report is generated from staged artifacts rather than an external human review.",
         f"Literature coverage is limited by the configured search query and paper limit ({max_papers}).",
-        "The current experiment uses a tiny built-in teaching dataset, so the metrics demonstrate pipeline mechanics rather than real-world model quality.",
         f"The experiment timeout was configured as {timeout} second(s).",
     ]
+    if is_code_task_demo_template(plan.get("template")):
+        lines.append(
+            "The current experiment uses a bundled toy codebase copied into an isolated workspace, "
+            "so the metrics show whether one benchmark passed after the patch rather than general model quality."
+        )
+    else:
+        lines.append(
+            "The current experiment uses a tiny built-in teaching dataset, so the metrics demonstrate "
+            "pipeline mechanics rather than real-world model quality."
+        )
     if search_meta.get("status") in {"fallback", "fixture_fallback", "offline_fixture"} or search_meta.get("source") == "fixture":
         lines.append(
             "The literature stage used fixture metadata, so the report should not be treated as a real literature-backed review."
@@ -909,6 +1062,7 @@ def _report_manifest(
         },
         "experiment": {
             "template": plan.get("template"),
+            "mode": plan.get("mode", "template"),
             "dataset": plan.get("dataset"),
             "baseline": plan.get("baseline"),
             "method": plan.get("method"),
@@ -917,6 +1071,7 @@ def _report_manifest(
             "returncode": results.get("returncode"),
             "timed_out": results.get("timed_out"),
             "metrics": results.get("metrics", {}),
+            "code_task": plan.get("code_task", {}),
         },
         "papers": [
             {
@@ -962,6 +1117,7 @@ def _source_artifacts(ctx: Context) -> dict[str, str]:
         "evidence_ledger.jsonl",
         "artifact_index.json",
         "artifact_chunks.jsonl",
+        "code_task_experiment.json",
         "paper_notes.json",
         "notes.md",
         "synthesis.md",
@@ -1072,6 +1228,17 @@ def _experiment_template(ctx: Context) -> str:
     value = ctx.config.get("experiment_template", "toy_text_classification")
     template = str(value).strip()
     return template or "toy_text_classification"
+
+
+def _model(ctx: Context) -> str | None:
+    """Read the configured model name for helper workflows."""
+    model_value = ctx.config.get("model")
+    return str(model_value) if model_value else None
+
+
+def _repo_root() -> Path:
+    """Return the repository root for bundled examples in editable checkouts."""
+    return Path(__file__).resolve().parents[2]
 
 
 def _experiment_timeout(ctx: Context) -> int:

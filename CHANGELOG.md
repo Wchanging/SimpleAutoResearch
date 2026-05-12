@@ -8,6 +8,7 @@ This file records user-visible project changes in reverse chronological order. P
 
 - Added `08-report/report_quality.json`, a rule-based report quality artifact that checks citation provenance, body-cited papers, metric visibility, and runtime/fallback disclosure.
 - Added automatic `code_task/summary.md` generation after code-task benchmark runs and failure analysis.
+- Added experimental `llm_code_task_toy_spam` 8-stage experiment template, which embeds the safer code-task patch workflow into the normal plan/search/read/synthesize/design/code/run/report pipeline.
 
 ### Changed
 

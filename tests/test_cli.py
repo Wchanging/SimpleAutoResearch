@@ -5,9 +5,10 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-from simple_ar.artifacts import read_json
-from simple_ar.cli import main
+from simple_ar.artifacts import read_json, write_json
+from simple_ar.cli import _resume_config, main
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
@@ -104,6 +105,58 @@ class CliTests(unittest.TestCase):
             self.assertIn("Operational metadata included: False", search_stdout.getvalue())
             self.assertTrue((run_dir / "artifact_chunks.jsonl").is_file())
             self.assertTrue((run_dir / "artifact_search_results.json").is_file())
+
+    def test_resume_config_preserves_saved_values_without_cli_overrides(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            write_json(
+                run_dir / "config_snapshot.json",
+                {
+                    "mode": "offline",
+                    "model": "saved-model",
+                    "llm_max_workers": 2,
+                    "max_papers": 3,
+                    "experiment_template": "llm_code_task_toy_spam",
+                    "experiment_timeout_sec": 60,
+                    "use_llm": False,
+                    "use_arxiv": False,
+                    "allow_fixture_fallback": True,
+                    "strict_search": False,
+                    "use_retrieval": True,
+                    "retrieval_top_k": 7,
+                },
+            )
+            args = SimpleNamespace(
+                to_stage="report",
+                model=None,
+                llm_workers=None,
+                max_papers=None,
+                search_query=None,
+                experiment_template=None,
+                experiment_timeout=None,
+                retrieval_top_k=None,
+                no_llm=False,
+                offline_search=False,
+                allow_fixture_fallback=False,
+                strict_search=False,
+                no_retrieval=False,
+            )
+
+            config = _resume_config(run_dir, args, "report")
+
+            self.assertEqual(config["experiment_template"], "llm_code_task_toy_spam")
+            self.assertEqual(config["experiment_timeout_sec"], 60)
+            self.assertEqual(config["retrieval_top_k"], 7)
+            self.assertEqual(config["use_llm"], False)
+            self.assertEqual(config["use_arxiv"], False)
+
+            args.experiment_timeout = 15
+            args.no_retrieval = True
+            overridden = _resume_config(run_dir, args, "report")
+            self.assertEqual(overridden["experiment_timeout_sec"], 15)
+            self.assertEqual(overridden["use_retrieval"], False)
 
 
 if __name__ == "__main__":

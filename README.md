@@ -133,7 +133,20 @@ uv run simple-ar run \
   --to-stage report
 ```
 
-Current status: supported in a narrow teaching form through a whitelisted experiment template. A future version should allow the experiment design stage to hand off to `code-task` or approved generated code.
+Current status: supported in a narrow teaching form through a whitelisted template experiment. An experimental `llm_code_task_toy_spam` template also demonstrates an 8-stage handoff into the safer `code-task` workflow.
+
+To try the experimental 8-stage code-task handoff, use the embedded toy spam demo:
+
+```bash
+uv run simple-ar run \
+  --topic "LLM-guided improvement of a toy spam baseline" \
+  --to-stage report \
+  --experiment-template llm_code_task_toy_spam \
+  --offline-search \
+  --experiment-timeout 60
+```
+
+This copies the example project, asks the LLM for a patch plan and controlled edits, applies the patch inside the run workspace, executes the benchmark, and reports the result.
 
 ## Documentation
 

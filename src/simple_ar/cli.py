@@ -54,17 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--from-stage", default=None)
     resume_parser.add_argument("--to-stage", default="report")
     resume_parser.add_argument("--model", default=None)
-    resume_parser.add_argument("--llm-workers", type=int, default=4)
-    resume_parser.add_argument("--max-papers", type=int, default=5)
+    resume_parser.add_argument("--llm-workers", type=int, default=None)
+    resume_parser.add_argument("--max-papers", type=int, default=None)
     resume_parser.add_argument("--search-query", default=None)
-    resume_parser.add_argument("--experiment-template", default="toy_text_classification")
-    resume_parser.add_argument("--experiment-timeout", type=int, default=30)
+    resume_parser.add_argument("--experiment-template", default=None)
+    resume_parser.add_argument("--experiment-timeout", type=int, default=None)
     resume_parser.add_argument("--no-llm", action="store_true")
     resume_parser.add_argument("--offline-search", action="store_true")
     resume_parser.add_argument("--allow-fixture-fallback", action="store_true")
     resume_parser.add_argument("--strict-search", action="store_true")
     resume_parser.add_argument("--no-retrieval", action="store_true")
-    resume_parser.add_argument("--retrieval-top-k", type=int, default=4)
+    resume_parser.add_argument("--retrieval-top-k", type=int, default=None)
     resume_parser.add_argument("--quiet", action="store_true")
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
@@ -238,23 +238,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         ctx = Context(
             run_dir=run_dir,
             topic=topic,
-            config={
-                "from_stage": from_stage,
-                "to_stage": args.to_stage,
-                "mode": "offline" if args.no_llm else "llm",
-                "model": args.model,
-                "llm_max_workers": args.llm_workers,
-                "max_papers": args.max_papers,
-                "search_query": args.search_query,
-                "experiment_template": args.experiment_template,
-                "experiment_timeout_sec": args.experiment_timeout,
-                "use_llm": not args.no_llm,
-                "use_arxiv": not args.offline_search,
-                "allow_fixture_fallback": args.allow_fixture_fallback,
-                "strict_search": args.strict_search,
-                "use_retrieval": not args.no_retrieval,
-                "retrieval_top_k": args.retrieval_top_k,
-            },
+            config=_resume_config(run_dir, args, from_stage),
         )
         executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
             ctx,
@@ -320,6 +304,78 @@ def main(argv: Sequence[str] | None = None) -> None:
 def _stage_handlers():
     """Return the mapping of stages to their respective handler functions."""
     return {Stage(number): handler for number, handler in HANDLERS.items()}
+
+
+def _resume_config(run_dir: Path, args: argparse.Namespace, from_stage: str) -> dict[str, object]:
+    """Merge resume-time overrides into the original run configuration.
+
+    Resuming a run should not silently replace the original template, timeout,
+    retrieval, or search settings with parser defaults. Only explicitly supplied
+    resume flags should override the saved ``config_snapshot.json``.
+    """
+    config = _base_resume_config(run_dir)
+    config["from_stage"] = from_stage
+    config["to_stage"] = args.to_stage
+
+    _set_if_not_none(config, "model", args.model)
+    _set_if_not_none(config, "llm_max_workers", args.llm_workers)
+    _set_if_not_none(config, "max_papers", args.max_papers)
+    _set_if_not_none(config, "search_query", args.search_query)
+    _set_if_not_none(config, "experiment_template", args.experiment_template)
+    _set_if_not_none(config, "experiment_timeout_sec", args.experiment_timeout)
+    _set_if_not_none(config, "retrieval_top_k", args.retrieval_top_k)
+
+    if args.no_llm:
+        config["use_llm"] = False
+        config["mode"] = "offline"
+    else:
+        config["use_llm"] = bool(config.get("use_llm", True))
+        config["mode"] = "llm" if config["use_llm"] else "offline"
+    if args.offline_search:
+        config["use_arxiv"] = False
+    else:
+        config["use_arxiv"] = bool(config.get("use_arxiv", True))
+    if args.allow_fixture_fallback:
+        config["allow_fixture_fallback"] = True
+    else:
+        config["allow_fixture_fallback"] = bool(config.get("allow_fixture_fallback", False))
+    if args.strict_search:
+        config["strict_search"] = True
+    else:
+        config["strict_search"] = bool(config.get("strict_search", False))
+    if args.no_retrieval:
+        config["use_retrieval"] = False
+    else:
+        config["use_retrieval"] = bool(config.get("use_retrieval", True))
+    return config
+
+
+def _base_resume_config(run_dir: Path) -> dict[str, object]:
+    config_path = run_dir / "config_snapshot.json"
+    if config_path.exists():
+        data = read_json(config_path)
+        if isinstance(data, dict):
+            return dict(data)
+    return {
+        "mode": "llm",
+        "model": None,
+        "llm_max_workers": 4,
+        "max_papers": 5,
+        "search_query": None,
+        "experiment_template": "toy_text_classification",
+        "experiment_timeout_sec": 30,
+        "use_llm": True,
+        "use_arxiv": True,
+        "allow_fixture_fallback": False,
+        "strict_search": False,
+        "use_retrieval": True,
+        "retrieval_top_k": 4,
+    }
+
+
+def _set_if_not_none(data: dict[str, object], key: str, value: object) -> None:
+    if value is not None:
+        data[key] = value
 
 
 def _new_run_dir(output_root: Path, topic: str) -> Path:
