@@ -49,12 +49,19 @@ class CodeTaskExampleTests(unittest.TestCase):
 
             self.assertEqual(final.status, "passed")
             self.assertEqual(final.returncode, 0)
+            summary_path = run_dir / "code_task" / "summary.md"
+            self.assertTrue(summary_path.is_file())
+            summary_text = read_text(summary_path)
+            self.assertIn("# Code Task Summary", summary_text)
+            self.assertIn("Status: `benchmark_passed`", summary_text)
+            self.assertIn("spamfilter/rules.py", summary_text)
             workspace_rules = run_dir / "code_task" / "workspace" / "spamfilter" / "rules.py"
             self.assertIn('"lottery"', read_text(workspace_rules))
             self.assertNotIn('"lottery"', read_text(EXAMPLE_ROOT / "spamfilter" / "rules.py"))
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["status"], "benchmark_passed")
             self.assertEqual(manifest["benchmark"]["last_status"], "passed")
+            self.assertEqual(manifest["layout"]["summary"], "code_task/summary.md")
 
 
 def _write_keyword_patch(run_dir: Path) -> Path:

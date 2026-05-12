@@ -26,6 +26,7 @@ from simple_ar.prompts import (
     report_user_prompt,
     synthesize_user_prompt,
 )
+from simple_ar.report_quality import build_report_quality
 from simple_ar.retrieval.evidence import collect_stage_evidence, format_evidence_snippets
 from simple_ar.usage import record_llm_usage
 
@@ -406,8 +407,10 @@ def execute_report(ctx: Context) -> None:
         raise CitationError("Report body did not cite any paper from papers.jsonl")
     report = _append_references_section(report_body, cited_papers)
     validate_citations(report, {paper.id for paper in papers})
+    quality = build_report_quality(report, report_body, search_meta, results, papers, cited_papers)
     write_text(ctx.artifact_path("report.md"), report)
     write_text(ctx.artifact_path("references.bib"), papers_to_bibtex(cited_papers))
+    write_json(ctx.artifact_path("report_quality.json"), quality)
     write_json(
         ctx.artifact_path("manifest.json"),
         _report_manifest(ctx, search_meta, plan, results, papers, cited_papers),
@@ -902,6 +905,7 @@ def _report_manifest(
             "report.md": _relative_artifact(ctx, ctx.artifact_path("report.md")),
             "references.bib": _relative_artifact(ctx, ctx.artifact_path("references.bib")),
             "manifest.json": _relative_artifact(ctx, ctx.artifact_path("manifest.json")),
+            "report_quality.json": _relative_artifact(ctx, ctx.artifact_path("report_quality.json")),
         },
         "experiment": {
             "template": plan.get("template"),

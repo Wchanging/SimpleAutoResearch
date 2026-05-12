@@ -52,6 +52,7 @@ The code-task workflow is split into small modules:
 - `runner.py`: benchmark execution in the copied workspace.
 - `failure.py`: deterministic failure analysis.
 - `repair.py`: bounded repair proposal generation.
+- `summary.py`: human-readable code-task status summaries.
 - `state.py`: shared paths, manifest helpers, and workspace path safety.
 
 When adding a new code-task feature:

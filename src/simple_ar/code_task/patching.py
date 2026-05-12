@@ -3,7 +3,6 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -65,16 +64,12 @@ class PatchApplyResult:
         run_dir: Code-task run directory.
         applied_edits_path: Metadata file describing applied edits.
         patch_diff_path: Unified diff for human review.
-        pre_manifest_path: Workspace hash manifest before applying edits.
-        post_manifest_path: Workspace hash manifest after applying edits.
         changed_files: Workspace-relative files changed by the patch.
     """
 
     run_dir: Path
     applied_edits_path: Path
     patch_diff_path: Path
-    pre_manifest_path: Path
-    post_manifest_path: Path
     changed_files: tuple[str, ...]
 
 
@@ -230,8 +225,8 @@ def apply_patch_edits(
     if not edits:
         raise PatchValidationError(f"No edits were found in {proposal_path}")
 
-    pre_manifest = build_workspace_manifest(workspace_dir)
     prepared = _prepare_edits(workspace_dir, edits)
+    pre_hash_rows = _hash_rows_for_prepared(workspace_dir, prepared)
     old_text_by_path = {item.file_path: read_text(item.file_path) for item in prepared}
     new_text_by_path = {item.file_path: item.updated_text for item in prepared}
     diff_text = _unified_diff(prepared, old_text_by_path, new_text_by_path)
@@ -246,20 +241,16 @@ def apply_patch_edits(
             _write_text_atomically(path, old_text_by_path[path])
         raise
 
-    post_manifest = build_workspace_manifest(workspace_dir)
+    post_hash_rows = _hash_rows_for_prepared(workspace_dir, prepared)
     patch_diff_path = task_dir / "patch.diff"
-    pre_manifest_path = meta_dir / "pre_patch_manifest.json"
-    post_manifest_path = meta_dir / "post_patch_manifest.json"
     applied_edits_path = meta_dir / "applied_edits.json"
 
     write_text(patch_diff_path, diff_text)
-    write_json(pre_manifest_path, pre_manifest)
-    write_json(post_manifest_path, post_manifest)
     applied = _applied_edits_record(
         proposal_path=proposal_path,
         prepared=prepared,
-        pre_manifest=pre_manifest,
-        post_manifest=post_manifest,
+        pre_hash_rows=pre_hash_rows,
+        post_hash_rows=post_hash_rows,
     )
     write_json(applied_edits_path, applied)
 
@@ -274,50 +265,8 @@ def apply_patch_edits(
         run_dir=root,
         applied_edits_path=applied_edits_path,
         patch_diff_path=patch_diff_path,
-        pre_manifest_path=pre_manifest_path,
-        post_manifest_path=post_manifest_path,
         changed_files=tuple(item.path for item in prepared),
     )
-
-
-def build_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
-    """Build a compact file hash manifest for a code-task workspace.
-
-    Args:
-        workspace_dir: Workspace directory to scan.
-
-    Returns:
-        JSON-serializable manifest with relative paths, sizes, and SHA-256
-        hashes. It intentionally omits source summaries to stay compact.
-    """
-    workspace = Path(workspace_dir)
-    if not workspace.exists():
-        raise FileNotFoundError(f"Workspace does not exist: {workspace}")
-    if not workspace.is_dir():
-        raise NotADirectoryError(f"Workspace path is not a directory: {workspace}")
-
-    files: list[dict[str, Any]] = []
-    for current, dirnames, filenames in os.walk(workspace):
-        dirnames[:] = [
-            dirname
-            for dirname in dirnames
-            if dirname not in {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
-        ]
-        current_path = Path(current)
-        for filename in filenames:
-            path = current_path / filename
-            if not path.is_file():
-                continue
-            files.append(_hash_row(workspace, path))
-    files.sort(key=lambda item: item["path"])
-    return {
-        "schema_version": 1,
-        "generated_at": _utcnow_iso(),
-        "workspace": str(workspace),
-        "file_count": len(files),
-        "total_bytes": sum(int(item["bytes"]) for item in files),
-        "files": files,
-    }
 
 
 def _ask_llm_for_edits(
@@ -540,11 +489,9 @@ def _applied_edits_record(
     *,
     proposal_path: Path,
     prepared: list[_PreparedEdit],
-    pre_manifest: dict[str, Any],
-    post_manifest: dict[str, Any],
+    pre_hash_rows: dict[str, dict[str, Any]],
+    post_hash_rows: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    pre_by_path = _hash_rows_by_path(pre_manifest)
-    post_by_path = _hash_rows_by_path(post_manifest)
     return {
         "schema_version": 1,
         "applied_at": _utcnow_iso(),
@@ -555,10 +502,10 @@ def _applied_edits_record(
             {
                 "path": item.path,
                 "reason": item.reason,
-                "old_sha256": pre_by_path.get(item.path, {}).get("sha256"),
-                "new_sha256": post_by_path.get(item.path, {}).get("sha256"),
-                "old_bytes": pre_by_path.get(item.path, {}).get("bytes"),
-                "new_bytes": post_by_path.get(item.path, {}).get("bytes"),
+                "old_sha256": pre_hash_rows.get(item.path, {}).get("sha256"),
+                "new_sha256": post_hash_rows.get(item.path, {}).get("sha256"),
+                "old_bytes": pre_hash_rows.get(item.path, {}).get("bytes"),
+                "new_bytes": post_hash_rows.get(item.path, {}).get("bytes"),
             }
             for item in prepared
         ],
@@ -661,8 +608,6 @@ def _update_manifest_after_apply(
             "applied_at": _utcnow_iso(),
             "patch_diff": "code_task/patch.diff",
             "applied_edits": "code_task/meta/applied_edits.json",
-            "pre_patch_manifest": "code_task/meta/pre_patch_manifest.json",
-            "post_patch_manifest": "code_task/meta/post_patch_manifest.json",
             "changed_files": changed_files,
         }
     )
@@ -671,8 +616,6 @@ def _update_manifest_after_apply(
         {
             "patch_diff": "code_task/patch.diff",
             "applied_edits": "code_task/meta/applied_edits.json",
-            "pre_patch_manifest": "code_task/meta/pre_patch_manifest.json",
-            "post_patch_manifest": "code_task/meta/post_patch_manifest.json",
         }
     )
     project = codebase_index.get("project", {})
@@ -753,23 +696,23 @@ def _hash_row(root: Path, path: Path) -> dict[str, Any]:
     }
 
 
+def _hash_rows_for_prepared(
+    workspace_dir: Path,
+    prepared: list[_PreparedEdit],
+) -> dict[str, dict[str, Any]]:
+    workspace = workspace_dir.resolve()
+    return {
+        item.path: _hash_row(workspace, item.file_path)
+        for item in prepared
+    }
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _hash_rows_by_path(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    files = manifest.get("files", [])
-    if not isinstance(files, list):
-        return {}
-    return {
-        str(item.get("path")): item
-        for item in files
-        if isinstance(item, dict) and item.get("path")
-    }
 
 
 def _plan_status(manifest: dict[str, Any]) -> str:

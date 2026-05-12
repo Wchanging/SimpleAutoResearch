@@ -186,6 +186,8 @@ uv run simple-ar code-task validate runs/<run-id>
 uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
+After `code-task run`, SimpleAutoResearch writes `code_task/summary.md` with the task, patch, validation, benchmark, and artifact summary.
+
 Analyze failures and request a bounded repair proposal:
 
 ```bash

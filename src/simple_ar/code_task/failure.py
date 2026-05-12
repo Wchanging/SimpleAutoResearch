@@ -14,6 +14,7 @@ from simple_ar.code_task.state import (
     save_code_task_manifest,
     utcnow_iso,
 )
+from simple_ar.code_task.summary import write_code_task_summary
 
 
 TRACEBACK_RE = re.compile(r"Traceback \(most recent call last\):[\s\S]*", re.MULTILINE)
@@ -100,6 +101,7 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         status=status,
         implicated_files=implicated_files,
     )
+    write_code_task_summary(run_dir)
     return FailureAnalysisResult(
         run_dir=paths.run_dir,
         analysis_path=analysis_path,

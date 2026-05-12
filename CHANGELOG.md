@@ -4,9 +4,15 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-05-12
 
+### Added
+
+- Added `08-report/report_quality.json`, a rule-based report quality artifact that checks citation provenance, body-cited papers, metric visibility, and runtime/fallback disclosure.
+- Added automatic `code_task/summary.md` generation after code-task benchmark runs and failure analysis.
+
 ### Changed
 
 - Reworked `README.md` into a cleaner open-source project entry page with setup, environment configuration, quickstart commands, preset workflows, documentation links, reference, and community notes.
+- Reduced code-task patch IO by removing full pre/post workspace manifest artifacts; `applied_edits.json` now keeps before/after hashes only for changed files.
 - Consolidated detailed documentation into three primary docs:
   - `docs/USAGE.md` for installation, environment variables, CLI commands, examples, and future config shape.
   - `docs/WORKFLOWS.md` for preset workflows, the default 8-stage pipeline, stage outputs, and artifact layout.
@@ -57,8 +63,6 @@ This file records user-visible project changes in reverse chronological order. P
   - `code_task/patch.diff`
   - `code_task/meta/proposed_edits.json`
   - `code_task/meta/applied_edits.json`
-  - `code_task/meta/pre_patch_manifest.json`
-  - `code_task/meta/post_patch_manifest.json`
 
 ### Changed
 

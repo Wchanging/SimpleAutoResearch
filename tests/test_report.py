@@ -6,6 +6,7 @@ from pathlib import Path
 from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
 from simple_ar.pipeline import Context
+from simple_ar.report_quality import build_report_quality
 from simple_ar.stage_handlers import (
     _append_references_section,
     _build_report,
@@ -125,6 +126,40 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual([paper.id for paper in cited], ["paper-1"])
         self.assertIn("[@paper-1]", report)
         self.assertNotIn("[@paper-2]", report)
+
+    def test_report_quality_records_metrics_and_runtime_limits(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="",
+            url="https://example.com/1",
+            source="fixture",
+        )
+        report_body = (
+            "# Draft\n\n"
+            "The run uses fixture metadata [@paper-1].\n\n"
+            "## Results\n\n"
+            "| Metric | Value |\n"
+            "|---|---:|\n"
+            "| `accuracy` | 0.75 |\n\n"
+            "## Limitations\n\n"
+            "The literature stage used fixture metadata and the experiment timed out."
+        )
+        report = _append_references_section(report_body, [paper])
+
+        quality = build_report_quality(
+            report,
+            report_body,
+            search_meta={"source": "fixture", "status": "fallback"},
+            results={"metrics": {"accuracy": 0.75}, "returncode": None, "timed_out": True},
+            papers=[paper],
+            cited_papers=[paper],
+        )
+
+        self.assertEqual(quality["status"], "passed")
+        self.assertEqual(quality["summary"]["metric_count"], 1)
+        self.assertEqual(quality["body_citation_ids"], ["paper-1"])
 
 
 if __name__ == "__main__":
