@@ -9,6 +9,7 @@ from simple_ar.pipeline import Context
 from simple_ar.report_quality import build_report_quality
 from simple_ar.stage_handlers import (
     _append_references_section,
+    _build_research_report,
     _build_report,
     _body_citation_ids,
     _cited_papers,
@@ -91,6 +92,42 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIn("[@fixture-001]", report.split("## References", maxsplit=1)[0])
         self.assertNotIn("Raw result metadata", report)
         validate_citations(report, {"fixture-001"})
+
+    def test_code_task_fixture_fallback_discussion_uses_operational_evidence(self) -> None:
+        ctx = Context(Path("run"), "LLM-guided improvement", config={"max_papers": 1})
+        paper = Paper(
+            id="fixture-001",
+            title="Placeholder Paper for Pipeline Testing",
+            authors=["SimpleAutoResearch"],
+            abstract="Fixture metadata.",
+            url="https://example.com/fixture-001",
+            source="fixture",
+        )
+
+        report = _build_report(
+            ctx,
+            goal="# Goal\nImprove toy code.",
+            problem="# Problem\nCan the workflow patch a toy project?",
+            search_meta={"source": "fixture", "status": "offline_fixture", "returned": 1},
+            synthesis="# Synthesis\nA placeholder hypothesis about output accuracy.",
+            hypothesis="# Hypothesis\nMeasure placeholder effectiveness.",
+            plan={
+                "template": "llm_code_task_toy_spam",
+                "mode": "embedded_code_task",
+                "metrics": ["benchmark_passed", "changed_files"],
+            },
+            results={
+                "returncode": 0,
+                "timed_out": False,
+                "metrics": {"benchmark_passed": 1.0, "changed_files": 1.0},
+                "command": ["python", "experiment.py"],
+            },
+            papers=[paper],
+        )
+
+        self.assertIn("operational rather than literature-backed", report)
+        self.assertIn("changed 1 file(s)", report)
+        self.assertNotIn("placeholder effectiveness", report)
 
     def test_body_citation_ids_ignore_reference_list_only_citations(self) -> None:
         markdown = (
@@ -176,9 +213,30 @@ class ReportSafetyTests(unittest.TestCase):
             report,
             search_meta={"source": "fixture", "status": "offline_fixture"},
             plan={"template": "llm_code_task_toy_spam"},
+            report_mode="experiment",
+            results_present=True,
         )
 
         self.assertTrue(any("overclaims" in error for error in errors))
+
+    def test_report_bounds_reject_toy_code_task_overclaims(self) -> None:
+        report = (
+            "# Draft\n\n"
+            "## Results\n\n"
+            "The patch demonstrates performance improvements and the potential of "
+            "LLMs for enhancing spam detection beyond this benchmark. This is a "
+            "promising direction."
+        )
+
+        errors = _report_bound_errors(
+            report,
+            search_meta={"source": "openalex", "status": "ok"},
+            plan={"template": "llm_code_task_toy_spam"},
+            report_mode="experiment",
+            results_present=True,
+        )
+
+        self.assertTrue(any("toy code-task" in error for error in errors))
 
     def test_report_bounds_accept_conservative_fixture_disclosure(self) -> None:
         report = (
@@ -195,9 +253,43 @@ class ReportSafetyTests(unittest.TestCase):
                 report,
                 search_meta={"source": "fixture", "status": "offline_fixture"},
                 plan={"template": "llm_code_task_toy_spam"},
+                report_mode="experiment",
+                results_present=True,
             ),
             [],
         )
+
+    def test_research_only_fallback_does_not_imply_experiment_execution(self) -> None:
+        paper = Paper(
+            id="fixture-001",
+            title="Placeholder Paper for Pipeline Testing",
+            authors=["SimpleAutoResearch"],
+            abstract="Fixture metadata.",
+            url="https://example.com/fixture-001",
+            source="fixture",
+        )
+        ctx = Context(Path("run"), "Agent Simulation", config={"max_papers": 1})
+
+        report = _build_research_report(
+            ctx,
+            goal="# Goal\nStudy agent simulation.",
+            problem="# Problem\nWhat themes appear in agent simulation metadata?",
+            search_meta={"source": "fixture", "status": "offline_fixture", "returned": 1},
+            synthesis="# Synthesis\nThe retrieved metadata is a placeholder.",
+            hypothesis="# Hypothesis\nA later benchmark could test a concrete implementation.",
+            papers=[paper],
+        )
+
+        self.assertIn("## Search Scope", report)
+        self.assertIn("## Thematic Synthesis", report)
+        self.assertIn("## Approach Patterns", report)
+        self.assertIn("## Open Questions", report)
+        self.assertNotIn("## Method", report)
+        self.assertNotIn("## Experiments", report)
+        self.assertNotIn("## Results", report)
+        self.assertNotIn("experiment design, code generation, execution", report)
+        self.assertIn("No experiment was executed", report)
+        self.assertIn("not a claim that the report covers the full literature", report)
 
 
 if __name__ == "__main__":

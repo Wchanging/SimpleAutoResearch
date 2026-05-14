@@ -60,69 +60,62 @@ Notes:
 - `SIMPLE_AR_MODEL` is the default model when `--model` is not supplied.
 - Price fields are optional and only affect cost estimates in usage summaries.
 
-## Research Run Commands
+## Research Pipeline (Topic To Report)
 
-Run the default topic-to-report pipeline:
+Run the default 8-stage pipeline:
 
 ```bash
 uv run simple-ar run --topic "toy topic" --to-stage report
 ```
 
-Use a specific model:
+Stop early for a literature-only pass (no experiment code/run artifacts):
 
 ```bash
-uv run simple-ar run \
-  --topic "agent simulation" \
-  --to-stage report \
-  --model gpt-4o-mini
+uv run simple-ar run --topic "toy topic" --to-stage synthesize
 ```
 
-Control literature search and LLM concurrency:
+Then generate a literature-only report from the existing artifacts:
 
 ```bash
-uv run simple-ar run \
-  --topic "agent simulation" \
-  --to-stage report \
-  --max-papers 5 \
-  --llm-workers 4
+uv run simple-ar resume runs/<run-id> --from-stage report
 ```
 
-Run offline for deterministic testing:
+By default, report drafting is automatic: if `results.json` is missing, the
+report switches to a literature-only structure. You can force a mode:
 
 ```bash
-uv run simple-ar run \
-  --topic "toy topic" \
-  --to-stage report \
-  --no-llm \
-  --offline-search
+uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
+uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experiment
 ```
 
-Run the experimental 8-stage LLM code-task demo:
+### What Is LLM-Backed vs Deterministic
 
-```bash
-uv run simple-ar run \
-  --topic "LLM-guided improvement of a toy spam baseline" \
-  --to-stage report \
-  --experiment-template llm_code_task_toy_spam \
-  --offline-search \
-  --experiment-timeout 60
-```
+- LLM-backed when enabled: `plan`, `read`, `synthesize`, and `report` stages.
+- Deterministic: `design`, `code`, and `run` use fixed experiment templates or the embedded code-task demo. They do not generate free-form code.
+- Embedded code-task demo: `06-code` can call the LLM for a patch plan and controlled edit proposal, but the patch is applied only inside the copied demo workspace.
+- Guarded reports: if an LLM-written report omits required body citations, invents citation keys, or overstates fixture/toy evidence, the report stage writes a structured fallback report instead.
+- `--no-llm` forces offline fallbacks with placeholder content in `goal.md`, `notes.md`, `synthesis.md`, and `report.md`.
 
-This still runs the normal 8 stages, but `06-code` copies the bundled toy spam
-project into an isolated code-task workspace, asks the LLM for a patch plan and
-old/new edit proposal, applies the approved demo patch, and writes
-`06-code/code_task_experiment.json`. `07-run` then executes the benchmark
-harness and `08-report` includes the parsed benchmark metrics.
+### Search Modes And Boundaries
 
-Search behavior:
+Default search behavior:
+
+- `search` queries OpenAlex first, then arXiv.
+- If a live provider fails and `--strict-search` is not set, cached metadata is used when available.
+
+Explicit search controls:
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage search --strict-search
 uv run simple-ar run --topic "agent simulation" --to-stage report --allow-fixture-fallback
+uv run simple-ar run --topic "agent simulation" --to-stage report --offline-search
 ```
 
-- `--strict-search` requires a live provider response and disables cache fallback.
+- `--strict-search` disables cache fallback for live providers.
 - `--allow-fixture-fallback` allows placeholder metadata when live providers and cache fail.
+- `--offline-search` skips live providers and uses fixture metadata immediately.
+
+### Resume And Status
 
 Resume a run:
 
@@ -137,7 +130,7 @@ Show run status:
 uv run simple-ar status runs/<run-id>
 ```
 
-## Artifact Tools
+## Retrieval And Artifact Tools
 
 Build a local artifact index:
 
@@ -145,7 +138,7 @@ Build a local artifact index:
 uv run simple-ar inspect runs/<run-id>
 ```
 
-Search run artifacts:
+Search run artifacts with lexical retrieval:
 
 ```bash
 uv run simple-ar search-artifacts runs/<run-id> "accuracy"
@@ -159,7 +152,9 @@ uv run simple-ar run --topic "toy topic" --to-stage report --retrieval-top-k 4
 uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 ```
 
-## Code Task Commands
+## Code Task Workflow
+
+The code-task workflow copies a source project into an isolated workspace and never mutates the original codebase. It is intentionally step-by-step so each stage can be reviewed.
 
 Initialize a code task from an existing codebase:
 
@@ -170,7 +165,7 @@ uv run simple-ar code-task init \
   --benchmark-command "python -m unittest discover -s tests"
 ```
 
-Generate a patch plan:
+Generate a patch plan (LLM optional; offline mode writes a conservative plan):
 
 ```bash
 uv run simple-ar code-task plan runs/<run-id>
@@ -184,7 +179,7 @@ uv run simple-ar code-task decide-plan runs/<run-id> \
   --note "small scoped edit"
 ```
 
-Ask the model for controlled edit proposals:
+Ask the model for controlled edit proposals (offline mode writes an empty proposal):
 
 ```bash
 uv run simple-ar code-task propose-edits runs/<run-id>
@@ -203,8 +198,6 @@ uv run simple-ar code-task validate runs/<run-id>
 uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
-After `code-task run`, SimpleAutoResearch writes `code_task/summary.md` with the task, patch, validation, benchmark, and artifact summary.
-
 Analyze failures and request a bounded repair proposal:
 
 ```bash
@@ -222,6 +215,8 @@ uv run simple-ar code-task apply-edits runs/<run-id> \
 ## Command Design
 
 The current CLI exposes primitive steps because this project is still a learning implementation. That makes each step inspectable and testable, but it can become verbose.
+
+Current boundary: the bundled `llm_code_task_toy_spam` template is the only code-task path that is fully embedded in the 8-stage pipeline. For arbitrary user projects, use the standalone `code-task` commands so the plan, approval, edit, validation, and benchmark steps remain reviewable.
 
 The planned direction is to keep primitive commands while adding config-driven convenience presets later:
 

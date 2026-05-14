@@ -441,12 +441,20 @@ def execute_report(ctx: Context) -> None:
     synthesis = read_text(ctx.find_artifact("synthesis.md") or ctx.artifact_path("synthesis.md"))
     hypothesis = _safe_read_artifact(ctx, "hypothesis.md")
     plan = _safe_read_json_artifact(ctx, "experiment_plan.json")
-    results = read_json(ctx.find_artifact("results.json") or ctx.artifact_path("results.json"))
+    results_path = ctx.find_artifact("results.json")
+    results_present = results_path is not None
+    results = read_json(results_path) if results_present else {}
     paper_rows = read_jsonl(ctx.find_artifact("papers.jsonl") or ctx.artifact_path("papers.jsonl"))
     papers = [
         Paper.from_row(row)
         for row in paper_rows
     ]
+    report_mode = _resolve_report_mode(ctx.config.get("report_mode"), results_present=results_present)
+    if report_mode == "experiment" and not results_present:
+        raise FileNotFoundError(
+            "report_mode=experiment requires results.json. Run the experiment stage or "
+            "set --report-mode research_only."
+        )
     evidence = _stage_evidence(ctx, "report")
     evidence_snippets = format_evidence_snippets(evidence)
     report = _report_with_llm(
@@ -461,9 +469,22 @@ def execute_report(ctx: Context) -> None:
         paper_rows=paper_rows,
         papers=papers,
         evidence_snippets=evidence_snippets,
+        report_mode=report_mode,
+        results_present=results_present,
     )
     if report is None:
-        report = _build_report(ctx, goal, problem, search_meta, synthesis, hypothesis, plan, results, papers)
+        if report_mode == "research_only":
+            report = _build_research_report(
+                ctx,
+                goal,
+                problem,
+                search_meta,
+                synthesis,
+                hypothesis,
+                papers,
+            )
+        else:
+            report = _build_report(ctx, goal, problem, search_meta, synthesis, hypothesis, plan, results, papers)
     report_body = _strip_references_section(report)
     cited_papers = _cited_papers(report_body, papers)
     if papers and not cited_papers:
@@ -476,8 +497,18 @@ def execute_report(ctx: Context) -> None:
     write_json(ctx.artifact_path("report_quality.json"), quality)
     write_json(
         ctx.artifact_path("manifest.json"),
-        _report_manifest(ctx, search_meta, plan, results, papers, cited_papers),
+        _report_manifest(ctx, search_meta, plan, results, papers, cited_papers, report_mode=report_mode),
     )
+
+
+def _resolve_report_mode(value: object, *, results_present: bool) -> str:
+    """Resolve report mode using config overrides and results availability."""
+    text = str(value).strip().lower() if value is not None else "auto"
+    if text not in {"auto", "research_only", "experiment"}:
+        text = "auto"
+    if text == "auto":
+        return "experiment" if results_present else "research_only"
+    return text
 
 
 HANDLERS = {
@@ -566,6 +597,8 @@ def _report_with_llm(
     paper_rows: list[dict[str, Any]],
     papers: list[Paper],
     evidence_snippets: str,
+    report_mode: str,
+    results_present: bool,
 ) -> str | None:
     """Generate the final report with an evidence-bounded LLM prompt.
 
@@ -607,6 +640,7 @@ def _report_with_llm(
                 results_json=json.dumps(results, indent=2, ensure_ascii=False),
                 evidence_snippets=evidence_snippets,
                 citation_instruction=_citation_instruction(papers),
+                report_mode=report_mode,
             ),
             label="report",
         )
@@ -617,7 +651,13 @@ def _report_with_llm(
         validate_citations(report, {paper.id for paper in papers})
         if papers and not _body_citation_ids(report, {paper.id for paper in papers}):
             raise LLMError("report_markdown did not cite any known paper in the body")
-        bound_errors = _report_bound_errors(report, search_meta, plan)
+        bound_errors = _report_bound_errors(
+            report,
+            search_meta,
+            plan,
+            report_mode=report_mode,
+            results_present=results_present,
+        )
         if bound_errors:
             raise LLMError("report_markdown exceeded artifact bounds: " + "; ".join(bound_errors))
         return report.strip() + "\n"
@@ -670,11 +710,42 @@ def _build_report(
         "## Literature Search\n\n"
         f"{_search_markdown(search_meta)}\n\n"
         "## Discussion\n\n"
-        f"{_discussion_markdown(synthesis, hypothesis)}\n\n"
+        f"{_experiment_discussion_markdown(search_meta, plan, results, synthesis, hypothesis)}\n\n"
         "## Limitations\n\n"
         f"{_limitations_markdown(ctx, search_meta, results, plan)}\n\n"
         "## Conclusion\n\n"
         f"{_conclusion_markdown(results)}\n"
+    )
+
+
+def _build_research_report(
+    ctx: Context,
+    goal: str,
+    problem: str,
+    search_meta: dict[str, Any],
+    synthesis: str,
+    hypothesis: str,
+    papers: list[Paper],
+) -> str:
+    """Build a literature-only report when no experiment results exist."""
+    return (
+        f"# {_research_report_title(ctx)}\n\n"
+        "## Abstract\n\n"
+        f"{_research_abstract_markdown(ctx, search_meta, papers)}\n\n"
+        "## Introduction\n\n"
+        f"{_research_introduction_markdown(ctx, goal, problem, search_meta, papers)}\n\n"
+        "## Search Scope\n\n"
+        f"{_research_search_scope_markdown(search_meta, papers)}\n\n"
+        "## Thematic Synthesis\n\n"
+        f"{_synthesis_markdown(synthesis, hypothesis)}\n\n"
+        "## Approach Patterns\n\n"
+        f"{_approach_patterns_markdown(papers, synthesis)}\n\n"
+        "## Open Questions\n\n"
+        f"{_open_questions_markdown(ctx, synthesis, hypothesis)}\n\n"
+        "## Limitations\n\n"
+        f"{_research_limitations_markdown(ctx, search_meta)}\n\n"
+        "## Conclusion\n\n"
+        f"{_research_conclusion_markdown(ctx, synthesis, hypothesis)}\n"
     )
 
 
@@ -694,10 +765,32 @@ def _abstract_markdown(ctx: Context, results: dict[str, Any]) -> str:
     )
 
 
+def _research_abstract_markdown(
+    ctx: Context,
+    search_meta: dict[str, Any],
+    papers: list[Paper],
+) -> str:
+    """Summarize a literature-only report without implying experiments."""
+    source = search_meta.get("source", "unknown") if search_meta else "unknown"
+    status = search_meta.get("status", "unknown") if search_meta else "unknown"
+    return (
+        f"This report summarizes literature metadata for `{ctx.topic}` using "
+        "the SimpleAutoResearch pipeline. The literature stage recorded source "
+        f"`{source}` with status `{status}` and returned {len(papers)} paper "
+        "record(s). No experiment was executed; the report focuses on the "
+        "available metadata and synthesis artifacts."
+    )
+
+
 def _report_title(ctx: Context, plan: dict[str, Any]) -> str:
     """Create a conservative paper-style title for fallback reports."""
     template = str(plan.get("template", "template experiment"))
     return f"A Reproducible Mini Auto-Research Study of {ctx.topic} with {template}"
+
+
+def _research_report_title(ctx: Context) -> str:
+    """Create a conservative title for literature-only reports."""
+    return f"A Literature-Focused Review of {ctx.topic}"
 
 
 def _introduction_markdown(
@@ -730,14 +823,120 @@ def _introduction_markdown(
     )
 
 
+def _research_introduction_markdown(
+    ctx: Context,
+    goal: str,
+    problem: str,
+    search_meta: dict[str, Any],
+    papers: list[Paper],
+) -> str:
+    """Render a literature-only introduction without experiment-stage claims."""
+    research_question = _markdown_body(problem) or _markdown_body(goal) or ctx.topic
+    source = search_meta.get("source", "unknown") if search_meta else "unknown"
+    status = search_meta.get("status", "unknown") if search_meta else "unknown"
+    literature_sentence = _literature_citation_sentence(papers)
+    return (
+        f"The starting point for this report is the question of how to understand "
+        f"`{ctx.topic}` from the available literature metadata and synthesis "
+        "artifacts. SimpleAutoResearch decomposes the literature-only pass into "
+        "planning, metadata search, reading, synthesis, and reporting stages, so "
+        "the intermediate reasoning remains visible as files.\n\n"
+        f"The planned research question was: {research_question} The literature "
+        f"stage recorded search source `{source}` with status `{status}`, so the "
+        "strength of the narrative depends directly on that provenance. "
+        f"{literature_sentence} "
+        "No experiment was executed for this report; the conclusions are bounded "
+        "to the retrieved metadata and staged synthesis."
+    )
+
+
+def _research_search_scope_markdown(
+    search_meta: dict[str, Any],
+    papers: list[Paper],
+) -> str:
+    """Describe search provenance for a survey-style report."""
+    if not search_meta:
+        return "No search metadata was available, so the scope of this survey-style report is undefined."
+    query = search_meta.get("query", "")
+    source = search_meta.get("source", "unknown")
+    status = search_meta.get("status", "unknown")
+    returned = search_meta.get("returned", len(papers))
+    citation_sentence = _literature_citation_sentence(papers)
+    return (
+        f"The search stage used query `{query}` and recorded source `{source}` "
+        f"with status `{status}`. It returned `{returned}` paper metadata "
+        f"record(s). {citation_sentence} This scope statement is provenance, "
+        "not a claim that the report covers the full literature."
+    )
+
+
+def _approach_patterns_markdown(papers: list[Paper], synthesis: str) -> str:
+    """Summarize approach patterns supported by metadata and synthesis text."""
+    if not papers:
+        return "No paper metadata was available to compare approach patterns."
+    if all(paper.source == "fixture" for paper in papers):
+        return (
+            "The available records are fixture metadata, so no real approach "
+            "taxonomy can be inferred. The only defensible pattern is that the "
+            "pipeline can carry citation keys and placeholder abstracts through "
+            "a survey-style report package."
+        )
+    categories = sorted({category for paper in papers for category in paper.categories if category})
+    category_text = ", ".join(categories[:8]) if categories else "unspecified categories"
+    synthesis_body = _clean_discussion_artifact(_markdown_body(synthesis))
+    synthesis_sentence = (
+        f" The synthesis artifact further frames the records as: {synthesis_body}"
+        if synthesis_body
+        else ""
+    )
+    return (
+        f"The retrieved metadata spans {category_text}. At this stage, SimpleAutoResearch "
+        "does not inspect full paper PDFs, so approach patterns are limited to titles, "
+        f"abstract snippets, categories, and staged notes.{synthesis_sentence}"
+    )
+
+
+def _open_questions_markdown(ctx: Context, synthesis: str, hypothesis: str) -> str:
+    """Render survey-style gaps and next steps without claiming results."""
+    hypothesis_body = _clean_discussion_artifact(_markdown_body(hypothesis))
+    synthesis_body = _clean_discussion_artifact(_markdown_body(synthesis))
+    if hypothesis_body:
+        return (
+            f"The staged hypothesis suggests a possible next step: {hypothesis_body} "
+            "A future run should turn this into a concrete benchmark or code-task "
+            "before making empirical claims."
+        )
+    if synthesis_body:
+        return (
+            "The synthesis identifies themes but does not yet define an executable "
+            "evaluation. A useful next step is to choose a target codebase, define "
+            "a benchmark command, and decide which claims can be measured."
+        )
+    return (
+        f"The report does not yet identify a concrete experiment for `{ctx.topic}`. "
+        "A future run should refine the question and collect stronger metadata before coding."
+    )
+
+
 def _report_bound_errors(
     report: str,
     search_meta: dict[str, Any],
     plan: dict[str, Any],
+    *,
+    report_mode: str,
+    results_present: bool,
 ) -> list[str]:
     """Return issues where an LLM report overstates weak staged evidence."""
     lower = report.lower()
     errors: list[str] = []
+    if report_mode == "research_only":
+        if any(
+            heading in lower
+            for heading in ("## experiments", "## results", "## method")
+        ):
+            errors.append("research-only report included experiment sections")
+    if report_mode == "experiment" and not results_present:
+        errors.append("experiment report mode selected without results.json")
     if _uses_fixture_metadata(search_meta):
         fixture_disclosure_terms = (
             "fixture metadata",
@@ -751,6 +950,10 @@ def _report_bound_errors(
             "prior research has",
             "prior research shows",
             "papers such as",
+            "existing literature",
+            "literature showcases",
+            "innovative solution",
+            "unexplored potential",
             "establishing groundwork",
             "real-world",
             "practical solution",
@@ -765,6 +968,31 @@ def _report_bound_errors(
 
     if is_code_task_demo_template(plan.get("template")):
         demo_overclaims = (
+            "enhancing the performance",
+            "enhancing spam detection",
+            "enhance spam detection",
+            "enhancement of spam detection",
+            "enhance the performance",
+            "improve the baseline performance",
+            "potentially improve",
+            "performance improvement",
+            "performance improvements",
+            "improve the system's ability",
+            "improving spam detection capabilities",
+            "effectiveness of the llm",
+            "effectiveness of the llm-guided",
+            "effective way",
+            "effective solution",
+            "potential of llms",
+            "feasibility of employing llms",
+            "feasibility of the llm",
+            "promising direction",
+            "superior",
+            "fresh perspective",
+            "new opportunities",
+            "contribute meaningfully",
+            "meaningful contribution",
+            "overall accuracy",
             "significantly enhanced",
             "significant improvement",
             "substantial improvement",
@@ -894,6 +1122,64 @@ def _discussion_markdown(synthesis: str, hypothesis: str) -> str:
     )
 
 
+def _experiment_discussion_markdown(
+    search_meta: dict[str, Any],
+    plan: dict[str, Any],
+    results: dict[str, Any],
+    synthesis: str,
+    hypothesis: str,
+) -> str:
+    """Discuss experiment evidence without treating fixture synthesis as literature."""
+    if _uses_fixture_metadata(search_meta) and is_code_task_demo_template(plan.get("template")):
+        metrics = results.get("metrics", {})
+        changed_files = metrics.get("changed_files") if isinstance(metrics, dict) else None
+        changed_text = (
+            f" and changed {int(changed_files)} file(s)"
+            if isinstance(changed_files, (int, float))
+            else ""
+        )
+        return (
+            "Because the literature source is fixture metadata, the useful evidence "
+            "in this run is operational rather than literature-backed. The code "
+            f"stage produced an LLM-proposed patch{changed_text}, and the run stage "
+            "recorded that the benchmark passed without timeout. The synthesis "
+            "artifacts remain visible for traceability, but they should not be read "
+            "as evidence about real prior work."
+        )
+    if _uses_fixture_metadata(search_meta):
+        return (
+            "The synthesis artifacts are retained as pipeline context, but fixture "
+            "metadata prevents drawing literature-backed conclusions. The experiment "
+            "results should therefore be read only as a local reproducibility "
+            "demonstration."
+        )
+    return _discussion_markdown(synthesis, hypothesis)
+
+
+def _synthesis_markdown(synthesis: str, hypothesis: str) -> str:
+    """Render a standalone synthesis section for literature-only reports."""
+    synthesis_body = _clean_discussion_artifact(_markdown_body(synthesis))
+    hypothesis_body = _clean_discussion_artifact(_markdown_body(hypothesis))
+    if not synthesis_body and not hypothesis_body:
+        return "No synthesis or hypothesis artifacts were available."
+    if synthesis_body and hypothesis_body:
+        return f"{synthesis_body}\n\nProposed hypothesis: {hypothesis_body}"
+    if synthesis_body:
+        return synthesis_body
+    return f"Proposed hypothesis: {hypothesis_body}"
+
+
+def _research_discussion_markdown(ctx: Context, synthesis: str, hypothesis: str) -> str:
+    """Discuss literature-only findings without implying experiments."""
+    base = _discussion_markdown(synthesis, hypothesis)
+    if not base:
+        base = "The available literature metadata was synthesized into a small set of themes."
+    return (
+        f"{base} The current report is literature-only; experiments are left for a later "
+        "workflow once a concrete implementation target is selected."
+    )
+
+
 def _clean_discussion_artifact(text: str) -> str:
     """Remove debug-style excerpts from synthesis artifacts before reporting."""
     cleaned = text.split("Notes excerpt:", maxsplit=1)[0].strip()
@@ -936,6 +1222,36 @@ def _limitations_markdown(
         "All citations are restricted to ids present in `02-search/papers.jsonl`, and `references.bib` is generated from the subset cited in the report body."
     )
     return " ".join(lines)
+
+
+def _research_limitations_markdown(ctx: Context, search_meta: dict[str, Any]) -> str:
+    """Explain literature-only scope limits without experiment claims."""
+    max_papers = ctx.config.get("max_papers", "unknown")
+    lines = [
+        "This report is literature-only; no experiment was executed.",
+        f"Literature coverage is limited by the configured search query and paper limit ({max_papers}).",
+    ]
+    if search_meta.get("status") in {"fallback", "fixture_fallback", "offline_fixture"} or search_meta.get("source") == "fixture":
+        lines.append(
+            "The literature stage used fixture metadata, so the report should not be treated as a real literature-backed review."
+        )
+    return " ".join(lines)
+
+
+def _research_conclusion_markdown(ctx: Context, synthesis: str, hypothesis: str) -> str:
+    """Close a literature-only report with conservative next-step guidance."""
+    synthesis_body = _clean_discussion_artifact(_markdown_body(synthesis))
+    hypothesis_body = _clean_discussion_artifact(_markdown_body(hypothesis))
+    if synthesis_body or hypothesis_body:
+        return (
+            f"The workflow produced a literature-focused report package on `{ctx.topic}` from staged artifacts. "
+            "The next step is to translate the synthesized themes into a concrete experiment "
+            "or code-task benchmark once a target codebase is selected."
+        )
+    return (
+        f"The workflow produced a literature-focused report package on `{ctx.topic}` from staged artifacts, "
+        "but additional analysis is needed to define a concrete experiment target."
+    )
 
 
 def _conclusion_markdown(results: dict[str, Any]) -> str:
@@ -1045,6 +1361,8 @@ def _report_manifest(
     results: dict[str, Any],
     papers: list[Paper],
     cited_papers: list[Paper],
+    *,
+    report_mode: str,
 ) -> dict[str, Any]:
     """Create a reproducibility manifest for the final report directory."""
     return {
@@ -1052,6 +1370,7 @@ def _report_manifest(
         "generated_at": utcnow_iso(),
         "topic": ctx.topic,
         "run_dir": str(ctx.run_dir),
+        "report_mode": report_mode,
         "source_artifacts": _source_artifacts(ctx),
         "literature_search": search_meta,
         "report_artifacts": {

@@ -121,6 +121,7 @@ def report_user_prompt(
     results_json: str,
     evidence_snippets: str = "",
     citation_instruction: str = "",
+    report_mode: str = "experiment",
 ) -> str:
     """Build the final report prompt from staged artifacts.
 
@@ -138,17 +139,24 @@ def report_user_prompt(
             for report drafting.
         citation_instruction: Optional list of allowed citation keys and usage
             rules generated from ``papers.jsonl``.
+        report_mode: Either ``research_only`` or ``experiment``.
 
     Returns:
         Prompt requesting a polished Markdown paper draft as JSON.
     """
-    evidence_block = _evidence_block(evidence_snippets)
-    citation_block = _citation_block(citation_instruction)
-    return (
-        "Write JSON with one string field: `report_markdown`.\n\n"
-        "The value must be a polished Markdown research report, not a run log. "
-        "Use this structure exactly:\n"
+    mode = report_mode if report_mode in {"research_only", "experiment"} else "experiment"
+    structure = (
         "# <paper title>\n"
+        "## Abstract\n"
+        "## Introduction\n"
+        "## Search Scope\n"
+        "## Thematic Synthesis\n"
+        "## Approach Patterns\n"
+        "## Open Questions\n"
+        "## Limitations\n"
+        "## Conclusion\n\n"
+        if mode == "research_only"
+        else "# <paper title>\n"
         "## Abstract\n"
         "## Introduction\n"
         "## Related Work\n"
@@ -157,24 +165,20 @@ def report_user_prompt(
         "## Results\n"
         "## Limitations\n"
         "## Conclusion\n\n"
-        "Writing style rules adapted from AutoResearchClaw:\n"
-        "- Write flowing academic paragraphs. Avoid bullet lists except compact "
-        "metric tables in Results.\n"
-        "- The paper should read like a short workshop paper, not a technical "
-        "artifact inventory.\n"
-        "- Every claim about results must be supported by numbers in `results_json`.\n"
-        "- When `Retrieved Evidence Snippets` are provided, use them as the "
-        "preferred source context and keep claims traceable to their labelled "
-        "paths and line ranges.\n"
+    )
+    mode_rules = (
+        "- This is a literature-only survey-style report. Do not include Method, Experiments, or Results sections.\n"
+        "- Do not claim an experiment was executed. Focus on search scope, themes, approach patterns, open questions, and limitations.\n"
+        "- Search Scope should summarize the query/source/status/record count rather than claiming comprehensive coverage.\n"
+        "- Thematic Synthesis should group ideas across the available metadata and notes; cite only listed papers.\n"
+        "- Approach Patterns should compare high-level technique families or evaluation habits only when supported by the supplied metadata.\n"
+        "- Open Questions should list concrete gaps or next-step experiment ideas, not conclusions from nonexistent experiments.\n"
+        if mode == "research_only"
+        else "- Every claim about results must be supported by numbers in `results_json`.\n"
+        "- In Results, render parsed metrics as a Markdown table using the exact "
+        "metric keys from `results_json`.\n"
         "- Do not report p-values, confidence intervals, multiple seeds, or "
         "statistical significance unless those values appear in `results_json`.\n"
-        "- Do not repeat caveats throughout the paper. Put caveats in Limitations.\n"
-        "- If the literature search used fixture metadata or cache fallback, state "
-        "that provenance honestly in Limitations and avoid claiming a full review.\n"
-        "- If a paper row has source `fixture`, treat it as placeholder metadata "
-        "only. Do not describe fixture rows as real prior work, do not say they "
-        "studied the topic, and do not use them as scientific support beyond "
-        "provenance disclosure.\n"
         "- If the experiment template is a tiny teaching experiment, frame the "
         "results as a reproducibility/pipeline demonstration rather than a broad "
         "scientific claim.\n"
@@ -182,10 +186,50 @@ def report_user_prompt(
         "that the benchmark passed after an LLM-proposed patch to an isolated toy "
         "workspace. Do not claim improved accuracy, robustness, real-world "
         "utility, significance, or general applicability.\n"
+    )
+    evidence_block = _evidence_block(evidence_snippets)
+    citation_block = _citation_block(citation_instruction)
+    return (
+        "Write JSON with one string field: `report_markdown`.\n\n"
+        "The value must be a polished Markdown research report, not a run log. "
+        "Use this structure exactly:\n"
+        f"{structure}"
+        "Writing style rules adapted from AutoResearchClaw:\n"
+        "- Write flowing academic paragraphs. Avoid bullet lists except compact "
+        "tables when needed.\n"
+        "- The paper should read like a short workshop paper, not a technical "
+        "artifact inventory.\n"
+        f"{mode_rules}"
+        "- When `Retrieved Evidence Snippets` are provided, use them as the "
+        "preferred source context and keep claims traceable to their labelled "
+        "paths and line ranges.\n"
+        "- Do not repeat caveats throughout the paper. Put caveats in Limitations.\n"
+        "- If the literature search used fixture metadata or cache fallback, state "
+        "that provenance honestly in Limitations and avoid claiming a full review.\n"
+        "- If a paper row has source `fixture`, treat it as placeholder metadata "
+        "only. Do not describe fixture rows as real prior work, do not say they "
+        "studied the topic, and do not use them as scientific support beyond "
+        "provenance disclosure.\n"
+        "- When fixture metadata is the only literature source, keep Related Work "
+        "or Search Scope to provenance wording such as placeholder metadata; do "
+        "not frame it as a real literature base.\n"
+        "- For the `llm_code_task_toy_spam` template, describe only the recorded "
+        "patch workflow, changed-file count, benchmark return code, timeout flag, "
+        "and parsed metrics. Do not claim broader accuracy, robustness, utility, "
+        "or generalization.\n"
+        "- For the `llm_code_task_toy_spam` template, avoid broad improvement "
+        "language such as enhancing spam detection, performance improvement, "
+        "effectiveness, effective solution, feasibility, potential of LLMs, "
+        "promising direction, superior approach, or meaningful contribution. "
+        "The only supported outcome is that the benchmark passed after an "
+        "LLM-proposed patch in an isolated toy workspace.\n"
         "- Avoid promotional phrases such as transformative, significant "
         "improvement, substantial improvement, compelling case, or practical "
         "solution unless the supplied artifacts directly measure that claim.\n"
         "- Use only citations from `papers_json`, in Pandoc style like `[@paper_id]`.\n"
+        "- If `papers_json` contains paper rows, include at least one body citation. "
+        "If the available rows are fixture placeholders, cite them only when "
+        "describing search provenance or placeholder metadata limitations.\n"
         "- Put citations in the body text where the paper is discussed, especially "
         "Introduction and Related Work. Do not rely on the final References section "
         "as the only place where papers appear.\n"
@@ -193,6 +237,7 @@ def report_user_prompt(
         "- Do not write a References section; the system appends it from "
         "`papers.jsonl`.\n\n"
         "Artifacts:\n\n"
+        f"Report Mode:\n{mode}\n\n"
         f"Topic:\n{topic}\n\n"
         f"Goal Markdown:\n{goal_markdown}\n\n"
         f"Problem Markdown:\n{problem_markdown}\n\n"

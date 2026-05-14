@@ -4,11 +4,11 @@ This document explains what SimpleAutoResearch is doing internally: workflow pre
 
 ## Workflow Presets
 
-The current 8-stage pipeline is one preset, not the whole architecture. SimpleAutoResearch should stay module-first so literature review, code improvement, experiment execution, and report writing can be recombined.
+The current 8-stage pipeline is one preset, not the whole architecture. SimpleAutoResearch stays module-first so literature review, code improvement, experiment execution, and report writing can be recombined.
 
-### 1. Research Report
+### 1. Research Report (Literature-First)
 
-Use this when the user wants a literature review, survey, or DeepResearch-like report without code execution.
+Use this when you want a literature review, survey, or DeepResearch-like report without emphasizing experiments.
 
 Conceptual flow:
 
@@ -16,21 +16,15 @@ Conceptual flow:
 plan -> search -> read -> synthesize -> report
 ```
 
-Examples:
+Reality check today:
 
-- Write a survey about agent simulation.
-- Compare recent retrieval-augmented generation papers.
-- Produce a no-code technical brief with verified citations.
+- `run --to-stage report` still executes design/code/run stages because the default pipeline is a teaching demo.
+- For a pure literature pass, stop at `synthesize`, then resume `report`; `auto`
+  mode will produce a research-only report because no `results.json` exists.
 
-Current status:
+### 2. Code Task (Existing Codebase)
 
-- Partially supported by the default research pipeline.
-- A true no-code `survey` or `review` preset is planned.
-- Today, `run --to-stage report` still includes design/code/run because V1 was built as a full topic-to-report-with-experiment teaching demo.
-
-### 2. Code Task
-
-Use this when the user already has code and wants a focused modification, optimization, repair, or benchmark improvement.
+Use this when you already have code and want a focused modification, optimization, repair, or benchmark improvement.
 
 Conceptual flow:
 
@@ -40,71 +34,61 @@ init workspace -> index code -> plan patch -> approve
 -> analyze failure -> repair proposal
 ```
 
-Examples:
+Key boundaries:
 
-- Improve the time complexity of a baseline algorithm while keeping its public API.
-- Add an ablation to an existing benchmark repo.
-- Fix an experiment script and rerun its tests.
-- Reduce runtime under a resource budget.
-
-Current status:
-
-- Supported as a standalone workflow through `simple-ar code-task ...`.
-- The source project is copied into `code_task/workspace`; original code is not modified.
-- Current patch mode uses conservative old/new replacements.
-- Validator, benchmark runner, failure analysis, and bounded repair proposals are available.
+- The source project is copied into `code_task/workspace`; the original code is never modified.
+- Patch application is gated by an explicit human approval step.
+- Edit proposals are conservative old/new replacements, not free-form rewrites.
 
 ### 3. Research With Experiment
 
-Use this when the user wants a research idea to become an executable experiment and a result-backed report.
+Use this when you want a research idea to become an executable experiment and a result-backed report.
 
 Conceptual flow:
 
 ```text
 plan -> search -> read -> synthesize -> design experiment
--> code task or template codegen -> run benchmark -> analyze results -> report
+-> template codegen or embedded code-task -> run benchmark -> report
 ```
-
-Examples:
-
-- Form a hypothesis from papers, then test it on a small reproducible benchmark.
-- Take an existing baseline repo and implement one improvement suggested by the literature.
-- Generate a small controlled experiment when no existing code is provided.
 
 Current status:
 
-- Supported in a narrow teaching form through the default 8-stage pipeline.
 - `06-code` normally generates a whitelisted template experiment.
-- `--experiment-template llm_code_task_toy_spam` is an experimental embedded
-  handoff into `code-task`: it copies the bundled toy spam project, asks the LLM
-  for a patch plan and controlled edits, applies them inside the isolated run
-  workspace, and lets `07-run` execute the benchmark harness.
-- Future versions should generalize this from one bundled demo into
-  user-provided code roots and config-driven experiment presets.
+- `--experiment-template llm_code_task_toy_spam` is an embedded handoff into the code-task workflow.
+- Future versions should generalize this from one bundled demo into user-provided code roots and config-driven presets.
+- Report generation is guarded: LLM drafts are accepted only when citations, metric visibility, fixture disclosure, and toy-demo boundaries pass rule-based checks.
 
 ## Default 8-Stage Pipeline
 
 ```text
 01 plan        Scope the topic and research question
-02 search      Collect real paper metadata
-03 read        Create literature notes from paper metadata
-04 synthesize  Summarize themes and propose a testable hypothesis
-05 design      Create a small experiment plan
+02 search      Collect paper metadata
+03 read        Create literature notes
+04 synthesize  Summarize themes and propose a hypothesis
+05 design      Create an experiment plan
 06 code        Generate experiment code or prepare an embedded code task
 07 run         Execute the experiment and parse metrics
-08 report      Write a final Markdown report with references
+08 report      Write a Markdown report with references
 ```
 
 | Stage | Main outputs | Purpose |
 | --- | --- | --- |
-| `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question. |
-| `search` | `papers.jsonl`, `search_meta.json` | Collect normalized OpenAlex/arXiv paper metadata or explicit offline fixture metadata. |
-| `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes. |
-| `synthesize` | `synthesis.md`, `hypothesis.md` | Produce a bounded synthesis and testable hypothesis. |
+| `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question (LLM-backed when enabled). |
+| `search` | `papers.jsonl`, `search_meta.json` | Collect OpenAlex/arXiv metadata or explicit fixture rows. |
+| `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes (LLM-backed when enabled). |
+| `synthesize` | `synthesis.md`, `hypothesis.md` | Produce a bounded synthesis and testable hypothesis (LLM-backed when enabled). |
 | `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
 | `code` | `experiment.py` | Generate code from the selected template or prepare an embedded code-task harness. |
 | `run` | `results.json`, `stdout.txt`, `stderr.txt` | Execute the experiment and parse numeric metrics. |
-| `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json` | Write a paper-like report and reproducibility package. |
+| `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json` | Write a paper-like report with citations (LLM-backed when enabled). |
+
+## Search And LLM Boundaries
+
+- Live search uses OpenAlex first, then arXiv. When `--strict-search` is not set, cached metadata is used after live failures.
+- `--offline-search` skips live providers and uses fixture metadata immediately.
+- `--allow-fixture-fallback` allows fixture metadata only after live and cache attempts fail.
+- `--no-llm` switches plan/read/synthesize/report to deterministic fallback text.
+- Report drafting defaults to `auto`: if `results.json` exists the report uses experiment sections, otherwise it becomes literature-only.
 
 ## Research Run Artifacts
 
@@ -149,8 +133,7 @@ Root-level files:
 - `source_plan.json`: source plan describing which artifacts each stage should consult.
 - `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
-- `06-code/code_task_experiment.json`: present only for the embedded
-  `llm_code_task_toy_spam` template; summarizes the nested code-task patch.
+- `06-code/code_task_experiment.json`: present only for the embedded `llm_code_task_toy_spam` template.
 
 Report-stage files:
 

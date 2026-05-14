@@ -59,7 +59,7 @@ CONTRACTS: dict[Stage, StageContract] = {
     ),
     Stage.REPORT: StageContract(
         stage=Stage.REPORT,
-        inputs=("synthesis.md", "results.json", "papers.jsonl"),
+        inputs=("synthesis.md", "papers.jsonl"),
         outputs=("report.md", "references.bib", "manifest.json", "report_quality.json"),
         description="Write the final report.",
     ),

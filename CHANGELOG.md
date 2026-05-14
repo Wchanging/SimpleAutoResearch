@@ -2,6 +2,40 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-14
+
+### Added
+
+- Added README capability boundaries for current research, report, and code-task workflows.
+- Added stricter report prompt rules for research-only survey reports and embedded code-task demo reports.
+- Added report-bound checks for common toy-demo overclaims such as broad accuracy, effectiveness, feasibility, or generalization language.
+- Added a fixture/code-task fallback discussion that treats offline fixture synthesis as traceability context rather than real literature evidence.
+
+### Changed
+
+- Updated `report_quality.json` wording so metric-table checks are clearly conditional on parsed metrics existing.
+- Updated docs to explain guarded LLM report drafting and the current boundary between standalone `code-task` and the embedded 8-stage demo.
+
+### Verified
+
+- Ran a real LLM-backed literature-only flow through `synthesize -> report`.
+- Ran a real LLM-backed 8-stage `llm_code_task_toy_spam` demo, including patch planning, controlled edit proposal, benchmark execution, and report generation.
+
+## 2026-05-13
+
+### Added
+
+- Added automatic report mode selection: when `results.json` is missing, the report drafts a literature-only narrative; when results exist, it uses experiment sections.
+- Added `--report-mode {auto,research_only,experiment}` for `simple-ar run` and `simple-ar resume` to force report structure.
+- Added research-only report fallback sections (`Search Scope`, `Thematic Synthesis`, `Approach Patterns`, `Open Questions`, `Limitations`, `Conclusion`) that avoid implying experiment execution.
+- Added report mode recording in `08-report/manifest.json` for reproducibility.
+
+### Changed
+
+- Relaxed the report stage contract to no longer require `results.json`, enabling `synthesize -> report` flows.
+- Updated report LLM prompt to switch structure and rules between research-only and experiment modes.
+- Documented report-mode behavior and synthesize-to-report flow in `docs/USAGE.md` and `docs/WORKFLOWS.md`.
+
 ## 2026-05-12
 
 ### Added

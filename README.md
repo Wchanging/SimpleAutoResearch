@@ -12,20 +12,7 @@ The goal is not to reproduce every feature of a large agent framework. The goal 
 - Prefer controlled, reproducible experiments over unconstrained code generation.
 - Keep the codebase small enough for learners and contributors to understand.
 
-## What It Can Do
-
-Current capabilities include:
-
-- an 8-stage topic-to-report research pipeline;
-- OpenAI-compatible LLM calls with visible progress and token usage logging;
-- OpenAlex/arXiv-backed literature metadata with local cache support;
-- local artifact inspection and lexical retrieval;
-- citation-bounded Markdown report generation;
-- a standalone `code-task` workflow for copying, analyzing, patching, validating, and running an existing codebase.
-
-SimpleAutoResearch is not a fully autonomous paper factory. The coding and experiment paths are intentionally conservative while the validation and execution layers mature.
-
-## Quickstart
+## Install And Configure
 
 Clone the repository:
 
@@ -52,7 +39,7 @@ On PowerShell:
 Copy-Item .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` (required for LLM-backed stages):
 
 ```bash
 OPENAI_API_KEY=your_api_key
@@ -64,44 +51,34 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 
 For third-party OpenAI-compatible providers, set `OPENAI_BASE_URL` to that provider's `/v1` endpoint. Price fields are optional; when unset, SimpleAutoResearch records token counts but leaves estimated cost as `null`.
 
-Run a basic research pipeline:
+## Quickstart (Pick A Workflow)
+
+### 1. Research Report (Literature-First)
 
 ```bash
-uv run simple-ar run --topic "toy topic" --to-stage report
+uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
 ```
 
-Show run status:
+The default 8-stage pipeline always includes design/code/run stages when you reach `report`. For a literature-only pass, stop earlier:
 
 ```bash
-uv run simple-ar status runs/<run-id>
+uv run simple-ar run --topic "agent simulation" --to-stage synthesize
 ```
 
-Run tests:
+Then generate a literature-only report from the existing artifacts:
 
 ```bash
-uv run python -m unittest discover -s tests
+uv run simple-ar resume runs/<run-id> --from-stage report
 ```
 
-## Preset Workflows
-
-SimpleAutoResearch is moving toward three preset workflows. The current implementation supports some parts fully and some parts as planned design.
-
-### 1. Research Report
-
-Use this for a literature review or DeepResearch-like report.
+You can also force a report mode:
 
 ```bash
-uv run simple-ar run \
-  --topic "agent simulation" \
-  --to-stage report \
-  --max-papers 5
+uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
+uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experiment
 ```
 
-Current status: supported through the default research pipeline, although the default 8-stage flow still includes experiment design/code/run stages. A true no-code `survey` preset is planned.
-
-### 2. Code Task
-
-Use this when you already have a codebase or benchmark and want a focused modification, such as improving a baseline algorithm, reducing runtime, or fixing failing tests.
+### 2. Code Task (Existing Codebase)
 
 ```bash
 uv run simple-ar code-task init \
@@ -110,32 +87,13 @@ uv run simple-ar code-task init \
   --benchmark-command "python -m unittest discover -s tests"
 ```
 
-Then plan, approve, patch, validate, and run:
+Then generate a patch plan:
 
 ```bash
 uv run simple-ar code-task plan runs/<run-id>
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-uv run simple-ar code-task propose-edits runs/<run-id>
-uv run simple-ar code-task apply-edits runs/<run-id>
-uv run simple-ar code-task validate runs/<run-id>
-uv run simple-ar code-task run runs/<run-id>
 ```
-
-Current status: supported as a standalone workflow. Edits are applied only inside a copied workspace, not the original project.
 
 ### 3. Research With Experiment
-
-Use this when the goal is to connect literature analysis with an executable experiment and a result-backed report.
-
-```bash
-uv run simple-ar run \
-  --topic "keyword rules versus bag-of-words logistic regression for toy spam classification" \
-  --to-stage report
-```
-
-Current status: supported in a narrow teaching form through a whitelisted template experiment. An experimental `llm_code_task_toy_spam` template also demonstrates an 8-stage handoff into the safer `code-task` workflow.
-
-To try the experimental 8-stage code-task handoff, use the embedded toy spam demo:
 
 ```bash
 uv run simple-ar run \
@@ -146,13 +104,36 @@ uv run simple-ar run \
   --experiment-timeout 60
 ```
 
-This copies the example project, asks the LLM for a patch plan and controlled edits, applies the patch inside the run workspace, executes the benchmark, and reports the result.
+This embedded demo copies a toy project into an isolated workspace, asks the LLM for a patch plan and controlled edits, applies the approved patch, runs a benchmark harness, and reports the result.
+
+## Current Capability Boundaries
+
+SimpleAutoResearch is usable as a learning and prototyping framework, but it is still intentionally conservative.
+
+What works today:
+
+- Topic-to-report runs with visible 8-stage artifacts and resumable execution.
+- OpenAI-compatible LLM calls for planning, paper notes, synthesis, report drafting, and code-task patch planning.
+- Literature-first report mode: stop at `synthesize`, then resume `report` to produce a survey-style report without experiment claims.
+- Existing-code code tasks as a standalone workflow: copy a source project, index files, generate a patch plan, require human approval, propose controlled edits, apply edits in the copied workspace, validate, and run a benchmark.
+- One embedded 8-stage code-task demo through `--experiment-template llm_code_task_toy_spam`.
+- Citation, report-boundary, runtime-limit, and metric-visibility checks in the final report package.
+
+Important limits:
+
+- The general “research a topic, modify my arbitrary existing codebase, run my benchmark, then write a report” workflow is not yet one command. Today, that is either the bundled toy demo or the standalone `code-task` workflow.
+- Code edits are controlled old/new replacements. This keeps patches auditable, but it is weaker than a full coding agent that can plan and edit many files across multiple autonomous rounds.
+- The tool does not install project dependencies, manage Docker/Conda/GPU/Slurm environments, or schedule large experiments.
+- Literature search currently works from metadata and local artifact snippets. It is not yet a full PDF-reading or vector-RAG survey system.
+- LLM-written reports are guarded. If the draft invents citations, omits required citations, or overstates toy evidence, SimpleAutoResearch falls back to a structured deterministic report.
+
+The next V2.1 focus is coding depth: better task decomposition, multi-file patching, environment isolation, benchmark loops, and a clearer human-in-the-loop path from existing research code to reproducible results.
 
 ## Documentation
 
-- [Usage And Configuration](docs/USAGE.md): installation, environment variables, commands, examples, and configuration direction.
-- [Workflows And Artifacts](docs/WORKFLOWS.md): workflow presets, the 8-stage pipeline, stage outputs, and artifact layout.
-- [Development Guide](docs/DEVELOPMENT.md): how to extend stages, templates, code-task modules, and tests.
+- [Usage And Configuration](docs/USAGE.md): installation, environment variables, commands, and examples.
+- [Workflows And Artifacts](docs/WORKFLOWS.md): workflow presets, the 8-stage pipeline, and artifact layouts.
+- [Development Guide](docs/DEVELOPMENT.md): how to extend stages, templates, and code-task modules.
 - [Changelog](CHANGELOG.md): chronological development progress.
 
 ## Reference

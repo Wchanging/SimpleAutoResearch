@@ -137,6 +137,7 @@ class CliTests(unittest.TestCase):
                 experiment_template=None,
                 experiment_timeout=None,
                 retrieval_top_k=None,
+                report_mode=None,
                 no_llm=False,
                 offline_search=False,
                 allow_fixture_fallback=False,

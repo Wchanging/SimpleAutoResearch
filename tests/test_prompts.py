@@ -26,10 +26,38 @@ class PromptTests(unittest.TestCase):
         self.assertIn("[@paper_id]", prompt)
         self.assertIn("Do not report p-values", prompt)
         self.assertIn("Never invent", prompt)
+        self.assertIn("llm_code_task_toy_spam", prompt)
+        self.assertIn("changed-file count", prompt)
+        self.assertIn("exact metric keys", prompt)
+        self.assertIn("benchmark passed after an LLM-proposed patch", prompt)
+        self.assertIn("promising direction", prompt)
         self.assertIn("Retrieved Evidence Snippets", prompt)
         self.assertIn("07-run/results.json:1-3", prompt)
         self.assertIn("Available Citation Keys", prompt)
         self.assertIn("[@paper-1]", prompt)
+        self.assertIn("include at least one body citation", prompt)
+
+    def test_research_only_report_prompt_uses_survey_structure(self) -> None:
+        prompt = report_user_prompt(
+            topic="agent simulation",
+            goal_markdown="# Goal\nReview agents.",
+            problem_markdown="# Problem\nWhat themes appear?",
+            search_meta_json='{"source": "openalex", "status": "ok"}',
+            papers_json='[{"id": "paper-1", "title": "Known Paper"}]',
+            synthesis_markdown="# Synthesis\nKnown themes.",
+            hypothesis_markdown="# Hypothesis\nA later benchmark is needed.",
+            experiment_plan_json="{}",
+            results_json="{}",
+            report_mode="research_only",
+        )
+
+        self.assertIn("## Search Scope", prompt)
+        self.assertIn("## Thematic Synthesis", prompt)
+        self.assertIn("## Approach Patterns", prompt)
+        self.assertIn("## Open Questions", prompt)
+        self.assertIn("literature-only survey-style report", prompt)
+        self.assertIn("Do not include Method, Experiments, or Results sections", prompt)
+        self.assertIn("fixture placeholders", prompt)
 
     def test_read_and_synthesis_prompts_accept_source_labelled_evidence(self) -> None:
         evidence = "[ev-1 | 02-search/papers.jsonl:1-1 | query=metadata]\nKnown paper row"

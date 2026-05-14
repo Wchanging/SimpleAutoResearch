@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--strict-search", action="store_true")
     run_parser.add_argument("--no-retrieval", action="store_true")
     run_parser.add_argument("--retrieval-top-k", type=int, default=4)
+    run_parser.add_argument(
+        "--report-mode",
+        choices=("auto", "research_only", "experiment"),
+        default="auto",
+        help="Report drafting mode: auto (based on results.json), research_only, or experiment.",
+    )
     run_parser.add_argument("--quiet", action="store_true")
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
@@ -65,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser.add_argument("--strict-search", action="store_true")
     resume_parser.add_argument("--no-retrieval", action="store_true")
     resume_parser.add_argument("--retrieval-top-k", type=int, default=None)
+    resume_parser.add_argument(
+        "--report-mode",
+        choices=("auto", "research_only", "experiment"),
+        default=None,
+        help="Override report drafting mode for a resumed run.",
+    )
     resume_parser.add_argument("--quiet", action="store_true")
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
@@ -218,6 +230,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "strict_search": args.strict_search,
                 "use_retrieval": not args.no_retrieval,
                 "retrieval_top_k": args.retrieval_top_k,
+                "report_mode": args.report_mode,
             },
         )
         executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
@@ -324,6 +337,7 @@ def _resume_config(run_dir: Path, args: argparse.Namespace, from_stage: str) -> 
     _set_if_not_none(config, "experiment_template", args.experiment_template)
     _set_if_not_none(config, "experiment_timeout_sec", args.experiment_timeout)
     _set_if_not_none(config, "retrieval_top_k", args.retrieval_top_k)
+    _set_if_not_none(config, "report_mode", args.report_mode)
 
     if args.no_llm:
         config["use_llm"] = False
@@ -370,6 +384,7 @@ def _base_resume_config(run_dir: Path) -> dict[str, object]:
         "strict_search": False,
         "use_retrieval": True,
         "retrieval_top_k": 4,
+        "report_mode": "auto",
     }
 
 

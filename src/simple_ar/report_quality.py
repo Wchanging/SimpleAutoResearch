@@ -53,8 +53,8 @@ def build_report_quality(
             "result_table_from_results_json",
             _result_table_status(report, results),
             (
-                "Parsed metric values from results.json are visible in the report "
-                "results section."
+                "When parsed metrics exist in results.json, those values are visible "
+                "in the report results section."
             ),
         ),
         _quality_check(

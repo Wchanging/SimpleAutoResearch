@@ -82,6 +82,29 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("fixture metadata", report)
             self.assertIn("## References", report)
 
+    def test_synthesize_to_report_uses_research_only_mode_without_results(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            ctx = Context(Path(tmp) / "run", "toy topic")
+            runner = PipelineRunner(handlers())
+            runner.run(ctx, to_stage=Stage.SYNTHESIZE)
+
+            executions = runner.run(ctx, from_stage=Stage.REPORT, to_stage=Stage.REPORT)
+
+            self.assertEqual(len(executions), 1)
+            self.assertFalse((ctx.run_dir / "07-run" / "results.json").exists())
+            report_manifest = read_json(ctx.run_dir / "08-report" / "manifest.json")
+            self.assertEqual(report_manifest["report_mode"], "research_only")
+            report = read_text(ctx.run_dir / "08-report" / "report.md")
+            self.assertIn("## Search Scope", report)
+            self.assertIn("## Thematic Synthesis", report)
+            self.assertIn("## Approach Patterns", report)
+            self.assertIn("## Open Questions", report)
+            self.assertNotIn("## Method", report)
+            self.assertNotIn("## Experiments", report)
+            self.assertNotIn("## Results", report)
+            self.assertIn("No experiment was executed", report)
+
     def test_reporter_receives_stage_progress_events(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
