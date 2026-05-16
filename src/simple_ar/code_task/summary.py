@@ -35,6 +35,7 @@ def write_code_task_summary(run_dir: Path) -> Path:
     baseline_metrics = _read_run_json(paths.run_artifact_dir, "baseline", "metrics.json")
     patched_execution = _read_run_json(paths.run_artifact_dir, "patched", "execution_report.json")
     patched_metrics = _read_run_json(paths.run_artifact_dir, "patched", "metrics.json")
+    comparison = _read_optional_json(paths.run_artifact_dir / "comparison.json")
     legacy_execution = _read_optional_json(paths.run_artifact_dir / "execution_report.json")
     legacy_metrics = _read_optional_json(paths.run_artifact_dir / "metrics.json")
     failure = _read_latest_failure(paths.run_artifact_dir, manifest)
@@ -52,6 +53,7 @@ def write_code_task_summary(run_dir: Path) -> Path:
             baseline_metrics=baseline_metrics,
             patched_execution=patched_execution,
             patched_metrics=patched_metrics,
+            comparison=comparison,
             legacy_execution=legacy_execution,
             legacy_metrics=legacy_metrics,
             failure=failure,
@@ -73,6 +75,7 @@ def _render_summary(
     baseline_metrics: dict[str, Any],
     patched_execution: dict[str, Any],
     patched_metrics: dict[str, Any],
+    comparison: dict[str, Any],
     legacy_execution: dict[str, Any],
     legacy_metrics: dict[str, Any],
     failure: str,
@@ -110,6 +113,7 @@ def _render_summary(
             baseline_metrics=baseline_metrics,
             patched_execution=patched_execution,
             patched_metrics=patched_metrics,
+            comparison=comparison,
             legacy_execution=legacy_execution,
             legacy_metrics=legacy_metrics,
         ),
@@ -123,22 +127,19 @@ def _render_summary(
                 _clip(_strip_heading(failure), max_chars=1800),
             ]
         )
-    lines.extend(
-        [
-            "",
-            "## Artifacts",
-            "",
-            "- Workspace: `code_task/workspace`",
-            "- Environment report: `code_task/meta/environment_report.json`",
-            "- Patch plan: `code_task/patch_plan.md`",
-            "- Patch diff: `code_task/patch.diff`",
-            "- Validation report: `code_task/meta/validation_report.json`",
-            "- Baseline execution: `code_task/run/baseline/execution_report.json`",
-            "- Patched execution: `code_task/run/patched/execution_report.json`",
-            "- Stdout/stderr: `code_task/run/<label>/stdout.txt`, `code_task/run/<label>/stderr.txt`",
-            "",
-        ]
-    )
+    artifact_lines = [
+        "- Workspace: `code_task/workspace`",
+        "- Environment report: `code_task/meta/environment_report.json`",
+        "- Patch plan: `code_task/patch_plan.md`",
+        "- Patch diff: `code_task/patch.diff`",
+        "- Validation report: `code_task/meta/validation_report.json`",
+        "- Baseline execution: `code_task/run/baseline/execution_report.json`",
+        "- Patched execution: `code_task/run/patched/execution_report.json`",
+        "- Stdout/stderr: `code_task/run/<label>/stdout.txt`, `code_task/run/<label>/stderr.txt`",
+    ]
+    if comparison:
+        artifact_lines.insert(-1, "- Comparison: `code_task/run/comparison.json`")
+    lines.extend(["", "## Artifacts", "", *artifact_lines, ""])
     return "\n".join(lines)
 
 
@@ -263,6 +264,7 @@ def _benchmark_summary(
     baseline_metrics: dict[str, Any],
     patched_execution: dict[str, Any],
     patched_metrics: dict[str, Any],
+    comparison: dict[str, Any],
     legacy_execution: dict[str, Any],
     legacy_metrics: dict[str, Any],
 ) -> str:
@@ -285,6 +287,16 @@ def _benchmark_summary(
                 _execution_summary(patched_execution, patched_metrics),
             ]
         )
+    if comparison:
+        if sections:
+            sections.append("")
+        sections.extend(
+            [
+                "### Comparison",
+                "",
+                _comparison_summary(comparison),
+            ]
+        )
     if not sections and legacy_execution:
         sections.extend(
             [
@@ -296,6 +308,33 @@ def _benchmark_summary(
     if not sections:
         return "- Benchmark has not been executed yet."
     return "\n".join(sections)
+
+
+def _comparison_summary(comparison: dict[str, Any]) -> str:
+    lines = [
+        f"- Verdict: `{comparison.get('verdict', 'inconclusive')}`",
+        f"- Status: `{comparison.get('status', 'unknown')}`",
+    ]
+    reasons = comparison.get("reasons", [])
+    if isinstance(reasons, list) and reasons:
+        lines.append("- Reasons: " + "; ".join(str(item) for item in reasons[:4]))
+    rows = comparison.get("metrics", [])
+    if isinstance(rows, list) and rows:
+        lines.append("")
+        lines.append("| Metric | Baseline | Patched | Delta | Direction |")
+        lines.append("| --- | ---: | ---: | ---: | --- |")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "| "
+                f"`{row.get('name', '')}` | "
+                f"{_number_text(row.get('baseline'))} | "
+                f"{_number_text(row.get('patched'))} | "
+                f"{_delta_text(row.get('delta'))} | "
+                f"`{row.get('interpretation', 'changed')}` |"
+            )
+    return "\n".join(lines)
 
 
 def _execution_summary(execution: dict[str, Any], metrics: dict[str, Any]) -> str:
@@ -321,6 +360,20 @@ def _execution_summary(execution: dict[str, Any], metrics: dict[str, Any]) -> st
         for key, value in sorted(metrics.items()):
             lines.append(f"| `{key}` | {value} |")
     return "\n".join(lines)
+
+
+def _number_text(value: object) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{float(value):.6g}"
+    return ""
+
+
+def _delta_text(value: object) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        sign = "+" if number > 0 else ""
+        return f"{sign}{number:.6g}"
+    return ""
 
 
 def _changed_files(manifest: dict[str, Any]) -> list[str]:

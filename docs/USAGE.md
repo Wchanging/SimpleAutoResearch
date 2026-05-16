@@ -222,6 +222,10 @@ Generate a patch plan (LLM optional; offline mode writes a conservative plan):
 uv run simple-ar code-task plan runs/<run-id>
 ```
 
+If `probe`, `validate`, or `baseline` artifacts already exist, the generated
+plan includes that run context so the model and reviewer can reason from
+recorded environment and benchmark evidence instead of starting cold.
+
 Review the plan, then approve it:
 
 ```bash
@@ -250,6 +254,8 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
 `run` stores the patched benchmark under `code_task/run/patched/`.
+When both baseline and patched artifacts exist, SimpleAutoResearch also writes
+`code_task/run/comparison.json` and includes metric deltas in `summary.md`.
 
 Analyze failures and request a bounded repair proposal:
 

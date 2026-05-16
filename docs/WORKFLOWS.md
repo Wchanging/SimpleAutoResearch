@@ -172,6 +172,7 @@ runs/<run-id>/
       llm_usage.jsonl
       llm_usage_summary.json
     run/
+      comparison.json
       baseline/
         execution_report.json
         stdout.txt
@@ -192,7 +193,7 @@ Important directories:
 
 - `workspace/`: editable copy of the source project.
 - `meta/`: environment reports, indexes, decisions, proposed edits, applied edit summaries, validation reports, and LLM usage.
-- `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, and failure analysis.
+- `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, before/after comparison, and failure analysis.
 - `repairs/`: bounded repair proposals grouped by attempt.
 
 Important user-facing code-task files:
@@ -201,7 +202,8 @@ Important user-facing code-task files:
 - `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
 - `run/baseline/execution_report.json`: pre-patch benchmark result.
 - `run/patched/execution_report.json`: post-patch benchmark result.
-- `patch_plan.md`: human-reviewable plan before edits.
+- `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist.
+- `patch_plan.md`: human-reviewable plan before edits, including recorded environment, validation, and baseline context when available.
 - `patch.diff`: applied patch for review.
 - `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch.
 

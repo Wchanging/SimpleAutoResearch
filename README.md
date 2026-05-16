@@ -97,11 +97,15 @@ uv run simple-ar code-task init \
   --env-mode current
 ```
 
-Then generate a patch plan:
+Then probe the environment, capture the unchanged baseline, and generate a patch plan:
 
 ```bash
+uv run simple-ar code-task probe runs/<run-id>
+uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 uv run simple-ar code-task plan runs/<run-id>
 ```
+
+After human review, continue with `decide-plan`, `propose-edits`, `apply-edits`, `validate`, and `run`. When both baseline and patched benchmark artifacts exist, the run summary includes a conservative before/after comparison.
 
 ### 3. Research With Experiment
 
@@ -125,19 +129,19 @@ What works today:
 - Topic-to-report runs with visible 8-stage artifacts and resumable execution.
 - OpenAI-compatible LLM calls for planning, paper notes, synthesis, report drafting, and code-task patch planning.
 - Literature-first report mode: stop at `synthesize`, then resume `report` to produce a survey-style report without experiment claims.
-- Existing-code code tasks as a standalone workflow: copy a source project, index files, generate a patch plan, require human approval, propose controlled edits, apply edits in the copied workspace, validate, and run a benchmark.
+- Existing-code code tasks as a standalone workflow: copy a source project, probe the environment, index files, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the copied workspace, validate, run a patched benchmark, and compare before/after metrics.
 - One embedded 8-stage code-task demo through `--experiment-template llm_code_task_toy_spam`.
 - Citation, report-boundary, runtime-limit, and metric-visibility checks in the final report package.
 
 Important limits:
 
-- The general “research a topic, modify my arbitrary existing codebase, run my benchmark, then write a report” workflow is not yet one command. Today, that is either the bundled toy demo or the standalone `code-task` workflow.
+- The general "research a topic, modify my arbitrary existing codebase, run my benchmark, then write a report" workflow is not yet one command. Today, that is either the bundled toy demo or the standalone `code-task` workflow.
 - Code edits are controlled old/new replacements. This keeps patches auditable, but it is weaker than a full coding agent that can plan and edit many files across multiple autonomous rounds.
 - The tool does not install project dependencies, manage Docker/Conda/GPU/Slurm environments, or schedule large experiments.
 - Literature search currently works from metadata and local artifact snippets. It is not yet a full PDF-reading or vector-RAG survey system.
 - LLM-written reports are guarded. If the draft invents citations, omits required citations, or overstates toy evidence, SimpleAutoResearch falls back to a structured deterministic report.
 
-The next V2.1 focus is coding depth: better task decomposition, multi-file patching, environment isolation, benchmark loops, and a clearer human-in-the-loop path from existing research code to reproducible results.
+V2.1 development has started with code-task environment probes, baseline runs, labelled benchmark artifacts, lightweight ML example coverage, and baseline-vs-patched comparison. The next focus is deeper coding loops: multi-round repair, stronger task decomposition, managed environments, and a clearer human-in-the-loop path from existing research code to reproducible results.
 
 ## Documentation
 

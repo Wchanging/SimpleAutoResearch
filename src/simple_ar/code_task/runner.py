@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import write_json, write_text
+from simple_ar.code_task.comparison import compare_code_task_runs
 from simple_ar.code_task.environment import ensure_code_task_environment_policy
 from simple_ar.code_task.state import (
     code_task_paths,
@@ -324,6 +325,7 @@ def _write_execution_result(
         metric_values=metrics,
         run_label=run_label,
     )
+    _maybe_compare_runs(run_dir)
     write_code_task_summary(run_dir)
     return CodeTaskRunResult(
         run_dir=paths.run_dir,
@@ -337,6 +339,14 @@ def _write_execution_result(
         timed_out=timed_out,
         metrics=metrics,
     )
+
+
+def _maybe_compare_runs(run_dir: Path) -> None:
+    paths = code_task_paths(run_dir)
+    baseline_report = paths.run_artifact_dir / "baseline" / "execution_report.json"
+    patched_report = paths.run_artifact_dir / "patched" / "execution_report.json"
+    if baseline_report.exists() and patched_report.exists():
+        compare_code_task_runs(run_dir)
 
 
 def _normalize_run_label(value: str) -> str:

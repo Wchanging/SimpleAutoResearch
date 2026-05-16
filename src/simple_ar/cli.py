@@ -598,6 +598,11 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
                 row = runs.get(label)
                 if isinstance(row, dict):
                     print(f"- {label}: {row.get('status', 'unknown')}")
+        comparison = benchmark.get("comparison", {})
+        if isinstance(comparison, dict) and comparison:
+            print(f"- comparison: {comparison.get('verdict', 'inconclusive')}")
+            if comparison.get("path"):
+                print(f"- comparison report: {run_dir / str(comparison.get('path'))}")
         if benchmark.get("execution_report"):
             print(f"- execution report: {run_dir / str(benchmark.get('execution_report'))}")
 

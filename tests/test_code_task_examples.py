@@ -102,6 +102,7 @@ class CodeTaskExampleTests(unittest.TestCase):
             summary = read_text(run_dir / "code_task" / "summary.md")
             self.assertIn("### Baseline", summary)
             self.assertIn("accuracy", summary)
+            self.assertFalse((run_dir / "code_task" / "run" / "comparison.json").exists())
 
 
 def _write_keyword_patch(run_dir: Path) -> Path:

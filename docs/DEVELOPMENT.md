@@ -53,11 +53,13 @@ through `07-run` instead of silently mutating source code during reporting.
 The code-task workflow is split into small modules:
 
 - `workspace.py`: safe source copy.
+- `environment.py`: environment observation and execution-interpreter policy.
 - `index.py`: codebase inventory and Python AST summaries.
 - `planning.py`: patch planning and HITL decisions.
 - `patching.py`: controlled old/new edit proposal and application.
 - `validation.py`: syntax and static safety checks.
 - `runner.py`: benchmark execution in the copied workspace.
+- `comparison.py`: baseline-vs-patched metric comparison.
 - `failure.py`: deterministic failure analysis.
 - `repair.py`: bounded repair proposal generation.
 - `summary.py`: human-readable code-task status summaries.

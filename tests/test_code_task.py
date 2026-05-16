@@ -232,6 +232,35 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(manifest["plan"]["status"], "pending_approval")
             self.assertEqual(manifest["layout"]["patch_plan"], "code_task/patch_plan.md")
 
+    def test_patch_plan_includes_baseline_and_environment_context(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "metric_project"
+            task_file = root / "task.md"
+            _write_metric_project(code_root, value="0.50")
+            write_text(task_file, "# Task\n\nImprove the printed accuracy metric.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python benchmark.py",
+            )
+            probe_code_task_environment(run_dir)
+            run_code_task_baseline(run_dir, timeout_sec=10)
+
+            result = generate_patch_plan(run_dir, use_llm=False)
+
+            self.assertEqual(result.mode, "offline")
+            plan_text = read_text(run_dir / "code_task" / "patch_plan.md")
+            self.assertIn("## Run Context", plan_text)
+            self.assertIn("Baseline metrics", plan_text)
+            self.assertIn("`accuracy`=0.5", plan_text)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["plan"]["context"]["baseline_status"], "passed")
+            self.assertEqual(manifest["plan"]["context"]["baseline_metrics"]["accuracy"], 0.5)
+
     def test_code_task_plan_and_decide_cli(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -499,6 +528,41 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("### Baseline", summary)
             self.assertIn("Environment mode: `current`", summary)
 
+    def test_patched_run_writes_comparison_when_baseline_exists(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "metric_project"
+            task_file = root / "task.md"
+            _write_metric_project(code_root, value="0.50")
+            write_text(task_file, "# Task\n\nImprove the printed accuracy metric.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python benchmark.py",
+            )
+
+            baseline = run_code_task_baseline(run_dir, timeout_sec=10)
+            self.assertEqual(baseline.metrics["accuracy"], 0.5)
+            write_text(run_dir / "code_task" / "workspace" / "metric_value.txt", "0.80\n")
+            patched = run_code_task_benchmark(run_dir, timeout_sec=10)
+
+            self.assertEqual(patched.metrics["accuracy"], 0.8)
+            comparison_path = run_dir / "code_task" / "run" / "comparison.json"
+            self.assertTrue(comparison_path.is_file())
+            comparison = read_json(comparison_path)
+            self.assertEqual(comparison["verdict"], "improved")
+            self.assertAlmostEqual(comparison["deltas"]["accuracy"], 0.3)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["benchmark"]["comparison"]["verdict"], "improved")
+            self.assertEqual(manifest["layout"]["comparison"], "code_task/run/comparison.json")
+            summary = read_text(run_dir / "code_task" / "summary.md")
+            self.assertIn("### Comparison", summary)
+            self.assertIn("Verdict: `improved`", summary)
+            self.assertIn("+0.3", summary)
+
     def test_external_env_mode_records_python_policy_and_uses_it(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -686,6 +750,19 @@ def _write_toy_project(code_root: Path) -> None:
     write_text(
         code_root / "pyproject.toml",
         "[project]\nname = \"toy-project\"\nversion = \"0.1.0\"\n",
+    )
+
+
+def _write_metric_project(code_root: Path, *, value: str) -> None:
+    write_text(code_root / "metric_value.txt", value + "\n")
+    write_text(
+        code_root / "benchmark.py",
+        (
+            "from pathlib import Path\n\n"
+            "value = float(Path('metric_value.txt').read_text().strip())\n"
+            "print(f'accuracy: {value:.6f}')\n"
+            "print('train_time_sec: 0.010000')\n"
+        ),
     )
 
 

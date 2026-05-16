@@ -12,13 +12,16 @@ This file records user-visible project changes in reverse chronological order. P
 - Added `code-task baseline` to capture pre-patch benchmark results under `code_task/run/baseline/`.
 - Added code-task `--env-mode current|external` and `--python` support for selecting the interpreter used by benchmark commands.
 - Added a lightweight `tiny_digits_mlp_project` code-task example for local ML-style benchmark testing without downloads or GPU requirements.
+- Added code-task baseline-vs-patched comparison artifacts with metric deltas and conservative verdicts.
 
 ### Changed
 
 - Documented the new code-task environment probe in usage and workflow docs.
 - Documented the V2.1 code-task environment isolation direction: current interpreter first, explicit external interpreters next, then per-run venvs, shared environment cache, and Docker later.
+- Updated README and development docs to reflect the current V2.1 code-task baseline, comparison, and module structure.
 - Code-task benchmark runs now use labelled artifact directories (`baseline` and `patched`) so before/after execution evidence can coexist.
 - Benchmark execution reports now record the selected environment mode and Python executable.
+- Code-task patch planning now includes recorded environment, validation, and baseline metric context when those artifacts exist.
 
 ## 2026-05-14
 
