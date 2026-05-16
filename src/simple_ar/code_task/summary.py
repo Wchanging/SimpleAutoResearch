@@ -29,10 +29,15 @@ def write_code_task_summary(run_dir: Path) -> Path:
     task = _read_optional(paths.task_dir / "task.md")
     patch_plan = _read_optional(paths.task_dir / "patch_plan.md")
     patch_diff = _read_optional(paths.task_dir / "patch.diff")
+    environment = _read_optional_json(paths.meta_dir / "environment_report.json")
     validation = _read_optional_json(paths.meta_dir / "validation_report.json")
-    execution = _read_optional_json(paths.run_artifact_dir / "execution_report.json")
-    metrics = _read_optional_json(paths.run_artifact_dir / "metrics.json")
-    failure = _read_optional(paths.run_artifact_dir / "failure_analysis.md")
+    baseline_execution = _read_run_json(paths.run_artifact_dir, "baseline", "execution_report.json")
+    baseline_metrics = _read_run_json(paths.run_artifact_dir, "baseline", "metrics.json")
+    patched_execution = _read_run_json(paths.run_artifact_dir, "patched", "execution_report.json")
+    patched_metrics = _read_run_json(paths.run_artifact_dir, "patched", "metrics.json")
+    legacy_execution = _read_optional_json(paths.run_artifact_dir / "execution_report.json")
+    legacy_metrics = _read_optional_json(paths.run_artifact_dir / "metrics.json")
+    failure = _read_latest_failure(paths.run_artifact_dir, manifest)
 
     write_text(
         summary_path,
@@ -41,9 +46,14 @@ def write_code_task_summary(run_dir: Path) -> Path:
             task=task,
             patch_plan=patch_plan,
             patch_diff=patch_diff,
+            environment=environment,
             validation=validation,
-            execution=execution,
-            metrics=metrics,
+            baseline_execution=baseline_execution,
+            baseline_metrics=baseline_metrics,
+            patched_execution=patched_execution,
+            patched_metrics=patched_metrics,
+            legacy_execution=legacy_execution,
+            legacy_metrics=legacy_metrics,
             failure=failure,
         ),
     )
@@ -57,9 +67,14 @@ def _render_summary(
     task: str,
     patch_plan: str,
     patch_diff: str,
+    environment: dict[str, Any],
     validation: dict[str, Any],
-    execution: dict[str, Any],
-    metrics: dict[str, Any],
+    baseline_execution: dict[str, Any],
+    baseline_metrics: dict[str, Any],
+    patched_execution: dict[str, Any],
+    patched_metrics: dict[str, Any],
+    legacy_execution: dict[str, Any],
+    legacy_metrics: dict[str, Any],
     failure: str,
 ) -> str:
     changed_files = _changed_files(manifest)
@@ -71,6 +86,10 @@ def _render_summary(
         "## Task",
         "",
         _clip(_strip_heading(task), max_chars=1200) or "No task text was recorded.",
+        "",
+        "## Environment",
+        "",
+        _environment_summary(environment, manifest),
         "",
         "## Plan",
         "",
@@ -86,7 +105,14 @@ def _render_summary(
         "",
         "## Benchmark",
         "",
-        _execution_summary(execution, metrics),
+        _benchmark_summary(
+            baseline_execution=baseline_execution,
+            baseline_metrics=baseline_metrics,
+            patched_execution=patched_execution,
+            patched_metrics=patched_metrics,
+            legacy_execution=legacy_execution,
+            legacy_metrics=legacy_metrics,
+        ),
     ]
     if failure:
         lines.extend(
@@ -103,15 +129,73 @@ def _render_summary(
             "## Artifacts",
             "",
             "- Workspace: `code_task/workspace`",
+            "- Environment report: `code_task/meta/environment_report.json`",
             "- Patch plan: `code_task/patch_plan.md`",
             "- Patch diff: `code_task/patch.diff`",
             "- Validation report: `code_task/meta/validation_report.json`",
-            "- Execution report: `code_task/run/execution_report.json`",
-            "- Stdout/stderr: `code_task/run/stdout.txt`, `code_task/run/stderr.txt`",
+            "- Baseline execution: `code_task/run/baseline/execution_report.json`",
+            "- Patched execution: `code_task/run/patched/execution_report.json`",
+            "- Stdout/stderr: `code_task/run/<label>/stdout.txt`, `code_task/run/<label>/stderr.txt`",
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def _environment_summary(environment: dict[str, Any], manifest: dict[str, Any]) -> str:
+    policy = _environment_policy(environment, manifest)
+    if not environment and not policy:
+        return "- Environment has not been probed yet."
+    platform_data = environment.get("platform", {})
+    python_data = environment.get("python", {})
+    project = environment.get("project", {})
+    gpu = environment.get("gpu", {})
+    lines = [f"- Status: `{environment.get('status', 'not_probed')}`"]
+    if policy:
+        lines.append(f"- Mode: `{policy.get('mode', 'current')}`")
+        lines.append(
+            f"- Execution Python: `{policy.get('python_executable', 'unknown')}`"
+        )
+        lines.append(
+            "- Dependency install: "
+            f"`{policy.get('dependency_install', 'disabled')}`"
+        )
+    if isinstance(platform_data, dict):
+        system = platform_data.get("system", "unknown")
+        release = platform_data.get("release", "")
+        machine = platform_data.get("machine", "")
+        lines.append(f"- Platform: `{system} {release}` `{machine}`".strip())
+    if isinstance(python_data, dict):
+        lines.append(
+            f"- Python: `{python_data.get('version', 'unknown')}` "
+            f"at `{python_data.get('executable', 'unknown')}`"
+        )
+    if isinstance(gpu, dict):
+        lines.append(f"- GPU devices: `{gpu.get('count', 0)}`")
+    if isinstance(project, dict):
+        dependency_files = project.get("dependency_files", [])
+        test_dirs = project.get("test_dirs", [])
+        if isinstance(dependency_files, list) and dependency_files:
+            lines.append("- Dependency files: " + ", ".join(f"`{item}`" for item in dependency_files))
+        if isinstance(test_dirs, list) and test_dirs:
+            lines.append("- Test dirs: " + ", ".join(f"`{item}`" for item in test_dirs))
+    warnings = environment.get("warnings", [])
+    if isinstance(warnings, list) and warnings:
+        lines.append("- Warnings: " + ", ".join(f"`{item}`" for item in warnings[:8]))
+    return "\n".join(lines)
+
+
+def _environment_policy(
+    environment_report: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    environment = manifest.get("environment", {})
+    if isinstance(environment, dict):
+        policy = environment.get("policy")
+        if isinstance(policy, dict):
+            return policy
+    policy = environment_report.get("execution_policy")
+    return policy if isinstance(policy, dict) else {}
 
 
 def _plan_status(manifest: dict[str, Any], patch_plan: str) -> str:
@@ -173,6 +257,47 @@ def _validation_summary(validation: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _benchmark_summary(
+    *,
+    baseline_execution: dict[str, Any],
+    baseline_metrics: dict[str, Any],
+    patched_execution: dict[str, Any],
+    patched_metrics: dict[str, Any],
+    legacy_execution: dict[str, Any],
+    legacy_metrics: dict[str, Any],
+) -> str:
+    sections: list[str] = []
+    if baseline_execution:
+        sections.extend(
+            [
+                "### Baseline",
+                "",
+                _execution_summary(baseline_execution, baseline_metrics),
+            ]
+        )
+    if patched_execution:
+        if sections:
+            sections.append("")
+        sections.extend(
+            [
+                "### Patched",
+                "",
+                _execution_summary(patched_execution, patched_metrics),
+            ]
+        )
+    if not sections and legacy_execution:
+        sections.extend(
+            [
+                "### Latest",
+                "",
+                _execution_summary(legacy_execution, legacy_metrics),
+            ]
+        )
+    if not sections:
+        return "- Benchmark has not been executed yet."
+    return "\n".join(sections)
+
+
 def _execution_summary(execution: dict[str, Any], metrics: dict[str, Any]) -> str:
     if not execution:
         return "- Benchmark has not been executed yet."
@@ -183,6 +308,12 @@ def _execution_summary(execution: dict[str, Any], metrics: dict[str, Any]) -> st
         f"- Command: `{execution.get('command_text', '')}`",
         f"- Duration: `{execution.get('duration_sec')}` second(s)",
     ]
+    environment = execution.get("environment", {})
+    if isinstance(environment, dict) and environment:
+        lines.append(f"- Environment mode: `{environment.get('mode', 'current')}`")
+        lines.append(
+            f"- Execution Python: `{environment.get('python_executable', 'unknown')}`"
+        )
     if metrics:
         lines.append("")
         lines.append("| Metric | Value |")
@@ -219,6 +350,24 @@ def _read_optional_json(path: Path) -> dict[str, Any]:
         return {}
     value = read_json(path)
     return value if isinstance(value, dict) else {}
+
+
+def _read_run_json(run_dir: Path, label: str, filename: str) -> dict[str, Any]:
+    return _read_optional_json(run_dir / label / filename)
+
+
+def _read_latest_failure(run_dir: Path, manifest: dict[str, Any]) -> str:
+    failure = manifest.get("failure_analysis", {})
+    if isinstance(failure, dict):
+        path = failure.get("analysis")
+        if path:
+            root = run_dir.parent.parent
+            return _read_optional(root / str(path))
+    for label in ("patched", "baseline"):
+        text = _read_optional(run_dir / label / "failure_analysis.md")
+        if text:
+            return text
+    return _read_optional(run_dir / "failure_analysis.md")
 
 
 def _clip(text: str, *, max_chars: int) -> str:

@@ -29,8 +29,9 @@ Use this when you already have code and want a focused modification, optimizatio
 Conceptual flow:
 
 ```text
-init workspace -> index code -> plan patch -> approve
--> propose edits -> apply edits -> validate -> run benchmark
+init workspace -> probe environment -> index code -> run baseline
+-> plan patch -> approve -> propose edits -> apply edits
+-> validate -> run patched benchmark -> compare results
 -> analyze failure -> repair proposal
 ```
 
@@ -39,6 +40,7 @@ Key boundaries:
 - The source project is copied into `code_task/workspace`; the original code is never modified.
 - Patch application is gated by an explicit human approval step.
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
+- Current execution uses workspace isolation plus an explicit interpreter policy. It supports `current` and `external`; managed environment creation is planned later.
 
 ### 3. Research With Experiment
 
@@ -156,6 +158,7 @@ runs/<run-id>/
     patch.diff
     workspace/
     meta/
+      environment_report.json
       codebase_index.json
       hitl_decisions.jsonl
       proposed_edits.json
@@ -164,11 +167,17 @@ runs/<run-id>/
       llm_usage.jsonl
       llm_usage_summary.json
     run/
-      execution_report.json
-      stdout.txt
-      stderr.txt
-      metrics.json
-      failure_analysis.md
+      baseline/
+        execution_report.json
+        stdout.txt
+        stderr.txt
+        metrics.json
+      patched/
+        execution_report.json
+        stdout.txt
+        stderr.txt
+        metrics.json
+        failure_analysis.md
     repairs/
       repair-001/
         proposed_edits.json
@@ -177,16 +186,43 @@ runs/<run-id>/
 Important directories:
 
 - `workspace/`: editable copy of the source project.
-- `meta/`: indexes, decisions, proposed edits, applied edit summaries, validation reports, and LLM usage.
-- `run/`: latest benchmark stdout/stderr, execution report, parsed metrics, and failure analysis.
+- `meta/`: environment reports, indexes, decisions, proposed edits, applied edit summaries, validation reports, and LLM usage.
+- `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, and failure analysis.
 - `repairs/`: bounded repair proposals grouped by attempt.
 
 Important user-facing code-task files:
 
 - `summary.md`: compact status, task, patch, validation, benchmark, and failure-analysis summary.
+- `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
+- `run/baseline/execution_report.json`: pre-patch benchmark result.
+- `run/patched/execution_report.json`: post-patch benchmark result.
 - `patch_plan.md`: human-reviewable plan before edits.
 - `patch.diff`: applied patch for review.
 - `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch.
+
+## Code-Task Environment Strategy
+
+Environment handling is intentionally separated from source-code isolation:
+
+- Source-code isolation means user code is copied to `code_task/workspace` before any patch is applied.
+- Execution isolation means benchmarks run with a selected Python/runtime environment.
+
+Today, code-task has the first kind of isolation and records environment signals
+with `meta/environment_report.json`. It can select either the active
+SimpleAutoResearch Python environment or a user-provided external interpreter.
+It does not yet create virtual environments or install dependencies automatically.
+
+The planned environment modes are:
+
+- `current`: use the active SimpleAutoResearch Python environment. Supported now.
+- `external`: use a user-provided Python or Conda interpreter. Supported now.
+- `project-venv`: create a per-run environment inside the run directory. Planned.
+- `shared-env-cache`: reuse environments keyed by dependency-file and platform hashes. Planned.
+- `docker`: run in a container when stronger isolation is needed. Planned.
+
+The default should remain conservative: dependency installation must be explicit
+and reviewable, and user project packages should not be silently installed into
+SimpleAutoResearch's own environment.
 
 ## Why This Split Matters
 

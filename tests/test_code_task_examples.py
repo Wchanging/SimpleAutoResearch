@@ -10,6 +10,7 @@ from simple_ar.code_task import (
     generate_patch_plan,
     initialize_code_task,
     record_plan_decision,
+    run_code_task_baseline,
     run_code_task_benchmark,
     validate_code_task,
 )
@@ -33,9 +34,10 @@ class CodeTaskExampleTests(unittest.TestCase):
                 benchmark_command="python -m unittest discover -s tests",
             )
 
-            initial = run_code_task_benchmark(run_dir, timeout_sec=10)
+            initial = run_code_task_baseline(run_dir, timeout_sec=10)
             self.assertEqual(initial.status, "failed")
             self.assertIn("AssertionError", read_text(initial.stderr_path))
+            self.assertTrue((run_dir / "code_task" / "run" / "baseline" / "execution_report.json").is_file())
 
             plan = generate_patch_plan(run_dir, use_llm=False)
             self.assertIn("spamfilter/rules.py", plan.selected_files)
@@ -49,6 +51,7 @@ class CodeTaskExampleTests(unittest.TestCase):
 
             self.assertEqual(final.status, "passed")
             self.assertEqual(final.returncode, 0)
+            self.assertTrue((run_dir / "code_task" / "run" / "patched" / "execution_report.json").is_file())
             summary_path = run_dir / "code_task" / "summary.md"
             self.assertTrue(summary_path.is_file())
             summary_text = read_text(summary_path)
@@ -61,6 +64,8 @@ class CodeTaskExampleTests(unittest.TestCase):
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["status"], "benchmark_passed")
             self.assertEqual(manifest["benchmark"]["last_status"], "passed")
+            self.assertEqual(manifest["benchmark"]["runs"]["baseline"]["status"], "failed")
+            self.assertEqual(manifest["benchmark"]["runs"]["patched"]["status"], "passed")
             self.assertEqual(manifest["layout"]["summary"], "code_task/summary.md")
 
 

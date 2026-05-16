@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,8 +15,10 @@ from simple_ar.code_task import (
     apply_patch_edits,
     generate_patch_plan,
     initialize_code_task,
+    probe_code_task_environment,
     propose_repair_edits,
     record_plan_decision,
+    run_code_task_baseline,
     run_code_task_benchmark,
     validate_code_task,
 )
@@ -57,6 +60,8 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(manifest["workflow"], "code_task")
             self.assertEqual(manifest["layout"]["workspace"], "code_task/workspace")
             self.assertEqual(manifest["benchmark"]["executed"], False)
+            self.assertEqual(manifest["environment"]["policy"]["mode"], "current")
+            self.assertEqual(manifest["environment"]["policy"]["python_executable"], sys.executable)
             self.assertGreaterEqual(manifest["copy"]["skipped_count"], 2)
 
             index = read_json(result.codebase_index_path)
@@ -118,6 +123,79 @@ class CodeTaskTests(unittest.TestCase):
             status_text = status_stdout.getvalue()
             self.assertIn("Workflow: code_task", status_text)
             self.assertIn("python files: 2", status_text)
+
+    def test_probe_code_task_environment_writes_report_and_manifest(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nProbe this project.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            result = probe_code_task_environment(run_dir)
+
+            self.assertTrue(result.report_path.is_file())
+            self.assertIn(result.status, {"ok", "warning"})
+            report = read_json(result.report_path)
+            self.assertEqual(report["schema_version"], 1)
+            self.assertEqual(report["project"]["dependency_files"], ["pyproject.toml"])
+            self.assertEqual(report["project"]["test_dirs"], ["tests"])
+            self.assertTrue(report["tools"]["python"]["available"])
+            self.assertEqual(report["execution_policy"]["mode"], "current")
+            self.assertIn("available", report["gpu"])
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["layout"]["environment_report"], "code_task/meta/environment_report.json")
+            self.assertEqual(manifest["environment"]["report"], "code_task/meta/environment_report.json")
+            self.assertEqual(manifest["status"], "environment_probed")
+            summary = read_text(run_dir / "code_task" / "summary.md")
+            self.assertIn("## Environment", summary)
+            self.assertIn("pyproject.toml", summary)
+
+    def test_code_task_probe_cli_prints_environment_summary(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nProbe from CLI.\n")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                    ]
+                )
+            run_dir = next(output_root.iterdir())
+
+            probe_stdout = io.StringIO()
+            with contextlib.redirect_stdout(probe_stdout):
+                main(["code-task", "probe", str(run_dir)])
+
+            output = probe_stdout.getvalue()
+            self.assertIn("Environment report:", output)
+            self.assertIn("Status:", output)
+            status_stdout = io.StringIO()
+            with contextlib.redirect_stdout(status_stdout):
+                main(["status", str(run_dir)])
+            self.assertIn("Environment:", status_stdout.getvalue())
 
     def test_patch_plan_offline_writes_reviewable_plan_and_updates_manifest(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -378,13 +456,127 @@ class CodeTaskTests(unittest.TestCase):
 
             result = run_code_task_benchmark(run_dir, timeout_sec=10)
 
+            self.assertEqual(result.label, "patched")
             self.assertEqual(result.status, "passed")
             self.assertEqual(result.returncode, 0)
-            self.assertTrue((run_dir / "code_task" / "run" / "execution_report.json").is_file())
-            self.assertTrue((run_dir / "code_task" / "run" / "stdout.txt").is_file())
+            self.assertTrue((run_dir / "code_task" / "run" / "patched" / "execution_report.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "run" / "patched" / "stdout.txt").is_file())
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["benchmark"]["last_status"], "passed")
+            self.assertEqual(manifest["benchmark"]["latest_label"], "patched")
+            self.assertEqual(manifest["benchmark"]["runs"]["patched"]["status"], "passed")
+            report = read_json(run_dir / "code_task" / "run" / "patched" / "execution_report.json")
+            self.assertEqual(report["environment"]["mode"], "current")
+            self.assertEqual(report["command"][0], sys.executable)
             self.assertEqual(manifest["status"], "benchmark_passed")
+
+    def test_run_code_task_baseline_records_pre_patch_result(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nCapture baseline.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            result = run_code_task_baseline(run_dir, timeout_sec=10)
+
+            self.assertEqual(result.label, "baseline")
+            self.assertEqual(result.status, "passed")
+            self.assertTrue((run_dir / "code_task" / "run" / "baseline" / "execution_report.json").is_file())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "baseline_passed")
+            self.assertEqual(manifest["benchmark"]["latest_label"], "baseline")
+            self.assertEqual(manifest["benchmark"]["runs"]["baseline"]["status"], "passed")
+            summary = read_text(run_dir / "code_task" / "summary.md")
+            self.assertIn("### Baseline", summary)
+            self.assertIn("Environment mode: `current`", summary)
+
+    def test_external_env_mode_records_python_policy_and_uses_it(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nRun with an explicit interpreter.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+                env_mode="external",
+                python_executable=sys.executable,
+            )
+
+            result = probe_code_task_environment(run_dir)
+            self.assertIn(result.status, {"ok", "warning"})
+            baseline = run_code_task_baseline(run_dir, timeout_sec=10)
+
+            report = read_json(baseline.report_path)
+            self.assertEqual(report["environment"]["mode"], "external")
+            self.assertEqual(report["environment"]["python_executable"], sys.executable)
+            self.assertEqual(report["command"][0], sys.executable)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["environment"]["policy"]["mode"], "external")
+            self.assertEqual(
+                manifest["benchmark"]["runs"]["baseline"]["environment"]["mode"],
+                "external",
+            )
+
+    def test_code_task_cli_can_override_env_mode_for_baseline(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nRun CLI baseline with explicit env.\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                        "--benchmark-command",
+                        "python -m unittest discover -s tests",
+                    ]
+                )
+            run_dir = next(output_root.iterdir())
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(
+                    [
+                        "code-task",
+                        "baseline",
+                        str(run_dir),
+                        "--timeout",
+                        "10",
+                        "--env-mode",
+                        "external",
+                        "--python",
+                        sys.executable,
+                    ]
+                )
+
+            self.assertIn("Status: passed", stdout.getvalue())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["environment"]["policy"]["mode"], "external")
 
     def test_analyze_failure_and_offline_repair_proposal(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -456,7 +648,7 @@ class CodeTaskTests(unittest.TestCase):
             with contextlib.redirect_stdout(run_stdout):
                 main(["code-task", "run", str(run_dir), "--timeout", "10"])
             self.assertIn("Status: passed", run_stdout.getvalue())
-            self.assertTrue((run_dir / "code_task" / "run" / "execution_report.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "run" / "patched" / "execution_report.json").is_file())
 
             status_stdout = io.StringIO()
             with contextlib.redirect_stdout(status_stdout):
@@ -491,6 +683,10 @@ def _write_toy_project(code_root: Path) -> None:
     )
     write_text(code_root / ".git" / "config", "[core]\nrepositoryformatversion = 0\n")
     write_text(code_root / ".env", "TOKEN=secret\n")
+    write_text(
+        code_root / "pyproject.toml",
+        "[project]\nname = \"toy-project\"\nversion = \"0.1.0\"\n",
+    )
 
 
 def _write_valid_edit_proposal(run_dir: Path, path: Path | None = None) -> Path:

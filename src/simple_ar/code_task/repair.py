@@ -79,14 +79,17 @@ def propose_repair_edits(
     """
     manifest = load_code_task_manifest(run_dir)
     paths = code_task_paths(run_dir)
-    analysis_path = paths.run_artifact_dir / "failure_analysis.md"
+    artifacts = _latest_run_artifacts(paths, manifest)
+    analysis_path = artifacts["failure_analysis"]
     if not analysis_path.exists():
         analysis = analyze_code_task_failure(run_dir)
         if analysis.status == "no_failure":
             raise RuntimeError("Latest benchmark passed; repair proposal is not needed.")
         manifest = load_code_task_manifest(run_dir)
+        artifacts = _latest_run_artifacts(paths, manifest)
+        analysis_path = artifacts["failure_analysis"]
     failure_analysis = read_text(analysis_path)
-    execution_report = _read_required_json(paths.run_artifact_dir / "execution_report.json")
+    execution_report = _read_required_json(artifacts["execution_report"])
     if execution_report.get("status") == "passed":
         raise RuntimeError("Latest benchmark passed; repair proposal is not needed.")
 
@@ -379,6 +382,22 @@ def _read_required_json(path: Path) -> dict[str, Any]:
 
 def _read_optional_text(path: Path) -> str:
     return read_text(path) if path.exists() else ""
+
+
+def _latest_run_artifacts(paths: Any, manifest: dict[str, Any]) -> dict[str, Path]:
+    benchmark = manifest.get("benchmark", {})
+    if isinstance(benchmark, dict):
+        report_rel = benchmark.get("execution_report")
+        if report_rel:
+            report = paths.run_dir / str(report_rel)
+            return {
+                "execution_report": report,
+                "failure_analysis": report.parent / "failure_analysis.md",
+            }
+    return {
+        "execution_report": paths.run_artifact_dir / "execution_report.json",
+        "failure_analysis": paths.run_artifact_dir / "failure_analysis.md",
+    }
 
 
 def _index_files(index: dict[str, Any]) -> list[dict[str, Any]]:

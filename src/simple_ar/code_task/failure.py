@@ -66,7 +66,8 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
     """
     manifest = load_code_task_manifest(run_dir)
     paths = code_task_paths(run_dir)
-    report_path = paths.run_artifact_dir / "execution_report.json"
+    artifacts = _latest_run_artifacts(paths, manifest)
+    report_path = artifacts["execution_report"]
     if not report_path.exists():
         raise FileNotFoundError(
             f"Missing execution report: {report_path}. Run `simple-ar code-task run` first."
@@ -75,8 +76,8 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
     if not isinstance(report, dict):
         raise RuntimeError(f"Expected JSON object in {report_path}")
 
-    stdout = _read_optional(paths.run_artifact_dir / "stdout.txt")
-    stderr = _read_optional(paths.run_artifact_dir / "stderr.txt")
+    stdout = _read_optional(artifacts["stdout"])
+    stderr = _read_optional(artifacts["stderr"])
     traceback_block = _traceback_block(stderr)
     implicated_files = _implicated_files(traceback_block or stderr, paths.workspace_dir)
     signal_lines = _signal_lines(stdout, stderr)
@@ -93,7 +94,7 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         changed_files=changed_files,
         status=status,
     )
-    analysis_path = paths.run_artifact_dir / "failure_analysis.md"
+    analysis_path = artifacts["failure_analysis"]
     write_text(analysis_path, markdown)
     _update_manifest_after_failure_analysis(
         run_dir,
@@ -299,13 +300,19 @@ def _update_manifest_after_failure_analysis(
     implicated_files: list[str],
 ) -> None:
     layout = manifest_section(manifest, "layout")
-    layout["failure_analysis"] = "code_task/run/failure_analysis.md"
+    benchmark = manifest.get("benchmark", {})
+    latest_label = "patched"
+    if isinstance(benchmark, dict):
+        latest_label = str(benchmark.get("latest_label") or latest_label)
+    analysis_rel = f"code_task/run/{latest_label}/failure_analysis.md"
+    layout["failure_analysis"] = analysis_rel
     failure = manifest_section(manifest, "failure_analysis")
     failure.update(
         {
             "status": status,
             "generated_at": utcnow_iso(),
-            "analysis": "code_task/run/failure_analysis.md",
+            "analysis": analysis_rel,
+            "run_label": latest_label,
             "implicated_files": implicated_files,
         }
     )
@@ -314,3 +321,26 @@ def _update_manifest_after_failure_analysis(
     if status == "needs_repair":
         manifest["status"] = "failure_analyzed"
     save_code_task_manifest(run_dir, manifest)
+
+
+def _latest_run_artifacts(paths: Any, manifest: dict[str, Any]) -> dict[str, Path]:
+    benchmark = manifest.get("benchmark", {})
+    if isinstance(benchmark, dict):
+        report_rel = benchmark.get("execution_report")
+        stdout_rel = benchmark.get("stdout")
+        stderr_rel = benchmark.get("stderr")
+        if report_rel and stdout_rel and stderr_rel:
+            report = paths.run_dir / str(report_rel)
+            run_dir = report.parent
+            return {
+                "execution_report": report,
+                "stdout": paths.run_dir / str(stdout_rel),
+                "stderr": paths.run_dir / str(stderr_rel),
+                "failure_analysis": run_dir / "failure_analysis.md",
+            }
+    return {
+        "execution_report": paths.run_artifact_dir / "execution_report.json",
+        "stdout": paths.run_artifact_dir / "stdout.txt",
+        "stderr": paths.run_artifact_dir / "stderr.txt",
+        "failure_analysis": paths.run_artifact_dir / "failure_analysis.md",
+    }

@@ -2,6 +2,23 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-16
+
+### Added
+
+- Added `code-task probe` for V2.1 environment inspection.
+- Added `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals.
+- Added environment status output to code-task summaries and `simple-ar status`.
+- Added `code-task baseline` to capture pre-patch benchmark results under `code_task/run/baseline/`.
+- Added code-task `--env-mode current|external` and `--python` support for selecting the interpreter used by benchmark commands.
+
+### Changed
+
+- Documented the new code-task environment probe in usage and workflow docs.
+- Documented the V2.1 code-task environment isolation direction: current interpreter first, explicit external interpreters next, then per-run venvs, shared environment cache, and Docker later.
+- Code-task benchmark runs now use labelled artifact directories (`baseline` and `patched`) so before/after execution evidence can coexist.
+- Benchmark execution reports now record the selected environment mode and Python executable.
+
 ## 2026-05-14
 
 ### Added

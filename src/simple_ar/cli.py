@@ -12,9 +12,11 @@ from simple_ar.code_task import (
     apply_patch_edits,
     generate_patch_plan,
     initialize_code_task,
+    probe_code_task_environment,
     propose_patch_edits,
     propose_repair_edits,
     record_plan_decision,
+    run_code_task_baseline,
     run_code_task_benchmark,
     validate_code_task,
 )
@@ -99,12 +101,20 @@ def build_parser() -> argparse.ArgumentParser:
     code_task_init.add_argument("--output-root", default="runs")
     code_task_init.add_argument("--name", default=None)
     code_task_init.add_argument("--benchmark-command", default=None)
+    _add_code_task_env_args(code_task_init)
     code_task_init.add_argument(
         "--max-file-bytes",
         type=int,
         default=2_000_000,
         help="Maximum file size copied into the workspace. Use 0 to disable.",
     )
+    code_task_probe = code_task_subparsers.add_parser(
+        "probe",
+        help="Inspect the copied workspace runtime and project environment.",
+    )
+    code_task_probe.add_argument("run_dir")
+    _add_code_task_env_args(code_task_probe)
+
     code_task_plan = code_task_subparsers.add_parser(
         "plan",
         help="Generate a human-reviewable patch plan for a code-task run.",
@@ -160,6 +170,16 @@ def build_parser() -> argparse.ArgumentParser:
     code_task_validate.add_argument("--strict", action="store_true")
     code_task_validate.add_argument("--max-file-bytes", type=int, default=500_000)
 
+    code_task_baseline = code_task_subparsers.add_parser(
+        "baseline",
+        help="Run the recorded benchmark before applying a patch.",
+    )
+    code_task_baseline.add_argument("run_dir")
+    code_task_baseline.add_argument("--command", dest="benchmark_command", default=None)
+    code_task_baseline.add_argument("--timeout", type=int, default=60)
+    code_task_baseline.add_argument("--skip-validation", action="store_true")
+    _add_code_task_env_args(code_task_baseline)
+
     code_task_run = code_task_subparsers.add_parser(
         "run",
         help="Run the recorded benchmark command in the code-task workspace.",
@@ -168,6 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     code_task_run.add_argument("--command", dest="benchmark_command", default=None)
     code_task_run.add_argument("--timeout", type=int, default=60)
     code_task_run.add_argument("--skip-validation", action="store_true")
+    _add_code_task_env_args(code_task_run)
 
     code_task_analyze = code_task_subparsers.add_parser(
         "analyze-failure",
@@ -202,6 +223,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _add_code_task_env_args(parser: argparse.ArgumentParser) -> None:
+    """Add shared code-task execution environment policy arguments."""
+    parser.add_argument(
+        "--env-mode",
+        choices=("current", "external"),
+        default=None,
+        help=(
+            "Execution environment mode. `current` uses the active "
+            "SimpleAutoResearch Python; `external` uses --python. "
+            "No dependencies are installed."
+        ),
+    )
+    parser.add_argument(
+        "--python",
+        dest="python_executable",
+        default=None,
+        help="Python executable path or command name for --env-mode external.",
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -272,6 +313,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.code_task_command == "init":
             _print_code_task_init(args)
             return
+        if args.code_task_command == "probe":
+            _print_code_task_probe(args)
+            return
         if args.code_task_command == "plan":
             _print_code_task_plan(args)
             return
@@ -286,6 +330,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.code_task_command == "validate":
             _print_code_task_validate(args)
+            return
+        if args.code_task_command == "baseline":
+            _print_code_task_baseline(args)
             return
         if args.code_task_command == "run":
             _print_code_task_run(args)
@@ -493,6 +540,28 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
         if plan.get("patch_plan"):
             print(f"- patch plan: {run_dir / str(plan.get('patch_plan'))}")
 
+    environment = manifest.get("environment", {})
+    if isinstance(environment, dict) and environment:
+        print("Environment:")
+        print(f"- status: {environment.get('status', 'unknown')}")
+        policy = environment.get("policy", {})
+        if isinstance(policy, dict):
+            print(f"- mode: {policy.get('mode', 'current')}")
+            if policy.get("python_executable"):
+                print(f"- python: {policy.get('python_executable')}")
+        report = environment.get("report")
+        if report:
+            print(f"- report: {run_dir / str(report)}")
+        platform_data = environment.get("platform", {})
+        if isinstance(platform_data, dict):
+            system = platform_data.get("system")
+            release = platform_data.get("release")
+            if system:
+                print(f"- platform: {system} {release or ''}".rstrip())
+        gpu = environment.get("gpu", {})
+        if isinstance(gpu, dict):
+            print(f"- gpu: {gpu.get('count', 0)} device(s)")
+
     patch = manifest.get("patch", {})
     if isinstance(patch, dict) and patch:
         print("Patch:")
@@ -521,6 +590,14 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
         print(f"- executed: {benchmark.get('executed', False)}")
         if benchmark.get("last_status"):
             print(f"- last status: {benchmark.get('last_status')}")
+        if benchmark.get("latest_label"):
+            print(f"- latest label: {benchmark.get('latest_label')}")
+        runs = benchmark.get("runs", {})
+        if isinstance(runs, dict) and runs:
+            for label in ("baseline", "patched"):
+                row = runs.get(label)
+                if isinstance(row, dict):
+                    print(f"- {label}: {row.get('status', 'unknown')}")
         if benchmark.get("execution_report"):
             print(f"- execution report: {run_dir / str(benchmark.get('execution_report'))}")
 
@@ -614,6 +691,8 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
         task_file=task_file,
         benchmark_command=args.benchmark_command,
         max_file_bytes=args.max_file_bytes,
+        env_mode=args.env_mode or "current",
+        python_executable=args.python_executable,
     )
     project = result.codebase_index.get("project", {})
     print(f"Code task run: {result.run_dir}")
@@ -633,6 +712,33 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     )
     if args.benchmark_command:
         print(f"Benchmark command recorded: {args.benchmark_command}")
+    print(f"Environment mode: {result.environment_policy.get('mode', 'current')}")
+    print(f"Python executable: {result.environment_policy.get('python_executable', '')}")
+
+
+def _print_code_task_probe(args: argparse.Namespace) -> None:
+    """Probe the copied workspace environment and print a compact summary."""
+    result = probe_code_task_environment(
+        Path(args.run_dir),
+        env_mode=args.env_mode,
+        python_executable=args.python_executable,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Environment report: {result.report_path}")
+    print(f"Status: {result.status}")
+    gpu_count = result.gpu.get("count", 0) if isinstance(result.gpu, dict) else 0
+    print(f"GPU devices: {gpu_count}")
+    available_tools = [
+        name
+        for name, data in result.tools.items()
+        if isinstance(data, dict) and data.get("available") is True
+    ]
+    if available_tools:
+        print("Available tools: " + ", ".join(sorted(available_tools)))
+    if result.warnings:
+        print("Warnings:")
+        for warning in result.warnings:
+            print(f"- {warning}")
 
 
 def _print_code_task_plan(args: argparse.Namespace) -> None:
@@ -724,9 +830,35 @@ def _print_code_task_run(args: argparse.Namespace) -> None:
         command=args.benchmark_command,
         timeout_sec=args.timeout,
         skip_validation=args.skip_validation,
+        env_mode=args.env_mode,
+        python_executable=args.python_executable,
     )
     print(f"Code task run: {result.run_dir}")
+    print(f"Run label: {result.label}")
     print(f"Execution report: {result.report_path}")
+    print(f"Status: {result.status}")
+    print(f"Return code: {result.returncode}")
+    print(f"Timed out: {result.timed_out}")
+    print(f"Stdout: {result.stdout_path}")
+    print(f"Stderr: {result.stderr_path}")
+    if result.metrics:
+        print("Metrics:")
+        for key, value in result.metrics.items():
+            print(f"- {key}: {value}")
+
+
+def _print_code_task_baseline(args: argparse.Namespace) -> None:
+    """Run the pre-patch benchmark and print execution artifacts."""
+    result = run_code_task_baseline(
+        Path(args.run_dir),
+        command=args.benchmark_command,
+        timeout_sec=args.timeout,
+        skip_validation=args.skip_validation,
+        env_mode=args.env_mode,
+        python_executable=args.python_executable,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Baseline report: {result.report_path}")
     print(f"Status: {result.status}")
     print(f"Return code: {result.returncode}")
     print(f"Timed out: {result.timed_out}")

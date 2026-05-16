@@ -71,6 +71,37 @@ When adding a new code-task feature:
 - add tests that exercise both the library function and CLI path when useful;
 - prefer small composable functions over a single agent loop.
 
+### Code-Task Environment Policy
+
+The current V2.1 code-task runner has workspace isolation, command timeouts,
+captured stdout/stderr, a restricted environment map, and an explicit execution
+interpreter policy. It supports `current` and `external` modes, but it does not
+yet create or install into a separate Python environment. Unless a future
+feature explicitly changes this, do not install user project dependencies into
+SimpleAutoResearch's own `.venv` by default.
+
+Environment support should evolve in layers:
+
+- `current`: run with the current SimpleAutoResearch Python. This is simple and
+  useful for demos, but it is not dependency isolation. Supported now.
+- `external`: run with a user-provided Python or Conda interpreter. This should
+  be the first practical escape hatch for real projects that already have an
+  environment. Supported now.
+- `project-venv`: create a per-run environment under
+  `code_task/.venv/`. This isolates well but can waste disk space. Planned.
+- `shared-env-cache`: create or reuse environments under a cache directory such
+  as `.simple_ar_cache/envs/<env-hash>/`, keyed by OS, Python version, and
+  dependency files. This is the preferred long-term default. Planned.
+- `docker`: run inside a container for stronger isolation. Keep this separate
+  from the Python runner because Windows, GPU, and image-build behavior need
+  careful handling. Planned.
+
+Future environment creation or dependency installation must be explicit,
+auditable, and recorded in artifacts. A safe implementation should record the
+selected mode, interpreter path, dependency files, install commands, exit codes,
+and warnings in `code_task/meta/environment_report.json` or a dedicated
+environment artifact.
+
 ## Documentation Rules
 
 Use the docs this way:

@@ -162,7 +162,43 @@ Initialize a code task from an existing codebase:
 uv run simple-ar code-task init \
   --code-root examples/code_tasks/toy_spam_project \
   --task-file examples/code_tasks/tasks/improve_toy_spam_baseline.md \
-  --benchmark-command "python -m unittest discover -s tests"
+  --benchmark-command "python -m unittest discover -s tests" \
+  --env-mode current
+```
+
+Probe the environment and run the unchanged baseline before asking for edits:
+
+```bash
+uv run simple-ar code-task probe runs/<run-id>
+uv run simple-ar code-task baseline runs/<run-id> --timeout 60
+```
+
+`probe` writes `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals. It does not install dependencies or run project code.
+
+`baseline` stores the pre-patch benchmark under `code_task/run/baseline/`.
+
+Current environment boundary:
+
+- Code-task runs execute inside the copied workspace, not the original source directory.
+- `--env-mode current` uses the active SimpleAutoResearch Python environment.
+- `--env-mode external --python path/to/python` uses a user-provided interpreter.
+- Dependency installation is intentionally not automatic, so project-specific packages should be prepared by the user for now.
+- The planned direction is to add managed modes such as `project-venv`, `shared-env-cache`, and eventually `docker`.
+
+Example with an existing virtual environment:
+
+```bash
+uv run simple-ar code-task baseline runs/<run-id> \
+  --env-mode external \
+  --python path/to/.venv/bin/python
+```
+
+On Windows, the interpreter usually looks like:
+
+```powershell
+uv run simple-ar code-task baseline runs/<run-id> `
+  --env-mode external `
+  --python path\to\.venv\Scripts\python.exe
 ```
 
 Generate a patch plan (LLM optional; offline mode writes a conservative plan):
@@ -191,12 +227,14 @@ Apply proposed edits inside the copied workspace:
 uv run simple-ar code-task apply-edits runs/<run-id>
 ```
 
-Validate and run the benchmark:
+Validate and run the patched benchmark:
 
 ```bash
 uv run simple-ar code-task validate runs/<run-id>
 uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
+
+`run` stores the patched benchmark under `code_task/run/patched/`.
 
 Analyze failures and request a bounded repair proposal:
 
@@ -240,6 +278,11 @@ name = "toy-spam"
 [benchmark]
 command = "python -m unittest discover -s tests"
 timeout_sec = 60
+
+[environment]
+mode = "current"  # current | external; future: project-venv | shared-env-cache | docker
+python = ""       # optional external interpreter path
+allow_dependency_install = false
 
 [llm]
 model = "gpt-4o-mini"

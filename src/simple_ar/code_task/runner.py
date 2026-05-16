@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import write_json, write_text
+from simple_ar.code_task.environment import ensure_code_task_environment_policy
 from simple_ar.code_task.state import (
     code_task_paths,
     load_code_task_manifest,
@@ -30,12 +31,16 @@ class CodeTaskRunError(RuntimeError):
     """Raised when a code-task benchmark cannot be launched safely."""
 
 
+VALID_RUN_LABELS = {"baseline", "patched"}
+
+
 @dataclass(frozen=True)
 class CodeTaskRunResult:
     """Captured result from running a code-task benchmark.
 
     Args:
         run_dir: Code-task run directory.
+        label: Execution label, usually ``baseline`` or ``patched``.
         report_path: Structured execution report.
         stdout_path: Captured stdout path.
         stderr_path: Captured stderr path.
@@ -48,6 +53,7 @@ class CodeTaskRunResult:
     """
 
     run_dir: Path
+    label: str
     report_path: Path
     stdout_path: Path
     stderr_path: Path
@@ -64,6 +70,9 @@ def run_code_task_benchmark(
     command: str | None = None,
     timeout_sec: int = 60,
     skip_validation: bool = False,
+    run_label: str = "patched",
+    env_mode: str | None = None,
+    python_executable: str | Path | None = None,
 ) -> CodeTaskRunResult:
     """Run the recorded benchmark command inside the copied workspace.
 
@@ -73,6 +82,11 @@ def run_code_task_benchmark(
             during ``code-task init`` is used.
         timeout_sec: Maximum runtime in seconds.
         skip_validation: Run even when static validation has not passed.
+        run_label: Result slot under ``code_task/run``. Use ``baseline`` before
+            patching and ``patched`` after edits have been applied.
+        env_mode: Optional execution environment mode override.
+        python_executable: External interpreter path or executable name when
+            ``env_mode`` is ``external``.
 
     Returns:
         Execution artifacts and status.
@@ -83,6 +97,7 @@ def run_code_task_benchmark(
     """
     if timeout_sec < 1:
         raise CodeTaskRunError("timeout_sec must be at least 1")
+    label = _normalize_run_label(run_label)
 
     manifest = load_code_task_manifest(run_dir)
     paths = code_task_paths(run_dir)
@@ -96,7 +111,13 @@ def run_code_task_benchmark(
             "No benchmark command recorded. Pass --command or rerun code-task init "
             "with --benchmark-command."
         )
-    command_args = _split_command(command_text)
+    environment_policy = ensure_code_task_environment_policy(
+        run_dir,
+        manifest,
+        env_mode=env_mode,
+        python_executable=python_executable,
+    )
+    command_args = _split_command(command_text, environment_policy=environment_policy)
 
     if not skip_validation:
         validation = validate_code_task(run_dir)
@@ -105,8 +126,10 @@ def run_code_task_benchmark(
                 run_dir,
                 command_text=command_text,
                 command_args=command_args,
+                environment_policy=environment_policy,
                 timeout_sec=timeout_sec,
                 reason="Static validation reported errors.",
+                run_label=label,
             )
         manifest = load_code_task_manifest(run_dir)
 
@@ -131,6 +154,7 @@ def run_code_task_benchmark(
             manifest=manifest,
             command_text=command_text,
             command_args=command_args,
+            environment_policy=environment_policy,
             timeout_sec=timeout_sec,
             duration_sec=duration_sec,
             status=status,
@@ -141,6 +165,7 @@ def run_code_task_benchmark(
             metrics=metrics,
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
+            run_label=label,
         )
     except subprocess.TimeoutExpired as exc:
         duration_sec = round(time.monotonic() - started, 3)
@@ -156,6 +181,7 @@ def run_code_task_benchmark(
             manifest=manifest,
             command_text=command_text,
             command_args=command_args,
+            environment_policy=environment_policy,
             timeout_sec=timeout_sec,
             duration_sec=duration_sec,
             status="timed_out",
@@ -166,7 +192,42 @@ def run_code_task_benchmark(
             metrics=metrics,
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
+            run_label=label,
         )
+
+
+def run_code_task_baseline(
+    run_dir: Path,
+    *,
+    command: str | None = None,
+    timeout_sec: int = 60,
+    skip_validation: bool = False,
+    env_mode: str | None = None,
+    python_executable: str | Path | None = None,
+) -> CodeTaskRunResult:
+    """Run the recorded benchmark as the pre-patch baseline.
+
+    Args:
+        run_dir: Code-task run directory.
+        command: Optional command override.
+        timeout_sec: Maximum runtime in seconds.
+        skip_validation: Run even when static validation has not passed.
+        env_mode: Optional execution environment mode override.
+        python_executable: External interpreter path or executable name when
+            ``env_mode`` is ``external``.
+
+    Returns:
+        Baseline execution artifacts and status.
+    """
+    return run_code_task_benchmark(
+        run_dir,
+        command=command,
+        timeout_sec=timeout_sec,
+        skip_validation=skip_validation,
+        run_label="baseline",
+        env_mode=env_mode,
+        python_executable=python_executable,
+    )
 
 
 def _write_blocked_result(
@@ -174,8 +235,10 @@ def _write_blocked_result(
     *,
     command_text: str,
     command_args: list[str],
+    environment_policy: dict[str, Any],
     timeout_sec: int,
     reason: str,
+    run_label: str,
 ) -> CodeTaskRunResult:
     manifest = load_code_task_manifest(run_dir)
     return _write_execution_result(
@@ -183,6 +246,7 @@ def _write_blocked_result(
         manifest=manifest,
         command_text=command_text,
         command_args=command_args,
+        environment_policy=environment_policy,
         timeout_sec=timeout_sec,
         duration_sec=0.0,
         status="blocked_by_validation",
@@ -193,6 +257,7 @@ def _write_blocked_result(
         metrics={},
         stdout_truncated=False,
         stderr_truncated=False,
+        run_label=run_label,
     )
 
 
@@ -202,6 +267,7 @@ def _write_execution_result(
     manifest: dict[str, Any],
     command_text: str,
     command_args: list[str],
+    environment_policy: dict[str, Any],
     timeout_sec: int,
     duration_sec: float,
     status: str,
@@ -212,13 +278,16 @@ def _write_execution_result(
     metrics: dict[str, float],
     stdout_truncated: bool,
     stderr_truncated: bool,
+    run_label: str,
 ) -> CodeTaskRunResult:
     paths = code_task_paths(run_dir)
-    paths.run_artifact_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = paths.run_artifact_dir / "stdout.txt"
-    stderr_path = paths.run_artifact_dir / "stderr.txt"
-    metrics_path = paths.run_artifact_dir / "metrics.json"
-    report_path = paths.run_artifact_dir / "execution_report.json"
+    run_dir_for_label = _run_label_dir(paths.run_artifact_dir, run_label)
+    run_dir_for_label.mkdir(parents=True, exist_ok=True)
+    stdout_path = run_dir_for_label / "stdout.txt"
+    stderr_path = run_dir_for_label / "stderr.txt"
+    metrics_path = run_dir_for_label / "metrics.json"
+    report_path = run_dir_for_label / "execution_report.json"
+    rel_base = f"code_task/run/{run_label}"
 
     write_text(stdout_path, stdout or "")
     write_text(stderr_path, stderr or "")
@@ -227,16 +296,18 @@ def _write_execution_result(
         "schema_version": 1,
         "generated_at": utcnow_iso(),
         "status": status,
+        "label": run_label,
         "command_text": command_text,
         "command": command_args,
         "cwd": str(paths.workspace_dir),
+        "environment": _execution_environment_record(environment_policy),
         "timeout_sec": timeout_sec,
         "duration_sec": duration_sec,
         "returncode": returncode,
         "timed_out": timed_out,
-        "stdout": "code_task/run/stdout.txt",
-        "stderr": "code_task/run/stderr.txt",
-        "metrics": "code_task/run/metrics.json",
+        "stdout": f"{rel_base}/stdout.txt",
+        "stderr": f"{rel_base}/stderr.txt",
+        "metrics": f"{rel_base}/metrics.json",
         "metric_values": metrics,
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
@@ -247,13 +318,16 @@ def _write_execution_result(
         manifest,
         status=status,
         command_text=command_text,
+        environment_policy=environment_policy,
         returncode=returncode,
         timed_out=timed_out,
         metric_values=metrics,
+        run_label=run_label,
     )
     write_code_task_summary(run_dir)
     return CodeTaskRunResult(
         run_dir=paths.run_dir,
+        label=run_label,
         report_path=report_path,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
@@ -265,7 +339,20 @@ def _write_execution_result(
     )
 
 
-def _split_command(command_text: str) -> list[str]:
+def _normalize_run_label(value: str) -> str:
+    label = value.strip().lower().replace("_", "-")
+    if label not in VALID_RUN_LABELS:
+        raise CodeTaskRunError(
+            "run_label must be one of: " + ", ".join(sorted(VALID_RUN_LABELS))
+        )
+    return label
+
+
+def _run_label_dir(run_artifact_dir: Path, label: str) -> Path:
+    return run_artifact_dir / label
+
+
+def _split_command(command_text: str, *, environment_policy: dict[str, Any]) -> list[str]:
     try:
         args = shlex.split(command_text, posix=os.name != "nt")
     except ValueError as exc:
@@ -278,8 +365,27 @@ def _split_command(command_text: str) -> list[str]:
             "Use a direct command such as `python -m unittest discover -s tests`."
         )
     if args[0] in {"python", "python3"}:
-        args[0] = sys.executable
+        args[0] = _policy_python_executable(environment_policy)
     return args
+
+
+def _policy_python_executable(environment_policy: dict[str, Any]) -> str:
+    executable = environment_policy.get("python_executable")
+    if isinstance(executable, str) and executable:
+        return executable
+    return sys.executable
+
+
+def _execution_environment_record(environment_policy: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": environment_policy.get("mode", "current"),
+        "python_executable": _policy_python_executable(environment_policy),
+        "python_version": environment_policy.get("python_version"),
+        "allow_dependency_install": bool(
+            environment_policy.get("allow_dependency_install", False)
+        ),
+        "dependency_install": environment_policy.get("dependency_install", "disabled"),
+    }
 
 
 def _safe_env(workspace_dir: Path) -> dict[str, str]:
@@ -335,32 +441,61 @@ def _update_manifest_after_run(
     *,
     status: str,
     command_text: str,
+    environment_policy: dict[str, Any],
     returncode: int | None,
     timed_out: bool,
     metric_values: dict[str, float],
+    run_label: str,
 ) -> None:
     layout = manifest_section(manifest, "layout")
     layout["run"] = "code_task/run"
-    layout["execution_report"] = "code_task/run/execution_report.json"
+    layout[f"{run_label}_execution_report"] = f"code_task/run/{run_label}/execution_report.json"
+    layout["latest_execution_report"] = f"code_task/run/{run_label}/execution_report.json"
     benchmark = manifest_section(manifest, "benchmark")
+    runs = benchmark.get("runs", {})
+    if not isinstance(runs, dict):
+        runs = {}
+    run_record = {
+        "label": run_label,
+        "status": status,
+        "run_at": utcnow_iso(),
+        "execution_report": f"code_task/run/{run_label}/execution_report.json",
+        "stdout": f"code_task/run/{run_label}/stdout.txt",
+        "stderr": f"code_task/run/{run_label}/stderr.txt",
+        "metrics": f"code_task/run/{run_label}/metrics.json",
+        "returncode": returncode,
+        "timed_out": timed_out,
+        "metric_values": metric_values,
+        "environment": _execution_environment_record(environment_policy),
+    }
+    runs[run_label] = run_record
     benchmark.update(
         {
             "command": command_text,
             "executed": True,
+            "latest_label": run_label,
             "last_status": status,
-            "last_run_at": utcnow_iso(),
-            "execution_report": "code_task/run/execution_report.json",
-            "stdout": "code_task/run/stdout.txt",
-            "stderr": "code_task/run/stderr.txt",
-            "metrics": "code_task/run/metrics.json",
+            "last_run_at": run_record["run_at"],
+            "execution_report": run_record["execution_report"],
+            "stdout": run_record["stdout"],
+            "stderr": run_record["stderr"],
+            "metrics": run_record["metrics"],
             "returncode": returncode,
             "timed_out": timed_out,
             "metric_values": metric_values,
+            "runs": runs,
         }
     )
     manifest["layout"] = layout
     manifest["benchmark"] = benchmark
-    if status == "passed":
+    if run_label == "baseline":
+        if status == "passed":
+            manifest["status"] = "baseline_passed"
+        elif status == "blocked_by_validation":
+            manifest["status"] = "baseline_blocked"
+        else:
+            manifest["status"] = "baseline_failed"
+    elif status == "passed":
         manifest["status"] = "benchmark_passed"
     elif status == "blocked_by_validation":
         manifest["status"] = "benchmark_blocked"
