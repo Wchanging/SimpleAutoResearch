@@ -11,6 +11,7 @@ This file records user-visible project changes in reverse chronological order. P
 - Added environment status output to code-task summaries and `simple-ar status`.
 - Added `code-task baseline` to capture pre-patch benchmark results under `code_task/run/baseline/`.
 - Added code-task `--env-mode current|external` and `--python` support for selecting the interpreter used by benchmark commands.
+- Added a lightweight `tiny_digits_mlp_project` code-task example for local ML-style benchmark testing without downloads or GPU requirements.
 
 ### Changed
 

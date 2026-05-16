@@ -1,0 +1,8 @@
+[project]
+name = "tiny-digits-mlp-benchmark"
+version = "0.1.0"
+description = "A lightweight NumPy MLP benchmark for SimpleAutoResearch code-task examples."
+requires-python = ">=3.12"
+dependencies = [
+    "scikit-learn",
+]

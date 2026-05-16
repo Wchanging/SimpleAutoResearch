@@ -87,6 +87,16 @@ uv run simple-ar code-task init \
   --benchmark-command "python -m unittest discover -s tests"
 ```
 
+For a lightweight ML-style benchmark:
+
+```bash
+uv run simple-ar code-task init \
+  --code-root examples/code_tasks/tiny_digits_mlp_project \
+  --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
+  --benchmark-command "python benchmark.py" \
+  --env-mode current
+```
+
 Then generate a patch plan:
 
 ```bash

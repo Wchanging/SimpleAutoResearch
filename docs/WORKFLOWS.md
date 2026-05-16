@@ -42,6 +42,11 @@ Key boundaries:
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
 - Current execution uses workspace isolation plus an explicit interpreter policy. It supports `current` and `external`; managed environment creation is planned later.
 
+Bundled examples:
+
+- `toy_spam_project`: tiny rule-based classifier, useful for patch and failure-analysis smoke tests.
+- `tiny_digits_mlp_project`: lightweight NumPy MLP over scikit-learn's bundled digits dataset, useful for realistic local ML benchmark experiments without GPU or downloads.
+
 ### 3. Research With Experiment
 
 Use this when you want a research idea to become an executable experiment and a result-backed report.

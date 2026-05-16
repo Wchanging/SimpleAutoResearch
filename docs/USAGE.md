@@ -166,6 +166,21 @@ uv run simple-ar code-task init \
   --env-mode current
 ```
 
+Lightweight ML benchmark example:
+
+```bash
+uv run simple-ar code-task init \
+  --code-root examples/code_tasks/tiny_digits_mlp_project \
+  --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
+  --benchmark-command "python benchmark.py" \
+  --env-mode current
+```
+
+This uses scikit-learn's bundled digits dataset and a small NumPy MLP. It does
+not download data, require a GPU, or run a large training job. The benchmark
+prints parseable metrics such as `accuracy`, `macro_f1`, `train_time_sec`, and
+`inference_time_ms`.
+
 Probe the environment and run the unchanged baseline before asking for edits:
 
 ```bash
