@@ -19,6 +19,12 @@ from simple_ar.code_task.comparison import (
     CodeTaskComparisonResult,
     compare_code_task_runs,
 )
+from simple_ar.code_task.config import (
+    CodeTaskConfigError,
+    CodeTaskInitOptions,
+    load_code_task_init_options,
+    parse_metric_direction_arg,
+)
 from simple_ar.code_task.failure import FailureAnalysisResult, analyze_code_task_failure
 from simple_ar.code_task.repair import RepairProposalResult, propose_repair_edits
 from simple_ar.code_task.runner import (
@@ -43,12 +49,16 @@ __all__ = [
     "CodeTaskRunResult",
     "CodeTaskComparisonResult",
     "CodeTaskValidationResult",
+    "CodeTaskConfigError",
+    "CodeTaskInitOptions",
     "apply_patch_edits",
     "analyze_code_task_failure",
     "configure_code_task_environment",
     "compare_code_task_runs",
     "generate_patch_plan",
     "initialize_code_task",
+    "load_code_task_init_options",
+    "parse_metric_direction_arg",
     "probe_code_task_environment",
     "propose_patch_edits",
     "propose_repair_edits",

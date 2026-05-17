@@ -1,6 +1,6 @@
 # Workflows And Artifacts
 
-This document explains what SimpleAutoResearch is doing internally: workflow presets, pipeline stages, stage outputs, and run artifact layout. For concrete commands, see [Usage And Configuration](USAGE.md).
+This document explains what SimpleAutoResearch is doing internally: workflow presets, pipeline stages, stage outputs, and run artifact layout. For concrete commands, see [CLI Reference](CLI_REFERENCE.md); for setup and walkthroughs, see [Usage And Configuration](USAGE.md).
 
 ## Workflow Presets
 
@@ -198,11 +198,11 @@ Important directories:
 
 Important user-facing code-task files:
 
-- `summary.md`: compact status, task, patch, validation, benchmark, and failure-analysis summary.
+- `summary.md`: compact outcome, next-step guidance, task, patch, validation, benchmark, comparison, and failure-analysis summary.
 - `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
 - `run/baseline/execution_report.json`: pre-patch benchmark result.
 - `run/patched/execution_report.json`: post-patch benchmark result.
-- `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist.
+- `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist. Explicit `primary_metric` and `metric_directions` from the manifest are used before heuristic metric-name rules.
 - `patch_plan.md`: human-reviewable plan before edits, including recorded environment, validation, and baseline context when available.
 - `patch.diff`: applied patch for review.
 - `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch.

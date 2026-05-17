@@ -2,6 +2,22 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-17
+
+### Added
+
+- Added code-task metric comparison configuration with `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
+- Added `code-task init --config` for TOML-based initialization, including metric direction settings.
+- Added a tiny-digits MLP code-task config example under `examples/code_tasks/configs/`.
+- Added `docs/CLI_REFERENCE.md` as the dedicated command and option reference.
+
+### Changed
+
+- Comparison artifacts now record configured metric directions and keep unknown metrics as deltas without using them for improved/regressed verdicts.
+- Moved code-task init config parsing out of `cli.py` and into `code_task/config.py`.
+- Slimmed `docs/USAGE.md` so detailed command/config tables live in the CLI reference.
+- Code-task summaries now start with an outcome and next-step section, and `simple-ar status` shows summary, metric config, and comparison deltas.
+
 ## 2026-05-16
 
 ### Added

@@ -94,6 +94,8 @@ uv run simple-ar code-task init \
   --code-root examples/code_tasks/tiny_digits_mlp_project \
   --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
   --benchmark-command "python benchmark.py" \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
   --env-mode current
 ```
 
@@ -106,6 +108,19 @@ uv run simple-ar code-task plan runs/<run-id>
 ```
 
 After human review, continue with `decide-plan`, `propose-edits`, `apply-edits`, `validate`, and `run`. When both baseline and patched benchmark artifacts exist, the run summary includes a conservative before/after comparison.
+
+For benchmark comparison, print numeric metrics as `name: value` lines.
+`--primary-metric` chooses the main quality target, while
+`--metric-direction METRIC=higher|lower|resource|ignore` tells
+SimpleAutoResearch how to interpret each metric. See
+[Usage And Configuration](docs/USAGE.md#metric-comparison-configuration) for
+examples.
+
+For metric-heavy projects, keep those settings in TOML instead:
+
+```bash
+uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+```
 
 ### 3. Research With Experiment
 
@@ -130,6 +145,7 @@ What works today:
 - OpenAI-compatible LLM calls for planning, paper notes, synthesis, report drafting, and code-task patch planning.
 - Literature-first report mode: stop at `synthesize`, then resume `report` to produce a survey-style report without experiment claims.
 - Existing-code code tasks as a standalone workflow: copy a source project, probe the environment, index files, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the copied workspace, validate, run a patched benchmark, and compare before/after metrics.
+- Configurable benchmark metric interpretation for code tasks through `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
 - One embedded 8-stage code-task demo through `--experiment-template llm_code_task_toy_spam`.
 - Citation, report-boundary, runtime-limit, and metric-visibility checks in the final report package.
 
@@ -146,6 +162,7 @@ V2.1 development has started with code-task environment probes, baseline runs, l
 ## Documentation
 
 - [Usage And Configuration](docs/USAGE.md): installation, environment variables, commands, and examples.
+- [CLI Reference](docs/CLI_REFERENCE.md): command groups, options, and code-task init config schema.
 - [Workflows And Artifacts](docs/WORKFLOWS.md): workflow presets, the 8-stage pipeline, and artifact layouts.
 - [Development Guide](docs/DEVELOPMENT.md): how to extend stages, templates, and code-task modules.
 - [Changelog](CHANGELOG.md): chronological development progress.

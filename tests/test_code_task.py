@@ -559,9 +559,195 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(manifest["benchmark"]["comparison"]["verdict"], "improved")
             self.assertEqual(manifest["layout"]["comparison"], "code_task/run/comparison.json")
             summary = read_text(run_dir / "code_task" / "summary.md")
+            self.assertIn("## Result", summary)
+            self.assertIn("Outcome: `improved`", summary)
+            self.assertIn("Next step:", summary)
             self.assertIn("### Comparison", summary)
             self.assertIn("Verdict: `improved`", summary)
             self.assertIn("+0.3", summary)
+
+    def test_comparison_uses_configured_direction_for_custom_metric(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "metric_project"
+            task_file = root / "task.md"
+            _write_metric_project(
+                code_root,
+                value="10.0",
+                metric_name="custom_reward",
+            )
+            write_text(task_file, "# Task\n\nImprove the custom reward metric.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python benchmark.py",
+                primary_metric="custom_reward",
+                metric_directions={"custom_reward": "higher"},
+            )
+
+            baseline = run_code_task_baseline(run_dir, timeout_sec=10)
+            self.assertEqual(baseline.metrics["custom_reward"], 10.0)
+            write_text(
+                run_dir / "code_task" / "workspace" / "metric_value.txt",
+                "12.5\n",
+            )
+            run_code_task_benchmark(run_dir, timeout_sec=10)
+
+            comparison = read_json(run_dir / "code_task" / "run" / "comparison.json")
+            self.assertEqual(comparison["verdict"], "improved")
+            self.assertEqual(comparison["metric_config"]["primary_metric"], "custom_reward")
+            row = comparison["metrics"][0]
+            self.assertEqual(row["name"], "custom_reward")
+            self.assertEqual(row["direction"], "higher_is_better")
+            self.assertEqual(row["direction_source"], "configured")
+            self.assertEqual(row["interpretation"], "improved")
+            self.assertEqual(row["is_primary"], True)
+            summary = read_text(run_dir / "code_task" / "summary.md")
+            self.assertIn("Primary metric: `custom_reward` (higher_is_better)", summary)
+            self.assertIn("Outcome: `improved`", summary)
+
+            status_stdout = io.StringIO()
+            with contextlib.redirect_stdout(status_stdout):
+                main(["status", str(run_dir)])
+            status = status_stdout.getvalue()
+            self.assertIn("- summary:", status)
+            self.assertIn("- primary metric: custom_reward", status)
+            self.assertIn("- comparison: improved", status)
+            self.assertIn("custom_reward=+2.5", status)
+
+    def test_unknown_metric_is_recorded_but_not_overinterpreted(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "metric_project"
+            task_file = root / "task.md"
+            _write_metric_project(code_root, value="10.0", metric_name="custom_reward")
+            write_text(task_file, "# Task\n\nImprove an unknown custom metric.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python benchmark.py",
+            )
+
+            run_code_task_baseline(run_dir, timeout_sec=10)
+            write_text(
+                run_dir / "code_task" / "workspace" / "metric_value.txt",
+                "12.5\n",
+            )
+            run_code_task_benchmark(run_dir, timeout_sec=10)
+
+            comparison = read_json(run_dir / "code_task" / "run" / "comparison.json")
+            self.assertEqual(comparison["verdict"], "inconclusive")
+            self.assertEqual(comparison["deltas"]["custom_reward"], 2.5)
+            self.assertEqual(comparison["metrics"][0]["direction"], "unknown")
+            self.assertEqual(comparison["metrics"][0]["interpretation"], "changed")
+
+    def test_code_task_init_cli_records_metric_config(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "metric_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_metric_project(code_root, value="0.50", metric_name="macro_f1")
+            write_text(task_file, "# Task\n\nImprove macro F1.\n")
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                        "--benchmark-command",
+                        "python benchmark.py",
+                        "--primary-metric",
+                        "macro_f1",
+                        "--metric-direction",
+                        "macro_f1=higher",
+                        "--metric-direction",
+                        "inference_time_ms=resource",
+                    ]
+                )
+
+            run_dir = next(output_root.iterdir())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["benchmark"]["primary_metric"], "macro_f1")
+            self.assertEqual(
+                manifest["benchmark"]["metric_directions"]["macro_f1"],
+                "higher_is_better",
+            )
+            self.assertEqual(
+                manifest["benchmark"]["metric_directions"]["inference_time_ms"],
+                "resource",
+            )
+            output = stdout.getvalue()
+            self.assertIn("Primary metric: macro_f1", output)
+            self.assertIn("Metric directions:", output)
+
+    def test_code_task_init_cli_reads_toml_config(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "metric_project"
+            task_file = root / "task.md"
+            output_root = root / "configured_runs"
+            config_file = root / "code_task.toml"
+            _write_metric_project(code_root, value="10.0", metric_name="custom_reward")
+            write_text(task_file, "# Task\n\nImprove configured reward.\n")
+            write_text(
+                config_file,
+                (
+                    "[code_task]\n"
+                    f'code_root = "{code_root.as_posix()}"\n'
+                    f'task_file = "{task_file.as_posix()}"\n'
+                    f'output_root = "{output_root.as_posix()}"\n'
+                    'name = "configured-metric-task"\n'
+                    "\n"
+                    "[benchmark]\n"
+                    'command = "python benchmark.py"\n'
+                    'primary_metric = "custom_reward"\n'
+                    "\n"
+                    "[benchmark.metric_directions]\n"
+                    'custom_reward = "higher"\n'
+                    'latency_ms = "resource"\n'
+                    "\n"
+                    "[environment]\n"
+                    'mode = "current"\n'
+                    "\n"
+                    "[safety]\n"
+                    "max_file_bytes = 10000\n"
+                ),
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["code-task", "init", "--config", str(config_file)])
+
+            run_dir = next(output_root.iterdir())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["benchmark"]["command"], "python benchmark.py")
+            self.assertEqual(manifest["benchmark"]["primary_metric"], "custom_reward")
+            self.assertEqual(
+                manifest["benchmark"]["metric_directions"]["custom_reward"],
+                "higher_is_better",
+            )
+            self.assertEqual(
+                manifest["benchmark"]["metric_directions"]["latency_ms"],
+                "resource",
+            )
+            self.assertEqual(manifest["copy"]["max_file_bytes"], 10000)
+            self.assertIn("Config:", stdout.getvalue())
 
     def test_external_env_mode_records_python_policy_and_uses_it(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -753,14 +939,19 @@ def _write_toy_project(code_root: Path) -> None:
     )
 
 
-def _write_metric_project(code_root: Path, *, value: str) -> None:
+def _write_metric_project(
+    code_root: Path,
+    *,
+    value: str,
+    metric_name: str = "accuracy",
+) -> None:
     write_text(code_root / "metric_value.txt", value + "\n")
     write_text(
         code_root / "benchmark.py",
         (
             "from pathlib import Path\n\n"
             "value = float(Path('metric_value.txt').read_text().strip())\n"
-            "print(f'accuracy: {value:.6f}')\n"
+            f"print(f'{metric_name}: {{value:.6f}}')\n"
             "print('train_time_sec: 0.010000')\n"
         ),
     )

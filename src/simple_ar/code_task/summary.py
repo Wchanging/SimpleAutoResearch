@@ -86,6 +86,19 @@ def _render_summary(
         "",
         f"Status: `{manifest.get('status', 'unknown')}`",
         "",
+        "## Result",
+        "",
+        _result_overview(
+            manifest=manifest,
+            environment=environment,
+            validation=validation,
+            baseline_execution=baseline_execution,
+            patched_execution=patched_execution,
+            comparison=comparison,
+            failure=failure,
+            changed_files=changed_files,
+        ),
+        "",
         "## Task",
         "",
         _clip(_strip_heading(task), max_chars=1200) or "No task text was recorded.",
@@ -141,6 +154,137 @@ def _render_summary(
         artifact_lines.insert(-1, "- Comparison: `code_task/run/comparison.json`")
     lines.extend(["", "## Artifacts", "", *artifact_lines, ""])
     return "\n".join(lines)
+
+
+def _result_overview(
+    *,
+    manifest: dict[str, Any],
+    environment: dict[str, Any],
+    validation: dict[str, Any],
+    baseline_execution: dict[str, Any],
+    patched_execution: dict[str, Any],
+    comparison: dict[str, Any],
+    failure: str,
+    changed_files: list[str],
+) -> str:
+    lines = [
+        f"- Outcome: {_outcome_text(baseline_execution, patched_execution, comparison, validation)}",
+        f"- Next step: {_next_step(manifest, environment, validation, baseline_execution, patched_execution, comparison, failure)}",
+    ]
+    primary = _primary_metric_text(manifest, comparison)
+    if primary:
+        lines.append(f"- Primary metric: {primary}")
+    if baseline_execution:
+        lines.append(f"- Baseline status: `{baseline_execution.get('status', 'unknown')}`")
+    if patched_execution:
+        lines.append(f"- Patched status: `{patched_execution.get('status', 'unknown')}`")
+    if changed_files:
+        lines.append(f"- Changed files: `{len(changed_files)}`")
+    if comparison:
+        reasons = comparison.get("reasons", [])
+        if isinstance(reasons, list) and reasons:
+            lines.append("- Evidence: " + "; ".join(str(item) for item in reasons[:3]))
+    return "\n".join(lines)
+
+
+def _outcome_text(
+    baseline_execution: dict[str, Any],
+    patched_execution: dict[str, Any],
+    comparison: dict[str, Any],
+    validation: dict[str, Any],
+) -> str:
+    if comparison:
+        return f"`{comparison.get('verdict', 'inconclusive')}` from baseline-vs-patched comparison."
+    if patched_execution:
+        return f"`{patched_execution.get('status', 'unknown')}` patched benchmark run; no comparison is available yet."
+    if validation and validation.get("status") == "failed":
+        return "`validation_failed`; benchmark should wait until errors are reviewed."
+    if baseline_execution:
+        return f"`{baseline_execution.get('status', 'unknown')}` baseline run; patch has not been benchmarked yet."
+    return "`not_complete`; no benchmark evidence has been collected yet."
+
+
+def _next_step(
+    manifest: dict[str, Any],
+    environment: dict[str, Any],
+    validation: dict[str, Any],
+    baseline_execution: dict[str, Any],
+    patched_execution: dict[str, Any],
+    comparison: dict[str, Any],
+    failure: str,
+) -> str:
+    plan = manifest.get("plan", {})
+    patch = manifest.get("patch", {})
+    plan_status = plan.get("status", "not_started") if isinstance(plan, dict) else "not_started"
+    patch_status = patch.get("status", "not_started") if isinstance(patch, dict) else "not_started"
+    validation_status = validation.get("status") if validation else ""
+    if not environment:
+        return "Run `simple-ar code-task probe <run-dir>` to record environment signals."
+    if not baseline_execution:
+        return "Run `simple-ar code-task baseline <run-dir>` before asking for edits."
+    if plan_status in {"not_started", "unknown"}:
+        return "Run `simple-ar code-task plan <run-dir>` to create a reviewable patch plan."
+    if plan_status == "pending_approval":
+        return "Review `code_task/patch_plan.md`, then run `simple-ar code-task decide-plan <run-dir> --decision approve|revise|reject`."
+    if plan_status == "revision_requested":
+        return "Revise the task or regenerate the patch plan with `simple-ar code-task plan <run-dir> --force`."
+    if plan_status == "rejected":
+        return "Stop this run or revise the task before generating edits."
+    if patch_status in {"not_started", "unknown"}:
+        return "Run `simple-ar code-task propose-edits <run-dir>` after plan approval."
+    if patch_status == "edits_proposed":
+        return "Review `code_task/meta/proposed_edits.json`, then run `simple-ar code-task apply-edits <run-dir>`."
+    if patch_status == "applied" and not validation:
+        return "Run `simple-ar code-task validate <run-dir>` before the patched benchmark."
+    if validation_status == "failed":
+        return "Review `code_task/meta/validation_report.json`; fix issues or request a repair proposal."
+    if not patched_execution:
+        return "Run `simple-ar code-task run <run-dir>` to benchmark the patched workspace."
+    patched_status = str(patched_execution.get("status", "unknown"))
+    if patched_status != "passed":
+        if failure:
+            return "Review failure analysis and consider `simple-ar code-task repair <run-dir>`."
+        return "Run `simple-ar code-task analyze-failure <run-dir>` to summarize the benchmark failure."
+    if comparison:
+        verdict = str(comparison.get("verdict", "inconclusive"))
+        if verdict == "improved":
+            return "Review `summary.md`, `patch.diff`, and `comparison.json`; apply the patch to the original project only after manual review."
+        if verdict in {"regressed", "mixed"}:
+            return "Inspect `comparison.json` and consider revising or repairing the patch."
+        return "Inspect `comparison.json`; add metric directions or a stronger benchmark if the verdict is inconclusive."
+    return "Run the baseline or patched benchmark again if comparison artifacts are missing."
+
+
+def _primary_metric_text(manifest: dict[str, Any], comparison: dict[str, Any]) -> str:
+    metric_config = comparison.get("metric_config", {}) if isinstance(comparison, dict) else {}
+    primary = ""
+    if isinstance(metric_config, dict):
+        primary = str(metric_config.get("primary_metric") or "").strip()
+    benchmark = manifest.get("benchmark", {})
+    if not primary and isinstance(benchmark, dict):
+        primary = str(benchmark.get("primary_metric") or "").strip()
+    if not primary:
+        return ""
+    direction = _configured_direction_text(primary, metric_config, benchmark)
+    suffix = f" ({direction})" if direction else ""
+    return f"`{primary}`{suffix}"
+
+
+def _configured_direction_text(
+    metric_name: str,
+    metric_config: dict[str, Any],
+    benchmark: object,
+) -> str:
+    for source in (
+        metric_config.get("metric_directions") if isinstance(metric_config, dict) else {},
+        benchmark.get("metric_directions") if isinstance(benchmark, dict) else {},
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if str(key).lower() == metric_name.lower():
+                return str(value)
+    return ""
 
 
 def _environment_summary(environment: dict[str, Any], manifest: dict[str, Any]) -> str:
@@ -321,18 +465,21 @@ def _comparison_summary(comparison: dict[str, Any]) -> str:
     rows = comparison.get("metrics", [])
     if isinstance(rows, list) and rows:
         lines.append("")
-        lines.append("| Metric | Baseline | Patched | Delta | Direction |")
-        lines.append("| --- | ---: | ---: | ---: | --- |")
+        lines.append("| Metric | Baseline | Patched | Delta | Interpretation | Direction |")
+        lines.append("| --- | ---: | ---: | ---: | --- | --- |")
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            direction = str(row.get("direction", "unknown"))
+            source = str(row.get("direction_source", "none"))
             lines.append(
                 "| "
                 f"`{row.get('name', '')}` | "
                 f"{_number_text(row.get('baseline'))} | "
                 f"{_number_text(row.get('patched'))} | "
                 f"{_delta_text(row.get('delta'))} | "
-                f"`{row.get('interpretation', 'changed')}` |"
+                f"`{row.get('interpretation', 'changed')}` | "
+                f"`{direction}` ({source}) |"
             )
     return "\n".join(lines)
 

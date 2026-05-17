@@ -1,0 +1,22 @@
+[code_task]
+code_root = "examples/code_tasks/tiny_digits_mlp_project"
+task_file = "examples/code_tasks/tasks/improve_tiny_digits_mlp.md"
+output_root = "runs"
+name = "tiny-digits-mlp"
+
+[benchmark]
+command = "python benchmark.py"
+primary_metric = "accuracy"
+
+[benchmark.metric_directions]
+accuracy = "higher"
+macro_f1 = "higher"
+train_time_sec = "resource"
+inference_time_ms = "resource"
+params = "resource"
+
+[environment]
+mode = "current"
+
+[safety]
+max_file_bytes = 2000000

@@ -20,6 +20,11 @@ from simple_ar.code_task import (
     run_code_task_benchmark,
     validate_code_task,
 )
+from simple_ar.code_task.config import (
+    CodeTaskConfigError,
+    load_code_task_init_options,
+    parse_metric_direction_arg,
+)
 from simple_ar.pipeline import Context, PipelineRunner
 from simple_ar.reporting import ConsoleReporter
 from simple_ar.retrieval.index import build_artifact_index
@@ -96,16 +101,40 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="Copy a codebase into a code-task workspace and build a code index.",
     )
-    code_task_init.add_argument("--code-root", required=True)
-    code_task_init.add_argument("--task-file", required=True)
-    code_task_init.add_argument("--output-root", default="runs")
+    code_task_init.add_argument(
+        "--config",
+        default=None,
+        help="Optional TOML config file for code-task init settings.",
+    )
+    code_task_init.add_argument("--code-root", default=None)
+    code_task_init.add_argument("--task-file", default=None)
+    code_task_init.add_argument("--output-root", default=None)
     code_task_init.add_argument("--name", default=None)
     code_task_init.add_argument("--benchmark-command", default=None)
+    code_task_init.add_argument(
+        "--primary-metric",
+        default=None,
+        help=(
+            "Primary benchmark metric for before/after verdicts, for example "
+            "`accuracy` or `macro_f1`."
+        ),
+    )
+    code_task_init.add_argument(
+        "--metric-direction",
+        action="append",
+        default=[],
+        type=_metric_direction_arg,
+        metavar="METRIC=DIRECTION",
+        help=(
+            "Metric direction for comparison. Direction aliases include "
+            "higher, lower, resource, and ignore. May be repeated."
+        ),
+    )
     _add_code_task_env_args(code_task_init)
     code_task_init.add_argument(
         "--max-file-bytes",
         type=int,
-        default=2_000_000,
+        default=None,
         help="Maximum file size copied into the workspace. Use 0 to disable.",
     )
     code_task_probe = code_task_subparsers.add_parser(
@@ -243,6 +272,14 @@ def _add_code_task_env_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Python executable path or command name for --env-mode external.",
     )
+
+
+def _metric_direction_arg(value: str) -> tuple[str, str]:
+    """Parse ``--metric-direction metric=direction`` arguments."""
+    try:
+        return parse_metric_direction_arg(value)
+    except CodeTaskConfigError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -520,7 +557,7 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
     layout = manifest.get("layout", {})
     if isinstance(layout, dict):
         print("Layout:")
-        for key in ("task", "workspace", "meta", "codebase_index"):
+        for key in ("summary", "task", "workspace", "meta", "codebase_index"):
             value = layout.get(key)
             if value:
                 print(f"- {key}: {run_dir / str(value)}")
@@ -587,6 +624,15 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
     if isinstance(benchmark, dict) and benchmark.get("command"):
         print("Benchmark:")
         print(f"- command: {benchmark.get('command')}")
+        if benchmark.get("primary_metric"):
+            print(f"- primary metric: {benchmark.get('primary_metric')}")
+        metric_directions = benchmark.get("metric_directions", {})
+        if isinstance(metric_directions, dict) and metric_directions:
+            direction_text = ", ".join(
+                f"{name}={direction}"
+                for name, direction in sorted(metric_directions.items())
+            )
+            print(f"- metric directions: {direction_text}")
         print(f"- executed: {benchmark.get('executed', False)}")
         if benchmark.get("last_status"):
             print(f"- last status: {benchmark.get('last_status')}")
@@ -601,6 +647,13 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
         comparison = benchmark.get("comparison", {})
         if isinstance(comparison, dict) and comparison:
             print(f"- comparison: {comparison.get('verdict', 'inconclusive')}")
+            deltas = comparison.get("deltas", {})
+            if isinstance(deltas, dict) and deltas:
+                delta_text = ", ".join(
+                    f"{name}={_format_status_number(value)}"
+                    for name, value in sorted(deltas.items())[:5]
+                )
+                print(f"- comparison deltas: {delta_text}")
             if comparison.get("path"):
                 print(f"- comparison report: {run_dir / str(comparison.get('path'))}")
         if benchmark.get("execution_report"):
@@ -686,18 +739,36 @@ def _print_artifact_search(
 
 def _print_code_task_init(args: argparse.Namespace) -> None:
     """Initialize a code-task run and print the resulting workspace summary."""
-    code_root = Path(args.code_root)
-    task_file = Path(args.task_file)
-    name = args.name or f"code-task-{code_root.resolve().name}"
-    run_dir = _new_run_dir(Path(args.output_root), name)
+    try:
+        options = load_code_task_init_options(
+            config_path=args.config,
+            code_root=args.code_root,
+            task_file=args.task_file,
+            output_root=args.output_root,
+            name=args.name,
+            benchmark_command=args.benchmark_command,
+            max_file_bytes=args.max_file_bytes,
+            env_mode=args.env_mode,
+            python_executable=args.python_executable,
+            primary_metric=args.primary_metric,
+            metric_directions=args.metric_direction or [],
+        )
+    except CodeTaskConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+    code_root = Path(options.code_root)
+    task_file = Path(options.task_file)
+    name = options.name or f"code-task-{code_root.resolve().name}"
+    run_dir = _new_run_dir(Path(options.output_root), name)
     result = initialize_code_task(
         run_dir=run_dir,
         code_root=code_root,
         task_file=task_file,
-        benchmark_command=args.benchmark_command,
-        max_file_bytes=args.max_file_bytes,
-        env_mode=args.env_mode or "current",
-        python_executable=args.python_executable,
+        benchmark_command=options.benchmark_command,
+        max_file_bytes=options.max_file_bytes,
+        env_mode=options.env_mode,
+        python_executable=options.python_executable,
+        primary_metric=options.primary_metric,
+        metric_directions=options.metric_directions,
     )
     project = result.codebase_index.get("project", {})
     print(f"Code task run: {result.run_dir}")
@@ -715,8 +786,16 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
         f"{project.get('python_file_count', 0)} Python file(s), "
         f"{project.get('test_file_count', 0)} test file(s)"
     )
-    if args.benchmark_command:
-        print(f"Benchmark command recorded: {args.benchmark_command}")
+    if options.config_path:
+        print(f"Config: {options.config_path}")
+    if options.benchmark_command:
+        print(f"Benchmark command recorded: {options.benchmark_command}")
+    if options.primary_metric:
+        print(f"Primary metric: {options.primary_metric}")
+    if options.metric_directions:
+        print("Metric directions:")
+        for name, direction in options.metric_directions.items():
+            print(f"- {name}: {direction}")
     print(f"Environment mode: {result.environment_policy.get('mode', 'current')}")
     print(f"Python executable: {result.environment_policy.get('python_executable', '')}")
 
@@ -928,6 +1007,14 @@ def _format_bytes(value: int) -> str:
     if value < 1024 * 1024:
         return f"{value / 1024:.1f} KiB"
     return f"{value / (1024 * 1024):.1f} MiB"
+
+
+def _format_status_number(value: object) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        sign = "+" if number > 0 else ""
+        return f"{sign}{number:.6g}"
+    return str(value)
 
 
 def _stage_status(item: dict[str, object]) -> str:

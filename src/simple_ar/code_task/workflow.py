@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import write_json, write_text
+from simple_ar.code_task.comparison import normalize_metric_directions
 from simple_ar.code_task.environment import build_code_task_environment_policy
 from simple_ar.code_task.index import build_codebase_index
 from simple_ar.code_task.workspace import CopyReport, copy_code_workspace
@@ -47,6 +48,8 @@ def initialize_code_task(
     max_file_bytes: int = 2_000_000,
     env_mode: str = "current",
     python_executable: str | Path | None = None,
+    primary_metric: str | None = None,
+    metric_directions: dict[str, str] | None = None,
 ) -> CodeTaskInitResult:
     """Initialize a local code-task run without modifying the source project.
 
@@ -62,6 +65,11 @@ def initialize_code_task(
             ``external``.
         python_executable: External interpreter path or executable name when
             ``env_mode`` is ``external``.
+        primary_metric: Optional primary metric used for conservative
+            baseline-vs-patched verdicts.
+        metric_directions: Optional mapping from metric name to direction.
+            Supported normalized directions are ``higher_is_better``,
+            ``lower_is_better``, ``resource``, and ``ignore``.
 
     Returns:
         Paths and metadata for the initialized code-task run.
@@ -80,6 +88,8 @@ def initialize_code_task(
         raise FileNotFoundError(f"Task file does not exist: {task_source}")
     if not task_source.is_file():
         raise FileNotFoundError(f"Task file is not a regular file: {task_source}")
+    primary_metric_value = (primary_metric or "").strip()
+    normalized_metric_directions = normalize_metric_directions(metric_directions)
 
     task_dir = root / "code_task"
     workspace_dir = task_dir / "workspace"
@@ -107,6 +117,8 @@ def initialize_code_task(
             code_root=source_root,
             task_file=task_source,
             benchmark_command=benchmark_command,
+            primary_metric=primary_metric_value,
+            metric_directions=normalized_metric_directions,
             max_file_bytes=max_file_bytes,
             copy_report=copy_report,
             codebase_index=codebase_index,
@@ -133,12 +145,16 @@ def _manifest(
     code_root: Path,
     task_file: Path,
     benchmark_command: str | None,
+    primary_metric: str | None,
+    metric_directions: dict[str, str] | None,
     max_file_bytes: int,
     copy_report: CopyReport,
     codebase_index: dict[str, Any],
     environment_policy: dict[str, Any],
 ) -> dict[str, Any]:
     project = codebase_index.get("project", {})
+    primary = (primary_metric or "").strip()
+    directions = dict(metric_directions or {})
     return {
         "schema_version": 1,
         "workflow": "code_task",
@@ -172,6 +188,8 @@ def _manifest(
         "benchmark": {
             "command": benchmark_command,
             "executed": False,
+            "primary_metric": primary,
+            "metric_directions": directions,
         },
     }
 

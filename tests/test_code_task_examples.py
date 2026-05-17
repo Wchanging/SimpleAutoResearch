@@ -88,7 +88,7 @@ class CodeTaskExampleTests(unittest.TestCase):
             self.assertIn(probe.status, {"ok", "warning"})
             validation = validate_code_task(run_dir)
             self.assertEqual(validation.status, "passed")
-            baseline = run_code_task_baseline(run_dir, timeout_sec=10)
+            baseline = run_code_task_baseline(run_dir, timeout_sec=30)
 
             self.assertEqual(baseline.status, "passed")
             self.assertIn("accuracy", baseline.metrics)

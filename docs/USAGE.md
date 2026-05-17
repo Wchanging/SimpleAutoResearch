@@ -132,31 +132,22 @@ uv run simple-ar status runs/<run-id>
 
 ## Retrieval And Artifact Tools
 
-Build a local artifact index:
+Use these when you want to inspect or search files produced by a run:
 
 ```bash
 uv run simple-ar inspect runs/<run-id>
-```
-
-Search run artifacts with lexical retrieval:
-
-```bash
 uv run simple-ar search-artifacts runs/<run-id> "accuracy"
-uv run simple-ar search-artifacts runs/<run-id> "timeout" --include-operational
-```
-
-Retrieval controls during normal runs:
-
-```bash
 uv run simple-ar run --topic "toy topic" --to-stage report --retrieval-top-k 4
 uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 ```
+
+See [CLI Reference](CLI_REFERENCE.md#artifact-tools) for option details.
 
 ## Code Task Workflow
 
 The code-task workflow copies a source project into an isolated workspace and never mutates the original codebase. It is intentionally step-by-step so each stage can be reviewed.
 
-Initialize a code task from an existing codebase:
+Initialize from explicit CLI flags:
 
 ```bash
 uv run simple-ar code-task init \
@@ -166,20 +157,23 @@ uv run simple-ar code-task init \
   --env-mode current
 ```
 
-Lightweight ML benchmark example:
+Or initialize from a TOML config when there are several benchmark metrics or
+environment settings:
 
 ```bash
-uv run simple-ar code-task init \
-  --code-root examples/code_tasks/tiny_digits_mlp_project \
-  --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
-  --benchmark-command "python benchmark.py" \
-  --env-mode current
+uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-This uses scikit-learn's bundled digits dataset and a small NumPy MLP. It does
-not download data, require a GPU, or run a large training job. The benchmark
-prints parseable metrics such as `accuracy`, `macro_f1`, `train_time_sec`, and
-`inference_time_ms`.
+`init` creates a new `runs/<run-id>/` directory, copies the source project into
+`code_task/workspace/`, writes the task to `code_task/task.md`, builds
+`code_task/meta/codebase_index.json`, and records the benchmark/environment
+policy in `manifest.json`. It does not run code, call the LLM, or modify the
+original source project.
+
+Benchmarks should print numeric metric lines as `name: value`. Custom metric
+names work when you declare their direction with `--metric-direction` or the
+TOML config. See [CLI Reference](CLI_REFERENCE.md#init) for the full option
+table and [CLI Reference](CLI_REFERENCE.md#init-config) for the config schema.
 
 Probe the environment and run the unchanged baseline before asking for edits:
 
@@ -190,31 +184,10 @@ uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 
 `probe` writes `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals. It does not install dependencies or run project code.
 
-`baseline` stores the pre-patch benchmark under `code_task/run/baseline/`.
-
-Current environment boundary:
-
-- Code-task runs execute inside the copied workspace, not the original source directory.
-- `--env-mode current` uses the active SimpleAutoResearch Python environment.
-- `--env-mode external --python path/to/python` uses a user-provided interpreter.
-- Dependency installation is intentionally not automatic, so project-specific packages should be prepared by the user for now.
-- The planned direction is to add managed modes such as `project-venv`, `shared-env-cache`, and eventually `docker`.
-
-Example with an existing virtual environment:
-
-```bash
-uv run simple-ar code-task baseline runs/<run-id> \
-  --env-mode external \
-  --python path/to/.venv/bin/python
-```
-
-On Windows, the interpreter usually looks like:
-
-```powershell
-uv run simple-ar code-task baseline runs/<run-id> `
-  --env-mode external `
-  --python path\to\.venv\Scripts\python.exe
-```
+`baseline` runs the recorded benchmark command inside `code_task/workspace/`
+before any patch is applied. It stores `execution_report.json`, `stdout.txt`,
+`stderr.txt`, and parsed `metrics.json` under `code_task/run/baseline/`, and
+updates `code_task/summary.md`.
 
 Generate a patch plan (LLM optional; offline mode writes a conservative plan):
 
@@ -226,6 +199,11 @@ If `probe`, `validate`, or `baseline` artifacts already exist, the generated
 plan includes that run context so the model and reviewer can reason from
 recorded environment and benchmark evidence instead of starting cold.
 
+`plan` writes `code_task/patch_plan.md`, updates `manifest.json`, and records
+selected context files. It does not change source files. In LLM mode it records
+token usage under `code_task/meta/llm_usage.jsonl`; with `--no-llm` it writes a
+conservative offline plan.
+
 Review the plan, then approve it:
 
 ```bash
@@ -234,17 +212,31 @@ uv run simple-ar code-task decide-plan runs/<run-id> \
   --note "small scoped edit"
 ```
 
+`decide-plan` appends a human decision to
+`code_task/meta/hitl_decisions.jsonl` and updates the plan status in
+`manifest.json`. Approval is the normal gate before model-generated edits can
+be applied.
+
 Ask the model for controlled edit proposals (offline mode writes an empty proposal):
 
 ```bash
 uv run simple-ar code-task propose-edits runs/<run-id>
 ```
 
+`propose-edits` writes `code_task/meta/proposed_edits.json`. The proposal uses
+controlled old/new text replacements and is meant for review. It does not edit
+the workspace by itself.
+
 Apply proposed edits inside the copied workspace:
 
 ```bash
 uv run simple-ar code-task apply-edits runs/<run-id>
 ```
+
+`apply-edits` applies the reviewed proposal only inside
+`code_task/workspace/`, writes a human-readable `code_task/patch.diff`, writes
+`code_task/meta/applied_edits.json` with changed files and hashes, and updates
+the codebase index. It still never mutates the original `--code-root`.
 
 Validate and run the patched benchmark:
 
@@ -253,9 +245,14 @@ uv run simple-ar code-task validate runs/<run-id>
 uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
+`validate` writes `code_task/meta/validation_report.json` with syntax errors,
+risky imports/calls, missing import warnings, and file-size warnings. It is a
+static check; it does not run the benchmark.
+
 `run` stores the patched benchmark under `code_task/run/patched/`.
 When both baseline and patched artifacts exist, SimpleAutoResearch also writes
-`code_task/run/comparison.json` and includes metric deltas in `summary.md`.
+`code_task/run/comparison.json` and includes outcome, next-step guidance, and
+metric deltas in `code_task/summary.md`.
 
 Analyze failures and request a bounded repair proposal:
 
@@ -264,56 +261,27 @@ uv run simple-ar code-task analyze-failure runs/<run-id>
 uv run simple-ar code-task repair runs/<run-id>
 ```
 
-Repair proposals are not applied automatically. Apply a reviewed repair proposal explicitly:
+`analyze-failure` reads the latest failed validation/benchmark evidence and
+writes a compact diagnosis, usually under `code_task/run/patched/` or the
+current run label. It is deterministic and does not call the LLM.
+
+`repair` uses the failure analysis, latest patch, task, and selected source
+context to write a bounded repair proposal under
+`code_task/repairs/repair-001/proposed_edits.json`. It does not apply the
+repair automatically.
+
+Apply a reviewed repair proposal explicitly:
 
 ```bash
 uv run simple-ar code-task apply-edits runs/<run-id> \
   --edits-file runs/<run-id>/code_task/repairs/repair-001/proposed_edits.json
 ```
 
+Detailed code-task command options live in [CLI Reference](CLI_REFERENCE.md#code-task-commands).
+
 ## Command Design
 
-The current CLI exposes primitive steps because this project is still a learning implementation. That makes each step inspectable and testable, but it can become verbose.
-
-Current boundary: the bundled `llm_code_task_toy_spam` template is the only code-task path that is fully embedded in the 8-stage pipeline. For arbitrary user projects, use the standalone `code-task` commands so the plan, approval, edit, validation, and benchmark steps remain reviewable.
-
-The planned direction is to keep primitive commands while adding config-driven convenience presets later:
-
-```bash
-uv run simple-ar survey --config simple_ar.toml
-uv run simple-ar code-task execute --config simple_ar_code_task.toml
-uv run simple-ar experiment --config simple_ar_experiment.toml
-```
-
-## Future Config Shape
-
-A future code-task config may look like this:
-
-```toml
-[code_task]
-code_root = "examples/code_tasks/toy_spam_project"
-task_file = "examples/code_tasks/tasks/improve_toy_spam_baseline.md"
-output_root = "runs"
-name = "toy-spam"
-
-[benchmark]
-command = "python -m unittest discover -s tests"
-timeout_sec = 60
-
-[environment]
-mode = "current"  # current | external; future: project-venv | shared-env-cache | docker
-python = ""       # optional external interpreter path
-allow_dependency_install = false
-
-[llm]
-model = "gpt-4o-mini"
-use_llm = true
-
-[safety]
-require_plan_approval = true
-strict_validation = false
-max_file_bytes = 2000000
-repair_rounds = 1
-```
-
-The config layer should shorten common workflows without hiding approval gates, artifact paths, validation results, or benchmark evidence.
+The CLI keeps primitive commands because this project is still a learning
+implementation. Each step is inspectable, testable, and reviewable. Config files
+are used to shorten setup-heavy commands, not to hide approval gates, artifact
+paths, validation results, baseline runs, or benchmark evidence.

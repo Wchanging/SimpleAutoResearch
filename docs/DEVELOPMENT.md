@@ -1,6 +1,6 @@
 # Development Guide
 
-This document is for contributors who want to extend SimpleAutoResearch. For usage commands, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
+This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
 
 ## Project Shape
 
@@ -53,6 +53,7 @@ through `07-run` instead of silently mutating source code during reporting.
 The code-task workflow is split into small modules:
 
 - `workspace.py`: safe source copy.
+- `config.py`: TOML config and CLI override resolution for code-task init.
 - `environment.py`: environment observation and execution-interpreter policy.
 - `index.py`: codebase inventory and Python AST summaries.
 - `planning.py`: patch planning and HITL decisions.
@@ -72,6 +73,12 @@ When adding a new code-task feature:
 - keep CLI steps explicit until the underlying behavior is stable;
 - add tests that exercise both the library function and CLI path when useful;
 - prefer small composable functions over a single agent loop.
+
+Metric comparison should stay conservative. Unknown numeric metrics may be
+recorded as deltas, but they should not decide an improved/regressed verdict
+unless their direction is known from explicit manifest configuration or a
+simple local heuristic. Add new default heuristics only when the metric naming
+convention is common enough to be unsurprising.
 
 ### Code-Task Environment Policy
 
@@ -109,7 +116,8 @@ environment artifact.
 Use the docs this way:
 
 - `README.md`: project entry, setup, quickstart, workflow overview, links.
-- `docs/USAGE.md`: commands, env configuration, examples, future config shape.
+- `docs/USAGE.md`: installation, env configuration, and workflow walkthroughs.
+- `docs/CLI_REFERENCE.md`: command groups, option tables, and config schema.
 - `docs/WORKFLOWS.md`: what each workflow/stage does and what files it produces.
 - `docs/DEVELOPMENT.md`: contributor guidance.
 - `CHANGELOG.md`: chronological development progress.
