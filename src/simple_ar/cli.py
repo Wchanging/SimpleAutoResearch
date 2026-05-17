@@ -30,6 +30,7 @@ from simple_ar.pipeline import Context, PipelineRunner
 from simple_ar.reporting import ConsoleReporter
 from simple_ar.retrieval.index import build_artifact_index
 from simple_ar.retrieval.search import search_artifacts
+from simple_ar.run_config import RunConfigError, load_pipeline_run_config
 from simple_ar.stage_handlers import HANDLERS
 from simple_ar.stages import Stage
 
@@ -39,45 +40,49 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Start a new research run.")
-    run_parser.add_argument("--topic", required=True)
-    run_parser.add_argument("--output-root", default="runs")
-    run_parser.add_argument("--from-stage", default="plan")
-    run_parser.add_argument("--to-stage", default="report")
+    run_parser.add_argument("--config", default=None, help="Optional TOML config for the 8-stage run.")
+    run_parser.add_argument("--topic", default=None)
+    run_parser.add_argument("--output-root", default=None)
+    run_parser.add_argument("--from-stage", default=None)
+    run_parser.add_argument("--to-stage", default=None)
     run_parser.add_argument("--model", default=None)
-    run_parser.add_argument("--llm-workers", type=int, default=4)
-    run_parser.add_argument("--max-papers", type=int, default=5)
+    run_parser.add_argument("--llm-workers", type=int, default=None)
+    run_parser.add_argument("--max-papers", type=int, default=None)
     run_parser.add_argument("--search-query", default=None)
-    run_parser.add_argument("--experiment-template", default="toy_text_classification")
-    run_parser.add_argument("--experiment-timeout", type=int, default=30)
-    run_parser.add_argument("--no-llm", action="store_true")
-    run_parser.add_argument("--offline-search", action="store_true")
-    run_parser.add_argument("--allow-fixture-fallback", action="store_true")
-    run_parser.add_argument("--strict-search", action="store_true")
-    run_parser.add_argument("--no-retrieval", action="store_true")
-    run_parser.add_argument("--retrieval-top-k", type=int, default=4)
+    run_parser.add_argument("--experiment-template", default=None)
+    run_parser.add_argument("--experiment-timeout", type=int, default=None)
+    _add_pipeline_code_task_args(run_parser)
+    run_parser.add_argument("--no-llm", action="store_true", default=None)
+    run_parser.add_argument("--offline-search", action="store_true", default=None)
+    run_parser.add_argument("--allow-fixture-fallback", action="store_true", default=None)
+    run_parser.add_argument("--strict-search", action="store_true", default=None)
+    run_parser.add_argument("--no-retrieval", action="store_true", default=None)
+    run_parser.add_argument("--retrieval-top-k", type=int, default=None)
     run_parser.add_argument(
         "--report-mode",
         choices=("auto", "research_only", "experiment"),
-        default="auto",
+        default=None,
         help="Report drafting mode: auto (based on results.json), research_only, or experiment.",
     )
-    run_parser.add_argument("--quiet", action="store_true")
+    run_parser.add_argument("--quiet", action="store_true", default=None)
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
     resume_parser.add_argument("run_dir")
+    resume_parser.add_argument("--config", default=None, help="Optional TOML config overrides.")
     resume_parser.add_argument("--from-stage", default=None)
-    resume_parser.add_argument("--to-stage", default="report")
+    resume_parser.add_argument("--to-stage", default=None)
     resume_parser.add_argument("--model", default=None)
     resume_parser.add_argument("--llm-workers", type=int, default=None)
     resume_parser.add_argument("--max-papers", type=int, default=None)
     resume_parser.add_argument("--search-query", default=None)
     resume_parser.add_argument("--experiment-template", default=None)
     resume_parser.add_argument("--experiment-timeout", type=int, default=None)
-    resume_parser.add_argument("--no-llm", action="store_true")
-    resume_parser.add_argument("--offline-search", action="store_true")
-    resume_parser.add_argument("--allow-fixture-fallback", action="store_true")
-    resume_parser.add_argument("--strict-search", action="store_true")
-    resume_parser.add_argument("--no-retrieval", action="store_true")
+    _add_pipeline_code_task_args(resume_parser)
+    resume_parser.add_argument("--no-llm", action="store_true", default=None)
+    resume_parser.add_argument("--offline-search", action="store_true", default=None)
+    resume_parser.add_argument("--allow-fixture-fallback", action="store_true", default=None)
+    resume_parser.add_argument("--strict-search", action="store_true", default=None)
+    resume_parser.add_argument("--no-retrieval", action="store_true", default=None)
     resume_parser.add_argument("--retrieval-top-k", type=int, default=None)
     resume_parser.add_argument(
         "--report-mode",
@@ -85,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override report drafting mode for a resumed run.",
     )
-    resume_parser.add_argument("--quiet", action="store_true")
+    resume_parser.add_argument("--quiet", action="store_true", default=None)
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
@@ -313,6 +318,71 @@ def _add_code_task_env_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
+    """Add optional 8-stage code-task experiment configuration arguments."""
+    parser.add_argument(
+        "--code-task-config",
+        default=None,
+        help="Optional TOML config for --experiment-template code_task_project.",
+    )
+    parser.add_argument(
+        "--code-root",
+        dest="code_task_code_root",
+        default=None,
+        help="Source project copied by --experiment-template code_task_project.",
+    )
+    parser.add_argument(
+        "--task-file",
+        dest="code_task_task_file",
+        default=None,
+        help="Markdown task file for --experiment-template code_task_project.",
+    )
+    parser.add_argument(
+        "--benchmark-command",
+        dest="code_task_benchmark_command",
+        default=None,
+        help="Benchmark command run before and after code-task edits.",
+    )
+    parser.add_argument(
+        "--code-task-name",
+        default=None,
+        help="Optional display name for the embedded code-task experiment.",
+    )
+    parser.add_argument(
+        "--code-task-max-file-bytes",
+        type=int,
+        default=None,
+        help="Maximum source file size copied into the embedded code-task workspace.",
+    )
+    parser.add_argument(
+        "--code-task-env-mode",
+        choices=("current", "external"),
+        default=None,
+        help="Embedded code-task execution environment mode.",
+    )
+    parser.add_argument(
+        "--code-task-python",
+        dest="code_task_python_executable",
+        default=None,
+        help="Python executable for --code-task-env-mode external.",
+    )
+    parser.add_argument(
+        "--primary-metric",
+        dest="code_task_primary_metric",
+        default=None,
+        help="Primary benchmark metric for embedded code-task comparison.",
+    )
+    parser.add_argument(
+        "--metric-direction",
+        dest="code_task_metric_direction",
+        action="append",
+        default=None,
+        type=_metric_direction_arg,
+        metavar="METRIC=DIRECTION",
+        help="Metric direction for embedded code-task comparison. May be repeated.",
+    )
+
+
 def _metric_direction_arg(value: str) -> tuple[str, str]:
     """Parse ``--metric-direction metric=direction`` arguments."""
     try:
@@ -326,36 +396,23 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        run_dir = _new_run_dir(Path(args.output_root), args.topic)
-        reporter = ConsoleReporter(enabled=not args.quiet)
+        settings = _resolve_run_settings(args)
+        topic = str(settings["topic"])
+        from_stage = str(settings["from_stage"])
+        to_stage = str(settings["to_stage"])
+        run_dir = _new_run_dir(Path(str(settings["output_root"])), topic)
+        reporter = ConsoleReporter(enabled=not bool(settings["quiet"]))
         ctx = Context(
             run_dir=run_dir,
-            topic=args.topic,
-            config={
-                "from_stage": args.from_stage,
-                "to_stage": args.to_stage,
-                "mode": "offline" if args.no_llm else "llm",
-                "model": args.model,
-                "llm_max_workers": args.llm_workers,
-                "max_papers": args.max_papers,
-                "search_query": args.search_query,
-                "experiment_template": args.experiment_template,
-                "experiment_timeout_sec": args.experiment_timeout,
-                "use_llm": not args.no_llm,
-                "use_arxiv": not args.offline_search,
-                "allow_fixture_fallback": args.allow_fixture_fallback,
-                "strict_search": args.strict_search,
-                "use_retrieval": not args.no_retrieval,
-                "retrieval_top_k": args.retrieval_top_k,
-                "report_mode": args.report_mode,
-            },
+            topic=topic,
+            config=dict(settings["config"]),
         )
         executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
             ctx,
-            from_stage=args.from_stage,
-            to_stage=args.to_stage,
+            from_stage=from_stage,
+            to_stage=to_stage,
         )
-        if args.quiet:
+        if settings["quiet"]:
             print(f"Run directory: {run_dir}")
         print(f"Stages completed: {len(executions)}")
         return
@@ -364,18 +421,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         run_dir = Path(args.run_dir)
         topic = _read_topic(run_dir)
         from_stage = args.from_stage or _next_stage_from_state(run_dir) or "plan"
-        reporter = ConsoleReporter(enabled=not args.quiet)
+        config = _resume_config(run_dir, args, from_stage)
+        quiet = bool(config.pop("_quiet", False))
+        to_stage = str(config.get("to_stage") or "report")
+        reporter = ConsoleReporter(enabled=not quiet)
         ctx = Context(
             run_dir=run_dir,
             topic=topic,
-            config=_resume_config(run_dir, args, from_stage),
+            config=config,
         )
         executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
             ctx,
             from_stage=from_stage,
-            to_stage=args.to_stage,
+            to_stage=to_stage,
         )
-        if args.quiet:
+        if quiet:
             print(f"Run directory: {run_dir}")
         print(f"Resumed from: {from_stage}")
         print(f"Stages completed: {len(executions)}")
@@ -445,6 +505,33 @@ def _stage_handlers():
     return {Stage(number): handler for number, handler in HANDLERS.items()}
 
 
+def _resolve_run_settings(args: argparse.Namespace) -> dict[str, object]:
+    """Merge run defaults, TOML config, and explicit CLI overrides."""
+    file_config = _load_run_config_or_exit(getattr(args, "config", None))
+    topic = _first_string(args.topic, file_config.get("topic"))
+    if not topic:
+        raise SystemExit("Missing research topic. Pass --topic or set [run].topic in --config.")
+    output_root = _first_string(args.output_root, file_config.get("output_root"), "runs")
+    from_stage = _first_string(args.from_stage, file_config.get("from_stage"), "plan")
+    to_stage = _first_string(args.to_stage, file_config.get("to_stage"), "report")
+    args_quiet = getattr(args, "quiet", None)
+    quiet = bool(args_quiet) if args_quiet is not None else bool(file_config.get("quiet", False))
+
+    config = _default_run_context_config()
+    config.update(_context_config_values(file_config))
+    _apply_run_cli_overrides(config, args)
+    config["from_stage"] = from_stage
+    config["to_stage"] = to_stage
+    return {
+        "topic": topic,
+        "output_root": output_root,
+        "from_stage": from_stage,
+        "to_stage": to_stage,
+        "quiet": quiet,
+        "config": config,
+    }
+
+
 def _resume_config(run_dir: Path, args: argparse.Namespace, from_stage: str) -> dict[str, object]:
     """Merge resume-time overrides into the original run configuration.
 
@@ -453,9 +540,19 @@ def _resume_config(run_dir: Path, args: argparse.Namespace, from_stage: str) -> 
     resume flags should override the saved ``config_snapshot.json``.
     """
     config = _base_resume_config(run_dir)
+    file_config = _load_run_config_or_exit(getattr(args, "config", None))
+    config.update(_context_config_values(file_config))
     config["from_stage"] = from_stage
-    config["to_stage"] = args.to_stage
+    config["to_stage"] = _first_string(args.to_stage, file_config.get("to_stage"), "report")
+    args_quiet = getattr(args, "quiet", None)
+    config["_quiet"] = bool(args_quiet) if args_quiet is not None else bool(file_config.get("quiet", False))
 
+    _apply_run_cli_overrides(config, args)
+    return config
+
+
+def _apply_run_cli_overrides(config: dict[str, object], args: argparse.Namespace) -> None:
+    """Apply explicit run/resume CLI values over defaults or config files."""
     _set_if_not_none(config, "model", args.model)
     _set_if_not_none(config, "llm_max_workers", args.llm_workers)
     _set_if_not_none(config, "max_papers", args.max_papers)
@@ -464,38 +561,52 @@ def _resume_config(run_dir: Path, args: argparse.Namespace, from_stage: str) -> 
     _set_if_not_none(config, "experiment_timeout_sec", args.experiment_timeout)
     _set_if_not_none(config, "retrieval_top_k", args.retrieval_top_k)
     _set_if_not_none(config, "report_mode", args.report_mode)
+    config.update(_pipeline_code_task_config(args))
 
-    if args.no_llm:
+    if args.no_llm is True:
         config["use_llm"] = False
         config["mode"] = "offline"
     else:
         config["use_llm"] = bool(config.get("use_llm", True))
         config["mode"] = "llm" if config["use_llm"] else "offline"
-    if args.offline_search:
+    if args.offline_search is True:
         config["use_arxiv"] = False
     else:
         config["use_arxiv"] = bool(config.get("use_arxiv", True))
-    if args.allow_fixture_fallback:
+    if args.allow_fixture_fallback is True:
         config["allow_fixture_fallback"] = True
     else:
         config["allow_fixture_fallback"] = bool(config.get("allow_fixture_fallback", False))
-    if args.strict_search:
+    if args.strict_search is True:
         config["strict_search"] = True
     else:
         config["strict_search"] = bool(config.get("strict_search", False))
-    if args.no_retrieval:
+    if args.no_retrieval is True:
         config["use_retrieval"] = False
     else:
         config["use_retrieval"] = bool(config.get("use_retrieval", True))
-    return config
 
 
-def _base_resume_config(run_dir: Path) -> dict[str, object]:
-    config_path = run_dir / "config_snapshot.json"
-    if config_path.exists():
-        data = read_json(config_path)
-        if isinstance(data, dict):
-            return dict(data)
+def _load_run_config_or_exit(config_path: str | None) -> dict[str, object]:
+    try:
+        return load_pipeline_run_config(config_path)
+    except RunConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _context_config_values(data: dict[str, object]) -> dict[str, object]:
+    meta_keys = {"topic", "output_root", "quiet"}
+    return {key: value for key, value in data.items() if key not in meta_keys}
+
+
+def _first_string(*values: object) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _default_run_context_config() -> dict[str, object]:
     return {
         "mode": "llm",
         "model": None,
@@ -512,6 +623,39 @@ def _base_resume_config(run_dir: Path) -> dict[str, object]:
         "retrieval_top_k": 4,
         "report_mode": "auto",
     }
+
+
+def _base_resume_config(run_dir: Path) -> dict[str, object]:
+    config_path = run_dir / "config_snapshot.json"
+    if config_path.exists():
+        data = read_json(config_path)
+        if isinstance(data, dict):
+            return dict(data)
+    return _default_run_context_config()
+
+
+def _pipeline_code_task_config(args: argparse.Namespace) -> dict[str, object]:
+    """Return non-empty top-level code-task experiment config overrides."""
+    config: dict[str, object] = {}
+    mapping = {
+        "code_task_config": "code_task_config",
+        "code_task_code_root": "code_task_code_root",
+        "code_task_task_file": "code_task_task_file",
+        "code_task_benchmark_command": "code_task_benchmark_command",
+        "code_task_name": "code_task_name",
+        "code_task_max_file_bytes": "code_task_max_file_bytes",
+        "code_task_env_mode": "code_task_env_mode",
+        "code_task_python_executable": "code_task_python_executable",
+        "code_task_primary_metric": "code_task_primary_metric",
+    }
+    for attr, key in mapping.items():
+        value = getattr(args, attr, None)
+        if value is not None:
+            config[key] = value
+    metric_directions = getattr(args, "code_task_metric_direction", None)
+    if metric_directions:
+        config["code_task_metric_directions"] = dict(metric_directions)
+    return config
 
 
 def _set_if_not_none(data: dict[str, object], key: str, value: object) -> None:

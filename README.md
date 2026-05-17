@@ -142,8 +142,7 @@ For benchmark comparison, print numeric metrics as `name: value` lines.
 `--primary-metric` chooses the main quality target, while
 `--metric-direction METRIC=higher|lower|resource|ignore` tells
 SimpleAutoResearch how to interpret each metric. See
-[Usage And Configuration](docs/USAGE.md#metric-comparison-configuration) for
-examples.
+[CLI Reference](docs/CLI_REFERENCE.md#init) for option details and examples.
 
 For metric-heavy projects, keep those settings in TOML instead:
 
@@ -152,6 +151,29 @@ uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits
 ```
 
 ### 3. Research With Experiment
+
+Use a user project through the generic embedded code-task template. The shortest
+form is a top-level run config:
+
+```bash
+uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+```
+
+The same run can be expressed with CLI flags when you want quick overrides:
+
+```bash
+uv run simple-ar run \
+  --topic "improve tiny digits MLP" \
+  --to-stage report \
+  --experiment-template code_task_project \
+  --code-task-config examples/code_tasks/configs/tiny_digits_mlp.toml \
+  --offline-search \
+  --experiment-timeout 60
+```
+
+This copies the configured project into `06-code/code_task_run/code_task/workspace`, runs a baseline benchmark, asks the LLM for a patch plan and controlled edits, applies the patch inside the copied workspace, runs the patched benchmark, and writes code-task evidence into the final report. Because the 8-stage pipeline must finish end to end, it auto-approves the patch plan inside that isolated workspace. Use standalone `code-task` commands when you want explicit human approval before each step.
+
+There is also a legacy bundled toy-spam smoke test, kept mostly for quick regression checks:
 
 ```bash
 uv run simple-ar run \
@@ -162,7 +184,7 @@ uv run simple-ar run \
   --experiment-timeout 60
 ```
 
-This embedded demo copies a toy project into an isolated workspace, asks the LLM for a patch plan and controlled edits, applies the approved patch, runs a benchmark harness, and reports the result.
+The toy template is useful for smoke testing because it has a tiny deterministic benchmark.
 
 ## Current Capability Boundaries
 
@@ -175,12 +197,14 @@ What works today:
 - Literature-first report mode: stop at `synthesize`, then resume `report` to produce a survey-style report without experiment claims.
 - Existing-code code tasks as a standalone workflow: copy a source project, probe the environment, index files, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the copied workspace, validate, run a patched benchmark, and compare before/after metrics.
 - Configurable benchmark metric interpretation for code tasks through `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
-- One embedded 8-stage code-task demo through `--experiment-template llm_code_task_toy_spam`.
+- Embedded 8-stage code-task experiments through `--experiment-template code_task_project` plus a code-task TOML config or explicit code-root/task/benchmark flags.
+- One bundled 8-stage smoke-test demo through `--experiment-template llm_code_task_toy_spam`.
 - Citation, report-boundary, runtime-limit, and metric-visibility checks in the final report package.
 
 Important limits:
 
-- The general "research a topic, modify my arbitrary existing codebase, run my benchmark, then write a report" workflow is not yet one command. Today, that is either the bundled toy demo or the standalone `code-task` workflow.
+- The generic 8-stage code-task path is real but still conservative. It copies the user project and can run one LLM patch pass, but it is not yet a full autonomous coding agent with deep multi-round planning, dependency installation, Docker/Conda setup, or large experiment scheduling.
+- The 8-stage code-task path auto-approves the model patch plan inside the copied workspace so the pipeline can complete end to end. Use standalone `code-task` for stronger human-in-the-loop review.
 - Code edits are controlled old/new replacements. This keeps patches auditable, but it is weaker than a full coding agent that can plan and edit many files across multiple autonomous rounds.
 - Reviewed proposals may contain multiple ordered edits in one file, but invalid old/new replacements are rejected before workspace files are changed.
 - The tool does not install project dependencies, manage Docker/Conda/GPU/Slurm environments, or schedule large experiments.

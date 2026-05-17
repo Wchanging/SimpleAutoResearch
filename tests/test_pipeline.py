@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from simple_ar.artifacts import read_json, read_text
-from simple_ar.experiment.code_task_demo import (
+from simple_ar.experiment.code_task_experiment import (
+    CODE_TASK_PROJECT_TEMPLATE,
     CODE_TASK_TOY_SPAM_TEMPLATE,
     CodeTaskExperimentResult,
 )
@@ -170,7 +171,7 @@ class PipelineTests(unittest.TestCase):
             ctx.current_stage = Stage.CODE
             ctx.stage_dir().mkdir(parents=True)
             with patch(
-                "simple_ar.stage_handlers.prepare_code_task_demo_experiment",
+                "simple_ar.stage_handlers.prepare_code_task_experiment",
                 return_value=fake_result,
             ):
                 execute_code(ctx)
@@ -181,6 +182,75 @@ class PipelineTests(unittest.TestCase):
             meta = read_json(run_dir / "06-code" / "code_task_experiment.json")
             self.assertEqual(meta["template"], CODE_TASK_TOY_SPAM_TEMPLATE)
             self.assertEqual(meta["changed_files"], ["spamfilter/rules.py"])
+
+    def test_code_task_project_template_accepts_user_project_config(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        repo_root = Path(__file__).resolve().parents[1]
+        config_path = repo_root / "examples" / "code_tasks" / "configs" / "tiny_digits_mlp.toml"
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            ctx = Context(
+                run_dir,
+                "Tiny digits MLP",
+                config={
+                    "experiment_template": CODE_TASK_PROJECT_TEMPLATE,
+                    "code_task_config": str(config_path),
+                    "experiment_timeout_sec": 45,
+                    "use_llm": True,
+                },
+            )
+            synth_dir = run_dir / "04-synthesize"
+            synth_dir.mkdir(parents=True)
+            (synth_dir / "hypothesis.md").write_text(
+                "# Hypothesis\n\nImprove an existing lightweight MLP benchmark.\n",
+                encoding="utf-8",
+            )
+
+            ctx.current_stage = Stage.DESIGN
+            ctx.stage_dir().mkdir(parents=True)
+            execute_design(ctx)
+
+            plan = read_json(run_dir / "05-design" / "experiment_plan.json")
+            self.assertEqual(plan["template"], CODE_TASK_PROJECT_TEMPLATE)
+            self.assertEqual(plan["code_task"]["benchmark_command"], "python benchmark.py")
+            self.assertEqual(plan["code_task"]["primary_metric"], "accuracy")
+            self.assertEqual(plan["code_task"]["scope"], "user_project")
+
+            code_dir = run_dir / "06-code"
+            fake_result = CodeTaskExperimentResult(
+                code_task_run_dir=code_dir / "code_task_run",
+                workspace_dir=code_dir / "code_task_run" / "code_task" / "workspace",
+                patch_plan_path=code_dir / "code_task_run" / "code_task" / "patch_plan.md",
+                proposed_edits_path=(
+                    code_dir / "code_task_run" / "code_task" / "meta" / "proposed_edits.json"
+                ),
+                patch_diff_path=code_dir / "code_task_run" / "code_task" / "patch.diff",
+                validation_report_path=(
+                    code_dir / "code_task_run" / "code_task" / "meta" / "validation_report.json"
+                ),
+                plan_mode="llm",
+                edit_mode="llm",
+                edit_count=2,
+                changed_files=("digits_mlp/model.py", "digits_mlp/train.py"),
+                validation_status="passed",
+                template=CODE_TASK_PROJECT_TEMPLATE,
+                baseline_status="passed",
+            )
+
+            ctx.current_stage = Stage.CODE
+            ctx.stage_dir().mkdir(parents=True)
+            with patch(
+                "simple_ar.stage_handlers.prepare_code_task_experiment",
+                return_value=fake_result,
+            ):
+                execute_code(ctx)
+
+            script = read_text(run_dir / "06-code" / "experiment.py")
+            self.assertIn("run_code_task_benchmark", script)
+            self.assertIn("comparison_improved", script)
+            meta = read_json(run_dir / "06-code" / "code_task_experiment.json")
+            self.assertEqual(meta["template"], CODE_TASK_PROJECT_TEMPLATE)
+            self.assertEqual(meta["baseline_status"], "passed")
 
 
 if __name__ == "__main__":

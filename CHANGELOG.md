@@ -6,6 +6,18 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Added
 
+- Added the generic `code_task_project` experiment template so an 8-stage
+  `simple-ar run --to-stage report` can copy a user-provided project, run a
+  baseline benchmark, apply an LLM-controlled patch, run the patched benchmark,
+  and include nested code-task evidence in the final report.
+- Added top-level `simple-ar run --config` / `resume --config` support for
+  repeatable TOML-configured research and embedded code-task runs.
+- Added `examples/run_configs/tiny_digits_mlp_pipeline.toml` as the canonical
+  config-driven end-to-end code-task pipeline example.
+- Added top-level pipeline code-task options for `run` and `resume`, including
+  `--code-task-config`, `--code-root`, `--task-file`, `--benchmark-command`,
+  `--primary-metric`, repeated `--metric-direction`, and environment policy
+  overrides.
 - Added Phase 5 failure analysis support for validation-only failures, so code-task runs can diagnose syntax/static validation errors before a benchmark has launched.
 - Added bounded repair proposal metadata with source analysis paths, selected repair context files, and explicit repair constraints.
 - Added `simple-ar code-task execute`, a conservative state-aware orchestrator that runs safe next steps while stopping at plan approval and proposal review gates.
@@ -16,6 +28,16 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Generalized the embedded code-task experiment preparation so the old toy-spam
+  demo and user-provided projects share the same baseline/plan/proposal/apply/
+  validate harness.
+- Renamed the embedded code-task bridge module from `code_task_demo.py` to
+  `code_task_experiment.py` so the code structure matches its generic role.
+- Final reports now append a deterministic Code Task Evidence section for
+  embedded code-task templates when the LLM draft does not include one.
+- Code-task summaries and embedded report evidence now flag changed test or
+  benchmark files as review-sensitive, so an automated patch cannot quietly
+  hide benchmark-surface edits.
 - Comparison artifacts now record configured metric directions and keep unknown metrics as deltas without using them for improved/regressed verdicts.
 - Moved code-task init config parsing out of `cli.py` and into `code_task/config.py`.
 - Repair context selection now prioritizes files changed by the current patch before traceback/test files, making benchmark-failure repairs less likely to edit tests by accident.

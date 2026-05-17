@@ -236,7 +236,7 @@ class ReportSafetyTests(unittest.TestCase):
             results_present=True,
         )
 
-        self.assertTrue(any("toy code-task" in error for error in errors))
+        self.assertTrue(any("code-task benchmark" in error for error in errors))
 
     def test_report_bounds_accept_conservative_fixture_disclosure(self) -> None:
         report = (

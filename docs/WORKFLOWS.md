@@ -65,8 +65,10 @@ plan -> search -> read -> synthesize -> design experiment
 Current status:
 
 - `06-code` normally generates a whitelisted template experiment.
-- `--experiment-template llm_code_task_toy_spam` is an embedded handoff into the code-task workflow.
-- Future versions should generalize this from one bundled demo into user-provided code roots and config-driven presets.
+- `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, `--task-file`, and `--benchmark-command` flags.
+- `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
+- `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
+- The embedded path is end-to-end: it auto-approves the patch plan inside the copied workspace. The standalone code-task workflow remains the safer human-review path.
 - Report generation is guarded: LLM drafts are accepted only when citations, metric visibility, fixture disclosure, and toy-demo boundaries pass rule-based checks.
 
 ## Default 8-Stage Pipeline
@@ -144,7 +146,17 @@ Root-level files:
 - `source_plan.json`: source plan describing which artifacts each stage should consult.
 - `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
-- `06-code/code_task_experiment.json`: present only for the embedded `llm_code_task_toy_spam` template.
+- `06-code/code_task_experiment.json`: present for embedded code-task templates such as `code_task_project` and `llm_code_task_toy_spam`.
+
+Nested embedded code-task files:
+
+- `06-code/code_task_run/code_task/summary.md`: consolidated nested code-task outcome.
+- `06-code/code_task_run/code_task/patch_plan.md`: LLM patch plan auto-approved by the pipeline.
+- `06-code/code_task_run/code_task/meta/proposed_edits.json`: controlled old/new edit proposal.
+- `06-code/code_task_run/code_task/patch.diff`: applied patch inside the copied workspace.
+- `06-code/code_task_run/code_task/run/baseline/`: pre-patch benchmark artifacts.
+- `06-code/code_task_run/code_task/run/patched/`: patched benchmark artifacts.
+- `06-code/code_task_run/code_task/run/comparison.json`: before/after comparison when both runs exist.
 
 Report-stage files:
 
@@ -204,6 +216,9 @@ Important directories:
 Important user-facing code-task files:
 
 - `summary.md`: compact outcome, next-step guidance, task, patch, validation, benchmark, comparison, and failure-analysis summary.
+- Changed test or benchmark files are highlighted as review-sensitive in
+  `summary.md` and embedded report evidence; benchmark improvements should be
+  trusted only after inspecting the diff.
 - `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
 - `run/baseline/execution_report.json`: pre-patch benchmark result.
 - `run/patched/execution_report.json`: post-patch benchmark result.

@@ -68,6 +68,18 @@ Run the default 8-stage pipeline:
 uv run simple-ar run --topic "toy topic" --to-stage report
 ```
 
+For repeatable multi-option runs, use a top-level TOML config:
+
+```bash
+uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+```
+
+The config can provide `[run]`, `[llm]`, `[search]`, `[retrieval]`,
+`[experiment]`, `[report]`, and the same `[code_task]`/`[benchmark]`/`[metrics]`
+sections used by `code-task init --config`. Explicit CLI flags override config
+values. See [CLI Reference](CLI_REFERENCE.md#run-config) for a complete
+commented config and field-by-field explanation.
+
 Stop early for a literature-only pass (no experiment code/run artifacts):
 
 ```bash
@@ -91,8 +103,8 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 ### What Is LLM-Backed vs Deterministic
 
 - LLM-backed when enabled: `plan`, `read`, `synthesize`, and `report` stages.
-- Deterministic: `design`, `code`, and `run` use fixed experiment templates or the embedded code-task demo. They do not generate free-form code.
-- Embedded code-task demo: `06-code` can call the LLM for a patch plan and controlled edit proposal, but the patch is applied only inside the copied demo workspace.
+- Deterministic by default: `design`, `code`, and `run` use fixed experiment templates unless a code-task experiment template is selected.
+- Embedded code-task experiment: `06-code` can call the LLM for a patch plan and controlled edit proposal, but the patch is applied only inside a copied workspace under the run directory.
 - Guarded reports: if an LLM-written report omits required body citations, invents citation keys, or overstates fixture/toy evidence, the report stage writes a structured fallback report instead.
 - `--no-llm` forces offline fallbacks with placeholder content in `goal.md`, `notes.md`, `synthesis.md`, and `report.md`.
 
@@ -330,6 +342,79 @@ uv run simple-ar code-task execute runs/<run-id> --dry-run
 ```
 
 Detailed code-task command options live in [CLI Reference](CLI_REFERENCE.md#code-task-commands).
+
+## Embedded Code Task In The 8-Stage Pipeline
+
+Use this when you want the normal research pipeline to hand off to a configured
+existing-code task during `06-code` and include the result in `08-report`.
+
+Config-driven user project:
+
+```bash
+uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+```
+
+The example config is intentionally complete: it includes the outer pipeline
+settings and the embedded code-task settings in one file. See
+[CLI Reference](CLI_REFERENCE.md#run-config) before adapting it to your own
+project.
+
+The equivalent split config form points the pipeline at a standalone code-task
+config:
+
+```bash
+uv run simple-ar run \
+  --topic "improve tiny digits MLP" \
+  --to-stage report \
+  --experiment-template code_task_project \
+  --code-task-config examples/code_tasks/configs/tiny_digits_mlp.toml \
+  --offline-search \
+  --experiment-timeout 60
+```
+
+And the fully explicit flag form is:
+
+```bash
+uv run simple-ar run \
+  --topic "improve tiny digits MLP" \
+  --to-stage report \
+  --experiment-template code_task_project \
+  --code-root examples/code_tasks/tiny_digits_mlp_project \
+  --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
+  --benchmark-command "python benchmark.py" \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --metric-direction macro_f1=higher \
+  --offline-search \
+  --experiment-timeout 60
+```
+
+`code_task_project` writes a normal pipeline run plus nested code-task artifacts
+under `06-code/code_task_run/`. During `06-code`, it copies the user project,
+probes the environment, runs a baseline benchmark, generates a patch plan,
+records an automatic pipeline approval, asks for controlled edits, applies
+them inside the copied workspace, and validates the result. During `07-run`,
+the harness runs the patched benchmark, writes `comparison.json` when baseline
+and patched metrics are both available, and exposes code-task metrics through
+`07-run/results.json`. During `08-report`, the report includes a deterministic
+Code Task Evidence section pointing back to the nested summary, diff, and
+comparison artifacts.
+
+This path is convenient for end-to-end experiments, but it deliberately trades
+away the standalone workflow's review pauses. For safety-sensitive or
+hard-to-debug projects, use standalone `code-task execute` or the manual path
+first, then move to `code_task_project` after the benchmark and task are stable.
+
+Legacy bundled toy smoke test:
+
+```bash
+uv run simple-ar run \
+  --topic "LLM-guided improvement of a toy spam baseline" \
+  --to-stage report \
+  --experiment-template llm_code_task_toy_spam \
+  --offline-search \
+  --experiment-timeout 60
+```
 
 ## Command Design
 

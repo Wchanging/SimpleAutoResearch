@@ -27,7 +27,8 @@ Common options:
 
 | Option | Meaning |
 | --- | --- |
-| `--topic TEXT` | Required research topic for a new run. |
+| `--config PATH` | TOML config for a repeatable run. Explicit CLI flags override config values. |
+| `--topic TEXT` | Research topic. Required unless `[run].topic` is set in `--config`. |
 | `--output-root DIR` | Where run directories are created. Default: `runs`. |
 | `--from-stage NAME` | First stage to execute. Default: `plan`. |
 | `--to-stage NAME` | Last stage to execute. Default: `report`. |
@@ -37,7 +38,7 @@ Common options:
 | `--search-query TEXT` | Override the generated search query. |
 | `--experiment-template NAME` | Experiment template name. |
 | `--experiment-timeout N` | Subprocess timeout for experiment execution. |
-| `--report-mode auto|research_only|experiment` | Report structure mode. |
+| `--report-mode auto / research_only / experiment` | Report structure mode. |
 | `--no-llm` | Use deterministic fallback text instead of LLM calls. |
 | `--offline-search` | Skip live literature providers. |
 | `--allow-fixture-fallback` | Allow placeholder metadata after live/cache failures. |
@@ -45,6 +46,180 @@ Common options:
 | `--no-retrieval` | Disable local artifact retrieval context. |
 | `--retrieval-top-k N` | Number of local artifact chunks to retrieve. |
 | `--quiet` | Suppress progress logs. |
+
+Experiment templates:
+
+| Template | Meaning |
+| --- | --- |
+| `toy_text_classification` | Default deterministic teaching experiment. |
+| `llm_code_task_toy_spam` | Bundled toy code-task smoke test. |
+| `code_task_project` | Embedded code-task experiment for a user-provided project. |
+
+### Run Config
+
+For multi-option runs, prefer a TOML config over a long CLI command:
+
+```bash
+uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+```
+
+The complete config below is equivalent to a full `code_task_project` pipeline
+run. It includes both outer research-pipeline settings and embedded code-task
+settings in one file:
+
+```toml
+[run]
+# Required unless --topic is supplied.
+topic = "improve tiny digits MLP"
+
+# Where timestamped run directories are created.
+output_root = "runs"
+
+# Optional. Default from_stage is "plan"; default to_stage is "report".
+from_stage = "plan"
+to_stage = "report"
+
+[llm]
+# true: use configured OpenAI-compatible LLM calls.
+# false: use deterministic fallbacks where possible. code_task_project requires
+# LLM mode for real patch planning/edit proposal.
+enabled = true
+
+# Optional model override. When omitted, SIMPLE_AR_MODEL / provider default is used.
+model = "gpt-4o-mini"
+
+# Parallel LLM workers for supported stages such as paper note generation.
+workers = 4
+
+[search]
+# true: skip live OpenAlex/arXiv and use fixture metadata.
+# Useful for local coding smoke tests where literature quality is not the focus.
+offline = true
+
+# Maximum paper metadata rows requested from live providers or fixture fallback.
+max_papers = 1
+
+# Optional manual search query. When omitted, the topic is used.
+query = "tiny digits MLP"
+
+# Optional. When true, allow fixture rows after live/cache search failures.
+allow_fixture_fallback = false
+
+# Optional. When true, fail instead of using cache/fixture fallback.
+strict = false
+
+[retrieval]
+# Whether report/read/synthesize stages may retrieve snippets from local artifacts.
+enabled = true
+top_k = 4
+
+[experiment]
+# "toy_text_classification": deterministic teaching experiment.
+# "code_task_project": embedded existing-code workflow.
+# "llm_code_task_toy_spam": legacy bundled smoke test.
+template = "code_task_project"
+
+# Timeout for 07-run experiment.py. For code_task_project this also constrains
+# nested baseline/patched benchmark calls.
+timeout = 60
+
+# Optional. Instead of putting [code_task]/[benchmark]/[environment]/[safety] in
+# this same file, point to a standalone code-task config.
+# code_task_config = "examples/code_tasks/configs/tiny_digits_mlp.toml"
+
+[report]
+# "auto": experiment report if results.json exists, research_only otherwise.
+# "research_only": survey-style report without experiment claims.
+# "experiment": require results.json and use experiment sections.
+mode = "auto"
+
+[code_task]
+# Source project copied into 06-code/code_task_run/code_task/workspace.
+code_root = "examples/code_tasks/tiny_digits_mlp_project"
+
+# Task prompt copied to code_task/task.md and used for patch planning.
+task_file = "examples/code_tasks/tasks/improve_tiny_digits_mlp.md"
+
+# Optional display name stored in experiment_plan.json and nested manifest.
+name = "tiny-digits-mlp-pipeline"
+
+[benchmark]
+# Command executed inside the copied workspace before and after the patch.
+command = "python benchmark.py"
+
+# Optional primary metric for before/after verdicts.
+primary_metric = "accuracy"
+
+[benchmark.metric_directions]
+# Directions may be higher, lower, resource, or ignore.
+# Unknown metric names are still recorded as deltas, but they do not decide
+# improved/regressed unless direction is configured or heuristically known.
+accuracy = "higher"
+macro_f1 = "higher"
+train_time_sec = "resource"
+inference_time_ms = "resource"
+params = "resource"
+
+[environment]
+# current: use the active SimpleAutoResearch Python.
+# external: use the interpreter given by python.
+mode = "current"
+# python = "C:/path/to/python.exe"
+
+[safety]
+# Maximum source file size copied into the workspace. Use 0 to disable.
+max_file_bytes = 2000000
+```
+
+Section summary:
+
+| Section | Used by | Meaning |
+| --- | --- | --- |
+| `[run]` | outer pipeline | Topic, run directory, and stage range. |
+| `[llm]` | outer pipeline and code task | LLM enablement, model override, and worker count. |
+| `[search]` | `02-search` | Literature provider behavior and fallback policy. |
+| `[retrieval]` | read/synthesize/report helpers | Local artifact retrieval context. |
+| `[experiment]` | `05-design` to `07-run` | Experiment template, timeout, and optional nested code-task config path. |
+| `[report]` | `08-report` | Report structure mode. |
+| `[code_task]` | embedded or standalone code task | Source project, task file, and display name. |
+| `[benchmark]` | code task | Benchmark command and primary metric. |
+| `[benchmark.metric_directions]` | code task comparison | Metric interpretation rules. |
+| `[environment]` | code task execution | Interpreter policy for probe/baseline/patched runs. |
+| `[safety]` | code task workspace copy/validation | File-size guard and future safety settings. |
+
+When a run config contains `[code_task]`, `[benchmark]`, `[metrics]`,
+`[environment]`, or `[safety]`, the same file is reused as the embedded
+code-task config. Alternatively, keep code-task settings in a separate file and
+set `[experiment].code_task_config`.
+
+Explicit CLI flags override config values. For example, this keeps the config
+but changes the stage range and disables LLM calls:
+
+```bash
+uv run simple-ar run \
+  --config examples/run_configs/tiny_digits_mlp_pipeline.toml \
+  --to-stage design \
+  --no-llm
+```
+
+`code_task_project` options for `run` and `resume`:
+
+| Option | Meaning |
+| --- | --- |
+| `--code-task-config PATH` | TOML config using the same schema as `code-task init --config`. |
+| `--code-root DIR` | Source project copied into `06-code/code_task_run/code_task/workspace`. |
+| `--task-file PATH` | Markdown/text task description. |
+| `--benchmark-command TEXT` | Benchmark run before and after the patch. |
+| `--code-task-name TEXT` | Optional display name stored in `experiment_plan.json`. |
+| `--code-task-max-file-bytes N` | Maximum source file size copied into the nested workspace. |
+| `--code-task-env-mode current / external` | Interpreter policy for nested probe/baseline/run steps. |
+| `--code-task-python PATH` | Interpreter path for `--code-task-env-mode external`. |
+| `--primary-metric NAME` | Primary metric for before/after verdicts. |
+| `--metric-direction NAME=DIRECTION` | Metric interpretation for embedded comparison. Repeatable. |
+
+The generic embedded path auto-approves the generated patch plan inside the
+copied pipeline workspace so `run --to-stage report` can finish. Use standalone
+`code-task` commands when you need manual review before each transition.
 
 Resume:
 
@@ -112,7 +287,7 @@ Options:
 | `--name TEXT` | Run name suffix. Default: based on `code-root`. |
 | `--benchmark-command TEXT` | Command to run inside copied workspace. |
 | `--max-file-bytes N` | Maximum copied file size. Use `0` to disable. |
-| `--env-mode current|external` | Execution interpreter policy. |
+| `--env-mode current / external` | Execution interpreter policy. |
 | `--python PATH` | Interpreter path for `--env-mode external`. |
 | `--primary-metric NAME` | Main metric for before/after verdicts. |
 | `--metric-direction NAME=DIRECTION` | Metric interpretation. Repeatable. |
@@ -209,7 +384,7 @@ uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 | `--max-files N` | Maximum selected context files. |
 | `--max-source-chars-per-file N` | Source snippet budget per file. |
 | `decide-plan RUN_DIR` | Record plan approval/rejection/revision. |
-| `--decision approve|reject|revise` | Required decision value. |
+| `--decision approve / reject / revise` | Required decision value. |
 | `--note TEXT` | Optional review note. |
 | `--reviewer TEXT` | Reviewer label. Default: `user`. |
 

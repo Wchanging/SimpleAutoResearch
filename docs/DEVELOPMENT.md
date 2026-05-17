@@ -27,10 +27,15 @@ A new stage should read existing artifacts with `ctx.find_artifact(...)` and wri
 
 ## Adding An Experiment Template
 
-Fixed script templates live in `src/simple_ar/experiment/templates.py`. The
-experimental 8-stage code-task demo lives in
-`src/simple_ar/experiment/code_task_demo.py` because it prepares an existing
+Fixed script templates live in `src/simple_ar/experiment/templates.py`.
+Embedded 8-stage code-task templates live in
+`src/simple_ar/experiment/code_task_experiment.py` because they prepare an existing
 workspace before writing the run harness.
+
+Top-level run config parsing lives in `src/simple_ar/run_config.py`. Keep it as
+a thin TOML-to-runtime-options layer; code-task-specific config semantics should
+continue to live in `src/simple_ar/code_task/config.py` so standalone and
+embedded code-task runs do not drift apart.
 
 A new template should:
 
@@ -48,6 +53,8 @@ For embedded code-task templates, keep the automatic approval boundary explicit:
 they should copy a workspace, use controlled old/new edits, write a compact
 stage artifact such as `code_task_experiment.json`, and run the benchmark
 through `07-run` instead of silently mutating source code during reporting.
+The generic `code_task_project` template should remain a thin bridge over the
+standalone code-task modules rather than a separate coding implementation.
 
 ## Extending Code Task
 

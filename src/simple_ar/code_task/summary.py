@@ -184,6 +184,13 @@ def _result_overview(
         lines.append(f"- Patched status: `{patched_execution.get('status', 'unknown')}`")
     if changed_files:
         lines.append(f"- Changed files: `{len(changed_files)}`")
+    risky_files = _review_sensitive_files(changed_files)
+    if risky_files:
+        lines.append(
+            "- Review risk: patch changed test/benchmark files "
+            + ", ".join(f"`{path}`" for path in risky_files)
+            + ". Treat the result as requiring extra human review."
+        )
     if comparison:
         reasons = comparison.get("reasons", [])
         if isinstance(reasons, list) and reasons:
@@ -370,6 +377,12 @@ def _patch_summary(
     lines = [f"- Status: `{status}`"]
     if changed_files:
         lines.append("- Changed files: " + ", ".join(f"`{path}`" for path in changed_files))
+        risky_files = _review_sensitive_files(changed_files)
+        if risky_files:
+            lines.append(
+                "- Review risk: test/benchmark files changed: "
+                + ", ".join(f"`{path}`" for path in risky_files)
+            )
     if patch_diff:
         added = sum(
             1
@@ -541,6 +554,23 @@ def _changed_files(manifest: dict[str, Any]) -> list[str]:
         if isinstance(value, list):
             return [str(item) for item in value if isinstance(item, str)]
     return []
+
+
+def _review_sensitive_files(paths: list[str]) -> list[str]:
+    """Return changed files that need extra review before trusting results."""
+    risky: list[str] = []
+    for path in paths:
+        normalized = path.replace("\\", "/").lower()
+        name = normalized.rsplit("/", 1)[-1]
+        if (
+            normalized.startswith("tests/")
+            or "/tests/" in normalized
+            or name.startswith("test_")
+            or name in {"benchmark.py", "bench.py"}
+            or "benchmark" in name
+        ):
+            risky.append(path)
+    return risky
 
 
 def _strip_heading(text: str) -> str:
