@@ -258,14 +258,14 @@ def apply_patch_edits(
     _update_manifest_after_apply(
         manifest_path,
         manifest,
-        changed_files=[item.path for item in prepared],
+        changed_files=_unique_prepared_paths(prepared),
         codebase_index=codebase_index,
     )
     return PatchApplyResult(
         run_dir=root,
         applied_edits_path=applied_edits_path,
         patch_diff_path=patch_diff_path,
-        changed_files=tuple(item.path for item in prepared),
+        changed_files=tuple(_unique_prepared_paths(prepared)),
     )
 
 
@@ -393,7 +393,7 @@ def _normalize_edit_proposal(
 
 def _prepare_edits(workspace_dir: Path, edits: list[dict[str, Any]]) -> list[_PreparedEdit]:
     workspace = workspace_dir.resolve()
-    seen_paths: set[str] = set()
+    current_text_by_path: dict[Path, str] = {}
     prepared: list[_PreparedEdit] = []
     errors: list[str] = []
     for index, edit in enumerate(edits, start=1):
@@ -404,10 +404,6 @@ def _prepare_edits(workspace_dir: Path, edits: list[dict[str, Any]]) -> list[_Pr
         if not path:
             errors.append(f"edit {index}: missing path")
             continue
-        if path in seen_paths:
-            errors.append(f"edit {index}: duplicate path `{path}`; combine edits per file")
-            continue
-        seen_paths.add(path)
         if not isinstance(old_text, str) or not old_text:
             errors.append(f"edit {index} `{path}`: old text must be a non-empty string")
             continue
@@ -421,7 +417,9 @@ def _prepare_edits(workspace_dir: Path, edits: list[dict[str, Any]]) -> list[_Pr
         if not file_path.exists() or not file_path.is_file():
             errors.append(f"edit {index} `{path}`: target file does not exist")
             continue
-        text = read_text(file_path)
+        text = current_text_by_path.get(file_path)
+        if text is None:
+            text = read_text(file_path)
         occurrences = text.count(old_text)
         if occurrences == 0:
             errors.append(f"edit {index} `{path}`: old text was not found")
@@ -430,6 +428,7 @@ def _prepare_edits(workspace_dir: Path, edits: list[dict[str, Any]]) -> list[_Pr
             errors.append(f"edit {index} `{path}`: old text matched {occurrences} times")
             continue
         updated_text = text.replace(old_text, new_text, 1)
+        current_text_by_path[file_path] = updated_text
         prepared.append(
             _PreparedEdit(
                 path=path,
@@ -464,11 +463,13 @@ def _unified_diff(
 ) -> str:
     chunks: list[str] = []
     for item in prepared:
-        old_lines = old_text_by_path[item.file_path].splitlines(keepends=True)
+        if item.file_path not in old_text_by_path:
+            continue
+        old_text = old_text_by_path.pop(item.file_path)
         new_lines = new_text_by_path[item.file_path].splitlines(keepends=True)
         chunks.extend(
             difflib.unified_diff(
-                old_lines,
+                old_text.splitlines(keepends=True),
                 new_lines,
                 fromfile=f"a/{item.path}",
                 tofile=f"b/{item.path}",
@@ -477,6 +478,14 @@ def _unified_diff(
         if chunks and not chunks[-1].endswith("\n"):
             chunks[-1] += "\n"
     return "".join(chunks)
+
+
+def _unique_prepared_paths(prepared: list[_PreparedEdit]) -> list[str]:
+    paths: list[str] = []
+    for item in prepared:
+        if item.path not in paths:
+            paths.append(item.path)
+    return paths
 
 
 def _write_text_atomically(path: Path, text: str) -> None:
@@ -497,7 +506,7 @@ def _applied_edits_record(
         "applied_at": _utcnow_iso(),
         "proposal": str(proposal_path),
         "edit_count": len(prepared),
-        "changed_files": [item.path for item in prepared],
+        "changed_files": _unique_prepared_paths(prepared),
         "edits": [
             {
                 "path": item.path,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from simple_ar.experiment.metrics import parse_metric_lines
+from simple_ar.metrics import parse_metric_lines
 
 
 class MetricParsingTests(unittest.TestCase):

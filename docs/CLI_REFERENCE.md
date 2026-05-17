@@ -159,7 +159,25 @@ Bundled example:
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-### Environment And Baseline
+### Manual Command Path
+
+Use the manual path when you want to run and inspect each primitive step
+yourself:
+
+```bash
+uv run simple-ar code-task probe runs/<run-id>
+uv run simple-ar code-task baseline runs/<run-id> --timeout 60
+uv run simple-ar code-task plan runs/<run-id>
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
+uv run simple-ar code-task propose-edits runs/<run-id>
+uv run simple-ar code-task apply-edits runs/<run-id>
+uv run simple-ar code-task validate runs/<run-id>
+uv run simple-ar code-task run runs/<run-id> --timeout 60
+```
+
+The following sections describe each primitive command.
+
+#### Environment And Baseline
 
 ```bash
 uv run simple-ar code-task probe runs/<run-id>
@@ -175,7 +193,7 @@ uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 | `--skip-validation` | Run benchmark even when static validation has not passed. |
 | `--env-mode`, `--python` | Override execution interpreter policy. |
 
-### Planning And Approval
+#### Planning And Approval
 
 ```bash
 uv run simple-ar code-task plan runs/<run-id>
@@ -195,7 +213,51 @@ uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 | `--note TEXT` | Optional review note. |
 | `--reviewer TEXT` | Reviewer label. Default: `user`. |
 
-### Patch, Validate, Run
+### Executor Path
+
+Use the executor path when you want the CLI to continue to the next safe stop:
+
+```bash
+# Continue to plan review.
+uv run simple-ar code-task execute runs/<run-id>
+
+# Approve the plan after reading code_task/patch_plan.md.
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
+
+# Continue to edit proposal review.
+uv run simple-ar code-task execute runs/<run-id>
+
+# Apply the reviewed proposal and run validation/benchmark.
+uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
+```
+
+Repeated `execute` calls are expected. The command is state-aware: it reads the
+run artifacts, performs the next safe work, and stops at review boundaries.
+
+| Command/Option | Meaning |
+| --- | --- |
+| `execute RUN_DIR` | Run the next safe code-task steps based on current artifacts. |
+| `--to-step STEP` | Stop no later than `probe`, `baseline`, `plan`, `propose-edits`, `apply-edits`, `validate`, `run`, `analyze-failure`, or `repair`. |
+| `--dry-run` | Print the next action without writing artifacts. |
+| `--no-llm`, `--model NAME` | Control LLM use for plan/proposal/repair steps. |
+| `--apply-proposed-edits` | Allow execute to apply reviewed `proposed_edits.json` after plan approval. |
+| `--repair-rounds N` | Maximum bounded repair proposals after validation/benchmark failure. Repair proposals are not auto-applied. |
+| `--timeout N` | Benchmark timeout for baseline and patched runs. |
+| `--strict-validation`, `--validation-max-file-bytes N` | Validation controls used by the orchestrated validate step. |
+| `--env-mode`, `--python` | Override execution interpreter policy for probe and benchmark runs. |
+
+Review gates are preserved. A fresh run stops after `patch_plan.md` with
+`approval_required`. After approval, execute may generate
+`proposed_edits.json`, but it stops again with `proposal_review_required`
+unless `--apply-proposed-edits` is set.
+
+Dry-run preview:
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> --dry-run
+```
+
+#### Patch, Validate, Run
 
 ```bash
 uv run simple-ar code-task propose-edits runs/<run-id>
@@ -217,7 +279,12 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 When both baseline and patched runs exist, SimpleAutoResearch writes
 `code_task/run/comparison.json` and updates `code_task/summary.md`.
 
-### Failure And Repair
+`proposed_edits.json` may contain multiple ordered edits for the same file.
+Each edit is applied against the current in-memory text, and each `old` block
+must match exactly once. Invalid proposals stop before file writes; under
+`execute`, this appears as `patch_apply_failed`.
+
+#### Failure And Repair
 
 ```bash
 uv run simple-ar code-task analyze-failure runs/<run-id>
@@ -234,6 +301,13 @@ uv run simple-ar code-task repair runs/<run-id>
 | `--max-source-chars-per-file N` | Source snippet budget per file. |
 
 Repair proposals are not applied automatically. Review them, then apply with:
+
+`analyze-failure` writes `failure_analysis.md` beside the failed benchmark run,
+or under `code_task/meta/` when static validation failed before benchmark
+launch. `repair` writes a proposal JSON with `source_analysis`,
+`selected_files`, `constraints`, normalized `edits`, and `warnings`; edits
+outside the selected repair context are dropped. It also refreshes
+`code_task/summary.md` with a Repair section.
 
 ```bash
 uv run simple-ar code-task apply-edits runs/<run-id> \

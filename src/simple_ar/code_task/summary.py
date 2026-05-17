@@ -36,8 +36,6 @@ def write_code_task_summary(run_dir: Path) -> Path:
     patched_execution = _read_run_json(paths.run_artifact_dir, "patched", "execution_report.json")
     patched_metrics = _read_run_json(paths.run_artifact_dir, "patched", "metrics.json")
     comparison = _read_optional_json(paths.run_artifact_dir / "comparison.json")
-    legacy_execution = _read_optional_json(paths.run_artifact_dir / "execution_report.json")
-    legacy_metrics = _read_optional_json(paths.run_artifact_dir / "metrics.json")
     failure = _read_latest_failure(paths.run_artifact_dir, manifest)
 
     write_text(
@@ -54,8 +52,6 @@ def write_code_task_summary(run_dir: Path) -> Path:
             patched_execution=patched_execution,
             patched_metrics=patched_metrics,
             comparison=comparison,
-            legacy_execution=legacy_execution,
-            legacy_metrics=legacy_metrics,
             failure=failure,
         ),
     )
@@ -76,11 +72,10 @@ def _render_summary(
     patched_execution: dict[str, Any],
     patched_metrics: dict[str, Any],
     comparison: dict[str, Any],
-    legacy_execution: dict[str, Any],
-    legacy_metrics: dict[str, Any],
     failure: str,
 ) -> str:
     changed_files = _changed_files(manifest)
+    repair = manifest.get("repair", {})
     lines = [
         "# Code Task Summary",
         "",
@@ -127,8 +122,6 @@ def _render_summary(
             patched_execution=patched_execution,
             patched_metrics=patched_metrics,
             comparison=comparison,
-            legacy_execution=legacy_execution,
-            legacy_metrics=legacy_metrics,
         ),
     ]
     if failure:
@@ -138,6 +131,15 @@ def _render_summary(
                 "## Failure Analysis",
                 "",
                 _clip(_strip_heading(failure), max_chars=1800),
+            ]
+        )
+    if isinstance(repair, dict) and repair:
+        lines.extend(
+            [
+                "",
+                "## Repair",
+                "",
+                _repair_summary(repair),
             ]
         )
     artifact_lines = [
@@ -152,6 +154,8 @@ def _render_summary(
     ]
     if comparison:
         artifact_lines.insert(-1, "- Comparison: `code_task/run/comparison.json`")
+    if isinstance(repair, dict) and repair.get("latest_proposed_edits"):
+        artifact_lines.insert(-1, f"- Repair proposal: `{repair.get('latest_proposed_edits')}`")
     lines.extend(["", "## Artifacts", "", *artifact_lines, ""])
     return "\n".join(lines)
 
@@ -409,8 +413,6 @@ def _benchmark_summary(
     patched_execution: dict[str, Any],
     patched_metrics: dict[str, Any],
     comparison: dict[str, Any],
-    legacy_execution: dict[str, Any],
-    legacy_metrics: dict[str, Any],
 ) -> str:
     sections: list[str] = []
     if baseline_execution:
@@ -439,14 +441,6 @@ def _benchmark_summary(
                 "### Comparison",
                 "",
                 _comparison_summary(comparison),
-            ]
-        )
-    if not sections and legacy_execution:
-        sections.extend(
-            [
-                "### Latest",
-                "",
-                _execution_summary(legacy_execution, legacy_metrics),
             ]
         )
     if not sections:
@@ -481,6 +475,23 @@ def _comparison_summary(comparison: dict[str, Any]) -> str:
                 f"`{row.get('interpretation', 'changed')}` | "
                 f"`{direction}` ({source}) |"
             )
+    return "\n".join(lines)
+
+
+def _repair_summary(repair: dict[str, Any]) -> str:
+    lines = [
+        f"- Status: `{repair.get('status', 'unknown')}`",
+        f"- Attempts: `{repair.get('repair_count', 0)}`",
+    ]
+    if repair.get("latest_proposed_edits"):
+        lines.append(f"- Latest proposal: `{repair.get('latest_proposed_edits')}`")
+    if repair.get("latest_edit_count") is not None:
+        lines.append(f"- Proposed edits: `{repair.get('latest_edit_count')}`")
+    selected = repair.get("selected_files")
+    if isinstance(selected, list) and selected:
+        files = ", ".join(f"`{path}`" for path in selected[:5])
+        suffix = " ..." if len(selected) > 5 else ""
+        lines.append(f"- Context files: {files}{suffix}")
     return "\n".join(lines)
 
 

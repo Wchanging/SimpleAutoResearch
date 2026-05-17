@@ -40,6 +40,10 @@ Key boundaries:
 - The source project is copied into `code_task/workspace`; the original code is never modified.
 - Patch application is gated by an explicit human approval step.
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
+- Multiple ordered edits may target one file, but every `old` block must remain
+  uniquely matchable; invalid proposals stop before workspace files are written.
+- `code-task execute` can run the next safe steps, but it stops at plan approval
+  and proposal review unless the user explicitly continues.
 - Current execution uses workspace isolation plus an explicit interpreter policy. It supports `current` and `external`; managed environment creation is planned later.
 
 Bundled examples:
@@ -169,6 +173,7 @@ runs/<run-id>/
       proposed_edits.json
       applied_edits.json
       validation_report.json
+      failure_analysis.md        # validation-only failure diagnosis
       llm_usage.jsonl
       llm_usage_summary.json
     run/
@@ -192,9 +197,9 @@ runs/<run-id>/
 Important directories:
 
 - `workspace/`: editable copy of the source project.
-- `meta/`: environment reports, indexes, decisions, proposed edits, applied edit summaries, validation reports, and LLM usage.
-- `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, before/after comparison, and failure analysis.
-- `repairs/`: bounded repair proposals grouped by attempt.
+- `meta/`: environment reports, indexes, decisions, proposed edits, applied edit summaries, validation reports, validation-only failure analysis, and LLM usage.
+- `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, before/after comparison, and benchmark failure analysis.
+- `repairs/`: bounded repair proposals grouped by attempt. Each proposal records the source analysis path and selected repair context.
 
 Important user-facing code-task files:
 

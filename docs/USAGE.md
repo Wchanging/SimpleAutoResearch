@@ -175,6 +175,15 @@ names work when you declare their direction with `--metric-direction` or the
 TOML config. See [CLI Reference](CLI_REFERENCE.md#init) for the full option
 table and [CLI Reference](CLI_REFERENCE.md#init-config) for the config schema.
 
+After init, choose one of two execution styles:
+
+- **Manual path**: run every primitive command yourself. This is best while
+  debugging or learning the internals.
+- **Executor path**: use `code-task execute` to continue to the next safe step.
+  This is shorter, but it still stops at review gates.
+
+### Manual Path
+
 Probe the environment and run the unchanged baseline before asking for edits:
 
 ```bash
@@ -225,7 +234,8 @@ uv run simple-ar code-task propose-edits runs/<run-id>
 
 `propose-edits` writes `code_task/meta/proposed_edits.json`. The proposal uses
 controlled old/new text replacements and is meant for review. It does not edit
-the workspace by itself.
+the workspace by itself. A proposal may include multiple ordered edits for the
+same file; each `old` block must still match uniquely when applied in sequence.
 
 Apply proposed edits inside the copied workspace:
 
@@ -236,7 +246,9 @@ uv run simple-ar code-task apply-edits runs/<run-id>
 `apply-edits` applies the reviewed proposal only inside
 `code_task/workspace/`, writes a human-readable `code_task/patch.diff`, writes
 `code_task/meta/applied_edits.json` with changed files and hashes, and updates
-the codebase index. It still never mutates the original `--code-root`.
+the codebase index. It still never mutates the original `--code-root`. If an
+edit cannot be matched safely, `execute` stops with `patch_apply_failed` before
+workspace files are changed.
 
 Validate and run the patched benchmark:
 
@@ -263,18 +275,58 @@ uv run simple-ar code-task repair runs/<run-id>
 
 `analyze-failure` reads the latest failed validation/benchmark evidence and
 writes a compact diagnosis, usually under `code_task/run/patched/` or the
-current run label. It is deterministic and does not call the LLM.
+current run label. If the benchmark was blocked before launch by static
+validation, it writes `code_task/meta/failure_analysis.md` instead. It is
+deterministic and does not call the LLM.
 
 `repair` uses the failure analysis, latest patch, task, and selected source
 context to write a bounded repair proposal under
-`code_task/repairs/repair-001/proposed_edits.json`. It does not apply the
-repair automatically.
+`code_task/repairs/repair-001/proposed_edits.json`. The proposal records the
+source analysis path, selected context files, and repair constraints. It does
+not apply the repair automatically. `code_task/summary.md` is refreshed with a
+Repair section.
 
 Apply a reviewed repair proposal explicitly:
 
 ```bash
 uv run simple-ar code-task apply-edits runs/<run-id> \
   --edits-file runs/<run-id>/code_task/repairs/repair-001/proposed_edits.json
+```
+
+### Executor Path
+
+The executor path is the shortest reviewed route through the same workflow:
+
+```bash
+# Continue to plan review.
+uv run simple-ar code-task execute runs/<run-id>
+
+# Approve the plan after reading code_task/patch_plan.md.
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
+
+# Continue to edit proposal review.
+uv run simple-ar code-task execute runs/<run-id>
+
+# Apply the reviewed proposal and run validation/benchmark.
+uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
+```
+
+Those repeated `execute` calls are intentional. `execute` means “inspect the
+current run and continue to the next safe stop.” It does not mean “skip review.”
+
+- First `execute`: writes `environment_report.json`, baseline artifacts,
+  `patch_plan.md`, then stops with `approval_required`.
+- `decide-plan`: records your approval in `hitl_decisions.jsonl`.
+- Second `execute`: writes `proposed_edits.json`, then stops with
+  `proposal_review_required`.
+- Final `execute --apply-proposed-edits`: applies the reviewed proposal, writes
+  `patch.diff`, validates the workspace, runs the patched benchmark, updates
+  `comparison.json`, and refreshes `summary.md`.
+
+Preview the next executor action without writing artifacts:
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> --dry-run
 ```
 
 Detailed code-task command options live in [CLI Reference](CLI_REFERENCE.md#code-task-commands).

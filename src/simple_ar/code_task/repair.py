@@ -16,6 +16,7 @@ from simple_ar.code_task.state import (
     utcnow_iso,
     workspace_file,
 )
+from simple_ar.code_task.summary import write_code_task_summary
 from simple_ar.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.usage import summarize_usage
 
@@ -89,8 +90,9 @@ def propose_repair_edits(
         artifacts = _latest_run_artifacts(paths, manifest)
         analysis_path = artifacts["failure_analysis"]
     failure_analysis = read_text(analysis_path)
-    execution_report = _read_required_json(artifacts["execution_report"])
-    if execution_report.get("status") == "passed":
+    execution_report = _read_optional_json(artifacts.get("execution_report"))
+    validation_report = _read_optional_json(artifacts.get("validation_report"))
+    if execution_report.get("status") == "passed" and not _validation_failed(validation_report):
         raise RuntimeError("Latest benchmark passed; repair proposal is not needed.")
 
     task_text = _read_optional_text(paths.task_dir / "task.md")
@@ -135,6 +137,7 @@ def propose_repair_edits(
                     patch_diff=patch_diff,
                     failure_analysis=failure_analysis,
                     execution_report=execution_report,
+                    validation_report=validation_report,
                     snippets=snippets,
                 ),
                 label="code-task-repair",
@@ -146,7 +149,13 @@ def propose_repair_edits(
     if proposal is None:
         proposal = _offline_repair(selected)
 
-    normalized = _normalize_repair_proposal(proposal, index=index, mode=mode)
+    normalized = _normalize_repair_proposal(
+        proposal,
+        index=index,
+        mode=mode,
+        selected_files=selected,
+        source_analysis=analysis_path.relative_to(paths.run_dir).as_posix(),
+    )
     write_json(proposal_path, normalized)
     _update_manifest_after_repair(
         run_dir,
@@ -155,6 +164,7 @@ def propose_repair_edits(
         edit_count=len(normalized["edits"]),
         selected_files=selected,
     )
+    write_code_task_summary(run_dir)
     return RepairProposalResult(
         run_dir=paths.run_dir,
         repair_dir=repair_dir,
@@ -172,6 +182,7 @@ def _repair_prompt(
     patch_diff: str,
     failure_analysis: str,
     execution_report: dict[str, Any],
+    validation_report: dict[str, Any],
     snippets: list[dict[str, str]],
 ) -> str:
     snippet_text = "\n\n".join(
@@ -186,13 +197,15 @@ def _repair_prompt(
         "- Use exact old/new text replacements only.\n"
         "- Use only workspace-relative paths from the supplied snippets.\n"
         "- Prefer repairing implicated or recently changed files.\n"
+        "- Treat validation errors as first-class evidence even when the benchmark was not launched.\n"
         "- Do not change tests unless the failure analysis clearly shows the test is wrong.\n"
         "- Keep the repair minimal and runnable.\n"
         "- Do not return markdown or a unified diff.\n\n"
         f"Task:\n{task_text or 'No task text found.'}\n\n"
         f"Patch plan:\n{patch_plan or 'No patch plan found.'}\n\n"
         f"Current patch diff:\n```diff\n{patch_diff or 'No patch diff found.'}\n```\n\n"
-        f"Execution report JSON:\n{json.dumps(execution_report, indent=2, ensure_ascii=False)}\n\n"
+        f"Execution report JSON:\n{json.dumps(execution_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"
+        f"Validation report JSON:\n{json.dumps(validation_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"
         f"Failure analysis:\n{failure_analysis}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
@@ -208,14 +221,14 @@ def _repair_context_files(
 ) -> list[str]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
     selected: list[str] = []
-    failure = manifest.get("failure_analysis", {})
-    if isinstance(failure, dict):
-        for path in failure.get("implicated_files", []):
-            if isinstance(path, str) and path in known_paths and path not in selected:
-                selected.append(path)
     patch = manifest.get("patch", {})
     if isinstance(patch, dict):
         for path in patch.get("changed_files", []):
+            if isinstance(path, str) and path in known_paths and path not in selected:
+                selected.append(path)
+    failure = manifest.get("failure_analysis", {})
+    if isinstance(failure, dict):
+        for path in failure.get("implicated_files", []):
             if isinstance(path, str) and path in known_paths and path not in selected:
                 selected.append(path)
     for path in select_relevant_files(index, task_text + "\n" + failure_analysis, max_files=max_files):
@@ -264,8 +277,11 @@ def _normalize_repair_proposal(
     *,
     index: dict[str, Any],
     mode: str,
+    selected_files: list[str],
+    source_analysis: str,
 ) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
+    permitted_paths = set(selected_files) if selected_files else known_paths
     warnings: list[str] = []
     edits: list[dict[str, str]] = []
     for item in proposal.get("edits", []):
@@ -277,6 +293,9 @@ def _normalize_repair_proposal(
         new = item.get("new")
         if path not in known_paths:
             warnings.append(f"Dropped edit for unknown path: {path or '<empty>'}")
+            continue
+        if path not in permitted_paths:
+            warnings.append(f"Dropped edit outside repair context: {path}")
             continue
         if not isinstance(old, str) or not isinstance(new, str):
             warnings.append(f"Dropped edit for {path}: old/new must be strings.")
@@ -297,6 +316,12 @@ def _normalize_repair_proposal(
         "generated_at": utcnow_iso(),
         "kind": "repair_proposal",
         "mode": mode,
+        "source_analysis": source_analysis,
+        "selected_files": selected_files,
+        "constraints": [
+            "Only selected context files may be edited by this repair proposal.",
+            "Apply this proposal explicitly with code-task apply-edits after review.",
+        ],
         "summary": _string(proposal.get("summary")) or "No summary provided.",
         "edits": edits,
         "validation": _string_list(proposal.get("validation")),
@@ -380,11 +405,21 @@ def _read_required_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _read_optional_json(path: object) -> dict[str, Any]:
+    if not isinstance(path, Path) or not path.exists():
+        return {}
+    value = read_json(path)
+    if not isinstance(value, dict):
+        return {}
+    return value
+
+
 def _read_optional_text(path: Path) -> str:
     return read_text(path) if path.exists() else ""
 
 
-def _latest_run_artifacts(paths: Any, manifest: dict[str, Any]) -> dict[str, Path]:
+def _latest_run_artifacts(paths: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+    validation_report = paths.meta_dir / "validation_report.json"
     benchmark = manifest.get("benchmark", {})
     if isinstance(benchmark, dict):
         report_rel = benchmark.get("execution_report")
@@ -392,11 +427,13 @@ def _latest_run_artifacts(paths: Any, manifest: dict[str, Any]) -> dict[str, Pat
             report = paths.run_dir / str(report_rel)
             return {
                 "execution_report": report,
+                "validation_report": validation_report,
                 "failure_analysis": report.parent / "failure_analysis.md",
             }
     return {
-        "execution_report": paths.run_artifact_dir / "execution_report.json",
-        "failure_analysis": paths.run_artifact_dir / "failure_analysis.md",
+        "execution_report": None,
+        "validation_report": validation_report,
+        "failure_analysis": paths.meta_dir / "failure_analysis.md",
     }
 
 
@@ -415,6 +452,17 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [_string(item) for item in value if _string(item)]
+
+
+def _validation_failed(validation: dict[str, Any]) -> bool:
+    return validation.get("status") == "failed" or _int_value(validation.get("error_count")) > 0
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _clip(text: str, *, max_chars: int) -> str:

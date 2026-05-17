@@ -24,7 +24,7 @@ def build_experiment_code(plan: dict[str, Any]) -> str:
         ExperimentTemplateError: If the plan requests an unknown template.
     """
     template = str(plan.get("template", "toy_text_classification"))
-    if template != "toy_text_classification":
+    if template not in SUPPORTED_TEMPLATES:
         raise ExperimentTemplateError(f"Unsupported experiment template: {template}")
     return _toy_text_classification_code(plan)
 

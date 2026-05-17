@@ -9,10 +9,10 @@ METRIC_RE = re.compile(
 
 
 def parse_metric_lines(text: str) -> dict[str, float]:
-    """Parse ``name: value`` metric lines from experiment stdout.
+    """Parse ``name: value`` metric lines from captured stdout.
 
     Args:
-        text: Captured stdout from an experiment script.
+        text: Captured stdout from an experiment or benchmark script.
 
     Returns:
         Mapping of metric names to numeric values. Non-numeric lines are

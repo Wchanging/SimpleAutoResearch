@@ -91,42 +91,6 @@ def probe_code_task_environment(
     )
 
 
-def configure_code_task_environment(
-    run_dir: Path,
-    *,
-    env_mode: str | None = None,
-    python_executable: str | Path | None = None,
-) -> dict[str, Any]:
-    """Record the execution environment policy for a code-task run.
-
-    The policy only selects the interpreter used by later benchmark commands.
-    It does not create virtual environments, install dependencies, or run
-    project code.
-
-    Args:
-        run_dir: Code-task run directory.
-        env_mode: ``current`` or ``external``. ``None`` keeps the existing mode
-            or falls back to ``current``.
-        python_executable: Required for ``external`` mode. May be an executable
-            name found on ``PATH`` or a filesystem path.
-
-    Returns:
-        Normalized policy stored in the manifest.
-    """
-    manifest = load_code_task_manifest(run_dir)
-    policy = _resolved_environment_policy(
-        manifest,
-        env_mode=env_mode,
-        python_executable=python_executable,
-    )
-    environment = manifest_section(manifest, "environment")
-    environment.setdefault("status", "not_probed")
-    environment["policy"] = policy
-    manifest["environment"] = environment
-    save_code_task_manifest(run_dir, manifest)
-    return policy
-
-
 def ensure_code_task_environment_policy(
     run_dir: Path,
     manifest: dict[str, Any],

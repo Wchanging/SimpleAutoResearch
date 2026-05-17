@@ -6,6 +6,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Added
 
+- Added Phase 5 failure analysis support for validation-only failures, so code-task runs can diagnose syntax/static validation errors before a benchmark has launched.
+- Added bounded repair proposal metadata with source analysis paths, selected repair context files, and explicit repair constraints.
+- Added `simple-ar code-task execute`, a conservative state-aware orchestrator that runs safe next steps while stopping at plan approval and proposal review gates.
 - Added code-task metric comparison configuration with `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
 - Added `code-task init --config` for TOML-based initialization, including metric direction settings.
 - Added a tiny-digits MLP code-task config example under `examples/code_tasks/configs/`.
@@ -15,6 +18,13 @@ This file records user-visible project changes in reverse chronological order. P
 
 - Comparison artifacts now record configured metric directions and keep unknown metrics as deltas without using them for improved/regressed verdicts.
 - Moved code-task init config parsing out of `cli.py` and into `code_task/config.py`.
+- Repair context selection now prioritizes files changed by the current patch before traceback/test files, making benchmark-failure repairs less likely to edit tests by accident.
+- `code_task/summary.md` now includes a Repair section after a repair proposal is generated.
+- Patch application now supports multiple ordered edits in the same file when each old-text block remains uniquely matchable.
+- `code-task execute` now reports invalid edit proposals as `patch_apply_failed` instead of surfacing a Python traceback.
+- Documented `code-task execute` as a convenience layer over primitive code-task commands, not a replacement for reviewable steps.
+- Moved shared metric parsing from `experiment.metrics` to top-level `simple_ar.metrics`, removing an unnecessary code-task dependency on the experiment package.
+- Removed unused code-task environment configuration helper and old unlabelled benchmark artifact fallbacks.
 - Slimmed `docs/USAGE.md` so detailed command/config tables live in the CLI reference.
 - Code-task summaries now start with an outcome and next-step section, and `simple-ar status` shows summary, metric config, and comparison deltas.
 

@@ -12,8 +12,12 @@ from simple_ar.code_task.patching import (
 )
 from simple_ar.code_task.environment import (
     CodeTaskEnvironmentResult,
-    configure_code_task_environment,
     probe_code_task_environment,
+)
+from simple_ar.code_task.execute import (
+    CodeTaskExecuteResult,
+    ExecuteStepRecord,
+    execute_code_task,
 )
 from simple_ar.code_task.comparison import (
     CodeTaskComparisonResult,
@@ -49,12 +53,14 @@ __all__ = [
     "CodeTaskRunResult",
     "CodeTaskComparisonResult",
     "CodeTaskValidationResult",
+    "CodeTaskExecuteResult",
+    "ExecuteStepRecord",
     "CodeTaskConfigError",
     "CodeTaskInitOptions",
     "apply_patch_edits",
     "analyze_code_task_failure",
-    "configure_code_task_environment",
     "compare_code_task_runs",
+    "execute_code_task",
     "generate_patch_plan",
     "initialize_code_task",
     "load_code_task_init_options",

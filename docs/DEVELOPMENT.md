@@ -37,7 +37,8 @@ A new template should:
 - be added to `SUPPORTED_TEMPLATES`;
 - generate a complete standalone `experiment.py`;
 - use only dependencies declared in `pyproject.toml`;
-- print machine-parseable metric lines like `metric_name: 0.123`;
+- print machine-parseable metric lines like `metric_name: 0.123`, parsed by
+  `src/simple_ar/metrics.py`;
 - avoid network access and uncontrolled downloads;
 - have a test in `tests/test_experiment_runner.py`.
 

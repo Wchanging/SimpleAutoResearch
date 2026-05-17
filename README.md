@@ -99,15 +99,44 @@ uv run simple-ar code-task init \
   --env-mode current
 ```
 
-Then probe the environment, capture the unchanged baseline, and generate a patch plan:
+There are two ways to run the code-task workflow.
+
+Manual path, fully expanded:
 
 ```bash
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 uv run simple-ar code-task plan runs/<run-id>
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
+uv run simple-ar code-task propose-edits runs/<run-id>
+uv run simple-ar code-task apply-edits runs/<run-id>
+uv run simple-ar code-task validate runs/<run-id>
+uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
-After human review, continue with `decide-plan`, `propose-edits`, `apply-edits`, `validate`, and `run`. When both baseline and patched benchmark artifacts exist, the run summary includes a conservative before/after comparison.
+Shortest reviewed path with the executor:
+
+```bash
+# Continue to plan review.
+uv run simple-ar code-task execute runs/<run-id>
+
+# Approve the plan after reading code_task/patch_plan.md.
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
+
+# Continue to edit proposal review.
+uv run simple-ar code-task execute runs/<run-id>
+
+# Apply the reviewed proposal and run validation/benchmark.
+uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
+```
+
+`execute` is a state-aware convenience command. From a fresh code task it stops
+at `approval_required` after writing the environment report, baseline run, and
+patch plan. After approval, it can generate `proposed_edits.json`, then stops
+again for proposal review. `--apply-proposed-edits` is the explicit signal to
+apply the reviewed proposal and run validation/benchmark. When both baseline
+and patched benchmark artifacts exist, the run summary includes a conservative
+before/after comparison.
 
 For benchmark comparison, print numeric metrics as `name: value` lines.
 `--primary-metric` chooses the main quality target, while
@@ -153,6 +182,7 @@ Important limits:
 
 - The general "research a topic, modify my arbitrary existing codebase, run my benchmark, then write a report" workflow is not yet one command. Today, that is either the bundled toy demo or the standalone `code-task` workflow.
 - Code edits are controlled old/new replacements. This keeps patches auditable, but it is weaker than a full coding agent that can plan and edit many files across multiple autonomous rounds.
+- Reviewed proposals may contain multiple ordered edits in one file, but invalid old/new replacements are rejected before workspace files are changed.
 - The tool does not install project dependencies, manage Docker/Conda/GPU/Slurm environments, or schedule large experiments.
 - Literature search currently works from metadata and local artifact snippets. It is not yet a full PDF-reading or vector-RAG survey system.
 - LLM-written reports are guarded. If the draft invents citations, omits required citations, or overstates toy evidence, SimpleAutoResearch falls back to a structured deterministic report.

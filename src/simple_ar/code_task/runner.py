@@ -21,7 +21,7 @@ from simple_ar.code_task.state import (
 )
 from simple_ar.code_task.summary import write_code_task_summary
 from simple_ar.code_task.validation import validate_code_task
-from simple_ar.experiment.metrics import parse_metric_lines
+from simple_ar.metrics import parse_metric_lines
 
 
 CONTROL_TOKENS = {"|", "||", "&&", ";", "<", ">", ">>", "2>", "2>>"}

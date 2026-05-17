@@ -10,6 +10,7 @@ from simple_ar.artifacts import read_json, read_text
 from simple_ar.code_task import (
     analyze_code_task_failure,
     apply_patch_edits,
+    execute_code_task,
     generate_patch_plan,
     initialize_code_task,
     probe_code_task_environment,
@@ -235,6 +236,44 @@ def build_parser() -> argparse.ArgumentParser:
     code_task_repair.add_argument("--max-files", type=int, default=8)
     code_task_repair.add_argument("--max-source-chars-per-file", type=int, default=4000)
 
+    code_task_execute = code_task_subparsers.add_parser(
+        "execute",
+        help="Run a conservative state-aware code-task sequence.",
+    )
+    code_task_execute.add_argument("run_dir")
+    code_task_execute.add_argument(
+        "--to-step",
+        choices=(
+            "probe",
+            "baseline",
+            "plan",
+            "propose-edits",
+            "apply-edits",
+            "validate",
+            "run",
+            "analyze-failure",
+            "repair",
+        ),
+        default="run",
+        help="Last step execute may attempt.",
+    )
+    code_task_execute.add_argument("--dry-run", action="store_true")
+    code_task_execute.add_argument("--model", default=None)
+    code_task_execute.add_argument("--no-llm", action="store_true")
+    code_task_execute.add_argument("--timeout", type=int, default=60)
+    code_task_execute.add_argument("--skip-validation", action="store_true")
+    code_task_execute.add_argument("--strict-validation", action="store_true")
+    code_task_execute.add_argument("--validation-max-file-bytes", type=int, default=500_000)
+    code_task_execute.add_argument(
+        "--apply-proposed-edits",
+        action="store_true",
+        help="Apply reviewed proposed_edits.json after plan approval.",
+    )
+    code_task_execute.add_argument("--repair-rounds", type=int, default=0)
+    code_task_execute.add_argument("--max-files", type=int, default=8)
+    code_task_execute.add_argument("--max-source-chars-per-file", type=int, default=4000)
+    _add_code_task_env_args(code_task_execute)
+
     inspect_parser = subparsers.add_parser("inspect", help="Index and summarize run artifacts.")
     inspect_parser.add_argument("run_dir")
 
@@ -379,6 +418,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.code_task_command == "repair":
             _print_code_task_repair(args)
+            return
+        if args.code_task_command == "execute":
+            _print_code_task_execute(args)
             return
         parser.error(f"Unknown code-task command: {args.code_task_command}")
 
@@ -663,6 +705,8 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
     if isinstance(failure, dict) and failure:
         print("Failure Analysis:")
         print(f"- status: {failure.get('status', 'unknown')}")
+        if failure.get("source"):
+            print(f"- source: {failure.get('source')}")
         if failure.get("analysis"):
             print(f"- analysis: {run_dir / str(failure.get('analysis'))}")
 
@@ -960,6 +1004,7 @@ def _print_code_task_analyze_failure(args: argparse.Namespace) -> None:
     print(f"Code task run: {result.run_dir}")
     print(f"Failure analysis: {result.analysis_path}")
     print(f"Status: {result.status}")
+    print(f"Source: {result.source}")
     print(f"Implicated files: {len(result.implicated_files)}")
     for path in result.implicated_files:
         print(f"- {path}")
@@ -983,6 +1028,35 @@ def _print_code_task_repair(args: argparse.Namespace) -> None:
     print(f"Context files: {len(result.selected_files)}")
     for path in result.selected_files:
         print(f"- {path}")
+
+
+def _print_code_task_execute(args: argparse.Namespace) -> None:
+    """Run the state-aware code-task orchestrator and print step decisions."""
+    result = execute_code_task(
+        Path(args.run_dir),
+        to_step=args.to_step,
+        dry_run=args.dry_run,
+        model=args.model,
+        use_llm=not args.no_llm,
+        timeout_sec=args.timeout,
+        skip_validation=args.skip_validation,
+        env_mode=args.env_mode,
+        python_executable=args.python_executable,
+        strict_validation=args.strict_validation,
+        validation_max_file_bytes=args.validation_max_file_bytes,
+        apply_proposed_edits=args.apply_proposed_edits,
+        repair_rounds=args.repair_rounds,
+        max_files=args.max_files,
+        max_source_chars_per_file=args.max_source_chars_per_file,
+        message_callback=lambda message: print(f"  - {message}"),
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Stop reason: {result.stop_reason}")
+    print(f"Next action: {result.next_action}")
+    print(f"Summary: {result.summary_path}")
+    print("Steps:")
+    for step in result.steps:
+        print(f"- {step.step}: {step.status} ({step.detail})")
 
 
 def _artifact_rows(index: dict[str, object]) -> list[dict[str, object]]:
