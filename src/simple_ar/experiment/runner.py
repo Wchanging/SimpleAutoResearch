@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from simple_ar.experiment.metrics import parse_metric_lines
+from simple_ar.metrics import parse_metric_lines
 
 
 class ExperimentRunError(RuntimeError):

@@ -1,6 +1,6 @@
 # Development Guide
 
-This document is for contributors who want to extend SimpleAutoResearch. For usage commands, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
+This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
 
 ## Project Shape
 
@@ -27,17 +27,23 @@ A new stage should read existing artifacts with `ctx.find_artifact(...)` and wri
 
 ## Adding An Experiment Template
 
-Fixed script templates live in `src/simple_ar/experiment/templates.py`. The
-experimental 8-stage code-task demo lives in
-`src/simple_ar/experiment/code_task_demo.py` because it prepares an existing
+Fixed script templates live in `src/simple_ar/experiment/templates.py`.
+Embedded 8-stage code-task templates live in
+`src/simple_ar/experiment/code_task_experiment.py` because they prepare an existing
 workspace before writing the run harness.
+
+Top-level run config parsing lives in `src/simple_ar/run_config.py`. Keep it as
+a thin TOML-to-runtime-options layer; code-task-specific config semantics should
+continue to live in `src/simple_ar/code_task/config.py` so standalone and
+embedded code-task runs do not drift apart.
 
 A new template should:
 
 - be added to `SUPPORTED_TEMPLATES`;
 - generate a complete standalone `experiment.py`;
 - use only dependencies declared in `pyproject.toml`;
-- print machine-parseable metric lines like `metric_name: 0.123`;
+- print machine-parseable metric lines like `metric_name: 0.123`, parsed by
+  `src/simple_ar/metrics.py`;
 - avoid network access and uncontrolled downloads;
 - have a test in `tests/test_experiment_runner.py`.
 
@@ -47,17 +53,22 @@ For embedded code-task templates, keep the automatic approval boundary explicit:
 they should copy a workspace, use controlled old/new edits, write a compact
 stage artifact such as `code_task_experiment.json`, and run the benchmark
 through `07-run` instead of silently mutating source code during reporting.
+The generic `code_task_project` template should remain a thin bridge over the
+standalone code-task modules rather than a separate coding implementation.
 
 ## Extending Code Task
 
 The code-task workflow is split into small modules:
 
 - `workspace.py`: safe source copy.
+- `config.py`: TOML config and CLI override resolution for code-task init.
+- `environment.py`: environment observation and execution-interpreter policy.
 - `index.py`: codebase inventory and Python AST summaries.
 - `planning.py`: patch planning and HITL decisions.
 - `patching.py`: controlled old/new edit proposal and application.
 - `validation.py`: syntax and static safety checks.
 - `runner.py`: benchmark execution in the copied workspace.
+- `comparison.py`: baseline-vs-patched metric comparison.
 - `failure.py`: deterministic failure analysis.
 - `repair.py`: bounded repair proposal generation.
 - `summary.py`: human-readable code-task status summaries.
@@ -71,12 +82,50 @@ When adding a new code-task feature:
 - add tests that exercise both the library function and CLI path when useful;
 - prefer small composable functions over a single agent loop.
 
+Metric comparison should stay conservative. Unknown numeric metrics may be
+recorded as deltas, but they should not decide an improved/regressed verdict
+unless their direction is known from explicit manifest configuration or a
+simple local heuristic. Add new default heuristics only when the metric naming
+convention is common enough to be unsurprising.
+
+### Code-Task Environment Policy
+
+The current V2.1 code-task runner has workspace isolation, command timeouts,
+captured stdout/stderr, a restricted environment map, and an explicit execution
+interpreter policy. It supports `current` and `external` modes, but it does not
+yet create or install into a separate Python environment. Unless a future
+feature explicitly changes this, do not install user project dependencies into
+SimpleAutoResearch's own `.venv` by default.
+
+Environment support should evolve in layers:
+
+- `current`: run with the current SimpleAutoResearch Python. This is simple and
+  useful for demos, but it is not dependency isolation. Supported now.
+- `external`: run with a user-provided Python or Conda interpreter. This should
+  be the first practical escape hatch for real projects that already have an
+  environment. Supported now.
+- `project-venv`: create a per-run environment under
+  `code_task/.venv/`. This isolates well but can waste disk space. Planned.
+- `shared-env-cache`: create or reuse environments under a cache directory such
+  as `.simple_ar_cache/envs/<env-hash>/`, keyed by OS, Python version, and
+  dependency files. This is the preferred long-term default. Planned.
+- `docker`: run inside a container for stronger isolation. Keep this separate
+  from the Python runner because Windows, GPU, and image-build behavior need
+  careful handling. Planned.
+
+Future environment creation or dependency installation must be explicit,
+auditable, and recorded in artifacts. A safe implementation should record the
+selected mode, interpreter path, dependency files, install commands, exit codes,
+and warnings in `code_task/meta/environment_report.json` or a dedicated
+environment artifact.
+
 ## Documentation Rules
 
 Use the docs this way:
 
 - `README.md`: project entry, setup, quickstart, workflow overview, links.
-- `docs/USAGE.md`: commands, env configuration, examples, future config shape.
+- `docs/USAGE.md`: installation, env configuration, and workflow walkthroughs.
+- `docs/CLI_REFERENCE.md`: command groups, option tables, and config schema.
 - `docs/WORKFLOWS.md`: what each workflow/stage does and what files it produces.
 - `docs/DEVELOPMENT.md`: contributor guidance.
 - `CHANGELOG.md`: chronological development progress.

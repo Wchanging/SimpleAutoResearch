@@ -43,12 +43,14 @@ class FailureAnalysisResult:
         status: ``needs_repair`` when a failed execution is present,
             otherwise ``no_failure``.
         implicated_files: Workspace-relative files mentioned by tracebacks.
+        source: Evidence source used for the diagnosis.
     """
 
     run_dir: Path
     analysis_path: Path
     status: str
     implicated_files: tuple[str, ...]
+    source: str = "benchmark"
 
 
 def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
@@ -66,39 +68,51 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
     """
     manifest = load_code_task_manifest(run_dir)
     paths = code_task_paths(run_dir)
-    report_path = paths.run_artifact_dir / "execution_report.json"
-    if not report_path.exists():
-        raise FileNotFoundError(
-            f"Missing execution report: {report_path}. Run `simple-ar code-task run` first."
-        )
-    report = read_json(report_path)
-    if not isinstance(report, dict):
-        raise RuntimeError(f"Expected JSON object in {report_path}")
+    artifacts = _latest_failure_artifacts(paths, manifest)
+    report_path = artifacts.get("execution_report")
+    report: dict[str, Any] = {}
+    if isinstance(report_path, Path) and report_path.exists():
+        report_value = read_json(report_path)
+        if not isinstance(report_value, dict):
+            raise RuntimeError(f"Expected JSON object in {report_path}")
+        report = report_value
 
-    stdout = _read_optional(paths.run_artifact_dir / "stdout.txt")
-    stderr = _read_optional(paths.run_artifact_dir / "stderr.txt")
+    stdout = _read_optional(artifacts["stdout"])
+    stderr = _read_optional(artifacts["stderr"])
+    validation = _read_optional_json(artifacts["validation_report"])
+    if not report and not _validation_failed(validation):
+        raise FileNotFoundError(
+            "No failed benchmark execution or validation report was found. "
+            "Run `simple-ar code-task validate` or `simple-ar code-task run` first."
+        )
+
     traceback_block = _traceback_block(stderr)
-    implicated_files = _implicated_files(traceback_block or stderr, paths.workspace_dir)
-    signal_lines = _signal_lines(stdout, stderr)
-    validation = _read_optional_json(paths.meta_dir / "validation_report.json")
+    implicated_files = _dedupe(
+        _implicated_files(traceback_block or stderr, paths.workspace_dir)
+        + _validation_issue_files(validation, paths.workspace_dir)
+    )
+    signal_lines = _signal_lines(stdout, stderr) or _validation_signal_lines(validation)
     changed_files = _changed_files(manifest)
 
     status = "no_failure" if report.get("status") == "passed" else "needs_repair"
     markdown = _render_failure_analysis(
         report=report,
         validation=validation,
+        source=str(artifacts["source"]),
         traceback_block=traceback_block,
         signal_lines=signal_lines,
         implicated_files=implicated_files,
         changed_files=changed_files,
         status=status,
     )
-    analysis_path = paths.run_artifact_dir / "failure_analysis.md"
+    analysis_path = artifacts["failure_analysis"]
     write_text(analysis_path, markdown)
     _update_manifest_after_failure_analysis(
         run_dir,
         manifest,
+        analysis_path=analysis_path,
         status=status,
+        source=str(artifacts["source"]),
         implicated_files=implicated_files,
     )
     write_code_task_summary(run_dir)
@@ -107,6 +121,7 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         analysis_path=analysis_path,
         status=status,
         implicated_files=tuple(implicated_files),
+        source=str(artifacts["source"]),
     )
 
 
@@ -114,6 +129,7 @@ def _render_failure_analysis(
     *,
     report: dict[str, Any],
     validation: dict[str, Any],
+    source: str,
     traceback_block: str,
     signal_lines: list[str],
     implicated_files: list[str],
@@ -125,13 +141,11 @@ def _render_failure_analysis(
         "# Failure Analysis",
         "",
         f"Status: `{status}`",
+        f"Source: `{source}`",
         "",
         "## Execution",
         "",
-        f"- Benchmark status: `{status_line}`",
-        f"- Return code: `{report.get('returncode')}`",
-        f"- Timed out: `{report.get('timed_out')}`",
-        f"- Command: `{report.get('command_text', '')}`",
+        _execution_summary(report, status_line),
         "",
         "## Validation",
         "",
@@ -178,6 +192,19 @@ def _render_failure_analysis(
     return "\n".join(sections)
 
 
+def _execution_summary(report: dict[str, Any], status_line: str) -> str:
+    if not report:
+        return "- Benchmark was not launched; diagnosis is based on validation evidence."
+    return "\n".join(
+        [
+            f"- Benchmark status: `{status_line}`",
+            f"- Return code: `{report.get('returncode')}`",
+            f"- Timed out: `{report.get('timed_out')}`",
+            f"- Command: `{report.get('command_text', '')}`",
+        ]
+    )
+
+
 def _validation_summary(validation: dict[str, Any]) -> str:
     if not validation:
         return "- No validation report found."
@@ -206,6 +233,8 @@ def _likely_cause(
     traceback_block: str,
     signal_lines: list[str],
 ) -> str:
+    if not report:
+        return "Static validation failed before a benchmark execution report was available."
     if report.get("status") == "passed":
         return "No failure detected in the latest execution report."
     if report.get("status") == "blocked_by_validation":
@@ -262,6 +291,65 @@ def _changed_files(manifest: dict[str, Any]) -> list[str]:
     return []
 
 
+def _validation_failed(validation: dict[str, Any]) -> bool:
+    return validation.get("status") == "failed" or _int_value(validation.get("error_count")) > 0
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _validation_issue_files(validation: dict[str, Any], workspace_dir: Path) -> list[str]:
+    issues = validation.get("issues", [])
+    if not isinstance(issues, list):
+        return []
+    workspace = workspace_dir.resolve()
+    files: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        value = issue.get("path")
+        if not isinstance(value, str) or not value:
+            continue
+        rel = Path(value)
+        if rel.is_absolute() or ".." in rel.parts:
+            continue
+        resolved = (workspace / rel).resolve()
+        if not is_relative_to(resolved, workspace):
+            continue
+        normalized = rel.as_posix()
+        if normalized not in files:
+            files.append(normalized)
+    return files
+
+
+def _validation_signal_lines(validation: dict[str, Any]) -> list[str]:
+    issues = validation.get("issues", [])
+    if not isinstance(issues, list):
+        return []
+    lines: list[str] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        severity = issue.get("severity", "issue")
+        code = issue.get("code", "")
+        path = issue.get("path", "")
+        message = issue.get("message", "")
+        lines.append(_clip(f"{severity} {code} in {path}: {message}", max_chars=240))
+    return lines
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for item in items:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+
 def _read_optional(path: Path) -> str:
     return read_text(path) if path.exists() else ""
 
@@ -295,17 +383,26 @@ def _update_manifest_after_failure_analysis(
     run_dir: Path,
     manifest: dict[str, Any],
     *,
+    analysis_path: Path,
     status: str,
+    source: str,
     implicated_files: list[str],
 ) -> None:
     layout = manifest_section(manifest, "layout")
-    layout["failure_analysis"] = "code_task/run/failure_analysis.md"
+    benchmark = manifest.get("benchmark", {})
+    latest_label = "patched"
+    if isinstance(benchmark, dict):
+        latest_label = str(benchmark.get("latest_label") or latest_label)
+    analysis_rel = analysis_path.relative_to(run_dir).as_posix()
+    layout["failure_analysis"] = analysis_rel
     failure = manifest_section(manifest, "failure_analysis")
     failure.update(
         {
             "status": status,
+            "source": source,
             "generated_at": utcnow_iso(),
-            "analysis": "code_task/run/failure_analysis.md",
+            "analysis": analysis_rel,
+            "run_label": latest_label if source != "validation" else "",
             "implicated_files": implicated_files,
         }
     )
@@ -314,3 +411,35 @@ def _update_manifest_after_failure_analysis(
     if status == "needs_repair":
         manifest["status"] = "failure_analyzed"
     save_code_task_manifest(run_dir, manifest)
+
+
+def _latest_failure_artifacts(paths: Any, manifest: dict[str, Any]) -> dict[str, Any]:
+    validation_report = paths.meta_dir / "validation_report.json"
+    benchmark = manifest.get("benchmark", {})
+    if isinstance(benchmark, dict):
+        report_rel = benchmark.get("execution_report")
+        stdout_rel = benchmark.get("stdout")
+        stderr_rel = benchmark.get("stderr")
+        if report_rel and stdout_rel and stderr_rel:
+            report = paths.run_dir / str(report_rel)
+            run_dir = report.parent
+            source = "benchmark"
+            report_value = _read_optional_json(report)
+            if report_value.get("status") == "blocked_by_validation":
+                source = "validation"
+            return {
+                "source": source,
+                "execution_report": report,
+                "stdout": paths.run_dir / str(stdout_rel),
+                "stderr": paths.run_dir / str(stderr_rel),
+                "validation_report": validation_report,
+                "failure_analysis": run_dir / "failure_analysis.md",
+            }
+    return {
+        "source": "validation",
+        "execution_report": None,
+        "stdout": paths.meta_dir / "validation_stdout.txt",
+        "stderr": paths.meta_dir / "validation_stderr.txt",
+        "validation_report": validation_report,
+        "failure_analysis": paths.meta_dir / "failure_analysis.md",
+    }

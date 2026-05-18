@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
+from simple_ar.code_task.edit_scope import is_protected_edit_path
 from simple_ar.experiment.runner import run_experiment
-from simple_ar.experiment.code_task_demo import (
-    CODE_TASK_TOY_SPAM_TEMPLATE,
+from simple_ar.experiment.code_task_experiment import (
+    CODE_TASK_PROJECT_TEMPLATE,
     build_code_task_experiment_script,
-    code_task_demo_spec,
-    is_code_task_demo_template,
-    prepare_code_task_demo_experiment,
+    code_task_experiment_spec,
+    is_code_task_experiment_template,
+    prepare_code_task_experiment,
     write_code_task_experiment_meta,
 )
 from simple_ar.experiment.templates import build_experiment_code
@@ -346,17 +347,18 @@ def execute_synthesize(ctx: Context) -> None:
 def execute_design(ctx: Context) -> None:
     hypothesis = read_text(ctx.find_artifact("hypothesis.md") or ctx.artifact_path("hypothesis.md"))
     template = _experiment_template(ctx)
-    if is_code_task_demo_template(template):
-        spec = code_task_demo_spec(_repo_root())
+    if is_code_task_experiment_template(template):
+        spec = code_task_experiment_spec(_repo_root(), ctx.config)
+        is_generic = spec.template == CODE_TASK_PROJECT_TEMPLATE
         write_json(
             ctx.artifact_path("experiment_plan.json"),
             {
-                "name": "llm_code_task_toy_spam",
-                "template": CODE_TASK_TOY_SPAM_TEMPLATE,
+                "name": spec.name or spec.template,
+                "template": spec.template,
                 "mode": "embedded_code_task",
                 "hypothesis": hypothesis.strip(),
-                "dataset": "examples/code_tasks/toy_spam_project",
-                "baseline": "existing_keyword_rules",
+                "dataset": str(spec.code_root),
+                "baseline": "existing_codebase",
                 "method": "llm_planned_controlled_patch",
                 "metrics": [
                     "benchmark_passed",
@@ -364,13 +366,23 @@ def execute_design(ctx: Context) -> None:
                     "benchmark_timed_out",
                     "changed_files",
                     "llm_patch_applied",
+                    "comparison_improved",
+                    "primary_metric_delta",
                 ],
                 "timeout_sec": _experiment_timeout(ctx),
                 "code_task": {
                     "code_root": str(spec.code_root),
                     "task_file": str(spec.task_file),
                     "benchmark_command": spec.benchmark_command,
-                    "approval": "auto_approved_inside_isolated_demo_workspace",
+                    "config_path": spec.config_path,
+                    "primary_metric": spec.primary_metric,
+                    "metric_directions": spec.metric_directions,
+                    "env_mode": spec.env_mode,
+                    "python_executable": spec.python_executable,
+                    "max_file_bytes": spec.max_file_bytes,
+                    "approval": "auto_approved_inside_isolated_pipeline_workspace",
+                    "allow_test_changes": spec.allow_test_changes,
+                    "scope": "user_project" if is_generic else "bundled_demo",
                 },
             },
         )
@@ -393,7 +405,7 @@ def execute_design(ctx: Context) -> None:
 
 def execute_code(ctx: Context) -> None:
     plan = read_json(ctx.find_artifact("experiment_plan.json") or ctx.artifact_path("experiment_plan.json"))
-    if is_code_task_demo_template(plan.get("template")):
+    if is_code_task_experiment_template(plan.get("template")):
         _execute_code_task_experiment_code(ctx, plan)
         return
 
@@ -405,11 +417,13 @@ def execute_code(ctx: Context) -> None:
 def _execute_code_task_experiment_code(ctx: Context, plan: dict[str, Any]) -> None:
     """Prepare an embedded code-task experiment and write its run harness."""
     ctx.emit("stage_message", "Preparing embedded LLM code-task experiment.")
-    result = prepare_code_task_demo_experiment(
+    spec = code_task_experiment_spec(_repo_root(), ctx.config)
+    result = prepare_code_task_experiment(
         code_task_run_dir=ctx.stage_dir() / "code_task_run",
-        repo_root=_repo_root(),
+        spec=spec,
         model=_model(ctx),
         use_llm=ctx.config.get("use_llm") is True,
+        timeout_sec=int(plan.get("timeout_sec") or _experiment_timeout(ctx)),
         message_callback=lambda message: ctx.emit("stage_message", message),
     )
     write_text(
@@ -486,6 +500,7 @@ def execute_report(ctx: Context) -> None:
         else:
             report = _build_report(ctx, goal, problem, search_meta, synthesis, hypothesis, plan, results, papers)
     report_body = _strip_references_section(report)
+    report_body = _ensure_code_task_evidence_section(ctx, plan, report_body)
     cited_papers = _cited_papers(report_body, papers)
     if papers and not cited_papers:
         raise CitationError("Report body did not cite any paper from papers.jsonl")
@@ -966,8 +981,31 @@ def _report_bound_errors(
         if any(term in lower for term in fixture_overclaims):
             errors.append("fixture metadata was used with literature-style overclaims")
 
-    if is_code_task_demo_template(plan.get("template")):
-        demo_overclaims = (
+    if is_code_task_experiment_template(plan.get("template")):
+        broad_code_task_overclaims = (
+            "effectiveness of the llm",
+            "effectiveness of the llm-guided",
+            "effective solution",
+            "potential of llms",
+            "feasibility of employing llms",
+            "feasibility of the llm",
+            "promising direction",
+            "superior",
+            "fresh perspective",
+            "new opportunities",
+            "contribute meaningfully",
+            "meaningful contribution",
+            "significantly enhanced",
+            "significant improvement",
+            "substantial improvement",
+            "transformative potential",
+            "real-world",
+            "practical solution",
+            "practical solutions",
+            "general applicability",
+            "improved robustness",
+        )
+        toy_only_overclaims = (
             "enhancing the performance",
             "enhancing spam detection",
             "enhance spam detection",
@@ -979,33 +1017,15 @@ def _report_bound_errors(
             "performance improvements",
             "improve the system's ability",
             "improving spam detection capabilities",
-            "effectiveness of the llm",
-            "effectiveness of the llm-guided",
-            "effective way",
-            "effective solution",
-            "potential of llms",
-            "feasibility of employing llms",
-            "feasibility of the llm",
-            "promising direction",
-            "superior",
-            "fresh perspective",
-            "new opportunities",
-            "contribute meaningfully",
-            "meaningful contribution",
             "overall accuracy",
-            "significantly enhanced",
-            "significant improvement",
-            "substantial improvement",
-            "transformative potential",
-            "real-world",
-            "practical solution",
-            "practical solutions",
-            "general applicability",
             "improved accuracy",
-            "improved robustness",
         )
-        if any(term in lower for term in demo_overclaims):
-            errors.append("toy code-task benchmark was described beyond measured evidence")
+        template = str(plan.get("template", ""))
+        overclaims = broad_code_task_overclaims
+        if template != CODE_TASK_PROJECT_TEMPLATE:
+            overclaims = broad_code_task_overclaims + toy_only_overclaims
+        if any(term in lower for term in overclaims):
+            errors.append("code-task benchmark was described beyond measured evidence")
     return errors
 
 
@@ -1021,20 +1041,23 @@ def _method_markdown(plan: dict[str, Any]) -> str:
     """Render the experiment plan into a compact method section."""
     if not plan:
         return "No experiment plan artifact was available."
-    if is_code_task_demo_template(plan.get("template")):
+    if is_code_task_experiment_template(plan.get("template")):
         code_task = plan.get("code_task", {})
         benchmark = ""
+        scope = "unknown"
         if isinstance(code_task, dict):
             benchmark = str(code_task.get("benchmark_command", ""))
+            scope = str(code_task.get("scope", "unknown"))
         metrics = plan.get("metrics", [])
         metric_text = ", ".join(str(item) for item in metrics) if isinstance(metrics, list) else str(metrics)
         return (
             f"The experiment uses the `{plan.get('template')}` embedded code-task "
             "template. Instead of generating a script from scratch, the code stage "
-            "copies an existing toy spam-filter project into an isolated workspace, "
-            "asks the LLM for a reviewable patch plan, auto-approves that plan only "
-            "inside this demo workspace, asks the LLM for controlled old/new edits, "
-            "and applies the patch after validation. The recorded benchmark command "
+            f"copies an existing project (`{scope}`) into an isolated workspace, "
+            "runs a baseline benchmark, asks the LLM for a reviewable patch plan, "
+            "auto-approves that plan only inside the pipeline workspace, asks the "
+            "LLM for controlled old/new edits, and applies the patch after "
+            "validation. The recorded benchmark command "
             f"is `{benchmark or 'not specified'}`. Parsed metrics are "
             f"{metric_text or 'not specified'}, and they come from the run-stage "
             "harness rather than from handwritten report text."
@@ -1084,6 +1107,78 @@ def _results_markdown(results: dict[str, Any]) -> str:
     return "No numeric metrics were parsed from stdout, so the report cannot make quantitative claims."
 
 
+def _ensure_code_task_evidence_section(ctx: Context, plan: dict[str, Any], markdown: str) -> str:
+    """Append deterministic code-task evidence when the report omits it."""
+    if not is_code_task_experiment_template(plan.get("template")):
+        return markdown
+    if "## Code Task Evidence" in markdown:
+        return markdown
+    section = _code_task_evidence_markdown(ctx, plan)
+    if not section:
+        return markdown
+    return markdown.strip() + "\n\n## Code Task Evidence\n\n" + section.strip() + "\n"
+
+
+def _code_task_evidence_markdown(ctx: Context, plan: dict[str, Any]) -> str:
+    """Summarize nested code-task artifacts for the final report."""
+    meta_path = ctx.find_artifact("code_task_experiment.json")
+    if meta_path is None:
+        return ""
+    meta = read_json(meta_path)
+    if not isinstance(meta, dict):
+        return ""
+    run_dir_value = meta.get("code_task_run_dir")
+    code_task_run_dir = Path(str(run_dir_value)) if run_dir_value else meta_path.parent / "code_task_run"
+    summary_path = code_task_run_dir / "code_task" / "summary.md"
+    comparison_path = code_task_run_dir / "code_task" / "run" / "comparison.json"
+    comparison = read_json(comparison_path) if comparison_path.exists() else {}
+    changed_files = meta.get("changed_files", [])
+    changed_text = ", ".join(f"`{path}`" for path in changed_files) if isinstance(changed_files, list) else ""
+    if not changed_text:
+        changed_text = "none recorded"
+    code_task = plan.get("code_task", {})
+    benchmark = code_task.get("benchmark_command") if isinstance(code_task, dict) else ""
+    lines = [
+        "The code-task experiment is backed by nested artifacts under `06-code/code_task_run`, "
+        "which contains the copied workspace, patch plan, controlled edit proposal, diff, "
+        "validation report, baseline run, and patched benchmark run.",
+        f"The benchmark command was `{benchmark or 'not specified'}`.",
+        f"Changed workspace files: {changed_text}.",
+    ]
+    risky_files = _review_sensitive_changed_files(changed_files)
+    if risky_files:
+        lines.append(
+            "Review risk: the patch changed test or benchmark files "
+            + ", ".join(f"`{path}`" for path in risky_files)
+            + ", so the diff should be inspected before trusting or applying the patch."
+        )
+    baseline_status = meta.get("baseline_status")
+    validation_status = meta.get("validation_status")
+    if baseline_status or validation_status:
+        lines.append(
+            f"Recorded preparation status: baseline=`{baseline_status or 'unknown'}`, "
+            f"validation=`{validation_status or 'unknown'}`."
+        )
+    if isinstance(comparison, dict) and comparison:
+        verdict = comparison.get("verdict", "inconclusive")
+        reasons = comparison.get("reasons", [])
+        reason_text = "; ".join(str(item) for item in reasons[:3]) if isinstance(reasons, list) else ""
+        lines.append(
+            f"The before/after comparison verdict is `{verdict}`"
+            + (f" ({reason_text})." if reason_text else ".")
+        )
+    if summary_path.exists():
+        lines.append("The consolidated code-task summary is stored at `06-code/code_task_run/code_task/summary.md`.")
+    return " ".join(lines)
+
+
+def _review_sensitive_changed_files(changed_files: object) -> list[str]:
+    """Return changed code-task files that should be highlighted in reports."""
+    if not isinstance(changed_files, list):
+        return []
+    return [item for item in changed_files if isinstance(item, str) and is_protected_edit_path(item)]
+
+
 def _search_markdown(search_meta: dict[str, Any]) -> str:
     """Render search provenance so fallback runs are visible in the report."""
     if not search_meta:
@@ -1130,19 +1225,27 @@ def _experiment_discussion_markdown(
     hypothesis: str,
 ) -> str:
     """Discuss experiment evidence without treating fixture synthesis as literature."""
-    if _uses_fixture_metadata(search_meta) and is_code_task_demo_template(plan.get("template")):
+    if _uses_fixture_metadata(search_meta) and is_code_task_experiment_template(plan.get("template")):
         metrics = results.get("metrics", {})
         changed_files = metrics.get("changed_files") if isinstance(metrics, dict) else None
+        benchmark_passed = metrics.get("benchmark_passed") if isinstance(metrics, dict) else None
         changed_text = (
             f" and changed {int(changed_files)} file(s)"
             if isinstance(changed_files, (int, float))
             else ""
         )
+        if benchmark_passed == 1.0 and results.get("timed_out") is not True:
+            outcome_text = "recorded that the benchmark passed without timeout"
+        else:
+            outcome_text = (
+                "captured the benchmark status, return code, timeout flag, and "
+                "parsed metrics for inspection"
+            )
         return (
             "Because the literature source is fixture metadata, the useful evidence "
             "in this run is operational rather than literature-backed. The code "
             f"stage produced an LLM-proposed patch{changed_text}, and the run stage "
-            "recorded that the benchmark passed without timeout. The synthesis "
+            f"{outcome_text}. The synthesis "
             "artifacts remain visible for traceability, but they should not be read "
             "as evidence about real prior work."
         )
@@ -1200,10 +1303,12 @@ def _limitations_markdown(
         f"Literature coverage is limited by the configured search query and paper limit ({max_papers}).",
         f"The experiment timeout was configured as {timeout} second(s).",
     ]
-    if is_code_task_demo_template(plan.get("template")):
+    if is_code_task_experiment_template(plan.get("template")):
         lines.append(
-            "The current experiment uses a bundled toy codebase copied into an isolated workspace, "
-            "so the metrics show whether one benchmark passed after the patch rather than general model quality."
+            "The current experiment uses a copied codebase inside an isolated workspace. "
+            "The 8-stage pipeline auto-approves the code-task plan to finish end to end, "
+            "so safety-sensitive tasks should use the standalone code-task workflow for human review. "
+            "The metrics show local benchmark behavior rather than general model quality."
         )
     else:
         lines.append(

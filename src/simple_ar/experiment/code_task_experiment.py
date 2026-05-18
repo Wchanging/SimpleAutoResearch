@@ -1,0 +1,438 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from simple_ar.artifacts import read_json, write_json
+from simple_ar.code_task import (
+    apply_patch_edits,
+    generate_patch_plan,
+    initialize_code_task,
+    load_code_task_init_options,
+    probe_code_task_environment,
+    propose_patch_edits,
+    record_plan_decision,
+    run_code_task_baseline,
+    validate_code_task,
+)
+from simple_ar.code_task.config import DEFAULT_MAX_FILE_BYTES, CodeTaskConfigError
+from simple_ar.code_task.edit_scope import is_protected_edit_path
+
+
+CODE_TASK_TOY_SPAM_TEMPLATE = "llm_code_task_toy_spam"
+CODE_TASK_PROJECT_TEMPLATE = "code_task_project"
+CODE_TASK_TOY_SPAM_BENCHMARK = "python -m unittest discover -s tests"
+MessageCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class CodeTaskExperimentSpec:
+    """Source and runtime configuration for an 8-stage code-task experiment.
+
+    Args:
+        template: Experiment template name recorded in stage artifacts.
+        code_root: Source project copied into the isolated code-task workspace.
+        task_file: Markdown task description used for planning and edits.
+        benchmark_command: Command run before and after the patch.
+        primary_metric: Optional primary metric for before/after comparison.
+        metric_directions: Optional metric direction map for comparisons.
+        max_file_bytes: Maximum source file size copied into the workspace.
+        env_mode: Code-task execution environment mode.
+        python_executable: Optional external Python when ``env_mode=external``.
+        config_path: Optional TOML config path used to resolve this spec.
+        name: Optional human-facing code-task name.
+        allow_test_changes: Whether patches may modify test files. The
+            code-task edit-scope guard rejects protected files before this
+            template-level check is reached; this flag remains as an extra
+            compatibility guard for older runs.
+        approval_note: Note recorded when the pipeline auto-approves the plan.
+    """
+
+    template: str
+    code_root: Path
+    task_file: Path
+    benchmark_command: str | None
+    primary_metric: str | None = None
+    metric_directions: dict[str, str] = field(default_factory=dict)
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
+    env_mode: str = "current"
+    python_executable: str | None = None
+    config_path: str | None = None
+    name: str | None = None
+    allow_test_changes: bool = False
+    approval_note: str = "Auto-approved inside isolated 8-stage code-task workspace."
+
+
+@dataclass(frozen=True)
+class CodeTaskExperimentResult:
+    """Result returned after preparing an embedded code-task experiment.
+
+    Args:
+        code_task_run_dir: Nested code-task run directory.
+        workspace_dir: Copied workspace where edits were applied.
+        patch_plan_path: Human-reviewable plan produced by the model.
+        proposed_edits_path: Model-generated controlled edit proposal.
+        patch_diff_path: Unified diff for the applied patch.
+        validation_report_path: Static validation report for the patched code.
+        plan_mode: ``llm`` when the model generated the patch plan.
+        edit_mode: ``llm`` when the model generated the edit proposal.
+        edit_count: Number of edit rows in the proposal.
+        changed_files: Workspace-relative files changed by the patch.
+        validation_status: Validation status after applying edits.
+        template: Experiment template name.
+        baseline_status: Baseline benchmark status before patching.
+        environment_report_path: Optional environment probe report.
+        baseline_report_path: Optional baseline execution report.
+        summary_path: Optional code-task summary artifact.
+    """
+
+    code_task_run_dir: Path
+    workspace_dir: Path
+    patch_plan_path: Path
+    proposed_edits_path: Path
+    patch_diff_path: Path
+    validation_report_path: Path
+    plan_mode: str
+    edit_mode: str
+    edit_count: int
+    changed_files: tuple[str, ...]
+    validation_status: str
+    template: str = CODE_TASK_TOY_SPAM_TEMPLATE
+    baseline_status: str = ""
+    environment_report_path: Path | None = None
+    baseline_report_path: Path | None = None
+    summary_path: Path | None = None
+
+
+def is_code_task_experiment_template(template: object) -> bool:
+    """Return whether an experiment template should enter code-task preparation."""
+    return str(template) in {CODE_TASK_TOY_SPAM_TEMPLATE, CODE_TASK_PROJECT_TEMPLATE}
+
+
+def code_task_toy_spam_spec(repo_root: Path) -> CodeTaskExperimentSpec:
+    """Resolve example files used by the legacy bundled smoke-test template."""
+    root = Path(repo_root)
+    return CodeTaskExperimentSpec(
+        template=CODE_TASK_TOY_SPAM_TEMPLATE,
+        code_root=root / "examples" / "code_tasks" / "toy_spam_project",
+        task_file=root / "examples" / "code_tasks" / "tasks" / "improve_toy_spam_baseline.md",
+        benchmark_command=CODE_TASK_TOY_SPAM_BENCHMARK,
+        allow_test_changes=False,
+        approval_note="Auto-approved inside isolated 8-stage demo workspace.",
+    )
+
+
+def code_task_project_spec(config: dict[str, object]) -> CodeTaskExperimentSpec:
+    """Resolve a generic user-project code-task spec from pipeline config.
+
+    The generic template intentionally reuses the standalone ``code-task init``
+    TOML format and CLI override semantics. That keeps one source of truth for
+    code roots, task files, benchmark commands, metrics, and environment mode.
+    """
+    try:
+        options = load_code_task_init_options(
+            config_path=_config_string(config.get("code_task_config")),
+            code_root=_config_string(config.get("code_task_code_root")),
+            task_file=_config_string(config.get("code_task_task_file")),
+            output_root=None,
+            name=_config_string(config.get("code_task_name")),
+            benchmark_command=_config_string(config.get("code_task_benchmark_command")),
+            max_file_bytes=_config_int(config.get("code_task_max_file_bytes")),
+            env_mode=_config_string(config.get("code_task_env_mode")),
+            python_executable=_config_string(config.get("code_task_python_executable")),
+            primary_metric=_config_string(config.get("code_task_primary_metric")),
+            metric_directions=_config_metric_directions(config.get("code_task_metric_directions")),
+        )
+    except CodeTaskConfigError as exc:
+        raise RuntimeError(f"Invalid code-task experiment configuration: {exc}") from exc
+    return CodeTaskExperimentSpec(
+        template=CODE_TASK_PROJECT_TEMPLATE,
+        code_root=_resolve_user_path(options.code_root),
+        task_file=_resolve_user_path(options.task_file),
+        benchmark_command=options.benchmark_command,
+        primary_metric=options.primary_metric,
+        metric_directions=options.metric_directions,
+        max_file_bytes=options.max_file_bytes,
+        env_mode=options.env_mode,
+        python_executable=options.python_executable,
+        config_path=options.config_path,
+        name=options.name,
+        allow_test_changes=False,
+    )
+
+
+def code_task_experiment_spec(repo_root: Path, config: dict[str, object]) -> CodeTaskExperimentSpec:
+    """Resolve the code-task experiment spec requested by pipeline config."""
+    template = str(config.get("experiment_template", "")).strip()
+    if template == CODE_TASK_TOY_SPAM_TEMPLATE:
+        return code_task_toy_spam_spec(repo_root)
+    if template == CODE_TASK_PROJECT_TEMPLATE:
+        return code_task_project_spec(config)
+    raise RuntimeError(f"Unsupported code-task experiment template: {template}")
+
+
+def prepare_code_task_experiment(
+    *,
+    code_task_run_dir: Path,
+    spec: CodeTaskExperimentSpec,
+    model: str | None,
+    use_llm: bool,
+    timeout_sec: int,
+    message_callback: MessageCallback | None = None,
+) -> CodeTaskExperimentResult:
+    """Prepare an LLM-assisted code-task experiment inside an 8-stage run.
+
+    The pipeline copies the target project into a nested workspace, records a
+    baseline benchmark, asks the LLM for a patch plan, auto-approves that plan
+    inside the isolated workspace, proposes controlled edits, applies them, and
+    validates the patched code. The actual patched benchmark is executed later
+    by the outer run stage.
+    """
+    if not use_llm:
+        raise RuntimeError(
+            f"`{spec.template}` requires LLM mode. Remove --no-llm or choose a "
+            "non-code-task experiment template."
+        )
+    if not spec.benchmark_command:
+        raise RuntimeError(
+            f"`{spec.template}` requires a benchmark command. Provide "
+            "--benchmark-command or set [benchmark].command in --code-task-config."
+        )
+    run_dir = Path(code_task_run_dir)
+    if run_dir.exists() and any(run_dir.iterdir()):
+        raise FileExistsError(
+            f"Code-task experiment run already exists: {run_dir}. "
+            "Resume from the run stage or start a fresh outer run."
+        )
+
+    _emit(message_callback, "Initializing isolated code-task workspace.")
+    init = initialize_code_task(
+        run_dir=run_dir,
+        code_root=spec.code_root,
+        task_file=spec.task_file,
+        benchmark_command=spec.benchmark_command,
+        max_file_bytes=spec.max_file_bytes,
+        env_mode=spec.env_mode,
+        python_executable=spec.python_executable,
+        primary_metric=spec.primary_metric,
+        metric_directions=spec.metric_directions,
+    )
+
+    _emit(message_callback, "Probing code-task execution environment.")
+    environment = probe_code_task_environment(
+        run_dir,
+        env_mode=spec.env_mode,
+        python_executable=spec.python_executable,
+    )
+
+    _emit(message_callback, "Running baseline benchmark for code-task evidence.")
+    baseline = run_code_task_baseline(
+        run_dir,
+        timeout_sec=timeout_sec,
+        env_mode=spec.env_mode,
+        python_executable=spec.python_executable,
+    )
+
+    _emit(message_callback, "Calling LLM for code-task patch plan.")
+    plan = generate_patch_plan(
+        run_dir,
+        model=model,
+        use_llm=True,
+        message_callback=message_callback,
+    )
+    if plan.mode != "llm":
+        raise RuntimeError(
+            "Code-task patch planning did not use the LLM. "
+            "Check SIMPLE_AR_API_KEY, SIMPLE_AR_BASE_URL, and SIMPLE_AR_MODEL."
+        )
+
+    record_plan_decision(
+        run_dir,
+        decision="approve",
+        note=spec.approval_note,
+        reviewer="pipeline",
+    )
+
+    _emit(message_callback, "Calling LLM for code-task edit proposal.")
+    proposal = propose_patch_edits(
+        run_dir,
+        model=model,
+        use_llm=True,
+        message_callback=message_callback,
+    )
+    if proposal.mode != "llm" or proposal.edit_count == 0:
+        raise RuntimeError(
+            "Code-task edit proposal was empty or did not use the LLM. "
+            "Inspect code_task_run/code_task/meta/proposed_edits.json if present."
+        )
+
+    _emit(message_callback, "Applying code-task edits to copied workspace.")
+    patch = apply_patch_edits(run_dir)
+    if not spec.allow_test_changes and any(_is_protected_evidence_path(path) for path in patch.changed_files):
+        raise RuntimeError(
+            "Code-task experiment rejected a patch that modified protected "
+            "tests or benchmark files. Improve source behavior without changing "
+            "validation targets."
+        )
+    validation = validate_code_task(run_dir)
+    if validation.status == "failed":
+        raise RuntimeError(
+            "Embedded code-task validation failed after applying edits. "
+            f"See {validation.report_path}."
+        )
+
+    return CodeTaskExperimentResult(
+        code_task_run_dir=run_dir,
+        workspace_dir=init.workspace_dir,
+        patch_plan_path=plan.patch_plan_path,
+        proposed_edits_path=proposal.proposal_path,
+        patch_diff_path=patch.patch_diff_path,
+        validation_report_path=validation.report_path,
+        plan_mode=plan.mode,
+        edit_mode=proposal.mode,
+        edit_count=proposal.edit_count,
+        changed_files=patch.changed_files,
+        validation_status=validation.status,
+        template=spec.template,
+        baseline_status=baseline.status,
+        environment_report_path=environment.report_path,
+        baseline_report_path=baseline.report_path,
+        summary_path=run_dir / "code_task" / "summary.md",
+    )
+
+
+def write_code_task_experiment_meta(path: Path, result: CodeTaskExperimentResult) -> None:
+    """Write a compact stage-level summary for the embedded code-task experiment."""
+    usage_summary_path = result.code_task_run_dir / "code_task" / "meta" / "llm_usage_summary.json"
+    usage_summary = read_json(usage_summary_path) if usage_summary_path.exists() else {}
+    comparison_path = result.code_task_run_dir / "code_task" / "run" / "comparison.json"
+    write_json(
+        path,
+        {
+            "schema_version": 1,
+            "template": result.template,
+            "code_task_run_dir": str(result.code_task_run_dir),
+            "workspace": _relative_or_string(path.parent, result.workspace_dir),
+            "patch_plan": _relative_or_string(path.parent, result.patch_plan_path),
+            "proposed_edits": _relative_or_string(path.parent, result.proposed_edits_path),
+            "patch_diff": _relative_or_string(path.parent, result.patch_diff_path),
+            "validation_report": _relative_or_string(path.parent, result.validation_report_path),
+            "environment_report": _optional_relative(path.parent, result.environment_report_path),
+            "baseline_report": _optional_relative(path.parent, result.baseline_report_path),
+            "summary": _optional_relative(path.parent, result.summary_path),
+            "comparison": _optional_relative(path.parent, comparison_path),
+            "plan_mode": result.plan_mode,
+            "edit_mode": result.edit_mode,
+            "edit_count": result.edit_count,
+            "changed_files": list(result.changed_files),
+            "baseline_status": result.baseline_status,
+            "validation_status": result.validation_status,
+            "llm_usage_summary": usage_summary,
+        },
+    )
+
+
+def build_code_task_experiment_script(
+    *,
+    changed_files: tuple[str, ...],
+    timeout_sec: int,
+) -> str:
+    """Build a harness script that runs the prepared code-task benchmark."""
+    changed_files_literal = repr(list(changed_files))
+    return f'''from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from simple_ar.code_task import run_code_task_benchmark
+
+
+def main() -> int:
+    stage_dir = Path(__file__).resolve().parent
+    code_task_run = stage_dir / "code_task_run"
+    changed_files = {changed_files_literal}
+    result = run_code_task_benchmark(code_task_run, timeout_sec={int(timeout_sec)})
+    stdout = result.stdout_path.read_text(encoding="utf-8", errors="replace")
+    stderr = result.stderr_path.read_text(encoding="utf-8", errors="replace")
+    if stdout.strip():
+        print("=== benchmark stdout ===")
+        print(stdout.rstrip())
+    if stderr.strip():
+        print("=== benchmark stderr ===", file=sys.stderr)
+        print(stderr.rstrip(), file=sys.stderr)
+    print(f"benchmark_passed: {{1.0 if result.status == 'passed' else 0.0}}")
+    print(f"benchmark_returncode: {{float(result.returncode) if result.returncode is not None else -1.0}}")
+    print(f"benchmark_timed_out: {{1.0 if result.timed_out else 0.0}}")
+    print(f"changed_files: {{float(len(changed_files))}}")
+    print(f"llm_patch_applied: {{1.0 if changed_files else 0.0}}")
+    comparison_path = code_task_run / "code_task" / "run" / "comparison.json"
+    if comparison_path.exists():
+        comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+        verdict = str(comparison.get("verdict", "inconclusive"))
+        print(f"comparison_improved: {{1.0 if verdict == 'improved' else 0.0}}")
+        for row in comparison.get("metrics", []):
+            if isinstance(row, dict) and row.get("is_primary"):
+                delta = row.get("delta")
+                if isinstance(delta, (int, float)):
+                    print(f"primary_metric_delta: {{float(delta)}}")
+                break
+    return 0 if result.status == "passed" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _relative_or_string(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _optional_relative(root: Path, path: Path | None) -> str | None:
+    if path is None or not path.exists():
+        return None
+    return _relative_or_string(root, path)
+
+
+def _resolve_user_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else (Path.cwd() / path)
+
+
+def _config_string(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _config_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _config_metric_directions(value: object) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, str] = {}
+    for key, direction in value.items():
+        name = str(key).strip()
+        if name:
+            result[name] = str(direction)
+    return result
+
+
+def _is_protected_evidence_path(path: str) -> bool:
+    return is_protected_edit_path(path)
+
+
+def _emit(callback: MessageCallback | None, message: str) -> None:
+    if callback is not None:
+        callback(message)

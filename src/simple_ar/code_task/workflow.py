@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import write_json, write_text
+from simple_ar.code_task.comparison import normalize_metric_directions
+from simple_ar.code_task.edit_scope import default_edit_scope
+from simple_ar.code_task.environment import build_code_task_environment_policy
 from simple_ar.code_task.index import build_codebase_index
 from simple_ar.code_task.workspace import CopyReport, copy_code_workspace
 
@@ -23,6 +26,7 @@ class CodeTaskInitResult:
         codebase_index_path: Path to the generated codebase index.
         copy_report: Summary of copied and skipped source paths.
         codebase_index: Generated index data.
+        environment_policy: Initial execution environment policy.
     """
 
     run_dir: Path
@@ -33,6 +37,7 @@ class CodeTaskInitResult:
     codebase_index_path: Path
     copy_report: CopyReport
     codebase_index: dict[str, Any]
+    environment_policy: dict[str, Any]
 
 
 def initialize_code_task(
@@ -42,6 +47,10 @@ def initialize_code_task(
     task_file: Path,
     benchmark_command: str | None = None,
     max_file_bytes: int = 2_000_000,
+    env_mode: str = "current",
+    python_executable: str | Path | None = None,
+    primary_metric: str | None = None,
+    metric_directions: dict[str, str] | None = None,
 ) -> CodeTaskInitResult:
     """Initialize a local code-task run without modifying the source project.
 
@@ -53,6 +62,15 @@ def initialize_code_task(
             stages. It is not executed during init.
         max_file_bytes: Maximum file size copied into the workspace. Use ``0``
             to disable the size guard.
+        env_mode: Execution environment mode. V2.1 supports ``current`` and
+            ``external``.
+        python_executable: External interpreter path or executable name when
+            ``env_mode`` is ``external``.
+        primary_metric: Optional primary metric used for conservative
+            baseline-vs-patched verdicts.
+        metric_directions: Optional mapping from metric name to direction.
+            Supported normalized directions are ``higher_is_better``,
+            ``lower_is_better``, ``resource``, and ``ignore``.
 
     Returns:
         Paths and metadata for the initialized code-task run.
@@ -71,6 +89,8 @@ def initialize_code_task(
         raise FileNotFoundError(f"Task file does not exist: {task_source}")
     if not task_source.is_file():
         raise FileNotFoundError(f"Task file is not a regular file: {task_source}")
+    primary_metric_value = (primary_metric or "").strip()
+    normalized_metric_directions = normalize_metric_directions(metric_directions)
 
     task_dir = root / "code_task"
     workspace_dir = task_dir / "workspace"
@@ -86,6 +106,10 @@ def initialize_code_task(
     )
     codebase_index_path = meta_dir / "codebase_index.json"
     codebase_index = build_codebase_index(workspace_dir, output_path=codebase_index_path)
+    environment_policy = build_code_task_environment_policy(
+        env_mode=env_mode,
+        python_executable=python_executable,
+    )
     manifest_path = root / "manifest.json"
     write_json(
         manifest_path,
@@ -94,9 +118,12 @@ def initialize_code_task(
             code_root=source_root,
             task_file=task_source,
             benchmark_command=benchmark_command,
+            primary_metric=primary_metric_value,
+            metric_directions=normalized_metric_directions,
             max_file_bytes=max_file_bytes,
             copy_report=copy_report,
             codebase_index=codebase_index,
+            environment_policy=environment_policy,
         ),
     )
 
@@ -109,6 +136,7 @@ def initialize_code_task(
         codebase_index_path=codebase_index_path,
         copy_report=copy_report,
         codebase_index=codebase_index,
+        environment_policy=environment_policy,
     )
 
 
@@ -118,11 +146,16 @@ def _manifest(
     code_root: Path,
     task_file: Path,
     benchmark_command: str | None,
+    primary_metric: str | None,
+    metric_directions: dict[str, str] | None,
     max_file_bytes: int,
     copy_report: CopyReport,
     codebase_index: dict[str, Any],
+    environment_policy: dict[str, Any],
 ) -> dict[str, Any]:
     project = codebase_index.get("project", {})
+    primary = (primary_metric or "").strip()
+    directions = dict(metric_directions or {})
     return {
         "schema_version": 1,
         "workflow": "code_task",
@@ -149,9 +182,16 @@ def _manifest(
             "test_file_count": project.get("test_file_count", 0),
             "entrypoint_candidates": project.get("entrypoint_candidates", []),
         },
+        "environment": {
+            "status": "not_probed",
+            "policy": environment_policy,
+        },
+        "edit_scope": default_edit_scope(),
         "benchmark": {
             "command": benchmark_command,
             "executed": False,
+            "primary_metric": primary,
+            "metric_directions": directions,
         },
     }
 

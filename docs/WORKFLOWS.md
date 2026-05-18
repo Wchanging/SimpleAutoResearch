@@ -1,6 +1,6 @@
 # Workflows And Artifacts
 
-This document explains what SimpleAutoResearch is doing internally: workflow presets, pipeline stages, stage outputs, and run artifact layout. For concrete commands, see [Usage And Configuration](USAGE.md).
+This document explains what SimpleAutoResearch is doing internally: workflow presets, pipeline stages, stage outputs, and run artifact layout. For concrete commands, see [CLI Reference](CLI_REFERENCE.md); for setup and walkthroughs, see [Usage And Configuration](USAGE.md).
 
 ## Workflow Presets
 
@@ -29,8 +29,9 @@ Use this when you already have code and want a focused modification, optimizatio
 Conceptual flow:
 
 ```text
-init workspace -> index code -> plan patch -> approve
--> propose edits -> apply edits -> validate -> run benchmark
+init workspace -> probe environment -> index code -> run baseline
+-> plan patch -> approve -> propose edits -> apply edits
+-> validate -> run patched benchmark -> compare results
 -> analyze failure -> repair proposal
 ```
 
@@ -39,6 +40,16 @@ Key boundaries:
 - The source project is copied into `code_task/workspace`; the original code is never modified.
 - Patch application is gated by an explicit human approval step.
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
+- Multiple ordered edits may target one file, but every `old` block must remain
+  uniquely matchable; invalid proposals stop before workspace files are written.
+- `code-task execute` can run the next safe steps, but it stops at plan approval
+  and proposal review unless the user explicitly continues.
+- Current execution uses workspace isolation plus an explicit interpreter policy. It supports `current` and `external`; managed environment creation is planned later.
+
+Bundled examples:
+
+- `toy_spam_project`: tiny rule-based classifier, useful for patch and failure-analysis smoke tests.
+- `tiny_digits_mlp_project`: lightweight NumPy MLP over scikit-learn's bundled digits dataset, useful for realistic local ML benchmark experiments without GPU or downloads.
 
 ### 3. Research With Experiment
 
@@ -54,8 +65,10 @@ plan -> search -> read -> synthesize -> design experiment
 Current status:
 
 - `06-code` normally generates a whitelisted template experiment.
-- `--experiment-template llm_code_task_toy_spam` is an embedded handoff into the code-task workflow.
-- Future versions should generalize this from one bundled demo into user-provided code roots and config-driven presets.
+- `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, `--task-file`, and `--benchmark-command` flags.
+- `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
+- `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
+- The embedded path is end-to-end: it auto-approves the patch plan inside the copied workspace. The standalone code-task workflow remains the safer human-review path.
 - Report generation is guarded: LLM drafts are accepted only when citations, metric visibility, fixture disclosure, and toy-demo boundaries pass rule-based checks.
 
 ## Default 8-Stage Pipeline
@@ -133,7 +146,17 @@ Root-level files:
 - `source_plan.json`: source plan describing which artifacts each stage should consult.
 - `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
-- `06-code/code_task_experiment.json`: present only for the embedded `llm_code_task_toy_spam` template.
+- `06-code/code_task_experiment.json`: present for embedded code-task templates such as `code_task_project` and `llm_code_task_toy_spam`.
+
+Nested embedded code-task files:
+
+- `06-code/code_task_run/code_task/summary.md`: consolidated nested code-task outcome.
+- `06-code/code_task_run/code_task/patch_plan.md`: LLM patch plan auto-approved by the pipeline.
+- `06-code/code_task_run/code_task/meta/proposed_edits.json`: controlled old/new edit proposal.
+- `06-code/code_task_run/code_task/patch.diff`: applied patch inside the copied workspace.
+- `06-code/code_task_run/code_task/run/baseline/`: pre-patch benchmark artifacts.
+- `06-code/code_task_run/code_task/run/patched/`: patched benchmark artifacts.
+- `06-code/code_task_run/code_task/run/comparison.json`: before/after comparison when both runs exist.
 
 Report-stage files:
 
@@ -156,19 +179,28 @@ runs/<run-id>/
     patch.diff
     workspace/
     meta/
+      environment_report.json
       codebase_index.json
       hitl_decisions.jsonl
       proposed_edits.json
       applied_edits.json
       validation_report.json
+      failure_analysis.md        # validation-only failure diagnosis
       llm_usage.jsonl
       llm_usage_summary.json
     run/
-      execution_report.json
-      stdout.txt
-      stderr.txt
-      metrics.json
-      failure_analysis.md
+      comparison.json
+      baseline/
+        execution_report.json
+        stdout.txt
+        stderr.txt
+        metrics.json
+      patched/
+        execution_report.json
+        stdout.txt
+        stderr.txt
+        metrics.json
+        failure_analysis.md
     repairs/
       repair-001/
         proposed_edits.json
@@ -177,16 +209,47 @@ runs/<run-id>/
 Important directories:
 
 - `workspace/`: editable copy of the source project.
-- `meta/`: indexes, decisions, proposed edits, applied edit summaries, validation reports, and LLM usage.
-- `run/`: latest benchmark stdout/stderr, execution report, parsed metrics, and failure analysis.
-- `repairs/`: bounded repair proposals grouped by attempt.
+- `meta/`: environment reports, indexes, decisions, proposed edits, applied edit summaries, validation reports, validation-only failure analysis, and LLM usage.
+- `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, before/after comparison, and benchmark failure analysis.
+- `repairs/`: bounded repair proposals grouped by attempt. Each proposal records the source analysis path and selected repair context.
 
 Important user-facing code-task files:
 
-- `summary.md`: compact status, task, patch, validation, benchmark, and failure-analysis summary.
-- `patch_plan.md`: human-reviewable plan before edits.
+- `summary.md`: compact outcome, next-step guidance, task, patch, validation, benchmark, comparison, and failure-analysis summary.
+- Tests and benchmark files are protected by the default edit scope. They may
+  be indexed as read-only evidence, but `propose-edits`, `repair`, and
+  `apply-edits` should not modify them.
+- `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
+- `run/baseline/execution_report.json`: pre-patch benchmark result.
+- `run/patched/execution_report.json`: post-patch benchmark result.
+- `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist. Explicit `primary_metric` and `metric_directions` from the manifest are used before heuristic metric-name rules.
+- `patch_plan.md`: human-reviewable plan before edits, including recorded environment, validation, and baseline context when available.
 - `patch.diff`: applied patch for review.
 - `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch.
+
+## Code-Task Environment Strategy
+
+Environment handling is intentionally separated from source-code isolation:
+
+- Source-code isolation means user code is copied to `code_task/workspace` before any patch is applied.
+- Execution isolation means benchmarks run with a selected Python/runtime environment.
+
+Today, code-task has the first kind of isolation and records environment signals
+with `meta/environment_report.json`. It can select either the active
+SimpleAutoResearch Python environment or a user-provided external interpreter.
+It does not yet create virtual environments or install dependencies automatically.
+
+The planned environment modes are:
+
+- `current`: use the active SimpleAutoResearch Python environment. Supported now.
+- `external`: use a user-provided Python or Conda interpreter. Supported now.
+- `project-venv`: create a per-run environment inside the run directory. Planned.
+- `shared-env-cache`: reuse environments keyed by dependency-file and platform hashes. Planned.
+- `docker`: run in a container when stronger isolation is needed. Planned.
+
+The default should remain conservative: dependency installation must be explicit
+and reviewable, and user project packages should not be silently installed into
+SimpleAutoResearch's own environment.
 
 ## Why This Split Matters
 

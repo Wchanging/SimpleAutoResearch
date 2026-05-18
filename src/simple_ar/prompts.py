@@ -182,10 +182,11 @@ def report_user_prompt(
         "- If the experiment template is a tiny teaching experiment, frame the "
         "results as a reproducibility/pipeline demonstration rather than a broad "
         "scientific claim.\n"
-        "- If the experiment template is `llm_code_task_toy_spam`, report only "
-        "that the benchmark passed after an LLM-proposed patch to an isolated toy "
-        "workspace. Do not claim improved accuracy, robustness, real-world "
-        "utility, significance, or general applicability.\n"
+        "- If the experiment template is `llm_code_task_toy_spam` or "
+        "`code_task_project`, report only the recorded isolated code-task "
+        "workflow, changed files, benchmark status, parsed metrics, and "
+        "comparison artifacts. Claim improvement only when `results_json` or the "
+        "code-task comparison artifact reports it.\n"
     )
     evidence_block = _evidence_block(evidence_snippets)
     citation_block = _citation_block(citation_instruction)
@@ -213,9 +214,9 @@ def report_user_prompt(
         "- When fixture metadata is the only literature source, keep Related Work "
         "or Search Scope to provenance wording such as placeholder metadata; do "
         "not frame it as a real literature base.\n"
-        "- For the `llm_code_task_toy_spam` template, describe only the recorded "
-        "patch workflow, changed-file count, benchmark return code, timeout flag, "
-        "and parsed metrics. Do not claim broader accuracy, robustness, utility, "
+        "- For code-task experiment templates, describe only the recorded patch "
+        "workflow, changed-file count, benchmark return code, timeout flag, parsed "
+        "metrics, and comparison evidence. Do not claim broader robustness, utility, "
         "or generalization.\n"
         "- For the `llm_code_task_toy_spam` template, avoid broad improvement "
         "language such as enhancing spam detection, performance improvement, "

@@ -159,6 +159,65 @@ class CliTests(unittest.TestCase):
             self.assertEqual(overridden["experiment_timeout_sec"], 15)
             self.assertEqual(overridden["use_retrieval"], False)
 
+    def test_run_config_can_drive_code_task_project_design(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            output_root = root / "configured_runs"
+            config_path = root / "pipeline.toml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "[run]",
+                        'topic = "configured tiny digits"',
+                        f'output_root = "{output_root.as_posix()}"',
+                        'to_stage = "design"',
+                        "",
+                        "[llm]",
+                        "enabled = false",
+                        "",
+                        "[search]",
+                        "offline = true",
+                        "max_papers = 1",
+                        "",
+                        "[experiment]",
+                        'template = "code_task_project"',
+                        "timeout = 11",
+                        "",
+                        "[code_task]",
+                        f'code_root = "{(repo_root / "examples" / "code_tasks" / "tiny_digits_mlp_project").as_posix()}"',
+                        f'task_file = "{(repo_root / "examples" / "code_tasks" / "tasks" / "improve_tiny_digits_mlp.md").as_posix()}"',
+                        'name = "configured-pipeline-task"',
+                        "",
+                        "[benchmark]",
+                        'command = "python benchmark.py"',
+                        'primary_metric = "accuracy"',
+                        "",
+                        "[benchmark.metric_directions]",
+                        'accuracy = "higher"',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["run", "--config", str(config_path), "--quiet"])
+
+            run_dir = next(output_root.iterdir())
+            snapshot = read_json(run_dir / "config_snapshot.json")
+            self.assertEqual(snapshot["experiment_template"], "code_task_project")
+            self.assertEqual(snapshot["experiment_timeout_sec"], 11)
+            self.assertEqual(snapshot["use_llm"], False)
+            self.assertEqual(snapshot["use_arxiv"], False)
+            self.assertEqual(snapshot["code_task_config"], str(config_path))
+
+            plan = read_json(run_dir / "05-design" / "experiment_plan.json")
+            self.assertEqual(plan["template"], "code_task_project")
+            self.assertEqual(plan["code_task"]["benchmark_command"], "python benchmark.py")
+            self.assertEqual(plan["code_task"]["primary_metric"], "accuracy")
+
 
 if __name__ == "__main__":
     unittest.main()

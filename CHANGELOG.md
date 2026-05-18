@@ -2,6 +2,78 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-17
+
+### Added
+
+- Added a default code-task edit-scope policy that records protected test and
+  benchmark path patterns in `manifest.json`.
+- Added the generic `code_task_project` experiment template so an 8-stage
+  `simple-ar run --to-stage report` can copy a user-provided project, run a
+  baseline benchmark, apply an LLM-controlled patch, run the patched benchmark,
+  and include nested code-task evidence in the final report.
+- Added top-level `simple-ar run --config` / `resume --config` support for
+  repeatable TOML-configured research and embedded code-task runs.
+- Added `examples/run_configs/tiny_digits_mlp_pipeline.toml` as the canonical
+  config-driven end-to-end code-task pipeline example.
+- Added top-level pipeline code-task options for `run` and `resume`, including
+  `--code-task-config`, `--code-root`, `--task-file`, `--benchmark-command`,
+  `--primary-metric`, repeated `--metric-direction`, and environment policy
+  overrides.
+- Added Phase 5 failure analysis support for validation-only failures, so code-task runs can diagnose syntax/static validation errors before a benchmark has launched.
+- Added bounded repair proposal metadata with source analysis paths, selected repair context files, and explicit repair constraints.
+- Added `simple-ar code-task execute`, a conservative state-aware orchestrator that runs safe next steps while stopping at plan approval and proposal review gates.
+- Added code-task metric comparison configuration with `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
+- Added `code-task init --config` for TOML-based initialization, including metric direction settings.
+- Added a tiny-digits MLP code-task config example under `examples/code_tasks/configs/`.
+- Added `docs/CLI_REFERENCE.md` as the dedicated command and option reference.
+
+### Changed
+
+- Generalized the embedded code-task experiment preparation so the old toy-spam
+  demo and user-provided projects share the same baseline/plan/proposal/apply/
+  validate harness.
+- Renamed the embedded code-task bridge module from `code_task_demo.py` to
+  `code_task_experiment.py` so the code structure matches its generic role.
+- Final reports now append a deterministic Code Task Evidence section for
+  embedded code-task templates when the LLM draft does not include one.
+- Code-task proposals, repairs, and patch application now treat tests and
+  benchmark files as read-only evidence by default. Protected paths are omitted
+  from editable snippets, dropped from model proposals, and rejected again by
+  `apply-edits` for manual proposal files.
+- Comparison artifacts now record configured metric directions and keep unknown metrics as deltas without using them for improved/regressed verdicts.
+- Moved code-task init config parsing out of `cli.py` and into `code_task/config.py`.
+- Repair context selection now prioritizes files changed by the current patch before traceback/test files, making benchmark-failure repairs less likely to edit tests by accident.
+- `code_task/summary.md` now includes a Repair section after a repair proposal is generated.
+- Patch application now supports multiple ordered edits in the same file when each old-text block remains uniquely matchable.
+- `code-task execute` now reports invalid edit proposals as `patch_apply_failed` instead of surfacing a Python traceback.
+- Documented `code-task execute` as a convenience layer over primitive code-task commands, not a replacement for reviewable steps.
+- Moved shared metric parsing from `experiment.metrics` to top-level `simple_ar.metrics`, removing an unnecessary code-task dependency on the experiment package.
+- Removed unused code-task environment configuration helper and old unlabelled benchmark artifact fallbacks.
+- Slimmed `docs/USAGE.md` so detailed command/config tables live in the CLI reference.
+- Code-task summaries now start with an outcome and next-step section, and `simple-ar status` shows summary, metric config, and comparison deltas.
+
+## 2026-05-16
+
+### Added
+
+- Added `code-task probe` for V2.1 environment inspection.
+- Added `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals.
+- Added environment status output to code-task summaries and `simple-ar status`.
+- Added `code-task baseline` to capture pre-patch benchmark results under `code_task/run/baseline/`.
+- Added code-task `--env-mode current|external` and `--python` support for selecting the interpreter used by benchmark commands.
+- Added a lightweight `tiny_digits_mlp_project` code-task example for local ML-style benchmark testing without downloads or GPU requirements.
+- Added code-task baseline-vs-patched comparison artifacts with metric deltas and conservative verdicts.
+
+### Changed
+
+- Documented the new code-task environment probe in usage and workflow docs.
+- Documented the V2.1 code-task environment isolation direction: current interpreter first, explicit external interpreters next, then per-run venvs, shared environment cache, and Docker later.
+- Updated README and development docs to reflect the current V2.1 code-task baseline, comparison, and module structure.
+- Code-task benchmark runs now use labelled artifact directories (`baseline` and `patched`) so before/after execution evidence can coexist.
+- Benchmark execution reports now record the selected environment mode and Python executable.
+- Code-task patch planning now includes recorded environment, validation, and baseline metric context when those artifacts exist.
+
 ## 2026-05-14
 
 ### Added

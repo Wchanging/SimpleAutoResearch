@@ -15,6 +15,10 @@ from simple_ar.artifacts import (
     write_json,
     write_text,
 )
+from simple_ar.code_task.edit_scope import (
+    is_protected_edit_path,
+    protected_patterns_from_manifest,
+)
 from simple_ar.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.usage import summarize_usage
 
@@ -94,7 +98,9 @@ def generate_patch_plan(
     manifest = _load_code_task_manifest(manifest_path)
     task_text = _read_required_text(task_dir / "task.md")
     index = _read_required_json(meta_dir / "codebase_index.json")
+    protected_patterns = protected_patterns_from_manifest(manifest)
     selected = select_relevant_files(index, task_text, max_files=max_files)
+    run_context = _collect_run_context(root, manifest)
     snippets = _source_snippets(
         workspace_dir,
         selected,
@@ -120,6 +126,8 @@ def generate_patch_plan(
                 index=index,
                 snippets=snippets,
                 benchmark_command=_benchmark_command(manifest),
+                run_context=run_context,
+                protected_patterns=protected_patterns,
             )
             mode = "llm"
         except LLMError as exc:
@@ -131,12 +139,15 @@ def generate_patch_plan(
             index=index,
             selected_files=selected,
             benchmark_command=_benchmark_command(manifest),
+            run_context=run_context,
+            protected_patterns=protected_patterns,
         )
 
     markdown = _render_patch_plan(
         plan_data,
         task_text=task_text,
         selected_files=selected,
+        run_context=run_context,
         mode=mode,
     )
     write_text(patch_plan_path, markdown)
@@ -144,6 +155,7 @@ def generate_patch_plan(
         manifest_path,
         manifest,
         selected_files=selected,
+        run_context=run_context,
         mode=mode,
     )
     return PatchPlanResult(
@@ -272,15 +284,19 @@ def _ask_llm_for_plan(
     index: dict[str, Any],
     snippets: list[dict[str, str]],
     benchmark_command: str,
+    run_context: dict[str, Any],
+    protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     prompt = _plan_user_prompt(
         task_text=task_text,
         index=index,
         snippets=snippets,
         benchmark_command=benchmark_command,
+        run_context=run_context,
+        protected_patterns=protected_patterns,
     )
     response = client.ask_json(CODE_TASK_PLAN_SYSTEM, prompt, label="code-task-plan")
-    return _normalize_plan_data(response, index)
+    return _normalize_plan_data(response, index, protected_patterns=protected_patterns)
 
 
 def _plan_user_prompt(
@@ -289,8 +305,10 @@ def _plan_user_prompt(
     index: dict[str, Any],
     snippets: list[dict[str, str]],
     benchmark_command: str,
+    run_context: dict[str, Any],
+    protected_patterns: tuple[str, ...],
 ) -> str:
-    compact_index = _compact_codebase_index(index)
+    compact_index = _compact_codebase_index(index, protected_patterns=protected_patterns)
     snippet_text = "\n\n".join(
         f"### {item['path']}\n```text\n{item['text']}\n```"
         for item in snippets
@@ -309,12 +327,18 @@ def _plan_user_prompt(
         "- Prefer modifying existing code over generating unrelated new modules.\n"
         "- Mention only workspace-relative paths from the index in "
         "`files_to_modify`. Put truly new files in `new_files`.\n"
+        "- Treat files with `edit_role` = `read_only` as evidence only. Do "
+        "not include them in `files_to_modify` or propose changing them.\n"
         "- Keep the plan small enough for one reviewable patch.\n"
         "- Include the benchmark or validation command when available.\n"
+        "- Use the supplied run context. Do not ask open questions that are "
+        "already answered by baseline metrics, environment policy, validation "
+        "status, or recorded artifacts.\n"
         "- Name risks, rollback steps, and any missing information.\n"
         "- Require human approval before patch application.\n\n"
         f"Task:\n{task_text}\n\n"
         f"Benchmark command recorded for later validation:\n{benchmark_command or 'None'}\n\n"
+        f"Run context JSON:\n{json.dumps(run_context, indent=2, ensure_ascii=False)}\n\n"
         f"Codebase index summary JSON:\n{json.dumps(compact_index, indent=2, ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
@@ -326,6 +350,8 @@ def _offline_plan(
     index: dict[str, Any],
     selected_files: list[str],
     benchmark_command: str,
+    run_context: dict[str, Any],
+    protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     files_to_modify = [
         {
@@ -334,6 +360,7 @@ def _offline_plan(
             "change_type": "inspect_then_edit",
         }
         for path in selected_files[:5]
+        if not is_protected_edit_path(path, protected_patterns=protected_patterns)
     ]
     validation = [benchmark_command] if benchmark_command else [
         "Run the project's existing tests or benchmark command after applying a patch."
@@ -347,6 +374,7 @@ def _offline_plan(
         "files_to_modify": files_to_modify,
         "new_files": [],
         "proposed_steps": [
+            _offline_context_step(run_context),
             "Inspect the selected files and confirm which functions/classes implement the target behavior.",
             "Prepare a minimal patch that changes only the behavior required by the task.",
             "Update or add focused tests when the current test coverage does not exercise the requested behavior.",
@@ -369,12 +397,21 @@ def _offline_plan(
     }
 
 
-def _normalize_plan_data(data: dict[str, Any], index: dict[str, Any]) -> dict[str, Any]:
+def _normalize_plan_data(
+    data: dict[str, Any],
+    index: dict[str, Any],
+    *,
+    protected_patterns: tuple[str, ...],
+) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
     normalized = {
         "summary": _string(data.get("summary")) or "Patch plan generated by LLM.",
         "goals": _string_list(data.get("goals")),
-        "files_to_modify": _file_plan_list(data.get("files_to_modify"), known_paths),
+        "files_to_modify": _file_plan_list(
+            data.get("files_to_modify"),
+            known_paths,
+            protected_patterns=protected_patterns,
+        ),
         "new_files": _new_file_plan_list(data.get("new_files")),
         "proposed_steps": _string_list(data.get("proposed_steps")),
         "validation": _string_list(data.get("validation")),
@@ -399,6 +436,7 @@ def _render_patch_plan(
     *,
     task_text: str,
     selected_files: list[str],
+    run_context: dict[str, Any],
     mode: str,
 ) -> str:
     sections = [
@@ -409,6 +447,10 @@ def _render_patch_plan(
         "## Task",
         "",
         task_text.strip() or "No task text was provided.",
+        "",
+        "## Run Context",
+        "",
+        _run_context_markdown(run_context),
         "",
         "## Summary",
         "",
@@ -490,11 +532,178 @@ def _new_file_plan_markdown(value: object) -> str:
     return "\n".join(lines) if lines else "- No new files proposed."
 
 
+def _collect_run_context(run_dir: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    task_dir = run_dir / "code_task"
+    meta_dir = task_dir / "meta"
+    run_artifact_dir = task_dir / "run"
+    environment = _read_optional_json(meta_dir / "environment_report.json")
+    validation = _read_optional_json(meta_dir / "validation_report.json")
+    baseline_execution = _read_optional_json(
+        run_artifact_dir / "baseline" / "execution_report.json"
+    )
+    baseline_metrics = _read_optional_json(run_artifact_dir / "baseline" / "metrics.json")
+    patched_execution = _read_optional_json(
+        run_artifact_dir / "patched" / "execution_report.json"
+    )
+    patched_metrics = _read_optional_json(run_artifact_dir / "patched" / "metrics.json")
+    context = {
+        "environment": _environment_context(environment, manifest),
+        "validation": _validation_context(validation),
+        "baseline": _execution_context(baseline_execution, baseline_metrics),
+        "patched": _execution_context(patched_execution, patched_metrics),
+    }
+    context["available_artifacts"] = [
+        name
+        for name, value in (
+            ("environment_report", environment),
+            ("validation_report", validation),
+            ("baseline_execution", baseline_execution),
+            ("baseline_metrics", baseline_metrics),
+            ("patched_execution", patched_execution),
+            ("patched_metrics", patched_metrics),
+        )
+        if value
+    ]
+    return context
+
+
+def _environment_context(environment: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+    policy = _object_dict(environment.get("execution_policy"))
+    if not policy:
+        manifest_environment = _object_dict(manifest.get("environment"))
+        policy = _object_dict(manifest_environment.get("policy"))
+    platform = _object_dict(environment.get("platform"))
+    gpu = _object_dict(environment.get("gpu"))
+    project = _object_dict(environment.get("project"))
+    return {
+        "status": environment.get("status"),
+        "mode": policy.get("mode"),
+        "python_executable": policy.get("python_executable"),
+        "dependency_install": policy.get("dependency_install"),
+        "platform": {
+            "system": platform.get("system"),
+            "release": platform.get("release"),
+            "machine": platform.get("machine"),
+        },
+        "gpu": {
+            "available": gpu.get("available"),
+            "count": gpu.get("count"),
+        },
+        "dependency_files": project.get("dependency_files", []),
+        "test_dirs": project.get("test_dirs", []),
+        "warnings": environment.get("warnings", []),
+    }
+
+
+def _validation_context(validation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": validation.get("status"),
+        "error_count": validation.get("error_count"),
+        "warning_count": validation.get("warning_count"),
+        "strict": validation.get("strict"),
+    }
+
+
+def _execution_context(
+    execution: dict[str, Any],
+    metrics: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": execution.get("status"),
+        "returncode": execution.get("returncode"),
+        "timed_out": execution.get("timed_out"),
+        "duration_sec": execution.get("duration_sec"),
+        "command_text": execution.get("command_text"),
+        "metrics": {
+            str(key): value
+            for key, value in metrics.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        },
+    }
+
+
+def _run_context_markdown(run_context: dict[str, Any]) -> str:
+    lines: list[str] = []
+    artifacts = run_context.get("available_artifacts", [])
+    if isinstance(artifacts, list) and artifacts:
+        lines.append("- Available artifacts: " + ", ".join(f"`{item}`" for item in artifacts))
+    else:
+        lines.append("- Available artifacts: none beyond task and codebase index.")
+    environment = _object_dict(run_context.get("environment"))
+    if environment and environment.get("status"):
+        lines.append(
+            "- Environment: "
+            f"`{environment.get('status')}` mode=`{environment.get('mode', 'unknown')}` "
+            f"dependency_install=`{environment.get('dependency_install', 'unknown')}`"
+        )
+        gpu = _object_dict(environment.get("gpu"))
+        if gpu:
+            lines.append(f"- GPU devices visible: `{gpu.get('count', 0)}`")
+    baseline = _object_dict(run_context.get("baseline"))
+    if baseline and baseline.get("status"):
+        lines.append(
+            "- Baseline: "
+            f"`{baseline.get('status')}` returncode=`{baseline.get('returncode')}` "
+            f"duration=`{baseline.get('duration_sec')}`"
+        )
+        metrics = _object_dict(baseline.get("metrics"))
+        if metrics:
+            lines.append("- Baseline metrics: " + _metric_inline(metrics))
+    patched = _object_dict(run_context.get("patched"))
+    if patched and patched.get("status"):
+        lines.append(
+            "- Existing patched run: "
+            f"`{patched.get('status')}` returncode=`{patched.get('returncode')}`"
+        )
+        metrics = _object_dict(patched.get("metrics"))
+        if metrics:
+            lines.append("- Existing patched metrics: " + _metric_inline(metrics))
+    validation = _object_dict(run_context.get("validation"))
+    if validation and validation.get("status"):
+        lines.append(
+            "- Latest validation: "
+            f"`{validation.get('status')}` errors=`{validation.get('error_count')}` "
+            f"warnings=`{validation.get('warning_count')}`"
+        )
+    return "\n".join(lines)
+
+
+def _metric_inline(metrics: dict[str, Any]) -> str:
+    return ", ".join(f"`{key}`={value}" for key, value in sorted(metrics.items()))
+
+
+def _offline_context_step(run_context: dict[str, Any]) -> str:
+    baseline = _object_dict(run_context.get("baseline"))
+    metrics = _object_dict(baseline.get("metrics"))
+    if metrics:
+        return (
+            "Use the recorded baseline metrics when judging the patch: "
+            + _metric_inline(metrics)
+            + "."
+        )
+    return "Run the recorded benchmark before judging whether the patch improves behavior."
+
+
+def _manifest_plan_context(run_context: dict[str, Any]) -> dict[str, Any]:
+    environment = _object_dict(run_context.get("environment"))
+    validation = _object_dict(run_context.get("validation"))
+    baseline = _object_dict(run_context.get("baseline"))
+    return {
+        "available_artifacts": run_context.get("available_artifacts", []),
+        "environment_status": environment.get("status"),
+        "environment_mode": environment.get("mode"),
+        "baseline_status": baseline.get("status"),
+        "baseline_metrics": baseline.get("metrics", {}),
+        "validation_status": validation.get("status"),
+    }
+
+
 def _update_manifest_after_plan(
     manifest_path: Path,
     manifest: dict[str, Any],
     *,
     selected_files: list[str],
+    run_context: dict[str, Any],
     mode: str,
 ) -> None:
     plan = _dict_value(manifest, "plan")
@@ -505,6 +714,7 @@ def _update_manifest_after_plan(
             "generated_at": _utcnow_iso(),
             "patch_plan": "code_task/patch_plan.md",
             "selected_files": selected_files,
+            "context": _manifest_plan_context(run_context),
         }
     )
     layout = _dict_value(manifest, "layout")
@@ -561,13 +771,23 @@ def _source_snippets(
     return snippets
 
 
-def _compact_codebase_index(index: dict[str, Any]) -> dict[str, Any]:
+def _compact_codebase_index(
+    index: dict[str, Any],
+    *,
+    protected_patterns: tuple[str, ...],
+) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     for item in _index_files(index):
+        path = str(item.get("path", ""))
         row: dict[str, Any] = {
-            "path": item.get("path"),
+            "path": path,
             "kind": item.get("kind"),
             "role_tags": item.get("role_tags", []),
+            "edit_role": (
+                "read_only"
+                if is_protected_edit_path(path, protected_patterns=protected_patterns)
+                else "editable"
+            ),
             "summary": item.get("summary", ""),
         }
         python = item.get("python")
@@ -640,6 +860,13 @@ def _read_required_text(path: Path) -> str:
     return read_text(path)
 
 
+def _read_optional_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    data = read_json(path)
+    return data if isinstance(data, dict) else {}
+
+
 def _index_files(index: dict[str, Any]) -> list[dict[str, Any]]:
     files = index.get("files", [])
     if not isinstance(files, list):
@@ -668,7 +895,12 @@ def _file_haystack(item: dict[str, Any]) -> str:
     return " ".join(pieces).lower()
 
 
-def _file_plan_list(value: object, known_paths: set[str]) -> list[dict[str, str]]:
+def _file_plan_list(
+    value: object,
+    known_paths: set[str],
+    *,
+    protected_patterns: tuple[str, ...],
+) -> list[dict[str, str]]:
     rows = value if isinstance(value, list) else []
     result: list[dict[str, str]] = []
     for item in rows:
@@ -676,6 +908,8 @@ def _file_plan_list(value: object, known_paths: set[str]) -> list[dict[str, str]
             continue
         path = _string(item.get("path"))
         if not path or path not in known_paths:
+            continue
+        if is_protected_edit_path(path, protected_patterns=protected_patterns):
             continue
         result.append(
             {
@@ -710,6 +944,10 @@ def _benchmark_command(manifest: dict[str, Any]) -> str:
 
 def _dict_value(data: dict[str, Any], key: str) -> dict[str, Any]:
     value = data.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _object_dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
