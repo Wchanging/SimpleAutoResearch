@@ -248,6 +248,10 @@ uv run simple-ar code-task propose-edits runs/<run-id>
 controlled old/new text replacements and is meant for review. It does not edit
 the workspace by itself. A proposal may include multiple ordered edits for the
 same file; each `old` block must still match uniquely when applied in sequence.
+By default, tests and benchmark files are treated as read-only evidence:
+`propose-edits` omits them from editable snippets, and any model edit targeting
+paths such as `tests/**`, `test_*.py`, `benchmark.py`, or `*benchmark*.py` is
+dropped from the proposal.
 
 Apply proposed edits inside the copied workspace:
 
@@ -261,6 +265,9 @@ uv run simple-ar code-task apply-edits runs/<run-id>
 the codebase index. It still never mutates the original `--code-root`. If an
 edit cannot be matched safely, `execute` stops with `patch_apply_failed` before
 workspace files are changed.
+`apply-edits` also re-checks the edit scope, so manually supplied JSON cannot
+modify protected tests or benchmark files even if it bypassed the LLM proposal
+step.
 
 Validate and run the patched benchmark:
 
@@ -295,8 +302,10 @@ deterministic and does not call the LLM.
 context to write a bounded repair proposal under
 `code_task/repairs/repair-001/proposed_edits.json`. The proposal records the
 source analysis path, selected context files, and repair constraints. It does
-not apply the repair automatically. `code_task/summary.md` is refreshed with a
-Repair section.
+not apply the repair automatically. Repair proposal context follows the same
+edit-scope rule: tests and benchmark files may inform diagnosis, but they are
+not supplied as editable snippets by default. `code_task/summary.md` is
+refreshed with a Repair section.
 
 Apply a reviewed repair proposal explicitly:
 
@@ -323,8 +332,8 @@ uv run simple-ar code-task execute runs/<run-id>
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
 ```
 
-Those repeated `execute` calls are intentional. `execute` means “inspect the
-current run and continue to the next safe stop.” It does not mean “skip review.”
+Those repeated `execute` calls are intentional. `execute` means "inspect the
+current run and continue to the next safe stop." It does not mean "skip review."
 
 - First `execute`: writes `environment_report.json`, baseline artifacts,
   `patch_plan.md`, then stops with `approval_required`.
@@ -398,7 +407,9 @@ the harness runs the patched benchmark, writes `comparison.json` when baseline
 and patched metrics are both available, and exposes code-task metrics through
 `07-run/results.json`. During `08-report`, the report includes a deterministic
 Code Task Evidence section pointing back to the nested summary, diff, and
-comparison artifacts.
+comparison artifacts. The embedded path uses the same edit-scope guard as the
+standalone workflow, so the patch cannot rewrite protected tests or benchmark
+files just to improve reported metrics.
 
 This path is convenient for end-to-end experiments, but it deliberately trades
 away the standalone workflow's review pauses. For safety-sensitive or

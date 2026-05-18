@@ -18,6 +18,7 @@ from simple_ar.code_task import (
     generate_patch_plan,
     initialize_code_task,
     probe_code_task_environment,
+    propose_patch_edits,
     propose_repair_edits,
     record_plan_decision,
     run_code_task_baseline,
@@ -64,6 +65,8 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(manifest["benchmark"]["executed"], False)
             self.assertEqual(manifest["environment"]["policy"]["mode"], "current")
             self.assertEqual(manifest["environment"]["policy"]["python_executable"], sys.executable)
+            self.assertEqual(manifest["edit_scope"]["mode"], "source_only_default")
+            self.assertIn("tests/**", manifest["edit_scope"]["protected_patterns"])
             self.assertGreaterEqual(manifest["copy"]["skipped_count"], 2)
 
             index = read_json(result.codebase_index_path)
@@ -448,6 +451,109 @@ class CodeTaskTests(unittest.TestCase):
             after = read_text(run_dir / "code_task" / "workspace" / "spam_model.py")
             self.assertEqual(before, after)
             self.assertFalse((run_dir / "code_task" / "patch.diff").exists())
+
+    def test_apply_edits_rejects_protected_test_and_benchmark_files(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(code_root / "benchmark.py", "print('accuracy: 0.5')\n")
+            write_text(task_file, "# Task\n\nImprove source behavior without changing validation targets.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file)
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            proposal_path = root / "protected_edits.json"
+            write_json(
+                proposal_path,
+                {
+                    "edits": [
+                        {
+                            "path": "tests/test_spam_model.py",
+                            "old": "        self.assertEqual(predict('win now'), 'spam')\n",
+                            "new": "        self.assertEqual(predict('win now'), 'ham')\n",
+                            "reason": "Should be blocked because tests are read-only evidence.",
+                        },
+                        {
+                            "path": "benchmark.py",
+                            "old": "print('accuracy: 0.5')\n",
+                            "new": "print('accuracy: 1.0')\n",
+                            "reason": "Should be blocked because benchmarks are read-only evidence.",
+                        },
+                    ]
+                },
+            )
+
+            before_test = read_text(run_dir / "code_task" / "workspace" / "tests" / "test_spam_model.py")
+            before_benchmark = read_text(run_dir / "code_task" / "workspace" / "benchmark.py")
+            with self.assertRaises(PatchValidationError) as caught:
+                apply_patch_edits(run_dir, edits_file=proposal_path)
+
+            self.assertIn("path is protected by the edit scope", str(caught.exception))
+            self.assertEqual(
+                before_test,
+                read_text(run_dir / "code_task" / "workspace" / "tests" / "test_spam_model.py"),
+            )
+            self.assertEqual(
+                before_benchmark,
+                read_text(run_dir / "code_task" / "workspace" / "benchmark.py"),
+            )
+            self.assertFalse((run_dir / "code_task" / "patch.diff").exists())
+
+    def test_propose_edits_drops_protected_llm_paths(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove the spam model without changing tests.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file)
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+
+            fake_client = _FakeRepairClient(
+                {
+                    "summary": "Attempt one valid edit and one protected edit.",
+                    "edits": [
+                        {
+                            "path": "spam_model.py",
+                            "old": (
+                                "def predict(text):\n"
+                                "    return 'spam' if 'win' in text.lower() else 'ham'\n"
+                            ),
+                            "new": (
+                                "def predict(text):\n"
+                                "    lowered = text.lower()\n"
+                                "    return 'spam' if 'win' in lowered or 'prize' in lowered else 'ham'\n"
+                            ),
+                            "reason": "Improve source behavior.",
+                        },
+                        {
+                            "path": "tests/test_spam_model.py",
+                            "old": "        self.assertEqual(predict('win now'), 'spam')\n",
+                            "new": "        self.assertEqual(predict('win now'), 'ham')\n",
+                            "reason": "This protected edit should be dropped.",
+                        },
+                    ],
+                    "validation": ["Run tests."],
+                    "risks": ["Changing tests would invalidate evidence."],
+                }
+            )
+
+            with patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client):
+                result = propose_patch_edits(run_dir, use_llm=True)
+
+            proposal = read_json(result.proposal_path)
+            self.assertEqual(result.edit_count, 1)
+            self.assertEqual([item["path"] for item in proposal["edits"]], ["spam_model.py"])
+            self.assertIn(
+                "Dropped edit for protected read-only path: tests/test_spam_model.py",
+                proposal["warnings"],
+            )
 
     def test_code_task_propose_and_apply_cli_with_manual_edits_file(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

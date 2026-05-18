@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
+from simple_ar.code_task.edit_scope import is_protected_edit_path
 from simple_ar.experiment.runner import run_experiment
 from simple_ar.experiment.code_task_experiment import (
     CODE_TASK_PROJECT_TEMPLATE,
@@ -1175,21 +1176,7 @@ def _review_sensitive_changed_files(changed_files: object) -> list[str]:
     """Return changed code-task files that should be highlighted in reports."""
     if not isinstance(changed_files, list):
         return []
-    risky: list[str] = []
-    for item in changed_files:
-        if not isinstance(item, str):
-            continue
-        normalized = item.replace("\\", "/").lower()
-        name = normalized.rsplit("/", 1)[-1]
-        if (
-            normalized.startswith("tests/")
-            or "/tests/" in normalized
-            or name.startswith("test_")
-            or name in {"benchmark.py", "bench.py"}
-            or "benchmark" in name
-        ):
-            risky.append(item)
-    return risky
+    return [item for item in changed_files if isinstance(item, str) and is_protected_edit_path(item)]
 
 
 def _search_markdown(search_meta: dict[str, Any]) -> str:

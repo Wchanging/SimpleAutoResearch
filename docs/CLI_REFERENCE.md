@@ -328,6 +328,12 @@ python = ""       # optional when mode = "external"
 max_file_bytes = 2000000
 ```
 
+Code-task runs also record an `edit_scope` in `manifest.json`. The current
+default treats tests and benchmark files as read-only evidence for patching:
+`tests/**`, `test_*.py`, `*_test.py`, `conftest.py`, `benchmark.py`,
+`bench.py`, and `*benchmark*.py`. These files may be indexed for planning, but
+they are omitted from editable snippets and rejected by `apply-edits`.
+
 Bundled example:
 
 ```bash
@@ -458,6 +464,10 @@ When both baseline and patched runs exist, SimpleAutoResearch writes
 Each edit is applied against the current in-memory text, and each `old` block
 must match exactly once. Invalid proposals stop before file writes; under
 `execute`, this appears as `patch_apply_failed`.
+
+Edit-scope validation is checked twice: model proposals for protected paths are
+dropped from `proposed_edits.json`, and `apply-edits` rejects protected paths
+again for both model-generated and manually supplied edit files.
 
 #### Failure And Repair
 

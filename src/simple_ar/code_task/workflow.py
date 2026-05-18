@@ -7,6 +7,7 @@ from typing import Any
 
 from simple_ar.artifacts import write_json, write_text
 from simple_ar.code_task.comparison import normalize_metric_directions
+from simple_ar.code_task.edit_scope import default_edit_scope
 from simple_ar.code_task.environment import build_code_task_environment_policy
 from simple_ar.code_task.index import build_codebase_index
 from simple_ar.code_task.workspace import CopyReport, copy_code_workspace
@@ -185,6 +186,7 @@ def _manifest(
             "status": "not_probed",
             "policy": environment_policy,
         },
+        "edit_scope": default_edit_scope(),
         "benchmark": {
             "command": benchmark_command,
             "executed": False,

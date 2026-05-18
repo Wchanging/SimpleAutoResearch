@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import read_json, read_text, write_text
+from simple_ar.code_task.edit_scope import is_protected_edit_path
 from simple_ar.code_task.state import (
     code_task_paths,
     load_code_task_manifest,
@@ -558,19 +559,7 @@ def _changed_files(manifest: dict[str, Any]) -> list[str]:
 
 def _review_sensitive_files(paths: list[str]) -> list[str]:
     """Return changed files that need extra review before trusting results."""
-    risky: list[str] = []
-    for path in paths:
-        normalized = path.replace("\\", "/").lower()
-        name = normalized.rsplit("/", 1)[-1]
-        if (
-            normalized.startswith("tests/")
-            or "/tests/" in normalized
-            or name.startswith("test_")
-            or name in {"benchmark.py", "bench.py"}
-            or "benchmark" in name
-        ):
-            risky.append(path)
-    return risky
+    return [path for path in paths if is_protected_edit_path(path)]
 
 
 def _strip_heading(text: str) -> str:

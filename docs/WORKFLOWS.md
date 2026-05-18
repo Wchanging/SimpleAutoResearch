@@ -216,9 +216,9 @@ Important directories:
 Important user-facing code-task files:
 
 - `summary.md`: compact outcome, next-step guidance, task, patch, validation, benchmark, comparison, and failure-analysis summary.
-- Changed test or benchmark files are highlighted as review-sensitive in
-  `summary.md` and embedded report evidence; benchmark improvements should be
-  trusted only after inspecting the diff.
+- Tests and benchmark files are protected by the default edit scope. They may
+  be indexed as read-only evidence, but `propose-edits`, `repair`, and
+  `apply-edits` should not modify them.
 - `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
 - `run/baseline/execution_report.json`: pre-patch benchmark result.
 - `run/patched/execution_report.json`: post-patch benchmark result.

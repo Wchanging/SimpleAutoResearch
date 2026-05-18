@@ -17,6 +17,7 @@ from simple_ar.code_task import (
     validate_code_task,
 )
 from simple_ar.code_task.config import DEFAULT_MAX_FILE_BYTES, CodeTaskConfigError
+from simple_ar.code_task.edit_scope import is_protected_edit_path
 
 
 CODE_TASK_TOY_SPAM_TEMPLATE = "llm_code_task_toy_spam"
@@ -41,7 +42,10 @@ class CodeTaskExperimentSpec:
         python_executable: Optional external Python when ``env_mode=external``.
         config_path: Optional TOML config path used to resolve this spec.
         name: Optional human-facing code-task name.
-        allow_test_changes: Whether patches may modify test files.
+        allow_test_changes: Whether patches may modify test files. The
+            code-task edit-scope guard rejects protected files before this
+            template-level check is reached; this flag remains as an extra
+            compatibility guard for older runs.
         approval_note: Note recorded when the pipeline auto-approves the plan.
     """
 
@@ -56,7 +60,7 @@ class CodeTaskExperimentSpec:
     python_executable: str | None = None
     config_path: str | None = None
     name: str | None = None
-    allow_test_changes: bool = True
+    allow_test_changes: bool = False
     approval_note: str = "Auto-approved inside isolated 8-stage code-task workspace."
 
 
@@ -154,7 +158,7 @@ def code_task_project_spec(config: dict[str, object]) -> CodeTaskExperimentSpec:
         python_executable=options.python_executable,
         config_path=options.config_path,
         name=options.name,
-        allow_test_changes=True,
+        allow_test_changes=False,
     )
 
 
@@ -265,10 +269,11 @@ def prepare_code_task_experiment(
 
     _emit(message_callback, "Applying code-task edits to copied workspace.")
     patch = apply_patch_edits(run_dir)
-    if not spec.allow_test_changes and any(_is_test_path(path) for path in patch.changed_files):
+    if not spec.allow_test_changes and any(_is_protected_evidence_path(path) for path in patch.changed_files):
         raise RuntimeError(
-            "Code-task experiment rejected a patch that modified tests. "
-            "The demo must improve source behavior without changing benchmark expectations."
+            "Code-task experiment rejected a patch that modified protected "
+            "tests or benchmark files. Improve source behavior without changing "
+            "validation targets."
         )
     validation = validate_code_task(run_dir)
     if validation.status == "failed":
@@ -424,9 +429,8 @@ def _config_metric_directions(value: object) -> dict[str, str] | None:
     return result
 
 
-def _is_test_path(path: str) -> bool:
-    normalized = path.replace("\\", "/")
-    return normalized.startswith("tests/") or "/tests/" in normalized or normalized.startswith("test_")
+def _is_protected_evidence_path(path: str) -> bool:
+    return is_protected_edit_path(path)
 
 
 def _emit(callback: MessageCallback | None, message: str) -> None:

@@ -17,6 +17,11 @@ from simple_ar.artifacts import (
     write_json,
     write_text,
 )
+from simple_ar.code_task.edit_scope import (
+    editable_paths,
+    is_protected_edit_path,
+    protected_patterns_from_manifest,
+)
 from simple_ar.code_task.index import build_codebase_index
 from simple_ar.code_task.planning import select_relevant_files
 from simple_ar.llm import LLMClient, LLMError, LLMUsage
@@ -127,13 +132,25 @@ def propose_patch_edits(
     task_text = _read_required_text(task_dir / "task.md")
     patch_plan = _read_required_text(task_dir / "patch_plan.md")
     index = _read_required_json(meta_dir / "codebase_index.json")
-    selected = _selected_context_files(
+    protected_patterns = protected_patterns_from_manifest(manifest)
+    selected_context = _selected_context_files(
         manifest,
         index,
         task_text=task_text,
         patch_plan=patch_plan,
         max_files=max_files,
     )
+    selected = _editable_context_files(
+        index,
+        selected_context,
+        protected_patterns=protected_patterns,
+        max_files=max_files,
+    )
+    read_only_context = [
+        path
+        for path in selected_context
+        if is_protected_edit_path(path, protected_patterns=protected_patterns)
+    ]
     snippets = _source_snippets(
         workspace_dir,
         selected,
@@ -160,20 +177,28 @@ def propose_patch_edits(
                 patch_plan=patch_plan,
                 index=index,
                 snippets=snippets,
+                read_only_context=read_only_context,
+                protected_patterns=protected_patterns,
             )
             mode = "llm"
         except LLMError as exc:
             _emit(message_callback, f"LLM edit proposal failed; writing offline empty proposal. {exc}")
 
     if proposal is None:
-        proposal = _offline_proposal(selected)
+        proposal = _offline_proposal(selected, read_only_context=read_only_context)
 
-    normalized = _normalize_edit_proposal(proposal, index=index, mode=mode)
+    normalized = _normalize_edit_proposal(
+        proposal,
+        index=index,
+        mode=mode,
+        protected_patterns=protected_patterns,
+    )
     write_json(proposal_path, normalized)
     _update_manifest_after_proposal(
         manifest_path,
         manifest,
         selected_files=selected,
+        read_only_context=read_only_context,
         proposal=normalized,
     )
     return ProposedEditsResult(
@@ -225,7 +250,12 @@ def apply_patch_edits(
     if not edits:
         raise PatchValidationError(f"No edits were found in {proposal_path}")
 
-    prepared = _prepare_edits(workspace_dir, edits)
+    protected_patterns = protected_patterns_from_manifest(manifest)
+    prepared = _prepare_edits(
+        workspace_dir,
+        edits,
+        protected_patterns=protected_patterns,
+    )
     pre_hash_rows = _hash_rows_for_prepared(workspace_dir, prepared)
     old_text_by_path = {item.file_path: read_text(item.file_path) for item in prepared}
     new_text_by_path = {item.file_path: item.updated_text for item in prepared}
@@ -276,6 +306,8 @@ def _ask_llm_for_edits(
     patch_plan: str,
     index: dict[str, Any],
     snippets: list[dict[str, str]],
+    read_only_context: list[str],
+    protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     response = client.ask_json(
         CODE_TASK_EDIT_SYSTEM,
@@ -284,6 +316,8 @@ def _ask_llm_for_edits(
             patch_plan=patch_plan,
             index=index,
             snippets=snippets,
+            read_only_context=read_only_context,
+            protected_patterns=protected_patterns,
         ),
         label="code-task-propose-edits",
     )
@@ -296,12 +330,22 @@ def _edit_user_prompt(
     patch_plan: str,
     index: dict[str, Any],
     snippets: list[dict[str, str]],
+    read_only_context: list[str],
+    protected_patterns: tuple[str, ...],
 ) -> str:
     compact_files = [
         {
-            "path": item.get("path"),
+            "path": str(item.get("path", "")),
             "kind": item.get("kind"),
             "role_tags": item.get("role_tags", []),
+            "edit_role": (
+                "read_only"
+                if is_protected_edit_path(
+                    str(item.get("path", "")),
+                    protected_patterns=protected_patterns,
+                )
+                else "editable"
+            ),
             "summary": item.get("summary", ""),
         }
         for item in _index_files(index)
@@ -318,6 +362,9 @@ def _edit_user_prompt(
         "Hard rules:\n"
         "- Do not return markdown or a unified diff.\n"
         "- Use only workspace-relative paths from the provided file inventory.\n"
+        "- Only propose edits for files whose inventory `edit_role` is `editable`.\n"
+        "- Files whose `edit_role` is `read_only` are evidence only; do not "
+        "modify tests, benchmarks, or validation targets.\n"
         "- Each `old` value must be an exact contiguous substring from the "
         "corresponding source snippet, including indentation and newlines.\n"
         "- Make each replacement large enough to be unique in the file.\n"
@@ -328,11 +375,13 @@ def _edit_user_prompt(
         f"Task:\n{task_text}\n\n"
         f"Approved patch plan:\n{patch_plan}\n\n"
         f"Workspace file inventory JSON:\n{json.dumps(compact_files, indent=2, ensure_ascii=False)}\n\n"
+        "Read-only context files omitted from editable snippets:\n"
+        f"{json.dumps(read_only_context, indent=2, ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
 
 
-def _offline_proposal(selected_files: list[str]) -> dict[str, Any]:
+def _offline_proposal(selected_files: list[str], *, read_only_context: list[str]) -> dict[str, Any]:
     return {
         "summary": "Offline mode does not invent edits. Provide an edits JSON file or rerun with LLM enabled.",
         "edits": [],
@@ -343,6 +392,7 @@ def _offline_proposal(selected_files: list[str]) -> dict[str, Any]:
             "Manual edits should still be validated by apply-edits before touching the workspace.",
         ],
         "selected_files": selected_files,
+        "read_only_context": read_only_context,
     }
 
 
@@ -351,6 +401,7 @@ def _normalize_edit_proposal(
     *,
     index: dict[str, Any],
     mode: str,
+    protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
     warnings: list[str] = []
@@ -364,6 +415,9 @@ def _normalize_edit_proposal(
         new = item.get("new")
         if path not in known_paths:
             warnings.append(f"Dropped edit for unknown path: {path or '<empty>'}")
+            continue
+        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+            warnings.append(f"Dropped edit for protected read-only path: {path}")
             continue
         if not isinstance(old, str) or not isinstance(new, str):
             warnings.append(f"Dropped edit for {path}: old/new must be strings.")
@@ -391,7 +445,12 @@ def _normalize_edit_proposal(
     }
 
 
-def _prepare_edits(workspace_dir: Path, edits: list[dict[str, Any]]) -> list[_PreparedEdit]:
+def _prepare_edits(
+    workspace_dir: Path,
+    edits: list[dict[str, Any]],
+    *,
+    protected_patterns: tuple[str, ...],
+) -> list[_PreparedEdit]:
     workspace = workspace_dir.resolve()
     current_text_by_path: dict[Path, str] = {}
     prepared: list[_PreparedEdit] = []
@@ -413,6 +472,11 @@ def _prepare_edits(workspace_dir: Path, edits: list[dict[str, Any]]) -> list[_Pr
         file_path = _workspace_file(workspace, path)
         if file_path is None:
             errors.append(f"edit {index} `{path}`: path escapes the workspace")
+            continue
+        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+            errors.append(
+                f"edit {index} `{path}`: path is protected by the edit scope"
+            )
             continue
         if not file_path.exists() or not file_path.is_file():
             errors.append(f"edit {index} `{path}`: target file does not exist")
@@ -544,6 +608,32 @@ def _selected_context_files(
     return selected[: max(1, max_files)]
 
 
+def _editable_context_files(
+    index: dict[str, Any],
+    selected_files: list[str],
+    *,
+    protected_patterns: tuple[str, ...],
+    max_files: int,
+) -> list[str]:
+    selected = editable_paths(selected_files, protected_patterns=protected_patterns)
+    if selected:
+        return selected[: max(1, max_files)]
+    fallback: list[str] = []
+    for item in _index_files(index):
+        path = _string(item.get("path"))
+        if not path:
+            continue
+        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+            continue
+        kind = _string(item.get("kind"))
+        role_tags = [str(tag) for tag in item.get("role_tags", []) if isinstance(tag, str)]
+        if kind == "python" or "source" in role_tags:
+            fallback.append(path)
+        if len(fallback) >= max(1, max_files):
+            break
+    return fallback
+
+
 def _paths_from_patch_plan(patch_plan: str, known_paths: set[str]) -> list[str]:
     found: list[str] = []
     for candidate in re.findall(r"`([^`]+)`", patch_plan):
@@ -582,6 +672,7 @@ def _update_manifest_after_proposal(
     manifest: dict[str, Any],
     *,
     selected_files: list[str],
+    read_only_context: list[str],
     proposal: dict[str, Any],
 ) -> None:
     edits = proposal.get("edits", [])
@@ -593,6 +684,7 @@ def _update_manifest_after_proposal(
             "proposed_edits": "code_task/meta/proposed_edits.json",
             "proposed_edit_count": len(edits) if isinstance(edits, list) else 0,
             "selected_files": selected_files,
+            "read_only_context_files": read_only_context,
         }
     )
     layout = _dict_value(manifest, "layout")

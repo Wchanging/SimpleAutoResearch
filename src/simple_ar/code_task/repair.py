@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from simple_ar.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
+from simple_ar.code_task.edit_scope import (
+    editable_paths,
+    is_protected_edit_path,
+    protected_patterns_from_manifest,
+)
 from simple_ar.code_task.failure import analyze_code_task_failure
 from simple_ar.code_task.planning import select_relevant_files
 from simple_ar.code_task.state import (
@@ -99,13 +104,25 @@ def propose_repair_edits(
     patch_plan = _read_optional_text(paths.task_dir / "patch_plan.md")
     patch_diff = _read_optional_text(paths.task_dir / "patch.diff")
     index = _read_required_json(paths.meta_dir / "codebase_index.json")
-    selected = _repair_context_files(
+    protected_patterns = protected_patterns_from_manifest(manifest)
+    selected_context = _repair_context_files(
         manifest,
         index,
         task_text=task_text,
         failure_analysis=failure_analysis,
         max_files=max_files,
     )
+    selected = _editable_repair_context_files(
+        index,
+        selected_context,
+        protected_patterns=protected_patterns,
+        max_files=max_files,
+    )
+    read_only_context = [
+        path
+        for path in selected_context
+        if is_protected_edit_path(path, protected_patterns=protected_patterns)
+    ]
     snippets = _source_snippets(
         paths.workspace_dir,
         selected,
@@ -139,6 +156,7 @@ def propose_repair_edits(
                     execution_report=execution_report,
                     validation_report=validation_report,
                     snippets=snippets,
+                    read_only_context=read_only_context,
                 ),
                 label="code-task-repair",
             )
@@ -154,7 +172,9 @@ def propose_repair_edits(
         index=index,
         mode=mode,
         selected_files=selected,
+        read_only_context=read_only_context,
         source_analysis=analysis_path.relative_to(paths.run_dir).as_posix(),
+        protected_patterns=protected_patterns,
     )
     write_json(proposal_path, normalized)
     _update_manifest_after_repair(
@@ -184,6 +204,7 @@ def _repair_prompt(
     execution_report: dict[str, Any],
     validation_report: dict[str, Any],
     snippets: list[dict[str, str]],
+    read_only_context: list[str],
 ) -> str:
     snippet_text = "\n\n".join(
         f"### {item['path']}\n```text\n{item['text']}\n```"
@@ -198,7 +219,7 @@ def _repair_prompt(
         "- Use only workspace-relative paths from the supplied snippets.\n"
         "- Prefer repairing implicated or recently changed files.\n"
         "- Treat validation errors as first-class evidence even when the benchmark was not launched.\n"
-        "- Do not change tests unless the failure analysis clearly shows the test is wrong.\n"
+        "- Do not change read-only files such as tests, benchmarks, or validation targets.\n"
         "- Keep the repair minimal and runnable.\n"
         "- Do not return markdown or a unified diff.\n\n"
         f"Task:\n{task_text or 'No task text found.'}\n\n"
@@ -207,6 +228,8 @@ def _repair_prompt(
         f"Execution report JSON:\n{json.dumps(execution_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"
         f"Validation report JSON:\n{json.dumps(validation_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"
         f"Failure analysis:\n{failure_analysis}\n\n"
+        "Read-only context files omitted from editable snippets:\n"
+        f"{json.dumps(read_only_context, indent=2, ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
 
@@ -235,6 +258,32 @@ def _repair_context_files(
         if path not in selected:
             selected.append(path)
     return selected[: max(1, max_files)]
+
+
+def _editable_repair_context_files(
+    index: dict[str, Any],
+    selected_files: list[str],
+    *,
+    protected_patterns: tuple[str, ...],
+    max_files: int,
+) -> list[str]:
+    selected = editable_paths(selected_files, protected_patterns=protected_patterns)
+    if selected:
+        return selected[: max(1, max_files)]
+    fallback: list[str] = []
+    for item in _index_files(index):
+        path = _string(item.get("path"))
+        if not path:
+            continue
+        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+            continue
+        kind = _string(item.get("kind"))
+        role_tags = [str(tag) for tag in item.get("role_tags", []) if isinstance(tag, str)]
+        if kind == "python" or "source" in role_tags:
+            fallback.append(path)
+        if len(fallback) >= max(1, max_files):
+            break
+    return fallback
 
 
 def _source_snippets(
@@ -278,7 +327,9 @@ def _normalize_repair_proposal(
     index: dict[str, Any],
     mode: str,
     selected_files: list[str],
+    read_only_context: list[str],
     source_analysis: str,
+    protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
     permitted_paths = set(selected_files) if selected_files else known_paths
@@ -293,6 +344,9 @@ def _normalize_repair_proposal(
         new = item.get("new")
         if path not in known_paths:
             warnings.append(f"Dropped edit for unknown path: {path or '<empty>'}")
+            continue
+        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+            warnings.append(f"Dropped edit for protected read-only path: {path}")
             continue
         if path not in permitted_paths:
             warnings.append(f"Dropped edit outside repair context: {path}")
@@ -318,8 +372,10 @@ def _normalize_repair_proposal(
         "mode": mode,
         "source_analysis": source_analysis,
         "selected_files": selected_files,
+        "read_only_context": read_only_context,
         "constraints": [
             "Only selected context files may be edited by this repair proposal.",
+            "Protected read-only files such as tests and benchmarks cannot be edited.",
             "Apply this proposal explicitly with code-task apply-edits after review.",
         ],
         "summary": _string(proposal.get("summary")) or "No summary provided.",

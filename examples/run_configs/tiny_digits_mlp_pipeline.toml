@@ -52,4 +52,5 @@ mode = "current"
 
 [safety]
 # Maximum copied source file size. Use 0 to disable.
+# Tests and benchmark files remain read-only patch evidence by default.
 max_file_bytes = 2000000

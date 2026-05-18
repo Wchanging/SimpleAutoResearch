@@ -6,6 +6,8 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Added
 
+- Added a default code-task edit-scope policy that records protected test and
+  benchmark path patterns in `manifest.json`.
 - Added the generic `code_task_project` experiment template so an 8-stage
   `simple-ar run --to-stage report` can copy a user-provided project, run a
   baseline benchmark, apply an LLM-controlled patch, run the patched benchmark,
@@ -35,9 +37,10 @@ This file records user-visible project changes in reverse chronological order. P
   `code_task_experiment.py` so the code structure matches its generic role.
 - Final reports now append a deterministic Code Task Evidence section for
   embedded code-task templates when the LLM draft does not include one.
-- Code-task summaries and embedded report evidence now flag changed test or
-  benchmark files as review-sensitive, so an automated patch cannot quietly
-  hide benchmark-surface edits.
+- Code-task proposals, repairs, and patch application now treat tests and
+  benchmark files as read-only evidence by default. Protected paths are omitted
+  from editable snippets, dropped from model proposals, and rejected again by
+  `apply-edits` for manual proposal files.
 - Comparison artifacts now record configured metric directions and keep unknown metrics as deltas without using them for improved/regressed verdicts.
 - Moved code-task init config parsing out of `cli.py` and into `code_task/config.py`.
 - Repair context selection now prioritizes files changed by the current patch before traceback/test files, making benchmark-failure repairs less likely to edit tests by accident.
