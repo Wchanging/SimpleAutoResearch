@@ -65,7 +65,7 @@ plan -> search -> read -> synthesize -> design experiment
 Current status:
 
 - `06-code` normally generates a whitelisted template experiment.
-- `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, `--task-file`, and `--benchmark-command` flags.
+- `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, optional `--task-file`, and `--benchmark-command` flags. If no task file is supplied, `05-design` generates `generated_code_task.md` from the earlier research artifacts and a compact codebase summary.
 - `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
 - `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
 - The embedded path is end-to-end: it auto-approves the patch plan inside the copied workspace. The standalone code-task workflow remains the safer human-review path.
@@ -146,6 +146,8 @@ Root-level files:
 - `source_plan.json`: source plan describing which artifacts each stage should consult.
 - `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
+- `05-design/generated_code_task.md`: generated only when an embedded `code_task_project` run omits a task file.
+- `05-design/generated_code_task_meta.json`: provenance for that generated task file.
 - `06-code/code_task_experiment.json`: present for embedded code-task templates such as `code_task_project` and `llm_code_task_toy_spam`.
 
 Nested embedded code-task files:

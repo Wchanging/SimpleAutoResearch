@@ -398,6 +398,27 @@ uv run simple-ar run \
   --experiment-timeout 60
 ```
 
+For a more research-first run, omit `--task-file` while still providing the
+code root and benchmark command:
+
+```bash
+uv run simple-ar run \
+  --topic "research and improve the tiny digits MLP baseline" \
+  --to-stage report \
+  --experiment-template code_task_project \
+  --code-root examples/code_tasks/tiny_digits_mlp_project \
+  --benchmark-command "python benchmark.py" \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --offline-search \
+  --experiment-timeout 60
+```
+
+In that mode, `05-design` writes `generated_code_task.md` and
+`generated_code_task_meta.json` from the prior research artifacts and a compact
+codebase summary. `06-code` then uses the generated task as the normal
+`code_task/task.md` input for planning and edit proposal.
+
 `code_task_project` writes a normal pipeline run plus nested code-task artifacts
 under `06-code/code_task_run/`. During `06-code`, it copies the user project,
 probes the environment, runs a baseline benchmark, generates a patch plan,

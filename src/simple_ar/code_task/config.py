@@ -22,7 +22,7 @@ class CodeTaskInitOptions:
     """Resolved options for ``code-task init`` after config/CLI merging."""
 
     code_root: str
-    task_file: str
+    task_file: str | None
     output_root: str
     name: str | None
     benchmark_command: str | None
@@ -66,11 +66,14 @@ def load_code_task_init_options(
     python_executable: str | None = None,
     primary_metric: str | None = None,
     metric_directions: list[tuple[str, str]] | dict[str, str] | None = None,
+    require_task_file: bool = True,
 ) -> CodeTaskInitOptions:
     """Resolve ``code-task init`` options from TOML config plus CLI overrides.
 
     Explicit arguments take precedence over the config file. The resulting
     object is intentionally small and maps directly to ``initialize_code_task``.
+    ``require_task_file`` stays true for standalone code-task runs; embedded
+    pipeline runs may generate a task file from earlier research artifacts.
     """
     config = _load_toml_config(config_path)
     code_task = _config_table(config, "code_task")
@@ -89,7 +92,7 @@ def load_code_task_init_options(
         raise CodeTaskConfigError(
             "Missing code root. Pass --code-root or set [code_task].code_root."
         )
-    if not resolved_task_file:
+    if require_task_file and not resolved_task_file:
         raise CodeTaskConfigError(
             "Missing task file. Pass --task-file or set [code_task].task_file."
         )

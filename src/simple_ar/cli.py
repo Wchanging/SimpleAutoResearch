@@ -944,6 +944,8 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     except CodeTaskConfigError as exc:
         raise SystemExit(str(exc)) from exc
     code_root = Path(options.code_root)
+    if options.task_file is None:
+        raise SystemExit("Missing task file. Pass --task-file or set [code_task].task_file.")
     task_file = Path(options.task_file)
     name = options.name or f"code-task-{code_root.resolve().name}"
     run_dir = _new_run_dir(Path(options.output_root), name)

@@ -1,6 +1,6 @@
 # Development Guide
 
-This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
+This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md). For the current code-task workspace flow and V2.2 replacement points, see [Code Task Workspace Notes](CODE_TASK_WORKSPACE.md).
 
 ## Project Shape
 
@@ -60,7 +60,7 @@ standalone code-task modules rather than a separate coding implementation.
 
 The code-task workflow is split into small modules:
 
-- `workspace.py`: safe source copy.
+- `workspace.py`: safe source copy. See [Code Task Workspace Notes](CODE_TASK_WORKSPACE.md) before changing workspace layout or copy behavior.
 - `config.py`: TOML config and CLI override resolution for code-task init.
 - `environment.py`: environment observation and execution-interpreter policy.
 - `index.py`: codebase inventory and Python AST summaries.

@@ -2,6 +2,25 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-18
+
+### Added
+
+- Added research-first task generation for embedded `code_task_project` runs:
+  when no task file is provided, `05-design` writes `generated_code_task.md`
+  from the prior research artifacts and a compact codebase summary, then
+  `06-code` uses it as the normal code-task prompt.
+- Added `docs/CODE_TASK_WORKSPACE.md` to document the current V2.1
+  workspace/copy data flow, hidden assumptions, and V2.2 workspace-mode
+  replacement points.
+
+### Changed
+
+- Made `[code_task].task_file` optional for 8-stage embedded code-task runs
+  while keeping it required for standalone `simple-ar code-task init`.
+- Updated README, usage, workflow, and CLI reference docs to distinguish
+  explicit user-authored task files from generated research-first task files.
+
 ## 2026-05-17
 
 ### Added

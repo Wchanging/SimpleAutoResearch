@@ -137,7 +137,10 @@ mode = "auto"
 # Source project copied into 06-code/code_task_run/code_task/workspace.
 code_root = "examples/code_tasks/tiny_digits_mlp_project"
 
-# Task prompt copied to code_task/task.md and used for patch planning.
+# Optional for embedded 8-stage runs. If omitted, 05-design generates
+# generated_code_task.md from goal/problem/synthesis/hypothesis plus the
+# codebase summary, then 06-code copies that into code_task/task.md.
+# Standalone `simple-ar code-task init` still requires a task file.
 task_file = "examples/code_tasks/tasks/improve_tiny_digits_mlp.md"
 
 # Optional display name stored in experiment_plan.json and nested manifest.
@@ -181,7 +184,7 @@ Section summary:
 | `[retrieval]` | read/synthesize/report helpers | Local artifact retrieval context. |
 | `[experiment]` | `05-design` to `07-run` | Experiment template, timeout, and optional nested code-task config path. |
 | `[report]` | `08-report` | Report structure mode. |
-| `[code_task]` | embedded or standalone code task | Source project, task file, and display name. |
+| `[code_task]` | embedded or standalone code task | Source project, optional embedded task file, and display name. |
 | `[benchmark]` | code task | Benchmark command and primary metric. |
 | `[benchmark.metric_directions]` | code task comparison | Metric interpretation rules. |
 | `[environment]` | code task execution | Interpreter policy for probe/baseline/patched runs. |
@@ -208,7 +211,7 @@ uv run simple-ar run \
 | --- | --- |
 | `--code-task-config PATH` | TOML config using the same schema as `code-task init --config`. |
 | `--code-root DIR` | Source project copied into `06-code/code_task_run/code_task/workspace`. |
-| `--task-file PATH` | Markdown/text task description. |
+| `--task-file PATH` | Markdown/text task description. Optional for embedded 8-stage runs; if omitted, `05-design` writes `generated_code_task.md` from the research artifacts. |
 | `--benchmark-command TEXT` | Benchmark run before and after the patch. |
 | `--code-task-name TEXT` | Optional display name stored in `experiment_plan.json`. |
 | `--code-task-max-file-bytes N` | Maximum source file size copied into the nested workspace. |

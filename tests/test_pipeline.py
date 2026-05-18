@@ -252,6 +252,51 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(meta["template"], CODE_TASK_PROJECT_TEMPLATE)
             self.assertEqual(meta["baseline_status"], "passed")
 
+    def test_code_task_project_design_can_generate_missing_task_file(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        repo_root = Path(__file__).resolve().parents[1]
+        code_root = repo_root / "examples" / "code_tasks" / "tiny_digits_mlp_project"
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            ctx = Context(
+                run_dir,
+                "Upgrade a tiny MLP after literature review",
+                config={
+                    "experiment_template": CODE_TASK_PROJECT_TEMPLATE,
+                    "code_task_code_root": str(code_root),
+                    "code_task_benchmark_command": "python benchmark.py",
+                    "code_task_primary_metric": "accuracy",
+                    "use_llm": False,
+                },
+            )
+            for stage_name, filename, text in (
+                ("01-plan", "goal.md", "# Goal\n\nImprove a lightweight MLP baseline.\n"),
+                ("01-plan", "problem.md", "# Problem\n\nFind a small local improvement.\n"),
+                ("04-synthesize", "synthesis.md", "# Synthesis\n\nPrefer modest architecture tuning.\n"),
+                ("04-synthesize", "hypothesis.md", "# Hypothesis\n\nA small source patch can improve validation accuracy.\n"),
+            ):
+                stage_dir = run_dir / stage_name
+                stage_dir.mkdir(parents=True, exist_ok=True)
+                (stage_dir / filename).write_text(text, encoding="utf-8")
+
+            ctx.current_stage = Stage.DESIGN
+            ctx.stage_dir().mkdir(parents=True)
+            execute_design(ctx)
+
+            generated_task = run_dir / "05-design" / "generated_code_task.md"
+            self.assertTrue(generated_task.is_file())
+            task_text = read_text(generated_task)
+            self.assertIn("# Code Task", task_text)
+            self.assertIn("python benchmark.py", task_text)
+            plan = read_json(run_dir / "05-design" / "experiment_plan.json")
+            self.assertEqual(plan["template"], CODE_TASK_PROJECT_TEMPLATE)
+            self.assertEqual(plan["code_task"]["task_source"], "generated_from_research")
+            self.assertEqual(
+                plan["code_task"]["generated_task_file"],
+                "05-design/generated_code_task.md",
+            )
+            self.assertEqual(plan["code_task"]["task_generation"]["mode"], "fallback")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -171,7 +171,7 @@ uv run simple-ar run \
   --experiment-timeout 60
 ```
 
-This copies the configured project into `06-code/code_task_run/code_task/workspace`, runs a baseline benchmark, asks the LLM for a patch plan and controlled edits, applies the patch inside the copied workspace, runs the patched benchmark, and writes code-task evidence into the final report. Because the 8-stage pipeline must finish end to end, it auto-approves the patch plan inside that isolated workspace. Use standalone `code-task` commands when you want explicit human approval before each step.
+This copies the configured project into `06-code/code_task_run/code_task/workspace`, runs a baseline benchmark, asks the LLM for a patch plan and controlled edits, applies the patch inside the copied workspace, runs the patched benchmark, and writes code-task evidence into the final report. If no task file is supplied for `code_task_project`, `05-design` now derives `generated_code_task.md` from the earlier research artifacts and a compact codebase summary, then `06-code` uses it as the normal `code_task/task.md`. Because the 8-stage pipeline must finish end to end, it auto-approves the patch plan inside that isolated workspace. Use standalone `code-task` commands when you want explicit human approval before each step.
 
 There is also a legacy bundled toy-spam smoke test, kept mostly for quick regression checks:
 
@@ -198,7 +198,7 @@ What works today:
 - Existing-code code tasks as a standalone workflow: copy a source project, probe the environment, index files, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the copied workspace, validate, run a patched benchmark, and compare before/after metrics.
 - Default code-task edit scope: tests and benchmark files are read-only evidence, so the model can use them for context but cannot patch them to improve metrics.
 - Configurable benchmark metric interpretation for code tasks through `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
-- Embedded 8-stage code-task experiments through `--experiment-template code_task_project` plus a code-task TOML config or explicit code-root/task/benchmark flags.
+- Embedded 8-stage code-task experiments through `--experiment-template code_task_project` plus a code-task TOML config or explicit code-root/benchmark flags. A task file can be provided by the user or generated during `05-design`.
 - One bundled 8-stage smoke-test demo through `--experiment-template llm_code_task_toy_spam`.
 - Citation, report-boundary, runtime-limit, and metric-visibility checks in the final report package.
 
