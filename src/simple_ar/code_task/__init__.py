@@ -38,6 +38,11 @@ from simple_ar.code_task.runner import (
     run_code_task_benchmark,
 )
 from simple_ar.code_task.validation import CodeTaskValidationResult, validate_code_task
+from simple_ar.code_task.workspace_modes import (
+    WorkspaceModeError,
+    WorkspaceResult,
+    WorkspaceSpec,
+)
 from simple_ar.code_task.workflow import CodeTaskInitResult, initialize_code_task
 
 __all__ = [
@@ -57,6 +62,9 @@ __all__ = [
     "ExecuteStepRecord",
     "CodeTaskConfigError",
     "CodeTaskInitOptions",
+    "WorkspaceModeError",
+    "WorkspaceResult",
+    "WorkspaceSpec",
     "apply_patch_edits",
     "analyze_code_task_failure",
     "compare_code_task_runs",

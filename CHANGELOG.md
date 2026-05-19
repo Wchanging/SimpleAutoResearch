@@ -2,6 +2,29 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-19
+
+### Added
+
+- Added V2.2 code-task workspace modes: `copy` remains the default, and
+  `git_worktree` can create a detached worktree at `code_task/workspace` for
+  repo-root git projects.
+- Added `[workspace]` config support plus CLI flags for standalone and embedded
+  code-task runs: workspace mode, source virtualenv reuse, and recorded setup
+  hooks.
+- Added a structured `workspace` section to code-task `manifest.json` while
+  preserving the old `copy` section for compatibility.
+
+### Changed
+
+- Code-task initialization now goes through a workspace dispatcher instead of
+  calling the copy routine directly.
+- Codebase indexing now skips `.git`, `.env`, virtualenv, and cache metadata so
+  worktree mode does not leak git metadata or secret-like files into model
+  context.
+- Default edit scope now also protects `.env` and secret/credential-looking
+  paths from automated patch proposals.
+
 ## 2026-05-18
 
 ### Added

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -65,6 +67,8 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(manifest["benchmark"]["executed"], False)
             self.assertEqual(manifest["environment"]["policy"]["mode"], "current")
             self.assertEqual(manifest["environment"]["policy"]["python_executable"], sys.executable)
+            self.assertEqual(manifest["workspace"]["mode"], "copy")
+            self.assertEqual(manifest["workspace"]["workspace_dir"], "code_task/workspace")
             self.assertEqual(manifest["edit_scope"]["mode"], "source_only_default")
             self.assertIn("tests/**", manifest["edit_scope"]["protected_patterns"])
             self.assertGreaterEqual(manifest["copy"]["skipped_count"], 2)
@@ -85,6 +89,71 @@ class CodeTaskTests(unittest.TestCase):
                 ["predict"],
             )
             self.assertEqual(spam_model["python"]["has_main_guard"], True)
+
+    def test_init_can_create_git_worktree_workspace(self) -> None:
+        if shutil.which("git") is None:
+            self.skipTest("git executable is not available")
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "git_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            shutil.rmtree(code_root / ".git")
+            write_text(task_file, "# Task\n\nImprove the spam classifier.\n")
+            _git(code_root, "init")
+            _git(code_root, "config", "user.email", "test@example.com")
+            _git(code_root, "config", "user.name", "SimpleAR Test")
+            _git(code_root, "add", ".")
+            _git(code_root, "commit", "-m", "initial")
+
+            run_dir = root / "runs" / "git-worktree-run"
+            result = initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+                workspace_mode="git_worktree",
+                max_file_bytes=10_000,
+            )
+
+            self.assertTrue((result.workspace_dir / "spam_model.py").is_file())
+            self.assertTrue((result.workspace_dir / ".git").exists())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["workspace"]["mode"], "git_worktree")
+            self.assertEqual(manifest["workspace"]["workspace_dir"], "code_task/workspace")
+            self.assertEqual(manifest["copy"]["files_copied"], 0)
+            self.assertTrue(manifest["workspace"]["git"]["origin_commit"])
+            self.assertEqual(manifest["workspace"]["environment_mapping"]["mode"], "git_worktree")
+            index = read_json(result.codebase_index_path)
+            self.assertEqual(index["project"]["python_file_count"], 2)
+            self.assertNotIn(".env", {item["path"] for item in index["files"]})
+
+    def test_git_worktree_requires_repo_root(self) -> None:
+        if shutil.which("git") is None:
+            self.skipTest("git executable is not available")
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            code_root = repo / "package"
+            code_root.mkdir(parents=True)
+            write_text(code_root / "module.py", "VALUE = 1\n")
+            task_file = root / "task.md"
+            write_text(task_file, "# Task\n\nChange VALUE.\n")
+            _git(repo, "init")
+            _git(repo, "config", "user.email", "test@example.com")
+            _git(repo, "config", "user.name", "SimpleAR Test")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "initial")
+
+            with self.assertRaisesRegex(RuntimeError, "requires code_root"):
+                initialize_code_task(
+                    run_dir=root / "runs" / "subdir-worktree-run",
+                    code_root=code_root,
+                    task_file=task_file,
+                    workspace_mode="git_worktree",
+                )
 
     def test_code_task_init_cli_prints_summary(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -1422,6 +1491,20 @@ def _write_failing_edit_proposal(run_dir: Path) -> Path:
         },
     )
     return proposal_path
+
+
+def _git(cwd: Path, *args: str) -> None:
+    completed = subprocess.run(
+        ["git", "-c", "safe.directory=*", "-C", str(cwd), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(args)} failed: {completed.stderr or completed.stdout}"
+        )
 
 
 class _FakeRepairClient:

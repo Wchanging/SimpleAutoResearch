@@ -388,6 +388,9 @@ def execute_design(ctx: Context) -> None:
                     "metric_directions": spec.metric_directions,
                     "env_mode": spec.env_mode,
                     "python_executable": spec.python_executable,
+                    "workspace_mode": spec.workspace_mode,
+                    "workspace_reuse_source_venv": spec.workspace_reuse_source_venv,
+                    "workspace_setup_hook": spec.workspace_setup_hook,
                     "max_file_bytes": spec.max_file_bytes,
                     "approval": "auto_approved_inside_isolated_pipeline_workspace",
                     "allow_test_changes": spec.allow_test_changes,
@@ -1265,7 +1268,7 @@ def _method_markdown(plan: dict[str, Any]) -> str:
         return (
             f"The experiment uses the `{plan.get('template')}` embedded code-task "
             "template. Instead of generating a script from scratch, the code stage "
-            f"copies an existing project (`{scope}`) into an isolated workspace, "
+            f"prepares an existing project (`{scope}`) inside an isolated workspace, "
             "runs a baseline benchmark, asks the LLM for a reviewable patch plan, "
             "auto-approves that plan only inside the pipeline workspace, asks the "
             "LLM for controlled old/new edits, and applies the patch after "
@@ -1352,7 +1355,7 @@ def _code_task_evidence_markdown(ctx: Context, plan: dict[str, Any]) -> str:
     benchmark = code_task.get("benchmark_command") if isinstance(code_task, dict) else ""
     lines = [
         "The code-task experiment is backed by nested artifacts under `06-code/code_task_run`, "
-        "which contains the copied workspace, patch plan, controlled edit proposal, diff, "
+        "which contains the isolated workspace, patch plan, controlled edit proposal, diff, "
         "validation report, baseline run, and patched benchmark run.",
         f"The benchmark command was `{benchmark or 'not specified'}`.",
         f"Changed workspace files: {changed_text}.",
@@ -1517,7 +1520,7 @@ def _limitations_markdown(
     ]
     if is_code_task_experiment_template(plan.get("template")):
         lines.append(
-            "The current experiment uses a copied codebase inside an isolated workspace. "
+            "The current experiment uses an editable codebase inside an isolated workspace. "
             "The 8-stage pipeline auto-approves the code-task plan to finish end to end, "
             "so safety-sensitive tasks should use the standalone code-task workflow for human review. "
             "The metrics show local benchmark behavior rather than general model quality."

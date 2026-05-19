@@ -13,7 +13,7 @@ concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
 | `simple-ar status` | Print status for either a research run or code-task run. |
 | `simple-ar inspect` | Build a local artifact index for a run. |
 | `simple-ar search-artifacts` | Search indexed run artifacts with lexical retrieval. |
-| `simple-ar code-task ...` | Work with an existing codebase in a copied workspace. |
+| `simple-ar code-task ...` | Work with an existing codebase in an isolated editable workspace. |
 
 ## Research Pipeline
 
@@ -134,7 +134,7 @@ timeout = 60
 mode = "auto"
 
 [code_task]
-# Source project copied into 06-code/code_task_run/code_task/workspace.
+# Source project prepared under 06-code/code_task_run/code_task/workspace.
 code_root = "examples/code_tasks/tiny_digits_mlp_project"
 
 # Optional for embedded 8-stage runs. If omitted, 05-design generates
@@ -147,7 +147,7 @@ task_file = "examples/code_tasks/tasks/improve_tiny_digits_mlp.md"
 name = "tiny-digits-mlp-pipeline"
 
 [benchmark]
-# Command executed inside the copied workspace before and after the patch.
+# Command executed inside the editable workspace before and after the patch.
 command = "python benchmark.py"
 
 # Optional primary metric for before/after verdicts.
@@ -169,8 +169,21 @@ params = "resource"
 mode = "current"
 # python = "C:/path/to/python.exe"
 
+[workspace]
+# copy: guarded physical copy, safest default.
+# git_worktree: detached worktree for repo-root git projects, useful when the
+# repository is too large to copy every run.
+mode = "copy"
+
+# If true and code_root has .venv/ or venv/, init records and uses that Python
+# as an external execution policy. No dependency installation is performed.
+reuse_source_venv = false
+
+# Recorded for future managed setup support; not executed during init.
+setup_hook = ""
+
 [safety]
-# Maximum source file size copied into the workspace. Use 0 to disable.
+# Maximum source file size copied in copy mode. Use 0 to disable.
 max_file_bytes = 2000000
 ```
 
@@ -188,10 +201,11 @@ Section summary:
 | `[benchmark]` | code task | Benchmark command and primary metric. |
 | `[benchmark.metric_directions]` | code task comparison | Metric interpretation rules. |
 | `[environment]` | code task execution | Interpreter policy for probe/baseline/patched runs. |
-| `[safety]` | code task workspace copy/validation | File-size guard and future safety settings. |
+| `[workspace]` | code task init | Workspace mode, source venv reuse, and recorded setup hook. |
+| `[safety]` | code task workspace/validation | Copy-mode file-size guard and future safety settings. |
 
 When a run config contains `[code_task]`, `[benchmark]`, `[metrics]`,
-`[environment]`, or `[safety]`, the same file is reused as the embedded
+`[environment]`, `[workspace]`, or `[safety]`, the same file is reused as the embedded
 code-task config. Alternatively, keep code-task settings in a separate file and
 set `[experiment].code_task_config`.
 
@@ -210,18 +224,21 @@ uv run simple-ar run \
 | Option | Meaning |
 | --- | --- |
 | `--code-task-config PATH` | TOML config using the same schema as `code-task init --config`. |
-| `--code-root DIR` | Source project copied into `06-code/code_task_run/code_task/workspace`. |
+| `--code-root DIR` | Source project prepared under `06-code/code_task_run/code_task/workspace`. |
 | `--task-file PATH` | Markdown/text task description. Optional for embedded 8-stage runs; if omitted, `05-design` writes `generated_code_task.md` from the research artifacts. |
 | `--benchmark-command TEXT` | Benchmark run before and after the patch. |
 | `--code-task-name TEXT` | Optional display name stored in `experiment_plan.json`. |
-| `--code-task-max-file-bytes N` | Maximum source file size copied into the nested workspace. |
+| `--code-task-max-file-bytes N` | Maximum source file size copied in `copy` mode. |
+| `--code-task-workspace-mode copy / git_worktree` | Workspace strategy for the nested code task. |
+| `--code-task-workspace-reuse-source-venv` | Use a detected source `.venv` Python for the nested execution policy. |
+| `--code-task-workspace-setup-hook TEXT` | Record a setup command for future managed environment support. |
 | `--code-task-env-mode current / external` | Interpreter policy for nested probe/baseline/run steps. |
 | `--code-task-python PATH` | Interpreter path for `--code-task-env-mode external`. |
 | `--primary-metric NAME` | Primary metric for before/after verdicts. |
 | `--metric-direction NAME=DIRECTION` | Metric interpretation for embedded comparison. Repeatable. |
 
 The generic embedded path auto-approves the generated patch plan inside the
-copied pipeline workspace so `run --to-stage report` can finish. Use standalone
+pipeline workspace so `run --to-stage report` can finish. Use standalone
 `code-task` commands when you need manual review before each transition.
 
 Resume:
@@ -251,8 +268,10 @@ uv run simple-ar search-artifacts runs/<run-id> "timeout" --include-operational
 
 ## Code Task Commands
 
-The code-task workflow copies an existing project into `code_task/workspace`.
-It does not mutate the original codebase.
+The code-task workflow prepares an existing project under `code_task/workspace`.
+By default this is a guarded copy; `git_worktree` can create a detached git
+worktree for larger repo-root projects. Later steps mutate only that workspace,
+not the original codebase.
 
 Recommended order:
 
@@ -288,8 +307,11 @@ Options:
 | `--task-file PATH` | Markdown/text task description. Required unless set in config. |
 | `--output-root DIR` | Where the run directory is created. Default: `runs`. |
 | `--name TEXT` | Run name suffix. Default: based on `code-root`. |
-| `--benchmark-command TEXT` | Command to run inside copied workspace. |
+| `--benchmark-command TEXT` | Command to run inside the editable workspace. |
 | `--max-file-bytes N` | Maximum copied file size. Use `0` to disable. |
+| `--workspace-mode copy / git_worktree` | Workspace strategy. `copy` is safest; `git_worktree` requires `--code-root` to be the git repository root. |
+| `--workspace-reuse-source-venv` | If a source `.venv` or `venv` exists, record and use its Python as the initial external execution policy. |
+| `--workspace-setup-hook TEXT` | Record a setup command. It is not executed during init. |
 | `--env-mode current / external` | Execution interpreter policy. |
 | `--python PATH` | Interpreter path for `--env-mode external`. |
 | `--primary-metric NAME` | Main metric for before/after verdicts. |
@@ -327,15 +349,22 @@ val_loss = "lower"
 mode = "current"  # current | external
 python = ""       # optional when mode = "external"
 
+[workspace]
+mode = "copy"                 # copy | git_worktree
+reuse_source_venv = false     # use source .venv Python if detected
+setup_hook = ""               # recorded only; not executed during init
+
 [safety]
 max_file_bytes = 2000000
 ```
 
 Code-task runs also record an `edit_scope` in `manifest.json`. The current
-default treats tests and benchmark files as read-only evidence for patching:
+default treats tests, benchmark files, `.env`, and secret/credential-looking
+paths as read-only evidence for patching:
 `tests/**`, `test_*.py`, `*_test.py`, `conftest.py`, `benchmark.py`,
-`bench.py`, and `*benchmark*.py`. These files may be indexed for planning, but
-they are omitted from editable snippets and rejected by `apply-edits`.
+`bench.py`, `*benchmark*.py`, `.env*`, `*secret*`, and `*credential*`.
+These files may be indexed for planning when appropriate, but they are omitted
+from editable snippets and rejected by `apply-edits`.
 
 Bundled example:
 

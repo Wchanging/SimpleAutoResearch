@@ -20,6 +20,14 @@ DEFAULT_PROTECTED_EDIT_PATTERNS = (
     "**/bench.py",
     "*benchmark*.py",
     "**/*benchmark*.py",
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "*secret*",
+    "**/*secret*",
+    "*credential*",
+    "**/*credential*",
 )
 
 DEFAULT_EDIT_SCOPE_MODE = "source_only_default"

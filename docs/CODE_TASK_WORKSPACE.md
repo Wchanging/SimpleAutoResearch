@@ -1,9 +1,9 @@
 # Code Task Workspace Notes
 
-This note captures the V2.1 workspace flow before the V2.2 workspace-mode
+This note captures the V2.1 workspace flow and the first V2.2 workspace-mode
 refactor. It is intentionally descriptive: it should help contributors see
 which assumptions must stay compatible while `copy`, `git_worktree`, and future
-workspace strategies are introduced.
+workspace strategies evolve.
 
 ## Current Flow
 
@@ -11,7 +11,7 @@ workspace strategies are introduced.
 user config / CLI
 -> load_code_task_init_options
 -> initialize_code_task
--> copy_code_workspace
+-> create_workspace(mode=copy|git_worktree)
 -> build_codebase_index
 -> probe_code_task_environment
 -> run_code_task_baseline
@@ -36,14 +36,17 @@ code_root
 
 The original `code_root` is never mutated after initialization. All patching,
 validation, and benchmark execution operate inside `code_task/workspace`.
+In `copy` mode that path is a guarded physical copy. In `git_worktree` mode it
+is a detached git worktree created from the source repository root.
 
 ## Current Responsibilities
 
 | Module | Current responsibility | Workspace assumption |
 | --- | --- | --- |
-| `code_task/config.py` | Merge TOML and CLI options for init. | No workspace yet; only resolves `code_root`, `task_file`, benchmark, metric, and environment options. |
-| `code_task/workflow.py` | Creates run layout, writes `task.md`, copies source, builds the first codebase index, writes `manifest.json`. | Calls `copy_code_workspace` directly and assumes `code_task/workspace` is a copied directory. |
-| `code_task/workspace.py` | Performs conservative recursive copy with ignored dirs/files, symlink rejection, file-size guard, and path safety. | Only supports copy mode. |
+| `code_task/config.py` | Merge TOML and CLI options for init. | Resolves `code_root`, `task_file`, benchmark, metric, environment, and workspace options. |
+| `code_task/workflow.py` | Creates run layout, writes `task.md`, creates workspace, builds the first codebase index, writes `manifest.json`. | Keeps `code_task/workspace` stable while delegating workspace creation. |
+| `code_task/workspace.py` | Performs conservative recursive copy with ignored dirs/files, symlink rejection, file-size guard, and path safety. | Copy-mode implementation. |
+| `code_task/workspace_modes.py` | Dispatches workspace creation strategies. | Owns `copy` compatibility mode and minimal `git_worktree` mode. |
 | `code_task/state.py` | Centralizes run paths and manifest helpers. | Hard-codes `code_task/workspace` as the editable root. |
 | `code_task/index.py` | Builds inventory and AST summaries from the workspace. | Reads local files under `workspace_dir`. |
 | `code_task/environment.py` | Observes platform, tools, dependency files, test dirs, GPU, and interpreter policy. | Probes `workspace_dir` only; does not install dependencies. |
@@ -57,8 +60,12 @@ validation, and benchmark execution operate inside `code_task/workspace`.
 
 - `copy_code_workspace` skips hidden/cache/build directories, symlinks, `.env`,
   bytecode, and oversized files.
+- `build_codebase_index` ignores `.git`, `.env`, virtualenv, and cache metadata
+  so worktree mode does not leak git metadata or secret-like files into model
+  context.
 - `state.workspace_file` and patching helpers reject absolute paths and `..`.
-- Edit scope treats tests and benchmark files as read-only evidence by default.
+- Edit scope treats tests, benchmark files, `.env`, and secret/credential-like
+  paths as read-only evidence by default.
 - Benchmark commands are split without a shell and reject common shell control
   operators.
 - Benchmark execution uses a restricted environment map and records stdout,
@@ -71,19 +78,62 @@ validation, and benchmark execution operate inside `code_task/workspace`.
 These are the assumptions V2.2 must either preserve through compatibility
 adapters or replace deliberately:
 
-- `code_task/workspace` is always a physical copied directory.
+- Older V2.1 docs assume `code_task/workspace` is always a physical copied
+  directory. V2.2 preserves the path but allows it to be a git worktree.
 - Workspace creation and copy report are stored under a top-level `copy`
   manifest section, not a general `workspace` section.
 - The editable root and benchmark `cwd` are always the same directory.
 - There is one active patch path, so `patch_plan.md`, `proposed_edits.json`,
   `patch.diff`, validation, and patched benchmark artifacts behave like
   "latest" outputs.
-- The initial codebase index is built immediately after copy and is rebuilt
-  after applying edits.
+- The initial codebase index is built immediately after workspace creation and
+  is rebuilt after applying edits.
 - `current` and `external` interpreter modes choose Python, but neither mode
   creates or installs project dependencies.
-- The 8-stage embedded template auto-approves the patch plan inside the copied
-  nested workspace so the pipeline can finish end to end.
+- The 8-stage embedded template auto-approves the patch plan inside the nested
+  isolated workspace so the pipeline can finish end to end.
+
+## V2.2 Workspace Modes
+
+V2.2 adds `simple_ar.code_task.workspace_modes` with two supported modes:
+
+| Mode | Behavior | Best use | Current limits |
+| --- | --- | --- | --- |
+| `copy` | Recursively copies source files with the existing safety skips. | Small projects, teaching examples, and safest default runs. | Large repositories can be slow and duplicate storage. |
+| `git_worktree` | Creates a detached git worktree at `code_task/workspace` from the current source commit. | Medium or large git repositories where copying every run is wasteful. | `code_root` must currently be the repository root; subdirectory worktrees are deferred until cwd and dependency mapping are richer. |
+
+`manifest.json` now keeps the old top-level `copy` section for compatibility
+and adds a new top-level `workspace` section:
+
+```json
+{
+  "workspace": {
+    "schema_version": 1,
+    "mode": "git_worktree",
+    "source_root": "...",
+    "workspace_dir": "code_task/workspace",
+    "writable_root": "code_task/workspace",
+    "read_only_roots": ["..."],
+    "copy_report": {},
+    "git": {
+      "origin_branch": "main",
+      "origin_commit": "...",
+      "mode": "detached"
+    },
+    "environment_mapping": {
+      "dependency_files": ["pyproject.toml"],
+      "reuse_source_venv": false,
+      "setup_hook_executed": false
+    }
+  }
+}
+```
+
+The environment mapping is intentionally conservative. Init records dependency
+files and optional source `.venv` reuse, but it does not install dependencies or
+execute setup hooks. If `workspace.reuse_source_venv = true` and a source
+virtualenv Python is detected, the initial execution policy uses that
+interpreter as `external`.
 
 ## V2.2 Replacement Points
 
@@ -120,20 +170,20 @@ class WorkspaceResult:
     cleanup_hint: str = ""
 ```
 
-For V2.2, `copy` should be the compatibility implementation that wraps the
-current `copy_code_workspace`. `git_worktree` can then return the same
-`workspace_dir` / `writable_root` shape while recording git provenance and
-environment mapping. `sparse_copy` should remain experimental until dependency
-breakage and include/exclude behavior are well understood.
+For V2.2, `copy` is the compatibility implementation that wraps the current
+`copy_code_workspace`. `git_worktree` returns the same `workspace_dir` /
+`writable_root` shape while recording git provenance and environment mapping.
+`sparse_copy` should remain experimental until dependency breakage and
+include/exclude behavior are well understood.
 
 ## Migration Order
 
 1. Add `workspace_modes.py` with `WorkspaceSpec`, `WorkspaceResult`, and a
-   `create_workspace(spec)` dispatcher.
-2. Implement `copy` by delegating to `copy_code_workspace`.
+   `create_workspace(spec)` dispatcher. Done.
+2. Implement `copy` by delegating to `copy_code_workspace`. Done.
 3. Update `initialize_code_task` to use the dispatcher while still writing the
-   old `copy` manifest section for compatibility.
-4. Add a new manifest `workspace` section:
+   old `copy` manifest section for compatibility. Done.
+4. Add a new manifest `workspace` section. Done:
 
 ```json
 {
@@ -150,8 +200,10 @@ breakage and include/exclude behavior are well understood.
 ```
 
 5. Keep `code_task_paths(...).workspace_dir` stable until all downstream modules
-   are attempt-aware and workspace-mode-aware.
-6. Add `git_worktree` after copy mode is fully covered by tests.
+   are attempt-aware and workspace-mode-aware. Still active.
+6. Add `git_worktree` after copy mode is fully covered by tests. Minimal
+   repo-root support is implemented; subdirectory and sparse modes are still
+   deferred.
 
 ## Day 1 Conclusions
 

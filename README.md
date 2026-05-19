@@ -171,7 +171,7 @@ uv run simple-ar run \
   --experiment-timeout 60
 ```
 
-This copies the configured project into `06-code/code_task_run/code_task/workspace`, runs a baseline benchmark, asks the LLM for a patch plan and controlled edits, applies the patch inside the copied workspace, runs the patched benchmark, and writes code-task evidence into the final report. If no task file is supplied for `code_task_project`, `05-design` now derives `generated_code_task.md` from the earlier research artifacts and a compact codebase summary, then `06-code` uses it as the normal `code_task/task.md`. Because the 8-stage pipeline must finish end to end, it auto-approves the patch plan inside that isolated workspace. Use standalone `code-task` commands when you want explicit human approval before each step.
+This prepares the configured project under `06-code/code_task_run/code_task/workspace`, runs a baseline benchmark, asks the LLM for a patch plan and controlled edits, applies the patch inside that isolated workspace, runs the patched benchmark, and writes code-task evidence into the final report. If no task file is supplied for `code_task_project`, `05-design` now derives `generated_code_task.md` from the earlier research artifacts and a compact codebase summary, then `06-code` uses it as the normal `code_task/task.md`. Because the 8-stage pipeline must finish end to end, it auto-approves the patch plan inside that isolated workspace. Use standalone `code-task` commands when you want explicit human approval before each step.
 
 There is also a legacy bundled toy-spam smoke test, kept mostly for quick regression checks:
 
@@ -195,8 +195,8 @@ What works today:
 - Topic-to-report runs with visible 8-stage artifacts and resumable execution.
 - OpenAI-compatible LLM calls for planning, paper notes, synthesis, report drafting, and code-task patch planning.
 - Literature-first report mode: stop at `synthesize`, then resume `report` to produce a survey-style report without experiment claims.
-- Existing-code code tasks as a standalone workflow: copy a source project, probe the environment, index files, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the copied workspace, validate, run a patched benchmark, and compare before/after metrics.
-- Default code-task edit scope: tests and benchmark files are read-only evidence, so the model can use them for context but cannot patch them to improve metrics.
+- Existing-code code tasks as a standalone workflow: prepare a source project with `copy` or `git_worktree`, probe the environment, index files, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the isolated workspace, validate, run a patched benchmark, and compare before/after metrics.
+- Default code-task edit scope: tests, benchmark files, and secret-like paths are read-only evidence, so the model can use allowed context but cannot patch them to improve metrics.
 - Configurable benchmark metric interpretation for code tasks through `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
 - Embedded 8-stage code-task experiments through `--experiment-template code_task_project` plus a code-task TOML config or explicit code-root/benchmark flags. A task file can be provided by the user or generated during `05-design`.
 - One bundled 8-stage smoke-test demo through `--experiment-template llm_code_task_toy_spam`.
@@ -204,8 +204,8 @@ What works today:
 
 Important limits:
 
-- The generic 8-stage code-task path is real but still conservative. It copies the user project and can run one LLM patch pass, but it is not yet a full autonomous coding agent with deep multi-round planning, dependency installation, Docker/Conda setup, or large experiment scheduling.
-- The 8-stage code-task path auto-approves the model patch plan inside the copied workspace so the pipeline can complete end to end. Use standalone `code-task` for stronger human-in-the-loop review.
+- The generic 8-stage code-task path is real but still conservative. It can prepare a user project with copy mode or repo-root `git_worktree` mode and run one LLM patch pass, but it is not yet a full autonomous coding agent with deep multi-round planning, dependency installation, Docker/Conda setup, or large experiment scheduling.
+- The 8-stage code-task path auto-approves the model patch plan inside the isolated workspace so the pipeline can complete end to end. Use standalone `code-task` for stronger human-in-the-loop review.
 - Code edits are controlled old/new replacements. This keeps patches auditable, but it is weaker than a full coding agent that can plan and edit many files across multiple autonomous rounds.
 - Reviewed proposals may contain multiple ordered edits in one file, but invalid old/new replacements are rejected before workspace files are changed.
 - By default, code-task patches reject protected paths such as `tests/**`, `test_*.py`, `benchmark.py`, and `*benchmark*.py`. If the real task is to update tests or benchmarks, handle that as a separate human-reviewed repository change rather than an automated metric-improvement patch.
@@ -213,7 +213,7 @@ Important limits:
 - Literature search currently works from metadata and local artifact snippets. It is not yet a full PDF-reading or vector-RAG survey system.
 - LLM-written reports are guarded. If the draft invents citations, omits required citations, or overstates toy evidence, SimpleAutoResearch falls back to a structured deterministic report.
 
-V2.1 development has started with code-task environment probes, baseline runs, labelled benchmark artifacts, lightweight ML example coverage, and baseline-vs-patched comparison. The next focus is deeper coding loops: multi-round repair, stronger task decomposition, managed environments, and a clearer human-in-the-loop path from existing research code to reproducible results.
+V2.2 development has started with workspace-mode abstraction and minimal git worktree support. The next focus is deeper coding loops: repo maps, multi-round attempts, stronger task decomposition, managed environments, and a clearer human-in-the-loop path from existing research code to reproducible results.
 
 ## Documentation
 

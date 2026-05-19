@@ -18,6 +18,12 @@ params = "resource"
 [environment]
 mode = "current"
 
+[workspace]
+# copy is the safest default. git_worktree is available for repo-root projects.
+mode = "copy"
+reuse_source_venv = false
+setup_hook = ""
+
 [safety]
 # Tests and benchmark files remain read-only patch evidence by default.
 max_file_bytes = 2000000

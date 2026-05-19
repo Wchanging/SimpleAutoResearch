@@ -66,6 +66,16 @@ class CopyReport:
         }
 
 
+def empty_copy_report() -> CopyReport:
+    """Return an empty copy report for non-copy workspace modes."""
+    return CopyReport(
+        files_copied=0,
+        bytes_copied=0,
+        skipped_count=0,
+        skipped=(),
+    )
+
+
 def copy_code_workspace(
     code_root: Path,
     workspace_dir: Path,

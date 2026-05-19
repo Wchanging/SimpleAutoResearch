@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     code_task_init = code_task_subparsers.add_parser(
         "init",
-        help="Copy a codebase into a code-task workspace and build a code index.",
+        help="Prepare a code-task workspace and build a code index.",
     )
     code_task_init.add_argument(
         "--config",
@@ -137,15 +137,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_code_task_env_args(code_task_init)
+    _add_code_task_workspace_args(code_task_init)
     code_task_init.add_argument(
         "--max-file-bytes",
         type=int,
         default=None,
-        help="Maximum file size copied into the workspace. Use 0 to disable.",
+        help="Maximum file size copied in copy mode. Use 0 to disable.",
     )
     code_task_probe = code_task_subparsers.add_parser(
         "probe",
-        help="Inspect the copied workspace runtime and project environment.",
+        help="Inspect the workspace runtime and project environment.",
     )
     code_task_probe.add_argument("run_dir")
     _add_code_task_env_args(code_task_probe)
@@ -318,6 +319,36 @@ def _add_code_task_env_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_code_task_workspace_args(parser: argparse.ArgumentParser) -> None:
+    """Add shared code-task workspace creation arguments."""
+    parser.add_argument(
+        "--workspace-mode",
+        choices=("copy", "git_worktree"),
+        default=None,
+        help=(
+            "Workspace strategy. `copy` copies a guarded source tree; "
+            "`git_worktree` creates a detached git worktree for repo-root projects."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-reuse-source-venv",
+        action="store_true",
+        default=None,
+        help=(
+            "When a source .venv is detected, record and use its Python "
+            "interpreter as the initial external execution policy."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-setup-hook",
+        default=None,
+        help=(
+            "Record a project setup command for future managed environments. "
+            "The hook is not executed during init."
+        ),
+    )
+
+
 def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
     """Add optional 8-stage code-task experiment configuration arguments."""
     parser.add_argument(
@@ -329,7 +360,7 @@ def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
         "--code-root",
         dest="code_task_code_root",
         default=None,
-        help="Source project copied by --experiment-template code_task_project.",
+        help="Source project prepared by --experiment-template code_task_project.",
     )
     parser.add_argument(
         "--task-file",
@@ -352,7 +383,24 @@ def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
         "--code-task-max-file-bytes",
         type=int,
         default=None,
-        help="Maximum source file size copied into the embedded code-task workspace.",
+        help="Maximum source file size copied in embedded copy mode.",
+    )
+    parser.add_argument(
+        "--code-task-workspace-mode",
+        choices=("copy", "git_worktree"),
+        default=None,
+        help="Embedded code-task workspace strategy.",
+    )
+    parser.add_argument(
+        "--code-task-workspace-reuse-source-venv",
+        action="store_true",
+        default=None,
+        help="Use a detected source .venv Python for the embedded code task.",
+    )
+    parser.add_argument(
+        "--code-task-workspace-setup-hook",
+        default=None,
+        help="Record a setup command for the embedded code-task workspace.",
     )
     parser.add_argument(
         "--code-task-env-mode",
@@ -644,6 +692,9 @@ def _pipeline_code_task_config(args: argparse.Namespace) -> dict[str, object]:
         "code_task_benchmark_command": "code_task_benchmark_command",
         "code_task_name": "code_task_name",
         "code_task_max_file_bytes": "code_task_max_file_bytes",
+        "code_task_workspace_mode": "code_task_workspace_mode",
+        "code_task_workspace_reuse_source_venv": "code_task_workspace_reuse_source_venv",
+        "code_task_workspace_setup_hook": "code_task_workspace_setup_hook",
         "code_task_env_mode": "code_task_env_mode",
         "code_task_python_executable": "code_task_python_executable",
         "code_task_primary_metric": "code_task_primary_metric",
@@ -747,6 +798,14 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
             value = layout.get(key)
             if value:
                 print(f"- {key}: {run_dir / str(value)}")
+
+    workspace = manifest.get("workspace", {})
+    if isinstance(workspace, dict) and workspace:
+        print("Workspace:")
+        print(f"- mode: {workspace.get('mode', 'copy')}")
+        cleanup = workspace.get("cleanup_hint")
+        if cleanup:
+            print(f"- cleanup: {cleanup}")
 
     codebase = manifest.get("codebase", {})
     if isinstance(codebase, dict):
@@ -936,6 +995,9 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
             name=args.name,
             benchmark_command=args.benchmark_command,
             max_file_bytes=args.max_file_bytes,
+            workspace_mode=args.workspace_mode,
+            workspace_reuse_source_venv=args.workspace_reuse_source_venv,
+            workspace_setup_hook=args.workspace_setup_hook,
             env_mode=args.env_mode,
             python_executable=args.python_executable,
             primary_metric=args.primary_metric,
@@ -955,6 +1017,9 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
         task_file=task_file,
         benchmark_command=options.benchmark_command,
         max_file_bytes=options.max_file_bytes,
+        workspace_mode=options.workspace_mode,
+        workspace_reuse_source_venv=options.workspace_reuse_source_venv,
+        workspace_setup_hook=options.workspace_setup_hook,
         env_mode=options.env_mode,
         python_executable=options.python_executable,
         primary_metric=options.primary_metric,
@@ -963,13 +1028,17 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     project = result.codebase_index.get("project", {})
     print(f"Code task run: {result.run_dir}")
     print(f"Workspace: {result.workspace_dir}")
+    print(f"Workspace mode: {result.workspace.mode}")
     print(f"Task: {result.task_dir / 'task.md'}")
     print(f"Index: {result.codebase_index_path}")
-    print(
-        "Files copied: "
-        f"{result.copy_report.files_copied} "
-        f"({result.copy_report.skipped_count} skipped)"
-    )
+    if result.workspace.mode == "copy":
+        print(
+            "Files copied: "
+            f"{result.copy_report.files_copied} "
+            f"({result.copy_report.skipped_count} skipped)"
+        )
+    else:
+        print(f"Workspace created with {result.workspace.mode}; source copy skipped.")
     print(
         "Indexed: "
         f"{project.get('file_count', 0)} file(s), "
@@ -991,7 +1060,7 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
 
 
 def _print_code_task_probe(args: argparse.Namespace) -> None:
-    """Probe the copied workspace environment and print a compact summary."""
+    """Probe the workspace environment and print a compact summary."""
     result = probe_code_task_environment(
         Path(args.run_dir),
         env_mode=args.env_mode,

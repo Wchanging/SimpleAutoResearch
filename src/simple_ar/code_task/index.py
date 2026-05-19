@@ -13,6 +13,27 @@ from simple_ar.artifacts import write_json
 from simple_ar.retrieval.index import kind_for_path
 
 
+IGNORED_DIR_NAMES = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".simple_ar_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+}
+
+IGNORED_FILE_NAMES = {
+    ".env",
+    ".git",
+}
+
+
 def build_codebase_index(
     workspace_dir: Path,
     *,
@@ -85,10 +106,12 @@ def _iter_files(root: Path) -> list[Path]:
         dirnames[:] = [
             dirname
             for dirname in dirnames
-            if dirname not in {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+            if dirname not in IGNORED_DIR_NAMES and not dirname.startswith(".")
         ]
         current_path = Path(current)
         for filename in filenames:
+            if filename in IGNORED_FILE_NAMES or filename.startswith(".env"):
+                continue
             path = current_path / filename
             if path.is_file():
                 files.append(path)

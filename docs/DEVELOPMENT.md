@@ -9,7 +9,8 @@ SimpleAutoResearch is intentionally file-first:
 - stages read and write concrete files;
 - workflow state is visible in run directories;
 - tests verify artifacts instead of hidden in-memory state;
-- risky code changes happen in copied workspaces.
+- risky code changes happen in isolated editable workspaces, usually a guarded
+  copy and optionally a detached git worktree.
 
 This keeps the project easier to learn, debug, and refactor.
 
@@ -60,14 +61,16 @@ standalone code-task modules rather than a separate coding implementation.
 
 The code-task workflow is split into small modules:
 
-- `workspace.py`: safe source copy. See [Code Task Workspace Notes](CODE_TASK_WORKSPACE.md) before changing workspace layout or copy behavior.
+- `workspace.py`: safe source copy implementation.
+- `workspace_modes.py`: workspace strategy dispatcher for `copy`,
+  `git_worktree`, and future workspace modes. See [Code Task Workspace Notes](CODE_TASK_WORKSPACE.md) before changing workspace layout or creation behavior.
 - `config.py`: TOML config and CLI override resolution for code-task init.
 - `environment.py`: environment observation and execution-interpreter policy.
 - `index.py`: codebase inventory and Python AST summaries.
 - `planning.py`: patch planning and HITL decisions.
 - `patching.py`: controlled old/new edit proposal and application.
 - `validation.py`: syntax and static safety checks.
-- `runner.py`: benchmark execution in the copied workspace.
+- `runner.py`: benchmark execution in the editable workspace.
 - `comparison.py`: baseline-vs-patched metric comparison.
 - `failure.py`: deterministic failure analysis.
 - `repair.py`: bounded repair proposal generation.

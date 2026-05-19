@@ -104,7 +104,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 - LLM-backed when enabled: `plan`, `read`, `synthesize`, and `report` stages.
 - Deterministic by default: `design`, `code`, and `run` use fixed experiment templates unless a code-task experiment template is selected.
-- Embedded code-task experiment: `06-code` can call the LLM for a patch plan and controlled edit proposal, but the patch is applied only inside a copied workspace under the run directory.
+- Embedded code-task experiment: `06-code` can call the LLM for a patch plan and controlled edit proposal, but the patch is applied only inside an isolated workspace under the run directory.
 - Guarded reports: if an LLM-written report omits required body citations, invents citation keys, or overstates fixture/toy evidence, the report stage writes a structured fallback report instead.
 - `--no-llm` forces offline fallbacks with placeholder content in `goal.md`, `notes.md`, `synthesis.md`, and `report.md`.
 
@@ -157,7 +157,11 @@ See [CLI Reference](CLI_REFERENCE.md#artifact-tools) for option details.
 
 ## Code Task Workflow
 
-The code-task workflow copies a source project into an isolated workspace and never mutates the original codebase. It is intentionally step-by-step so each stage can be reviewed.
+The code-task workflow prepares a source project under an isolated editable
+workspace and never mutates the original codebase. The default `copy` mode is
+the safest choice; V2.2 also supports `git_worktree` for larger repo-root git
+projects where a full copy is wasteful. The workflow is intentionally
+step-by-step so each stage can be reviewed.
 
 Initialize from explicit CLI flags:
 
@@ -181,6 +185,13 @@ uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits
 `code_task/meta/codebase_index.json`, and records the benchmark/environment
 policy in `manifest.json`. It does not run code, call the LLM, or modify the
 original source project.
+
+When `workspace.mode = "git_worktree"` or `--workspace-mode git_worktree` is
+used, `init` creates a detached git worktree at the same
+`code_task/workspace/` path instead of copying files. This mode currently
+requires `code_root` to be the repository root, records git provenance under
+`manifest.json.workspace`, and keeps `.git`/`.env` metadata out of the codebase
+index and model context. It still does not install dependencies.
 
 Benchmarks should print numeric metric lines as `name: value`. Custom metric
 names work when you declare their direction with `--metric-direction` or the
@@ -253,7 +264,7 @@ By default, tests and benchmark files are treated as read-only evidence:
 paths such as `tests/**`, `test_*.py`, `benchmark.py`, or `*benchmark*.py` is
 dropped from the proposal.
 
-Apply proposed edits inside the copied workspace:
+Apply proposed edits inside the editable workspace:
 
 ```bash
 uv run simple-ar code-task apply-edits runs/<run-id>
@@ -423,7 +434,7 @@ codebase summary. `06-code` then uses the generated task as the normal
 under `06-code/code_task_run/`. During `06-code`, it copies the user project,
 probes the environment, runs a baseline benchmark, generates a patch plan,
 records an automatic pipeline approval, asks for controlled edits, applies
-them inside the copied workspace, and validates the result. During `07-run`,
+them inside the prepared workspace, and validates the result. During `07-run`,
 the harness runs the patched benchmark, writes `comparison.json` when baseline
 and patched metrics are both available, and exposes code-task metrics through
 `07-run/results.json`. During `08-report`, the report includes a deterministic

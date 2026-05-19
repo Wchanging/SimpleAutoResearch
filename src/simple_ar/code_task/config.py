@@ -11,6 +11,7 @@ from simple_ar.code_task.comparison import normalize_metric_direction
 DEFAULT_OUTPUT_ROOT = "runs"
 DEFAULT_MAX_FILE_BYTES = 2_000_000
 DEFAULT_ENV_MODE = "current"
+DEFAULT_WORKSPACE_MODE = "copy"
 
 
 class CodeTaskConfigError(RuntimeError):
@@ -27,6 +28,9 @@ class CodeTaskInitOptions:
     name: str | None
     benchmark_command: str | None
     max_file_bytes: int
+    workspace_mode: str
+    workspace_reuse_source_venv: bool
+    workspace_setup_hook: str
     env_mode: str
     python_executable: str | None
     primary_metric: str | None
@@ -62,6 +66,9 @@ def load_code_task_init_options(
     name: str | None = None,
     benchmark_command: str | None = None,
     max_file_bytes: int | None = None,
+    workspace_mode: str | None = None,
+    workspace_reuse_source_venv: bool | None = None,
+    workspace_setup_hook: str | None = None,
     env_mode: str | None = None,
     python_executable: str | None = None,
     primary_metric: str | None = None,
@@ -80,6 +87,7 @@ def load_code_task_init_options(
     benchmark = _config_table(config, "benchmark")
     metrics = _config_table(config, "metrics")
     environment = _config_table(config, "environment")
+    workspace = _config_table(config, "workspace")
     safety = _config_table(config, "safety")
 
     resolved_code_root = _config_string(code_root) or _config_string(
@@ -122,6 +130,19 @@ def load_code_task_init_options(
         or _config_string(environment.get("python"))
         or _config_string(environment.get("python_executable"))
     )
+    resolved_workspace_mode = (
+        _config_string(workspace_mode)
+        or _config_string(workspace.get("mode"))
+        or DEFAULT_WORKSPACE_MODE
+    )
+    resolved_reuse_source_venv = _resolve_bool(
+        override=workspace_reuse_source_venv,
+        value=workspace.get("reuse_source_venv"),
+        default=False,
+    )
+    resolved_setup_hook = _config_string(workspace_setup_hook) or _config_string(
+        workspace.get("setup_hook")
+    )
 
     return CodeTaskInitOptions(
         code_root=resolved_code_root,
@@ -134,6 +155,9 @@ def load_code_task_init_options(
             code_task=code_task,
             safety=safety,
         ),
+        workspace_mode=resolved_workspace_mode,
+        workspace_reuse_source_venv=resolved_reuse_source_venv,
+        workspace_setup_hook=resolved_setup_hook or "",
         env_mode=resolved_env_mode,
         python_executable=resolved_python,
         primary_metric=resolved_primary_metric,
@@ -180,6 +204,14 @@ def _config_int(value: object) -> int | None:
     if isinstance(value, int):
         return value
     return None
+
+
+def _resolve_bool(*, override: bool | None, value: object, default: bool) -> bool:
+    if override is not None:
+        return override
+    if isinstance(value, bool):
+        return value
+    return default
 
 
 def _resolve_max_file_bytes(

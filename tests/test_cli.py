@@ -196,6 +196,9 @@ class CliTests(unittest.TestCase):
                         "",
                         "[benchmark.metric_directions]",
                         'accuracy = "higher"',
+                        "",
+                        "[workspace]",
+                        'mode = "copy"',
                     ]
                 )
                 + "\n",
@@ -217,6 +220,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(plan["template"], "code_task_project")
             self.assertEqual(plan["code_task"]["benchmark_command"], "python benchmark.py")
             self.assertEqual(plan["code_task"]["primary_metric"], "accuracy")
+            self.assertEqual(plan["code_task"]["workspace_mode"], "copy")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,13 @@ from simple_ar.code_task.comparison import normalize_metric_directions
 from simple_ar.code_task.edit_scope import default_edit_scope
 from simple_ar.code_task.environment import build_code_task_environment_policy
 from simple_ar.code_task.index import build_codebase_index
-from simple_ar.code_task.workspace import CopyReport, copy_code_workspace
+from simple_ar.code_task.workspace import CopyReport
+from simple_ar.code_task.workspace_modes import (
+    WorkspaceResult,
+    WorkspaceSpec,
+    create_workspace,
+    suggested_python_executable,
+)
 
 
 @dataclass(frozen=True)
@@ -20,13 +26,14 @@ class CodeTaskInitResult:
     Args:
         run_dir: Root run directory for this code task.
         task_dir: Directory containing all code-task artifacts.
-        workspace_dir: Isolated editable copy of the source code.
+        workspace_dir: Isolated editable workspace for the source code.
         meta_dir: Metadata directory for indexes and manifests.
         manifest_path: Root workflow manifest path.
         codebase_index_path: Path to the generated codebase index.
         copy_report: Summary of copied and skipped source paths.
         codebase_index: Generated index data.
         environment_policy: Initial execution environment policy.
+        workspace: Workspace creation metadata.
     """
 
     run_dir: Path
@@ -38,6 +45,7 @@ class CodeTaskInitResult:
     copy_report: CopyReport
     codebase_index: dict[str, Any]
     environment_policy: dict[str, Any]
+    workspace: WorkspaceResult
 
 
 def initialize_code_task(
@@ -47,6 +55,9 @@ def initialize_code_task(
     task_file: Path,
     benchmark_command: str | None = None,
     max_file_bytes: int = 2_000_000,
+    workspace_mode: str = "copy",
+    workspace_reuse_source_venv: bool = False,
+    workspace_setup_hook: str = "",
     env_mode: str = "current",
     python_executable: str | Path | None = None,
     primary_metric: str | None = None,
@@ -60,8 +71,15 @@ def initialize_code_task(
         task_file: Markdown or text file describing the requested change.
         benchmark_command: Optional validation command to record for later
             stages. It is not executed during init.
-        max_file_bytes: Maximum file size copied into the workspace. Use ``0``
+        max_file_bytes: Maximum file size copied in ``copy`` mode. Use ``0``
             to disable the size guard.
+        workspace_mode: Workspace strategy. ``copy`` preserves the V2.1
+            behavior; ``git_worktree`` creates a detached git worktree when
+            ``code_root`` is a repository root.
+        workspace_reuse_source_venv: Whether a detected source ``.venv`` may
+            be used as the initial external Python interpreter.
+        workspace_setup_hook: Optional setup command recorded for future
+            managed-environment support. It is not executed during init.
         env_mode: Execution environment mode. V2.1 supports ``current`` and
             ``external``.
         python_executable: External interpreter path or executable name when
@@ -93,22 +111,34 @@ def initialize_code_task(
     normalized_metric_directions = normalize_metric_directions(metric_directions)
 
     task_dir = root / "code_task"
-    workspace_dir = task_dir / "workspace"
     meta_dir = task_dir / "meta"
     task_dir.mkdir(parents=True, exist_ok=True)
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     write_text(task_dir / "task.md", task_source.read_text(encoding="utf-8", errors="replace"))
-    copy_report = copy_code_workspace(
-        source_root,
-        workspace_dir,
-        max_file_bytes=max_file_bytes,
+    workspace = create_workspace(
+        WorkspaceSpec(
+            code_root=source_root,
+            task_dir=task_dir,
+            mode=workspace_mode,
+            max_file_bytes=max_file_bytes,
+            reuse_source_venv=workspace_reuse_source_venv,
+            setup_hook=workspace_setup_hook,
+        )
     )
+    workspace_dir = workspace.workspace_dir
+    copy_report = workspace.copy_report
     codebase_index_path = meta_dir / "codebase_index.json"
     codebase_index = build_codebase_index(workspace_dir, output_path=codebase_index_path)
+    resolved_env_mode = env_mode
+    resolved_python = python_executable
+    mapped_python = suggested_python_executable(workspace)
+    if mapped_python and resolved_python is None and resolved_env_mode in {"current", "external"}:
+        resolved_env_mode = "external"
+        resolved_python = mapped_python
     environment_policy = build_code_task_environment_policy(
-        env_mode=env_mode,
-        python_executable=python_executable,
+        env_mode=resolved_env_mode,
+        python_executable=resolved_python,
     )
     manifest_path = root / "manifest.json"
     write_json(
@@ -122,6 +152,7 @@ def initialize_code_task(
             metric_directions=normalized_metric_directions,
             max_file_bytes=max_file_bytes,
             copy_report=copy_report,
+            workspace=workspace,
             codebase_index=codebase_index,
             environment_policy=environment_policy,
         ),
@@ -137,6 +168,7 @@ def initialize_code_task(
         copy_report=copy_report,
         codebase_index=codebase_index,
         environment_policy=environment_policy,
+        workspace=workspace,
     )
 
 
@@ -150,6 +182,7 @@ def _manifest(
     metric_directions: dict[str, str] | None,
     max_file_bytes: int,
     copy_report: CopyReport,
+    workspace: WorkspaceResult,
     codebase_index: dict[str, Any],
     environment_policy: dict[str, Any],
 ) -> dict[str, Any]:
@@ -176,6 +209,7 @@ def _manifest(
             **copy_report.to_json(),
             "max_file_bytes": max_file_bytes,
         },
+        "workspace": workspace.to_manifest(run_dir=run_dir),
         "codebase": {
             "file_count": project.get("file_count", 0),
             "python_file_count": project.get("python_file_count", 0),

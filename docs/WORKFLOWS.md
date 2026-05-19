@@ -37,14 +37,19 @@ init workspace -> probe environment -> index code -> run baseline
 
 Key boundaries:
 
-- The source project is copied into `code_task/workspace`; the original code is never modified.
+- The source project is prepared under `code_task/workspace`; default `copy`
+  mode creates a guarded physical copy, while `git_worktree` creates a detached
+  worktree for repo-root git projects. The original code is never modified.
 - Patch application is gated by an explicit human approval step.
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
 - Multiple ordered edits may target one file, but every `old` block must remain
   uniquely matchable; invalid proposals stop before workspace files are written.
 - `code-task execute` can run the next safe steps, but it stops at plan approval
   and proposal review unless the user explicitly continues.
-- Current execution uses workspace isolation plus an explicit interpreter policy. It supports `current` and `external`; managed environment creation is planned later.
+- Current execution uses workspace isolation plus an explicit interpreter
+  policy. It supports `current` and `external`; managed environment creation is
+  planned later. `workspace.reuse_source_venv` can point a worktree/copy run at
+  an existing source `.venv` Python without installing dependencies.
 
 Bundled examples:
 
@@ -68,7 +73,9 @@ Current status:
 - `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, optional `--task-file`, and `--benchmark-command` flags. If no task file is supplied, `05-design` generates `generated_code_task.md` from the earlier research artifacts and a compact codebase summary.
 - `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
 - `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
-- The embedded path is end-to-end: it auto-approves the patch plan inside the copied workspace. The standalone code-task workflow remains the safer human-review path.
+- The embedded path is end-to-end: it auto-approves the patch plan inside the
+  prepared workspace. The standalone code-task workflow remains the safer
+  human-review path.
 - Report generation is guarded: LLM drafts are accepted only when citations, metric visibility, fixture disclosure, and toy-demo boundaries pass rule-based checks.
 
 ## Default 8-Stage Pipeline
@@ -155,7 +162,7 @@ Nested embedded code-task files:
 - `06-code/code_task_run/code_task/summary.md`: consolidated nested code-task outcome.
 - `06-code/code_task_run/code_task/patch_plan.md`: LLM patch plan auto-approved by the pipeline.
 - `06-code/code_task_run/code_task/meta/proposed_edits.json`: controlled old/new edit proposal.
-- `06-code/code_task_run/code_task/patch.diff`: applied patch inside the copied workspace.
+- `06-code/code_task_run/code_task/patch.diff`: applied patch inside the prepared workspace.
 - `06-code/code_task_run/code_task/run/baseline/`: pre-patch benchmark artifacts.
 - `06-code/code_task_run/code_task/run/patched/`: patched benchmark artifacts.
 - `06-code/code_task_run/code_task/run/comparison.json`: before/after comparison when both runs exist.
@@ -233,7 +240,9 @@ Important user-facing code-task files:
 
 Environment handling is intentionally separated from source-code isolation:
 
-- Source-code isolation means user code is copied to `code_task/workspace` before any patch is applied.
+- Source-code isolation means user code is prepared under `code_task/workspace`
+  before any patch is applied. In default `copy` mode that is a physical copy;
+  in `git_worktree` mode it is a detached worktree.
 - Execution isolation means benchmarks run with a selected Python/runtime environment.
 
 Today, code-task has the first kind of isolation and records environment signals
