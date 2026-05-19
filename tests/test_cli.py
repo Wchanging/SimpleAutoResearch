@@ -222,6 +222,61 @@ class CliTests(unittest.TestCase):
             self.assertEqual(plan["code_task"]["primary_metric"], "accuracy")
             self.assertEqual(plan["code_task"]["workspace_mode"], "copy")
 
+    def test_code_task_init_git_worktree_error_gives_next_steps(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "no_git_project"
+            code_root.mkdir()
+            task_file = root / "task.md"
+            task_file.write_text("# Task\n\nImprove this project.\n", encoding="utf-8")
+
+            with self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--workspace-mode",
+                        "git_worktree",
+                        "--output-root",
+                        str(root / "runs"),
+                    ]
+                )
+
+            message = str(raised.exception)
+            self.assertIn("Could not initialize code task", message)
+            self.assertIn("git_worktree quick checklist", message)
+            self.assertIn("--workspace-mode copy", message)
+
+    def test_code_task_init_missing_task_file_gives_path_hint(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "project"
+            code_root.mkdir()
+
+            with self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(root / "missing-task.md"),
+                        "--output-root",
+                        str(root / "runs"),
+                    ]
+                )
+
+            message = str(raised.exception)
+            self.assertIn("Check the task file path", message)
+            self.assertIn("[code_task].task_file", message)
+
 
 if __name__ == "__main__":
     unittest.main()

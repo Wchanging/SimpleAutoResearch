@@ -20,6 +20,7 @@ from simple_ar.code_task import (
     run_code_task_baseline,
     run_code_task_benchmark,
     validate_code_task,
+    WorkspaceModeError,
 )
 from simple_ar.code_task.config import (
     CodeTaskConfigError,
@@ -1011,20 +1012,29 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     task_file = Path(options.task_file)
     name = options.name or f"code-task-{code_root.resolve().name}"
     run_dir = _new_run_dir(Path(options.output_root), name)
-    result = initialize_code_task(
-        run_dir=run_dir,
-        code_root=code_root,
-        task_file=task_file,
-        benchmark_command=options.benchmark_command,
-        max_file_bytes=options.max_file_bytes,
-        workspace_mode=options.workspace_mode,
-        workspace_reuse_source_venv=options.workspace_reuse_source_venv,
-        workspace_setup_hook=options.workspace_setup_hook,
-        env_mode=options.env_mode,
-        python_executable=options.python_executable,
-        primary_metric=options.primary_metric,
-        metric_directions=options.metric_directions,
-    )
+    try:
+        result = initialize_code_task(
+            run_dir=run_dir,
+            code_root=code_root,
+            task_file=task_file,
+            benchmark_command=options.benchmark_command,
+            max_file_bytes=options.max_file_bytes,
+            workspace_mode=options.workspace_mode,
+            workspace_reuse_source_venv=options.workspace_reuse_source_venv,
+            workspace_setup_hook=options.workspace_setup_hook,
+            env_mode=options.env_mode,
+            python_executable=options.python_executable,
+            primary_metric=options.primary_metric,
+            metric_directions=options.metric_directions,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        ValueError,
+        WorkspaceModeError,
+    ) as exc:
+        raise SystemExit(_code_task_init_error_message(exc, options=options)) from exc
     project = result.codebase_index.get("project", {})
     print(f"Code task run: {result.run_dir}")
     print(f"Workspace: {result.workspace_dir}")
@@ -1057,6 +1067,50 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
             print(f"- {name}: {direction}")
     print(f"Environment mode: {result.environment_policy.get('mode', 'current')}")
     print(f"Python executable: {result.environment_policy.get('python_executable', '')}")
+
+
+def _code_task_init_error_message(
+    exc: Exception,
+    *,
+    options: object,
+) -> str:
+    """Return a user-facing init error with likely next steps."""
+    workspace_mode = getattr(options, "workspace_mode", "copy")
+    code_root = getattr(options, "code_root", "")
+    task_file = getattr(options, "task_file", "")
+    lines = [f"Could not initialize code task: {exc}"]
+    if isinstance(exc, FileNotFoundError) and "Task file" in str(exc):
+        lines.extend(
+            [
+                "",
+                "Check the task file path:",
+                f"- configured task_file: {task_file or '(missing)'}",
+                "- Pass --task-file path\\to\\task.md, or set [code_task].task_file in TOML.",
+                "- For embedded 8-stage code_task_project runs, omit task_file only if you want 05-design to generate one.",
+            ]
+        )
+    elif isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+        lines.extend(
+            [
+                "",
+                "Check the code root path:",
+                f"- configured code_root: {code_root or '(missing)'}",
+                "- It should point to the baseline project directory, not the task file.",
+                "- If you use git_worktree, code_root must be the baseline git repository root.",
+            ]
+        )
+    elif isinstance(exc, WorkspaceModeError) and workspace_mode == "git_worktree":
+        lines.extend(
+            [
+                "",
+                "git_worktree quick checklist:",
+                "- code_root should be the baseline repository root.",
+                "- The repository needs at least one local commit.",
+                "- GitHub or any remote is not required.",
+                "- Use --workspace-mode copy when the baseline is not a git repository.",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _print_code_task_probe(args: argparse.Namespace) -> None:

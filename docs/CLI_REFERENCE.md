@@ -273,6 +273,10 @@ By default this is a guarded copy; `git_worktree` can create a detached git
 worktree for larger repo-root projects. Later steps mutate only that workspace,
 not the original codebase.
 
+When init cannot prepare the workspace, the CLI reports the failed path and a
+short checklist. For `git_worktree`, the common fixes are to pass the baseline
+git repository root, make an initial local commit, or choose `copy` mode.
+
 Recommended order:
 
 ```text

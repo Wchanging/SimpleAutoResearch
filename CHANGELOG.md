@@ -19,6 +19,8 @@ This file records user-visible project changes in reverse chronological order. P
 
 - Code-task initialization now goes through a workspace dispatcher instead of
   calling the copy routine directly.
+- `code-task init` now reports workspace and task-file setup problems with
+  user-facing next-step checklists instead of raw Python tracebacks.
 - Codebase indexing now skips `.git`, `.env`, virtualenv, and cache metadata so
   worktree mode does not leak git metadata or secret-like files into model
   context.

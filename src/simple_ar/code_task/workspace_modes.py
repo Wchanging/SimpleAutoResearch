@@ -152,10 +152,17 @@ def _create_git_worktree_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     if not _same_path(source, repo_root):
         raise WorkspaceModeError(
             "git_worktree mode currently requires code_root to be the git "
-            f"repository root. Got code_root={source}, repo_root={repo_root}."
+            f"repository root.\n"
+            f"code_root: {source}\n"
+            f"detected repo root: {repo_root}\n"
+            "Next steps:\n"
+            "- Pass the detected repo root as --code-root and adjust the benchmark path if needed.\n"
+            "- Or make the intended baseline directory its own git repository: "
+            "`git init`, `git add .`, `git commit -m \"initial baseline\"`.\n"
+            "- Or rerun with --workspace-mode copy for a guarded physical copy."
         )
 
-    commit = _git_output(repo_root, "rev-parse", "HEAD")
+    commit = _git_head_commit(repo_root)
     branch = _git_output(repo_root, "branch", "--show-current") or "detached"
     dirty_status = _git_output(repo_root, "status", "--short")
     workspace.parent.mkdir(parents=True, exist_ok=True)
@@ -213,10 +220,36 @@ def _normalize_mode(value: str) -> str:
 
 
 def _git_repo_root(path: Path) -> Path:
-    output = _git_output(path, "rev-parse", "--show-toplevel")
+    try:
+        output = _git_output(path, "rev-parse", "--show-toplevel")
+    except WorkspaceModeError as exc:
+        if "git executable" in str(exc) or "timed out" in str(exc):
+            raise
+        raise WorkspaceModeError(
+            "git_worktree mode requires code_root to be inside a local git "
+            f"repository, but Git could not find a usable repository at: {path}\n"
+            "Next steps:\n"
+            "- If this project does not need git isolation, rerun with --workspace-mode copy.\n"
+            "- If you want git_worktree, run these commands in the baseline project root: "
+            "`git init`, `git add .`, `git commit -m \"initial baseline\"`.\n"
+            "- If the project lives in a subdirectory, make that subdirectory its own git repository root."
+        ) from exc
     if not output:
         raise WorkspaceModeError(f"Path is not inside a git repository: {path}")
     return Path(output).resolve()
+
+
+def _git_head_commit(repo_root: Path) -> str:
+    try:
+        return _git_output(repo_root, "rev-parse", "HEAD")
+    except WorkspaceModeError as exc:
+        raise WorkspaceModeError(
+            "git_worktree mode requires the baseline repository to have at "
+            f"least one commit: {repo_root}\n"
+            "Next steps:\n"
+            "- Commit the baseline first: `git add .` then `git commit -m \"initial baseline\"`.\n"
+            "- Or rerun with --workspace-mode copy if you do not want to use git yet."
+        ) from exc
 
 
 def _git_output(cwd: Path, *args: str) -> str:

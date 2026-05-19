@@ -193,6 +193,11 @@ requires `code_root` to be the repository root, records git provenance under
 `manifest.json.workspace`, and keeps `.git`/`.env` metadata out of the codebase
 index and model context. It still does not install dependencies.
 
+If `git_worktree` init fails, the CLI prints a checklist instead of a Python
+traceback. The usual fixes are: pass the baseline repository root as
+`--code-root`, create an initial local commit with `git init`, `git add .`, and
+`git commit -m "initial baseline"`, or switch back to `--workspace-mode copy`.
+
 Benchmarks should print numeric metric lines as `name: value`. Custom metric
 names work when you declare their direction with `--metric-direction` or the
 TOML config. See [CLI Reference](CLI_REFERENCE.md#init) for the full option
