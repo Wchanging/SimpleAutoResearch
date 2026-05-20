@@ -20,7 +20,10 @@ mode = "current"
 
 [workspace]
 # copy is the safest default. git_worktree is available for repo-root projects.
+# sparse_copy is experimental; when used, add include/exclude patterns here.
 mode = "copy"
+# include = ["digits_mlp/**", "tests/**", "benchmark.py", "pyproject.toml"]
+# exclude = ["data/**", "models/**"]
 reuse_source_venv = false
 setup_hook = ""
 

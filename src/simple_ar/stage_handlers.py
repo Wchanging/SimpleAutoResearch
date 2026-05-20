@@ -389,6 +389,8 @@ def execute_design(ctx: Context) -> None:
                     "env_mode": spec.env_mode,
                     "python_executable": spec.python_executable,
                     "workspace_mode": spec.workspace_mode,
+                    "workspace_include": list(spec.workspace_include),
+                    "workspace_exclude": list(spec.workspace_exclude),
                     "workspace_reuse_source_venv": spec.workspace_reuse_source_venv,
                     "workspace_setup_hook": spec.workspace_setup_hook,
                     "max_file_bytes": spec.max_file_bytes,

@@ -155,6 +155,51 @@ class CodeTaskTests(unittest.TestCase):
                     workspace_mode="git_worktree",
                 )
 
+    def test_init_can_create_sparse_copy_workspace(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "sparse_project"
+            task_file = root / "task.md"
+            write_text(code_root / "src" / "pkg" / "model.py", "def predict():\n    return 1\n")
+            write_text(code_root / "tests" / "test_model.py", "def test_predict():\n    assert True\n")
+            write_text(code_root / "benchmark.py", "print('accuracy: 1.0')\n")
+            write_text(code_root / "pyproject.toml", "[project]\nname = 'sparse-project'\n")
+            write_text(code_root / "data" / "dataset.csv", "id,label\n1,spam\n")
+            write_text(code_root / "models" / "weights.bin", "not really weights\n")
+            write_text(code_root / ".env", "TOKEN=secret\n")
+            write_text(task_file, "# Task\n\nImprove sparse project.\n")
+
+            run_dir = root / "runs" / "sparse-run"
+            result = initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python benchmark.py",
+                workspace_mode="sparse_copy",
+                workspace_include=("src/**", "tests/**", "benchmark.py", "pyproject.toml"),
+                workspace_exclude=("models/**",),
+            )
+
+            workspace = result.workspace_dir
+            self.assertTrue((workspace / "src" / "pkg" / "model.py").is_file())
+            self.assertTrue((workspace / "tests" / "test_model.py").is_file())
+            self.assertTrue((workspace / "benchmark.py").is_file())
+            self.assertTrue((workspace / "pyproject.toml").is_file())
+            self.assertFalse((workspace / "data" / "dataset.csv").exists())
+            self.assertFalse((workspace / "models" / "weights.bin").exists())
+            self.assertFalse((workspace / ".env").exists())
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["workspace"]["mode"], "sparse_copy")
+            self.assertEqual(
+                manifest["workspace"]["patterns"]["include"],
+                ["src/**", "tests/**", "benchmark.py", "pyproject.toml"],
+            )
+            self.assertIn("models/**", manifest["workspace"]["patterns"]["exclude"])
+            skipped_reasons = {item["reason"] for item in manifest["copy"]["skipped"]}
+            self.assertIn("sparse_excluded_dir", skipped_reasons)
+
     def test_code_task_init_cli_prints_summary(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

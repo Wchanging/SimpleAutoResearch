@@ -199,6 +199,8 @@ class CliTests(unittest.TestCase):
                         "",
                         "[workspace]",
                         'mode = "copy"',
+                        'include = ["src/**", "benchmark.py"]',
+                        'exclude = ["data/**"]',
                     ]
                 )
                 + "\n",
@@ -221,6 +223,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(plan["code_task"]["benchmark_command"], "python benchmark.py")
             self.assertEqual(plan["code_task"]["primary_metric"], "accuracy")
             self.assertEqual(plan["code_task"]["workspace_mode"], "copy")
+            self.assertEqual(plan["code_task"]["workspace_include"], ["src/**", "benchmark.py"])
+            self.assertEqual(plan["code_task"]["workspace_exclude"], ["data/**"])
 
     def test_code_task_init_git_worktree_error_gives_next_steps(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

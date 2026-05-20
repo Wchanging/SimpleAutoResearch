@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-file-bytes",
         type=int,
         default=None,
-        help="Maximum file size copied in copy mode. Use 0 to disable.",
+        help="Maximum file size copied in copy/sparse modes. Use 0 to disable.",
     )
     code_task_probe = code_task_subparsers.add_parser(
         "probe",
@@ -324,11 +324,30 @@ def _add_code_task_workspace_args(parser: argparse.ArgumentParser) -> None:
     """Add shared code-task workspace creation arguments."""
     parser.add_argument(
         "--workspace-mode",
-        choices=("copy", "git_worktree"),
+        choices=("copy", "git_worktree", "sparse_copy"),
         default=None,
         help=(
             "Workspace strategy. `copy` copies a guarded source tree; "
-            "`git_worktree` creates a detached git worktree for repo-root projects."
+            "`git_worktree` creates a detached git worktree for repo-root projects; "
+            "`sparse_copy` is experimental and copies selected patterns."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-include",
+        action="append",
+        default=None,
+        help=(
+            "POSIX glob copied by --workspace-mode sparse_copy. Repeatable. "
+            "Prefer TOML [workspace].include for multiple patterns."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-exclude",
+        action="append",
+        default=None,
+        help=(
+            "Additional POSIX glob skipped by --workspace-mode sparse_copy. "
+            "Repeatable."
         ),
     )
     parser.add_argument(
@@ -384,11 +403,11 @@ def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
         "--code-task-max-file-bytes",
         type=int,
         default=None,
-        help="Maximum source file size copied in embedded copy mode.",
+        help="Maximum source file size copied in embedded copy/sparse modes.",
     )
     parser.add_argument(
         "--code-task-workspace-mode",
-        choices=("copy", "git_worktree"),
+        choices=("copy", "git_worktree", "sparse_copy"),
         default=None,
         help="Embedded code-task workspace strategy.",
     )
@@ -997,6 +1016,8 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
             benchmark_command=args.benchmark_command,
             max_file_bytes=args.max_file_bytes,
             workspace_mode=args.workspace_mode,
+            workspace_include=args.workspace_include,
+            workspace_exclude=args.workspace_exclude,
             workspace_reuse_source_venv=args.workspace_reuse_source_venv,
             workspace_setup_hook=args.workspace_setup_hook,
             env_mode=args.env_mode,
@@ -1020,6 +1041,8 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
             benchmark_command=options.benchmark_command,
             max_file_bytes=options.max_file_bytes,
             workspace_mode=options.workspace_mode,
+            workspace_include=options.workspace_include,
+            workspace_exclude=options.workspace_exclude,
             workspace_reuse_source_venv=options.workspace_reuse_source_venv,
             workspace_setup_hook=options.workspace_setup_hook,
             env_mode=options.env_mode,
@@ -1041,9 +1064,10 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     print(f"Workspace mode: {result.workspace.mode}")
     print(f"Task: {result.task_dir / 'task.md'}")
     print(f"Index: {result.codebase_index_path}")
-    if result.workspace.mode == "copy":
+    if result.workspace.mode in {"copy", "sparse_copy"}:
+        label = "Files copied" if result.workspace.mode == "copy" else "Files selected"
         print(
-            "Files copied: "
+            f"{label}: "
             f"{result.copy_report.files_copied} "
             f"({result.copy_report.skipped_count} skipped)"
         )

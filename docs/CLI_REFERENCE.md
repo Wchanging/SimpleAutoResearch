@@ -173,7 +173,12 @@ mode = "current"
 # copy: guarded physical copy, safest default.
 # git_worktree: detached worktree for repo-root git projects, useful when the
 # repository is too large to copy every run.
+# sparse_copy: experimental allowlist copy for small known subsets.
 mode = "copy"
+
+# Used only by sparse_copy. Defaults are conservative source/config/test globs.
+include = ["src/**", "tests/**", "benchmark.py", "pyproject.toml"]
+exclude = ["data/**", "models/**"]
 
 # If true and code_root has .venv/ or venv/, init records and uses that Python
 # as an external execution policy. No dependency installation is performed.
@@ -183,7 +188,7 @@ reuse_source_venv = false
 setup_hook = ""
 
 [safety]
-# Maximum source file size copied in copy mode. Use 0 to disable.
+# Maximum source file size copied in copy/sparse modes. Use 0 to disable.
 max_file_bytes = 2000000
 ```
 
@@ -202,7 +207,7 @@ Section summary:
 | `[benchmark.metric_directions]` | code task comparison | Metric interpretation rules. |
 | `[environment]` | code task execution | Interpreter policy for probe/baseline/patched runs. |
 | `[workspace]` | code task init | Workspace mode, source venv reuse, and recorded setup hook. |
-| `[safety]` | code task workspace/validation | Copy-mode file-size guard and future safety settings. |
+| `[safety]` | code task workspace/validation | Copy/sparse file-size guard and future safety settings. |
 
 When a run config contains `[code_task]`, `[benchmark]`, `[metrics]`,
 `[environment]`, `[workspace]`, or `[safety]`, the same file is reused as the embedded
@@ -228,8 +233,8 @@ uv run simple-ar run \
 | `--task-file PATH` | Markdown/text task description. Optional for embedded 8-stage runs; if omitted, `05-design` writes `generated_code_task.md` from the research artifacts. |
 | `--benchmark-command TEXT` | Benchmark run before and after the patch. |
 | `--code-task-name TEXT` | Optional display name stored in `experiment_plan.json`. |
-| `--code-task-max-file-bytes N` | Maximum source file size copied in `copy` mode. |
-| `--code-task-workspace-mode copy / git_worktree` | Workspace strategy for the nested code task. |
+| `--code-task-max-file-bytes N` | Maximum source file size copied in `copy` or `sparse_copy` mode. |
+| `--code-task-workspace-mode copy / git_worktree / sparse_copy` | Workspace strategy for the nested code task. Use TOML for sparse include/exclude patterns. |
 | `--code-task-workspace-reuse-source-venv` | Use a detected source `.venv` Python for the nested execution policy. |
 | `--code-task-workspace-setup-hook TEXT` | Record a setup command for future managed environment support. |
 | `--code-task-env-mode current / external` | Interpreter policy for nested probe/baseline/run steps. |
@@ -270,8 +275,9 @@ uv run simple-ar search-artifacts runs/<run-id> "timeout" --include-operational
 
 The code-task workflow prepares an existing project under `code_task/workspace`.
 By default this is a guarded copy; `git_worktree` can create a detached git
-worktree for larger repo-root projects. Later steps mutate only that workspace,
-not the original codebase.
+worktree for larger repo-root projects; `sparse_copy` is an experimental
+allowlist copy for small, well-understood subsets. Later steps mutate only that
+workspace, not the original codebase.
 
 When init cannot prepare the workspace, the CLI reports the failed path and a
 short checklist. For `git_worktree`, the common fixes are to pass the baseline
@@ -313,7 +319,9 @@ Options:
 | `--name TEXT` | Run name suffix. Default: based on `code-root`. |
 | `--benchmark-command TEXT` | Command to run inside the editable workspace. |
 | `--max-file-bytes N` | Maximum copied file size. Use `0` to disable. |
-| `--workspace-mode copy / git_worktree` | Workspace strategy. `copy` is safest; `git_worktree` requires `--code-root` to be the git repository root. |
+| `--workspace-mode copy / git_worktree / sparse_copy` | Workspace strategy. `copy` is safest; `git_worktree` requires `--code-root` to be the git repository root; `sparse_copy` copies selected patterns. |
+| `--workspace-include GLOB` | Sparse-copy include pattern. Repeatable; TOML is clearer for multiple patterns. |
+| `--workspace-exclude GLOB` | Additional sparse-copy exclude pattern. Repeatable. |
 | `--workspace-reuse-source-venv` | If a source `.venv` or `venv` exists, record and use its Python as the initial external execution policy. |
 | `--workspace-setup-hook TEXT` | Record a setup command. It is not executed during init. |
 | `--env-mode current / external` | Execution interpreter policy. |
@@ -354,13 +362,21 @@ mode = "current"  # current | external
 python = ""       # optional when mode = "external"
 
 [workspace]
-mode = "copy"                 # copy | git_worktree
-reuse_source_venv = false     # use source .venv Python if detected
-setup_hook = ""               # recorded only; not executed during init
+mode = "copy"                  # copy | git_worktree | sparse_copy
+include = ["src/**", "tests/**", "benchmark.py", "pyproject.toml"]
+exclude = ["data/**", "models/**"]
+reuse_source_venv = false      # use source .venv Python if detected
+setup_hook = ""                # recorded only; not executed during init
 
 [safety]
 max_file_bytes = 2000000
 ```
+
+`sparse_copy` always applies built-in exclusions for `.git`, virtualenvs,
+`runs`, cache/build directories, `data`, `models`, `.env`, and secret-like
+paths before user patterns. It is useful for small allowlisted experiments, but
+it can omit runtime dependencies; prefer `copy` or `git_worktree` for general
+projects.
 
 Code-task runs also record an `edit_scope` in `manifest.json`. The current
 default treats tests, benchmark files, `.env`, and secret/credential-looking

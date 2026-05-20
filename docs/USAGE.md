@@ -160,8 +160,9 @@ See [CLI Reference](CLI_REFERENCE.md#artifact-tools) for option details.
 The code-task workflow prepares a source project under an isolated editable
 workspace and never mutates the original codebase. The default `copy` mode is
 the safest choice; V2.2 also supports `git_worktree` for larger repo-root git
-projects where a full copy is wasteful. The workflow is intentionally
-step-by-step so each stage can be reviewed.
+projects where a full copy is wasteful, plus experimental `sparse_copy` for
+small allowlisted subsets. The workflow is intentionally step-by-step so each
+stage can be reviewed.
 
 Initialize from explicit CLI flags:
 
@@ -180,7 +181,7 @@ environment settings:
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-`init` creates a new `runs/<run-id>/` directory, copies the source project into
+`init` creates a new `runs/<run-id>/` directory, prepares the source project under
 `code_task/workspace/`, writes the task to `code_task/task.md`, builds
 `code_task/meta/codebase_index.json`, and records the benchmark/environment
 policy in `manifest.json`. It does not run code, call the LLM, or modify the
@@ -197,6 +198,14 @@ If `git_worktree` init fails, the CLI prints a checklist instead of a Python
 traceback. The usual fixes are: pass the baseline repository root as
 `--code-root`, create an initial local commit with `git init`, `git add .`, and
 `git commit -m "initial baseline"`, or switch back to `--workspace-mode copy`.
+
+When `workspace.mode = "sparse_copy"` or `--workspace-mode sparse_copy` is
+used, init copies only selected files. Configure patterns with
+`[workspace].include` / `[workspace].exclude` or repeated
+`--workspace-include` / `--workspace-exclude`. Built-in exclusions still block
+`.git`, virtualenvs, `runs`, cache/build directories, `data`, `models`, `.env`,
+and secret-like paths. This mode is useful for small known subsets, but it can
+omit runtime dependencies; prefer `copy` or `git_worktree` for general projects.
 
 Benchmarks should print numeric metric lines as `name: value`. Custom metric
 names work when you declare their direction with `--metric-direction` or the

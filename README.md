@@ -195,7 +195,7 @@ What works today:
 - Topic-to-report runs with visible 8-stage artifacts and resumable execution.
 - OpenAI-compatible LLM calls for planning, paper notes, synthesis, report drafting, and code-task patch planning.
 - Literature-first report mode: stop at `synthesize`, then resume `report` to produce a survey-style report without experiment claims.
-- Existing-code code tasks as a standalone workflow: prepare a source project with `copy` or `git_worktree`, probe the environment, index files, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the isolated workspace, validate, run a patched benchmark, and compare before/after metrics.
+- Existing-code code tasks as a standalone workflow: prepare a source project with `copy`, `git_worktree`, or experimental `sparse_copy`, probe the environment, index files, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the isolated workspace, validate, run a patched benchmark, and compare before/after metrics.
 - Default code-task edit scope: tests, benchmark files, and secret-like paths are read-only evidence, so the model can use allowed context but cannot patch them to improve metrics.
 - Configurable benchmark metric interpretation for code tasks through `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
 - Embedded 8-stage code-task experiments through `--experiment-template code_task_project` plus a code-task TOML config or explicit code-root/benchmark flags. A task file can be provided by the user or generated during `05-design`.
@@ -204,7 +204,7 @@ What works today:
 
 Important limits:
 
-- The generic 8-stage code-task path is real but still conservative. It can prepare a user project with copy mode or repo-root `git_worktree` mode and run one LLM patch pass, but it is not yet a full autonomous coding agent with deep multi-round planning, dependency installation, Docker/Conda setup, or large experiment scheduling.
+- The generic 8-stage code-task path is real but still conservative. It can prepare a user project with copy mode, repo-root `git_worktree` mode, or experimental sparse-copy mode and run one LLM patch pass, but it is not yet a full autonomous coding agent with deep multi-round planning, dependency installation, Docker/Conda setup, or large experiment scheduling.
 - The 8-stage code-task path auto-approves the model patch plan inside the isolated workspace so the pipeline can complete end to end. Use standalone `code-task` for stronger human-in-the-loop review.
 - Code edits are controlled old/new replacements. This keeps patches auditable, but it is weaker than a full coding agent that can plan and edit many files across multiple autonomous rounds.
 - Reviewed proposals may contain multiple ordered edits in one file, but invalid old/new replacements are rejected before workspace files are changed.
@@ -213,7 +213,7 @@ Important limits:
 - Literature search currently works from metadata and local artifact snippets. It is not yet a full PDF-reading or vector-RAG survey system.
 - LLM-written reports are guarded. If the draft invents citations, omits required citations, or overstates toy evidence, SimpleAutoResearch falls back to a structured deterministic report.
 
-V2.2 development has started with workspace-mode abstraction and minimal git worktree support. The next focus is deeper coding loops: repo maps, multi-round attempts, stronger task decomposition, managed environments, and a clearer human-in-the-loop path from existing research code to reproducible results.
+V2.2 development has started with workspace-mode abstraction, minimal git worktree support, and experimental sparse-copy support. The next focus is deeper coding loops: repo maps, multi-round attempts, stronger task decomposition, managed environments, and a clearer human-in-the-loop path from existing research code to reproducible results.
 
 ## Documentation
 

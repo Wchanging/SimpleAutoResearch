@@ -37,7 +37,10 @@ name = "tiny-digits-mlp-pipeline"
 [workspace]
 # copy is the safest default. git_worktree is available for repo-root projects
 # when copying a larger git repository would be wasteful.
+# sparse_copy is experimental; if used, uncomment include/exclude patterns.
 mode = "copy"
+# include = ["digits_mlp/**", "tests/**", "benchmark.py", "pyproject.toml"]
+# exclude = ["data/**", "models/**"]
 reuse_source_venv = false
 setup_hook = ""
 

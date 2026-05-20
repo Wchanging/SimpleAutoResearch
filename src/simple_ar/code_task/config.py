@@ -29,6 +29,8 @@ class CodeTaskInitOptions:
     benchmark_command: str | None
     max_file_bytes: int
     workspace_mode: str
+    workspace_include: tuple[str, ...]
+    workspace_exclude: tuple[str, ...]
     workspace_reuse_source_venv: bool
     workspace_setup_hook: str
     env_mode: str
@@ -67,6 +69,8 @@ def load_code_task_init_options(
     benchmark_command: str | None = None,
     max_file_bytes: int | None = None,
     workspace_mode: str | None = None,
+    workspace_include: list[str] | tuple[str, ...] | None = None,
+    workspace_exclude: list[str] | tuple[str, ...] | None = None,
     workspace_reuse_source_venv: bool | None = None,
     workspace_setup_hook: str | None = None,
     env_mode: str | None = None,
@@ -143,6 +147,14 @@ def load_code_task_init_options(
     resolved_setup_hook = _config_string(workspace_setup_hook) or _config_string(
         workspace.get("setup_hook")
     )
+    resolved_workspace_include = _resolve_string_list(
+        override=workspace_include,
+        value=workspace.get("include"),
+    )
+    resolved_workspace_exclude = _resolve_string_list(
+        override=workspace_exclude,
+        value=workspace.get("exclude"),
+    )
 
     return CodeTaskInitOptions(
         code_root=resolved_code_root,
@@ -156,6 +168,8 @@ def load_code_task_init_options(
             safety=safety,
         ),
         workspace_mode=resolved_workspace_mode,
+        workspace_include=resolved_workspace_include,
+        workspace_exclude=resolved_workspace_exclude,
         workspace_reuse_source_venv=resolved_reuse_source_venv,
         workspace_setup_hook=resolved_setup_hook or "",
         env_mode=resolved_env_mode,
@@ -212,6 +226,27 @@ def _resolve_bool(*, override: bool | None, value: object, default: bool) -> boo
     if isinstance(value, bool):
         return value
     return default
+
+
+def _resolve_string_list(
+    *,
+    override: list[str] | tuple[str, ...] | None,
+    value: object,
+) -> tuple[str, ...]:
+    if override is not None:
+        return _config_string_list(override)
+    return _config_string_list(value)
+
+
+def _config_string_list(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    result: list[str] = []
+    for item in value:
+        text = _config_string(item)
+        if text:
+            result.append(text)
+    return tuple(dict.fromkeys(result))
 
 
 def _resolve_max_file_bytes(

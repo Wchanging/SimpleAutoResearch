@@ -38,8 +38,10 @@ class CodeTaskExperimentSpec:
         benchmark_command: Command run before and after the patch.
         primary_metric: Optional primary metric for before/after comparison.
         metric_directions: Optional metric direction map for comparisons.
-        max_file_bytes: Maximum source file size copied in copy mode.
+        max_file_bytes: Maximum source file size copied in copy/sparse modes.
         workspace_mode: Workspace creation strategy.
+        workspace_include: POSIX glob patterns for experimental sparse copy.
+        workspace_exclude: Additional POSIX globs skipped by sparse copy.
         workspace_reuse_source_venv: Whether source .venv Python may be reused.
         workspace_setup_hook: Optional setup command recorded for future
             managed-environment support.
@@ -62,6 +64,8 @@ class CodeTaskExperimentSpec:
     metric_directions: dict[str, str] = field(default_factory=dict)
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     workspace_mode: str = "copy"
+    workspace_include: tuple[str, ...] = ()
+    workspace_exclude: tuple[str, ...] = ()
     workspace_reuse_source_venv: bool = False
     workspace_setup_hook: str = ""
     env_mode: str = "current"
@@ -176,6 +180,8 @@ def code_task_project_spec(
         metric_directions=options.metric_directions,
         max_file_bytes=options.max_file_bytes,
         workspace_mode=options.workspace_mode,
+        workspace_include=options.workspace_include,
+        workspace_exclude=options.workspace_exclude,
         workspace_reuse_source_venv=options.workspace_reuse_source_venv,
         workspace_setup_hook=options.workspace_setup_hook,
         env_mode=options.env_mode,
@@ -249,6 +255,8 @@ def prepare_code_task_experiment(
         benchmark_command=spec.benchmark_command,
         max_file_bytes=spec.max_file_bytes,
         workspace_mode=spec.workspace_mode,
+        workspace_include=spec.workspace_include,
+        workspace_exclude=spec.workspace_exclude,
         workspace_reuse_source_venv=spec.workspace_reuse_source_venv,
         workspace_setup_hook=spec.workspace_setup_hook,
         env_mode=spec.env_mode,

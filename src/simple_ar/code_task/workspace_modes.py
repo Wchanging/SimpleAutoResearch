@@ -7,10 +7,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from simple_ar.code_task.workspace import CopyReport, copy_code_workspace, empty_copy_report
+from simple_ar.code_task.workspace import (
+    CopyReport,
+    copy_code_workspace,
+    empty_copy_report,
+    sparse_copy_code_workspace,
+)
 
 
-SUPPORTED_WORKSPACE_MODES = {"copy", "git_worktree"}
+SUPPORTED_WORKSPACE_MODES = {"copy", "git_worktree", "sparse_copy"}
 DEPENDENCY_FILE_NAMES = (
     "pyproject.toml",
     "requirements.txt",
@@ -35,8 +40,11 @@ class WorkspaceSpec:
         code_root: Source project directory provided by the user.
         task_dir: Code-task artifact directory.
         mode: Workspace strategy. V2.2 supports ``copy`` and
-            ``git_worktree``.
-        max_file_bytes: Maximum copied file size for ``copy`` mode.
+            ``git_worktree``; ``sparse_copy`` is experimental.
+        max_file_bytes: Maximum copied file size for ``copy`` and
+            ``sparse_copy`` modes.
+        include: POSIX glob patterns copied by ``sparse_copy``.
+        exclude: Additional POSIX glob patterns skipped by ``sparse_copy``.
         reuse_source_venv: Whether a detected source ``.venv`` may be recorded
             and selected as the initial execution interpreter.
         setup_hook: Optional setup command recorded for future managed
@@ -47,6 +55,8 @@ class WorkspaceSpec:
     task_dir: Path
     mode: str = "copy"
     max_file_bytes: int = 2_000_000
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
     reuse_source_venv: bool = False
     setup_hook: str = ""
 
@@ -65,6 +75,7 @@ class WorkspaceResult:
         copy_report: Copy summary for ``copy`` mode; empty for worktrees.
         git: Git provenance for ``git_worktree`` mode.
         environment_mapping: Dependency and interpreter mapping notes.
+        patterns: Include/exclude patterns used by sparse workspace modes.
         cleanup_hint: Human-facing cleanup note for this mode.
     """
 
@@ -77,6 +88,7 @@ class WorkspaceResult:
     copy_report: CopyReport
     git: dict[str, Any] | None
     environment_mapping: dict[str, Any]
+    patterns: dict[str, Any]
     cleanup_hint: str
 
     def to_manifest(self, *, run_dir: Path) -> dict[str, Any]:
@@ -94,6 +106,7 @@ class WorkspaceResult:
             "copy_report": self.copy_report.to_json(),
             "git": self.git or {},
             "environment_mapping": self.environment_mapping,
+            "patterns": self.patterns,
             "cleanup_hint": self.cleanup_hint,
         }
 
@@ -105,6 +118,8 @@ def create_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
         return _create_copy_workspace(spec)
     if mode == "git_worktree":
         return _create_git_worktree_workspace(spec)
+    if mode == "sparse_copy":
+        return _create_sparse_copy_workspace(spec)
     raise WorkspaceModeError(f"Unsupported workspace mode: {spec.mode}")
 
 
@@ -138,7 +153,48 @@ def _create_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
             setup_hook=spec.setup_hook,
             mode="copy",
         ),
+        patterns={},
         cleanup_hint="Delete the run directory to remove this copied workspace.",
+    )
+
+
+def _create_sparse_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
+    source = _validated_source_root(spec.code_root)
+    workspace = (spec.task_dir / "workspace").resolve()
+    copy_report = sparse_copy_code_workspace(
+        source,
+        workspace,
+        include_patterns=spec.include,
+        exclude_patterns=spec.exclude,
+        max_file_bytes=spec.max_file_bytes,
+    )
+    return WorkspaceResult(
+        mode="sparse_copy",
+        source_root=source,
+        workspace_dir=workspace,
+        writable_root=workspace,
+        read_only_roots=(),
+        created_at=_utcnow_iso(),
+        copy_report=copy_report,
+        git=None,
+        environment_mapping=_environment_mapping(
+            source_root=source,
+            workspace_dir=workspace,
+            reuse_source_venv=spec.reuse_source_venv,
+            setup_hook=spec.setup_hook,
+            mode="sparse_copy",
+        ),
+        patterns={
+            "include": list(_normalize_patterns(spec.include)),
+            "exclude": list(_normalize_patterns(spec.exclude)),
+            "default_includes_used": not bool(spec.include),
+            "default_excludes_always_applied": True,
+            "risk": (
+                "sparse_copy may omit runtime dependencies. Prefer copy or "
+                "git_worktree unless you know the needed project subset."
+            ),
+        },
+        cleanup_hint="Delete the run directory to remove this sparse workspace.",
     )
 
 
@@ -193,6 +249,7 @@ def _create_git_worktree_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
             setup_hook=spec.setup_hook,
             mode="git_worktree",
         ),
+        patterns={},
         cleanup_hint=(
             "Remove this workspace with `git worktree remove <workspace>` or "
             "delete the run directory and prune stale worktrees."
@@ -217,6 +274,15 @@ def _normalize_mode(value: str) -> str:
             + ", ".join(sorted(SUPPORTED_WORKSPACE_MODES))
         )
     return mode
+
+
+def _normalize_patterns(patterns: tuple[str, ...]) -> tuple[str, ...]:
+    result: list[str] = []
+    for pattern in patterns:
+        text = str(pattern).replace("\\", "/").strip().strip("/")
+        if text:
+            result.append(text)
+    return tuple(dict.fromkeys(result))
 
 
 def _git_repo_root(path: Path) -> Path:

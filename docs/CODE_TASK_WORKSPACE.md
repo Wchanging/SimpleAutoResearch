@@ -2,7 +2,8 @@
 
 This note captures the V2.1 workspace flow and the first V2.2 workspace-mode
 refactor. It is intentionally descriptive: it should help contributors see
-which assumptions must stay compatible while `copy`, `git_worktree`, and future
+which assumptions must stay compatible while `copy`, `git_worktree`,
+`sparse_copy`, and future
 workspace strategies evolve.
 
 ## Current Flow
@@ -95,12 +96,13 @@ adapters or replace deliberately:
 
 ## V2.2 Workspace Modes
 
-V2.2 adds `simple_ar.code_task.workspace_modes` with two supported modes:
+V2.2 adds `simple_ar.code_task.workspace_modes` with three supported modes:
 
 | Mode | Behavior | Best use | Current limits |
 | --- | --- | --- | --- |
 | `copy` | Recursively copies source files with the existing safety skips. | Small projects, teaching examples, and safest default runs. | Large repositories can be slow and duplicate storage. |
 | `git_worktree` | Creates a detached git worktree at `code_task/workspace` from the current source commit. | Medium or large git repositories where copying every run is wasteful. | `code_root` must currently be the repository root; subdirectory worktrees are deferred until cwd and dependency mapping are richer. |
+| `sparse_copy` | Copies only selected include patterns after applying built-in and user exclude rules. | Small known subsets or experiments where the user understands required files. | Experimental; it can omit runtime dependencies and is not the default recommendation for general projects. |
 
 `manifest.json` now keeps the old top-level `copy` section for compatibility
 and adds a new top-level `workspace` section:
@@ -124,6 +126,11 @@ and adds a new top-level `workspace` section:
       "dependency_files": ["pyproject.toml"],
       "reuse_source_venv": false,
       "setup_hook_executed": false
+    },
+    "patterns": {
+      "include": ["src/**", "tests/**", "benchmark.py"],
+      "exclude": ["data/**", "models/**"],
+      "risk": "sparse_copy may omit runtime dependencies."
     }
   }
 }
@@ -173,8 +180,8 @@ class WorkspaceResult:
 For V2.2, `copy` is the compatibility implementation that wraps the current
 `copy_code_workspace`. `git_worktree` returns the same `workspace_dir` /
 `writable_root` shape while recording git provenance and environment mapping.
-`sparse_copy` should remain experimental until dependency breakage and
-include/exclude behavior are well understood.
+`sparse_copy` is implemented as an experimental allowlist copy and records
+include/exclude patterns plus a dependency-risk note in the manifest.
 
 ## Migration Order
 
@@ -202,8 +209,10 @@ include/exclude behavior are well understood.
 5. Keep `code_task_paths(...).workspace_dir` stable until all downstream modules
    are attempt-aware and workspace-mode-aware. Still active.
 6. Add `git_worktree` after copy mode is fully covered by tests. Minimal
-   repo-root support is implemented; subdirectory and sparse modes are still
-   deferred.
+   repo-root support is implemented; subdirectory worktrees are still deferred.
+7. Add experimental `sparse_copy` after worktree diagnostics are stable. Done
+   for include/exclude patterns, built-in risky-path exclusions, and manifest
+   recording; it remains documented as non-default.
 
 ## Day 1 Conclusions
 

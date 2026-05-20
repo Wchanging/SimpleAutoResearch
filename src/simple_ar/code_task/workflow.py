@@ -56,6 +56,8 @@ def initialize_code_task(
     benchmark_command: str | None = None,
     max_file_bytes: int = 2_000_000,
     workspace_mode: str = "copy",
+    workspace_include: tuple[str, ...] = (),
+    workspace_exclude: tuple[str, ...] = (),
     workspace_reuse_source_venv: bool = False,
     workspace_setup_hook: str = "",
     env_mode: str = "current",
@@ -71,11 +73,14 @@ def initialize_code_task(
         task_file: Markdown or text file describing the requested change.
         benchmark_command: Optional validation command to record for later
             stages. It is not executed during init.
-        max_file_bytes: Maximum file size copied in ``copy`` mode. Use ``0``
-            to disable the size guard.
+        max_file_bytes: Maximum file size copied in ``copy`` and
+            ``sparse_copy`` modes. Use ``0`` to disable the size guard.
         workspace_mode: Workspace strategy. ``copy`` preserves the V2.1
             behavior; ``git_worktree`` creates a detached git worktree when
-            ``code_root`` is a repository root.
+            ``code_root`` is a repository root; ``sparse_copy`` is experimental.
+        workspace_include: POSIX glob patterns copied by sparse mode.
+        workspace_exclude: Additional POSIX glob patterns skipped by sparse
+            mode.
         workspace_reuse_source_venv: Whether a detected source ``.venv`` may
             be used as the initial external Python interpreter.
         workspace_setup_hook: Optional setup command recorded for future
@@ -122,6 +127,8 @@ def initialize_code_task(
             task_dir=task_dir,
             mode=workspace_mode,
             max_file_bytes=max_file_bytes,
+            include=workspace_include,
+            exclude=workspace_exclude,
             reuse_source_venv=workspace_reuse_source_venv,
             setup_hook=workspace_setup_hook,
         )

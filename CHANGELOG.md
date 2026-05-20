@@ -9,6 +9,9 @@ This file records user-visible project changes in reverse chronological order. P
 - Added V2.2 code-task workspace modes: `copy` remains the default, and
   `git_worktree` can create a detached worktree at `code_task/workspace` for
   repo-root git projects.
+- Added experimental `sparse_copy` workspace mode with include/exclude patterns,
+  built-in exclusions for data/model/cache/secret-like paths, and manifest
+  pattern/risk recording.
 - Added `[workspace]` config support plus CLI flags for standalone and embedded
   code-task runs: workspace mode, source virtualenv reuse, and recorded setup
   hooks.

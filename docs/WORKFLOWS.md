@@ -39,7 +39,9 @@ Key boundaries:
 
 - The source project is prepared under `code_task/workspace`; default `copy`
   mode creates a guarded physical copy, while `git_worktree` creates a detached
-  worktree for repo-root git projects. The original code is never modified.
+  worktree for repo-root git projects. Experimental `sparse_copy` copies only
+  configured include patterns and always excludes data/model/cache/secret-like
+  paths. The original code is never modified.
 - Patch application is gated by an explicit human approval step.
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
 - Multiple ordered edits may target one file, but every `old` block must remain
@@ -48,8 +50,8 @@ Key boundaries:
   and proposal review unless the user explicitly continues.
 - Current execution uses workspace isolation plus an explicit interpreter
   policy. It supports `current` and `external`; managed environment creation is
-  planned later. `workspace.reuse_source_venv` can point a worktree/copy run at
-  an existing source `.venv` Python without installing dependencies.
+  planned later. `workspace.reuse_source_venv` can point a worktree/copy/sparse
+  run at an existing source `.venv` Python without installing dependencies.
 
 Bundled examples:
 

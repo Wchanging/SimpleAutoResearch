@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,63 @@ DEFAULT_IGNORED_SUFFIXES = {
     ".pyd",
     ".pyo",
 }
+
+DEFAULT_SPARSE_EXCLUDE_PATTERNS = (
+    ".git/**",
+    ".hg/**",
+    ".svn/**",
+    ".venv/**",
+    "venv/**",
+    "__pycache__/**",
+    "**/__pycache__/**",
+    ".pytest_cache/**",
+    ".mypy_cache/**",
+    ".ruff_cache/**",
+    ".simple_ar_cache/**",
+    "node_modules/**",
+    "build/**",
+    "dist/**",
+    "runs/**",
+    "data/**",
+    "**/data/**",
+    "models/**",
+    "**/models/**",
+    "cache/**",
+    ".cache/**",
+    "**/.cache/**",
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    "*secret*",
+    "**/*secret*",
+    "*credential*",
+    "**/*credential*",
+)
+
+DEFAULT_SPARSE_INCLUDE_PATTERNS = (
+    "*.py",
+    "**/*.py",
+    "*.toml",
+    "*.cfg",
+    "*.ini",
+    "*.yaml",
+    "*.yml",
+    "*.txt",
+    "*.md",
+    "requirements*.txt",
+    "uv.lock",
+    "Pipfile",
+    "poetry.lock",
+    "src/**",
+    "tests/**",
+    "configs/**",
+    "config/**",
+    "benchmark.py",
+    "**/benchmark.py",
+    "bench.py",
+    "**/bench.py",
+)
 
 MAX_RECORDED_SKIPS = 200
 
@@ -157,6 +215,100 @@ def copy_code_workspace(
     )
 
 
+def sparse_copy_code_workspace(
+    code_root: Path,
+    workspace_dir: Path,
+    *,
+    include_patterns: tuple[str, ...] = (),
+    exclude_patterns: tuple[str, ...] = (),
+    max_file_bytes: int = 2_000_000,
+) -> CopyReport:
+    """Copy selected source files into an isolated workspace.
+
+    Sparse copy is intentionally experimental. It is useful when the user knows
+    the project subset needed for a task, but it can omit runtime dependencies
+    in larger projects. Exclude rules always include cache/build/data/model and
+    secret-like paths before user-supplied patterns are applied.
+
+    Args:
+        code_root: Existing project or benchmark directory to copy from.
+        workspace_dir: Destination workspace inside the code-task run.
+        include_patterns: POSIX-style glob patterns to copy. When omitted,
+            conservative source/config/test defaults are used.
+        exclude_patterns: Additional POSIX-style glob patterns to skip.
+        max_file_bytes: Maximum size for files to copy. Use ``0`` to disable
+            this size guard.
+
+    Returns:
+        Summary of copied and skipped paths.
+    """
+    source = Path(code_root).resolve()
+    workspace = Path(workspace_dir).resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"Code root does not exist: {source}")
+    if not source.is_dir():
+        raise NotADirectoryError(f"Code root is not a directory: {source}")
+    if max_file_bytes < 0:
+        raise ValueError("max_file_bytes must be >= 0")
+    if workspace.exists() and any(workspace.iterdir()):
+        raise FileExistsError(f"Workspace already contains files: {workspace}")
+
+    includes = _normalize_patterns(include_patterns or DEFAULT_SPARSE_INCLUDE_PATTERNS)
+    excludes = _normalize_patterns(DEFAULT_SPARSE_EXCLUDE_PATTERNS + tuple(exclude_patterns))
+    workspace.mkdir(parents=True, exist_ok=True)
+    skipped: list[dict[str, Any]] = []
+    skipped_count = 0
+    files_copied = 0
+    bytes_copied = 0
+
+    for current, dirnames, filenames in os.walk(source):
+        current_path = Path(current)
+        filtered_dirnames: list[str] = []
+        for dirname in dirnames:
+            path = current_path / dirname
+            rel_path = _relative_posix(source, path)
+            reason = _skip_dir_reason(path, source, workspace) or _sparse_dir_skip_reason(
+                rel_path,
+                exclude_patterns=excludes,
+            )
+            if reason:
+                skipped_count += 1
+                _record_skip(skipped, source, path, "dir", reason)
+                continue
+            filtered_dirnames.append(dirname)
+        dirnames[:] = filtered_dirnames
+
+        for filename in filenames:
+            path = current_path / filename
+            rel_path = _relative_posix(source, path)
+            reason = (
+                _skip_file_reason(path, max_file_bytes=max_file_bytes)
+                or _sparse_file_skip_reason(
+                    rel_path,
+                    include_patterns=includes,
+                    exclude_patterns=excludes,
+                )
+            )
+            if reason:
+                skipped_count += 1
+                _record_skip(skipped, source, path, "file", reason)
+                continue
+
+            destination = _safe_destination(workspace, Path(rel_path))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            copied_size = destination.stat().st_size
+            files_copied += 1
+            bytes_copied += copied_size
+
+    return CopyReport(
+        files_copied=files_copied,
+        bytes_copied=bytes_copied,
+        skipped_count=skipped_count,
+        skipped=tuple(skipped),
+    )
+
+
 def _skip_dir_reason(path: Path, source: Path, workspace: Path) -> str | None:
     name = path.name
     if path.is_symlink():
@@ -211,6 +363,51 @@ def _record_skip(
     except ValueError:
         relative = str(path)
     skipped.append({"path": relative, "kind": kind, "reason": reason})
+
+
+def _normalize_patterns(patterns: tuple[str, ...]) -> tuple[str, ...]:
+    result: list[str] = []
+    for pattern in patterns:
+        text = str(pattern).replace("\\", "/").strip().strip("/")
+        if text:
+            result.append(text)
+    return tuple(dict.fromkeys(result))
+
+
+def _sparse_dir_skip_reason(
+    relative_path: str,
+    *,
+    exclude_patterns: tuple[str, ...],
+) -> str | None:
+    rel = relative_path.rstrip("/")
+    if _matches_any(rel, exclude_patterns) or _matches_any(rel + "/placeholder", exclude_patterns):
+        return "sparse_excluded_dir"
+    return None
+
+
+def _sparse_file_skip_reason(
+    relative_path: str,
+    *,
+    include_patterns: tuple[str, ...],
+    exclude_patterns: tuple[str, ...],
+) -> str | None:
+    if _matches_any(relative_path, exclude_patterns):
+        return "sparse_excluded_file"
+    if not _matches_any(relative_path, include_patterns):
+        return "sparse_not_included"
+    return None
+
+
+def _matches_any(relative_path: str, patterns: tuple[str, ...]) -> bool:
+    path = relative_path.replace("\\", "/").strip("/")
+    return any(fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def _relative_posix(source: Path, path: Path) -> str:
+    try:
+        return path.relative_to(source).as_posix()
+    except ValueError:
+        return str(path).replace("\\", "/")
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
