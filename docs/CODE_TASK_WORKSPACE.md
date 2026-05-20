@@ -18,6 +18,7 @@ user config / CLI
 -> build_codebase_index
 -> build_repo_map
 -> optional code-task map refresh
+-> optional locate/context-pack refresh
 -> probe_code_task_environment
 -> run_code_task_baseline
 -> generate_patch_plan
@@ -37,6 +38,8 @@ code_root
 -> code_task/workspace
 -> code_task/meta/codebase_index.json
 -> code_task/meta/repo_map.json
+-> code_task/meta/locate_results.json
+-> code_task/context_packs/context-NNN/
 -> code_task/run/<baseline|patched>/
 ```
 
@@ -56,6 +59,8 @@ is a detached git worktree created from the source repository root.
 | `code_task/state.py` | Centralizes run paths and manifest helpers. | Hard-codes `code_task/workspace` as the editable root. |
 | `code_task/index.py` | Builds inventory and AST summaries from the workspace. | Reads local files under `workspace_dir`. |
 | `code_task/repo_map.py` | Builds layered project, directory, file, symbol, entrypoint, test, benchmark, and config maps from the index. | Keeps `codebase_index.json` compatible while adding `repo_map.json` and `repo_map_summary.md`. |
+| `code_task/locate.py` | Ranks likely editable targets and read-only evidence from the repo map. | Does not read outside the run workspace and writes only metadata artifacts. |
+| `code_task/context.py` | Builds bounded context packs from locate results and workspace snippets. | Reads selected workspace-relative files and preserves editable/read-only separation. |
 | `code_task/environment.py` | Observes platform, tools, dependency files, test dirs, GPU, and interpreter policy. | Probes `workspace_dir` only; does not install dependencies. |
 | `code_task/runner.py` | Runs benchmark commands with timeout and restricted env. | Uses `cwd=workspace_dir`; injects `workspace` and `workspace/src` into `PYTHONPATH`. |
 | `code_task/planning.py` | Selects context files and asks for a patch plan. | Reads files from `workspace_dir` and references workspace-relative paths. |
@@ -79,6 +84,33 @@ is a detached git worktree created from the source repository root.
   stderr, parsed metrics, timeout, and interpreter policy.
 - Environment probing is observational; it does not import project modules,
   run tests, install dependencies, or mutate the workspace.
+
+## Current Controlled-Patch Limit
+
+The V2.2 Day 14 LLM smoke exposed a real boundary of the current
+`controlled_patch` backend. The prompt/context pack can be reasonably small,
+but an OpenAI-compatible model may still generate a very large JSON edit
+proposal, especially when it tries to rewrite whole files or include long
+`old`/`new` replacement blocks. Because the current provider call is
+non-streaming, the CLI waits until the provider finishes the full completion;
+long completions can therefore look like a local hang even when the provider is
+still generating text.
+
+This does not mean context packs should be removed. It means the editor layer
+needs stronger output contracts and routing:
+
+- `controlled_patch` should remain the default backend for small and medium
+  reviewable edits.
+- Each attempt should bound editable files, edit count, `old`/`new` text
+  length, total proposal size, provider output tokens, and request time.
+- Oversized edits, suspected full-file rewrites, protected-path edits, and
+  out-of-scope paths should be dropped or marked with warnings before apply.
+- When context is insufficient, the model should be able to return a
+  `context_request` artifact instead of inventing a large patch.
+- Larger refactors should be decomposed into multiple attempts or routed later
+  to an external coding-agent backend such as Codex, Claude Code, or OpenCode,
+  while SimpleAutoResearch still owns diff review, safety checks, validation,
+  benchmark execution, and summaries.
 
 ## Hidden V2.1 Assumptions
 

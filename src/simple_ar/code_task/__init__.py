@@ -23,6 +23,13 @@ from simple_ar.code_task.comparison import (
     CodeTaskComparisonResult,
     compare_code_task_runs,
 )
+from simple_ar.code_task.context import (
+    CodeTaskContextPackResult,
+    LoadedCodeTaskContextPack,
+    build_code_task_context_pack,
+    load_latest_code_task_context_pack,
+    render_prompt_context,
+)
 from simple_ar.code_task.config import (
     CodeTaskConfigError,
     CodeTaskInitOptions,
@@ -30,6 +37,11 @@ from simple_ar.code_task.config import (
     parse_metric_direction_arg,
 )
 from simple_ar.code_task.failure import FailureAnalysisResult, analyze_code_task_failure
+from simple_ar.code_task.locate import (
+    CodeTaskLocateResult,
+    locate_code_task_context,
+    render_locate_summary,
+)
 from simple_ar.code_task.repair import RepairProposalResult, propose_repair_edits
 from simple_ar.code_task.repo_map import (
     RepoMapBuildResult,
@@ -68,6 +80,9 @@ __all__ = [
     "ExecuteStepRecord",
     "CodeTaskConfigError",
     "CodeTaskInitOptions",
+    "CodeTaskContextPackResult",
+    "CodeTaskLocateResult",
+    "LoadedCodeTaskContextPack",
     "WorkspaceModeError",
     "WorkspaceResult",
     "WorkspaceSpec",
@@ -84,9 +99,14 @@ __all__ = [
     "propose_patch_edits",
     "propose_repair_edits",
     "build_code_task_repo_map",
+    "build_code_task_context_pack",
     "build_repo_map",
     "render_repo_map_summary",
+    "locate_code_task_context",
+    "load_latest_code_task_context_pack",
     "record_plan_decision",
+    "render_locate_summary",
+    "render_prompt_context",
     "run_code_task_benchmark",
     "run_code_task_baseline",
     "validate_code_task",

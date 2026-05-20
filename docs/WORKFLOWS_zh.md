@@ -184,6 +184,8 @@ runs/<run-id>/
       codebase_index.json
       repo_map.json
       repo_map_summary.md
+      locate_results.json
+      locate_results.md
       hitl_decisions.jsonl
       proposed_edits.json
       applied_edits.json
@@ -191,6 +193,11 @@ runs/<run-id>/
       failure_analysis.md
       llm_usage.jsonl
       llm_usage_summary.json
+    context_packs/
+      context-001/
+        context_pack.json
+        prompt_context.md
+        selected_snippets.jsonl
     run/
       comparison.json
       baseline/
@@ -212,7 +219,8 @@ runs/<run-id>/
 重要目录：
 
 - `workspace/`：源项目的可编辑副本、worktree 或 sparse subset。
-- `meta/`：环境报告、索引、决策、proposal、applied edit summary、validation report、failure analysis 和 LLM usage。
+- `meta/`：环境报告、索引、locate results、决策、proposal、applied edit summary、validation report、failure analysis 和 LLM usage。
+- `context_packs/`：从 locate results 和 workspace snippets 派生的受限 prompt context pack。
 - `run/`：带 label 的 benchmark stdout/stderr、execution report、parsed metrics、before/after comparison 和 benchmark failure analysis。
 - `repairs/`：按 attempt 分组的 bounded repair proposal。
 
@@ -222,11 +230,17 @@ runs/<run-id>/
 - tests 和 benchmark 文件默认受 edit scope 保护。它们可以作为只读证据被索引，但 `propose-edits`、`repair` 和 `apply-edits` 不应修改它们。
 - `meta/environment_report.json`：OS/Python/tool/GPU/project probe。
 - `meta/repo_map.json`：从 `codebase_index.json` 派生的 project/directory/file/symbol/entrypoint/test/benchmark/config 分层 map。
-- `meta/repo_map_summary.md`：人类可读的紧凑 repo-map summary，以及未来 context pack 使用的 prompt-budget 说明。
+- `meta/repo_map_summary.md`：人类可读的紧凑 repo-map summary 和 prompt-budget 说明。
+- `meta/locate_results.json`：确定性排序后的 editable targets 和 protected read-only evidence。
+- `meta/locate_results.md`：便于人工检查的 locate summary。
+- `context_packs/context-NNN/context_pack.json`：选择文件、预算、来源 artifact 和省略文件记录。
+- `context_packs/context-NNN/prompt_context.md`：按 editable targets / read-only evidence 分组的 prompt-ready Markdown。
+- `context_packs/context-NNN/selected_snippets.jsonl`：实际截断后的源码片段，每个文件一行。
 - `run/baseline/execution_report.json`：pre-patch benchmark result。
 - `run/patched/execution_report.json`：post-patch benchmark result。
 - `run/comparison.json`：baseline/patched metric deltas 和保守 verdict。
 - `patch_plan.md`：编辑前供人审核的计划，包含已记录环境、validation 和 baseline context。
+- 如果存在 latest context pack，`patch_plan.md` 会记录其路径，并优先使用其中的 selected snippets，而不是旧的 index-only 文件选择。
 - `patch.diff`：应用后的补丁，便于 review。
 - `meta/applied_edits.json`：被修改文件及 before/after hash。
 

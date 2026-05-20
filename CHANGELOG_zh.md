@@ -11,12 +11,17 @@
 - 添加 Day 8 V2.2 分层 repo-map 产物：`code_task/meta/repo_map.json` 和 `code_task/meta/repo_map_summary.md`。
 - Repo-map schema 包含 project、directory、file、symbol、entrypoint、test、benchmark、config 和 prompt-budget 层，同时保留 `codebase_index.json` 兼容旧流程。
 - 添加 `simple-ar code-task map`，可以作为独立步骤从当前 workspace 重建 repo-map 产物。
+- 添加 `simple-ar code-task locate`，可以从 repo map 中排序 likely editable targets 和 protected read-only evidence。
+- 添加 `simple-ar code-task context`，可以在 `code_task/context_packs/context-NNN/` 下生成受预算限制的 prompt context pack。
 - 添加 `simple-ar-checks` 和 `scripts/run_checks.py`，支持 `quick`、`code-task`、`pipeline`、`research`、`all` 等分层开发验证组。
 
 ### Changed
 
 - Code-task 初始化现在同时写旧 codebase index 和新 repo map；补丁应用后也会同步重建两个产物。
+- Code-task 文档现在说明 `map -> locate -> context` 路径，便于大项目在规划/编辑前先缩小上下文。
+- Patch planning 现在会在存在 latest context pack 时优先使用它；controlled edit proposal 只读取其中 editable snippets，并继续把保护文件作为 read-only evidence。
 - 开发文档现在推荐迭代时使用目标测试组，把完整测试发现保留给提交、推送或大范围重构前。
+- V2.2 计划和 workspace 文档现在记录 Day 14 真实 LLM smoke 暴露的问题：普通 JSON patch proposal 可能触发很长 completion，因此后续 editor-backend 工作需要加入 bounded proposal contract、context request artifact、多轮 attempt 和 future external coding-agent routing。
 
 ## 2026-05-19
 

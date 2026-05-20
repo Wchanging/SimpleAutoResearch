@@ -71,10 +71,15 @@ The code-task workflow is split into small modules:
 - `config.py`: TOML config and CLI override resolution for code-task init.
 - `environment.py`: environment observation and execution-interpreter policy.
 - `index.py`: codebase inventory and Python AST summaries.
-- `repo_map.py`: layered repo map derived from the index for future locate and
-  context-pack steps.
-- `planning.py`: patch planning and HITL decisions.
-- `patching.py`: controlled old/new edit proposal and application.
+- `repo_map.py`: layered repo map derived from the index.
+- `locate.py`: deterministic ranking of editable targets and read-only
+  evidence from the repo map.
+- `context.py`: bounded context-pack generation from locate results and
+  workspace snippets.
+- `planning.py`: patch planning and HITL decisions. It uses the latest context
+  pack when available, with index-selection fallback.
+- `patching.py`: controlled old/new edit proposal and application. It uses
+  only editable context-pack snippets for model edit proposals.
 - `validation.py`: syntax and static safety checks.
 - `runner.py`: benchmark execution in the editable workspace.
 - `comparison.py`: baseline-vs-patched metric comparison.

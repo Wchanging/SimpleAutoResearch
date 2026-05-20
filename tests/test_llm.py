@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import unittest
+from unittest.mock import patch
 
 from simple_ar.llm import LLMClient, LLMError, LLMRequest, estimate_tokens, parse_json_object
 
@@ -43,6 +45,29 @@ class LLMParsingTests(unittest.TestCase):
 
         with self.assertRaises(LLMError):
             LLMClient.ask_many(client, requests, max_workers=0)
+
+    def test_from_env_configures_provider_timeout(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "test-key",
+                "OPENAI_BASE_URL": "https://example.test/v1",
+                "SIMPLE_AR_MODEL": "test-model",
+                "SIMPLE_AR_LLM_TIMEOUT_SEC": "42.5",
+                "SIMPLE_AR_MAX_OUTPUT_TOKENS": "1234",
+            },
+            clear=True,
+        ), patch("simple_ar.llm.OpenAI") as openai:
+            client = LLMClient.from_env()
+
+        self.assertEqual(client.model, "test-model")
+        self.assertEqual(client._settings.request_timeout_sec, 42.5)
+        self.assertEqual(client._settings.max_output_tokens, 1234)
+        openai.assert_called_once_with(
+            api_key="test-key",
+            timeout=42.5,
+            base_url="https://example.test/v1",
+        )
 
     def test_estimate_tokens_is_deterministic_and_nonzero_for_text(self) -> None:
         self.assertEqual(estimate_tokens(""), 0)

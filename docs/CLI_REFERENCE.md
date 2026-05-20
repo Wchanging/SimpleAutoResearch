@@ -288,7 +288,7 @@ git repository root, make an initial local commit, or choose `copy` mode.
 Recommended order:
 
 ```text
-init -> map -> probe -> baseline -> plan -> decide-plan
+init -> map -> locate -> context -> probe -> baseline -> plan -> decide-plan
 -> propose-edits -> apply-edits -> validate -> run
 -> analyze-failure -> repair
 ```
@@ -410,8 +410,59 @@ uv run simple-ar code-task map runs/<run-id>
 
 `map` is deterministic. It does not call the LLM, run project code, install
 dependencies, or patch files. Its purpose is to make project structure
-inspectable and to provide the base artifact for future locate/context-pack
-steps.
+inspectable and to provide the base artifact for locate/context-pack steps.
+
+### Locate And Context Pack
+
+Rank likely files before asking the model to plan or edit:
+
+```bash
+uv run simple-ar code-task locate runs/<run-id> --query "improve spam keyword prediction"
+```
+
+| Command/Option | Meaning |
+| --- | --- |
+| `locate RUN_DIR` | Write `code_task/meta/locate_results.json` and `locate_results.md`. |
+| `--query TEXT` | Optional locate query. Defaults to `code_task/task.md`. |
+| `--top-k N` | Maximum candidates kept in each editable/evidence group. Default: `8`. |
+| `--refresh-map` | Rebuild the codebase index and repo map before ranking files. |
+| `--no-read-only` | Omit protected read-only evidence such as tests and benchmarks. |
+| `--show-summary` | Print `locate_results.md` after writing it. |
+
+`locate` is deterministic. It scores path names, summaries, imports, role tags,
+and symbol names from `repo_map.json`, then separates editable targets from
+read-only evidence. It is meant to answer "where should a coding agent look
+first?" without reading every source file into the prompt.
+
+Build a bounded prompt-ready context pack:
+
+```bash
+uv run simple-ar code-task context runs/<run-id> \
+  --query "improve spam keyword prediction" \
+  --max-files 8 \
+  --max-total-chars 20000
+```
+
+| Command/Option | Meaning |
+| --- | --- |
+| `context RUN_DIR` | Write a new `code_task/context_packs/context-NNN/` directory. |
+| `--query TEXT` | Optional locate query. Defaults to `code_task/task.md`. |
+| `--top-k N` | Locate candidate budget per group. Default: `8`. |
+| `--max-files N` | Maximum snippets included across editable and read-only files. |
+| `--max-source-chars-per-file N` | Per-file snippet character budget. |
+| `--max-total-chars N` | Total source snippet character budget. |
+| `--refresh-map` | Rebuild the map before locating and packing context. |
+| `--show-prompt` | Print the generated `prompt_context.md`. |
+
+`context` writes:
+
+- `context_pack.json`: budget, selected files, omitted files, and source artifact references.
+- `prompt_context.md`: Markdown context grouped into editable targets and read-only evidence.
+- `selected_snippets.jsonl`: the actual clipped source snippets, one file per row.
+
+This command does not call the LLM or modify files. When a latest context pack
+exists, `plan` reads it for planning context and `propose-edits` reads only its
+editable snippets while keeping protected files as read-only evidence.
 
 ### Manual Command Path
 
@@ -420,6 +471,8 @@ yourself:
 
 ```bash
 uv run simple-ar code-task map runs/<run-id>
+uv run simple-ar code-task locate runs/<run-id>
+uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 uv run simple-ar code-task plan runs/<run-id>

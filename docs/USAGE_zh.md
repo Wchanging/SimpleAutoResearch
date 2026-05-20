@@ -51,6 +51,8 @@ Copy-Item .env.example .env
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
+SIMPLE_AR_LLM_TIMEOUT_SEC=120
+SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -60,6 +62,8 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `OPENAI_API_KEY` 是 LLM 模式必需项。
 - `OPENAI_BASE_URL` 可以指向 OpenAI，也可以指向第三方 OpenAI 兼容 `/v1` 接口。
 - `SIMPLE_AR_MODEL` 是没有传入 `--model` 时的默认模型。
+- `SIMPLE_AR_LLM_TIMEOUT_SEC` 限制单次 provider 请求等待时间；较大的 coding prompt 如果确实需要更久，可以适当调高。
+- `SIMPLE_AR_MAX_OUTPUT_TOKENS` 限制模型输出长度，避免较长 coding prompt 生成过大的结果。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
 
 ## Research Pipeline：从主题到报告
@@ -193,12 +197,38 @@ uv run simple-ar code-task map runs/<run-id>
 
 `map` 会扫描当前 `code_task/workspace/`，刷新 `code_task/meta/codebase_index.json`，写入 `code_task/meta/repo_map.json` 和 `code_task/meta/repo_map_summary.md`，并更新 `manifest.json`。它不会调用 LLM、不会安装依赖、不会运行 benchmark，也不会修改原始项目。
 
+定位最可能相关的可编辑文件和只读证据：
+
+```bash
+uv run simple-ar code-task locate runs/<run-id> --query "improve spam keyword prediction"
+```
+
+`locate` 会写入 `code_task/meta/locate_results.json` 和
+`code_task/meta/locate_results.md`。它基于 repo map 对 path、summary、
+imports、role tags 和 symbols 做轻量排序，并把 editable targets 与
+read-only evidence 分开。它不会调用 LLM，也不会修改文件。
+
+构建受预算限制的 prompt context pack：
+
+```bash
+uv run simple-ar code-task context runs/<run-id> --max-files 8 --max-total-chars 20000
+```
+
+`context` 会创建 `code_task/context_packs/context-NNN/`，其中包含
+`context_pack.json`、`prompt_context.md` 和 `selected_snippets.jsonl`。
+这些文件记录选择了哪些源码片段、哪些文件因为预算被省略、哪些内容只作为证据
+而不能被自动修改。当前如果存在 latest context pack，`plan` 会优先使用它作为
+规划上下文，`propose-edits` 只会读取其中 editable snippets，并继续把 tests /
+benchmarks 作为 read-only evidence。
+
 ### Manual Path
 
 先探测环境并运行未修改 baseline：
 
 ```bash
 uv run simple-ar code-task map runs/<run-id>
+uv run simple-ar code-task locate runs/<run-id>
+uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 ```

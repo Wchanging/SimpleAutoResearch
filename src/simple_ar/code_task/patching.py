@@ -22,6 +22,10 @@ from simple_ar.code_task.edit_scope import (
     is_protected_edit_path,
     protected_patterns_from_manifest,
 )
+from simple_ar.code_task.context import (
+    LoadedCodeTaskContextPack,
+    load_latest_code_task_context_pack,
+)
 from simple_ar.code_task.index import build_codebase_index
 from simple_ar.code_task.planning import select_relevant_files
 from simple_ar.code_task.repo_map import build_repo_map
@@ -134,29 +138,61 @@ def propose_patch_edits(
     patch_plan = _read_required_text(task_dir / "patch_plan.md")
     index = _read_required_json(meta_dir / "codebase_index.json")
     protected_patterns = protected_patterns_from_manifest(manifest)
-    selected_context = _selected_context_files(
-        manifest,
-        index,
-        task_text=task_text,
-        patch_plan=patch_plan,
-        max_files=max_files,
-    )
-    selected = _editable_context_files(
-        index,
-        selected_context,
-        protected_patterns=protected_patterns,
-        max_files=max_files,
-    )
-    read_only_context = [
-        path
-        for path in selected_context
-        if is_protected_edit_path(path, protected_patterns=protected_patterns)
-    ]
-    snippets = _source_snippets(
-        workspace_dir,
-        selected,
-        max_chars_per_file=max_source_chars_per_file,
-    )
+    loaded_context = load_latest_code_task_context_pack(root)
+    context_pack_ref: dict[str, Any] | None = None
+    if loaded_context is not None:
+        selected_context = _context_pack_files(loaded_context, max_files=max_files)
+        selected = _context_pack_editable_files(
+            loaded_context,
+            protected_patterns=protected_patterns,
+            max_files=max_files,
+        )
+        read_only_context = _context_pack_read_only_files(
+            loaded_context,
+            protected_patterns=protected_patterns,
+            max_files=max_files,
+        )
+        snippets = _context_pack_editable_snippets(
+            loaded_context,
+            selected_files=selected,
+            max_chars_per_file=max_source_chars_per_file,
+        )
+        context_pack_ref = _context_pack_manifest_ref(root, loaded_context)
+        _emit(message_callback, f"Using code-task context pack: {context_pack_ref['path']}")
+        if not selected:
+            _emit(message_callback, "Context pack has no editable snippets; falling back to index selection.")
+            selected_context = []
+            context_pack_ref = None
+    else:
+        selected_context = []
+        selected = []
+        read_only_context = []
+        snippets = []
+
+    if not selected_context:
+        selected_context = _selected_context_files(
+            manifest,
+            index,
+            task_text=task_text,
+            patch_plan=patch_plan,
+            max_files=max_files,
+        )
+        selected = _editable_context_files(
+            index,
+            selected_context,
+            protected_patterns=protected_patterns,
+            max_files=max_files,
+        )
+        read_only_context = [
+            path
+            for path in selected_context
+            if is_protected_edit_path(path, protected_patterns=protected_patterns)
+        ]
+        snippets = _source_snippets(
+            workspace_dir,
+            selected,
+            max_chars_per_file=max_source_chars_per_file,
+        )
 
     mode = "offline"
     proposal: dict[str, Any] | None = None
@@ -194,12 +230,16 @@ def propose_patch_edits(
         mode=mode,
         protected_patterns=protected_patterns,
     )
+    normalized["selected_files"] = selected
+    normalized["read_only_context"] = read_only_context
+    normalized["context_pack"] = context_pack_ref
     write_json(proposal_path, normalized)
     _update_manifest_after_proposal(
         manifest_path,
         manifest,
         selected_files=selected,
         read_only_context=read_only_context,
+        context_pack=context_pack_ref,
         proposal=normalized,
     )
     return ProposedEditsResult(
@@ -359,7 +399,9 @@ def _edit_user_prompt(
         for item in _index_files(index)
     ]
     snippet_text = "\n\n".join(
-        f"### {item['path']}\n```text\n{item['text']}\n```"
+        f"### {item.get('path', '')} "
+        f"({item.get('access_role', 'editable')})\n"
+        f"```text\n{item.get('text', '')}\n```"
         for item in snippets
     )
     return (
@@ -616,6 +658,106 @@ def _selected_context_files(
     return selected[: max(1, max_files)]
 
 
+def _context_pack_files(
+    loaded: LoadedCodeTaskContextPack,
+    *,
+    max_files: int,
+) -> list[str]:
+    selected: list[str] = []
+    for path in loaded.selected_files:
+        if path not in selected:
+            selected.append(path)
+        if len(selected) >= max(1, max_files):
+            break
+    return selected
+
+
+def _context_pack_editable_files(
+    loaded: LoadedCodeTaskContextPack,
+    *,
+    protected_patterns: tuple[str, ...],
+    max_files: int,
+) -> list[str]:
+    selected: list[str] = []
+    for row in loaded.snippets:
+        path = _string(row.get("path"))
+        if not path or path in selected:
+            continue
+        role = str(row.get("access_role", "editable"))
+        if role != "editable" or is_protected_edit_path(path, protected_patterns=protected_patterns):
+            continue
+        selected.append(path)
+        if len(selected) >= max(1, max_files):
+            break
+    return selected
+
+
+def _context_pack_read_only_files(
+    loaded: LoadedCodeTaskContextPack,
+    *,
+    protected_patterns: tuple[str, ...],
+    max_files: int,
+) -> list[str]:
+    selected: list[str] = []
+    for row in loaded.snippets:
+        path = _string(row.get("path"))
+        if not path or path in selected:
+            continue
+        role = str(row.get("access_role", "editable"))
+        if role == "editable" and not is_protected_edit_path(path, protected_patterns=protected_patterns):
+            continue
+        selected.append(path)
+        if len(selected) >= max(1, max_files):
+            break
+    return selected
+
+
+def _context_pack_editable_snippets(
+    loaded: LoadedCodeTaskContextPack,
+    *,
+    selected_files: list[str],
+    max_chars_per_file: int,
+) -> list[dict[str, str]]:
+    selected_set = set(selected_files)
+    snippets: list[dict[str, str]] = []
+    for row in loaded.snippets:
+        path = _string(row.get("path"))
+        text = row.get("text")
+        if path not in selected_set or not isinstance(text, str):
+            continue
+        snippets.append(
+            {
+                "path": path,
+                "access_role": "editable",
+                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
+            }
+        )
+    return snippets
+
+
+def _context_pack_manifest_ref(
+    run_dir: Path,
+    loaded: LoadedCodeTaskContextPack,
+) -> dict[str, Any]:
+    budget = loaded.context_pack.get("budget")
+    if not isinstance(budget, dict):
+        budget = {}
+    return {
+        "path": _relative_to_run(run_dir, loaded.context_pack_path),
+        "prompt_context": _relative_to_run(run_dir, loaded.prompt_context_path),
+        "snippets": _relative_to_run(run_dir, loaded.snippets_path),
+        "selected_files": list(loaded.selected_files),
+        "budget": budget,
+    }
+
+
+def _relative_to_run(run_dir: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(run_dir.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def _editable_context_files(
     index: dict[str, Any],
     selected_files: list[str],
@@ -669,6 +811,7 @@ def _source_snippets(
         snippets.append(
             {
                 "path": rel_path,
+                "access_role": "editable",
                 "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
             }
         )
@@ -681,6 +824,7 @@ def _update_manifest_after_proposal(
     *,
     selected_files: list[str],
     read_only_context: list[str],
+    context_pack: dict[str, Any] | None,
     proposal: dict[str, Any],
 ) -> None:
     edits = proposal.get("edits", [])
@@ -693,6 +837,7 @@ def _update_manifest_after_proposal(
             "proposed_edit_count": len(edits) if isinstance(edits, list) else 0,
             "selected_files": selected_files,
             "read_only_context_files": read_only_context,
+            "context_pack": context_pack,
         }
     )
     layout = _dict_value(manifest, "layout")

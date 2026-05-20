@@ -51,6 +51,8 @@ Supported settings:
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
+SIMPLE_AR_LLM_TIMEOUT_SEC=120
+SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -60,6 +62,10 @@ Notes:
 - `OPENAI_API_KEY` is required for LLM mode.
 - `OPENAI_BASE_URL` can point to OpenAI or a third-party OpenAI-compatible `/v1` endpoint.
 - `SIMPLE_AR_MODEL` is the default model when `--model` is not supplied.
+- `SIMPLE_AR_LLM_TIMEOUT_SEC` bounds each provider request; increase it only
+  when deliberately running large prompts.
+- `SIMPLE_AR_MAX_OUTPUT_TOKENS` limits the model response size for long coding
+  prompts.
 - Price fields are optional and only affect cost estimates in usage summaries.
 
 ## Research Pipeline (Topic To Report)
@@ -234,12 +240,40 @@ uv run simple-ar code-task map runs/<run-id>
 call the LLM, install dependencies, run benchmark code, or modify the original
 source project.
 
+Locate likely files before planning or editing:
+
+```bash
+uv run simple-ar code-task locate runs/<run-id> --query "improve spam keyword prediction"
+```
+
+`locate` writes `code_task/meta/locate_results.json` and
+`code_task/meta/locate_results.md`. It ranks editable targets separately from
+read-only evidence such as tests and benchmarks, using the repo map rather than
+loading the whole project into a prompt. It does not call the LLM or read files
+outside the prepared workspace.
+
+Build a bounded prompt context pack:
+
+```bash
+uv run simple-ar code-task context runs/<run-id> --max-files 8 --max-total-chars 20000
+```
+
+`context` creates `code_task/context_packs/context-NNN/` containing
+`context_pack.json`, `prompt_context.md`, and `selected_snippets.jsonl`. The
+pack records token-like character budgets, selected editable files,
+read-only evidence, truncated snippets, and omitted files. It is a reviewable
+intermediate artifact for LLM planning/editing. When a latest context pack
+exists, `plan` uses it for planning context, while `propose-edits` uses only
+its editable snippets and keeps tests/benchmarks as read-only evidence.
+
 ### Manual Path
 
 Probe the environment and run the unchanged baseline before asking for edits:
 
 ```bash
 uv run simple-ar code-task map runs/<run-id>
+uv run simple-ar code-task locate runs/<run-id>
+uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 ```

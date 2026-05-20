@@ -55,9 +55,11 @@ Code-task workflow 拆分成小模块：
 - `config.py`：code-task init 的 TOML config 和 CLI override 解析。
 - `environment.py`：环境观察和执行解释器策略。
 - `index.py`：代码清单和 Python AST summaries。
-- `repo_map.py`：从 index 派生分层 repo map，供后续 locate 和 context-pack 步骤使用。
-- `planning.py`：patch planning 和 HITL decisions。
-- `patching.py`：controlled old/new edit proposal 与应用。
+- `repo_map.py`：从 index 派生分层 repo map。
+- `locate.py`：基于 repo map 确定性排序 editable targets 和 read-only evidence。
+- `context.py`：从 locate results 和 workspace snippets 构建受预算限制的 context pack。
+- `planning.py`：patch planning 和 HITL decisions；存在 latest context pack 时优先使用它，否则回退到 index selector。
+- `patching.py`：controlled old/new edit proposal 与应用；proposal 阶段只使用 context pack 中的 editable snippets。
 - `validation.py`：语法和静态安全检查。
 - `runner.py`：在 editable workspace 中执行 benchmark。
 - `comparison.py`：baseline-vs-patched metric comparison。

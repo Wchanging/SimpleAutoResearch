@@ -47,11 +47,13 @@ Copy-Item .env.example .env
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
+SIMPLE_AR_LLM_TIMEOUT_SEC=120
+SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
 
-如果使用第三方 OpenAI 兼容接口，把 `OPENAI_BASE_URL` 指向对应服务的 `/v1` 地址即可。价格字段是可选项；不填写时，SimpleAutoResearch 仍会记录 token 数量，但费用估算会显示为 `null`。
+如果使用第三方 OpenAI 兼容接口，把 `OPENAI_BASE_URL` 指向对应服务的 `/v1` 地址即可。`SIMPLE_AR_LLM_TIMEOUT_SEC` 用来限制单次 provider 请求等待时间，`SIMPLE_AR_MAX_OUTPUT_TOKENS` 用来限制较长 coding prompt 的输出规模。价格字段是可选项；不填写时，SimpleAutoResearch 仍会记录 token 数量，但费用估算会显示为 `null`。
 
 ## 快速开始：选择一个工作流
 
@@ -106,6 +108,9 @@ Code Task 有两种运行方式。
 手动路径，适合学习每个步骤：
 
 ```bash
+uv run simple-ar code-task map runs/<run-id>
+uv run simple-ar code-task locate runs/<run-id>
+uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 uv run simple-ar code-task plan runs/<run-id>
@@ -184,7 +189,7 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 - 从 topic 到 report 的 8 阶段流程，产物可见，并支持 resume。
 - OpenAI 兼容 LLM 调用，用于 planning、paper notes、synthesis、report drafting 和 code-task patch planning。
 - 文献优先报告模式：停在 `synthesize` 后继续 `report`，生成 survey 风格报告。
-- Standalone code task：准备已有项目，使用 `copy`、`git_worktree` 或实验性 `sparse_copy` 建立隔离 workspace，探测环境，索引代码，运行 baseline，生成可审核 patch plan，提出受控 edits，应用补丁，验证，运行 patched benchmark，并比较前后指标。
+- Standalone code task：准备已有项目，使用 `copy`、`git_worktree` 或实验性 `sparse_copy` 建立隔离 workspace，探测环境，索引代码，构建 repo map，定位相关文件，生成受限 context pack，运行 baseline，生成可审核 patch plan，提出受控 edits，应用补丁，验证，运行 patched benchmark，并比较前后指标。
 - 默认 edit scope 会保护 tests、benchmark 文件和 secret-like 路径，模型可以读取这些信息作为证据，但不能自动修改它们来刷指标。
 - 支持通过 CLI 或 TOML 配置 benchmark metric 的解释方式。
 - 支持通过 `code_task_project` 把已有代码任务嵌入 8 阶段流程。task file 可以由用户提供，也可以在 `05-design` 自动生成。
@@ -195,12 +200,13 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 - 通用 8 阶段 code-task 路径是真实可运行的，但仍偏保守。它还不是深度多轮、自主配置环境、自动 Docker/Conda/GPU/Slurm 调度的大型 coding agent。
 - 8 阶段内嵌 code-task 为了跑完整流程，会在隔离 workspace 内自动批准 patch plan；如果需要强人工审核，应使用 standalone `code-task`。
 - 当前代码编辑是受控 old/new replacement。它更可审计，但弱于完整 coding agent 的自由多文件、多轮重构能力。
+- 较大的代码修改 proposal 仍可能触发很长的 LLM completion。V2.2 会把它作为 editor backend 设计目标处理：增加 bounded proposal contract、context request、多轮 attempt，以及未来 external coding-agent adapter；在这些能力成熟前，不建议把它当作大型无人值守重构工具。
 - 默认拒绝自动修改 `tests/**`、`test_*.py`、`benchmark.py`、`*benchmark*.py` 等保护路径。
 - 目前不会自动安装项目依赖，也不会自动管理 Docker/Conda/GPU/Slurm 环境。
 - 文献检索主要基于元数据和本地产物片段，还不是完整 PDF 阅读或向量 RAG survey 系统。
 - LLM 报告有规则保护；如果引用、指标或边界声明不合格，会回退到结构化 deterministic report。
 
-V2.2 正在推进 workspace-mode abstraction、git worktree、实验性 sparse-copy 和分层 repo-map 产物。下一步会继续推进 context pack、多轮 attempt、更强任务拆解和更清晰的人类审核路径。
+V2.2 正在推进 workspace-mode abstraction、git worktree、实验性 sparse-copy、分层 repo-map、确定性 locate results 和受限 context pack。下一步会继续推进多轮 attempt、更强任务拆解、环境管理和更清晰的人类审核路径。
 
 ## 文档
 

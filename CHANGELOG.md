@@ -15,6 +15,10 @@ This file records user-visible project changes in reverse chronological order. P
   `codebase_index.json` for compatibility.
 - Added `simple-ar code-task map` to rebuild repo-map artifacts from the
   current workspace as a standalone step.
+- Added `simple-ar code-task locate` to rank likely editable targets and
+  protected read-only evidence from the repo map.
+- Added `simple-ar code-task context` to build bounded prompt context packs
+  under `code_task/context_packs/context-NNN/`.
 - Added `simple-ar-checks` and `scripts/run_checks.py` for layered developer
   validation groups such as `quick`, `code-task`, `pipeline`, `research`, and
   `all`.
@@ -23,8 +27,17 @@ This file records user-visible project changes in reverse chronological order. P
 
 - Code-task initialization now writes both the legacy codebase index and the
   new repo map, and patch application rebuilds both artifacts after edits.
+- Code-task docs now describe the map -> locate -> context path before
+  planning/editing for larger projects.
+- Patch planning now uses the latest context pack when available, while
+  controlled edit proposals use only editable context-pack snippets and keep
+  protected files as read-only evidence.
 - Development docs now recommend targeted check groups during iteration and
   reserving full test discovery for commits, pushes, or broad refactors.
+- V2.2 planning and workspace docs now record the Day 14 real-LLM smoke finding:
+  ordinary JSON patch proposals can trigger very long completions, so the next
+  editor-backend work should add bounded proposal contracts, context-request
+  artifacts, multi-round attempts, and future external coding-agent routing.
 
 ## 2026-05-19
 

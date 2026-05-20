@@ -269,7 +269,7 @@ Code-task workflow 会把已有项目准备到 `code_task/workspace`。默认是
 推荐顺序：
 
 ```text
-init -> map -> probe -> baseline -> plan -> decide-plan
+init -> map -> locate -> context -> probe -> baseline -> plan -> decide-plan
 -> propose-edits -> apply-edits -> validate -> run
 -> analyze-failure -> repair
 ```
@@ -382,12 +382,60 @@ uv run simple-ar code-task map runs/<run-id>
 
 `map` 是确定性步骤。它不会调用 LLM、不会运行项目代码、不会安装依赖，也不会修改文件。它的用途是让项目结构可检查，并为后续 locate/context-pack 提供基础 artifact。
 
+### Locate And Context Pack
+
+在规划或编辑前，先对可能相关的文件进行排序：
+
+```bash
+uv run simple-ar code-task locate runs/<run-id> --query "improve spam keyword prediction"
+```
+
+| 命令/参数 | 含义 |
+| --- | --- |
+| `locate RUN_DIR` | 写入 `code_task/meta/locate_results.json` 和 `locate_results.md`。 |
+| `--query TEXT` | 可选 query；不填时使用 `code_task/task.md`。 |
+| `--top-k N` | 每组 editable/evidence 保留的候选数量，默认 `8`。 |
+| `--refresh-map` | 排序前重建 codebase index 和 repo map。 |
+| `--no-read-only` | 不输出 tests、benchmarks 等只读证据。 |
+| `--show-summary` | 写入后打印 `locate_results.md`。 |
+
+`locate` 是确定性步骤，不调用 LLM。它从 `repo_map.json` 中读取 path、
+summary、imports、role tags 和 symbols，分开输出可编辑目标和只读证据，
+用于回答“大项目里应该先看哪里”。
+
+构建可直接放进 prompt 的受限上下文包：
+
+```bash
+uv run simple-ar code-task context runs/<run-id> \
+  --query "improve spam keyword prediction" \
+  --max-files 8 \
+  --max-total-chars 20000
+```
+
+| 命令/参数 | 含义 |
+| --- | --- |
+| `context RUN_DIR` | 创建新的 `code_task/context_packs/context-NNN/`。 |
+| `--query TEXT` | 可选 locate query；不填时使用 `code_task/task.md`。 |
+| `--top-k N` | 传给 locate 的每组候选预算，默认 `8`。 |
+| `--max-files N` | editable 和 read-only 文件合计最多纳入多少个 snippet。 |
+| `--max-source-chars-per-file N` | 每个文件的源码片段字符预算。 |
+| `--max-total-chars N` | 全部 snippet 的总字符预算。 |
+| `--refresh-map` | context pack 前刷新 repo map。 |
+| `--show-prompt` | 打印生成的 `prompt_context.md`。 |
+
+`context` 会写入 `context_pack.json`、`prompt_context.md` 和
+`selected_snippets.jsonl`。它不调用 LLM，也不修改 workspace。当前如果存在
+latest context pack，`plan` 会优先使用它作为规划上下文，`propose-edits` 只会读取其中
+editable snippets，把 tests/benchmarks 等保护文件继续作为 read-only evidence。
+
 ### Manual Command Path
 
 当你想自己运行并检查每个 primitive step 时，使用手动路径：
 
 ```bash
 uv run simple-ar code-task map runs/<run-id>
+uv run simple-ar code-task locate runs/<run-id>
+uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 uv run simple-ar code-task plan runs/<run-id>

@@ -14,6 +14,7 @@ user config / CLI
 -> build_codebase_index
 -> build_repo_map
 -> optional code-task map refresh
+-> optional locate/context-pack refresh
 -> probe_code_task_environment
 -> run_code_task_baseline
 -> generate_patch_plan
@@ -33,6 +34,8 @@ code_root
 -> code_task/workspace
 -> code_task/meta/codebase_index.json
 -> code_task/meta/repo_map.json
+-> code_task/meta/locate_results.json
+-> code_task/context_packs/context-NNN/
 -> code_task/run/<baseline|patched>/
 ```
 
@@ -49,6 +52,8 @@ code_root
 | `code_task/state.py` | 集中管理 run paths、manifest helpers 和 safe workspace path helpers。 | 将 `code_task/workspace` 作为 editable root。 |
 | `code_task/index.py` | 从 workspace 构建 inventory 和 AST summaries。 | 只读取 `workspace_dir` 下的本地文件。 |
 | `code_task/repo_map.py` | 从 index 构建 project、directory、file、symbol、entrypoint、test、benchmark 和 config 分层 map。 | 保持 `codebase_index.json` 兼容，同时新增 `repo_map.json` 和 `repo_map_summary.md`。 |
+| `code_task/locate.py` | 从 repo map 排序 likely editable targets 和 read-only evidence。 | 不读取 run workspace 外的文件，只写 metadata artifact。 |
+| `code_task/context.py` | 从 locate results 和 workspace snippets 构建受预算限制的 context pack。 | 只读取 workspace-relative 文件，并保留 editable/read-only 分离。 |
 | `code_task/environment.py` | 观察 platform、tools、dependency files、test dirs、GPU 和 interpreter policy。 | 只 probe `workspace_dir`，不安装依赖。 |
 | `code_task/runner.py` | 带 timeout 和 restricted env 运行 benchmark commands。 | 使用 `cwd=workspace_dir`，并把 `workspace` 和 `workspace/src` 注入 `PYTHONPATH`。 |
 | `code_task/planning.py` | 选择上下文文件并请求 patch plan。 | 从 `workspace_dir` 读取文件，使用 workspace-relative paths。 |
@@ -66,6 +71,18 @@ code_root
 - Benchmark commands 不通过 shell 执行，并拒绝常见 shell control operators。
 - Benchmark execution 使用受限 environment map，并记录 stdout、stderr、parsed metrics、timeout 和 interpreter policy。
 - Environment probing 是观察性的：不 import project modules、不运行 tests、不安装依赖、不修改 workspace。
+
+## 当前 Controlled-Patch 边界
+
+V2.2 Day 14 的真实 LLM smoke 暴露了当前 `controlled_patch` backend 的一个真实边界：prompt/context pack 可以保持相对紧凑，但 OpenAI-compatible 模型仍可能生成非常大的 JSON edit proposal，尤其是在它试图重写整文件或输出很长的 `old`/`new` replacement block 时。由于当前 provider 调用是非流式的，CLI 会一直等到 provider 完成整个 completion；超长 completion 因此会表现得像本地卡死，即使真实原因是模型仍在生成文本。
+
+这不意味着 context pack 应该被移除，而是说明 editor 层需要更强的输出契约和路由策略：
+
+- `controlled_patch` 继续作为小到中等规模可审核修改的默认 backend。
+- 每个 attempt 都应限制 editable 文件数、edit 数、`old/new` 文本长度、总 proposal 规模、provider output tokens 和请求等待时间。
+- 超长 edit、疑似整文件重写、保护路径修改和越界路径应在 apply 前被丢弃或写入 warning。
+- 当上下文不足时，模型应该能返回 `context_request` artifact，而不是硬编一个巨大 patch。
+- 更大的重构应拆成多轮 attempt，或在后续路由到 Codex、Claude Code、OpenCode 这类 external coding-agent backend；SimpleAutoResearch 仍负责 diff review、安全检查、validation、benchmark execution 和 summary。
 
 ## 隐含的 V2.1 假设
 

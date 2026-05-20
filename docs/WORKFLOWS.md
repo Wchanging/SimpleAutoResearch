@@ -196,6 +196,8 @@ runs/<run-id>/
       codebase_index.json
       repo_map.json
       repo_map_summary.md
+      locate_results.json
+      locate_results.md
       hitl_decisions.jsonl
       proposed_edits.json
       applied_edits.json
@@ -203,6 +205,11 @@ runs/<run-id>/
       failure_analysis.md        # validation-only failure diagnosis
       llm_usage.jsonl
       llm_usage_summary.json
+    context_packs/
+      context-001/
+        context_pack.json
+        prompt_context.md
+        selected_snippets.jsonl
     run/
       comparison.json
       baseline/
@@ -224,7 +231,8 @@ runs/<run-id>/
 Important directories:
 
 - `workspace/`: editable copy of the source project.
-- `meta/`: environment reports, indexes, decisions, proposed edits, applied edit summaries, validation reports, validation-only failure analysis, and LLM usage.
+- `meta/`: environment reports, indexes, locate results, decisions, proposed edits, applied edit summaries, validation reports, validation-only failure analysis, and LLM usage.
+- `context_packs/`: bounded prompt context packs derived from locate results and workspace snippets.
 - `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, before/after comparison, and benchmark failure analysis.
 - `repairs/`: bounded repair proposals grouped by attempt. Each proposal records the source analysis path and selected repair context.
 
@@ -236,11 +244,18 @@ Important user-facing code-task files:
   `apply-edits` should not modify them.
 - `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
 - `meta/repo_map.json`: layered project/directory/file/symbol/entrypoint/test/benchmark/config map derived from `codebase_index.json`.
-- `meta/repo_map_summary.md`: compact human-readable repo-map summary and prompt-budget note for future context packs.
+- `meta/repo_map_summary.md`: compact human-readable repo-map summary and prompt-budget note.
+- `meta/locate_results.json`: deterministic ranking of likely editable targets and protected read-only evidence.
+- `meta/locate_results.md`: human-readable locate summary for review before building prompt context.
+- `context_packs/context-NNN/context_pack.json`: selected files, budgets, source references, and omitted-file accounting.
+- `context_packs/context-NNN/prompt_context.md`: prompt-ready Markdown grouped into editable targets and read-only evidence.
+- `context_packs/context-NNN/selected_snippets.jsonl`: clipped source snippets, one selected file per row.
 - `run/baseline/execution_report.json`: pre-patch benchmark result.
 - `run/patched/execution_report.json`: post-patch benchmark result.
 - `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist. Explicit `primary_metric` and `metric_directions` from the manifest are used before heuristic metric-name rules.
 - `patch_plan.md`: human-reviewable plan before edits, including recorded environment, validation, and baseline context when available.
+- When a latest context pack exists, `patch_plan.md` records its path and uses
+  its selected snippets instead of the older index-only file selector.
 - `patch.diff`: applied patch for review.
 - `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch.
 

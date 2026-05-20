@@ -10,10 +10,12 @@ from simple_ar.artifacts import read_json, read_text
 from simple_ar.code_task import (
     analyze_code_task_failure,
     apply_patch_edits,
+    build_code_task_context_pack,
     build_code_task_repo_map,
     execute_code_task,
     generate_patch_plan,
     initialize_code_task,
+    locate_code_task_context,
     probe_code_task_environment,
     propose_patch_edits,
     propose_repair_edits,
@@ -167,6 +169,83 @@ def build_parser() -> argparse.ArgumentParser:
         "--show-summary",
         action="store_true",
         help="Print repo_map_summary.md after writing it.",
+    )
+
+    code_task_locate = code_task_subparsers.add_parser(
+        "locate",
+        help="Rank likely editable files and read-only evidence from the repo map.",
+    )
+    code_task_locate.add_argument("run_dir")
+    code_task_locate.add_argument(
+        "--query",
+        default=None,
+        help="Optional locate query. Defaults to code_task/task.md.",
+    )
+    code_task_locate.add_argument(
+        "--top-k",
+        type=int,
+        default=8,
+        help="Maximum candidates kept in each editable/evidence group.",
+    )
+    code_task_locate.add_argument(
+        "--refresh-map",
+        action="store_true",
+        help="Rebuild codebase_index.json and repo_map.json before locating files.",
+    )
+    code_task_locate.add_argument(
+        "--no-read-only",
+        action="store_true",
+        help="Omit protected read-only evidence files from locate results.",
+    )
+    code_task_locate.add_argument(
+        "--show-summary",
+        action="store_true",
+        help="Print locate_results.md after writing it.",
+    )
+
+    code_task_context = code_task_subparsers.add_parser(
+        "context",
+        help="Build a bounded prompt context pack from locate results.",
+    )
+    code_task_context.add_argument("run_dir")
+    code_task_context.add_argument(
+        "--query",
+        default=None,
+        help="Optional locate query. Defaults to code_task/task.md.",
+    )
+    code_task_context.add_argument(
+        "--top-k",
+        type=int,
+        default=8,
+        help="Candidate budget passed to locate for each candidate group.",
+    )
+    code_task_context.add_argument(
+        "--max-files",
+        type=int,
+        default=8,
+        help="Maximum snippets included in the context pack.",
+    )
+    code_task_context.add_argument(
+        "--max-source-chars-per-file",
+        type=int,
+        default=4000,
+        help="Per-file source snippet character budget.",
+    )
+    code_task_context.add_argument(
+        "--max-total-chars",
+        type=int,
+        default=20000,
+        help="Total source snippet character budget.",
+    )
+    code_task_context.add_argument(
+        "--refresh-map",
+        action="store_true",
+        help="Rebuild codebase_index.json and repo_map.json before locating files.",
+    )
+    code_task_context.add_argument(
+        "--show-prompt",
+        action="store_true",
+        help="Print prompt_context.md after writing it.",
     )
 
     code_task_plan = code_task_subparsers.add_parser(
@@ -539,6 +618,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.code_task_command == "map":
             _print_code_task_map(args)
+            return
+        if args.code_task_command == "locate":
+            _print_code_task_locate(args)
+            return
+        if args.code_task_command == "context":
+            _print_code_task_context(args)
             return
         if args.code_task_command == "plan":
             _print_code_task_plan(args)
@@ -1220,6 +1305,54 @@ def _print_code_task_map(args: argparse.Namespace) -> None:
     if args.show_summary:
         print("")
         print(read_text(result.summary_path))
+
+
+def _print_code_task_locate(args: argparse.Namespace) -> None:
+    """Rank likely code-task context files and print a compact summary."""
+    result = locate_code_task_context(
+        Path(args.run_dir),
+        query=args.query,
+        top_k=args.top_k,
+        refresh_map=args.refresh_map,
+        include_read_only=not args.no_read_only,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Locate results: {result.results_path}")
+    print(f"Summary: {result.summary_path}")
+    print(f"Editable targets: {len(result.editable_targets)}")
+    for row in result.editable_targets[:8]:
+        print(f"- {row.get('path', '')} (score {row.get('score', 0)})")
+    print(f"Read-only evidence: {len(result.read_only_evidence)}")
+    for row in result.read_only_evidence[:8]:
+        print(f"- {row.get('path', '')} (score {row.get('score', 0)})")
+    if args.show_summary:
+        print("")
+        print(read_text(result.summary_path))
+
+
+def _print_code_task_context(args: argparse.Namespace) -> None:
+    """Build a bounded code-task context pack and print artifact paths."""
+    result = build_code_task_context_pack(
+        Path(args.run_dir),
+        query=args.query,
+        top_k=args.top_k,
+        max_files=args.max_files,
+        max_source_chars_per_file=args.max_source_chars_per_file,
+        max_total_chars=args.max_total_chars,
+        refresh_map=args.refresh_map,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Context directory: {result.context_dir}")
+    print(f"Context pack: {result.context_pack_path}")
+    print(f"Prompt context: {result.prompt_context_path}")
+    print(f"Snippets: {result.snippets_path}")
+    print(f"Locate results: {result.locate_results_path}")
+    print(f"Selected files: {len(result.selected_files)}")
+    for path in result.selected_files[:12]:
+        print(f"- {path}")
+    if args.show_prompt:
+        print("")
+        print(read_text(result.prompt_context_path))
 
 
 def _print_code_task_plan(args: argparse.Namespace) -> None:

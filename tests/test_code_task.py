@@ -16,10 +16,12 @@ from simple_ar.code_task import (
     PatchValidationError,
     analyze_code_task_failure,
     apply_patch_edits,
+    build_code_task_context_pack,
     build_code_task_repo_map,
     execute_code_task,
     generate_patch_plan,
     initialize_code_task,
+    locate_code_task_context,
     probe_code_task_environment,
     propose_patch_edits,
     propose_repair_edits,
@@ -315,6 +317,121 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("Repo map:", output)
             self.assertIn("Index refreshed: False", output)
 
+    def test_code_task_locate_writes_ranked_targets_and_evidence(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove spam keyword prediction.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            result = locate_code_task_context(
+                run_dir,
+                query="improve spam keyword predict behavior",
+                top_k=4,
+            )
+
+            self.assertTrue(result.results_path.is_file())
+            self.assertTrue(result.summary_path.is_file())
+            self.assertEqual(result.editable_targets[0]["path"], "spam_model.py")
+            evidence_paths = {row["path"] for row in result.read_only_evidence}
+            self.assertIn("tests/test_spam_model.py", evidence_paths)
+            locate_data = read_json(result.results_path)
+            self.assertEqual(locate_data["schema_version"], 1)
+            self.assertIn("spam", locate_data["query_terms"])
+            summary = read_text(result.summary_path)
+            self.assertIn("# Locate Results", summary)
+            self.assertIn("spam_model.py", summary)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["layout"]["locate_results"], "code_task/meta/locate_results.json")
+            self.assertEqual(manifest["locate"]["status"], "completed")
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(
+                    [
+                        "code-task",
+                        "locate",
+                        str(run_dir),
+                        "--query",
+                        "spam keyword",
+                        "--top-k",
+                        "3",
+                    ]
+                )
+            output = stdout.getvalue()
+            self.assertIn("Locate results:", output)
+            self.assertIn("Editable targets:", output)
+
+    def test_code_task_context_pack_writes_prompt_and_snippets(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove spam keyword prediction.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            result = build_code_task_context_pack(
+                run_dir,
+                query="improve spam keyword predict behavior",
+                top_k=4,
+                max_files=3,
+                max_source_chars_per_file=600,
+                max_total_chars=1200,
+            )
+
+            self.assertTrue(result.context_pack_path.is_file())
+            self.assertTrue(result.prompt_context_path.is_file())
+            self.assertTrue(result.snippets_path.is_file())
+            self.assertIn("spam_model.py", result.selected_files)
+            snippets = read_jsonl(result.snippets_path)
+            snippet_paths = {row["path"] for row in snippets}
+            self.assertIn("spam_model.py", snippet_paths)
+            self.assertIn("tests/test_spam_model.py", snippet_paths)
+            prompt_context = read_text(result.prompt_context_path)
+            self.assertIn("# Code Task Context Pack", prompt_context)
+            self.assertIn("## Editable Targets", prompt_context)
+            self.assertIn("## Read-Only Evidence", prompt_context)
+            context_pack = read_json(result.context_pack_path)
+            self.assertEqual(context_pack["schema_version"], 1)
+            self.assertLessEqual(context_pack["budget"]["used_chars"], 1200)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["layout"]["context_packs"], "code_task/context_packs")
+            self.assertEqual(manifest["context_pack"]["status"], "completed")
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(
+                    [
+                        "code-task",
+                        "context",
+                        str(run_dir),
+                        "--query",
+                        "spam keyword",
+                        "--max-files",
+                        "2",
+                    ]
+                )
+            output = stdout.getvalue()
+            self.assertIn("Context pack:", output)
+            self.assertIn("Selected files:", output)
+
     def test_probe_code_task_environment_writes_report_and_manifest(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -422,6 +539,62 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "planned")
             self.assertEqual(manifest["plan"]["status"], "pending_approval")
             self.assertEqual(manifest["layout"]["patch_plan"], "code_task/patch_plan.md")
+
+    def test_plan_and_propose_use_latest_context_pack_when_available(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove spam keyword prediction without editing tests.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            context = build_code_task_context_pack(
+                run_dir,
+                query="improve spam keyword prediction",
+                top_k=4,
+                max_files=3,
+            )
+
+            plan = generate_patch_plan(run_dir, use_llm=False)
+
+            self.assertIn("spam_model.py", plan.selected_files)
+            plan_text = read_text(plan.patch_plan_path)
+            self.assertIn("Context pack:", plan_text)
+            self.assertIn("code_task/context_packs/context-001/context_pack.json", plan_text)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(
+                manifest["plan"]["context_pack"]["path"],
+                "code_task/context_packs/context-001/context_pack.json",
+            )
+            self.assertEqual(
+                manifest["plan"]["context_pack"]["prompt_context"],
+                "code_task/context_packs/context-001/prompt_context.md",
+            )
+
+            record_plan_decision(run_dir, decision="approve")
+            proposal = propose_patch_edits(run_dir, use_llm=False)
+
+            self.assertEqual(proposal.edit_count, 0)
+            proposal_data = read_json(proposal.proposal_path)
+            self.assertEqual(
+                proposal_data["context_pack"]["path"],
+                "code_task/context_packs/context-001/context_pack.json",
+            )
+            self.assertEqual(proposal_data["selected_files"], ["spam_model.py"])
+            self.assertIn("tests/test_spam_model.py", proposal_data["read_only_context"])
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(
+                manifest["patch"]["context_pack"]["path"],
+                "code_task/context_packs/context-001/context_pack.json",
+            )
+            self.assertTrue(context.context_pack_path.is_file())
 
     def test_patch_plan_includes_baseline_and_environment_context(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

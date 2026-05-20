@@ -32,6 +32,8 @@ class LLMSettings:
             estimates.
         output_price_per_million: Optional output-token price used for local
             cost estimates.
+        request_timeout_sec: Per-request provider timeout in seconds.
+        max_output_tokens: Optional maximum output-token budget per request.
     """
 
     model: str = "gpt-4o-mini"
@@ -39,6 +41,8 @@ class LLMSettings:
     base_url: str = ""
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
+    request_timeout_sec: float = 120.0
+    max_output_tokens: int | None = 4096
 
 
 @dataclass(frozen=True)
@@ -117,7 +121,10 @@ class LLMClient:
         """
         if not settings.api_key:
             raise LLMError("OPENAI_API_KEY is not configured")
-        kwargs: dict[str, str] = {"api_key": settings.api_key}
+        kwargs: dict[str, Any] = {
+            "api_key": settings.api_key,
+            "timeout": settings.request_timeout_sec,
+        }
         if settings.base_url:
             kwargs["base_url"] = settings.base_url
         self._client = OpenAI(**kwargs)
@@ -150,6 +157,8 @@ class LLMClient:
             base_url=os.environ.get("OPENAI_BASE_URL", ""),
             input_price_per_million=_optional_float("SIMPLE_AR_INPUT_PRICE_PER_1M"),
             output_price_per_million=_optional_float("SIMPLE_AR_OUTPUT_PRICE_PER_1M"),
+            request_timeout_sec=_positive_float("SIMPLE_AR_LLM_TIMEOUT_SEC", default=120.0),
+            max_output_tokens=_optional_positive_int("SIMPLE_AR_MAX_OUTPUT_TOKENS", default=4096),
         )
         return cls(settings, usage_callback=usage_callback)
 
@@ -169,31 +178,39 @@ class LLMClient:
                 fail.
         """
         try:
-            response = self._client.responses.create(
-                model=self.model,
-                input=[
+            request: dict[str, Any] = {
+                "model": self.model,
+                "input": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-            )
+            }
+            if self._settings.max_output_tokens is not None:
+                request["max_output_tokens"] = self._settings.max_output_tokens
+            response = self._client.responses.create(**request)
             text = getattr(response, "output_text", "")
             if text:
                 output = str(text).strip()
                 self._record_usage(response, system, user, output, label=label)
                 return output
-        except Exception:
+        except Exception as exc:
+            if _is_timeout_error(exc):
+                raise LLMError(f"LLM request timed out: {exc}") from exc
             # Some OpenAI-compatible endpoints support chat completions but not
             # the Responses API. Fall through to the compatibility path.
             pass
 
         try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=[
+            request = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-            )
+            }
+            if self._settings.max_output_tokens is not None:
+                request["max_tokens"] = self._settings.max_output_tokens
+            response = self._client.chat.completions.create(**request)
             content = response.choices[0].message.content or ""
             output = content.strip()
             self._record_usage(response, system, user, output, label=label)
@@ -449,3 +466,31 @@ def _optional_float(env_name: str) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def _positive_float(env_name: str, *, default: float) -> float:
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _optional_positive_int(env_name: str, *, default: int | None) -> int | None:
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    return "timeout" in name or "timed out" in message or "timeout" in message
