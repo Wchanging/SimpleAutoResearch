@@ -1,5 +1,7 @@
 # CLI Reference
 
+[中文版本](CLI_REFERENCE_zh.md)
+
 This document is the command lookup for SimpleAutoResearch. For installation
 and workflow walkthroughs, see [Usage And Configuration](USAGE.md). For stage
 concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).

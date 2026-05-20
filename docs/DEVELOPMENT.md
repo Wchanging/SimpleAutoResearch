@@ -1,5 +1,7 @@
 # Development Guide
 
+[中文版本](DEVELOPMENT_zh.md)
+
 This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md). For the current code-task workspace flow and V2.2 replacement points, see [Code Task Workspace Notes](CODE_TASK_WORKSPACE.md).
 
 ## Project Shape

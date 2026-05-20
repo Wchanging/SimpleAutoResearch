@@ -1,5 +1,7 @@
 # Workflows And Artifacts
 
+[中文版本](WORKFLOWS_zh.md)
+
 This document explains what SimpleAutoResearch is doing internally: workflow presets, pipeline stages, stage outputs, and run artifact layout. For concrete commands, see [CLI Reference](CLI_REFERENCE.md); for setup and walkthroughs, see [Usage And Configuration](USAGE.md).
 
 ## Workflow Presets

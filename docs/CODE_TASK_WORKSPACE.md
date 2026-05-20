@@ -1,5 +1,7 @@
 # Code Task Workspace Notes
 
+[中文版本](CODE_TASK_WORKSPACE_zh.md)
+
 This note captures the V2.1 workspace flow and the first V2.2 workspace-mode
 refactor. It is intentionally descriptive: it should help contributors see
 which assumptions must stay compatible while `copy`, `git_worktree`,

@@ -1,5 +1,7 @@
 # Changelog
 
+[中文版本](CHANGELOG_zh.md)
+
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
 ## 2026-05-19
