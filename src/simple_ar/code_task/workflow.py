@@ -10,6 +10,7 @@ from simple_ar.code_task.comparison import normalize_metric_directions
 from simple_ar.code_task.edit_scope import default_edit_scope
 from simple_ar.code_task.environment import build_code_task_environment_policy
 from simple_ar.code_task.index import build_codebase_index
+from simple_ar.code_task.repo_map import build_repo_map
 from simple_ar.code_task.workspace import CopyReport
 from simple_ar.code_task.workspace_modes import (
     WorkspaceResult,
@@ -30,8 +31,11 @@ class CodeTaskInitResult:
         meta_dir: Metadata directory for indexes and manifests.
         manifest_path: Root workflow manifest path.
         codebase_index_path: Path to the generated codebase index.
+        repo_map_path: Path to the generated layered repository map.
+        repo_map_summary_path: Path to the generated repository map summary.
         copy_report: Summary of copied and skipped source paths.
         codebase_index: Generated index data.
+        repo_map: Generated layered repository map.
         environment_policy: Initial execution environment policy.
         workspace: Workspace creation metadata.
     """
@@ -42,8 +46,11 @@ class CodeTaskInitResult:
     meta_dir: Path
     manifest_path: Path
     codebase_index_path: Path
+    repo_map_path: Path
+    repo_map_summary_path: Path
     copy_report: CopyReport
     codebase_index: dict[str, Any]
+    repo_map: dict[str, Any]
     environment_policy: dict[str, Any]
     workspace: WorkspaceResult
 
@@ -137,6 +144,16 @@ def initialize_code_task(
     copy_report = workspace.copy_report
     codebase_index_path = meta_dir / "codebase_index.json"
     codebase_index = build_codebase_index(workspace_dir, output_path=codebase_index_path)
+    edit_scope = default_edit_scope()
+    protected_patterns = tuple(str(item) for item in edit_scope["protected_patterns"])
+    repo_map_path = meta_dir / "repo_map.json"
+    repo_map_summary_path = meta_dir / "repo_map_summary.md"
+    repo_map = build_repo_map(
+        codebase_index,
+        output_path=repo_map_path,
+        summary_path=repo_map_summary_path,
+        protected_patterns=protected_patterns,
+    )
     resolved_env_mode = env_mode
     resolved_python = python_executable
     mapped_python = suggested_python_executable(workspace)
@@ -161,6 +178,8 @@ def initialize_code_task(
             copy_report=copy_report,
             workspace=workspace,
             codebase_index=codebase_index,
+            repo_map=repo_map,
+            edit_scope=edit_scope,
             environment_policy=environment_policy,
         ),
     )
@@ -172,8 +191,11 @@ def initialize_code_task(
         meta_dir=meta_dir,
         manifest_path=manifest_path,
         codebase_index_path=codebase_index_path,
+        repo_map_path=repo_map_path,
+        repo_map_summary_path=repo_map_summary_path,
         copy_report=copy_report,
         codebase_index=codebase_index,
+        repo_map=repo_map,
         environment_policy=environment_policy,
         workspace=workspace,
     )
@@ -191,9 +213,12 @@ def _manifest(
     copy_report: CopyReport,
     workspace: WorkspaceResult,
     codebase_index: dict[str, Any],
+    repo_map: dict[str, Any],
+    edit_scope: dict[str, Any],
     environment_policy: dict[str, Any],
 ) -> dict[str, Any]:
     project = codebase_index.get("project", {})
+    repo_project = repo_map.get("project", {})
     primary = (primary_metric or "").strip()
     directions = dict(metric_directions or {})
     return {
@@ -211,6 +236,8 @@ def _manifest(
             "workspace": "code_task/workspace",
             "meta": "code_task/meta",
             "codebase_index": "code_task/meta/codebase_index.json",
+            "repo_map": "code_task/meta/repo_map.json",
+            "repo_map_summary": "code_task/meta/repo_map_summary.md",
         },
         "copy": {
             **copy_report.to_json(),
@@ -222,12 +249,21 @@ def _manifest(
             "python_file_count": project.get("python_file_count", 0),
             "test_file_count": project.get("test_file_count", 0),
             "entrypoint_candidates": project.get("entrypoint_candidates", []),
+            "repo_map": {
+                "schema_version": repo_map.get("schema_version"),
+                "path": "code_task/meta/repo_map.json",
+                "summary": "code_task/meta/repo_map_summary.md",
+                "directory_count": repo_project.get("directory_count", 0),
+                "symbol_count": repo_project.get("symbol_count", 0),
+                "benchmark_file_count": repo_project.get("benchmark_file_count", 0),
+                "config_file_count": repo_project.get("config_file_count", 0),
+            },
         },
         "environment": {
             "status": "not_probed",
             "policy": environment_policy,
         },
-        "edit_scope": default_edit_scope(),
+        "edit_scope": edit_scope,
         "benchmark": {
             "command": benchmark_command,
             "executed": False,

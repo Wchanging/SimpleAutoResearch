@@ -4,6 +4,20 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-05-20
+
+### Added
+
+- 添加 Day 8 V2.2 分层 repo-map 产物：`code_task/meta/repo_map.json` 和 `code_task/meta/repo_map_summary.md`。
+- Repo-map schema 包含 project、directory、file、symbol、entrypoint、test、benchmark、config 和 prompt-budget 层，同时保留 `codebase_index.json` 兼容旧流程。
+- 添加 `simple-ar code-task map`，可以作为独立步骤从当前 workspace 重建 repo-map 产物。
+- 添加 `simple-ar-checks` 和 `scripts/run_checks.py`，支持 `quick`、`code-task`、`pipeline`、`research`、`all` 等分层开发验证组。
+
+### Changed
+
+- Code-task 初始化现在同时写旧 codebase index 和新 repo map；补丁应用后也会同步重建两个产物。
+- 开发文档现在推荐迭代时使用目标测试组，把完整测试发现保留给提交、推送或大范围重构前。
+
 ## 2026-05-19
 
 ### Added

@@ -71,6 +71,8 @@ The code-task workflow is split into small modules:
 - `config.py`: TOML config and CLI override resolution for code-task init.
 - `environment.py`: environment observation and execution-interpreter policy.
 - `index.py`: codebase inventory and Python AST summaries.
+- `repo_map.py`: layered repo map derived from the index for future locate and
+  context-pack steps.
 - `planning.py`: patch planning and HITL decisions.
 - `patching.py`: controlled old/new edit proposal and application.
 - `validation.py`: syntax and static safety checks.
@@ -140,7 +142,36 @@ Use the docs this way:
 
 ## Tests
 
-Run the full test suite:
+Use layered checks during development:
+
+```bash
+uv run simple-ar-checks --list
+uv run simple-ar-checks quick
+uv run simple-ar-checks code-task
+uv run simple-ar-checks pipeline
+uv run simple-ar-checks research
+uv run simple-ar-checks code-task-examples
+```
+
+The same runner can be called without the console script:
+
+```bash
+uv run python scripts/run_checks.py code-task
+```
+
+Recommended validation layers:
+
+| Change area | Suggested check |
+| --- | --- |
+| Docs only | `git diff --check` plus manual link review. |
+| Small parser, prompt, metric, or CLI changes | `uv run simple-ar-checks quick`. |
+| Code-task internals, workspace, repo-map, patching, validation, runner, repair | `uv run simple-ar-checks code-task`. |
+| Bundled code-task examples or benchmark examples | `uv run simple-ar-checks code-task-examples`. |
+| Pipeline, stages, experiment templates, run config | `uv run simple-ar-checks pipeline`. |
+| Literature, retrieval, evidence ledger, report generation, LLM adapter | `uv run simple-ar-checks research`. |
+| Before commit/push or broad refactors | `uv run simple-ar-checks all`. |
+
+Run the full test suite directly when needed:
 
 ```bash
 uv run python -m unittest discover -s tests

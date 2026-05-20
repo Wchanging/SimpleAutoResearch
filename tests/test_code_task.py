@@ -16,6 +16,7 @@ from simple_ar.code_task import (
     PatchValidationError,
     analyze_code_task_failure,
     apply_patch_edits,
+    build_code_task_repo_map,
     execute_code_task,
     generate_patch_plan,
     initialize_code_task,
@@ -89,6 +90,33 @@ class CodeTaskTests(unittest.TestCase):
                 ["predict"],
             )
             self.assertEqual(spam_model["python"]["has_main_guard"], True)
+
+            self.assertTrue(result.repo_map_path.is_file())
+            self.assertTrue(result.repo_map_summary_path.is_file())
+            repo_map = read_json(result.repo_map_path)
+            self.assertEqual(repo_map["schema_version"], 1)
+            self.assertEqual(repo_map["project"]["file_count"], 3)
+            self.assertEqual(repo_map["project"]["python_file_count"], 2)
+            self.assertEqual(repo_map["project"]["test_file_count"], 1)
+            self.assertGreaterEqual(repo_map["project"]["symbol_count"], 4)
+            mapped_files = {item["path"]: item for item in repo_map["files"]}
+            self.assertEqual(mapped_files["spam_model.py"]["access_role"], "editable")
+            self.assertEqual(
+                mapped_files["tests/test_spam_model.py"]["access_role"],
+                "read_only_evidence",
+            )
+            symbols = {item["qualified_name"] for item in repo_map["symbols"]}
+            self.assertIn("SpamModel", symbols)
+            self.assertIn("SpamModel.score", symbols)
+            self.assertIn("predict", symbols)
+            self.assertIn("SpamModelTests.test_predicts_spam_keyword", symbols)
+            entrypoint_paths = {item["path"] for item in repo_map["entrypoints"]}
+            self.assertIn("spam_model.py", entrypoint_paths)
+            self.assertEqual(repo_map["tests"][0]["path"], "tests/test_spam_model.py")
+            self.assertEqual(repo_map["configs"][0]["path"], "pyproject.toml")
+            repo_summary = read_text(result.repo_map_summary_path)
+            self.assertIn("# Repo Map Summary", repo_summary)
+            self.assertIn("## Prompt Budget", repo_summary)
 
     def test_init_can_create_git_worktree_workspace(self) -> None:
         if shutil.which("git") is None:
@@ -231,9 +259,11 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("Code task run:", output)
             self.assertIn("Workspace:", output)
             self.assertIn("Indexed:", output)
+            self.assertIn("Repo map:", output)
             run_dir = next(output_root.iterdir())
             self.assertTrue((run_dir / "code_task" / "workspace" / "spam_model.py").is_file())
             self.assertTrue((run_dir / "code_task" / "meta" / "codebase_index.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "repo_map.json").is_file())
 
             status_stdout = io.StringIO()
             with contextlib.redirect_stdout(status_stdout):
@@ -242,6 +272,48 @@ class CodeTaskTests(unittest.TestCase):
             status_text = status_stdout.getvalue()
             self.assertIn("Workflow: code_task", status_text)
             self.assertIn("python files: 2", status_text)
+
+    def test_code_task_map_rebuilds_repo_map_from_workspace(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nMap this project.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            write_text(
+                run_dir / "code_task" / "workspace" / "feature.py",
+                "def improve_feature(value):\n    return value + 1\n",
+            )
+
+            result = build_code_task_repo_map(run_dir)
+
+            self.assertTrue(result.refreshed_index)
+            repo_map = read_json(result.repo_map_path)
+            mapped_files = {item["path"] for item in repo_map["files"]}
+            self.assertIn("feature.py", mapped_files)
+            symbols = {item["qualified_name"] for item in repo_map["symbols"]}
+            self.assertIn("improve_feature", symbols)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["layout"]["repo_map"], "code_task/meta/repo_map.json")
+            self.assertEqual(
+                manifest["codebase"]["repo_map"]["summary"],
+                "code_task/meta/repo_map_summary.md",
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["code-task", "map", str(run_dir), "--no-refresh-index"])
+            output = stdout.getvalue()
+            self.assertIn("Repo map:", output)
+            self.assertIn("Index refreshed: False", output)
 
     def test_probe_code_task_environment_writes_report_and_manifest(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

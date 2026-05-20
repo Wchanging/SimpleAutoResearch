@@ -200,7 +200,7 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 - 文献检索主要基于元数据和本地产物片段，还不是完整 PDF 阅读或向量 RAG survey 系统。
 - LLM 报告有规则保护；如果引用、指标或边界声明不合格，会回退到结构化 deterministic report。
 
-V2.2 正在推进 workspace-mode abstraction、git worktree、实验性 sparse-copy，以及更深入的 coding loop：repo map、context pack、多轮 attempt、更强任务拆解和更清晰的人类审核路径。
+V2.2 正在推进 workspace-mode abstraction、git worktree、实验性 sparse-copy 和分层 repo-map 产物。下一步会继续推进 context pack、多轮 attempt、更强任务拆解和更清晰的人类审核路径。
 
 ## 文档
 

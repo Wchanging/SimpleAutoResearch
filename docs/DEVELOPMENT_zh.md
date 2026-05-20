@@ -55,6 +55,7 @@ Code-task workflow 拆分成小模块：
 - `config.py`：code-task init 的 TOML config 和 CLI override 解析。
 - `environment.py`：环境观察和执行解释器策略。
 - `index.py`：代码清单和 Python AST summaries。
+- `repo_map.py`：从 index 派生分层 repo map，供后续 locate 和 context-pack 步骤使用。
 - `planning.py`：patch planning 和 HITL decisions。
 - `patching.py`：controlled old/new edit proposal 与应用。
 - `validation.py`：语法和静态安全检查。
@@ -106,7 +107,36 @@ Metric comparison 应保持保守。未知数值指标可以记录 delta，但�
 
 ## 测试
 
-运行完整测试：
+开发时优先使用分层 checks：
+
+```bash
+uv run simple-ar-checks --list
+uv run simple-ar-checks quick
+uv run simple-ar-checks code-task
+uv run simple-ar-checks pipeline
+uv run simple-ar-checks research
+uv run simple-ar-checks code-task-examples
+```
+
+也可以不用 console script，直接运行脚本入口：
+
+```bash
+uv run python scripts/run_checks.py code-task
+```
+
+推荐验证层级：
+
+| 修改范围 | 建议检查 |
+| --- | --- |
+| 仅文档 | `git diff --check` 加人工检查链接。 |
+| 小型 parser、prompt、metric 或 CLI 改动 | `uv run simple-ar-checks quick`。 |
+| Code-task 内部、workspace、repo-map、patching、validation、runner、repair | `uv run simple-ar-checks code-task`。 |
+| 内置 code-task 示例或 benchmark 示例 | `uv run simple-ar-checks code-task-examples`。 |
+| Pipeline、stages、experiment templates、run config | `uv run simple-ar-checks pipeline`。 |
+| Literature、retrieval、evidence ledger、report generation、LLM adapter | `uv run simple-ar-checks research`。 |
+| 提交/推送前或大范围重构 | `uv run simple-ar-checks all`。 |
+
+必要时仍可直接运行完整测试：
 
 ```bash
 uv run python -m unittest discover -s tests

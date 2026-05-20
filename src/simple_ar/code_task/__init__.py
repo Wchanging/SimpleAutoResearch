@@ -31,6 +31,12 @@ from simple_ar.code_task.config import (
 )
 from simple_ar.code_task.failure import FailureAnalysisResult, analyze_code_task_failure
 from simple_ar.code_task.repair import RepairProposalResult, propose_repair_edits
+from simple_ar.code_task.repo_map import (
+    RepoMapBuildResult,
+    build_code_task_repo_map,
+    build_repo_map,
+    render_repo_map_summary,
+)
 from simple_ar.code_task.runner import (
     CodeTaskRunError,
     CodeTaskRunResult,
@@ -65,6 +71,7 @@ __all__ = [
     "WorkspaceModeError",
     "WorkspaceResult",
     "WorkspaceSpec",
+    "RepoMapBuildResult",
     "apply_patch_edits",
     "analyze_code_task_failure",
     "compare_code_task_runs",
@@ -76,6 +83,9 @@ __all__ = [
     "probe_code_task_environment",
     "propose_patch_edits",
     "propose_repair_edits",
+    "build_code_task_repo_map",
+    "build_repo_map",
+    "render_repo_map_summary",
     "record_plan_decision",
     "run_code_task_benchmark",
     "run_code_task_baseline",

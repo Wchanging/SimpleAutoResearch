@@ -10,6 +10,7 @@ from simple_ar.artifacts import read_json, read_text
 from simple_ar.code_task import (
     analyze_code_task_failure,
     apply_patch_edits,
+    build_code_task_repo_map,
     execute_code_task,
     generate_patch_plan,
     initialize_code_task,
@@ -151,6 +152,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     code_task_probe.add_argument("run_dir")
     _add_code_task_env_args(code_task_probe)
+
+    code_task_map = code_task_subparsers.add_parser(
+        "map",
+        help="Build or refresh layered repo-map artifacts for a code-task run.",
+    )
+    code_task_map.add_argument("run_dir")
+    code_task_map.add_argument(
+        "--no-refresh-index",
+        action="store_true",
+        help="Reuse the existing codebase_index.json instead of scanning the current workspace.",
+    )
+    code_task_map.add_argument(
+        "--show-summary",
+        action="store_true",
+        help="Print repo_map_summary.md after writing it.",
+    )
 
     code_task_plan = code_task_subparsers.add_parser(
         "plan",
@@ -519,6 +536,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.code_task_command == "probe":
             _print_code_task_probe(args)
+            return
+        if args.code_task_command == "map":
+            _print_code_task_map(args)
             return
         if args.code_task_command == "plan":
             _print_code_task_plan(args)
@@ -1064,6 +1084,7 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     print(f"Workspace mode: {result.workspace.mode}")
     print(f"Task: {result.task_dir / 'task.md'}")
     print(f"Index: {result.codebase_index_path}")
+    print(f"Repo map: {result.repo_map_path}")
     if result.workspace.mode in {"copy", "sparse_copy"}:
         label = "Files copied" if result.workspace.mode == "copy" else "Files selected"
         print(
@@ -1160,6 +1181,45 @@ def _print_code_task_probe(args: argparse.Namespace) -> None:
         print("Warnings:")
         for warning in result.warnings:
             print(f"- {warning}")
+
+
+def _print_code_task_map(args: argparse.Namespace) -> None:
+    """Build repo-map artifacts and print the resulting project summary."""
+    result = build_code_task_repo_map(
+        Path(args.run_dir),
+        refresh_index=not args.no_refresh_index,
+    )
+    project = result.repo_map.get("project", {})
+    if not isinstance(project, dict):
+        project = {}
+    print(f"Code task run: {result.run_dir}")
+    print(f"Repo map: {result.repo_map_path}")
+    print(f"Summary: {result.summary_path}")
+    print(f"Index: {result.codebase_index_path}")
+    print(f"Index refreshed: {result.refreshed_index}")
+    print(
+        "Mapped: "
+        f"{project.get('file_count', 0)} file(s), "
+        f"{project.get('directory_count', 0)} directory group(s), "
+        f"{project.get('symbol_count', 0)} symbol(s)"
+    )
+    print(
+        "Roles: "
+        f"{project.get('test_file_count', 0)} test file(s), "
+        f"{project.get('benchmark_file_count', 0)} benchmark file(s), "
+        f"{project.get('config_file_count', 0)} config file(s)"
+    )
+    entrypoints = result.repo_map.get("entrypoints", [])
+    if isinstance(entrypoints, list) and entrypoints:
+        print("Entrypoints:")
+        for item in entrypoints[:8]:
+            if isinstance(item, dict):
+                symbol = item.get("symbol")
+                suffix = f"::{symbol}" if symbol else ""
+                print(f"- {item.get('path', '')}{suffix}")
+    if args.show_summary:
+        print("")
+        print(read_text(result.summary_path))
 
 
 def _print_code_task_plan(args: argparse.Namespace) -> None:

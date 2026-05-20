@@ -172,7 +172,7 @@ uv run simple-ar code-task init \
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-`init` 会创建新的 `runs/<run-id>/`，把源项目准备到 `code_task/workspace/`，把任务写入 `code_task/task.md`，生成 `code_task/meta/codebase_index.json`，并把 benchmark / environment / workspace 策略记录到 `manifest.json`。它不会运行代码、不会调用 LLM，也不会修改原始项目。
+`init` 会创建新的 `runs/<run-id>/`，把源项目准备到 `code_task/workspace/`，把任务写入 `code_task/task.md`，生成 `code_task/meta/codebase_index.json` 以及分层 `code_task/meta/repo_map.json` / `repo_map_summary.md`，并把 benchmark / environment / workspace 策略记录到 `manifest.json`。它不会运行代码、不会调用 LLM，也不会修改原始项目。
 
 如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。当前要求 `code_root` 是目标项目的 git 仓库根目录；如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入 repo root，或者改用 `copy` 模式。
 
@@ -185,11 +185,20 @@ benchmark 最好输出 `name: value` 数值行。自定义指标可以用 `--met
 - **Manual Path**：手动运行每个 primitive command，适合学习和调试。
 - **Executor Path**：使用 `code-task execute` 推进到下一个安全步骤，更短，但仍保留审核点。
 
+任何时候都可以刷新代码地图：
+
+```bash
+uv run simple-ar code-task map runs/<run-id>
+```
+
+`map` 会扫描当前 `code_task/workspace/`，刷新 `code_task/meta/codebase_index.json`，写入 `code_task/meta/repo_map.json` 和 `code_task/meta/repo_map_summary.md`，并更新 `manifest.json`。它不会调用 LLM、不会安装依赖、不会运行 benchmark，也不会修改原始项目。
+
 ### Manual Path
 
 先探测环境并运行未修改 baseline：
 
 ```bash
+uv run simple-ar code-task map runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 ```

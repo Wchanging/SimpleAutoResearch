@@ -288,7 +288,7 @@ git repository root, make an initial local commit, or choose `copy` mode.
 Recommended order:
 
 ```text
-init -> probe -> baseline -> plan -> decide-plan
+init -> map -> probe -> baseline -> plan -> decide-plan
 -> propose-edits -> apply-edits -> validate -> run
 -> analyze-failure -> repair
 ```
@@ -394,12 +394,32 @@ Bundled example:
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
+### Map
+
+Build or refresh layered repo-map artifacts from the current editable workspace:
+
+```bash
+uv run simple-ar code-task map runs/<run-id>
+```
+
+| Command/Option | Meaning |
+| --- | --- |
+| `map RUN_DIR` | Rebuild `code_task/meta/codebase_index.json`, `repo_map.json`, and `repo_map_summary.md` from `code_task/workspace/`. |
+| `--no-refresh-index` | Reuse the existing `codebase_index.json` instead of scanning the current workspace first. |
+| `--show-summary` | Print `repo_map_summary.md` after writing it. |
+
+`map` is deterministic. It does not call the LLM, run project code, install
+dependencies, or patch files. Its purpose is to make project structure
+inspectable and to provide the base artifact for future locate/context-pack
+steps.
+
 ### Manual Command Path
 
 Use the manual path when you want to run and inspect each primitive step
 yourself:
 
 ```bash
+uv run simple-ar code-task map runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 uv run simple-ar code-task plan runs/<run-id>

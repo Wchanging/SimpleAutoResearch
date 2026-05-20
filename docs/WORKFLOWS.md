@@ -31,8 +31,8 @@ Use this when you already have code and want a focused modification, optimizatio
 Conceptual flow:
 
 ```text
-init workspace -> probe environment -> index code -> run baseline
--> plan patch -> approve -> propose edits -> apply edits
+init workspace -> index code -> map repo -> probe environment
+-> run baseline -> plan patch -> approve -> propose edits -> apply edits
 -> validate -> run patched benchmark -> compare results
 -> analyze failure -> repair proposal
 ```
@@ -194,6 +194,8 @@ runs/<run-id>/
     meta/
       environment_report.json
       codebase_index.json
+      repo_map.json
+      repo_map_summary.md
       hitl_decisions.jsonl
       proposed_edits.json
       applied_edits.json
@@ -233,6 +235,8 @@ Important user-facing code-task files:
   be indexed as read-only evidence, but `propose-edits`, `repair`, and
   `apply-edits` should not modify them.
 - `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
+- `meta/repo_map.json`: layered project/directory/file/symbol/entrypoint/test/benchmark/config map derived from `codebase_index.json`.
+- `meta/repo_map_summary.md`: compact human-readable repo-map summary and prompt-budget note for future context packs.
 - `run/baseline/execution_report.json`: pre-patch benchmark result.
 - `run/patched/execution_report.json`: post-patch benchmark result.
 - `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist. Explicit `primary_metric` and `metric_directions` from the manifest are used before heuristic metric-name rules.

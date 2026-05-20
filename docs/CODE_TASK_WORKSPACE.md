@@ -14,8 +14,10 @@ workspace strategies evolve.
 user config / CLI
 -> load_code_task_init_options
 -> initialize_code_task
--> create_workspace(mode=copy|git_worktree)
+-> create_workspace(mode=copy|git_worktree|sparse_copy)
 -> build_codebase_index
+-> build_repo_map
+-> optional code-task map refresh
 -> probe_code_task_environment
 -> run_code_task_baseline
 -> generate_patch_plan
@@ -34,6 +36,7 @@ The key path is always:
 code_root
 -> code_task/workspace
 -> code_task/meta/codebase_index.json
+-> code_task/meta/repo_map.json
 -> code_task/run/<baseline|patched>/
 ```
 
@@ -52,6 +55,7 @@ is a detached git worktree created from the source repository root.
 | `code_task/workspace_modes.py` | Dispatches workspace creation strategies. | Owns `copy` compatibility mode and minimal `git_worktree` mode. |
 | `code_task/state.py` | Centralizes run paths and manifest helpers. | Hard-codes `code_task/workspace` as the editable root. |
 | `code_task/index.py` | Builds inventory and AST summaries from the workspace. | Reads local files under `workspace_dir`. |
+| `code_task/repo_map.py` | Builds layered project, directory, file, symbol, entrypoint, test, benchmark, and config maps from the index. | Keeps `codebase_index.json` compatible while adding `repo_map.json` and `repo_map_summary.md`. |
 | `code_task/environment.py` | Observes platform, tools, dependency files, test dirs, GPU, and interpreter policy. | Probes `workspace_dir` only; does not install dependencies. |
 | `code_task/runner.py` | Runs benchmark commands with timeout and restricted env. | Uses `cwd=workspace_dir`; injects `workspace` and `workspace/src` into `PYTHONPATH`. |
 | `code_task/planning.py` | Selects context files and asks for a patch plan. | Reads files from `workspace_dir` and references workspace-relative paths. |

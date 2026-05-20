@@ -12,6 +12,8 @@ user config / CLI
 -> initialize_code_task
 -> create_workspace(mode=copy|git_worktree|sparse_copy)
 -> build_codebase_index
+-> build_repo_map
+-> optional code-task map refresh
 -> probe_code_task_environment
 -> run_code_task_baseline
 -> generate_patch_plan
@@ -30,6 +32,7 @@ user config / CLI
 code_root
 -> code_task/workspace
 -> code_task/meta/codebase_index.json
+-> code_task/meta/repo_map.json
 -> code_task/run/<baseline|patched>/
 ```
 
@@ -45,6 +48,7 @@ code_root
 | `code_task/workspace_modes.py` | 调度 workspace creation strategies。 | 拥有 `copy` compatibility mode、repo-root `git_worktree` 和实验性 `sparse_copy`。 |
 | `code_task/state.py` | 集中管理 run paths、manifest helpers 和 safe workspace path helpers。 | 将 `code_task/workspace` 作为 editable root。 |
 | `code_task/index.py` | 从 workspace 构建 inventory 和 AST summaries。 | 只读取 `workspace_dir` 下的本地文件。 |
+| `code_task/repo_map.py` | 从 index 构建 project、directory、file、symbol、entrypoint、test、benchmark 和 config 分层 map。 | 保持 `codebase_index.json` 兼容，同时新增 `repo_map.json` 和 `repo_map_summary.md`。 |
 | `code_task/environment.py` | 观察 platform、tools、dependency files、test dirs、GPU 和 interpreter policy。 | 只 probe `workspace_dir`，不安装依赖。 |
 | `code_task/runner.py` | 带 timeout 和 restricted env 运行 benchmark commands。 | 使用 `cwd=workspace_dir`，并把 `workspace` 和 `workspace/src` 注入 `PYTHONPATH`。 |
 | `code_task/planning.py` | 选择上下文文件并请求 patch plan。 | 从 `workspace_dir` 读取文件，使用 workspace-relative paths。 |

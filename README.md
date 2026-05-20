@@ -215,7 +215,7 @@ Important limits:
 - Literature search currently works from metadata and local artifact snippets. It is not yet a full PDF-reading or vector-RAG survey system.
 - LLM-written reports are guarded. If the draft invents citations, omits required citations, or overstates toy evidence, SimpleAutoResearch falls back to a structured deterministic report.
 
-V2.2 development has started with workspace-mode abstraction, minimal git worktree support, and experimental sparse-copy support. The next focus is deeper coding loops: repo maps, multi-round attempts, stronger task decomposition, managed environments, and a clearer human-in-the-loop path from existing research code to reproducible results.
+V2.2 development has started with workspace-mode abstraction, minimal git worktree support, experimental sparse-copy support, and layered repo-map artifacts. The next focus is deeper coding loops: context packs, multi-round attempts, stronger task decomposition, managed environments, and a clearer human-in-the-loop path from existing research code to reproducible results.
 
 ## Documentation
 

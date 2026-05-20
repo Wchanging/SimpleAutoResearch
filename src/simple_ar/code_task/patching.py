@@ -24,6 +24,7 @@ from simple_ar.code_task.edit_scope import (
 )
 from simple_ar.code_task.index import build_codebase_index
 from simple_ar.code_task.planning import select_relevant_files
+from simple_ar.code_task.repo_map import build_repo_map
 from simple_ar.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.usage import summarize_usage
 
@@ -285,11 +286,18 @@ def apply_patch_edits(
     write_json(applied_edits_path, applied)
 
     codebase_index = build_codebase_index(workspace_dir, output_path=meta_dir / "codebase_index.json")
+    repo_map = build_repo_map(
+        codebase_index,
+        output_path=meta_dir / "repo_map.json",
+        summary_path=meta_dir / "repo_map_summary.md",
+        protected_patterns=protected_patterns,
+    )
     _update_manifest_after_apply(
         manifest_path,
         manifest,
         changed_files=_unique_prepared_paths(prepared),
         codebase_index=codebase_index,
+        repo_map=repo_map,
     )
     return PatchApplyResult(
         run_dir=root,
@@ -701,6 +709,7 @@ def _update_manifest_after_apply(
     *,
     changed_files: list[str],
     codebase_index: dict[str, Any],
+    repo_map: dict[str, Any],
 ) -> None:
     patch = _dict_value(manifest, "patch")
     patch.update(
@@ -717,9 +726,12 @@ def _update_manifest_after_apply(
         {
             "patch_diff": "code_task/patch.diff",
             "applied_edits": "code_task/meta/applied_edits.json",
+            "repo_map": "code_task/meta/repo_map.json",
+            "repo_map_summary": "code_task/meta/repo_map_summary.md",
         }
     )
     project = codebase_index.get("project", {})
+    repo_project = repo_map.get("project", {})
     manifest["layout"] = layout
     manifest["patch"] = patch
     manifest["status"] = "patched"
@@ -728,6 +740,15 @@ def _update_manifest_after_apply(
         "python_file_count": project.get("python_file_count", 0),
         "test_file_count": project.get("test_file_count", 0),
         "entrypoint_candidates": project.get("entrypoint_candidates", []),
+        "repo_map": {
+            "schema_version": repo_map.get("schema_version"),
+            "path": "code_task/meta/repo_map.json",
+            "summary": "code_task/meta/repo_map_summary.md",
+            "directory_count": repo_project.get("directory_count", 0),
+            "symbol_count": repo_project.get("symbol_count", 0),
+            "benchmark_file_count": repo_project.get("benchmark_file_count", 0),
+            "config_file_count": repo_project.get("config_file_count", 0),
+        },
     }
     write_json(manifest_path, manifest)
 

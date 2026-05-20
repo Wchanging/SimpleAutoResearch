@@ -185,9 +185,10 @@ uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits
 
 `init` creates a new `runs/<run-id>/` directory, prepares the source project under
 `code_task/workspace/`, writes the task to `code_task/task.md`, builds
-`code_task/meta/codebase_index.json`, and records the benchmark/environment
-policy in `manifest.json`. It does not run code, call the LLM, or modify the
-original source project.
+`code_task/meta/codebase_index.json` plus the layered
+`code_task/meta/repo_map.json` / `repo_map_summary.md`, and records the
+benchmark/environment policy in `manifest.json`. It does not run code, call the
+LLM, or modify the original source project.
 
 When `workspace.mode = "git_worktree"` or `--workspace-mode git_worktree` is
 used, `init` creates a detached git worktree at the same
@@ -221,11 +222,24 @@ After init, choose one of two execution styles:
 - **Executor path**: use `code-task execute` to continue to the next safe step.
   This is shorter, but it still stops at review gates.
 
+Refresh the code map at any time:
+
+```bash
+uv run simple-ar code-task map runs/<run-id>
+```
+
+`map` scans the current `code_task/workspace/`, refreshes
+`code_task/meta/codebase_index.json`, writes `code_task/meta/repo_map.json` and
+`code_task/meta/repo_map_summary.md`, and updates `manifest.json`. It does not
+call the LLM, install dependencies, run benchmark code, or modify the original
+source project.
+
 ### Manual Path
 
 Probe the environment and run the unchanged baseline before asking for edits:
 
 ```bash
+uv run simple-ar code-task map runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 ```

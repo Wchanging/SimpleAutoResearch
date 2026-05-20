@@ -30,8 +30,8 @@ plan -> search -> read -> synthesize -> report
 概念流程：
 
 ```text
-init workspace -> probe environment -> index code -> run baseline
--> plan patch -> approve -> propose edits -> apply edits
+init workspace -> index code -> map repo -> probe environment
+-> run baseline -> plan patch -> approve -> propose edits -> apply edits
 -> validate -> run patched benchmark -> compare results
 -> analyze failure -> repair proposal
 ```
@@ -182,6 +182,8 @@ runs/<run-id>/
     meta/
       environment_report.json
       codebase_index.json
+      repo_map.json
+      repo_map_summary.md
       hitl_decisions.jsonl
       proposed_edits.json
       applied_edits.json
@@ -219,6 +221,8 @@ runs/<run-id>/
 - `summary.md`：紧凑 outcome、下一步建议、task、patch、validation、benchmark、comparison 和 failure-analysis summary。
 - tests 和 benchmark 文件默认受 edit scope 保护。它们可以作为只读证据被索引，但 `propose-edits`、`repair` 和 `apply-edits` 不应修改它们。
 - `meta/environment_report.json`：OS/Python/tool/GPU/project probe。
+- `meta/repo_map.json`：从 `codebase_index.json` 派生的 project/directory/file/symbol/entrypoint/test/benchmark/config 分层 map。
+- `meta/repo_map_summary.md`：人类可读的紧凑 repo-map summary，以及未来 context pack 使用的 prompt-budget 说明。
 - `run/baseline/execution_report.json`：pre-patch benchmark result。
 - `run/patched/execution_report.json`：post-patch benchmark result。
 - `run/comparison.json`：baseline/patched metric deltas 和保守 verdict。

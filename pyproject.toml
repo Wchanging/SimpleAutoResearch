@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 simple-ar = "simple_ar.cli:main"
+simple-ar-checks = "simple_ar.dev_checks:main"
 
 [build-system]
 requires = ["hatchling"]

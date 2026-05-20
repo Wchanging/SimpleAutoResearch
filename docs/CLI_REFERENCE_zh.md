@@ -269,7 +269,7 @@ Code-task workflow 会把已有项目准备到 `code_task/workspace`。默认是
 推荐顺序：
 
 ```text
-init -> probe -> baseline -> plan -> decide-plan
+init -> map -> probe -> baseline -> plan -> decide-plan
 -> propose-edits -> apply-edits -> validate -> run
 -> analyze-failure -> repair
 ```
@@ -366,11 +366,28 @@ Code-task run 也会在 `manifest.json` 中记录 `edit_scope`。当前默认把
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
+### Map
+
+从当前 editable workspace 构建或刷新分层 repo-map artifacts：
+
+```bash
+uv run simple-ar code-task map runs/<run-id>
+```
+
+| 命令/参数 | 含义 |
+| --- | --- |
+| `map RUN_DIR` | 从 `code_task/workspace/` 重建 `code_task/meta/codebase_index.json`、`repo_map.json` 和 `repo_map_summary.md`。 |
+| `--no-refresh-index` | 不重新扫描当前 workspace，直接复用已有 `codebase_index.json`。 |
+| `--show-summary` | 写入后打印 `repo_map_summary.md`。 |
+
+`map` 是确定性步骤。它不会调用 LLM、不会运行项目代码、不会安装依赖，也不会修改文件。它的用途是让项目结构可检查，并为后续 locate/context-pack 提供基础 artifact。
+
 ### Manual Command Path
 
 当你想自己运行并检查每个 primitive step 时，使用手动路径：
 
 ```bash
+uv run simple-ar code-task map runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 uv run simple-ar code-task plan runs/<run-id>

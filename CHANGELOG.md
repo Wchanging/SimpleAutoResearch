@@ -4,6 +4,28 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-20
+
+### Added
+
+- Added Day 8 V2.2 layered repo-map artifacts for code-task runs:
+  `code_task/meta/repo_map.json` and `code_task/meta/repo_map_summary.md`.
+- Added project, directory, file, symbol, entrypoint, test, benchmark, config,
+  and prompt-budget layers to the repo-map schema while preserving
+  `codebase_index.json` for compatibility.
+- Added `simple-ar code-task map` to rebuild repo-map artifacts from the
+  current workspace as a standalone step.
+- Added `simple-ar-checks` and `scripts/run_checks.py` for layered developer
+  validation groups such as `quick`, `code-task`, `pipeline`, `research`, and
+  `all`.
+
+### Changed
+
+- Code-task initialization now writes both the legacy codebase index and the
+  new repo map, and patch application rebuilds both artifacts after edits.
+- Development docs now recommend targeted check groups during iteration and
+  reserving full test discovery for commits, pushes, or broad refactors.
+
 ## 2026-05-19
 
 ### Added
