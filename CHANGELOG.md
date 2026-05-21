@@ -4,6 +4,39 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-21
+
+### Added
+
+- Added Day 17-20 V2.2 batch-level edit budget enforcement for code-task
+  proposals, including normal/large/absolute profiles and explicit
+  `--allow-large-edits` review gates.
+- Added per-batch artifacts under
+  `code_task/attempts/attempt-NNN/batches/batch-NNN/`, including batch context,
+  proposal warnings, usage summaries, validation links, benchmark links, and
+  repair proposal links.
+- Added `code-task execute --config` support for `[execute]`,
+  `[models.code_task]`, and `[budget]` settings, so model routing and budget
+  caps can live in TOML instead of long CLI commands.
+
+### Changed
+
+- `code-task execute` now routes work-plan/patch-plan, edit proposal, and repair
+  steps through planner/editor/repair model slots when configured.
+- Active work-item batches now constrain LLM edit proposals to the batch target
+  files; protected tests and benchmark files still remain read-only evidence.
+- Validation, benchmark, and repair steps now update the active batch state so
+  interrupted or failed attempts are easier to inspect and resume manually.
+- Large or over-budget model outputs are normalized into warnings/rejected edits
+  instead of being applied implicitly.
+- Documentation now shows the correct reviewed executor sequence with
+  `execute --to-step propose-edits`, and adds troubleshooting notes for missing
+  proposals, benchmark regressions, repair proposals, exact-text patch failures,
+  large-edit approval, and local `uv` cache permission issues.
+- Repair and edit proposal handling now rejects accidental unified-diff
+  fragments inside structured `old`/`new` JSON fields, and `apply-edits` reports
+  patch validation failures without a Python traceback.
+
 ## 2026-05-20
 
 ### Added
@@ -19,6 +52,12 @@ This file records user-visible project changes in reverse chronological order. P
   protected read-only evidence from the repo map.
 - Added `simple-ar code-task context` to build bounded prompt context packs
   under `code_task/context_packs/context-NNN/`.
+- Added Day 15-16 V2.2 work-plan artifacts:
+  `code_task/work_plan.json` and `code_task/work_plan.md`, plus
+  `simple-ar code-task work-plan`.
+- Added initial attempt/batch state directories under
+  `code_task/attempts/attempt-NNN/batches/batch-NNN/`, plus
+  `simple-ar code-task batch --work-item W1`.
 - Added `simple-ar-checks` and `scripts/run_checks.py` for layered developer
   validation groups such as `quick`, `code-task`, `pipeline`, `research`, and
   `all`.
@@ -32,6 +71,10 @@ This file records user-visible project changes in reverse chronological order. P
 - Patch planning now uses the latest context pack when available, while
   controlled edit proposals use only editable context-pack snippets and keep
   protected files as read-only evidence.
+- Code-task planning now has a higher-level work-plan layer for splitting
+  broad tasks into small batches before asking for patch proposals.
+- `code-task execute` now includes the work-plan and batch setup steps in its
+  normal path, using the configured LLM unless `--no-llm` is set.
 - Development docs now recommend targeted check groups during iteration and
   reserving full test discovery for commits, pushes, or broad refactors.
 - V2.2 planning and workspace docs now record the Day 14 real-LLM smoke finding:

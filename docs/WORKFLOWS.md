@@ -50,6 +50,10 @@ Key boundaries:
   uniquely matchable; invalid proposals stop before workspace files are written.
 - `code-task execute` can run the next safe steps, but it stops at plan approval
   and proposal review unless the user explicitly continues.
+- A benchmark-passing repair is not automatically a task success. The
+  before/after verdict comes from `code_task/run/comparison.json`; if patched
+  metrics remain below baseline, the system has recovered execution but has not
+  achieved an improvement objective yet.
 - Current execution uses workspace isolation plus an explicit interpreter
   policy. It supports `current` and `external`; managed environment creation is
   planned later. `workspace.reuse_source_venv` can point a worktree/copy/sparse

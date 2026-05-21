@@ -12,7 +12,9 @@ from simple_ar.code_task import (
     apply_patch_edits,
     build_code_task_context_pack,
     build_code_task_repo_map,
+    create_code_task_batch,
     execute_code_task,
+    generate_code_task_work_plan,
     generate_patch_plan,
     initialize_code_task,
     locate_code_task_context,
@@ -23,11 +25,13 @@ from simple_ar.code_task import (
     run_code_task_baseline,
     run_code_task_benchmark,
     validate_code_task,
+    PatchValidationError,
     WorkspaceModeError,
 )
 from simple_ar.code_task.config import (
     CodeTaskConfigError,
     load_code_task_init_options,
+    load_code_task_execute_options,
     parse_metric_direction_arg,
 )
 from simple_ar.pipeline import Context, PipelineRunner
@@ -248,6 +252,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print prompt_context.md after writing it.",
     )
 
+    code_task_work_plan = code_task_subparsers.add_parser(
+        "work-plan",
+        help="Generate a batch-oriented implementation work plan for a code-task run.",
+    )
+    code_task_work_plan.add_argument("run_dir")
+    code_task_work_plan.add_argument("--model", default=None)
+    code_task_work_plan.add_argument("--no-llm", action="store_true")
+    code_task_work_plan.add_argument("--force", action="store_true")
+    code_task_work_plan.add_argument("--max-files", type=int, default=8)
+    code_task_work_plan.add_argument("--max-source-chars-per-file", type=int, default=2500)
+
+    code_task_batch = code_task_subparsers.add_parser(
+        "batch",
+        help="Create an attempt/batch state directory for one work-plan item.",
+    )
+    code_task_batch.add_argument("run_dir")
+    code_task_batch.add_argument(
+        "--work-item",
+        required=True,
+        help="Work-plan item id to execute, for example W1.",
+    )
+    code_task_batch.add_argument(
+        "--attempt-id",
+        default=None,
+        help="Optional attempt id such as attempt-001. Defaults to the active attempt.",
+    )
+    code_task_batch.add_argument(
+        "--force",
+        action="store_true",
+        help="Create a new batch even if the active attempt already has one for this item.",
+    )
+
     code_task_plan = code_task_subparsers.add_parser(
         "plan",
         help="Generate a human-reviewable patch plan for a code-task run.",
@@ -282,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
     code_task_propose.add_argument("--force", action="store_true")
     code_task_propose.add_argument("--max-files", type=int, default=8)
     code_task_propose.add_argument("--max-source-chars-per-file", type=int, default=4000)
+    code_task_propose.add_argument(
+        "--allow-large-edits",
+        action="store_true",
+        help="Accept proposals that exceed the normal budget but fit the large budget.",
+    )
 
     code_task_apply = code_task_subparsers.add_parser(
         "apply-edits",
@@ -293,6 +334,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-unapproved-plan",
         action="store_true",
         help="Bypass the human approval gate. Intended only for local experiments/tests.",
+    )
+    code_task_apply.add_argument(
+        "--allow-large-edits",
+        action="store_true",
+        help="Apply a reviewed proposal that requires large-edit approval.",
     )
 
     code_task_validate = code_task_subparsers.add_parser(
@@ -345,10 +391,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     code_task_execute.add_argument("run_dir")
     code_task_execute.add_argument(
+        "--config",
+        default=None,
+        help="Optional TOML config for execute model, budget, and runtime settings.",
+    )
+    code_task_execute.add_argument(
         "--to-step",
         choices=(
             "probe",
             "baseline",
+            "work-plan",
+            "batch",
             "plan",
             "propose-edits",
             "apply-edits",
@@ -357,7 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
             "analyze-failure",
             "repair",
         ),
-        default="run",
+        default=None,
         help="Last step execute may attempt.",
     )
     code_task_execute.add_argument("--dry-run", action="store_true")
@@ -371,6 +424,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply-proposed-edits",
         action="store_true",
         help="Apply reviewed proposed_edits.json after plan approval.",
+    )
+    code_task_execute.add_argument(
+        "--allow-large-edits",
+        action="store_true",
+        help="Allow execute to accept/apply proposals that exceed the normal edit budget.",
     )
     code_task_execute.add_argument("--repair-rounds", type=int, default=0)
     code_task_execute.add_argument("--max-files", type=int, default=8)
@@ -624,6 +682,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.code_task_command == "context":
             _print_code_task_context(args)
+            return
+        if args.code_task_command == "work-plan":
+            _print_code_task_work_plan(args)
+            return
+        if args.code_task_command == "batch":
+            _print_code_task_batch(args)
             return
         if args.code_task_command == "plan":
             _print_code_task_plan(args)
@@ -919,7 +983,15 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
     layout = manifest.get("layout", {})
     if isinstance(layout, dict):
         print("Layout:")
-        for key in ("summary", "task", "workspace", "meta", "codebase_index"):
+        for key in (
+            "summary",
+            "task",
+            "workspace",
+            "meta",
+            "codebase_index",
+            "work_plan",
+            "attempts",
+        ):
             value = layout.get(key)
             if value:
                 print(f"- {key}: {run_dir / str(value)}")
@@ -946,6 +1018,24 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
         print(f"- mode: {plan.get('mode', 'unknown')}")
         if plan.get("patch_plan"):
             print(f"- patch plan: {run_dir / str(plan.get('patch_plan'))}")
+
+    work_plan = manifest.get("work_plan", {})
+    if isinstance(work_plan, dict) and work_plan:
+        print("Work Plan:")
+        print(f"- status: {work_plan.get('status', 'unknown')}")
+        print(f"- mode: {work_plan.get('mode', 'unknown')}")
+        print(f"- items: {work_plan.get('item_count', 0)}")
+        if work_plan.get("path"):
+            print(f"- json: {run_dir / str(work_plan.get('path'))}")
+        if work_plan.get("markdown"):
+            print(f"- markdown: {run_dir / str(work_plan.get('markdown'))}")
+
+    attempts = manifest.get("attempts", {})
+    if isinstance(attempts, dict) and attempts:
+        print("Attempts:")
+        print(f"- active: {attempts.get('active', '')}")
+        if attempts.get("latest_batch"):
+            print(f"- latest batch: {run_dir / str(attempts.get('latest_batch'))}")
 
     environment = manifest.get("environment", {})
     if isinstance(environment, dict) and environment:
@@ -1355,6 +1445,45 @@ def _print_code_task_context(args: argparse.Namespace) -> None:
         print(read_text(result.prompt_context_path))
 
 
+def _print_code_task_work_plan(args: argparse.Namespace) -> None:
+    """Generate a batch-oriented work plan and print artifact paths."""
+    result = generate_code_task_work_plan(
+        Path(args.run_dir),
+        model=args.model,
+        use_llm=not args.no_llm,
+        force=args.force,
+        max_files=args.max_files,
+        max_source_chars_per_file=args.max_source_chars_per_file,
+        message_callback=lambda message: print(f"  - {message}"),
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Work plan: {result.work_plan_path}")
+    print(f"Work plan markdown: {result.work_plan_markdown_path}")
+    print(f"Mode: {result.mode}")
+    print(f"Items: {result.item_count}")
+    print(f"Pending approval: {result.pending_approval}")
+    print(f"Context files: {len(result.selected_files)}")
+    for path in result.selected_files:
+        print(f"- {path}")
+
+
+def _print_code_task_batch(args: argparse.Namespace) -> None:
+    """Create attempt/batch state for a reviewed work item."""
+    result = create_code_task_batch(
+        Path(args.run_dir),
+        work_item_id=args.work_item,
+        attempt_id=args.attempt_id,
+        force=args.force,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Attempt: {result.attempt_id}")
+    print(f"Batch: {result.batch_id}")
+    print(f"Work item: {result.work_item_id}")
+    print(f"State: {result.state}")
+    print(f"Attempt state: {result.attempt_state_path}")
+    print(f"Batch state: {result.batch_state_path}")
+
+
 def _print_code_task_plan(args: argparse.Namespace) -> None:
     """Generate a code-task patch plan and print a compact summary."""
     result = generate_patch_plan(
@@ -1397,6 +1526,7 @@ def _print_code_task_propose_edits(args: argparse.Namespace) -> None:
         force=args.force,
         max_files=args.max_files,
         max_source_chars_per_file=args.max_source_chars_per_file,
+        allow_large_edits=args.allow_large_edits,
         message_callback=lambda message: print(f"  - {message}"),
     )
     print(f"Code task run: {result.run_dir}")
@@ -1410,11 +1540,17 @@ def _print_code_task_propose_edits(args: argparse.Namespace) -> None:
 
 def _print_code_task_apply_edits(args: argparse.Namespace) -> None:
     """Safely apply controlled edits and print changed files."""
-    result = apply_patch_edits(
-        Path(args.run_dir),
-        edits_file=Path(args.edits_file) if args.edits_file else None,
-        allow_unapproved_plan=args.allow_unapproved_plan,
-    )
+    try:
+        result = apply_patch_edits(
+            Path(args.run_dir),
+            edits_file=Path(args.edits_file) if args.edits_file else None,
+            allow_unapproved_plan=args.allow_unapproved_plan,
+            allow_large_edits=args.allow_large_edits,
+        )
+    except PatchValidationError as exc:
+        print("Patch validation failed; no workspace files were changed.")
+        print(str(exc))
+        raise SystemExit(1) from exc
     print(f"Code task run: {result.run_dir}")
     print(f"Patch diff: {result.patch_diff_path}")
     print(f"Applied edits: {result.applied_edits_path}")
@@ -1518,22 +1654,51 @@ def _print_code_task_repair(args: argparse.Namespace) -> None:
 
 def _print_code_task_execute(args: argparse.Namespace) -> None:
     """Run the state-aware code-task orchestrator and print step decisions."""
+    try:
+        options = load_code_task_execute_options(config_path=args.config)
+    except CodeTaskConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+    model = args.model or options.model
+    use_llm = False if args.no_llm else options.use_llm
+    timeout = args.timeout if args.timeout != 60 else options.timeout_sec
+    repair_rounds = args.repair_rounds if args.repair_rounds != 0 else options.repair_rounds
+    max_files = args.max_files if args.max_files != 8 else options.max_files
+    max_source_chars = (
+        args.max_source_chars_per_file
+        if args.max_source_chars_per_file != 4000
+        else options.max_source_chars_per_file
+    )
+    validation_max_file_bytes = (
+        args.validation_max_file_bytes
+        if args.validation_max_file_bytes != 500_000
+        else options.validation_max_file_bytes
+    )
+    env_mode = args.env_mode or options.env_mode
+    python_executable = args.python_executable or options.python_executable
     result = execute_code_task(
         Path(args.run_dir),
-        to_step=args.to_step,
+        to_step=args.to_step or options.to_step,
         dry_run=args.dry_run,
-        model=args.model,
-        use_llm=not args.no_llm,
-        timeout_sec=args.timeout,
-        skip_validation=args.skip_validation,
-        env_mode=args.env_mode,
-        python_executable=args.python_executable,
-        strict_validation=args.strict_validation,
-        validation_max_file_bytes=args.validation_max_file_bytes,
-        apply_proposed_edits=args.apply_proposed_edits,
-        repair_rounds=args.repair_rounds,
-        max_files=args.max_files,
-        max_source_chars_per_file=args.max_source_chars_per_file,
+        model=model,
+        planner_model=options.planner_model,
+        editor_model=options.editor_model,
+        repair_model=options.repair_model,
+        use_llm=use_llm,
+        timeout_sec=timeout,
+        skip_validation=args.skip_validation or options.skip_validation,
+        env_mode=env_mode,
+        python_executable=python_executable,
+        strict_validation=args.strict_validation or options.strict_validation,
+        validation_max_file_bytes=validation_max_file_bytes,
+        apply_proposed_edits=args.apply_proposed_edits or options.apply_proposed_edits,
+        allow_large_edits=args.allow_large_edits or options.allow_large_edits,
+        repair_rounds=repair_rounds,
+        budget_profile=options.budget_profile,
+        edit_budget_overrides=options.edit_budget_overrides,
+        max_batches=options.max_batches,
+        cost_cap_usd=options.cost_cap_usd,
+        max_files=max_files,
+        max_source_chars_per_file=max_source_chars,
         message_callback=lambda message: print(f"  - {message}"),
     )
     print(f"Code task run: {result.run_dir}")

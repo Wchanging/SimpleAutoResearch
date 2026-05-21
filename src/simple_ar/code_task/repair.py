@@ -216,6 +216,8 @@ def _repair_prompt(
         "Each edit must contain `path`, `old`, `new`, and `reason` string fields.\n\n"
         "Rules:\n"
         "- Use exact old/new text replacements only.\n"
+        "- Do not include diff markers such as `+`, `-`, `@@`, `---`, or "
+        "`+++` inside `old` or `new`; they must contain only file text.\n"
         "- Use only workspace-relative paths from the supplied snippets.\n"
         "- Prefer repairing implicated or recently changed files.\n"
         "- Treat validation errors as first-class evidence even when the benchmark was not launched.\n"
@@ -354,6 +356,11 @@ def _normalize_repair_proposal(
         if not isinstance(old, str) or not isinstance(new, str):
             warnings.append(f"Dropped edit for {path}: old/new must be strings.")
             continue
+        if _looks_like_diff_fragment(old) or _looks_like_diff_fragment(new):
+            warnings.append(
+                f"Dropped edit for {path}: old/new must be exact text, not a diff fragment."
+            )
+            continue
         if old == new:
             warnings.append(f"Dropped edit for {path}: old and new are identical.")
             continue
@@ -400,6 +407,16 @@ def _next_repair_dir(repairs_dir: Path) -> Path:
         except ValueError:
             continue
     return repairs_dir / f"repair-{(max(numbers) + 1 if numbers else 1):03d}"
+
+
+def _looks_like_diff_fragment(text: str) -> bool:
+    """Return true when a model put unified-diff markers inside an edit field."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if any(line.startswith(("@@", "--- ", "+++ ")) for line in lines):
+        return True
+    removed = any(line.startswith("-") for line in lines)
+    added = any(line.startswith("+") for line in lines)
+    return removed and added
 
 
 def _update_manifest_after_repair(

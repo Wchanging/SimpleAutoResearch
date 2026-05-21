@@ -127,20 +127,30 @@ uv run simple-ar code-task execute runs/<run-id>
 # Approve the plan after reading code_task/patch_plan.md.
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 
-# Continue to edit proposal review.
-uv run simple-ar code-task execute runs/<run-id>
+# Continue explicitly to edit proposal review.
+uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
 
 # Apply the reviewed proposal and run validation/benchmark.
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
 ```
 
 `execute` is a state-aware convenience command. From a fresh code task it stops
-at `approval_required` after writing the environment report, baseline run, and
-patch plan. After approval, it can generate `proposed_edits.json`, then stops
-again for proposal review. `--apply-proposed-edits` is the explicit signal to
-apply the reviewed proposal and run validation/benchmark. When both baseline
-and patched benchmark artifacts exist, the run summary includes a conservative
-before/after comparison.
+at `approval_required` after writing the environment report, baseline run,
+work plan, first attempt/batch state, and patch plan. After approval, it can
+generate a budget-checked `proposed_edits.json`, then stops again for proposal
+review. `--apply-proposed-edits` is the explicit signal to apply the reviewed
+proposal and run validation/benchmark. When both baseline and patched benchmark
+artifacts exist, the run summary includes a conservative before/after
+comparison. Use `execute --config` when model routing and edit budgets should
+come from TOML instead of CLI flags.
+
+If `proposed_edits.json` is missing after the first executor call, that is
+usually expected: review `code_task/patch_plan.md`, approve it with
+`decide-plan`, then run `execute --to-step propose-edits`. If validation passes
+but the patched benchmark regresses, inspect `code_task/run/patched/` and use
+`execute --to-step repair --repair-rounds 1` to request a bounded repair
+proposal. More troubleshooting notes are in
+[Usage And Configuration](docs/USAGE.md#troubleshooting-code-task-runs).
 
 For benchmark comparison, print numeric metrics as `name: value` lines.
 `--primary-metric` chooses the main quality target, while

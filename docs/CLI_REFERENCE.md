@@ -464,6 +464,34 @@ This command does not call the LLM or modify files. When a latest context pack
 exists, `plan` reads it for planning context and `propose-edits` reads only its
 editable snippets while keeping protected files as read-only evidence.
 
+Generate a batch-oriented work plan:
+
+```bash
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
+```
+
+| Command/Option | Meaning |
+| --- | --- |
+| `work-plan RUN_DIR` | Write `code_task/work_plan.json` and `code_task/work_plan.md`. |
+| `--model NAME` | Override the model used for work-plan generation. |
+| `--no-llm` | Use the deterministic fallback planner. |
+| `--force` | Regenerate existing work-plan artifacts. |
+| `--max-files N` | Maximum selected context files for planning. |
+| `--max-source-chars-per-file N` | Per-file source snippet budget. |
+| `batch RUN_DIR --work-item W1` | Create an attempt/batch state directory for one work-plan item. |
+| `--attempt-id attempt-001` | Reuse or create a specific attempt id. |
+| `--force` | Create another batch for the same work item instead of reusing the existing one. |
+
+`work-plan` is the V2.2 bridge between a broad task and bounded edit batches.
+It writes work items with target files, read-only evidence, validation hints,
+context requests, and budget profiles. `batch` writes durable state under
+`code_task/attempts/attempt-NNN/batches/batch-NNN/`; it does not call the LLM
+or modify files yet. Later edit proposals for an active batch are constrained
+to that batch's target files and write per-batch artifacts such as
+`batch_context.json`, `proposed_edits.json`, `proposal_warnings.json`, and
+`usage_summary.json`.
+
 ### Manual Command Path
 
 Use the manual path when you want to run and inspect each primitive step
@@ -475,6 +503,8 @@ uv run simple-ar code-task locate runs/<run-id>
 uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
 uv run simple-ar code-task plan runs/<run-id>
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 uv run simple-ar code-task propose-edits runs/<run-id>
@@ -504,6 +534,8 @@ uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 #### Planning And Approval
 
 ```bash
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
 uv run simple-ar code-task plan runs/<run-id>
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 ```
@@ -516,6 +548,8 @@ uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 | `--force` | Regenerate an existing plan. |
 | `--max-files N` | Maximum selected context files. |
 | `--max-source-chars-per-file N` | Source snippet budget per file. |
+| `work-plan RUN_DIR` | Generate `code_task/work_plan.json` and `work_plan.md` for batch execution. |
+| `batch RUN_DIR --work-item W1` | Create `code_task/attempts/attempt-NNN/batches/batch-NNN/batch_state.json`. |
 | `decide-plan RUN_DIR` | Record plan approval/rejection/revision. |
 | `--decision approve / reject / revise` | Required decision value. |
 | `--note TEXT` | Optional review note. |
@@ -532,8 +566,8 @@ uv run simple-ar code-task execute runs/<run-id>
 # Approve the plan after reading code_task/patch_plan.md.
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 
-# Continue to edit proposal review.
-uv run simple-ar code-task execute runs/<run-id>
+# Continue explicitly to edit proposal review.
+uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
 
 # Apply the reviewed proposal and run validation/benchmark.
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
@@ -545,19 +579,64 @@ run artifacts, performs the next safe work, and stops at review boundaries.
 | Command/Option | Meaning |
 | --- | --- |
 | `execute RUN_DIR` | Run the next safe code-task steps based on current artifacts. |
-| `--to-step STEP` | Stop no later than `probe`, `baseline`, `plan`, `propose-edits`, `apply-edits`, `validate`, `run`, `analyze-failure`, or `repair`. |
+| `--config PATH` | Optional TOML config for execute model routing, budget, and runtime settings. |
+| `--to-step STEP` | Stop no later than `probe`, `baseline`, `work-plan`, `batch`, `plan`, `propose-edits`, `apply-edits`, `validate`, `run`, `analyze-failure`, or `repair`. |
 | `--dry-run` | Print the next action without writing artifacts. |
 | `--no-llm`, `--model NAME` | Control LLM use for plan/proposal/repair steps. |
 | `--apply-proposed-edits` | Allow execute to apply reviewed `proposed_edits.json` after plan approval. |
+| `--allow-large-edits` | Accept and apply a reviewed proposal that exceeds the normal edit budget but fits the large budget. |
 | `--repair-rounds N` | Maximum bounded repair proposals after validation/benchmark failure. Repair proposals are not auto-applied. |
 | `--timeout N` | Benchmark timeout for baseline and patched runs. |
 | `--strict-validation`, `--validation-max-file-bytes N` | Validation controls used by the orchestrated validate step. |
 | `--env-mode`, `--python` | Override execution interpreter policy for probe and benchmark runs. |
 
-Review gates are preserved. A fresh run stops after `patch_plan.md` with
-`approval_required`. After approval, execute may generate
-`proposed_edits.json`, but it stops again with `proposal_review_required`
-unless `--apply-proposed-edits` is set.
+Review gates are preserved. A fresh run also creates the real `work_plan.json`
+using the configured LLM unless `--no-llm` is set, then creates the first
+attempt/batch state before stopping after `patch_plan.md` with
+`approval_required`. After approval, run
+`execute --to-step propose-edits` to make the proposal generation step explicit.
+The command stops again with `proposal_review_required` unless
+`--apply-proposed-edits` is set.
+
+`execute --config` can reuse the same TOML file as `code-task init --config`
+and read these extra sections:
+
+```toml
+[execute]
+to_step = "run"
+use_llm = true
+timeout_sec = 60
+repair_rounds = 1
+max_files = 8
+max_source_chars_per_file = 4000
+apply_proposed_edits = false
+allow_large_edits = false
+
+[models.code_task]
+# If omitted, SIMPLE_AR_MODEL or --model is used.
+planner = "gpt-5.1"
+editor = "gpt-5.1"
+repair = "gpt-5.1"
+summarizer = "gpt-5.1"
+
+[budget]
+profile = "normal"       # normal | large | absolute
+max_batches = 3
+cost_cap_usd = 2.0       # only enforced when provider usage includes cost
+
+[budget.normal]
+max_files = 2
+max_edits = 4
+max_old_chars = 3000
+max_new_chars = 4000
+max_total_edit_chars = 12000
+max_proposal_chars = 24000
+```
+
+The edit budget is enforced after the model returns JSON. Over-budget proposals
+are written with warnings and rejected edits instead of being applied. If a
+proposal fits the large profile, rerun with `--allow-large-edits` only after
+reviewing the generated JSON and patch intent.
 
 Dry-run preview:
 
@@ -577,9 +656,11 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 | Command/Option | Meaning |
 | --- | --- |
 | `propose-edits RUN_DIR` | Ask the model for controlled old/new replacements. |
+| `--allow-large-edits` | Accept a large but bounded proposal after explicit review. |
 | `apply-edits RUN_DIR` | Apply approved edit proposals inside workspace. |
 | `--edits-file PATH` | Apply a specific proposal file. |
 | `--allow-unapproved-plan` | Bypass approval gate for local tests/demos. |
+| `--allow-large-edits` | Apply a reviewed proposal marked as requiring large-edit approval. |
 | `validate RUN_DIR` | Run syntax/static safety checks. |
 | `--strict` | Treat higher-risk validation warnings as errors. |
 | `run RUN_DIR` | Run patched benchmark under `code_task/run/patched/`. |
@@ -591,6 +672,13 @@ When both baseline and patched runs exist, SimpleAutoResearch writes
 Each edit is applied against the current in-memory text, and each `old` block
 must match exactly once. Invalid proposals stop before file writes; under
 `execute`, this appears as `patch_apply_failed`.
+
+The proposal format is structured JSON, not a unified diff. `old` and `new`
+must contain exact file text. Do not include diff markers such as `+`, `-`,
+`@@`, `---`, or `+++` inside those fields. When the model returns those markers
+in a repair proposal, the normalizer drops that edit with a warning; when a
+manual proposal does not match the current workspace, `apply-edits` exits with
+a concise validation error and leaves files unchanged.
 
 Edit-scope validation is checked twice: model proposals for protected paths are
 dropped from `proposed_edits.json`, and `apply-edits` rejects protected paths
@@ -620,6 +708,11 @@ launch. `repair` writes a proposal JSON with `source_analysis`,
 `selected_files`, `constraints`, normalized `edits`, and `warnings`; edits
 outside the selected repair context are dropped. It also refreshes
 `code_task/summary.md` with a Repair section.
+
+A repair proposal is still only a proposal. Apply it explicitly, validate, and
+rerun the benchmark. A successful repair can restore the benchmark floor while
+still being worse than the original baseline, so use `run/comparison.json` to
+decide whether the task objective was actually achieved.
 
 ```bash
 uv run simple-ar code-task apply-edits runs/<run-id> \

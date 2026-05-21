@@ -18,7 +18,9 @@ from simple_ar.code_task import (
     apply_patch_edits,
     build_code_task_context_pack,
     build_code_task_repo_map,
+    create_code_task_batch,
     execute_code_task,
+    generate_code_task_work_plan,
     generate_patch_plan,
     initialize_code_task,
     locate_code_task_context,
@@ -432,6 +434,140 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("Context pack:", output)
             self.assertIn("Selected files:", output)
 
+    def test_work_plan_offline_writes_batchable_items_and_manifest(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(
+                task_file,
+                "# Task\n\nImprove spam keyword prediction without changing tests.\n",
+            )
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            build_code_task_context_pack(
+                run_dir,
+                query="improve spam keyword prediction",
+                top_k=4,
+                max_files=3,
+            )
+
+            result = generate_code_task_work_plan(run_dir, use_llm=False)
+
+            self.assertEqual(result.mode, "offline")
+            self.assertTrue(result.pending_approval)
+            self.assertEqual(result.item_count, 1)
+            self.assertTrue(result.work_plan_path.is_file())
+            self.assertTrue(result.work_plan_markdown_path.is_file())
+            plan = read_json(result.work_plan_path)
+            self.assertEqual(plan["schema_version"], 1)
+            self.assertEqual(plan["items"][0]["id"], "W1")
+            self.assertIn("spam_model.py", plan["items"][0]["target_files"])
+            self.assertNotIn("tests/test_spam_model.py", plan["items"][0]["target_files"])
+            self.assertIn("tests/test_spam_model.py", plan["items"][0]["read_only_evidence"])
+            markdown = read_text(result.work_plan_markdown_path)
+            self.assertIn("# Work Plan", markdown)
+            self.assertIn("## Work Items", markdown)
+            self.assertIn("W1", markdown)
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "work_planned")
+            self.assertEqual(manifest["layout"]["work_plan"], "code_task/work_plan.json")
+            self.assertEqual(manifest["work_plan"]["status"], "pending_approval")
+            self.assertEqual(manifest["work_plan"]["item_count"], 1)
+
+    def test_work_plan_and_batch_cli_create_attempt_state(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove spam classifier accuracy.\n")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                    ]
+                )
+            run_dir = next(output_root.iterdir())
+
+            work_plan_stdout = io.StringIO()
+            with contextlib.redirect_stdout(work_plan_stdout):
+                main(["code-task", "work-plan", str(run_dir), "--no-llm"])
+
+            self.assertIn("Work plan:", work_plan_stdout.getvalue())
+            self.assertTrue((run_dir / "code_task" / "work_plan.json").is_file())
+
+            batch_stdout = io.StringIO()
+            with contextlib.redirect_stdout(batch_stdout):
+                main(["code-task", "batch", str(run_dir), "--work-item", "W1"])
+
+            output = batch_stdout.getvalue()
+            self.assertIn("Attempt: attempt-001", output)
+            self.assertIn("Batch: batch-001", output)
+            attempt_state = read_json(
+                run_dir / "code_task" / "attempts" / "attempt-001" / "attempt_state.json"
+            )
+            batch_state = read_json(
+                run_dir
+                / "code_task"
+                / "attempts"
+                / "attempt-001"
+                / "batches"
+                / "batch-001"
+                / "batch_state.json"
+            )
+            self.assertEqual(attempt_state["state"], "batching")
+            self.assertEqual(batch_state["state"], "created")
+            self.assertEqual(batch_state["work_item_id"], "W1")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "batch_created")
+            self.assertEqual(manifest["attempts"]["active"], "attempt-001")
+            self.assertIn("latest_batch", manifest["attempts"])
+
+    def test_create_code_task_batch_reuses_existing_item_batch(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove spam classifier accuracy.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_code_task_work_plan(run_dir, use_llm=False)
+
+            first = create_code_task_batch(run_dir, work_item_id="W1")
+            second = create_code_task_batch(run_dir, work_item_id="W1")
+            forced = create_code_task_batch(run_dir, work_item_id="W1", force=True)
+
+            self.assertEqual(first.batch_id, "batch-001")
+            self.assertEqual(second.batch_id, "batch-001")
+            self.assertEqual(forced.batch_id, "batch-002")
+            self.assertTrue(forced.batch_state_path.is_file())
+
     def test_probe_code_task_environment_writes_report_and_manifest(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -595,6 +731,145 @@ class CodeTaskTests(unittest.TestCase):
                 "code_task/context_packs/context-001/context_pack.json",
             )
             self.assertTrue(context.context_pack_path.is_file())
+
+    def test_propose_edits_restricts_llm_to_current_batch_targets(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(code_root / "extra.py", "VALUE = 1\n")
+            write_text(task_file, "# Task\n\nImprove spam prediction only.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_code_task_work_plan(run_dir, use_llm=False)
+            work_plan_path = run_dir / "code_task" / "work_plan.json"
+            work_plan = read_json(work_plan_path)
+            work_plan["items"][0]["target_files"] = ["spam_model.py"]
+            write_json(work_plan_path, work_plan)
+            create_code_task_batch(run_dir, work_item_id="W1")
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            fake_client = _FakeRepairClient(
+                {
+                    "summary": "Try one valid batch edit and one unrelated edit.",
+                    "edits": [
+                        {
+                            "path": "spam_model.py",
+                            "old": (
+                                "def predict(text):\n"
+                                "    return 'spam' if 'win' in text.lower() else 'ham'\n"
+                            ),
+                            "new": (
+                                "def predict(text):\n"
+                                "    lowered = text.lower()\n"
+                                "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize')) else 'ham'\n"
+                            ),
+                            "reason": "Improve the selected batch target.",
+                        },
+                        {
+                            "path": "extra.py",
+                            "old": "VALUE = 1\n",
+                            "new": "VALUE = 2\n",
+                            "reason": "This file is outside the current batch.",
+                        },
+                    ],
+                    "validation": ["Run unit tests."],
+                    "risks": [],
+                }
+            )
+
+            with patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client):
+                proposal = propose_patch_edits(run_dir, use_llm=True)
+
+            self.assertEqual(proposal.edit_count, 1)
+            data = read_json(proposal.proposal_path)
+            self.assertEqual([edit["path"] for edit in data["edits"]], ["spam_model.py"])
+            self.assertIn(
+                "Dropped edit outside current batch target files: extra.py",
+                data["warnings"],
+            )
+            batch_state = read_json(
+                run_dir
+                / "code_task"
+                / "attempts"
+                / "attempt-001"
+                / "batches"
+                / "batch-001"
+                / "batch_state.json"
+            )
+            self.assertEqual(batch_state["state"], "proposal_ready")
+            self.assertEqual(
+                batch_state["artifacts"]["proposed_edits"],
+                "code_task/attempts/attempt-001/batches/batch-001/proposed_edits.json",
+            )
+
+    def test_propose_edits_budget_requires_large_approval(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nMake a deliberately large local implementation.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_code_task_work_plan(run_dir, use_llm=False)
+            create_code_task_batch(run_dir, work_item_id="W1")
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            large_new = "def predict(text):\n" + "    lowered = text.lower()\n" * 260 + "    return 'spam'\n"
+            fake_client = _FakeRepairClient(
+                {
+                    "summary": "Large but localized function replacement.",
+                    "edits": [
+                        {
+                            "path": "spam_model.py",
+                            "old": (
+                                "def predict(text):\n"
+                                "    return 'spam' if 'win' in text.lower() else 'ham'\n"
+                            ),
+                            "new": large_new,
+                            "reason": "Large local implementation.",
+                        }
+                    ],
+                    "validation": ["Run unit tests."],
+                    "risks": ["Large edit."],
+                }
+            )
+
+            with patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client):
+                blocked = propose_patch_edits(run_dir, use_llm=True)
+
+            blocked_data = read_json(blocked.proposal_path)
+            self.assertEqual(blocked.edit_count, 0)
+            self.assertEqual(blocked_data["budget"]["status"], "large_requires_approval")
+            self.assertTrue(blocked_data["budget"]["requires_approval"])
+            self.assertIn("Proposal exceeds the selected edit budget", blocked_data["warnings"][0])
+
+            with patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client):
+                approved = propose_patch_edits(
+                    run_dir,
+                    use_llm=True,
+                    force=True,
+                    allow_large_edits=True,
+                )
+
+            approved_data = read_json(approved.proposal_path)
+            self.assertEqual(approved.edit_count, 1)
+            self.assertEqual(approved_data["budget"]["status"], "large_approved")
+            self.assertTrue(approved_data["budget"]["approved"])
 
     def test_patch_plan_includes_baseline_and_environment_context(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -958,6 +1233,59 @@ class CodeTaskTests(unittest.TestCase):
                 main(["status", str(run_dir)])
             self.assertIn("Patch:", status_stdout.getvalue())
             self.assertIn("status: applied", status_stdout.getvalue())
+
+    def test_code_task_apply_cli_reports_validation_errors_without_traceback(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            output_root = root / "runs"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nDetect prize messages as spam.\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "code-task",
+                        "init",
+                        "--code-root",
+                        str(code_root),
+                        "--task-file",
+                        str(task_file),
+                        "--output-root",
+                        str(output_root),
+                    ]
+                )
+            run_dir = next(output_root.iterdir())
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["code-task", "plan", str(run_dir), "--no-llm"])
+                main(["code-task", "decide-plan", str(run_dir), "--decision", "approve"])
+
+            edits_file = root / "bad_edits.json"
+            write_json(
+                edits_file,
+                {
+                    "schema_version": 1,
+                    "edits": [
+                        {
+                            "path": "spam_model.py",
+                            "old": "def missing():\n    pass\n",
+                            "new": "def missing():\n    return None\n",
+                            "reason": "This cannot match the workspace.",
+                        }
+                    ],
+                },
+            )
+
+            apply_stdout = io.StringIO()
+            with contextlib.redirect_stdout(apply_stdout):
+                with self.assertRaises(SystemExit) as caught:
+                    main(["code-task", "apply-edits", str(run_dir), "--edits-file", str(edits_file)])
+
+            self.assertEqual(caught.exception.code, 1)
+            output = apply_stdout.getvalue()
+            self.assertIn("Patch validation failed; no workspace files were changed.", output)
+            self.assertIn("old text was not found", output)
 
     def test_validate_code_task_reports_warnings_and_strict_errors(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -1405,11 +1733,29 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(result.stop_reason, "approval_required")
             self.assertTrue((run_dir / "code_task" / "meta" / "environment_report.json").is_file())
             self.assertTrue((run_dir / "code_task" / "run" / "baseline" / "execution_report.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "work_plan.json").is_file())
+            self.assertTrue(
+                (
+                    run_dir
+                    / "code_task"
+                    / "attempts"
+                    / "attempt-001"
+                    / "batches"
+                    / "batch-001"
+                    / "batch_state.json"
+                ).is_file()
+            )
             self.assertTrue((run_dir / "code_task" / "patch_plan.md").is_file())
             self.assertFalse((run_dir / "code_task" / "meta" / "proposed_edits.json").exists())
             self.assertEqual(
-                [(step.step, step.status) for step in result.steps[-3:]],
-                [("probe", "done"), ("baseline", "done"), ("plan", "done")],
+                [(step.step, step.status) for step in result.steps[-5:]],
+                [
+                    ("probe", "done"),
+                    ("baseline", "done"),
+                    ("work-plan", "done"),
+                    ("batch", "done"),
+                    ("plan", "done"),
+                ],
             )
 
     def test_execute_dry_run_has_no_side_effects(self) -> None:
@@ -1440,6 +1786,59 @@ class CodeTaskTests(unittest.TestCase):
                 main(["code-task", "execute", str(run_dir), "--dry-run", "--no-llm"])
             self.assertIn("Stop reason: dry_run", stdout.getvalue())
             self.assertIn("probe: would_run", stdout.getvalue())
+
+    def test_execute_cli_reads_runtime_config(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            config_file = root / "execute.toml"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nRun configured execute.\n")
+            write_text(
+                config_file,
+                (
+                    "[execute]\n"
+                    'to_step = "baseline"\n'
+                    "use_llm = false\n"
+                    "timeout_sec = 10\n"
+                    "max_files = 3\n"
+                    "max_source_chars_per_file = 900\n"
+                    "\n"
+                    "[models.code_task]\n"
+                    'planner = "planner-model"\n'
+                    'editor = "editor-model"\n'
+                    'repair = "repair-model"\n'
+                    "\n"
+                    "[budget]\n"
+                    'profile = "normal"\n'
+                    "max_batches = 2\n"
+                    "cost_cap_usd = 1.0\n"
+                    "\n"
+                    "[budget.normal]\n"
+                    "max_edits = 3\n"
+                    "\n"
+                    "[environment]\n"
+                    'mode = "current"\n'
+                ),
+            )
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["code-task", "execute", str(run_dir), "--config", str(config_file)])
+
+            output = stdout.getvalue()
+            self.assertIn("Stop reason: stop_point", output)
+            self.assertIn("baseline: done", output)
+            self.assertFalse((run_dir / "code_task" / "work_plan.json").exists())
 
     def test_execute_applies_reviewed_proposal_after_approval(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -1476,6 +1875,25 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn(("apply-edits", "done"), step_status)
             self.assertIn(("validate", "done"), step_status)
             self.assertIn(("run", "done"), step_status)
+            batch_state = read_json(
+                run_dir
+                / "code_task"
+                / "attempts"
+                / "attempt-001"
+                / "batches"
+                / "batch-001"
+                / "batch_state.json"
+            )
+            self.assertEqual(batch_state["state"], "completed")
+            self.assertEqual(batch_state["validation_status"], "passed")
+            self.assertEqual(batch_state["benchmark_status"], "passed")
+            attempt_state = read_json(
+                run_dir / "code_task" / "attempts" / "attempt-001" / "attempt_state.json"
+            )
+            self.assertEqual(attempt_state["state"], "completed")
+            self.assertEqual(attempt_state["batches"][0]["state"], "completed")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["work_plan"]["status"], "completed")
 
     def test_execute_generates_repair_proposal_after_failed_run(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -1509,6 +1927,24 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(result.stop_reason, "repair_review_required")
             self.assertTrue((run_dir / "code_task" / "run" / "patched" / "failure_analysis.md").is_file())
             self.assertTrue((run_dir / "code_task" / "repairs" / "repair-001" / "proposed_edits.json").is_file())
+            repair_batch = read_json(
+                run_dir
+                / "code_task"
+                / "attempts"
+                / "attempt-001"
+                / "batches"
+                / "batch-002"
+                / "batch_state.json"
+            )
+            self.assertEqual(repair_batch["kind"], "repair")
+            self.assertEqual(repair_batch["parent_batch_id"], "batch-001")
+            self.assertIn("repair_proposal", repair_batch["artifacts"])
+            attempt_state = read_json(
+                run_dir / "code_task" / "attempts" / "attempt-001" / "attempt_state.json"
+            )
+            self.assertEqual(attempt_state["state"], "batching")
+            self.assertEqual(attempt_state["batches"][0]["state"], "failed")
+            self.assertEqual(attempt_state["batches"][1]["kind"], "repair")
             step_status = [(step.step, step.status) for step in result.steps]
             self.assertIn(("analyze-failure", "done"), step_status)
             self.assertIn(("repair", "done"), step_status)
@@ -1637,6 +2073,62 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(proposal["edits"], [])
             self.assertIn("spam_model.py", proposal["selected_files"])
             self.assertIn("Dropped edit outside repair context: extra.py", proposal["warnings"])
+
+    def test_repair_proposal_drops_diff_marker_edits(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nRepair the broken spam classifier.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            apply_patch_edits(run_dir, edits_file=_write_failing_edit_proposal(run_dir))
+            failed = run_code_task_benchmark(run_dir, timeout_sec=10)
+            self.assertEqual(failed.status, "failed")
+            analyze_code_task_failure(run_dir)
+
+            fake_client = _FakeRepairClient(
+                {
+                    "summary": "Accidentally return a diff hunk.",
+                    "edits": [
+                        {
+                            "path": "spam_model.py",
+                            "old": (
+                                "-def predict(text):\n"
+                                "-    return 'ham'\n"
+                                "+def predict(text):\n"
+                                "+    return 'spam'\n"
+                            ),
+                            "new": (
+                                "def predict(text):\n"
+                                "    return 'spam'\n"
+                            ),
+                            "reason": "The model should not put diff markers in old.",
+                        }
+                    ],
+                    "validation": ["python -m unittest discover -s tests"],
+                    "risks": [],
+                }
+            )
+
+            with patch("simple_ar.code_task.repair.LLMClient.from_env", return_value=fake_client):
+                repair = propose_repair_edits(run_dir, use_llm=True)
+
+            proposal = read_json(repair.proposal_path)
+            self.assertEqual(proposal["edits"], [])
+            self.assertIn(
+                "Dropped edit for spam_model.py: old/new must be exact text, not a diff fragment.",
+                proposal["warnings"],
+            )
 
     def test_code_task_validate_run_and_failure_cli(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

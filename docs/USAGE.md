@@ -276,6 +276,8 @@ uv run simple-ar code-task locate runs/<run-id>
 uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
 ```
 
 `probe` writes `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals. It does not install dependencies or run project code.
@@ -284,6 +286,23 @@ uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 before any patch is applied. It stores `execution_report.json`, `stdout.txt`,
 `stderr.txt`, and parsed `metrics.json` under `code_task/run/baseline/`, and
 updates `code_task/summary.md`.
+
+Generate a higher-level work plan when the task is broad or may need multiple
+edit batches:
+
+```bash
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
+```
+
+`work-plan` writes `code_task/work_plan.json` and `code_task/work_plan.md`.
+It records work items, target files, read-only evidence, validation hints,
+context requests, and budget profiles. It does not generate code or edit
+files. `batch` creates durable attempt state under
+`code_task/attempts/attempt-NNN/batches/batch-NNN/`, which is the V2.2
+foundation for later multi-round, per-batch editing and recovery. When a batch
+is active, edit proposals are constrained to that batch's target files and
+write extra batch-local review artifacts.
 
 Generate a patch plan (LLM optional; offline mode writes a conservative plan):
 
@@ -326,7 +345,10 @@ same file; each `old` block must still match uniquely when applied in sequence.
 By default, tests and benchmark files are treated as read-only evidence:
 `propose-edits` omits them from editable snippets, and any model edit targeting
 paths such as `tests/**`, `test_*.py`, `benchmark.py`, or `*benchmark*.py` is
-dropped from the proposal.
+dropped from the proposal. V2.2 also applies an edit budget after the model
+returns JSON. Oversized proposals are written with warnings and rejected edits
+instead of being applied; if the proposal fits the larger review budget, rerun
+with `--allow-large-edits` only after reading the JSON.
 
 Apply proposed edits inside the editable workspace:
 
@@ -400,8 +422,8 @@ uv run simple-ar code-task execute runs/<run-id>
 # Approve the plan after reading code_task/patch_plan.md.
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 
-# Continue to edit proposal review.
-uv run simple-ar code-task execute runs/<run-id>
+# Continue explicitly to edit proposal review.
+uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
 
 # Apply the reviewed proposal and run validation/benchmark.
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
@@ -411,13 +433,26 @@ Those repeated `execute` calls are intentional. `execute` means "inspect the
 current run and continue to the next safe stop." It does not mean "skip review."
 
 - First `execute`: writes `environment_report.json`, baseline artifacts,
-  `patch_plan.md`, then stops with `approval_required`.
+  an LLM-backed `work_plan.json` unless `--no-llm` is set, first
+  attempt/batch state, `patch_plan.md`, then stops with `approval_required`.
 - `decide-plan`: records your approval in `hitl_decisions.jsonl`.
-- Second `execute`: writes `proposed_edits.json`, then stops with
+- Second `execute --to-step propose-edits`: writes `proposed_edits.json`, then stops with
   `proposal_review_required`.
 - Final `execute --apply-proposed-edits`: applies the reviewed proposal, writes
   `patch.diff`, validates the workspace, runs the patched benchmark, updates
   `comparison.json`, and refreshes `summary.md`.
+
+For projects with many knobs, keep the short command and move model/budget
+settings into TOML:
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> \
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml
+```
+
+`execute --config` understands `[execute]`, `[models.code_task]`, and
+`[budget]` sections in addition to the normal code-task init sections. See
+[CLI Reference](CLI_REFERENCE.md#executor-path) for the full example.
 
 Preview the next executor action without writing artifacts:
 
@@ -426,6 +461,83 @@ uv run simple-ar code-task execute runs/<run-id> --dry-run
 ```
 
 Detailed code-task command options live in [CLI Reference](CLI_REFERENCE.md#code-task-commands).
+
+### Troubleshooting Code Task Runs
+
+`proposed_edits.json` was not created after `execute`:
+
+- This is normal after the first executor call. A fresh run stops at
+  `approval_required` after writing `code_task/patch_plan.md`.
+- Review `code_task/patch_plan.md`, then run:
+
+```bash
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
+uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
+```
+
+- Check `manifest.json`: `plan.status` should be `approved`. The decision log
+  is `code_task/meta/hitl_decisions.jsonl`.
+
+Validation passed but patched benchmark failed:
+
+- This means the patch was syntactically acceptable but behavior or metrics got
+  worse. Inspect:
+
+```bash
+code_task/run/patched/execution_report.json
+code_task/run/patched/stdout.txt
+code_task/run/patched/stderr.txt
+code_task/run/comparison.json
+code_task/summary.md
+```
+
+- Ask for a bounded repair proposal:
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> \
+  --to-step repair \
+  --repair-rounds 1 \
+  --timeout 60
+```
+
+- Review the newest `code_task/repairs/repair-NNN/proposed_edits.json`, then
+  apply it explicitly:
+
+```bash
+uv run simple-ar code-task apply-edits runs/<run-id> \
+  --edits-file runs/<run-id>/code_task/repairs/repair-NNN/proposed_edits.json
+uv run simple-ar code-task validate runs/<run-id>
+uv run simple-ar code-task run runs/<run-id> --timeout 60
+```
+
+- A repair can make the benchmark pass without truly improving over baseline.
+  Use `code_task/run/comparison.json` to decide whether the task goal was met.
+
+`apply-edits` reports `old text was not found`:
+
+- No workspace files are changed when this happens. It means a proposal's
+  `old` text does not exactly match the current workspace, or the model put
+  unified-diff markers inside the structured JSON.
+- Regenerate the proposal or edit the JSON manually. Each edit must use exact
+  current file text in `old` and replacement file text in `new`; do not include
+  `+`, `-`, `@@`, `---`, or `+++` diff markers inside either field.
+- If several edits target the same nearby block, combine them into one larger
+  exact old/new replacement so later edits do not invalidate earlier ones.
+
+Large-edit approval is required:
+
+- Read `code_task/meta/proposed_edits.json` and any
+  `proposal_warnings.json` under `code_task/meta/` or the latest
+  `code_task/attempts/.../batch-NNN/` directory.
+- If the larger change is intentional, rerun the apply/executor command with
+  `--allow-large-edits`. Do not use this flag just to silence an unclear model
+  proposal.
+
+`uv run` fails with a local cache permission error:
+
+- This is an environment issue outside the run artifacts. Fix the uv cache
+  permissions or run the project virtualenv entrypoint directly, for example
+  `.\.venv\Scripts\simple-ar.exe ...` on PowerShell.
 
 ## Embedded Code Task In The 8-Stage Pipeline
 

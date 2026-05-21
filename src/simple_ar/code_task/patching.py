@@ -17,6 +17,12 @@ from simple_ar.artifacts import (
     write_json,
     write_text,
 )
+from simple_ar.code_task.attempts import (
+    LoadedCodeTaskBatch,
+    load_latest_code_task_batch,
+    update_code_task_batch_state,
+)
+from simple_ar.code_task.budget import EditBudget, budget_profiles_json, edit_budget_for_profile
 from simple_ar.code_task.edit_scope import (
     editable_paths,
     is_protected_edit_path,
@@ -101,6 +107,9 @@ def propose_patch_edits(
     force: bool = False,
     max_files: int = 8,
     max_source_chars_per_file: int = 4000,
+    allow_large_edits: bool = False,
+    budget_profile: str | None = None,
+    edit_budget_overrides: dict[str, Any] | None = None,
     message_callback: MessageCallback | None = None,
 ) -> ProposedEditsResult:
     """Generate controlled old/new text edits from an approved patch plan.
@@ -114,6 +123,10 @@ def propose_patch_edits(
         max_files: Maximum number of workspace files to include in prompt
             context.
         max_source_chars_per_file: Per-file source snippet character budget.
+        allow_large_edits: Accept proposals that exceed the selected profile
+            but fit the large profile.
+        budget_profile: Optional budget profile override.
+        edit_budget_overrides: Optional numeric budget overrides.
         message_callback: Optional progress callback.
 
     Returns:
@@ -138,6 +151,14 @@ def propose_patch_edits(
     patch_plan = _read_required_text(task_dir / "patch_plan.md")
     index = _read_required_json(meta_dir / "codebase_index.json")
     protected_patterns = protected_patterns_from_manifest(manifest)
+    batch = load_latest_code_task_batch(root)
+    batch_constraints = _batch_constraints(batch)
+    allowed_edit_files = batch_constraints["target_files"]
+    budget = edit_budget_for_profile(
+        budget_profile or batch_constraints["budget_profile"],
+        overrides=edit_budget_overrides,
+    )
+    batch_dir = batch.batch_state_path.parent if batch is not None else None
     loaded_context = load_latest_code_task_context_pack(root)
     context_pack_ref: dict[str, Any] | None = None
     if loaded_context is not None:
@@ -194,6 +215,28 @@ def propose_patch_edits(
             max_chars_per_file=max_source_chars_per_file,
         )
 
+    if allowed_edit_files:
+        selected_context = _ordered_allowed_context(
+            allowed_edit_files,
+            read_only_context,
+            max_files=max_files,
+        )
+        selected = _limit_known_paths(allowed_edit_files, _known_paths(index), max_files=max_files)
+        snippets = _source_snippets(
+            workspace_dir,
+            selected,
+            max_chars_per_file=max_source_chars_per_file,
+        )
+    proposal_allowed_files = allowed_edit_files if allowed_edit_files else selected
+    _write_batch_context(
+        root,
+        batch,
+        selected_files=selected,
+        read_only_context=read_only_context,
+        budget=budget,
+        context_pack=context_pack_ref,
+    )
+
     mode = "offline"
     proposal: dict[str, Any] | None = None
     if use_llm:
@@ -205,6 +248,7 @@ def propose_patch_edits(
                     meta_dir,
                     usage,
                     stage="code_task.propose_edits",
+                    batch_dir=batch_dir,
                     message_callback=message_callback,
                 ),
             )
@@ -216,6 +260,8 @@ def propose_patch_edits(
                 snippets=snippets,
                 read_only_context=read_only_context,
                 protected_patterns=protected_patterns,
+                budget=budget,
+                allowed_edit_files=proposal_allowed_files,
             )
             mode = "llm"
         except LLMError as exc:
@@ -229,11 +275,22 @@ def propose_patch_edits(
         index=index,
         mode=mode,
         protected_patterns=protected_patterns,
+        workspace_dir=workspace_dir,
+        budget=budget,
+        allow_large_edits=allow_large_edits,
+        allowed_edit_files=proposal_allowed_files,
     )
     normalized["selected_files"] = selected
     normalized["read_only_context"] = read_only_context
     normalized["context_pack"] = context_pack_ref
+    normalized["batch"] = _batch_ref(root, batch)
     write_json(proposal_path, normalized)
+    _write_batch_proposal(
+        root,
+        batch,
+        proposal=normalized,
+        proposal_path=proposal_path,
+    )
     _update_manifest_after_proposal(
         manifest_path,
         manifest,
@@ -241,6 +298,7 @@ def propose_patch_edits(
         read_only_context=read_only_context,
         context_pack=context_pack_ref,
         proposal=normalized,
+        budget=normalized.get("budget", {}),
     )
     return ProposedEditsResult(
         run_dir=root,
@@ -256,6 +314,7 @@ def apply_patch_edits(
     *,
     edits_file: Path | None = None,
     allow_unapproved_plan: bool = False,
+    allow_large_edits: bool = False,
 ) -> PatchApplyResult:
     """Safely apply controlled old/new text edits to the copied workspace.
 
@@ -287,6 +346,17 @@ def apply_patch_edits(
 
     proposal_path = Path(edits_file) if edits_file is not None else meta_dir / "proposed_edits.json"
     proposal = _read_required_json(proposal_path)
+    budget_info = proposal.get("budget")
+    if (
+        isinstance(budget_info, dict)
+        and budget_info.get("requires_approval")
+        and not budget_info.get("approved")
+        and not allow_large_edits
+    ):
+        raise PermissionError(
+            "Proposal exceeds the normal edit budget. Review it and rerun with "
+            "`--allow-large-edits` only if the larger patch is intentional."
+        )
     edits = _edit_rows(proposal)
     if not edits:
         raise PatchValidationError(f"No edits were found in {proposal_path}")
@@ -339,6 +409,7 @@ def apply_patch_edits(
         codebase_index=codebase_index,
         repo_map=repo_map,
     )
+    _update_latest_batch_after_apply(root, applied_edits_path, patch_diff_path)
     return PatchApplyResult(
         run_dir=root,
         applied_edits_path=applied_edits_path,
@@ -356,6 +427,8 @@ def _ask_llm_for_edits(
     snippets: list[dict[str, str]],
     read_only_context: list[str],
     protected_patterns: tuple[str, ...],
+    budget: EditBudget,
+    allowed_edit_files: list[str],
 ) -> dict[str, Any]:
     response = client.ask_json(
         CODE_TASK_EDIT_SYSTEM,
@@ -366,6 +439,8 @@ def _ask_llm_for_edits(
             snippets=snippets,
             read_only_context=read_only_context,
             protected_patterns=protected_patterns,
+            budget=budget,
+            allowed_edit_files=allowed_edit_files,
         ),
         label="code-task-propose-edits",
     )
@@ -380,6 +455,8 @@ def _edit_user_prompt(
     snippets: list[dict[str, str]],
     read_only_context: list[str],
     protected_patterns: tuple[str, ...],
+    budget: EditBudget,
+    allowed_edit_files: list[str],
 ) -> str:
     compact_files = [
         {
@@ -406,11 +483,14 @@ def _edit_user_prompt(
     )
     return (
         "Return JSON with fields: `summary` string, `edits` list, "
-        "`validation` list of strings, and `risks` list of strings.\n\n"
+        "`validation` list of strings, `risks` list of strings, and optional "
+        "`context_request` object when more files/symbols are needed.\n\n"
         "Each item in `edits` must contain exactly these string fields: "
         "`path`, `old`, `new`, and `reason`.\n\n"
         "Hard rules:\n"
         "- Do not return markdown or a unified diff.\n"
+        "- Do not include diff markers such as `+`, `-`, `@@`, `---`, or "
+        "`+++` inside `old` or `new`; they must contain only file text.\n"
         "- Use only workspace-relative paths from the provided file inventory.\n"
         "- Only propose edits for files whose inventory `edit_role` is `editable`.\n"
         "- Files whose `edit_role` is `read_only` are evidence only; do not "
@@ -422,6 +502,14 @@ def _edit_user_prompt(
         "- Prefer one edit per file. If a file needs multiple nearby changes, "
         "combine them into one larger old/new replacement.\n"
         "- Keep the patch minimal and aligned with the approved patch plan.\n\n"
+        "Current edit budget JSON. Stay within this budget. If the task cannot "
+        "be completed within it, return a concise `context_request` or explain "
+        "why a larger budget is required instead of emitting a giant patch:\n"
+        f"{json.dumps(budget.to_json(), indent=2, ensure_ascii=False)}\n\n"
+        "Allowed editable files for this batch:\n"
+        f"{json.dumps(allowed_edit_files, indent=2, ensure_ascii=False)}\n\n"
+        "Available budget profiles for later planning:\n"
+        f"{json.dumps(budget_profiles_json(), indent=2, ensure_ascii=False)}\n\n"
         f"Task:\n{task_text}\n\n"
         f"Approved patch plan:\n{patch_plan}\n\n"
         f"Workspace file inventory JSON:\n{json.dumps(compact_files, indent=2, ensure_ascii=False)}\n\n"
@@ -452,11 +540,21 @@ def _normalize_edit_proposal(
     index: dict[str, Any],
     mode: str,
     protected_patterns: tuple[str, ...],
+    workspace_dir: Path,
+    budget: EditBudget,
+    allow_large_edits: bool,
+    allowed_edit_files: list[str],
 ) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
+    allowed_paths = set(allowed_edit_files)
     warnings: list[str] = []
     edits: list[dict[str, str]] = []
-    for item in proposal.get("edits", []):
+    rejected_edits: list[dict[str, Any]] = []
+    raw_edits = proposal.get("edits", [])
+    if not isinstance(raw_edits, list):
+        warnings.append("Dropped edits because `edits` was not a list.")
+        raw_edits = []
+    for item in raw_edits:
         if not isinstance(item, dict):
             warnings.append("Dropped non-object edit.")
             continue
@@ -469,8 +567,17 @@ def _normalize_edit_proposal(
         if is_protected_edit_path(path, protected_patterns=protected_patterns):
             warnings.append(f"Dropped edit for protected read-only path: {path}")
             continue
+        if allowed_paths and path not in allowed_paths:
+            warnings.append(f"Dropped edit outside current batch target files: {path}")
+            rejected_edits.append({"path": path, "reason": "outside_batch_target_files"})
+            continue
         if not isinstance(old, str) or not isinstance(new, str):
             warnings.append(f"Dropped edit for {path}: old/new must be strings.")
+            continue
+        if _looks_like_diff_fragment(old) or _looks_like_diff_fragment(new):
+            warnings.append(
+                f"Dropped edit for {path}: old/new must be exact text, not a diff fragment."
+            )
             continue
         if old == new:
             warnings.append(f"Dropped edit for {path}: old and new are identical.")
@@ -483,6 +590,20 @@ def _normalize_edit_proposal(
                 "reason": _string(item.get("reason")) or "No reason provided.",
             }
         )
+    budget_result = _evaluate_budget(
+        edits,
+        proposal=proposal,
+        workspace_dir=workspace_dir,
+        budget=budget,
+        allow_large_edits=allow_large_edits,
+    )
+    warnings.extend(budget_result["warnings"])
+    context_request = proposal.get("context_request")
+    if not isinstance(context_request, dict):
+        context_request = {}
+    if budget_result["drop_edits"]:
+        rejected_edits.extend({"path": edit["path"], "reason": budget_result["status"]} for edit in edits)
+        edits = []
     return {
         "schema_version": 1,
         "generated_at": _utcnow_iso(),
@@ -492,6 +613,9 @@ def _normalize_edit_proposal(
         "validation": _string_list(proposal.get("validation")),
         "risks": _string_list(proposal.get("risks")),
         "warnings": warnings,
+        "rejected_edits": rejected_edits,
+        "context_request": _normalize_context_request(context_request, known_paths),
+        "budget": budget_result["budget"],
     }
 
 
@@ -558,6 +682,168 @@ def _prepare_edits(
     if not prepared:
         raise PatchValidationError("Patch validation failed: no valid edits to apply")
     return prepared
+
+
+def _looks_like_diff_fragment(text: str) -> bool:
+    """Detect accidental unified-diff content in structured old/new edits."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if any(line.startswith(("@@", "--- ", "+++ ")) for line in lines):
+        return True
+    removed = any(line.startswith("-") for line in lines)
+    added = any(line.startswith("+") for line in lines)
+    return removed and added
+
+
+def _evaluate_budget(
+    edits: list[dict[str, str]],
+    *,
+    proposal: dict[str, Any],
+    workspace_dir: Path,
+    budget: EditBudget,
+    allow_large_edits: bool,
+) -> dict[str, Any]:
+    stats = _proposal_stats(edits, proposal=proposal, workspace_dir=workspace_dir)
+    warnings: list[str] = []
+    normal = edit_budget_for_profile("normal")
+    large = edit_budget_for_profile("large")
+    absolute = edit_budget_for_profile("absolute")
+    if _stats_exceed(stats, absolute) or stats["whole_file_rewrite_suspicions"]:
+        if stats["whole_file_rewrite_suspicions"]:
+            warnings.extend(
+                f"Rejected suspected whole-file rewrite for {path}."
+                for path in stats["whole_file_rewrite_suspicions"]
+            )
+        if _stats_exceed(stats, absolute):
+            warnings.append("Rejected proposal because it exceeds the absolute edit budget.")
+        return {
+            "drop_edits": True,
+            "status": "rejected_absolute",
+            "warnings": warnings,
+            "budget": _budget_record(budget, stats, status="rejected_absolute", approved=False),
+        }
+
+    if _stats_exceed(stats, budget):
+        if not _stats_exceed(stats, large):
+            warnings.append(
+                "Proposal exceeds the selected edit budget but fits the large budget; "
+                "explicit approval is required before apply."
+            )
+            approved = allow_large_edits
+            return {
+                "drop_edits": not approved,
+                "status": "large_approved" if approved else "large_requires_approval",
+                "warnings": warnings,
+                "budget": _budget_record(
+                    budget,
+                    stats,
+                    status="large_approved" if approved else "large_requires_approval",
+                    approved=approved,
+                    requires_approval=True,
+                ),
+            }
+        warnings.append("Rejected proposal because it exceeds the large edit budget.")
+        return {
+            "drop_edits": True,
+            "status": "rejected_large",
+            "warnings": warnings,
+            "budget": _budget_record(budget, stats, status="rejected_large", approved=False),
+        }
+
+    return {
+        "drop_edits": False,
+        "status": "accepted",
+        "warnings": warnings,
+        "budget": _budget_record(
+            budget,
+            stats,
+            status="accepted",
+            approved=not budget.requires_approval or allow_large_edits,
+            requires_approval=budget.requires_approval and not allow_large_edits,
+        ),
+    }
+
+
+def _proposal_stats(
+    edits: list[dict[str, str]],
+    *,
+    proposal: dict[str, Any],
+    workspace_dir: Path,
+) -> dict[str, Any]:
+    paths = sorted({edit["path"] for edit in edits})
+    total_edit_chars = sum(len(edit["old"]) + len(edit["new"]) for edit in edits)
+    max_old_chars = max((len(edit["old"]) for edit in edits), default=0)
+    max_new_chars = max((len(edit["new"]) for edit in edits), default=0)
+    proposal_chars = len(json.dumps(proposal, ensure_ascii=False))
+    whole_file = _whole_file_rewrite_suspicions(workspace_dir, edits)
+    return {
+        "file_count": len(paths),
+        "edit_count": len(edits),
+        "max_old_chars": max_old_chars,
+        "max_new_chars": max_new_chars,
+        "total_edit_chars": total_edit_chars,
+        "proposal_chars": proposal_chars,
+        "whole_file_rewrite_suspicions": whole_file,
+    }
+
+
+def _stats_exceed(stats: dict[str, Any], budget: EditBudget) -> bool:
+    return (
+        int(stats.get("file_count", 0)) > budget.max_files
+        or int(stats.get("edit_count", 0)) > budget.max_edits
+        or int(stats.get("max_old_chars", 0)) > budget.max_old_chars
+        or int(stats.get("max_new_chars", 0)) > budget.max_new_chars
+        or int(stats.get("total_edit_chars", 0)) > budget.max_total_edit_chars
+        or int(stats.get("proposal_chars", 0)) > budget.max_proposal_chars
+    )
+
+
+def _budget_record(
+    budget: EditBudget,
+    stats: dict[str, Any],
+    *,
+    status: str,
+    approved: bool,
+    requires_approval: bool | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "profile": budget.profile,
+        "limits": budget.to_json(),
+        "stats": stats,
+        "requires_approval": budget.requires_approval if requires_approval is None else requires_approval,
+        "approved": approved,
+    }
+
+
+def _whole_file_rewrite_suspicions(workspace_dir: Path, edits: list[dict[str, str]]) -> list[str]:
+    workspace = workspace_dir.resolve()
+    suspicious: list[str] = []
+    for edit in edits:
+        path = _workspace_file(workspace, edit["path"])
+        if path is None or not path.is_file():
+            continue
+        try:
+            source = read_text(path)
+        except OSError:
+            continue
+        source_len = len(source)
+        if source_len < 4000:
+            continue
+        old_ratio = len(edit["old"]) / max(1, source_len)
+        new_ratio = len(edit["new"]) / max(1, source_len)
+        if old_ratio > 0.85 or new_ratio > 0.95:
+            suspicious.append(edit["path"])
+    return suspicious
+
+
+def _normalize_context_request(value: dict[str, Any], known_paths: set[str]) -> dict[str, Any]:
+    files = [path for path in _string_list(value.get("files")) if path in known_paths]
+    return {
+        "query": _string(value.get("query")),
+        "files": files,
+        "symbols": _string_list(value.get("symbols"))[:20],
+        "reason": _string(value.get("reason")),
+    }
 
 
 def _workspace_file(workspace: Path, relative_path: str) -> Path | None:
@@ -751,6 +1037,150 @@ def _context_pack_manifest_ref(
     }
 
 
+def _batch_constraints(batch: LoadedCodeTaskBatch | None) -> dict[str, Any]:
+    if batch is None:
+        return {"target_files": [], "read_only_evidence": [], "budget_profile": "normal"}
+    work_item = batch.state.get("work_item")
+    if not isinstance(work_item, dict):
+        work_item = {}
+    return {
+        "target_files": _string_list(work_item.get("target_files")),
+        "read_only_evidence": _string_list(work_item.get("read_only_evidence")),
+        "budget_profile": _string(work_item.get("budget_profile")) or "normal",
+        "validation": _string_list(work_item.get("validation")),
+    }
+
+
+def _ordered_allowed_context(
+    editable_files: list[str],
+    read_only_context: list[str],
+    *,
+    max_files: int,
+) -> list[str]:
+    result: list[str] = []
+    for path in [*editable_files, *read_only_context]:
+        if path and path not in result:
+            result.append(path)
+        if len(result) >= max(1, max_files):
+            break
+    return result
+
+
+def _known_paths(index: dict[str, Any]) -> set[str]:
+    return {str(item.get("path", "")) for item in _index_files(index) if item.get("path")}
+
+
+def _limit_known_paths(paths: list[str], known_paths: set[str], *, max_files: int) -> list[str]:
+    result: list[str] = []
+    for path in paths:
+        if path in known_paths and path not in result:
+            result.append(path)
+        if len(result) >= max(1, max_files):
+            break
+    return result
+
+
+def _write_batch_context(
+    run_dir: Path,
+    batch: LoadedCodeTaskBatch | None,
+    *,
+    selected_files: list[str],
+    read_only_context: list[str],
+    budget: EditBudget,
+    context_pack: dict[str, Any] | None,
+) -> None:
+    if batch is None:
+        return
+    path = batch.batch_state_path.parent / "batch_context.json"
+    data = {
+        "schema_version": 1,
+        "generated_at": _utcnow_iso(),
+        "batch_id": batch.batch_id,
+        "work_item_id": batch.state.get("work_item_id"),
+        "selected_files": selected_files,
+        "read_only_context": read_only_context,
+        "budget": budget.to_json(),
+        "context_pack": context_pack,
+    }
+    write_json(path, data)
+    update_code_task_batch_state(
+        run_dir,
+        batch.batch_state_path,
+        state="context_ready",
+        artifacts={"batch_context": _relative_to_run(run_dir, path)},
+        detail="Batch context prepared for controlled edit proposal.",
+    )
+
+
+def _write_batch_proposal(
+    run_dir: Path,
+    batch: LoadedCodeTaskBatch | None,
+    *,
+    proposal: dict[str, Any],
+    proposal_path: Path,
+) -> None:
+    if batch is None:
+        return
+    batch_dir = batch.batch_state_path.parent
+    batch_proposal_path = batch_dir / "proposed_edits.json"
+    warnings_path = batch_dir / "proposal_warnings.json"
+    write_json(batch_proposal_path, proposal)
+    write_json(
+        warnings_path,
+        {
+            "schema_version": 1,
+            "generated_at": _utcnow_iso(),
+            "warnings": proposal.get("warnings", []),
+            "rejected_edits": proposal.get("rejected_edits", []),
+            "budget": proposal.get("budget", {}),
+            "context_request": proposal.get("context_request", {}),
+            "top_level_proposal": _relative_to_run(run_dir, proposal_path),
+        },
+    )
+    state = "proposal_ready" if proposal.get("edits") else "failed"
+    update_code_task_batch_state(
+        run_dir,
+        batch.batch_state_path,
+        state=state,
+        artifacts={
+            "proposed_edits": _relative_to_run(run_dir, batch_proposal_path),
+            "proposal_warnings": _relative_to_run(run_dir, warnings_path),
+        },
+        detail="Controlled edit proposal generated for this batch.",
+        extra={"proposal_budget": proposal.get("budget", {})},
+    )
+
+
+def _batch_ref(run_dir: Path, batch: LoadedCodeTaskBatch | None) -> dict[str, Any] | None:
+    if batch is None:
+        return None
+    return {
+        "attempt_id": batch.attempt_id,
+        "batch_id": batch.batch_id,
+        "state_path": _relative_to_run(run_dir, batch.batch_state_path),
+    }
+
+
+def _update_latest_batch_after_apply(
+    run_dir: Path,
+    applied_edits_path: Path,
+    patch_diff_path: Path,
+) -> None:
+    batch = load_latest_code_task_batch(run_dir)
+    if batch is None:
+        return
+    update_code_task_batch_state(
+        run_dir,
+        batch.batch_state_path,
+        state="applying",
+        artifacts={
+            "applied_edits": _relative_to_run(run_dir, applied_edits_path),
+            "patch_diff": _relative_to_run(run_dir, patch_diff_path),
+        },
+        detail="Reviewed proposal applied to workspace.",
+    )
+
+
 def _relative_to_run(run_dir: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(run_dir.resolve()).as_posix()
@@ -826,6 +1256,7 @@ def _update_manifest_after_proposal(
     read_only_context: list[str],
     context_pack: dict[str, Any] | None,
     proposal: dict[str, Any],
+    budget: dict[str, Any],
 ) -> None:
     edits = proposal.get("edits", [])
     patch = _dict_value(manifest, "patch")
@@ -838,6 +1269,7 @@ def _update_manifest_after_proposal(
             "selected_files": selected_files,
             "read_only_context_files": read_only_context,
             "context_pack": context_pack,
+            "budget": budget,
         }
     )
     layout = _dict_value(manifest, "layout")
@@ -903,6 +1335,7 @@ def _record_code_task_usage(
     usage: LLMUsage,
     *,
     stage: str,
+    batch_dir: Path | None = None,
     message_callback: MessageCallback | None,
 ) -> None:
     usage_path = meta_dir / "llm_usage.jsonl"
@@ -910,6 +1343,10 @@ def _record_code_task_usage(
     row["stage"] = stage
     append_jsonl(usage_path, row)
     write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
+    if batch_dir is not None:
+        batch_usage_path = batch_dir / "usage.jsonl"
+        append_jsonl(batch_usage_path, row)
+        write_json(batch_dir / "usage_summary.json", summarize_usage(read_jsonl(batch_usage_path)))
     cost = row.get("estimated_cost_usd")
     cost_text = f", est cost ${cost:.6f}" if isinstance(cost, (int, float)) else ""
     _emit(

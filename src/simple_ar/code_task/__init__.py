@@ -1,3 +1,10 @@
+from simple_ar.code_task.attempts import (
+    CodeTaskBatchResult,
+    LoadedCodeTaskBatch,
+    create_code_task_batch,
+    load_latest_code_task_batch,
+    update_code_task_batch_state,
+)
 from simple_ar.code_task.planning import (
     PatchPlanResult,
     generate_patch_plan,
@@ -32,7 +39,9 @@ from simple_ar.code_task.context import (
 )
 from simple_ar.code_task.config import (
     CodeTaskConfigError,
+    CodeTaskExecuteOptions,
     CodeTaskInitOptions,
+    load_code_task_execute_options,
     load_code_task_init_options,
     parse_metric_direction_arg,
 )
@@ -56,6 +65,11 @@ from simple_ar.code_task.runner import (
     run_code_task_benchmark,
 )
 from simple_ar.code_task.validation import CodeTaskValidationResult, validate_code_task
+from simple_ar.code_task.work_plan import (
+    CodeTaskWorkPlanResult,
+    generate_code_task_work_plan,
+    render_work_plan_markdown,
+)
 from simple_ar.code_task.workspace_modes import (
     WorkspaceModeError,
     WorkspaceResult,
@@ -77,8 +91,12 @@ __all__ = [
     "CodeTaskComparisonResult",
     "CodeTaskValidationResult",
     "CodeTaskExecuteResult",
+    "CodeTaskBatchResult",
+    "LoadedCodeTaskBatch",
+    "CodeTaskWorkPlanResult",
     "ExecuteStepRecord",
     "CodeTaskConfigError",
+    "CodeTaskExecuteOptions",
     "CodeTaskInitOptions",
     "CodeTaskContextPackResult",
     "CodeTaskLocateResult",
@@ -90,10 +108,13 @@ __all__ = [
     "apply_patch_edits",
     "analyze_code_task_failure",
     "compare_code_task_runs",
+    "create_code_task_batch",
     "execute_code_task",
     "generate_patch_plan",
+    "generate_code_task_work_plan",
     "initialize_code_task",
     "load_code_task_init_options",
+    "load_code_task_execute_options",
     "parse_metric_direction_arg",
     "probe_code_task_environment",
     "propose_patch_edits",
@@ -103,11 +124,14 @@ __all__ = [
     "build_repo_map",
     "render_repo_map_summary",
     "locate_code_task_context",
+    "load_latest_code_task_batch",
     "load_latest_code_task_context_pack",
     "record_plan_decision",
     "render_locate_summary",
     "render_prompt_context",
+    "render_work_plan_markdown",
     "run_code_task_benchmark",
     "run_code_task_baseline",
+    "update_code_task_batch_state",
     "validate_code_task",
 ]

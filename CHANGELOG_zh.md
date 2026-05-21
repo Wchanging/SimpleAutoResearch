@@ -4,6 +4,23 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-05-21
+
+### Added
+
+- 添加 Day 17-20 V2.2 batch-level edit budget enforcement：code-task proposal 现在有 normal / large / absolute 三档预算，并通过 `--allow-large-edits` 做显式大编辑审核。
+- 在 `code_task/attempts/attempt-NNN/batches/batch-NNN/` 下补充 batch context、proposal warnings、usage summaries、validation links、benchmark links 和 repair proposal links。
+- 添加 `code-task execute --config`，支持读取 `[execute]`、`[models.code_task]` 和 `[budget]`，让模型路由和预算控制可以放进 TOML，而不是堆很长的 CLI 参数。
+
+### Changed
+
+- `code-task execute` 现在可以按配置把 work-plan / patch-plan、edit proposal、repair 分别路由到 planner/editor/repair 模型。
+- Active work-item batch 会限制 LLM edit proposal 只能修改该 batch 的 target files；tests 和 benchmark 文件仍然作为只读证据。
+- Validation、benchmark 和 repair 步骤现在会更新 active batch state，便于检查中断、失败和修复尝试。
+- 超大或超预算模型输出会被 normalizer 转成 warnings / rejected edits，而不是隐式应用。
+- 文档现在明确展示正确的 reviewed executor 顺序：批准 plan 后使用 `execute --to-step propose-edits` 生成 proposal，并补充 missing proposal、benchmark regression、repair proposal、exact-text patch failure、large-edit approval 和本地 `uv` cache 权限问题的排错说明。
+- Repair 和 edit proposal 现在会拒绝把 unified-diff 片段误写进结构化 `old` / `new` JSON 字段的 edit；`apply-edits` 遇到 patch validation failure 时会输出可读错误，而不是直接打印 Python traceback。
+
 ## 2026-05-20
 
 ### Added
@@ -13,6 +30,8 @@
 - 添加 `simple-ar code-task map`，可以作为独立步骤从当前 workspace 重建 repo-map 产物。
 - 添加 `simple-ar code-task locate`，可以从 repo map 中排序 likely editable targets 和 protected read-only evidence。
 - 添加 `simple-ar code-task context`，可以在 `code_task/context_packs/context-NNN/` 下生成受预算限制的 prompt context pack。
+- 添加 Day 15-16 V2.2 work-plan artifacts：`code_task/work_plan.json` 和 `code_task/work_plan.md`，以及 `simple-ar code-task work-plan`。
+- 添加初始 attempt/batch 状态目录：`code_task/attempts/attempt-NNN/batches/batch-NNN/`，以及 `simple-ar code-task batch --work-item W1`。
 - 添加 `simple-ar-checks` 和 `scripts/run_checks.py`，支持 `quick`、`code-task`、`pipeline`、`research`、`all` 等分层开发验证组。
 
 ### Changed
@@ -20,6 +39,8 @@
 - Code-task 初始化现在同时写旧 codebase index 和新 repo map；补丁应用后也会同步重建两个产物。
 - Code-task 文档现在说明 `map -> locate -> context` 路径，便于大项目在规划/编辑前先缩小上下文。
 - Patch planning 现在会在存在 latest context pack 时优先使用它；controlled edit proposal 只读取其中 editable snippets，并继续把保护文件作为 read-only evidence。
+- Code-task planning 现在增加更高一层的 work-plan，用于先把宽泛任务拆成小批次，再进入 patch proposal。
+- `code-task execute` 现在会在正常路径中包含 work-plan 和 batch setup；除非传 `--no-llm`，否则 work-plan 使用配置好的 LLM。
 - 开发文档现在推荐迭代时使用目标测试组，把完整测试发现保留给提交、推送或大范围重构前。
 - V2.2 计划和 workspace 文档现在记录 Day 14 真实 LLM smoke 暴露的问题：普通 JSON patch proposal 可能触发很长 completion，因此后续 editor-backend 工作需要加入 bounded proposal contract、context request artifact、多轮 attempt 和 future external coding-agent routing。
 

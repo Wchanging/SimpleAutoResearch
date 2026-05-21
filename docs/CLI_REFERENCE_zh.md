@@ -428,6 +428,34 @@ uv run simple-ar code-task context runs/<run-id> \
 latest context pack，`plan` 会优先使用它作为规划上下文，`propose-edits` 只会读取其中
 editable snippets，把 tests/benchmarks 等保护文件继续作为 read-only evidence。
 
+生成面向批次执行的 work plan：
+
+```bash
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
+```
+
+| 命令/参数 | 含义 |
+| --- | --- |
+| `work-plan RUN_DIR` | 写入 `code_task/work_plan.json` 和 `code_task/work_plan.md`。 |
+| `--model NAME` | 覆盖 work-plan 生成使用的模型。 |
+| `--no-llm` | 使用 deterministic fallback planner。 |
+| `--force` | 重新生成已有 work-plan artifacts。 |
+| `--max-files N` | 规划时最多纳入多少个上下文文件。 |
+| `--max-source-chars-per-file N` | 每个文件的源码 snippet budget。 |
+| `batch RUN_DIR --work-item W1` | 为某个 work-plan item 创建 attempt/batch 状态目录。 |
+| `--attempt-id attempt-001` | 复用或创建指定 attempt id。 |
+| `--force` | 即使该 work item 已有 batch，也强制创建一个新 batch。 |
+
+`work-plan` 是 V2.2 中从“大任务”过渡到“受控编辑批次”的桥。它会记录
+target files、read-only evidence、validation hints、context requests 和 budget
+profiles。`batch` 会在
+`code_task/attempts/attempt-NNN/batches/batch-NNN/` 下写入持久状态；它暂时
+不调用 LLM，也不修改文件。后续 active batch 的 edit proposal 会被限制在
+该 batch 的 target files 内，并额外写入 `batch_context.json`、
+`proposed_edits.json`、`proposal_warnings.json` 和 `usage_summary.json` 等
+批次级产物。
+
 ### Manual Command Path
 
 当你想自己运行并检查每个 primitive step 时，使用手动路径：
@@ -438,6 +466,8 @@ uv run simple-ar code-task locate runs/<run-id>
 uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
 uv run simple-ar code-task plan runs/<run-id>
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 uv run simple-ar code-task propose-edits runs/<run-id>
@@ -465,6 +495,8 @@ uv run simple-ar code-task baseline runs/<run-id> --timeout 60
 #### Planning And Approval
 
 ```bash
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
 uv run simple-ar code-task plan runs/<run-id>
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 ```
@@ -477,6 +509,8 @@ uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 | `--force` | 重新生成已有 plan。 |
 | `--max-files N` | 选择上下文文件数量上限。 |
 | `--max-source-chars-per-file N` | 每个文件的源码 snippet budget。 |
+| `work-plan RUN_DIR` | 生成用于 batch execution 的 `code_task/work_plan.json` 和 `work_plan.md`。 |
+| `batch RUN_DIR --work-item W1` | 创建 `code_task/attempts/attempt-NNN/batches/batch-NNN/batch_state.json`。 |
 | `decide-plan RUN_DIR` | 记录 plan 审核结果。 |
 | `--decision approve / reject / revise` | 必填决策。 |
 | `--note TEXT` | 可选审核备注。 |
@@ -493,8 +527,8 @@ uv run simple-ar code-task execute runs/<run-id>
 # 阅读 code_task/patch_plan.md 后批准。
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 
-# 运行到 edit proposal 审核点。
-uv run simple-ar code-task execute runs/<run-id>
+# 明确运行到 edit proposal 审核点。
+uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
 
 # 应用已审核 proposal，并运行验证/benchmark。
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
@@ -505,16 +539,54 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | 命令/参数 | 含义 |
 | --- | --- |
 | `execute RUN_DIR` | 基于当前 artifacts 运行下一组安全 code-task 步骤。 |
-| `--to-step STEP` | 最多运行到 `probe`、`baseline`、`plan`、`propose-edits`、`apply-edits`、`validate`、`run`、`analyze-failure` 或 `repair`。 |
+| `--config PATH` | 可选 TOML 配置，用于 execute 的模型路由、预算和运行参数。 |
+| `--to-step STEP` | 最多运行到 `probe`、`baseline`、`work-plan`、`batch`、`plan`、`propose-edits`、`apply-edits`、`validate`、`run`、`analyze-failure` 或 `repair`。 |
 | `--dry-run` | 只打印下一步动作，不写产物。 |
 | `--no-llm`, `--model NAME` | 控制 plan/proposal/repair 的 LLM 使用。 |
 | `--apply-proposed-edits` | 允许 execute 在 plan 已批准后应用审核过的 `proposed_edits.json`。 |
+| `--allow-large-edits` | 允许接受/应用超过 normal 预算但仍在 large 预算内的已审核 proposal。 |
 | `--repair-rounds N` | validation/benchmark 失败后的 bounded repair proposal 轮数上限。repair 不会自动应用。 |
 | `--timeout N` | baseline 和 patched run 的 benchmark timeout。 |
 | `--strict-validation`, `--validation-max-file-bytes N` | orchestrated validate step 的控制项。 |
 | `--env-mode`, `--python` | 覆盖 probe 和 benchmark run 的解释器策略。 |
 
-Review gate 会保留。fresh run 会在 `patch_plan.md` 后以 `approval_required` 停止。批准后，execute 可以生成 `proposed_edits.json`，但仍会以 `proposal_review_required` 停止，除非提供 `--apply-proposed-edits`。
+Review gate 会保留。fresh run 会先用配置好的 LLM 创建真实的 `work_plan.json`（除非显式传 `--no-llm`），再创建第一份 attempt/batch 状态，然后在 `patch_plan.md` 后以 `approval_required` 停止。批准后，建议运行 `execute --to-step propose-edits` 明确生成 `proposed_edits.json`；生成后仍会以 `proposal_review_required` 停止，除非提供 `--apply-proposed-edits`。
+
+`execute --config` 可以复用 `code-task init --config` 的 TOML 文件，并读取下面这些额外 section：
+
+```toml
+[execute]
+to_step = "run"
+use_llm = true
+timeout_sec = 60
+repair_rounds = 1
+max_files = 8
+max_source_chars_per_file = 4000
+apply_proposed_edits = false
+allow_large_edits = false
+
+[models.code_task]
+# 省略时使用 SIMPLE_AR_MODEL 或 --model。
+planner = "gpt-5.1"
+editor = "gpt-5.1"
+repair = "gpt-5.1"
+summarizer = "gpt-5.1"
+
+[budget]
+profile = "normal"       # normal | large | absolute
+max_batches = 3
+cost_cap_usd = 2.0       # 仅当 provider usage 返回费用时强制生效
+
+[budget.normal]
+max_files = 2
+max_edits = 4
+max_old_chars = 3000
+max_new_chars = 4000
+max_total_edit_chars = 12000
+max_proposal_chars = 24000
+```
+
+编辑预算会在模型返回 JSON 后由本地 normalizer 强制检查。超预算 proposal 会写入 warnings 和 rejected edits，而不是直接应用。如果 proposal 落在 large profile 内，需要人工审核后再显式加 `--allow-large-edits`。
 
 预览下一步：
 
@@ -534,9 +606,11 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 | 命令/参数 | 含义 |
 | --- | --- |
 | `propose-edits RUN_DIR` | 请求模型生成受控 old/new replacements。 |
+| `--allow-large-edits` | 人工审核后接受 large 预算内的较大 proposal。 |
 | `apply-edits RUN_DIR` | 在 workspace 内应用已批准 edit proposal。 |
 | `--edits-file PATH` | 应用指定 proposal 文件。 |
 | `--allow-unapproved-plan` | 为本地测试/demo 绕过 approval gate。 |
+| `--allow-large-edits` | 应用一个标记为需要 large-edit 审批的已审核 proposal。 |
 | `validate RUN_DIR` | 运行 syntax/static safety checks。 |
 | `--strict` | 把较高风险 validation warning 当作 error。 |
 | `run RUN_DIR` | 在 `code_task/run/patched/` 下运行 patched benchmark。 |
@@ -544,6 +618,8 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 当 baseline 和 patched run 都存在时，SimpleAutoResearch 会写入 `code_task/run/comparison.json` 并更新 `code_task/summary.md`。
 
 `proposed_edits.json` 可以包含同一文件的多个有序 edit。每个 edit 都在当前内存文本上应用，且每个 `old` block 必须唯一匹配。无效 proposal 会在写文件前停止；在 `execute` 中表现为 `patch_apply_failed`。
+
+proposal 是结构化 JSON，不是 unified diff。`old` 和 `new` 必须包含精确文件文本，不要在其中写 `+`、`-`、`@@`、`---`、`+++` 这类 diff 标记。如果 repair proposal 中出现这些标记，normalizer 会丢弃该 edit 并写入 warning；如果手工 proposal 无法匹配当前 workspace，`apply-edits` 会输出简洁的 validation error，并保持文件不变。
 
 Edit-scope 会检查两次：模型 proposal 中的保护路径会被丢弃，`apply-edits` 对模型和手工 proposal 都会再次拒绝保护路径。
 
@@ -571,6 +647,8 @@ uv run simple-ar code-task apply-edits runs/<run-id> \
 ```
 
 `analyze-failure` 会把 `failure_analysis.md` 写在失败 benchmark run 旁边；如果静态 validation 在 benchmark 启动前失败，则写到 `code_task/meta/`。`repair` 会写 proposal JSON，包含 `source_analysis`、`selected_files`、`constraints`、规范化 `edits` 和 `warnings`，并刷新 `summary.md` 的 Repair section。
+
+repair proposal 仍然只是 proposal。应用后还要重新 validate 和 run。benchmark pass 也不一定代表任务目标已经完成；如果 patched 指标仍低于 baseline，说明只是恢复可运行或恢复到阈值以上，是否完成要看 `run/comparison.json` 的 verdict 和指标差值。
 
 ## Status
 

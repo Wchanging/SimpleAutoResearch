@@ -12,6 +12,19 @@ DEFAULT_OUTPUT_ROOT = "runs"
 DEFAULT_MAX_FILE_BYTES = 2_000_000
 DEFAULT_ENV_MODE = "current"
 DEFAULT_WORKSPACE_MODE = "copy"
+VALID_EXECUTE_STEPS = {
+    "probe",
+    "baseline",
+    "work-plan",
+    "batch",
+    "plan",
+    "propose-edits",
+    "apply-edits",
+    "validate",
+    "run",
+    "analyze-failure",
+    "repair",
+}
 
 
 class CodeTaskConfigError(RuntimeError):
@@ -40,6 +53,40 @@ class CodeTaskInitOptions:
     config_path: str | None
 
 
+@dataclass(frozen=True)
+class CodeTaskExecuteOptions:
+    """Resolved options for ``code-task execute`` from a TOML config.
+
+    The config is intentionally optional. It keeps the common long-tail knobs
+    out of the CLI happy path while preserving explicit CLI overrides in
+    ``cli.py``.
+    """
+
+    to_step: str
+    model: str | None
+    planner_model: str | None
+    editor_model: str | None
+    repair_model: str | None
+    summarizer_model: str | None
+    use_llm: bool
+    timeout_sec: int
+    skip_validation: bool
+    strict_validation: bool
+    validation_max_file_bytes: int
+    apply_proposed_edits: bool
+    allow_large_edits: bool
+    repair_rounds: int
+    budget_profile: str | None
+    edit_budget_overrides: dict[str, Any]
+    max_batches: int | None
+    cost_cap_usd: float | None
+    max_files: int
+    max_source_chars_per_file: int
+    env_mode: str | None
+    python_executable: str | None
+    config_path: str | None
+
+
 def parse_metric_direction_arg(value: str) -> tuple[str, str]:
     """Parse and normalize ``METRIC=DIRECTION`` strings."""
     separator = "=" if "=" in value else ":"
@@ -57,6 +104,114 @@ def parse_metric_direction_arg(value: str) -> tuple[str, str]:
     except ValueError as exc:
         raise CodeTaskConfigError(str(exc)) from exc
     return name, normalized
+
+
+def load_code_task_execute_options(
+    *,
+    config_path: str | None = None,
+) -> CodeTaskExecuteOptions:
+    """Resolve optional ``code-task execute`` settings from TOML.
+
+    Supported sections:
+    - ``[execute]`` for orchestration knobs.
+    - ``[models.code_task]`` for planner/editor/repair/summarizer models.
+    - ``[budget]`` plus optional ``[budget.normal]``/``[budget.large]`` for
+      edit budget profile and caps.
+    - ``[environment]`` for env mode and Python executable.
+    """
+
+    config = _load_toml_config(config_path)
+    execute = _config_table(config, "execute")
+    benchmark = _config_table(config, "benchmark")
+    llm = _config_table(config, "llm")
+    models = _config_table(config, "models")
+    code_task_models = _config_table(models, "code_task")
+    budget = _config_table(config, "budget")
+    environment = _config_table(config, "environment")
+    safety = _config_table(config, "safety")
+
+    to_step = _config_string(execute.get("to_step")) or "run"
+    if to_step not in VALID_EXECUTE_STEPS:
+        raise CodeTaskConfigError(
+            "Unsupported [execute].to_step. Expected one of: "
+            + ", ".join(sorted(VALID_EXECUTE_STEPS))
+        )
+    budget_profile = (
+        _config_string(execute.get("budget_profile"))
+        or _config_string(budget.get("profile"))
+    )
+    max_batches = _config_int(execute.get("max_batches"))
+    if max_batches is None:
+        max_batches = _config_int(budget.get("max_batches"))
+    cost_cap = _config_float(execute.get("cost_cap_usd"))
+    if cost_cap is None:
+        cost_cap = _config_float(budget.get("cost_cap_usd"))
+
+    return CodeTaskExecuteOptions(
+        to_step=to_step,
+        model=(
+            _config_string(execute.get("model"))
+            or _config_string(code_task_models.get("default"))
+            or _config_string(models.get("default"))
+            or _config_string(llm.get("model"))
+        ),
+        planner_model=_config_string(code_task_models.get("planner")),
+        editor_model=_config_string(code_task_models.get("editor")),
+        repair_model=_config_string(code_task_models.get("repair")),
+        summarizer_model=_config_string(code_task_models.get("summarizer")),
+        use_llm=_resolve_bool(
+            override=None,
+            value=execute.get("use_llm", llm.get("enabled")),
+            default=True,
+        ),
+        timeout_sec=_positive_int(
+            _config_int(execute.get("timeout_sec"))
+            or _config_int(execute.get("timeout"))
+            or _config_int(benchmark.get("timeout")),
+            60,
+        ),
+        skip_validation=_resolve_bool(
+            override=None,
+            value=execute.get("skip_validation"),
+            default=False,
+        ),
+        strict_validation=_resolve_bool(
+            override=None,
+            value=execute.get("strict_validation"),
+            default=False,
+        ),
+        validation_max_file_bytes=_positive_int(
+            _config_int(execute.get("validation_max_file_bytes"))
+            or _config_int(safety.get("validation_max_file_bytes")),
+            500_000,
+        ),
+        apply_proposed_edits=_resolve_bool(
+            override=None,
+            value=execute.get("apply_proposed_edits"),
+            default=False,
+        ),
+        allow_large_edits=_resolve_bool(
+            override=None,
+            value=execute.get("allow_large_edits"),
+            default=False,
+        ),
+        repair_rounds=_non_negative_int(_config_int(execute.get("repair_rounds")), 0),
+        budget_profile=budget_profile,
+        edit_budget_overrides=_edit_budget_overrides(budget, budget_profile),
+        max_batches=max_batches if max_batches and max_batches > 0 else None,
+        cost_cap_usd=cost_cap if cost_cap is not None and cost_cap >= 0 else None,
+        max_files=_positive_int(_config_int(execute.get("max_files")), 8),
+        max_source_chars_per_file=_positive_int(
+            _config_int(execute.get("max_source_chars_per_file")),
+            4000,
+        ),
+        env_mode=_config_string(environment.get("mode")),
+        python_executable=(
+            _config_string(environment.get("python"))
+            or _config_string(environment.get("python_executable"))
+        ),
+        config_path=config_path,
+    )
 
 
 def load_code_task_init_options(
@@ -220,6 +375,14 @@ def _config_int(value: object) -> int | None:
     return None
 
 
+def _config_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
 def _resolve_bool(*, override: bool | None, value: object, default: bool) -> bool:
     if override is not None:
         return override
@@ -264,6 +427,44 @@ def _resolve_max_file_bytes(
     if safety_value is not None:
         return safety_value
     return DEFAULT_MAX_FILE_BYTES
+
+
+def _positive_int(value: int | None, default: int) -> int:
+    if isinstance(value, int) and value > 0:
+        return value
+    return default
+
+
+def _non_negative_int(value: int | None, default: int) -> int:
+    if isinstance(value, int) and value >= 0:
+        return value
+    return default
+
+
+def _edit_budget_overrides(
+    budget: dict[str, Any],
+    profile: str | None,
+) -> dict[str, Any]:
+    """Return numeric edit budget overrides for the selected profile."""
+
+    keys = {
+        "max_files",
+        "max_edits",
+        "max_old_chars",
+        "max_new_chars",
+        "max_total_edit_chars",
+        "max_proposal_chars",
+    }
+    values: dict[str, Any] = {}
+    for key in keys:
+        if key in budget:
+            values[key] = budget[key]
+    selected_profile = (profile or _config_string(budget.get("profile")) or "normal").strip().lower()
+    profile_table = _config_table(budget, selected_profile)
+    for key in keys:
+        if key in profile_table:
+            values[key] = profile_table[key]
+    return values
 
 
 def _merge_metric_directions(

@@ -231,11 +231,28 @@ uv run simple-ar code-task locate runs/<run-id>
 uv run simple-ar code-task context runs/<run-id>
 uv run simple-ar code-task probe runs/<run-id>
 uv run simple-ar code-task baseline runs/<run-id> --timeout 60
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
 ```
 
 `probe` 写入 `code_task/meta/environment_report.json`，包含 OS、Python、工具、GPU、依赖文件和 test 目录信号。它不安装依赖，也不运行项目代码。
 
 `baseline` 在任何补丁应用前运行记录的 benchmark command，结果存到 `code_task/run/baseline/`，包括 `execution_report.json`、`stdout.txt`、`stderr.txt` 和解析后的 `metrics.json`，并刷新 `code_task/summary.md`。
+
+如果任务比较宽泛，或者可能需要多批次修改，可以先生成更高一层的 work plan：
+
+```bash
+uv run simple-ar code-task work-plan runs/<run-id>
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
+```
+
+`work-plan` 写入 `code_task/work_plan.json` 和 `code_task/work_plan.md`，
+记录 work items、target files、read-only evidence、validation hints、
+context requests 和 budget profiles。它不生成代码，也不修改文件。`batch`
+会在 `code_task/attempts/attempt-NNN/batches/batch-NNN/` 下创建持久状态，
+这是 V2.2 后续做多轮、分批编辑和失败恢复的基础。active batch 存在时，
+edit proposal 会被限制在该 batch 的 target files 内，并写入额外的批次级
+review 产物。
 
 生成 patch plan：
 
@@ -262,6 +279,7 @@ uv run simple-ar code-task propose-edits runs/<run-id>
 ```
 
 `propose-edits` 写入 `code_task/meta/proposed_edits.json`。proposal 使用 old/new 文本替换，供人工审核；它本身不会编辑 workspace。默认 tests 和 benchmark 文件是只读证据，proposal 不会给这些路径提供可编辑 snippet，后续 apply 也会再次拒绝保护路径。
+V2.2 还会在模型返回 JSON 后执行本地编辑预算检查。超预算 proposal 会写入 warnings 和 rejected edits，而不是直接应用；如果 proposal 仍在 larger review budget 内，审核 JSON 后再显式使用 `--allow-large-edits`。
 
 应用已审核 edits：
 
@@ -309,8 +327,8 @@ uv run simple-ar code-task execute runs/<run-id>
 # 阅读 code_task/patch_plan.md 后批准。
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
 
-# 运行到 edit proposal 审核点。
-uv run simple-ar code-task execute runs/<run-id>
+# 明确运行到 edit proposal 审核点。
+uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
 
 # 应用已审核 proposal，并运行验证和 benchmark。
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
@@ -318,10 +336,19 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 
 重复调用 `execute` 是有意设计的。它的语义是“检查当前 run 状态，并推进到下一个安全停止点”，不是“跳过审核”。
 
-- 第一次 `execute`：写 `environment_report.json`、baseline 产物、`patch_plan.md`，然后以 `approval_required` 停下。
+- 第一次 `execute`：写 `environment_report.json`、baseline 产物、真实 LLM-backed `work_plan.json`（除非传 `--no-llm`）、第一份 attempt/batch 状态和 `patch_plan.md`，然后以 `approval_required` 停下。
 - `decide-plan`：记录你的批准。
-- 第二次 `execute`：写 `proposed_edits.json`，然后以 `proposal_review_required` 停下。
+- 第二次 `execute --to-step propose-edits`：写 `proposed_edits.json`，然后以 `proposal_review_required` 停下。
 - 最后 `execute --apply-proposed-edits`：应用 proposal，写 `patch.diff`，验证 workspace，运行 patched benchmark，更新 `comparison.json` 和 `summary.md`。
+
+如果项目参数较多，可以继续保持短命令，把模型和预算设置放进 TOML：
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> \
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml
+```
+
+`execute --config` 会读取 `[execute]`、`[models.code_task]` 和 `[budget]`，同时兼容常规 code-task init sections。完整示例见 [CLI 参考](CLI_REFERENCE_zh.md#executor-path)。
 
 只预览下一步，不写产物：
 
@@ -330,6 +357,67 @@ uv run simple-ar code-task execute runs/<run-id> --dry-run
 ```
 
 完整 code-task 命令选项见 [CLI 参考](CLI_REFERENCE_zh.md#code-task-commands)。
+
+### Code Task 运行排错
+
+`execute` 后没有生成 `proposed_edits.json`：
+
+- 这是第一次 executor 调用后的正常情况。fresh run 会先停在 `approval_required`，此时应该已经有 `code_task/patch_plan.md`。
+- 先审核并批准计划，再明确推进到 proposal：
+
+```bash
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
+uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
+```
+
+- 可检查 `manifest.json` 中的 `plan.status` 是否为 `approved`；人工决策记录在 `code_task/meta/hitl_decisions.jsonl`。
+
+validation 通过，但 patched benchmark 失败：
+
+- 这说明代码语法和静态规则没问题，但行为或指标变差了。优先查看：
+
+```bash
+code_task/run/patched/execution_report.json
+code_task/run/patched/stdout.txt
+code_task/run/patched/stderr.txt
+code_task/run/comparison.json
+code_task/summary.md
+```
+
+- 请求一个有限范围的修复 proposal：
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> \
+  --to-step repair \
+  --repair-rounds 1 \
+  --timeout 60
+```
+
+- 审核最新的 `code_task/repairs/repair-NNN/proposed_edits.json`，再显式应用、验证和重跑：
+
+```bash
+uv run simple-ar code-task apply-edits runs/<run-id> \
+  --edits-file runs/<run-id>/code_task/repairs/repair-NNN/proposed_edits.json
+uv run simple-ar code-task validate runs/<run-id>
+uv run simple-ar code-task run runs/<run-id> --timeout 60
+```
+
+- 修复后 benchmark pass 不等于任务真正完成。比如修复可能只是恢复到可运行或接近 baseline；是否真的 improved 要看 `code_task/run/comparison.json`。
+
+`apply-edits` 报 `old text was not found`：
+
+- 发生这种情况时，workspace 文件不会被修改。原因通常是 proposal 里的 `old` 不是当前文件中的精确原文，或者模型把 unified diff 的 `+` / `-` / `@@` 等标记写进了结构化 JSON。
+- 重新生成 proposal，或手工修正 JSON。每个 edit 的 `old` 必须是当前文件里唯一匹配的连续文本，`new` 是替换后的文件文本；不要在 `old` / `new` 里写 `+`、`-`、`@@`、`---`、`+++` 这类 diff 标记。
+- 如果同一文件的多个 edit 位置很近，最好合并成一个更大的 old/new replacement，避免前一个 edit 让后一个 edit 的 `old` 失效。
+
+提示需要 large-edit approval：
+
+- 先阅读 `code_task/meta/proposed_edits.json`，以及 `code_task/meta/` 或最新 `code_task/attempts/.../batch-NNN/` 下的 `proposal_warnings.json`。
+- 如果确认这是必要的大修改，再加 `--allow-large-edits`。不要只为了绕过模型输出异常而使用这个参数。
+
+`uv run` 出现本地 cache 权限错误：
+
+- 这是本机环境问题，不是 run artifact 问题。可以修复 uv cache 权限，或者在 PowerShell 中直接使用项目虚拟环境入口，例如 `.\.venv\Scripts\simple-ar.exe ...`。
 
 ## 8 阶段流程中的内嵌 Code Task
 
