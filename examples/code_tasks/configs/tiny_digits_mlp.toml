@@ -25,7 +25,7 @@ use_llm = true
 timeout_sec = 60
 repair_rounds = 1
 max_files = 8
-max_source_chars_per_file = 4000
+max_source_chars_per_file = 6000
 apply_proposed_edits = false
 allow_large_edits = false
 
@@ -46,7 +46,7 @@ max_batches = 3
 max_files = 2
 max_edits = 4
 max_old_chars = 3000
-max_new_chars = 4000
+max_new_chars = 6000
 max_total_edit_chars = 12000
 max_proposal_chars = 24000
 

@@ -4,6 +4,27 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-22
+
+### Changed
+
+- Code-task patched runs now record a separate `objective.status` from
+  baseline-vs-patched comparison, so a passing benchmark can still be reported
+  as `regressed`, `mixed`, or `inconclusive` when the measured goal was not met.
+- `code-task execute` now prefers the first executable implementation work item
+  instead of blindly batching an inspection-only first work-plan item.
+- Manual `code-task validate` and `code-task run` now synchronize latest
+  batch/attempt/work-plan state after a patch has been applied, matching the
+  executor path more closely.
+- Applying repair proposals now records the actual repair proposal path as the
+  latest applied proposal, and later passing patched benchmarks resolve stale
+  failure/repair sections in status and summaries.
+- Failure analysis now captures metric-floor and timing-budget signals such as
+  `accuracy below benchmark floor`, `macro_f1`, and `train_time_sec`.
+- Documentation now explains objective verdicts, implementation-batch selection,
+  repair application state, and how to handle benchmark pass with metric
+  regression.
+
 ## 2026-05-21
 
 ### Added

@@ -335,7 +335,9 @@ def _work_plan_user_prompt(
         '  "approval": {"required": true, "reason": string}\n'
         "}\n\n"
         "Planning rules:\n"
-        "- Make 1 to 5 work items. Each item should be a small implementation batch.\n"
+        "- Make 1 to 5 work items. Each item should be a small implementation batch that can produce code edits.\n"
+        "- Do not create inspection-only, review-only, measurement-only, or documentation-only items. Put needed inspection in `context_request`.\n"
+        "- The first item should normally be the smallest useful code change, not a broad analysis step.\n"
         "- Use `task.md` as requirements, not as a patch. This work plan is the execution plan.\n"
         "- Use only workspace-relative paths from the supplied index in `target_files` and "
         "`read_only_evidence`.\n"

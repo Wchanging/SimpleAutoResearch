@@ -141,15 +141,18 @@ generate a budget-checked `proposed_edits.json`, then stops again for proposal
 review. `--apply-proposed-edits` is the explicit signal to apply the reviewed
 proposal and run validation/benchmark. When both baseline and patched benchmark
 artifacts exist, the run summary includes a conservative before/after
-comparison. Use `execute --config` when model routing and edit budgets should
-come from TOML instead of CLI flags.
+comparison and a separate objective verdict, so benchmark pass and measured
+improvement are not confused. Use `execute --config` when model routing and
+edit budgets should come from TOML instead of CLI flags.
 
 If `proposed_edits.json` is missing after the first executor call, that is
 usually expected: review `code_task/patch_plan.md`, approve it with
 `decide-plan`, then run `execute --to-step propose-edits`. If validation passes
 but the patched benchmark regresses, inspect `code_task/run/patched/` and use
 `execute --to-step repair --repair-rounds 1` to request a bounded repair
-proposal. More troubleshooting notes are in
+proposal. If the benchmark passes but `comparison.json` reports `regressed` or
+`mixed`, treat it as an objective-quality failure and revise the plan/proposal
+rather than marking the task complete. More troubleshooting notes are in
 [Usage And Configuration](docs/USAGE.md#troubleshooting-code-task-runs).
 
 For benchmark comparison, print numeric metrics as `name: value` lines.

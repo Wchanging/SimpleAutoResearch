@@ -43,6 +43,7 @@ init workspace -> index code -> map repo -> probe environment
 - Edit proposal 是保守 old/new replacement，不是自由形式重写。
 - 同一个文件可以有多个有序 edit，但每个 `old` block 必须保持唯一匹配；无效 proposal 会在写文件前停止。
 - `code-task execute` 可以推进下一步，但会在 plan approval 和 proposal review 处停下，除非用户显式继续。
+- Work-plan item 应该是可执行的 implementation batch。executor 在选择第一个 active batch 时会跳过明显的纯分析 item，因此 LLM 生成的“先 inspect 项目”不会意外限制后续 edit 阶段。
 - benchmark 通过的 repair 不自动等于任务成功。最终是否 improved 要看 `code_task/run/comparison.json`；如果 patched 指标仍低于 baseline，只能说明流程恢复到可运行或超过 benchmark floor，还没有真正完成“提升”目标。
 - 当前执行有 workspace isolation 和明确 interpreter policy。支持 `current` 和 `external`；自动创建环境留到后续。`workspace.reuse_source_venv` 可以把 worktree/copy/sparse run 指向 source 项目已有 `.venv` Python，但不会安装依赖。
 
@@ -240,10 +241,11 @@ runs/<run-id>/
 - `run/baseline/execution_report.json`：pre-patch benchmark result。
 - `run/patched/execution_report.json`：post-patch benchmark result。
 - `run/comparison.json`：baseline/patched metric deltas 和保守 verdict。
+- `manifest.json.objective`：当 patched benchmark artifact 存在时，从 comparison 派生出的当前任务目标 verdict。它用于区分“代码跑通了”和“指标目标真的提升了”。
 - `patch_plan.md`：编辑前供人审核的计划，包含已记录环境、validation 和 baseline context。
 - 如果存在 latest context pack，`patch_plan.md` 会记录其路径，并优先使用其中的 selected snippets，而不是旧的 index-only 文件选择。
 - `patch.diff`：应用后的补丁，便于 review。
-- `meta/applied_edits.json`：被修改文件及 before/after hash。
+- `meta/applied_edits.json`：被修改文件及 before/after hash，并记录实际应用的 proposal path。对于 repair proposal，这里会指向 `code_task/repairs/repair-NNN/proposed_edits.json`。
 
 ## Code-Task 环境策略
 

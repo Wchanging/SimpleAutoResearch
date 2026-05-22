@@ -50,6 +50,10 @@ Key boundaries:
   uniquely matchable; invalid proposals stop before workspace files are written.
 - `code-task execute` can run the next safe steps, but it stops at plan approval
   and proposal review unless the user explicitly continues.
+- Work-plan items are meant to be executable implementation batches. The
+  executor skips obvious analysis-only items when choosing the first active
+  batch, so an LLM-generated "inspect the project" item does not constrain the
+  edit stage by accident.
 - A benchmark-passing repair is not automatically a task success. The
   before/after verdict comes from `code_task/run/comparison.json`; if patched
   metrics remain below baseline, the system has recovered execution but has not
@@ -257,11 +261,14 @@ Important user-facing code-task files:
 - `run/baseline/execution_report.json`: pre-patch benchmark result.
 - `run/patched/execution_report.json`: post-patch benchmark result.
 - `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist. Explicit `primary_metric` and `metric_directions` from the manifest are used before heuristic metric-name rules.
+- `manifest.json.objective`: current task-objective verdict derived from
+  comparison when patched benchmark artifacts exist. This separates "the code
+  ran" from "the measured goal improved."
 - `patch_plan.md`: human-reviewable plan before edits, including recorded environment, validation, and baseline context when available.
 - When a latest context pack exists, `patch_plan.md` records its path and uses
   its selected snippets instead of the older index-only file selector.
 - `patch.diff`: applied patch for review.
-- `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch.
+- `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch, including the proposal path actually applied. For repair proposals this is the `code_task/repairs/repair-NNN/proposed_edits.json` path.
 
 ## Code-Task Environment Strategy
 

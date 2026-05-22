@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -380,7 +381,6 @@ def execute_code_task(
             strict=strict_validation,
             max_file_bytes=validation_max_file_bytes,
         )
-        _update_latest_batch_validation(root, validation.report_path, validation.status)
         _record(steps, "validate", "done", f"status {validation.status}")
         if validation.status == "failed":
             if not _should_run("analyze-failure", to_step):
@@ -423,7 +423,6 @@ def execute_code_task(
             env_mode=env_mode,
             python_executable=python_executable,
         )
-        _update_latest_batch_benchmark(root, result.report_path, result.status)
         _record(steps, "run", "done", f"status {result.status}")
         if result.status != "passed":
             if not _should_run("analyze-failure", to_step):
@@ -597,34 +596,6 @@ def _cost_cap_exceeded(meta_dir: Path, cost_cap_usd: float | None) -> bool:
     return isinstance(cost, (int, float)) and float(cost) >= cost_cap_usd
 
 
-def _update_latest_batch_validation(run_dir: Path, report_path: Path, status: str) -> None:
-    batch = load_latest_code_task_batch(run_dir)
-    if batch is None:
-        return
-    update_code_task_batch_state(
-        run_dir,
-        batch.batch_state_path,
-        state="failed" if status == "failed" else "validating",
-        artifacts={"validation_report": _relative_to_run(run_dir, report_path)},
-        detail=f"Static validation {status}.",
-        extra={"validation_status": status},
-    )
-
-
-def _update_latest_batch_benchmark(run_dir: Path, report_path: Path, status: str) -> None:
-    batch = load_latest_code_task_batch(run_dir)
-    if batch is None:
-        return
-    update_code_task_batch_state(
-        run_dir,
-        batch.batch_state_path,
-        state="completed" if status == "passed" else "failed",
-        artifacts={"benchmark_run": _relative_to_run(run_dir, report_path)},
-        detail=f"Patched benchmark {status}.",
-        extra={"benchmark_status": status},
-    )
-
-
 def _create_repair_batch(run_dir: Path) -> LoadedCodeTaskBatch | None:
     parent = load_latest_code_task_batch(run_dir)
     if parent is None:
@@ -658,12 +629,53 @@ def _first_work_item_id(paths: object) -> str:
     work_plan = read_json(work_plan_path)
     if not isinstance(work_plan, dict):
         raise RuntimeError(f"Expected JSON object in {work_plan_path}")
-    items = work_plan.get("items")
-    if isinstance(items, list):
-        for item in items:
-            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip():
-                return item["id"].strip()
+    items = [item for item in work_plan.get("items", []) if isinstance(item, dict)]
+    for item in items:
+        if _is_executable_work_item(item):
+            item_id = str(item.get("id") or "").strip()
+            if item_id:
+                return item_id
+    for item in items:
+        item_id = str(item.get("id") or "").strip()
+        if item_id:
+            return item_id
     raise RuntimeError(f"Work plan has no executable items: {work_plan_path}")
+
+
+def _is_executable_work_item(item: dict[str, object]) -> bool:
+    objective = str(item.get("objective") or "").lower()
+    done = " ".join(str(value).lower() for value in item.get("done_criteria", []) if isinstance(value, str))
+    text = objective + "\n" + done
+    target_files = item.get("target_files")
+    if not isinstance(target_files, list) or not any(isinstance(path, str) and path for path in target_files):
+        return False
+    edit_patterns = (
+        r"\badd(?:s|ed|ing)?\b",
+        r"\bchang(?:e|es|ed|ing)\b",
+        r"\bfix(?:es|ed|ing)?\b",
+        r"\bimplement(?:s|ed|ing)?\b",
+        r"\bimprov(?:e|es|ed|ing)\b",
+        r"\bmodif(?:y|ies|ied|ying)\b",
+        r"\boptimi[sz](?:e|es|ed|ing)\b",
+        r"\brefactor(?:s|ed|ing)?\b",
+        r"\brepair(?:s|ed|ing)?\b",
+        r"\btun(?:e|es|ed|ing)\b",
+        r"\bupdat(?:e|es|ed|ing)\b",
+    )
+    analysis_patterns = (
+        r"\banaly[sz](?:e|es|ed|ing)\b",
+        r"\bcaptur(?:e|es|ed|ing)\b",
+        r"\bdocument(?:s|ed|ing)?\b",
+        r"\bfinali[sz](?:e|es|ed|ing)\b",
+        r"\bidentif(?:y|ies|ied|ying)\b",
+        r"\binspect(?:s|ed|ing)?\b",
+        r"\bmeasur(?:e|es|ed|ing)\b",
+        r"\breview(?:s|ed|ing)?\b",
+        r"\bunderstand(?:s|ing)?\b",
+    )
+    if any(re.search(pattern, text) for pattern in edit_patterns):
+        return True
+    return not any(re.search(pattern, objective) for pattern in analysis_patterns)
 
 
 def _run_record(manifest: dict[str, object], label: str) -> dict[str, object]:

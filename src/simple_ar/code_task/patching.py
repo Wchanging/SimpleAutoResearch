@@ -388,6 +388,7 @@ def apply_patch_edits(
 
     write_text(patch_diff_path, diff_text)
     applied = _applied_edits_record(
+        run_dir=root,
         proposal_path=proposal_path,
         prepared=prepared,
         pre_hash_rows=pre_hash_rows,
@@ -408,6 +409,7 @@ def apply_patch_edits(
         changed_files=_unique_prepared_paths(prepared),
         codebase_index=codebase_index,
         repo_map=repo_map,
+        proposal_path=proposal_path,
     )
     _update_latest_batch_after_apply(root, applied_edits_path, patch_diff_path)
     return PatchApplyResult(
@@ -896,6 +898,7 @@ def _write_text_atomically(path: Path, text: str) -> None:
 
 def _applied_edits_record(
     *,
+    run_dir: Path,
     proposal_path: Path,
     prepared: list[_PreparedEdit],
     pre_hash_rows: dict[str, dict[str, Any]],
@@ -904,7 +907,7 @@ def _applied_edits_record(
     return {
         "schema_version": 1,
         "applied_at": _utcnow_iso(),
-        "proposal": str(proposal_path),
+        "proposal": _relative_to_run(run_dir, proposal_path),
         "edit_count": len(prepared),
         "changed_files": _unique_prepared_paths(prepared),
         "edits": [
@@ -1287,7 +1290,10 @@ def _update_manifest_after_apply(
     changed_files: list[str],
     codebase_index: dict[str, Any],
     repo_map: dict[str, Any],
+    proposal_path: Path,
 ) -> None:
+    run_dir = manifest_path.parent
+    proposal_ref = _relative_to_run(run_dir, proposal_path)
     patch = _dict_value(manifest, "patch")
     patch.update(
         {
@@ -1295,6 +1301,7 @@ def _update_manifest_after_apply(
             "applied_at": _utcnow_iso(),
             "patch_diff": "code_task/patch.diff",
             "applied_edits": "code_task/meta/applied_edits.json",
+            "latest_applied_proposal": proposal_ref,
             "changed_files": changed_files,
         }
     )
@@ -1312,6 +1319,7 @@ def _update_manifest_after_apply(
     manifest["layout"] = layout
     manifest["patch"] = patch
     manifest["status"] = "patched"
+    _update_repair_after_apply(manifest, proposal_ref)
     manifest["codebase"] = {
         "file_count": project.get("file_count", 0),
         "python_file_count": project.get("python_file_count", 0),
@@ -1328,6 +1336,20 @@ def _update_manifest_after_apply(
         },
     }
     write_json(manifest_path, manifest)
+
+
+def _update_repair_after_apply(manifest: dict[str, Any], proposal_ref: str) -> None:
+    repair = manifest.get("repair")
+    if not isinstance(repair, dict) or not repair:
+        return
+    latest = str(repair.get("latest_proposed_edits") or "")
+    if latest and latest != proposal_ref:
+        return
+    repair["status"] = "repair_applied"
+    repair["latest_applied_proposal"] = proposal_ref
+    repair["latest_applied_edits"] = "code_task/meta/applied_edits.json"
+    repair["applied_at"] = _utcnow_iso()
+    manifest["repair"] = repair
 
 
 def _record_code_task_usage(

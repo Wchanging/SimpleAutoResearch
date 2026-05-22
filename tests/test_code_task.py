@@ -568,6 +568,63 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(forced.batch_id, "batch-002")
             self.assertTrue(forced.batch_state_path.is_file())
 
+    def test_execute_selects_first_implementation_work_item(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove spam prediction.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            _write_analysis_first_work_plan(run_dir)
+
+            result = execute_code_task(run_dir, use_llm=False, to_step="batch", timeout_sec=10)
+
+            self.assertEqual(result.stop_reason, "stop_point")
+            batch_state = read_json(
+                run_dir
+                / "code_task"
+                / "attempts"
+                / "attempt-001"
+                / "batches"
+                / "batch-001"
+                / "batch_state.json"
+            )
+            self.assertEqual(batch_state["work_item_id"], "W2")
+            self.assertIn("Implement", batch_state["work_item"]["objective"])
+
+    def test_record_plan_decision_updates_work_plan_approval(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nApprove both plans.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_code_task_work_plan(run_dir, use_llm=False)
+            generate_patch_plan(run_dir, use_llm=False)
+
+            record_plan_decision(run_dir, decision="approve", note="ready")
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["plan"]["status"], "approved")
+            self.assertEqual(manifest["work_plan"]["status"], "ready")
+            self.assertEqual(manifest["work_plan"]["approval"]["status"], "approved")
+
     def test_probe_code_task_environment_writes_report_and_manifest(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -999,6 +1056,41 @@ class CodeTaskTests(unittest.TestCase):
             self.assertNotIn("pre_patch_manifest", manifest["patch"])
             self.assertNotIn("post_patch_manifest", manifest["patch"])
 
+    def test_apply_repair_proposal_records_latest_applied_proposal(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nApply a reviewed repair proposal.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file)
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            repair_dir = run_dir / "code_task" / "repairs" / "repair-001"
+            repair_dir.mkdir(parents=True)
+            repair_proposal = _write_valid_edit_proposal(run_dir, path=repair_dir / "proposed_edits.json")
+            manifest = read_json(run_dir / "manifest.json")
+            manifest["repair"] = {
+                "status": "repair_proposed",
+                "repair_count": 1,
+                "latest_proposed_edits": "code_task/repairs/repair-001/proposed_edits.json",
+            }
+            write_json(run_dir / "manifest.json", manifest)
+
+            apply_patch_edits(run_dir, edits_file=repair_proposal)
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["patch"]["latest_applied_proposal"], "code_task/repairs/repair-001/proposed_edits.json")
+            self.assertEqual(manifest["repair"]["status"], "repair_applied")
+            self.assertEqual(
+                manifest["repair"]["latest_applied_proposal"],
+                "code_task/repairs/repair-001/proposed_edits.json",
+            )
+            applied = read_json(run_dir / "code_task" / "meta" / "applied_edits.json")
+            self.assertEqual(applied["proposal"], "code_task/repairs/repair-001/proposed_edits.json")
+
     def test_apply_edits_allows_multiple_ordered_edits_in_one_file(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -1412,6 +1504,89 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("### Comparison", summary)
             self.assertIn("Verdict: `improved`", summary)
             self.assertIn("+0.3", summary)
+
+    def test_patched_regression_sets_objective_status(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "metric_project"
+            task_file = root / "task.md"
+            _write_metric_project(code_root, value="0.80")
+            write_text(task_file, "# Task\n\nImprove the printed accuracy metric.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python benchmark.py",
+            )
+            run_code_task_baseline(run_dir, timeout_sec=10)
+            manifest = read_json(run_dir / "manifest.json")
+            manifest["failure_analysis"] = {
+                "status": "needs_repair",
+                "analysis": "code_task/run/patched/failure_analysis.md",
+            }
+            manifest["repair"] = {
+                "status": "repair_applied",
+                "repair_count": 1,
+                "latest_proposed_edits": "code_task/repairs/repair-001/proposed_edits.json",
+            }
+            write_json(run_dir / "manifest.json", manifest)
+            failure_path = run_dir / "code_task" / "run" / "patched" / "failure_analysis.md"
+            write_text(failure_path, "# Failure Analysis\n\nOld failure.\n")
+            write_text(run_dir / "code_task" / "workspace" / "metric_value.txt", "0.50\n")
+
+            run_code_task_benchmark(run_dir, timeout_sec=10)
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "objective_regressed")
+            self.assertEqual(manifest["objective"]["status"], "regressed")
+            self.assertEqual(manifest["failure_analysis"]["status"], "resolved")
+            self.assertEqual(manifest["repair"]["status"], "benchmark_passed")
+            summary = read_text(run_dir / "code_task" / "summary.md")
+            self.assertIn("Outcome: `regressed`", summary)
+            self.assertNotIn("## Failure Analysis", summary)
+            self.assertNotIn("## Repair", summary)
+
+    def test_manual_validate_and_run_sync_latest_batch_state(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nDetect prize messages as spam.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_code_task_work_plan(run_dir, use_llm=False)
+            create_code_task_batch(run_dir, work_item_id="W1")
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            apply_patch_edits(run_dir, edits_file=_write_valid_edit_proposal(run_dir))
+
+            validate_code_task(run_dir)
+            batch_path = (
+                run_dir
+                / "code_task"
+                / "attempts"
+                / "attempt-001"
+                / "batches"
+                / "batch-001"
+                / "batch_state.json"
+            )
+            self.assertEqual(read_json(batch_path)["state"], "validating")
+            run_code_task_benchmark(run_dir, timeout_sec=10)
+
+            self.assertEqual(read_json(batch_path)["state"], "completed")
+            attempt = read_json(run_dir / "code_task" / "attempts" / "attempt-001" / "attempt_state.json")
+            self.assertEqual(attempt["state"], "completed")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["work_plan"]["status"], "completed")
 
     def test_comparison_uses_configured_direction_for_custom_metric(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -1942,7 +2117,7 @@ class CodeTaskTests(unittest.TestCase):
             attempt_state = read_json(
                 run_dir / "code_task" / "attempts" / "attempt-001" / "attempt_state.json"
             )
-            self.assertEqual(attempt_state["state"], "batching")
+            self.assertEqual(attempt_state["state"], "failed")
             self.assertEqual(attempt_state["batches"][0]["state"], "failed")
             self.assertEqual(attempt_state["batches"][1]["kind"], "repair")
             step_status = [(step.step, step.status) for step in result.steps]
@@ -2222,6 +2397,74 @@ def _write_metric_project(
             "print('train_time_sec: 0.010000')\n"
         ),
     )
+
+
+def _write_analysis_first_work_plan(run_dir: Path) -> None:
+    work_plan = {
+        "schema_version": 1,
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "mode": "test",
+        "summary": "Analysis item appears before the actual implementation item.",
+        "goal": "Improve spam prediction.",
+        "success_criteria": ["Tests pass after a useful code change."],
+        "items": [
+            {
+                "id": "W1",
+                "status": "pending",
+                "objective": "Inspect current behavior and identify candidate improvements.",
+                "target_files": ["spam_model.py"],
+                "read_only_evidence": ["tests/test_spam_model.py"],
+                "depends_on": [],
+                "validation": ["python -m unittest discover -s tests"],
+                "done_criteria": ["Behavior is understood."],
+                "risk": "Low",
+                "parallelizable": False,
+                "budget_profile": "normal",
+                "requires_budget_override": False,
+                "suggested_budget_override": "",
+                "context_request": {"query": "inspect", "files": ["spam_model.py"], "symbols": []},
+            },
+            {
+                "id": "W2",
+                "status": "pending",
+                "objective": "Implement keyword handling improvement in the classifier.",
+                "target_files": ["spam_model.py"],
+                "read_only_evidence": ["tests/test_spam_model.py"],
+                "depends_on": ["W1"],
+                "validation": ["python -m unittest discover -s tests"],
+                "done_criteria": ["The classifier recognizes the requested keyword."],
+                "risk": "Low",
+                "parallelizable": False,
+                "budget_profile": "normal",
+                "requires_budget_override": False,
+                "suggested_budget_override": "",
+                "context_request": {"query": "implement", "files": ["spam_model.py"], "symbols": []},
+            },
+        ],
+        "context_requests": [],
+        "risks": [],
+        "approval": {"required": True, "status": "pending", "reason": "Review before editing."},
+        "selected_files": ["spam_model.py", "tests/test_spam_model.py"],
+        "context_pack": None,
+        "run_context": {},
+        "budget_profiles": {},
+    }
+    write_json(run_dir / "code_task" / "work_plan.json", work_plan)
+    write_text(run_dir / "code_task" / "work_plan.md", "# Work Plan\n")
+    manifest = read_json(run_dir / "manifest.json")
+    manifest["layout"]["work_plan"] = "code_task/work_plan.json"
+    manifest["layout"]["work_plan_markdown"] = "code_task/work_plan.md"
+    manifest["work_plan"] = {
+        "status": "pending_approval",
+        "mode": "test",
+        "path": "code_task/work_plan.json",
+        "markdown": "code_task/work_plan.md",
+        "item_count": 2,
+        "selected_files": ["spam_model.py", "tests/test_spam_model.py"],
+        "context_pack": None,
+        "approval": work_plan["approval"],
+    }
+    write_json(run_dir / "manifest.json", manifest)
 
 
 def _write_valid_edit_proposal(run_dir: Path, path: Path | None = None) -> Path:

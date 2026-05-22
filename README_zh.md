@@ -137,9 +137,9 @@ uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
 ```
 
-`execute` 是一个状态感知的便捷命令。它会查看当前 run 目录里已经有哪些产物，然后推进到下一个安全停止点。它不会跳过人工审核。第一次通常会写入环境报告、baseline、work plan、第一份 attempt/batch 状态和 patch plan，然后停在 `approval_required`；批准计划后再用 `execute --to-step propose-edits` 明确生成经过预算检查的 `proposed_edits.json`，并再次停下；只有提供 `--apply-proposed-edits` 后才会应用补丁并运行验证和 benchmark。如果模型路由和编辑预算参数较多，可以使用 `execute --config` 从 TOML 读取。
+`execute` 是一个状态感知的便捷命令。它会查看当前 run 目录里已经有哪些产物，然后推进到下一个安全停止点。它不会跳过人工审核。第一次通常会写入环境报告、baseline、work plan、第一份 attempt/batch 状态和 patch plan，然后停在 `approval_required`；批准计划后再用 `execute --to-step propose-edits` 明确生成经过预算检查的 `proposed_edits.json`，并再次停下；只有提供 `--apply-proposed-edits` 后才会应用补丁并运行验证和 benchmark。当 baseline 和 patched benchmark 都存在时，summary 会给出 conservative comparison 和单独的 objective verdict，避免把 benchmark pass 和真正指标提升混为一谈。如果模型路由和编辑预算参数较多，可以使用 `execute --config` 从 TOML 读取。
 
-如果第一次 `execute` 后没有 `proposed_edits.json`，通常不是错误，而是还停在 plan 审核点。先阅读并批准 `code_task/patch_plan.md`，再运行 `execute --to-step propose-edits`。如果 validation 通过但 patched benchmark 退化，查看 `code_task/run/patched/` 和 `code_task/run/comparison.json`，再用 `execute --to-step repair --repair-rounds 1` 请求有限范围的修复 proposal。更多排错说明见 [使用与配置](docs/USAGE_zh.md#code-task-运行排错)。
+如果第一次 `execute` 后没有 `proposed_edits.json`，通常不是错误，而是还停在 plan 审核点。先阅读并批准 `code_task/patch_plan.md`，再运行 `execute --to-step propose-edits`。如果 validation 通过但 patched benchmark 退化，查看 `code_task/run/patched/` 和 `code_task/run/comparison.json`，再用 `execute --to-step repair --repair-rounds 1` 请求有限范围的修复 proposal。如果 benchmark 通过但 `comparison.json` 是 `regressed` 或 `mixed`，应把它当作 objective-quality failure，修改计划或 proposal，而不是标记任务完成。更多排错说明见 [使用与配置](docs/USAGE_zh.md#code-task-运行排错)。
 
 benchmark 最好输出 `name: value` 形式的数值指标。`--primary-metric` 指定主要目标，`--metric-direction METRIC=higher|lower|resource|ignore` 指定指标解释规则。详见 [CLI 参考](docs/CLI_REFERENCE_zh.md#init)。
 

@@ -30,6 +30,11 @@ SIGNAL_LINES = (
     "FAILED",
     "ERROR",
     "Timed out",
+    "below benchmark floor",
+    "exceeded local benchmark budget",
+    "accuracy:",
+    "macro_f1:",
+    "train_time_sec:",
 )
 
 

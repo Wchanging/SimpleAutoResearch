@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import write_json, write_text
-from simple_ar.code_task.comparison import compare_code_task_runs
+from simple_ar.code_task.attempts import (
+    load_latest_code_task_batch,
+    update_code_task_batch_state,
+)
+from simple_ar.code_task.comparison import CodeTaskComparisonResult, compare_code_task_runs
 from simple_ar.code_task.environment import ensure_code_task_environment_policy
 from simple_ar.code_task.state import (
     code_task_paths,
@@ -325,7 +329,14 @@ def _write_execution_result(
         metric_values=metrics,
         run_label=run_label,
     )
-    _maybe_compare_runs(run_dir)
+    comparison = _maybe_compare_runs(run_dir)
+    if run_label == "patched":
+        _update_latest_batch_after_benchmark(run_dir, report_path, status)
+        _update_manifest_after_patched_outcome(
+            run_dir,
+            status=status,
+            comparison_verdict=comparison.verdict if comparison is not None else "",
+        )
     write_code_task_summary(run_dir)
     return CodeTaskRunResult(
         run_dir=paths.run_dir,
@@ -341,12 +352,79 @@ def _write_execution_result(
     )
 
 
-def _maybe_compare_runs(run_dir: Path) -> None:
+def _maybe_compare_runs(run_dir: Path) -> CodeTaskComparisonResult | None:
     paths = code_task_paths(run_dir)
     baseline_report = paths.run_artifact_dir / "baseline" / "execution_report.json"
     patched_report = paths.run_artifact_dir / "patched" / "execution_report.json"
     if baseline_report.exists() and patched_report.exists():
-        compare_code_task_runs(run_dir)
+        return compare_code_task_runs(run_dir)
+    return None
+
+
+def _update_latest_batch_after_benchmark(run_dir: Path, report_path: Path, status: str) -> None:
+    batch = load_latest_code_task_batch(run_dir)
+    if batch is None:
+        return
+    update_code_task_batch_state(
+        run_dir,
+        batch.batch_state_path,
+        state="completed" if status == "passed" else "failed",
+        artifacts={"benchmark_run": _relative_to_run(run_dir, report_path)},
+        detail=f"Patched benchmark {status}.",
+        extra={"benchmark_status": status},
+    )
+
+
+def _update_manifest_after_patched_outcome(
+    run_dir: Path,
+    *,
+    status: str,
+    comparison_verdict: str,
+) -> None:
+    manifest = load_code_task_manifest(run_dir)
+    if status == "passed":
+        if comparison_verdict:
+            manifest["objective"] = {
+                "status": comparison_verdict,
+                "source": "code_task/run/comparison.json",
+                "updated_at": utcnow_iso(),
+            }
+            if comparison_verdict == "improved":
+                manifest["status"] = "objective_improved"
+            elif comparison_verdict in {"regressed", "mixed"}:
+                manifest["status"] = "objective_" + comparison_verdict
+            else:
+                manifest["status"] = "objective_inconclusive"
+        _mark_failure_resolved(manifest)
+        _mark_repair_benchmark_resolved(manifest)
+    save_code_task_manifest(run_dir, manifest)
+
+
+def _mark_failure_resolved(manifest: dict[str, Any]) -> None:
+    failure = manifest.get("failure_analysis")
+    if not isinstance(failure, dict) or not failure:
+        return
+    if failure.get("status") != "no_failure":
+        failure["status"] = "resolved"
+        failure["resolved_at"] = utcnow_iso()
+        manifest["failure_analysis"] = failure
+
+
+def _mark_repair_benchmark_resolved(manifest: dict[str, Any]) -> None:
+    repair = manifest.get("repair")
+    if not isinstance(repair, dict) or not repair:
+        return
+    if str(repair.get("status", "")).startswith("repair_"):
+        repair["status"] = "benchmark_passed"
+        repair["resolved_at"] = utcnow_iso()
+        manifest["repair"] = repair
+
+
+def _relative_to_run(run_dir: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(Path(run_dir).resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _normalize_run_label(value: str) -> str:

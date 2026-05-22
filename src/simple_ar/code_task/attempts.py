@@ -398,14 +398,7 @@ def _sync_batch_ref(run_dir: Path, batch_state: dict[str, Any], batch_state_path
         )
     attempt["batches"] = batches
     attempt["updated_at"] = batch_state.get("updated_at")
-    batch_states = [
-        str(item.get("state", ""))
-        for item in _object_list(batches)
-        if item.get("state")
-    ]
-    next_attempt_state = "completed" if batch_states and all(
-        state in {"completed", "skipped"} for state in batch_states
-    ) else "batching"
+    next_attempt_state = _attempt_state_from_batches(batches, latest_state=str(batch_state.get("state", "")))
     if attempt.get("state") != next_attempt_state:
         attempt["state"] = next_attempt_state
         history = attempt.get("state_history")
@@ -498,13 +491,11 @@ def _update_manifest_after_batch(
     manifest["attempts"] = attempts
     work_plan = manifest.get("work_plan")
     if isinstance(work_plan, dict):
-        batch_states = [
-            str(item.get("state", ""))
-            for item in _object_list(attempt.get("batches"))
-            if item.get("state")
-        ]
-        if batch_states and all(state in {"completed", "skipped"} for state in batch_states):
+        batch_states = _batch_state_values(attempt.get("batches"))
+        if batch_ref.get("state") == "completed":
             work_plan["status"] = "completed"
+        elif batch_states and all(state in {"failed", "skipped"} for state in batch_states):
+            work_plan["status"] = "failed"
         elif batch_states:
             work_plan["status"] = "batching"
         manifest["work_plan"] = work_plan
@@ -519,6 +510,27 @@ def _next_attempt_id(root: Path) -> str:
 
 def _next_batch_id(root: Path) -> str:
     return f"batch-{_next_number(root, r'batch-(\d{3})'):03d}"
+
+
+def _attempt_state_from_batches(batches: object, *, latest_state: str) -> str:
+    """Return the parent attempt state implied by current batch progress."""
+
+    states = _batch_state_values(batches)
+    if latest_state == "completed":
+        return "completed"
+    if states and all(state in {"failed", "skipped"} for state in states):
+        return "failed"
+    if states:
+        return "batching"
+    return "work_plan_ready"
+
+
+def _batch_state_values(batches: object) -> list[str]:
+    return [
+        str(item.get("state", ""))
+        for item in _object_list(batches)
+        if item.get("state")
+    ]
 
 
 def _next_number(root: Path, pattern: str) -> int:

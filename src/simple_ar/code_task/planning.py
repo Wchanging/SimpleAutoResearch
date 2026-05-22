@@ -250,6 +250,21 @@ def record_plan_decision(
     plan["status"] = status_by_decision[normalized]
     plan["last_decision"] = row
     manifest["plan"] = plan
+    work_plan = manifest.get("work_plan")
+    if isinstance(work_plan, dict):
+        approval = work_plan.get("approval")
+        if not isinstance(approval, dict):
+            approval = {}
+        approval["status"] = status_by_decision[normalized]
+        approval["last_decision"] = row
+        work_plan["approval"] = approval
+        if normalized == "approve" and work_plan.get("status") == "pending_approval":
+            work_plan["status"] = "ready"
+        elif normalized == "reject":
+            work_plan["status"] = "rejected"
+        elif normalized == "revise":
+            work_plan["status"] = "revision_requested"
+        manifest["work_plan"] = work_plan
     manifest["status"] = "plan_" + status_by_decision[normalized]
     write_json(manifest_path, manifest)
     return row

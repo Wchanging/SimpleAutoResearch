@@ -492,6 +492,12 @@ to that batch's target files and write per-batch artifacts such as
 `batch_context.json`, `proposed_edits.json`, `proposal_warnings.json`, and
 `usage_summary.json`.
 
+Work-plan items should be implementation batches. The planner prompt now asks
+models to put inspection needs in `context_request` rather than creating
+inspection-only items. If a generated work plan still starts with an
+analysis-only item, `code-task execute` selects the first later item that looks
+like a concrete code change before creating the active batch.
+
 ### Manual Command Path
 
 Use the manual path when you want to run and inspect each primitive step
@@ -598,6 +604,12 @@ attempt/batch state before stopping after `patch_plan.md` with
 The command stops again with `proposal_review_required` unless
 `--apply-proposed-edits` is set.
 
+When the patched benchmark passes, `execute` still checks the baseline-vs-
+patched comparison. `manifest.json.objective.status`, `simple-ar status`, and
+`code_task/summary.md` distinguish benchmark success from objective success:
+`regressed` or `mixed` means the code ran but the metric goal was not actually
+met.
+
 `execute --config` can reuse the same TOML file as `code-task init --config`
 and read these extra sections:
 
@@ -667,6 +679,9 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 
 When both baseline and patched runs exist, SimpleAutoResearch writes
 `code_task/run/comparison.json` and updates `code_task/summary.md`.
+Primitive `validate` and `run` also synchronize the latest batch/attempt state
+after a patch has been applied, so manual step-by-step runs and `execute` leave
+consistent state artifacts.
 
 `proposed_edits.json` may contain multiple ordered edits for the same file.
 Each edit is applied against the current in-memory text, and each `old` block
@@ -713,6 +728,10 @@ A repair proposal is still only a proposal. Apply it explicitly, validate, and
 rerun the benchmark. A successful repair can restore the benchmark floor while
 still being worse than the original baseline, so use `run/comparison.json` to
 decide whether the task objective was actually achieved.
+Applying a repair proposal records the actual proposal path in
+`patch.latest_applied_proposal` and `meta/applied_edits.json`; once a later
+patched benchmark passes, stale failure-analysis and repair sections are marked
+resolved in summaries/status output.
 
 ```bash
 uv run simple-ar code-task apply-edits runs/<run-id> \
@@ -729,3 +748,6 @@ For code-task runs, status prints environment, plan, patch, validation,
 benchmark, primary metric, metric directions, comparison deltas,
 failure-analysis, repair pointers, and the `code_task/summary.md` path when
 available.
+When available, it also prints the top-level objective verdict. Resolved
+failure/repair sections are omitted from the compact status output so older
+failed attempts do not obscure the current run state.

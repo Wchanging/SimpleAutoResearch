@@ -979,6 +979,9 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
     print(f"Run: {run_dir}")
     print(f"Workflow: {manifest.get('workflow', 'code_task')}")
     print(f"Status: {manifest.get('status', 'unknown')}")
+    objective = manifest.get("objective", {})
+    if isinstance(objective, dict) and objective:
+        print(f"Objective: {objective.get('status', 'unknown')}")
 
     layout = manifest.get("layout", {})
     if isinstance(layout, dict):
@@ -1121,20 +1124,22 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
 
     failure = manifest.get("failure_analysis", {})
     if isinstance(failure, dict) and failure:
-        print("Failure Analysis:")
-        print(f"- status: {failure.get('status', 'unknown')}")
-        if failure.get("source"):
-            print(f"- source: {failure.get('source')}")
-        if failure.get("analysis"):
-            print(f"- analysis: {run_dir / str(failure.get('analysis'))}")
+        if failure.get("status") not in {"no_failure", "resolved"}:
+            print("Failure Analysis:")
+            print(f"- status: {failure.get('status', 'unknown')}")
+            if failure.get("source"):
+                print(f"- source: {failure.get('source')}")
+            if failure.get("analysis"):
+                print(f"- analysis: {run_dir / str(failure.get('analysis'))}")
 
     repair = manifest.get("repair", {})
     if isinstance(repair, dict) and repair:
-        print("Repair:")
-        print(f"- status: {repair.get('status', 'unknown')}")
-        print(f"- attempts: {repair.get('repair_count', 0)}")
-        if repair.get("latest_proposed_edits"):
-            print(f"- latest proposal: {run_dir / str(repair.get('latest_proposed_edits'))}")
+        if repair.get("status") not in {"benchmark_passed", "resolved"}:
+            print("Repair:")
+            print(f"- status: {repair.get('status', 'unknown')}")
+            print(f"- attempts: {repair.get('repair_count', 0)}")
+            if repair.get("latest_proposed_edits"):
+                print(f"- latest proposal: {run_dir / str(repair.get('latest_proposed_edits'))}")
 
 
 def _print_inspect(run_dir: Path) -> None:

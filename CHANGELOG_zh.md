@@ -4,6 +4,17 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-05-22
+
+### Changed
+
+- Code-task patched run 现在会把 benchmark 是否通过和任务目标是否达成分开记录：`manifest.json.objective.status` 来自 baseline-vs-patched comparison，因此 benchmark 通过时仍可能被标记为 `regressed`、`mixed` 或 `inconclusive`。
+- `code-task execute` 现在会优先选择第一个真正可执行的实现型 work item，而不是盲目把纯检查、纯分析的第一个 work-plan item 当作编辑批次。
+- 手动运行 `code-task validate` 和 `code-task run` 时，如果补丁已经应用，也会同步 latest batch、attempt 和 work-plan 状态，使手动路径更接近 executor 路径。
+- 应用 repair proposal 时，现在会记录实际使用的 repair proposal path 作为 latest applied proposal；后续 patched benchmark 通过后，旧的 failure/repair section 会在 status 和 summary 中标记为 resolved。
+- Failure analysis 现在会捕获 metric floor 和 timing budget 信号，例如 `accuracy below benchmark floor`、`macro_f1` 和 `train_time_sec`。
+- 文档补充说明了 objective verdict、implementation-batch selection、repair application state，以及 benchmark pass 但指标退化时应该如何判断。
+
 ## 2026-05-21
 
 ### Added

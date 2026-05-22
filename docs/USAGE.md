@@ -304,6 +304,13 @@ foundation for later multi-round, per-batch editing and recovery. When a batch
 is active, edit proposals are constrained to that batch's target files and
 write extra batch-local review artifacts.
 
+Work-plan items are intended to be executable implementation batches, not
+standalone analysis notes. The LLM prompt asks the planner to put inspection
+needs in `context_request`. If a model still returns an analysis-only first
+item, `code-task execute` prefers the first later item that looks like a real
+code change, so a broad "inspect the project" step does not accidentally become
+the active edit batch.
+
 Generate a patch plan (LLM optional; offline mode writes a conservative plan):
 
 ```bash
@@ -382,6 +389,12 @@ When both baseline and patched artifacts exist, SimpleAutoResearch also writes
 `code_task/run/comparison.json` and includes outcome, next-step guidance, and
 metric deltas in `code_task/summary.md`.
 
+Patched benchmark success is separated from task-objective success. A run may
+pass the benchmark floor but still regress against baseline metrics. In that
+case `manifest.json` records `objective.status = "regressed"`, `simple-ar
+status` prints the objective verdict, and `summary.md` points you back to
+`code_task/run/comparison.json` instead of treating the task as complete.
+
 Analyze failures and request a bounded repair proposal:
 
 ```bash
@@ -410,6 +423,12 @@ Apply a reviewed repair proposal explicitly:
 uv run simple-ar code-task apply-edits runs/<run-id> \
   --edits-file runs/<run-id>/code_task/repairs/repair-001/proposed_edits.json
 ```
+
+When a repair proposal is applied, `manifest.json.patch.latest_applied_proposal`
+and `code_task/meta/applied_edits.json` record the repair proposal path. After a
+later patched benchmark passes, stale failure-analysis and repair sections are
+marked resolved so `status` and `summary.md` reflect the current state rather
+than an older failed attempt.
 
 ### Executor Path
 
@@ -440,7 +459,7 @@ current run and continue to the next safe stop." It does not mean "skip review."
   `proposal_review_required`.
 - Final `execute --apply-proposed-edits`: applies the reviewed proposal, writes
   `patch.diff`, validates the workspace, runs the patched benchmark, updates
-  `comparison.json`, and refreshes `summary.md`.
+  `comparison.json`, records the objective verdict, and refreshes `summary.md`.
 
 For projects with many knobs, keep the short command and move model/budget
 settings into TOML:
@@ -511,7 +530,18 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
 - A repair can make the benchmark pass without truly improving over baseline.
-  Use `code_task/run/comparison.json` to decide whether the task goal was met.
+  Use `code_task/run/comparison.json`, `manifest.json.objective.status`, and
+  `simple-ar status` to decide whether the task goal was met.
+
+Patched benchmark passed but the objective is `regressed` or `mixed`:
+
+- This is not a runtime failure; it means the patch did not satisfy the metric
+  goal compared with the recorded baseline.
+- Inspect `code_task/run/comparison.json` first. It lists metric deltas,
+  directions, the primary metric when configured, and the conservative verdict.
+- Treat this like a quality failure: revise the task/plan, regenerate a tighter
+  proposal, or request a repair only if the comparison gives enough evidence for
+  a bounded follow-up patch.
 
 `apply-edits` reports `old text was not found`:
 

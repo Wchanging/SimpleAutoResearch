@@ -254,6 +254,8 @@ context requests 和 budget profiles。它不生成代码，也不修改文件�
 edit proposal 会被限制在该 batch 的 target files 内，并写入额外的批次级
 review 产物。
 
+Work-plan item 应该是可以产生代码修改的 implementation batch，而不是单独的分析笔记。现在 prompt 会要求模型把“还需要看什么”放进 `context_request`；如果模型仍然把第一个 item 写成纯 `inspect/review/measure` 之类的分析步骤，`code-task execute` 会优先选择后面第一个真正像代码修改的 item，避免把“先了解项目”误当成 active edit batch。
+
 生成 patch plan：
 
 ```bash
@@ -300,6 +302,8 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 
 `run` 把 patched benchmark 存到 `code_task/run/patched/`。当 baseline 和 patched 都存在时，还会写入 `code_task/run/comparison.json`，并在 `summary.md` 中加入前后对比和下一步建议。
 
+patched benchmark 通过不等于任务目标一定完成。现在系统会把“代码可运行”和“指标目标是否达成”分开：如果 patched benchmark 通过，但相对 baseline 指标退化，`manifest.json` 会写入 `objective.status = "regressed"`，`simple-ar status` 会显示 Objective，`summary.md` 也会引导你查看 `code_task/run/comparison.json`，而不是把它当作真正成功。
+
 失败分析和修复 proposal：
 
 ```bash
@@ -315,6 +319,8 @@ uv run simple-ar code-task repair runs/<run-id>
 uv run simple-ar code-task apply-edits runs/<run-id> \
   --edits-file runs/<run-id>/code_task/repairs/repair-001/proposed_edits.json
 ```
+
+应用 repair proposal 后，`manifest.json.patch.latest_applied_proposal` 和 `code_task/meta/applied_edits.json` 会记录实际应用的是哪一份 repair proposal。后续 patched benchmark 通过后，旧的 failure-analysis 和 repair section 会被标记为 resolved，`status` 和 `summary.md` 会反映当前状态，而不是继续展示早前失败的尝试。
 
 ### Executor Path
 
@@ -339,7 +345,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 - 第一次 `execute`：写 `environment_report.json`、baseline 产物、真实 LLM-backed `work_plan.json`（除非传 `--no-llm`）、第一份 attempt/batch 状态和 `patch_plan.md`，然后以 `approval_required` 停下。
 - `decide-plan`：记录你的批准。
 - 第二次 `execute --to-step propose-edits`：写 `proposed_edits.json`，然后以 `proposal_review_required` 停下。
-- 最后 `execute --apply-proposed-edits`：应用 proposal，写 `patch.diff`，验证 workspace，运行 patched benchmark，更新 `comparison.json` 和 `summary.md`。
+- 最后 `execute --apply-proposed-edits`：应用 proposal，写 `patch.diff`，验证 workspace，运行 patched benchmark，更新 `comparison.json`、记录 objective verdict，并刷新 `summary.md`。
 
 如果项目参数较多，可以继续保持短命令，把模型和预算设置放进 TOML：
 
@@ -402,7 +408,13 @@ uv run simple-ar code-task validate runs/<run-id>
 uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
-- 修复后 benchmark pass 不等于任务真正完成。比如修复可能只是恢复到可运行或接近 baseline；是否真的 improved 要看 `code_task/run/comparison.json`。
+- 修复后 benchmark pass 不等于任务真正完成。比如修复可能只是恢复到可运行或接近 baseline；是否真的 improved 要看 `code_task/run/comparison.json`、`manifest.json.objective.status` 和 `simple-ar status`。
+
+patched benchmark 通过，但 objective 是 `regressed` 或 `mixed`：
+
+- 这不是运行失败，而是说明补丁没有在记录的 baseline 指标上完成目标。
+- 先看 `code_task/run/comparison.json`，其中包含指标 delta、方向、主指标和保守 verdict。
+- 把它当成质量失败处理：可以修改任务/计划，重新生成更聚焦的 proposal；只有当 comparison 提供了足够明确的证据时，再请求有限范围的 repair。
 
 `apply-edits` 报 `old text was not found`：
 

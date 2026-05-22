@@ -456,6 +456,8 @@ profiles。`batch` 会在
 `proposed_edits.json`、`proposal_warnings.json` 和 `usage_summary.json` 等
 批次级产物。
 
+Work-plan item 应该是 implementation batch。planner prompt 现在要求模型把需要继续查看的内容放进 `context_request`，而不是生成纯 inspection item。如果生成的 work plan 仍然以分析型 item 开头，`code-task execute` 会在创建 active batch 前优先选择后面第一个真正像代码修改的 item。
+
 ### Manual Command Path
 
 当你想自己运行并检查每个 primitive step 时，使用手动路径：
@@ -552,6 +554,8 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 
 Review gate 会保留。fresh run 会先用配置好的 LLM 创建真实的 `work_plan.json`（除非显式传 `--no-llm`），再创建第一份 attempt/batch 状态，然后在 `patch_plan.md` 后以 `approval_required` 停止。批准后，建议运行 `execute --to-step propose-edits` 明确生成 `proposed_edits.json`；生成后仍会以 `proposal_review_required` 停止，除非提供 `--apply-proposed-edits`。
 
+patched benchmark 通过后，`execute` 仍会检查 baseline-vs-patched comparison。`manifest.json.objective.status`、`simple-ar status` 和 `code_task/summary.md` 会区分 benchmark success 和 objective success：`regressed` 或 `mixed` 代表代码跑通了，但指标目标并没有真正完成。
+
 `execute --config` 可以复用 `code-task init --config` 的 TOML 文件，并读取下面这些额外 section：
 
 ```toml
@@ -616,6 +620,7 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 | `run RUN_DIR` | 在 `code_task/run/patched/` 下运行 patched benchmark。 |
 
 当 baseline 和 patched run 都存在时，SimpleAutoResearch 会写入 `code_task/run/comparison.json` 并更新 `code_task/summary.md`。
+手动执行 primitive `validate` 和 `run` 时，只要 patch 已经应用，也会同步 latest batch / attempt 状态，因此手动分步路径和 `execute` 路径会留下更一致的状态产物。
 
 `proposed_edits.json` 可以包含同一文件的多个有序 edit。每个 edit 都在当前内存文本上应用，且每个 `old` block 必须唯一匹配。无效 proposal 会在写文件前停止；在 `execute` 中表现为 `patch_apply_failed`。
 
@@ -649,6 +654,7 @@ uv run simple-ar code-task apply-edits runs/<run-id> \
 `analyze-failure` 会把 `failure_analysis.md` 写在失败 benchmark run 旁边；如果静态 validation 在 benchmark 启动前失败，则写到 `code_task/meta/`。`repair` 会写 proposal JSON，包含 `source_analysis`、`selected_files`、`constraints`、规范化 `edits` 和 `warnings`，并刷新 `summary.md` 的 Repair section。
 
 repair proposal 仍然只是 proposal。应用后还要重新 validate 和 run。benchmark pass 也不一定代表任务目标已经完成；如果 patched 指标仍低于 baseline，说明只是恢复可运行或恢复到阈值以上，是否完成要看 `run/comparison.json` 的 verdict 和指标差值。
+应用 repair proposal 时，实际使用的 proposal path 会记录在 `patch.latest_applied_proposal` 和 `meta/applied_edits.json` 中；后续 patched benchmark 通过后，旧的 failure-analysis 和 repair section 会在 summary/status 中标记为 resolved，不再遮挡当前状态。
 
 ## Status
 
@@ -657,3 +663,4 @@ uv run simple-ar status runs/<run-id>
 ```
 
 对 code-task run，status 会打印 environment、plan、patch、validation、benchmark、primary metric、metric directions、comparison deltas、failure-analysis、repair pointers，以及可用时的 `code_task/summary.md` 路径。
+如果存在 objective verdict，也会显示 Objective。已经 resolved 的 failure/repair section 会从紧凑 status 输出中隐藏，避免旧失败尝试干扰当前判断。
