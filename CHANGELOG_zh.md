@@ -14,6 +14,7 @@
 - 应用 repair proposal 时，现在会记录实际使用的 repair proposal path 作为 latest applied proposal；后续 patched benchmark 通过后，旧的 failure/repair section 会在 status 和 summary 中标记为 resolved。
 - Failure analysis 现在会捕获 metric floor 和 timing budget 信号，例如 `accuracy below benchmark floor`、`macro_f1` 和 `train_time_sec`。
 - 文档补充说明了 objective verdict、implementation-batch selection、repair application state，以及 benchmark pass 但指标退化时应该如何判断。
+- `README.md` / `README_zh.md` 和 `docs/USAGE.md` / `docs/USAGE_zh.md` 现在把 TOML + `code-task execute` 作为主要 code-task 使用路径，primitive commands 下沉为高级调试步骤。
 
 ## 2026-05-21
 

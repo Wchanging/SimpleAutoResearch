@@ -84,70 +84,56 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 ### 2. Code Task：已有代码库修改
 
-```bash
-uv run simple-ar code-task init \
-  --code-root examples/code_tasks/toy_spam_project \
-  --task-file examples/code_tasks/tasks/improve_toy_spam_baseline.md \
-  --benchmark-command "python -m unittest discover -s tests"
-```
-
-一个更接近真实机器学习场景的轻量示例：
-
-```bash
-uv run simple-ar code-task init \
-  --code-root examples/code_tasks/tiny_digits_mlp_project \
-  --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
-  --benchmark-command "python benchmark.py" \
-  --primary-metric accuracy \
-  --metric-direction accuracy=higher \
-  --env-mode current
-```
-
-Code Task 有两种运行方式。
-
-手动路径，适合学习每个步骤：
-
-```bash
-uv run simple-ar code-task map runs/<run-id>
-uv run simple-ar code-task locate runs/<run-id>
-uv run simple-ar code-task context runs/<run-id>
-uv run simple-ar code-task probe runs/<run-id>
-uv run simple-ar code-task baseline runs/<run-id> --timeout 60
-uv run simple-ar code-task plan runs/<run-id>
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-uv run simple-ar code-task propose-edits runs/<run-id>
-uv run simple-ar code-task apply-edits runs/<run-id>
-uv run simple-ar code-task validate runs/<run-id>
-uv run simple-ar code-task run runs/<run-id> --timeout 60
-```
-
-较短的人工审核路径：
-
-```bash
-# 运行到 plan 审核点。
-uv run simple-ar code-task execute runs/<run-id>
-
-# 阅读 code_task/patch_plan.md 后批准计划。
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-
-# 明确运行到 edit proposal 审核点。
-uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
-
-# 显式允许应用已审核的 proposal，并运行验证和 benchmark。
-uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
-```
-
-`execute` 是一个状态感知的便捷命令。它会查看当前 run 目录里已经有哪些产物，然后推进到下一个安全停止点。它不会跳过人工审核。第一次通常会写入环境报告、baseline、work plan、第一份 attempt/batch 状态和 patch plan，然后停在 `approval_required`；批准计划后再用 `execute --to-step propose-edits` 明确生成经过预算检查的 `proposed_edits.json`，并再次停下；只有提供 `--apply-proposed-edits` 后才会应用补丁并运行验证和 benchmark。当 baseline 和 patched benchmark 都存在时，summary 会给出 conservative comparison 和单独的 objective verdict，避免把 benchmark pass 和真正指标提升混为一谈。如果模型路由和编辑预算参数较多，可以使用 `execute --config` 从 TOML 读取。
-
-如果第一次 `execute` 后没有 `proposed_edits.json`，通常不是错误，而是还停在 plan 审核点。先阅读并批准 `code_task/patch_plan.md`，再运行 `execute --to-step propose-edits`。如果 validation 通过但 patched benchmark 退化，查看 `code_task/run/patched/` 和 `code_task/run/comparison.json`，再用 `execute --to-step repair --repair-rounds 1` 请求有限范围的修复 proposal。如果 benchmark 通过但 `comparison.json` 是 `regressed` 或 `mixed`，应把它当作 objective-quality failure，修改计划或 proposal，而不是标记任务完成。更多排错说明见 [使用与配置](docs/USAGE_zh.md#code-task-运行排错)。
-
-benchmark 最好输出 `name: value` 形式的数值指标。`--primary-metric` 指定主要目标，`--metric-direction METRIC=higher|lower|resource|ignore` 指定指标解释规则。详见 [CLI 参考](docs/CLI_REFERENCE_zh.md#init)。
-
-如果指标和环境参数较多，建议放到 TOML 配置：
+当你已经有一个 baseline 项目，希望 LLM 在隔离 workspace 中提出可审核改进时，推荐使用 TOML 配置加状态感知的 `execute`：
 
 ```bash
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
+
+如果在 PowerShell 里想复制后续命令，可以把最新 run 目录保存到 `$RUN`：
+
+```powershell
+$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
+  Where-Object { $_.Name -like "*tiny-digits-mlp*" } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1).Name)
+```
+
+运行带人工审核点的 executor 流程：
+
+```powershell
+uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml
+
+# 阅读 code_task/patch_plan.md 后批准计划。
+uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
+
+# 明确运行到 edit proposal 审核点。
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --to-step propose-edits
+
+# 显式允许应用已审核的 proposal，并运行验证和 benchmark。
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --apply-proposed-edits `
+  --timeout 60
+
+uv run simple-ar status $RUN
+```
+
+第一次 `execute` 会在写入环境、baseline、work plan、batch state 和 patch plan 后停在 `approval_required`。第二次 executor 调用会生成 `code_task/meta/proposed_edits.json` 供审核。最后一次 executor 调用会应用 proposal、验证 workspace、运行 patched benchmark、写入 `code_task/run/comparison.json`，并刷新 `code_task/summary.md`。正常成功信号是 `objective_improved`；如果 benchmark 通过但 objective 是 `regressed` 或 `mixed`，应继续修改 plan/proposal，而不是把任务标记为完成。
+
+如果补丁需要修复，可以请求一个有限范围的 repair proposal：
+
+```powershell
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --to-step repair `
+  --repair-rounds 1 `
+  --timeout 60
+```
+
+更完整的 primitive commands、显式 CLI 参数初始化、产物说明和排错流程见 [使用与配置](docs/USAGE_zh.md#code-task-工作流) 与 [CLI 参考](docs/CLI_REFERENCE_zh.md#code-task-commands)。
 
 ### 3. Research With Experiment：研究流程衔接代码实验
 

@@ -84,88 +84,69 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 ### 2. Code Task (Existing Codebase)
 
-```bash
-uv run simple-ar code-task init \
-  --code-root examples/code_tasks/toy_spam_project \
-  --task-file examples/code_tasks/tasks/improve_toy_spam_baseline.md \
-  --benchmark-command "python -m unittest discover -s tests"
-```
-
-For a lightweight ML-style benchmark:
-
-```bash
-uv run simple-ar code-task init \
-  --code-root examples/code_tasks/tiny_digits_mlp_project \
-  --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
-  --benchmark-command "python benchmark.py" \
-  --primary-metric accuracy \
-  --metric-direction accuracy=higher \
-  --env-mode current
-```
-
-There are two ways to run the code-task workflow.
-
-Manual path, fully expanded:
-
-```bash
-uv run simple-ar code-task probe runs/<run-id>
-uv run simple-ar code-task baseline runs/<run-id> --timeout 60
-uv run simple-ar code-task plan runs/<run-id>
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-uv run simple-ar code-task propose-edits runs/<run-id>
-uv run simple-ar code-task apply-edits runs/<run-id>
-uv run simple-ar code-task validate runs/<run-id>
-uv run simple-ar code-task run runs/<run-id> --timeout 60
-```
-
-Shortest reviewed path with the executor:
-
-```bash
-# Continue to plan review.
-uv run simple-ar code-task execute runs/<run-id>
-
-# Approve the plan after reading code_task/patch_plan.md.
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-
-# Continue explicitly to edit proposal review.
-uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
-
-# Apply the reviewed proposal and run validation/benchmark.
-uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
-```
-
-`execute` is a state-aware convenience command. From a fresh code task it stops
-at `approval_required` after writing the environment report, baseline run,
-work plan, first attempt/batch state, and patch plan. After approval, it can
-generate a budget-checked `proposed_edits.json`, then stops again for proposal
-review. `--apply-proposed-edits` is the explicit signal to apply the reviewed
-proposal and run validation/benchmark. When both baseline and patched benchmark
-artifacts exist, the run summary includes a conservative before/after
-comparison and a separate objective verdict, so benchmark pass and measured
-improvement are not confused. Use `execute --config` when model routing and
-edit budgets should come from TOML instead of CLI flags.
-
-If `proposed_edits.json` is missing after the first executor call, that is
-usually expected: review `code_task/patch_plan.md`, approve it with
-`decide-plan`, then run `execute --to-step propose-edits`. If validation passes
-but the patched benchmark regresses, inspect `code_task/run/patched/` and use
-`execute --to-step repair --repair-rounds 1` to request a bounded repair
-proposal. If the benchmark passes but `comparison.json` reports `regressed` or
-`mixed`, treat it as an objective-quality failure and revise the plan/proposal
-rather than marking the task complete. More troubleshooting notes are in
-[Usage And Configuration](docs/USAGE.md#troubleshooting-code-task-runs).
-
-For benchmark comparison, print numeric metrics as `name: value` lines.
-`--primary-metric` chooses the main quality target, while
-`--metric-direction METRIC=higher|lower|resource|ignore` tells
-SimpleAutoResearch how to interpret each metric. See
-[CLI Reference](docs/CLI_REFERENCE.md#init) for option details and examples.
-
-For metric-heavy projects, keep those settings in TOML instead:
+Use this when you already have a baseline project and want an LLM to propose a
+reviewable improvement inside an isolated workspace. The recommended path is a
+TOML config plus the state-aware executor:
 
 ```bash
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
+
+For copyable PowerShell commands, set `RUN` to the latest matching run
+directory:
+
+```powershell
+$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
+  Where-Object { $_.Name -like "*tiny-digits-mlp*" } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1).Name)
+```
+
+Run the reviewed executor flow:
+
+```powershell
+uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml
+
+# Approve the plan after reading code_task/patch_plan.md.
+uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
+
+# Continue explicitly to edit proposal review.
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --to-step propose-edits
+
+# Apply the reviewed proposal and run validation/benchmark.
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --apply-proposed-edits `
+  --timeout 60
+
+uv run simple-ar status $RUN
+```
+
+The first `execute` stops at `approval_required` after writing environment,
+baseline, work-plan, batch-state, and patch-plan artifacts. The second executor
+call writes `code_task/meta/proposed_edits.json` for review. The final executor
+call applies the reviewed proposal, validates the workspace, runs the patched
+benchmark, writes `code_task/run/comparison.json`, and refreshes
+`code_task/summary.md`. Treat `objective_improved` as the normal success signal;
+if the benchmark passes but the objective is `regressed` or `mixed`, revise the
+plan/proposal instead of marking the task complete.
+
+If the patch needs repair, request one bounded repair proposal:
+
+```powershell
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --to-step repair `
+  --repair-rounds 1 `
+  --timeout 60
+```
+
+Detailed primitive commands, explicit CLI-flag initialization, artifact
+descriptions, and troubleshooting notes live in
+[Usage And Configuration](docs/USAGE.md#code-task-workflow) and
+[CLI Reference](docs/CLI_REFERENCE.md#code-task-commands).
 
 ### 3. Research With Experiment
 

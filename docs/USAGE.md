@@ -172,18 +172,8 @@ projects where a full copy is wasteful, plus experimental `sparse_copy` for
 small allowlisted subsets. The workflow is intentionally step-by-step so each
 stage can be reviewed.
 
-Initialize from explicit CLI flags:
-
-```bash
-uv run simple-ar code-task init \
-  --code-root examples/code_tasks/toy_spam_project \
-  --task-file examples/code_tasks/tasks/improve_toy_spam_baseline.md \
-  --benchmark-command "python -m unittest discover -s tests" \
-  --env-mode current
-```
-
-Or initialize from a TOML config when there are several benchmark metrics or
-environment settings:
+Initialize from a TOML config so project paths, benchmark metrics, workspace
+mode, model routing, and edit budgets stay in one reviewable file:
 
 ```bash
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
@@ -217,16 +207,134 @@ and secret-like paths. This mode is useful for small known subsets, but it can
 omit runtime dependencies; prefer `copy` or `git_worktree` for general projects.
 
 Benchmarks should print numeric metric lines as `name: value`. Custom metric
-names work when you declare their direction with `--metric-direction` or the
-TOML config. See [CLI Reference](CLI_REFERENCE.md#init) for the full option
-table and [CLI Reference](CLI_REFERENCE.md#init-config) for the config schema.
+names work when you declare their direction in TOML. Explicit CLI flags are
+still supported for experiments and quick tests, but the TOML path is the
+recommended public workflow. See [CLI Reference](CLI_REFERENCE.md#init) for the
+full option table and [CLI Reference](CLI_REFERENCE.md#init-config) for the
+config schema.
 
-After init, choose one of two execution styles:
+### Recommended Path: TOML + Execute
 
-- **Manual path**: run every primitive command yourself. This is best while
-  debugging or learning the internals.
-- **Executor path**: use `code-task execute` to continue to the next safe step.
-  This is shorter, but it still stops at review gates.
+For normal use, prefer a TOML config plus the state-aware executor. This keeps
+commands short while preserving review gates for the patch plan and edit
+proposal.
+
+Start a run:
+
+```bash
+uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+```
+
+Set `RUN` to the newest matching run directory if you want copyable commands:
+
+```powershell
+$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
+  Where-Object { $_.Name -like "*tiny-digits-mlp*" } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1).Name)
+```
+
+`init` writes the isolated workspace and static project map. The important
+artifacts are:
+
+- `code_task/workspace/`: editable copy/worktree used by the model.
+- `code_task/task.md`: the task prompt copied from the config.
+- `code_task/meta/codebase_index.json`: lightweight file index.
+- `code_task/meta/repo_map.json` and `repo_map_summary.md`: layered project map.
+- `manifest.json`: benchmark, workspace, environment, and safety policy.
+
+Continue to the first human review gate:
+
+```powershell
+uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml
+```
+
+This usually writes:
+
+- `code_task/meta/environment_report.json`: OS, Python, GPU, dependency, and test signals.
+- `code_task/run/baseline/metrics.json`: baseline benchmark metrics.
+- `code_task/work_plan.md`: LLM-generated implementation batches.
+- `code_task/attempts/attempt-001/batches/batch-001/batch_state.json`: active batch state.
+- `code_task/patch_plan.md`: reviewable patch plan.
+
+Read `code_task/work_plan.md` and `code_task/patch_plan.md`. If the plan is
+reasonable, approve it:
+
+```powershell
+uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
+```
+
+Generate an edit proposal, but do not apply it yet:
+
+```powershell
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --to-step propose-edits
+```
+
+Review:
+
+- `code_task/meta/proposed_edits.json`: controlled old/new replacements.
+- `code_task/meta/llm_usage_summary.json`: LLM token usage summary.
+- latest `code_task/attempts/.../proposal_warnings.json`, when present.
+
+Apply the reviewed proposal and evaluate the patched workspace:
+
+```powershell
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --apply-proposed-edits `
+  --timeout 60
+```
+
+Then inspect the result:
+
+```powershell
+uv run simple-ar status $RUN
+```
+
+Key output files:
+
+- `code_task/patch.diff`: readable diff for manual review.
+- `code_task/meta/applied_edits.json`: applied proposal path and changed file hashes.
+- `code_task/meta/validation_report.json`: static validation results.
+- `code_task/run/patched/metrics.json`: patched benchmark metrics.
+- `code_task/run/comparison.json`: baseline-vs-patched verdict and metric deltas.
+- `code_task/summary.md`: compact final summary and next-step guidance.
+
+Treat `objective_improved` or `objective.status = "improved"` as the normal
+success signal. A patched benchmark can pass while `objective.status` is
+`regressed` or `mixed`; in that case, the code ran but the measured task goal
+was not really met.
+
+If the proposal needs repair, ask for one bounded repair proposal:
+
+```powershell
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --to-step repair `
+  --repair-rounds 1 `
+  --timeout 60
+```
+
+Review the newest `code_task/repairs/repair-NNN/proposed_edits.json`, then
+apply it explicitly:
+
+```powershell
+uv run simple-ar code-task apply-edits $RUN `
+  --edits-file "$RUN\code_task\repairs\repair-NNN\proposed_edits.json"
+uv run simple-ar code-task validate $RUN
+uv run simple-ar code-task run $RUN --timeout 60
+uv run simple-ar status $RUN
+```
+
+Preview the next executor action without writing artifacts:
+
+```powershell
+uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml --dry-run
+```
+
+### Optional Mapping And Context Tools
 
 Refresh the code map at any time:
 
@@ -266,7 +374,11 @@ intermediate artifact for LLM planning/editing. When a latest context pack
 exists, `plan` uses it for planning context, while `propose-edits` uses only
 its editable snippets and keeps tests/benchmarks as read-only evidence.
 
-### Manual Path
+### Manual Primitive Path
+
+The executor path above calls these primitive commands for you. Use this manual
+path when you are learning the internals, debugging one step, or intentionally
+building a custom workflow.
 
 Probe the environment and run the unchanged baseline before asking for edits:
 
@@ -430,57 +542,6 @@ later patched benchmark passes, stale failure-analysis and repair sections are
 marked resolved so `status` and `summary.md` reflect the current state rather
 than an older failed attempt.
 
-### Executor Path
-
-The executor path is the shortest reviewed route through the same workflow:
-
-```bash
-# Continue to plan review.
-uv run simple-ar code-task execute runs/<run-id>
-
-# Approve the plan after reading code_task/patch_plan.md.
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-
-# Continue explicitly to edit proposal review.
-uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
-
-# Apply the reviewed proposal and run validation/benchmark.
-uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
-```
-
-Those repeated `execute` calls are intentional. `execute` means "inspect the
-current run and continue to the next safe stop." It does not mean "skip review."
-
-- First `execute`: writes `environment_report.json`, baseline artifacts,
-  an LLM-backed `work_plan.json` unless `--no-llm` is set, first
-  attempt/batch state, `patch_plan.md`, then stops with `approval_required`.
-- `decide-plan`: records your approval in `hitl_decisions.jsonl`.
-- Second `execute --to-step propose-edits`: writes `proposed_edits.json`, then stops with
-  `proposal_review_required`.
-- Final `execute --apply-proposed-edits`: applies the reviewed proposal, writes
-  `patch.diff`, validates the workspace, runs the patched benchmark, updates
-  `comparison.json`, records the objective verdict, and refreshes `summary.md`.
-
-For projects with many knobs, keep the short command and move model/budget
-settings into TOML:
-
-```bash
-uv run simple-ar code-task execute runs/<run-id> \
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml
-```
-
-`execute --config` understands `[execute]`, `[models.code_task]`, and
-`[budget]` sections in addition to the normal code-task init sections. See
-[CLI Reference](CLI_REFERENCE.md#executor-path) for the full example.
-
-Preview the next executor action without writing artifacts:
-
-```bash
-uv run simple-ar code-task execute runs/<run-id> --dry-run
-```
-
-Detailed code-task command options live in [CLI Reference](CLI_REFERENCE.md#code-task-commands).
-
 ### Troubleshooting Code Task Runs
 
 `proposed_edits.json` was not created after `execute`:
@@ -489,9 +550,11 @@ Detailed code-task command options live in [CLI Reference](CLI_REFERENCE.md#code
   `approval_required` after writing `code_task/patch_plan.md`.
 - Review `code_task/patch_plan.md`, then run:
 
-```bash
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
-uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
+```powershell
+uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --to-step propose-edits
 ```
 
 - Check `manifest.json`: `plan.status` should be `approved`. The decision log
@@ -512,21 +575,22 @@ code_task/summary.md
 
 - Ask for a bounded repair proposal:
 
-```bash
-uv run simple-ar code-task execute runs/<run-id> \
-  --to-step repair \
-  --repair-rounds 1 \
+```powershell
+uv run simple-ar code-task execute $RUN `
+  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
+  --to-step repair `
+  --repair-rounds 1 `
   --timeout 60
 ```
 
 - Review the newest `code_task/repairs/repair-NNN/proposed_edits.json`, then
   apply it explicitly:
 
-```bash
-uv run simple-ar code-task apply-edits runs/<run-id> \
-  --edits-file runs/<run-id>/code_task/repairs/repair-NNN/proposed_edits.json
-uv run simple-ar code-task validate runs/<run-id>
-uv run simple-ar code-task run runs/<run-id> --timeout 60
+```powershell
+uv run simple-ar code-task apply-edits $RUN `
+  --edits-file "$RUN\code_task\repairs\repair-NNN\proposed_edits.json"
+uv run simple-ar code-task validate $RUN
+uv run simple-ar code-task run $RUN --timeout 60
 ```
 
 - A repair can make the benchmark pass without truly improving over baseline.

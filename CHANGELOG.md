@@ -24,6 +24,9 @@ This file records user-visible project changes in reverse chronological order. P
 - Documentation now explains objective verdicts, implementation-batch selection,
   repair application state, and how to handle benchmark pass with metric
   regression.
+- `README.md` and `docs/USAGE.md` now present the TOML + `code-task execute`
+  route as the primary code-task workflow, with primitive commands moved later
+  as advanced debugging steps.
 
 ## 2026-05-21
 
