@@ -32,6 +32,11 @@ from simple_ar.code_task import (
     run_code_task_benchmark,
     validate_code_task,
 )
+from simple_ar.experiment.code_task_experiment import (
+    CodeTaskExperimentSpec,
+    prepare_code_task_experiment,
+    write_code_task_experiment_meta,
+)
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
@@ -600,6 +605,38 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(batch_state["work_item_id"], "W2")
             self.assertIn("Implement", batch_state["work_item"]["objective"])
 
+    def test_create_code_task_batch_merges_serial_dependent_items(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(code_root / "extra.py", "VALUE = 1\n")
+            write_text(task_file, "# Task\n\nImplement a coupled feature, scorer, and config change.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            _write_dependent_work_plan(run_dir)
+
+            result = create_code_task_batch(run_dir, work_item_id="W1")
+
+            batch_state = read_json(result.batch_state_path)
+            self.assertEqual(batch_state["work_item_id"], "W1")
+            work_item = batch_state["work_item"]
+            self.assertEqual(work_item["source_work_item_ids"], ["W1", "W2", "W3"])
+            self.assertEqual(work_item["execution_scope"], "merged_dependent_chain")
+            self.assertEqual(
+                work_item["target_files"],
+                ["spam_model.py", "extra.py", "pyproject.toml"],
+            )
+            self.assertEqual(work_item["budget_profile"], "large")
+            self.assertTrue(work_item["requires_budget_override"])
+
     def test_record_plan_decision_updates_work_plan_approval(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -847,11 +884,15 @@ class CodeTaskTests(unittest.TestCase):
 
             self.assertEqual(proposal.edit_count, 1)
             data = read_json(proposal.proposal_path)
+            self.assertEqual(data["editor"]["backend"], "controlled_patch")
             self.assertEqual([edit["path"] for edit in data["edits"]], ["spam_model.py"])
             self.assertIn(
                 "Dropped edit outside current batch target files: extra.py",
                 data["warnings"],
             )
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["patch"]["editor_backend"], "controlled_patch")
+            self.assertEqual(manifest["patch"]["editor"]["backend"], "controlled_patch")
             batch_state = read_json(
                 run_dir
                 / "code_task"
@@ -862,10 +903,21 @@ class CodeTaskTests(unittest.TestCase):
                 / "batch_state.json"
             )
             self.assertEqual(batch_state["state"], "proposal_ready")
+            self.assertEqual(batch_state["editor"]["backend"], "controlled_patch")
             self.assertEqual(
                 batch_state["artifacts"]["proposed_edits"],
                 "code_task/attempts/attempt-001/batches/batch-001/proposed_edits.json",
             )
+            batch_proposal = read_json(
+                run_dir
+                / "code_task"
+                / "attempts"
+                / "attempt-001"
+                / "batches"
+                / "batch-001"
+                / "proposed_edits.json"
+            )
+            self.assertEqual(batch_proposal["editor"]["backend"], "controlled_patch")
 
     def test_propose_edits_budget_requires_large_approval(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -927,6 +979,52 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(approved.edit_count, 1)
             self.assertEqual(approved_data["budget"]["status"], "large_approved")
             self.assertTrue(approved_data["budget"]["approved"])
+
+    def test_embedded_code_task_experiment_creates_work_plan_and_batch(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove spam prediction for prize messages.\n")
+            run_dir = root / "runs" / "embedded-code-task"
+            fake_client = _FakeCodeTaskClient()
+
+            with (
+                patch("simple_ar.code_task.work_plan.LLMClient.from_env", return_value=fake_client),
+                patch("simple_ar.code_task.planning.LLMClient.from_env", return_value=fake_client),
+                patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client),
+            ):
+                result = prepare_code_task_experiment(
+                    code_task_run_dir=run_dir,
+                    spec=CodeTaskExperimentSpec(
+                        template="code_task_project",
+                        code_root=code_root,
+                        task_file=task_file,
+                        benchmark_command="python -m unittest discover -s tests",
+                    ),
+                    model="fake-model",
+                    use_llm=True,
+                    timeout_sec=30,
+                )
+
+            self.assertEqual(result.work_plan_mode, "llm")
+            self.assertEqual(result.work_item_id, "W1")
+            self.assertTrue(result.context_pack_path and result.context_pack_path.is_file())
+            self.assertTrue(result.work_plan_path and result.work_plan_path.is_file())
+            self.assertTrue(result.batch_state_path and result.batch_state_path.is_file())
+            self.assertEqual(result.changed_files, ("spam_model.py",))
+
+            meta_path = root / "code_task_experiment.json"
+            write_code_task_experiment_meta(meta_path, result)
+            meta = read_json(meta_path)
+            self.assertEqual(meta["work_plan_mode"], "llm")
+            self.assertEqual(meta["batch"]["work_item_id"], "W1")
+            self.assertEqual(meta["batch"]["state"], "validating")
+            self.assertEqual(meta["editor_backend"], "controlled_patch")
+            self.assertIn("repo_map", meta)
+            self.assertIn("context_pack", meta)
 
     def test_patch_plan_includes_baseline_and_environment_context(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -1046,6 +1144,8 @@ class CodeTaskTests(unittest.TestCase):
             self.assertFalse((run_dir / "code_task" / "meta" / "post_patch_manifest.json").exists())
             applied = read_json(run_dir / "code_task" / "meta" / "applied_edits.json")
             self.assertEqual(applied["changed_files"], ["spam_model.py"])
+            self.assertEqual(applied["editor"]["backend"], "controlled_patch")
+            self.assertEqual(applied["editor"]["source"], "legacy_or_manual_proposal")
             self.assertTrue(applied["edits"][0]["old_sha256"])
             self.assertTrue(applied["edits"][0]["new_sha256"])
             diff_text = read_text(run_dir / "code_task" / "patch.diff")
@@ -1053,8 +1153,47 @@ class CodeTaskTests(unittest.TestCase):
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["status"], "patched")
             self.assertEqual(manifest["patch"]["status"], "applied")
+            self.assertEqual(manifest["patch"]["editor_backend"], "controlled_patch")
+            self.assertEqual(manifest["patch"]["editor"]["backend"], "controlled_patch")
             self.assertNotIn("pre_patch_manifest", manifest["patch"])
             self.assertNotIn("post_patch_manifest", manifest["patch"])
+
+    def test_apply_large_edits_records_apply_time_approval(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nApply a reviewed large proposal.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root, task_file=task_file)
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            proposal_path = _write_valid_edit_proposal(run_dir)
+            proposal = read_json(proposal_path)
+            proposal["budget"] = {
+                "status": "accepted",
+                "profile": "large",
+                "requires_approval": True,
+                "approved": False,
+            }
+            write_json(proposal_path, proposal)
+
+            with self.assertRaises(PermissionError):
+                apply_patch_edits(run_dir, edits_file=proposal_path)
+
+            apply_patch_edits(run_dir, edits_file=proposal_path, allow_large_edits=True)
+
+            applied = read_json(run_dir / "code_task" / "meta" / "applied_edits.json")
+            self.assertTrue(applied["budget"]["approved"])
+            self.assertEqual(applied["budget"]["approval_source"], "apply_edits_allow_large_edits")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertTrue(manifest["patch"]["budget"]["approved"])
+            self.assertEqual(
+                manifest["patch"]["budget"]["approval_source"],
+                "apply_edits_allow_large_edits",
+            )
 
     def test_apply_repair_proposal_records_latest_applied_proposal(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -2467,6 +2606,90 @@ def _write_analysis_first_work_plan(run_dir: Path) -> None:
     write_json(run_dir / "manifest.json", manifest)
 
 
+def _write_dependent_work_plan(run_dir: Path) -> None:
+    work_plan = {
+        "schema_version": 1,
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "mode": "test",
+        "summary": "Three tightly coupled implementation items.",
+        "goal": "Implement a feature, scorer, and config change together.",
+        "success_criteria": ["The coupled implementation passes benchmark validation."],
+        "items": [
+            {
+                "id": "W1",
+                "status": "pending",
+                "objective": "Add the feature producer.",
+                "target_files": ["spam_model.py"],
+                "read_only_evidence": ["tests/test_spam_model.py"],
+                "depends_on": [],
+                "validation": ["python -m unittest discover -s tests"],
+                "done_criteria": ["The producer emits the new feature."],
+                "risk": "Producer must remain backward compatible.",
+                "parallelizable": False,
+                "budget_profile": "normal",
+                "requires_budget_override": False,
+                "suggested_budget_override": "",
+                "context_request": {"query": "producer", "files": ["spam_model.py"], "symbols": []},
+            },
+            {
+                "id": "W2",
+                "status": "pending",
+                "objective": "Use the feature in scoring.",
+                "target_files": ["extra.py"],
+                "read_only_evidence": ["tests/test_spam_model.py"],
+                "depends_on": ["W1"],
+                "validation": ["python -m unittest discover -s tests"],
+                "done_criteria": ["The scorer consumes the new feature."],
+                "risk": "Scoring can drift if the feature is absent.",
+                "parallelizable": False,
+                "budget_profile": "normal",
+                "requires_budget_override": False,
+                "suggested_budget_override": "",
+                "context_request": {"query": "scorer", "files": ["extra.py"], "symbols": []},
+            },
+            {
+                "id": "W3",
+                "status": "pending",
+                "objective": "Enable the new behavior in configuration.",
+                "target_files": ["pyproject.toml"],
+                "read_only_evidence": ["tests/test_spam_model.py"],
+                "depends_on": ["W2"],
+                "validation": ["python -m unittest discover -s tests"],
+                "done_criteria": ["The default config enables the feature."],
+                "risk": "Config changes should be additive.",
+                "parallelizable": False,
+                "budget_profile": "normal",
+                "requires_budget_override": False,
+                "suggested_budget_override": "",
+                "context_request": {"query": "config", "files": ["pyproject.toml"], "symbols": []},
+            },
+        ],
+        "context_requests": [],
+        "risks": [],
+        "approval": {"required": True, "status": "pending", "reason": "Review before editing."},
+        "selected_files": ["spam_model.py", "extra.py", "pyproject.toml", "tests/test_spam_model.py"],
+        "context_pack": None,
+        "run_context": {},
+        "budget_profiles": {},
+    }
+    write_json(run_dir / "code_task" / "work_plan.json", work_plan)
+    write_text(run_dir / "code_task" / "work_plan.md", "# Work Plan\n")
+    manifest = read_json(run_dir / "manifest.json")
+    manifest["layout"]["work_plan"] = "code_task/work_plan.json"
+    manifest["layout"]["work_plan_markdown"] = "code_task/work_plan.md"
+    manifest["work_plan"] = {
+        "status": "pending_approval",
+        "mode": "test",
+        "path": "code_task/work_plan.json",
+        "markdown": "code_task/work_plan.md",
+        "item_count": 3,
+        "selected_files": work_plan["selected_files"],
+        "context_pack": None,
+        "approval": work_plan["approval"],
+    }
+    write_json(run_dir / "manifest.json", manifest)
+
+
 def _write_valid_edit_proposal(run_dir: Path, path: Path | None = None) -> Path:
     proposal_path = path or run_dir / "code_task" / "meta" / "proposed_edits.json"
     write_json(
@@ -2538,6 +2761,77 @@ class _FakeRepairClient:
 
     def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
         return self._response
+
+
+class _FakeCodeTaskClient:
+    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+        if label == "code-task-work-plan":
+            return {
+                "summary": "Improve prize-message classification in one small batch.",
+                "goal": "Classify prize messages as spam without changing tests.",
+                "success_criteria": ["Benchmark passes after the patch."],
+                "items": [
+                    {
+                        "id": "W1",
+                        "objective": "Implement a small keyword handling improvement.",
+                        "target_files": ["spam_model.py"],
+                        "read_only_evidence": ["tests/test_spam_model.py"],
+                        "depends_on": [],
+                        "validation": ["python -m unittest discover -s tests"],
+                        "done_criteria": ["Prediction handles prize messages."],
+                        "risk": "Low.",
+                        "parallelizable": False,
+                        "budget_profile": "normal",
+                        "requires_budget_override": False,
+                        "suggested_budget_override": "",
+                        "context_request": {"query": "predict prize", "files": ["spam_model.py"], "symbols": ["predict"]},
+                    }
+                ],
+                "context_requests": [],
+                "risks": [],
+                "approval": {"required": True, "reason": "Review before editing."},
+            }
+        if label == "code-task-plan":
+            return {
+                "summary": "Patch the classifier keyword logic.",
+                "goals": ["Handle prize messages as spam."],
+                "files_to_modify": [
+                    {
+                        "path": "spam_model.py",
+                        "reason": "Contains predict keyword logic.",
+                        "change_type": "modify",
+                    }
+                ],
+                "new_files": [],
+                "proposed_steps": ["Update predict keyword check."],
+                "validation": ["python -m unittest discover -s tests"],
+                "risks": ["Keep API stable."],
+                "rollback": ["Discard workspace changes."],
+                "open_questions": [],
+                "requires_approval_before_patch": True,
+            }
+        if label == "code-task-propose-edits":
+            return {
+                "summary": "Add prize keyword support.",
+                "edits": [
+                    {
+                        "path": "spam_model.py",
+                        "old": (
+                            "def predict(text):\n"
+                            "    return 'spam' if 'win' in text.lower() else 'ham'\n"
+                        ),
+                        "new": (
+                            "def predict(text):\n"
+                            "    lowered = text.lower()\n"
+                            "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize')) else 'ham'\n"
+                        ),
+                        "reason": "Classify prize messages as spam.",
+                    }
+                ],
+                "validation": ["python -m unittest discover -s tests"],
+                "risks": [],
+            }
+        raise AssertionError(f"Unexpected LLM label: {label}")
 
 
 def _indexed_file(index: dict[str, object], path: str) -> dict[str, object]:

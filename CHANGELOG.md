@@ -4,6 +4,34 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-23
+
+### Changed
+
+- Embedded 8-stage `code_task_project` runs now use the V2.2 code-task
+  execution shape during `06-code`: repo map/context pack, LLM work plan,
+  attempt/batch state, patch plan, controlled edit proposal, apply, and
+  validation. The final report evidence now points to work-plan and batch
+  artifacts in addition to summary, diff, and comparison outputs.
+- Added the medium review pipeline code-task example with a `main.py` entrypoint,
+  JSON config, multi-module feature/model/metric structure, visible progress
+  output, and a TOML task config that enables streamed benchmark output.
+- `code-task execute --config` can now relay benchmark stdout/stderr during
+  baseline and patched runs via `[execute].stream_benchmark_output = true`.
+- Benchmark streaming now supports string modes including `"auto"`, `"line"`,
+  and `"summary"`; `"auto"` is compatible with normal line logs and
+  carriage-return progress output from tools such as `tqdm`.
+- Documentation now describes the embedded research-to-code path as a
+  work-plan/batch-based flow instead of the older direct patch-plan flow.
+- Work-plan batch creation now merges small serial dependency chains, such as
+  feature producer -> model consumer -> config switch, into one bounded
+  execution batch. The reviewed items remain visible, while
+  `batch_state.json.work_item.source_work_item_ids` records the merged scope and
+  the larger batch still requires explicit large-edit review when applicable.
+- Applying a reviewed large proposal now records apply-time approval in
+  `applied_edits.json` and `manifest.json.patch.budget`, and executor benchmark
+  runs avoid duplicate validation history entries.
+
 ## 2026-05-22
 
 ### Changed
@@ -27,6 +55,14 @@ This file records user-visible project changes in reverse chronological order. P
 - `README.md` and `docs/USAGE.md` now present the TOML + `code-task execute`
   route as the primary code-task workflow, with primitive commands moved later
   as advanced debugging steps.
+- Added the V2.2 editor backend interface and migrated the default controlled
+  old/new patch path behind the `controlled_patch` backend while preserving the
+  existing CLI/API surface. Proposal, batch, apply, manifest, and status
+  artifacts now expose backend metadata.
+- Added the reserved `external_agent` editor boundary for future
+  Codex/Claude/OpenCode adapters. It now has provider normalization,
+  conservative permissions, blocked secret/home read patterns, and a reviewable
+  invocation-plan artifact, but it remains non-executable by default.
 
 ## 2026-05-21
 
@@ -142,9 +178,6 @@ This file records user-visible project changes in reverse chronological order. P
   when no task file is provided, `05-design` writes `generated_code_task.md`
   from the prior research artifacts and a compact codebase summary, then
   `06-code` uses it as the normal code-task prompt.
-- Added `docs/CODE_TASK_WORKSPACE.md` to document the current V2.1
-  workspace/copy data flow, hidden assumptions, and V2.2 workspace-mode
-  replacement points.
 
 ### Changed
 

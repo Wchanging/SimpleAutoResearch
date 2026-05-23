@@ -338,6 +338,8 @@ def _work_plan_user_prompt(
         "- Make 1 to 5 work items. Each item should be a small implementation batch that can produce code edits.\n"
         "- Do not create inspection-only, review-only, measurement-only, or documentation-only items. Put needed inspection in `context_request`.\n"
         "- The first item should normally be the smallest useful code change, not a broad analysis step.\n"
+        "- If a useful change requires definition, caller, and configuration files to change together before it can pass the benchmark, put those tightly coupled files in the same item.\n"
+        "- Do not split producer/caller/config edits into separate dependent items unless each item is independently runnable and useful after validation.\n"
         "- Use `task.md` as requirements, not as a patch. This work plan is the execution plan.\n"
         "- Use only workspace-relative paths from the supplied index in `target_files` and "
         "`read_only_evidence`.\n"

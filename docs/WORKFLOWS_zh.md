@@ -41,9 +41,11 @@ init workspace -> index code -> map repo -> probe environment
 - 源项目会准备到 `code_task/workspace`。默认 `copy` 会建立受保护物理复制；`git_worktree` 会为 repo-root git 项目创建 detached worktree；实验性 `sparse_copy` 只复制配置的 include patterns，并始终排除 data/model/cache/secret-like 路径。原始代码不会被修改。
 - Patch application 必须经过显式人工 approval gate。
 - Edit proposal 是保守 old/new replacement，不是自由形式重写。
+- 默认 editor backend 是 `controlled_patch`；backend interface 现在已经显式存在，后续外部 agent 可以接到同一套安全和审核 gate 后面。
 - 同一个文件可以有多个有序 edit，但每个 `old` block 必须保持唯一匹配；无效 proposal 会在写文件前停止。
 - `code-task execute` 可以推进下一步，但会在 plan approval 和 proposal review 处停下，除非用户显式继续。
 - Work-plan item 应该是可执行的 implementation batch。executor 在选择第一个 active batch 时会跳过明显的纯分析 item，因此 LLM 生成的“先 inspect 项目”不会意外限制后续 edit 阶段。
+- 如果多个已审核 work-plan item 形成小型串行依赖链，且必须一起落地才可运行，比如 feature producer、model consumer 和 config switch，active batch 可以把它们合并。拆分后的计划仍然可见，`batch_state.json.work_item.source_work_item_ids` 和合并后的 `target_files` 会记录实际执行范围。
 - benchmark 通过的 repair 不自动等于任务成功。最终是否 improved 要看 `code_task/run/comparison.json`；如果 patched 指标仍低于 baseline，只能说明流程恢复到可运行或超过 benchmark floor，还没有真正完成“提升”目标。
 - 当前执行有 workspace isolation 和明确 interpreter policy。支持 `current` 和 `external`；自动创建环境留到后续。`workspace.reuse_source_venv` 可以把 worktree/copy/sparse run 指向 source 项目已有 `.venv` Python，但不会安装依赖。
 
@@ -51,6 +53,7 @@ init workspace -> index code -> map repo -> probe environment
 
 - `toy_spam_project`：极小规则分类器，适合 patch 和 failure-analysis smoke test。
 - `tiny_digits_mlp_project`：基于 NumPy 和 scikit-learn bundled digits dataset 的轻量 MLP，适合无需 GPU/下载的本地 ML benchmark。
+- `medium_review_pipeline_project`：多模块 review classifier，入口是 `main.py`，使用 JSON config，运行时有进度输出，任务自然涉及 feature extraction、model scoring 和配置文件之间的联动。
 
 ### 3. Research With Experiment：研究衔接实验
 
@@ -69,7 +72,7 @@ plan -> search -> read -> synthesize -> design experiment
 - `--experiment-template code_task_project` 是通用内嵌 handoff，会接入 code-task workflow。它接受 `--code-task-config`，也接受显式 `--code-root`、可选 `--task-file` 和 `--benchmark-command`。如果没有 task file，`05-design` 会基于前面研究产物和紧凑代码摘要生成 `generated_code_task.md`。
 - `simple-ar run --config ...` 是保持多参数 research/code-task run 可读、可复现的推荐方式。
 - `--experiment-template llm_code_task_toy_spam` 仍保留为 bundled smoke-test template。
-- 内嵌路径是端到端的：它会在准备好的 workspace 内自动批准 patch plan。standalone code-task 仍是更安全的人工审核路径。
+- 内嵌路径是端到端的：它会构建和 standalone code-task 一致的 repo map / context pack、work plan、attempt/batch 证据，然后在准备好的 workspace 内自动批准 patch plan。standalone code-task 仍是更安全的人工审核路径。
 - Report generation 有保护：只有 citation、metric visibility、fixture disclosure 和 toy-demo boundary 检查通过时，才接受 LLM draft。
 
 ## 默认 8 阶段 Pipeline
@@ -154,6 +157,10 @@ runs/<run-id>/
 嵌套 code-task 文件：
 
 - `06-code/code_task_run/code_task/summary.md`：嵌套 code-task outcome 汇总。
+- `06-code/code_task_run/code_task/meta/repo_map.json`：准备后 workspace 的分层 repo map。
+- `06-code/code_task_run/code_task/context_packs/context-001/`：planning/editing 使用的 prompt-ready context pack。
+- `06-code/code_task_run/code_task/work_plan.md`：批次式 implementation plan。
+- `06-code/code_task_run/code_task/attempts/attempt-001/batches/batch-001/batch_state.json`：当前内嵌 batch 状态。
 - `06-code/code_task_run/code_task/patch_plan.md`：由 pipeline 自动批准的 LLM patch plan。
 - `06-code/code_task_run/code_task/meta/proposed_edits.json`：受控 old/new edit proposal。
 - `06-code/code_task_run/code_task/patch.diff`：在准备好的 workspace 中应用的补丁。
@@ -178,6 +185,7 @@ runs/<run-id>/
   code_task/
     task.md
     summary.md
+    work_plan.md
     patch_plan.md
     patch.diff
     workspace/
@@ -200,6 +208,15 @@ runs/<run-id>/
         context_pack.json
         prompt_context.md
         selected_snippets.jsonl
+    attempts/
+      attempt-001/
+        attempt_state.json
+        batches/
+          batch-001/
+            batch_state.json
+            batch_context.json
+            proposed_edits.json
+            proposal_warnings.json
     run/
       comparison.json
       baseline/
@@ -223,6 +240,7 @@ runs/<run-id>/
 - `workspace/`：源项目的可编辑副本、worktree 或 sparse subset。
 - `meta/`：环境报告、索引、locate results、决策、proposal、applied edit summary、validation report、failure analysis 和 LLM usage。
 - `context_packs/`：从 locate results 和 workspace snippets 派生的受限 prompt context pack。
+- `attempts/`：用于 bounded implementation / repair loop 的 work-plan attempt 和 batch state。
 - `run/`：带 label 的 benchmark stdout/stderr、execution report、parsed metrics、before/after comparison 和 benchmark failure analysis。
 - `repairs/`：按 attempt 分组的 bounded repair proposal。
 
@@ -238,6 +256,9 @@ runs/<run-id>/
 - `context_packs/context-NNN/context_pack.json`：选择文件、预算、来源 artifact 和省略文件记录。
 - `context_packs/context-NNN/prompt_context.md`：按 editable targets / read-only evidence 分组的 prompt-ready Markdown。
 - `context_packs/context-NNN/selected_snippets.jsonl`：实际截断后的源码片段，每个文件一行。
+- `work_plan.md`：位于 patch plan 之上的批次式 implementation plan。
+- `attempts/attempt-NNN/attempt_state.json`：由 work-plan 和 batch outcome 推导的 attempt 生命周期状态。
+- `attempts/attempt-NNN/batches/batch-NNN/batch_state.json`：active work item、允许修改的 target files、batch artifacts 和最终 batch state。
 - `run/baseline/execution_report.json`：pre-patch benchmark result。
 - `run/patched/execution_report.json`：post-patch benchmark result。
 - `run/comparison.json`：baseline/patched metric deltas 和保守 verdict。
@@ -245,7 +266,8 @@ runs/<run-id>/
 - `patch_plan.md`：编辑前供人审核的计划，包含已记录环境、validation 和 baseline context。
 - 如果存在 latest context pack，`patch_plan.md` 会记录其路径，并优先使用其中的 selected snippets，而不是旧的 index-only 文件选择。
 - `patch.diff`：应用后的补丁，便于 review。
-- `meta/applied_edits.json`：被修改文件及 before/after hash，并记录实际应用的 proposal path。对于 repair proposal，这里会指向 `code_task/repairs/repair-NNN/proposed_edits.json`。
+- `meta/proposed_edits.json`：可审核 edit proposal，并记录 editor backend metadata。
+- `meta/applied_edits.json`：被修改文件及 before/after hash，并记录实际应用的 proposal path 和 editor backend。对于 repair proposal，这里会指向 `code_task/repairs/repair-NNN/proposed_edits.json`。
 
 ## Code-Task 环境策略
 

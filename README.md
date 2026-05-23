@@ -132,6 +132,24 @@ benchmark, writes `code_task/run/comparison.json`, and refreshes
 `code_task/summary.md`. Treat `objective_improved` as the normal success signal;
 if the benchmark passes but the objective is `regressed` or `mixed`, revise the
 plan/proposal instead of marking the task complete.
+The default editor backend is `controlled_patch`, which produces bounded
+old/new replacements and records backend metadata in proposal, apply, batch,
+and manifest artifacts.
+
+For a more realistic multi-file example with `main.py`, JSON config, progress
+output, and cross-module feature/model wiring, use:
+
+```bash
+uv run simple-ar code-task init --config examples/code_tasks/configs/medium_review_pipeline.toml
+```
+
+Then follow the same executor sequence above with the medium config path and a
+`*medium-review-pipeline*` `$RUN` filter. Because that config enables streamed
+benchmark output, `execute` will relay progress lines while still saving the
+full logs under `code_task/run/<label>/`. The medium task usually merges
+feature, model, and config changes into one reviewed `large` batch, so the final
+apply command should include `--allow-large-edits` only after reviewing
+`code_task/meta/proposed_edits.json`.
 
 If the patch needs repair, request one bounded repair proposal:
 
@@ -169,7 +187,7 @@ uv run simple-ar run \
   --experiment-timeout 60
 ```
 
-This prepares the configured project under `06-code/code_task_run/code_task/workspace`, runs a baseline benchmark, asks the LLM for a patch plan and controlled edits, applies the patch inside that isolated workspace, runs the patched benchmark, and writes code-task evidence into the final report. If no task file is supplied for `code_task_project`, `05-design` now derives `generated_code_task.md` from the earlier research artifacts and a compact codebase summary, then `06-code` uses it as the normal `code_task/task.md`. Because the 8-stage pipeline must finish end to end, it auto-approves the patch plan inside that isolated workspace. Use standalone `code-task` commands when you want explicit human approval before each step.
+This prepares the configured project under `06-code/code_task_run/code_task/workspace`, runs a baseline benchmark, builds a repo map/context pack, asks the LLM for a batch-oriented work plan, creates an attempt/batch record, asks for a patch plan and controlled edits, applies the patch inside that isolated workspace, runs the patched benchmark, and writes code-task evidence into the final report. If no task file is supplied for `code_task_project`, `05-design` now derives `generated_code_task.md` from the earlier research artifacts and a compact codebase summary, then `06-code` uses it as the normal `code_task/task.md`. Because the 8-stage pipeline must finish end to end, it auto-approves the patch plan inside that isolated workspace. Use standalone `code-task` commands when you want explicit human approval before each step.
 
 There is also a legacy bundled toy-spam smoke test, kept mostly for quick regression checks:
 
@@ -193,18 +211,21 @@ What works today:
 - Topic-to-report runs with visible 8-stage artifacts and resumable execution.
 - OpenAI-compatible LLM calls for planning, paper notes, synthesis, report drafting, and code-task patch planning.
 - Literature-first report mode: stop at `synthesize`, then resume `report` to produce a survey-style report without experiment claims.
-- Existing-code code tasks as a standalone workflow: prepare a source project with `copy`, `git_worktree`, or experimental `sparse_copy`, probe the environment, index files, build repo maps, locate likely files, package bounded context, run a baseline benchmark, generate a context-aware patch plan, require human approval, propose controlled edits, apply edits in the isolated workspace, validate, run a patched benchmark, and compare before/after metrics.
+- Existing-code code tasks as a standalone workflow: prepare a source project with `copy`, `git_worktree`, or experimental `sparse_copy`, probe the environment, index files, build repo maps, locate likely files, package bounded context, run a baseline benchmark, generate a context-aware patch plan, require human approval, call the default `controlled_patch` editor backend for bounded edits, apply edits in the isolated workspace, validate, run a patched benchmark, and compare before/after metrics.
 - Default code-task edit scope: tests, benchmark files, and secret-like paths are read-only evidence, so the model can use allowed context but cannot patch them to improve metrics.
 - Configurable benchmark metric interpretation for code tasks through `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
-- Embedded 8-stage code-task experiments through `--experiment-template code_task_project` plus a code-task TOML config or explicit code-root/benchmark flags. A task file can be provided by the user or generated during `05-design`.
+- Embedded 8-stage code-task experiments through `--experiment-template code_task_project` plus a code-task TOML config or explicit code-root/benchmark flags. A task file can be provided by the user or generated during `05-design`; `06-code` then uses the same repo-map, context-pack, work-plan, and attempt/batch evidence model as standalone code tasks.
 - One bundled 8-stage smoke-test demo through `--experiment-template llm_code_task_toy_spam`.
 - Citation, report-boundary, runtime-limit, and metric-visibility checks in the final report package.
 
 Important limits:
 
-- The generic 8-stage code-task path is real but still conservative. It can prepare a user project with copy mode, repo-root `git_worktree` mode, or experimental sparse-copy mode and run one LLM patch pass, but it is not yet a full autonomous coding agent with deep multi-round planning, dependency installation, Docker/Conda setup, or large experiment scheduling.
+- The generic 8-stage code-task path is real but still conservative. It can prepare a user project with copy mode, repo-root `git_worktree` mode, or experimental sparse-copy mode and run one bounded LLM work-plan/batch/patch pass, but it is not yet a full autonomous coding agent with deep multi-round planning, dependency installation, Docker/Conda setup, or large experiment scheduling.
 - The 8-stage code-task path auto-approves the model patch plan inside the isolated workspace so the pipeline can complete end to end. Use standalone `code-task` for stronger human-in-the-loop review.
 - Code edits are controlled old/new replacements. This keeps patches auditable, but it is weaker than a full coding agent that can plan and edit many files across multiple autonomous rounds.
+- The editor backend interface now exists. The reserved `external_agent` backend
+  has a design-time permission model and invocation-plan artifact, but
+  Codex/Claude/OpenCode adapters are not executable yet.
 - Large code-edit proposals can still produce very long LLM completions. V2.2 treats this as an editor-backend design target: bounded proposal contracts, context requests, multi-round attempts, and future external coding-agent adapters are planned before recommending the tool for large unattended refactors.
 - Reviewed proposals may contain multiple ordered edits in one file, but invalid old/new replacements are rejected before workspace files are changed.
 - By default, code-task patches reject protected paths such as `tests/**`, `test_*.py`, `benchmark.py`, and `*benchmark*.py`. If the real task is to update tests or benchmarks, handle that as a separate human-reviewed repository change rather than an automated metric-improvement patch.

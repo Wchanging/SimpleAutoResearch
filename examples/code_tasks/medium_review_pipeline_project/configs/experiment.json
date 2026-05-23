@@ -1,0 +1,7 @@
+{
+  "experiment_name": "medium-review-pipeline-baseline",
+  "feature_families": ["word"],
+  "threshold": 0.0,
+  "rounds": 4,
+  "progress_width": 18
+}

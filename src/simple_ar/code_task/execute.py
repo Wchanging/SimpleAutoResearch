@@ -90,6 +90,7 @@ def execute_code_task(
     python_executable: str | Path | None = None,
     strict_validation: bool = False,
     validation_max_file_bytes: int = 500_000,
+    stream_benchmark_output: bool | str = False,
     apply_proposed_edits: bool = False,
     allow_large_edits: bool = False,
     repair_rounds: int = 0,
@@ -124,6 +125,9 @@ def execute_code_task(
         python_executable: External interpreter when ``env_mode`` is external.
         strict_validation: Treat risky validation warnings as errors.
         validation_max_file_bytes: Per-file validation scan budget.
+        stream_benchmark_output: Relay benchmark stdout/stderr while baseline
+            or patched runs are executing. ``True`` uses ``auto`` mode, which
+            understands carriage-return progress output such as tqdm.
         apply_proposed_edits: Allow execute to apply an existing or generated
             proposal after the patch plan has been approved.
         allow_large_edits: Allow proposals that exceed the normal edit budget
@@ -191,6 +195,8 @@ def execute_code_task(
                 skip_validation=skip_validation,
                 env_mode=env_mode,
                 python_executable=python_executable,
+                stream_output=stream_benchmark_output,
+                output_callback=_benchmark_output_callback(message_callback),
             )
             _record(steps, "baseline", "done", f"status {result.status}")
             if result.status != "passed":
@@ -419,9 +425,13 @@ def execute_code_task(
         result = run_code_task_benchmark(
             root,
             timeout_sec=timeout_sec,
-            skip_validation=skip_validation,
+            # The execute path runs static validation immediately before this
+            # benchmark step, so avoid recording the same validation twice.
+            skip_validation=True,
             env_mode=env_mode,
             python_executable=python_executable,
+            stream_output=stream_benchmark_output,
+            output_callback=_benchmark_output_callback(message_callback),
         )
         _record(steps, "run", "done", f"status {result.status}")
         if result.status != "passed":
@@ -716,6 +726,18 @@ def _repair_count(manifest: dict[str, object]) -> int:
 def _emit(callback: MessageCallback | None, message: str) -> None:
     if callback is not None:
         callback(message)
+
+
+def _benchmark_output_callback(callback: MessageCallback | None) -> Callable[[str, str], None] | None:
+    if callback is None:
+        return None
+
+    def _relay(stream: str, line: str) -> None:
+        text = line.rstrip()
+        if text:
+            callback(f"benchmark {stream}: {text}")
+
+    return _relay
 
 
 def _first_error_line(text: str) -> str:

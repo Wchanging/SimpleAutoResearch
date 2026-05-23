@@ -80,7 +80,7 @@ to_stage = "report"
 [llm]
 # true：使用配置好的 OpenAI-compatible LLM。
 # false：尽可能使用 deterministic fallback。
-# code_task_project 的真实 patch planning/edit proposal 需要 LLM。
+# code_task_project 的真实 work planning / patch planning / edit proposal 需要 LLM。
 enabled = true
 
 # 可选模型覆盖。不填时使用 SIMPLE_AR_MODEL 或 provider 默认值。
@@ -234,7 +234,7 @@ uv run simple-ar run \
 | `--primary-metric NAME` | before/after verdict 的主要指标。 |
 | `--metric-direction NAME=DIRECTION` | 内嵌 comparison 的指标解释，可重复。 |
 
-通用内嵌路径会在 pipeline workspace 内自动批准生成的 patch plan，使 `run --to-stage report` 能完整结束。如果需要每个状态转换前都人工审核，请使用 standalone `code-task` 命令。
+通用内嵌路径会先构建 repo map / context pack、work plan 和 active attempt/batch state，然后在 pipeline workspace 内自动批准生成的 patch plan，使 `run --to-stage report` 能完整结束。如果需要每个状态转换前都人工审核，请使用 standalone `code-task` 命令。
 
 恢复：
 
@@ -458,6 +458,8 @@ profiles。`batch` 会在
 
 Work-plan item 应该是 implementation batch。planner prompt 现在要求模型把需要继续查看的内容放进 `context_request`，而不是生成纯 inspection item。如果生成的 work plan 仍然以分析型 item 开头，`code-task execute` 会在创建 active batch 前优先选择后面第一个真正像代码修改的 item。
 
+如果多个 work-plan item 是严格串行依赖，且后续 item 没有前面的代码改动就无法独立验证，`batch` 会把这个小链条合并成一个执行 item。查看 `batch_state.json.work_item.source_work_item_ids` 可以知道哪些已审核项被合并；真正允许编辑的文件是合并后的 `target_files`。这个合并有文件数和 item 数上限，并通常会进入 `large` budget profile，因此应用时仍需要审核后显式传入 `--allow-large-edits`。
+
 ### Manual Command Path
 
 当你想自己运行并检查每个 primitive step 时，使用手动路径：
@@ -566,6 +568,7 @@ timeout_sec = 60
 repair_rounds = 1
 max_files = 8
 max_source_chars_per_file = 4000
+stream_benchmark_output = "off"
 apply_proposed_edits = false
 allow_large_edits = false
 
@@ -591,6 +594,14 @@ max_proposal_chars = 24000
 ```
 
 编辑预算会在模型返回 JSON 后由本地 normalizer 强制检查。超预算 proposal 会写入 warnings 和 rejected edits，而不是直接应用。如果 proposal 落在 large profile 内，需要人工审核后再显式加 `--allow-large-edits`。
+
+`stream_benchmark_output` 控制 `code-task execute` 如何转发 baseline / patched
+benchmark 的 stdout 和 stderr，同时仍把完整输出保存到
+`code_task/run/<label>/stdout.txt` 和 `stderr.txt`。支持 `false` / `"off"`、
+`true` / `"auto"`、`"line"` 和 `"summary"`。真实项目通常建议用 `"auto"`：
+它能正常显示普通逐行日志，也会把 `tqdm` 这类 carriage-return 进度输出当作
+进度更新处理，而不是一直等到最终换行。`"line"` 适合纯 newline 日志；
+`"summary"` 适合实时输出太吵、只想在 benchmark 结束后看尾部日志的情况。
 
 预览下一步：
 
@@ -623,6 +634,8 @@ uv run simple-ar code-task run runs/<run-id> --timeout 60
 手动执行 primitive `validate` 和 `run` 时，只要 patch 已经应用，也会同步 latest batch / attempt 状态，因此手动分步路径和 `execute` 路径会留下更一致的状态产物。
 
 `proposed_edits.json` 可以包含同一文件的多个有序 edit。每个 edit 都在当前内存文本上应用，且每个 `old` block 必须唯一匹配。无效 proposal 会在写文件前停止；在 `execute` 中表现为 `patch_apply_failed`。
+
+默认 editor backend 是 `controlled_patch`。`propose-edits` 和 `apply-edits` 现在内部走 editor backend interface，但保持原有 CLI 命令和 JSON 兼容性。proposal、batch state、applied edit record 和 manifest patch section 都会记录 backend metadata，便于审计。预留的 `external_agent` backend 目前还不能执行；它只定义未来 Codex / Claude / OpenCode adapter 需要遵守的权限策略和可审查 invocation-plan artifact。
 
 proposal 是结构化 JSON，不是 unified diff。`old` 和 `new` 必须包含精确文件文本，不要在其中写 `+`、`-`、`@@`、`---`、`+++` 这类 diff 标记。如果 repair proposal 中出现这些标记，normalizer 会丢弃该 edit 并写入 warning；如果手工 proposal 无法匹配当前 workspace，`apply-edits` 会输出简洁的 validation error，并保持文件不变。
 
@@ -663,4 +676,4 @@ uv run simple-ar status runs/<run-id>
 ```
 
 对 code-task run，status 会打印 environment、plan、patch、validation、benchmark、primary metric、metric directions、comparison deltas、failure-analysis、repair pointers，以及可用时的 `code_task/summary.md` 路径。
-如果存在 objective verdict，也会显示 Objective。已经 resolved 的 failure/repair section 会从紧凑 status 输出中隐藏，避免旧失败尝试干扰当前判断。
+如果存在 patch editor backend 和 objective verdict，也会显示对应信息。已经 resolved 的 failure/repair section 会从紧凑 status 输出中隐藏，避免旧失败尝试干扰当前判断。

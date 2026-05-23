@@ -122,6 +122,20 @@ uv run simple-ar status $RUN
 ```
 
 第一次 `execute` 会在写入环境、baseline、work plan、batch state 和 patch plan 后停在 `approval_required`。第二次 executor 调用会生成 `code_task/meta/proposed_edits.json` 供审核。最后一次 executor 调用会应用 proposal、验证 workspace、运行 patched benchmark、写入 `code_task/run/comparison.json`，并刷新 `code_task/summary.md`。正常成功信号是 `objective_improved`；如果 benchmark 通过但 objective 是 `regressed` 或 `mixed`，应继续修改 plan/proposal，而不是把任务标记为完成。
+默认 editor backend 是 `controlled_patch`，它生成受预算限制的 old/new replacement，并在 proposal、apply、batch 和 manifest 产物中记录 backend metadata。
+
+如果想试一个更接近真实项目的多文件示例，包含 `main.py` 入口、JSON config、运行进度输出，以及跨模块的 feature/model wiring，可以使用：
+
+```bash
+uv run simple-ar code-task init --config examples/code_tasks/configs/medium_review_pipeline.toml
+```
+
+然后沿用上面的 executor 流程，只需要把 config 路径和 `$RUN` 筛选条件换成
+medium 示例即可。该配置启用了 streamed benchmark output，所以 `execute`
+会把进度行转发到命令行，同时仍把完整日志保存到 `code_task/run/<label>/`。
+medium 任务通常会把 feature、model 和 config 改动合并为一个已审核的
+`large` batch，因此最后应用 proposal 时，只有在审核
+`code_task/meta/proposed_edits.json` 后才应显式加入 `--allow-large-edits`。
 
 如果补丁需要修复，可以请求一个有限范围的 repair proposal：
 
@@ -155,7 +169,7 @@ uv run simple-ar run \
   --experiment-timeout 60
 ```
 
-这个流程会把配置中的项目准备到 `06-code/code_task_run/code_task/workspace`，运行 baseline benchmark，调用 LLM 生成 patch plan 和受控编辑 proposal，在隔离 workspace 内应用补丁，运行 patched benchmark，并把 code-task 证据写入最终报告。如果 `code_task_project` 没有提供 task file，`05-design` 会基于前面研究阶段的产物和紧凑代码摘要生成 `generated_code_task.md`，然后 `06-code` 将它作为正常的 `code_task/task.md` 输入。
+这个流程会把配置中的项目准备到 `06-code/code_task_run/code_task/workspace`，运行 baseline benchmark，构建 repo map / context pack，调用 LLM 生成批次式 work plan，再创建 attempt/batch 记录，随后生成 patch plan 和受控编辑 proposal，在隔离 workspace 内应用补丁，运行 patched benchmark，并把 code-task 证据写入最终报告。如果 `code_task_project` 没有提供 task file，`05-design` 会基于前面研究阶段的产物和紧凑代码摘要生成 `generated_code_task.md`，然后 `06-code` 将它作为正常的 `code_task/task.md` 输入。
 
 还有一个 legacy toy-spam smoke test，主要用于快速回归测试：
 
@@ -177,7 +191,7 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 - 从 topic 到 report 的 8 阶段流程，产物可见，并支持 resume。
 - OpenAI 兼容 LLM 调用，用于 planning、paper notes、synthesis、report drafting 和 code-task patch planning。
 - 文献优先报告模式：停在 `synthesize` 后继续 `report`，生成 survey 风格报告。
-- Standalone code task：准备已有项目，使用 `copy`、`git_worktree` 或实验性 `sparse_copy` 建立隔离 workspace，探测环境，索引代码，构建 repo map，定位相关文件，生成受限 context pack，运行 baseline，生成可审核 patch plan，提出受控 edits，应用补丁，验证，运行 patched benchmark，并比较前后指标。
+- Standalone code task：准备已有项目，使用 `copy`、`git_worktree` 或实验性 `sparse_copy` 建立隔离 workspace，探测环境，索引代码，构建 repo map，定位相关文件，生成受限 context pack，运行 baseline，生成批次式 work plan，创建 attempt/batch，生成可审核 patch plan，调用默认 `controlled_patch` editor backend 生成受控 edits，应用补丁，验证，运行 patched benchmark，并比较前后指标。
 - 默认 edit scope 会保护 tests、benchmark 文件和 secret-like 路径，模型可以读取这些信息作为证据，但不能自动修改它们来刷指标。
 - 支持通过 CLI 或 TOML 配置 benchmark metric 的解释方式。
 - 支持通过 `code_task_project` 把已有代码任务嵌入 8 阶段流程。task file 可以由用户提供，也可以在 `05-design` 自动生成。
@@ -186,8 +200,9 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 重要限制：
 
 - 通用 8 阶段 code-task 路径是真实可运行的，但仍偏保守。它还不是深度多轮、自主配置环境、自动 Docker/Conda/GPU/Slurm 调度的大型 coding agent。
-- 8 阶段内嵌 code-task 为了跑完整流程，会在隔离 workspace 内自动批准 patch plan；如果需要强人工审核，应使用 standalone `code-task`。
+- 8 阶段内嵌 code-task 为了跑完整流程，会在隔离 workspace 内自动创建 context pack、work plan 和首个 implementation batch，并自动批准 patch plan；如果需要强人工审核，应使用 standalone `code-task`。
 - 当前代码编辑是受控 old/new replacement。它更可审计，但弱于完整 coding agent 的自由多文件、多轮重构能力。
+- editor backend 接口已经存在。预留的 `external_agent` backend 现在有设计期权限模型和 invocation-plan artifact，但 Codex / Claude / OpenCode adapter 还不能执行。
 - 较大的代码修改 proposal 仍可能触发很长的 LLM completion。V2.2 会把它作为 editor backend 设计目标处理：增加 bounded proposal contract、context request、多轮 attempt，以及未来 external coding-agent adapter；在这些能力成熟前，不建议把它当作大型无人值守重构工具。
 - 默认拒绝自动修改 `tests/**`、`test_*.py`、`benchmark.py`、`*benchmark*.py` 等保护路径。
 - 目前不会自动安装项目依赖，也不会自动管理 Docker/Conda/GPU/Slurm 环境。
@@ -202,7 +217,6 @@ V2.2 正在推进 workspace-mode abstraction、git worktree、实验性 sparse-c
 - [CLI 参考](docs/CLI_REFERENCE_zh.md)：命令组、参数表和配置 schema。
 - [工作流与产物](docs/WORKFLOWS_zh.md)：预设工作流、8 阶段流程和产物布局。
 - [开发指南](docs/DEVELOPMENT_zh.md)：如何扩展 stage、template 和 code-task 模块。
-- [Code Task Workspace 笔记](docs/CODE_TASK_WORKSPACE_zh.md)：V2.2 workspace mode 的设计、假设和迁移点。
 - [Changelog](CHANGELOG_zh.md)：按时间记录的开发进展。
 
 ## 参考项目

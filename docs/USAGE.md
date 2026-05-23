@@ -112,7 +112,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 - LLM-backed when enabled: `plan`, `read`, `synthesize`, and `report` stages.
 - Deterministic by default: `design`, `code`, and `run` use fixed experiment templates unless a code-task experiment template is selected.
-- Embedded code-task experiment: `06-code` can call the LLM for a patch plan and controlled edit proposal, but the patch is applied only inside an isolated workspace under the run directory.
+- Embedded code-task experiment: `06-code` can call the LLM for a work plan, patch plan, and controlled edit proposal, but the patch is applied only inside an isolated workspace under the run directory.
 - Guarded reports: if an LLM-written report omits required body citations, invents citation keys, or overstates fixture/toy evidence, the report stage writes a structured fallback report instead.
 - `--no-llm` forces offline fallbacks with placeholder content in `goal.md`, `notes.md`, `synthesis.md`, and `report.md`.
 
@@ -179,6 +179,19 @@ mode, model routing, and edit budgets stay in one reviewable file:
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
+For a slightly more realistic local example, use the medium review pipeline:
+
+```bash
+uv run simple-ar code-task init --config examples/code_tasks/configs/medium_review_pipeline.toml
+```
+
+That example runs `python main.py --config configs/experiment.json
+--show-progress`, prints newline progress bars during baseline/patched runs,
+and uses `[execute].stream_benchmark_output = "auto"` so `code-task execute`
+relays benchmark progress while still saving stdout/stderr artifacts. The
+`auto` mode handles both normal `print` logs and carriage-return progress
+output such as `tqdm`.
+
 `init` creates a new `runs/<run-id>/` directory, prepares the source project under
 `code_task/workspace/`, writes the task to `code_task/task.md`, builds
 `code_task/meta/codebase_index.json` plus the layered
@@ -223,6 +236,25 @@ Start a run:
 
 ```bash
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+```
+
+The commands below use the tiny digits MLP config. To run the Day27 medium
+review pipeline with visible benchmark progress, replace the config path with
+`examples/code_tasks/configs/medium_review_pipeline.toml` and use the run-name
+filter `*medium-review-pipeline*` when setting `$RUN`. During `execute`, you
+should see relayed lines such as `benchmark stdout: round 1/4 ...` while the
+same output is captured under `code_task/run/<label>/stdout.txt`. Because the
+medium task naturally touches feature extraction, model scoring, and config, it
+usually produces a reviewed `large` batch; add `--allow-large-edits` to the
+final apply command only after inspecting the proposal.
+
+For the medium example, the matching PowerShell run selector is:
+
+```powershell
+$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
+  Where-Object { $_.Name -like "*medium-review-pipeline*" } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1).Name)
 ```
 
 Set `RUN` to the newest matching run directory if you want copyable commands:
@@ -277,6 +309,11 @@ Review:
 - `code_task/meta/proposed_edits.json`: controlled old/new replacements.
 - `code_task/meta/llm_usage_summary.json`: LLM token usage summary.
 - latest `code_task/attempts/.../proposal_warnings.json`, when present.
+
+The default editor backend is `controlled_patch`. Its metadata is recorded in
+`proposed_edits.json`, the active batch state, `applied_edits.json`, and
+`manifest.json.patch`. The backend does not run benchmarks, approve plans, or
+write reports; those gates remain owned by the code-task workflow.
 
 Apply the reviewed proposal and evaluate the patched workspace:
 
@@ -423,6 +460,15 @@ item, `code-task execute` prefers the first later item that looks like a real
 code change, so a broad "inspect the project" step does not accidentally become
 the active edit batch.
 
+If a model splits one tightly coupled implementation into a serial chain, for
+example feature extraction -> scorer wiring -> config enablement, the batch
+creator can merge that small dependent chain into one execution batch. The
+reviewed `work_plan.md` still shows the separate items, but
+`batch_state.json.work_item.source_work_item_ids` records the merged item ids
+and `target_files` becomes the union of the coupled files. Because these merged
+batches may touch more than two files, they usually use the `large` budget
+profile and require explicit review before `--allow-large-edits` is used.
+
 Generate a patch plan (LLM optional; offline mode writes a conservative plan):
 
 ```bash
@@ -461,6 +507,14 @@ uv run simple-ar code-task propose-edits runs/<run-id>
 controlled old/new text replacements and is meant for review. It does not edit
 the workspace by itself. A proposal may include multiple ordered edits for the
 same file; each `old` block must still match uniquely when applied in sequence.
+The proposal also records `editor.backend = "controlled_patch"` so future
+backends can be audited through the same artifact shape.
+The reserved `external_agent` backend is intentionally non-executable in this
+version. It can build a reviewable invocation plan for future
+Codex/Claude/OpenCode adapters, including provider, command preview, blocked
+read patterns, timeout, network/shell permissions, log path, and diff path. Any
+future external-agent result must still become a captured diff/proposal before
+SimpleAutoResearch applies validation, benchmark execution, and summary logic.
 By default, tests and benchmark files are treated as read-only evidence:
 `propose-edits` omits them from editable snippets, and any model edit targeting
 paths such as `tests/**`, `test_*.py`, `benchmark.py`, or `*benchmark*.py` is
@@ -481,6 +535,8 @@ uv run simple-ar code-task apply-edits runs/<run-id>
 the codebase index. It still never mutates the original `--code-root`. If an
 edit cannot be matched safely, `execute` stops with `patch_apply_failed` before
 workspace files are changed.
+`applied_edits.json` records the proposal path and editor backend used for the
+application, including manually supplied or repair proposal files.
 `apply-edits` also re-checks the edit scope, so manually supplied JSON cannot
 modify protected tests or benchmark files even if it bypassed the LLM proposal
 step.
@@ -627,6 +683,18 @@ Large-edit approval is required:
   `--allow-large-edits`. Do not use this flag just to silence an unclear model
   proposal.
 
+Proposal covers only the first part of a coupled plan:
+
+- Check `code_task/work_plan.md` and the latest
+  `code_task/attempts/.../batch_state.json`. If a plan has serial items such as
+  feature -> model -> config, the active batch should list all coupled ids in
+  `work_item.source_work_item_ids` and all editable files in `work_item.target_files`.
+- For older runs created before this behavior, create a fresh batch with
+  `uv run simple-ar code-task batch $RUN --work-item W1 --force`, then regenerate
+  the proposal with `uv run simple-ar code-task propose-edits $RUN --force`.
+- If the merged batch is marked `large`, review the full proposal before using
+  `--allow-large-edits`.
+
 `uv run` fails with a local cache permission error:
 
 - This is an environment issue outside the run artifacts. Fix the uv cache
@@ -701,14 +769,16 @@ codebase summary. `06-code` then uses the generated task as the normal
 `code_task/task.md` input for planning and edit proposal.
 
 `code_task_project` writes a normal pipeline run plus nested code-task artifacts
-under `06-code/code_task_run/`. During `06-code`, it copies the user project,
-probes the environment, runs a baseline benchmark, generates a patch plan,
-records an automatic pipeline approval, asks for controlled edits, applies
-them inside the prepared workspace, and validates the result. During `07-run`,
-the harness runs the patched benchmark, writes `comparison.json` when baseline
-and patched metrics are both available, and exposes code-task metrics through
-`07-run/results.json`. During `08-report`, the report includes a deterministic
-Code Task Evidence section pointing back to the nested summary, diff, and
+under `06-code/code_task_run/`. During `06-code`, it copies or worktrees the
+user project, probes the environment, runs a baseline benchmark, builds a repo
+map/context pack, generates a batch-oriented work plan, creates an
+attempt/batch record, generates a patch plan, records an automatic pipeline
+approval, asks for controlled edits, applies them inside the prepared
+workspace, and validates the result. During `07-run`, the harness runs the
+patched benchmark, writes `comparison.json` when baseline and patched metrics
+are both available, and exposes code-task metrics through `07-run/results.json`.
+During `08-report`, the report includes a deterministic Code Task Evidence
+section pointing back to the nested work plan, batch state, summary, diff, and
 comparison artifacts. The embedded path uses the same edit-scope guard as the
 standalone workflow, so the patch cannot rewrite protected tests or benchmark
 files just to improve reported metrics.

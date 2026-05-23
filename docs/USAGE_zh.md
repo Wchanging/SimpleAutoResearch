@@ -105,7 +105,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 - LLM 支持阶段：`plan`、`read`、`synthesize` 和 `report`。
 - 默认确定性阶段：`design`、`code` 和 `run` 使用固定实验模板，除非选择了 code-task experiment template。
-- 内嵌 code-task experiment：`06-code` 可以调用 LLM 生成 patch plan 和受控 edit proposal，但补丁只会应用到 run 目录下的隔离 workspace。
+- 内嵌 code-task experiment：`06-code` 可以调用 LLM 生成 work plan、patch plan 和受控 edit proposal，但补丁只会应用到 run 目录下的隔离 workspace。
 - Guarded reports：如果 LLM 报告缺少必要正文引用、虚构 citation key 或夸大 fixture/toy evidence，会回退到结构化 deterministic report。
 - `--no-llm` 会让相关阶段使用离线 fallback 内容。
 
@@ -166,6 +166,14 @@ Code Task 会把源项目准备到一个隔离的可编辑 workspace 中，后�
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
+如果想试一个更接近真实项目的本地示例，可以使用 medium review pipeline：
+
+```bash
+uv run simple-ar code-task init --config examples/code_tasks/configs/medium_review_pipeline.toml
+```
+
+这个示例会运行 `python main.py --config configs/experiment.json --show-progress`，baseline / patched run 中会打印逐轮进度行，并通过 `[execute].stream_benchmark_output = "auto"` 让 `code-task execute` 在保存 stdout/stderr 产物的同时，把 benchmark 进度转发到命令行。`auto` 模式同时兼容普通 `print` 日志和 `tqdm` 这类 carriage-return 进度输出。
+
 `init` 会创建新的 `runs/<run-id>/`，把源项目准备到 `code_task/workspace/`，把任务写入 `code_task/task.md`，生成 `code_task/meta/codebase_index.json` 以及分层 `code_task/meta/repo_map.json` / `repo_map_summary.md`，并把 benchmark / environment / workspace 策略记录到 `manifest.json`。它不会运行代码、不会调用 LLM，也不会修改原始项目。
 
 如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。当前要求 `code_root` 是目标项目的 git 仓库根目录；如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入 repo root，或者改用 `copy` 模式。
@@ -182,6 +190,24 @@ benchmark 最好输出 `name: value` 数值行。自定义指标推荐在 TOML �
 
 ```bash
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+```
+
+下面的命令默认使用 tiny digits MLP 配置。如果要运行 Day27 的 medium
+review pipeline，并在 benchmark 运行时看到进度输出，把 config 路径替换为
+`examples/code_tasks/configs/medium_review_pipeline.toml`，并在设置 `$RUN`
+时把筛选条件改成 `*medium-review-pipeline*`。执行 `execute` 时应该能看到
+类似 `benchmark stdout: round 1/4 ...` 的转发行，同时完整 stdout 仍会保存到
+`code_task/run/<label>/stdout.txt`。由于 medium 任务自然会联动 feature
+extraction、model scoring 和 config，通常会生成一个已审核的 `large` batch；
+最后应用 proposal 时，只有在检查 proposal 后才应加入 `--allow-large-edits`。
+
+medium 示例对应的 PowerShell run selector 是：
+
+```powershell
+$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
+  Where-Object { $_.Name -like "*medium-review-pipeline*" } |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1).Name)
 ```
 
 如果想在 PowerShell 里复制后续命令，可以把最新 run 目录保存到 `$RUN`：
@@ -234,6 +260,10 @@ uv run simple-ar code-task execute $RUN `
 - `code_task/meta/proposed_edits.json`：受控 old/new replacement。
 - `code_task/meta/llm_usage_summary.json`：LLM token 用量摘要。
 - 最新 `code_task/attempts/.../proposal_warnings.json`，如果存在。
+
+默认 editor backend 是 `controlled_patch`。它的 metadata 会记录在
+`proposed_edits.json`、active batch state、`applied_edits.json` 和
+`manifest.json.patch` 中。backend 不负责运行 benchmark、批准计划或写报告；这些 gate 仍由 code-task workflow 管理。
 
 确认 proposal 后，应用补丁并运行验证和 patched benchmark：
 
@@ -358,6 +388,8 @@ review 产物。
 
 Work-plan item 应该是可以产生代码修改的 implementation batch，而不是单独的分析笔记。现在 prompt 会要求模型把“还需要看什么”放进 `context_request`；如果模型仍然把第一个 item 写成纯 `inspect/review/measure` 之类的分析步骤，`code-task execute` 会优先选择后面第一个真正像代码修改的 item，避免把“先了解项目”误当成 active edit batch。
 
+如果模型把一个必须联动落地的实现拆成串行依赖链，比如 feature extraction -> scorer wiring -> config enablement，`batch` 会把这个小链条合并成一个执行批次。`work_plan.md` 仍然保留分开的审核项；实际执行范围记录在 `batch_state.json.work_item.source_work_item_ids` 和合并后的 `target_files` 中。由于这种批次可能触碰两个以上文件，通常会升级为 `large` budget profile，应用前仍需要人工审核并显式使用 `--allow-large-edits`。
+
 生成 patch plan：
 
 ```bash
@@ -383,6 +415,8 @@ uv run simple-ar code-task propose-edits runs/<run-id>
 ```
 
 `propose-edits` 写入 `code_task/meta/proposed_edits.json`。proposal 使用 old/new 文本替换，供人工审核；它本身不会编辑 workspace。默认 tests 和 benchmark 文件是只读证据，proposal 不会给这些路径提供可编辑 snippet，后续 apply 也会再次拒绝保护路径。
+proposal 也会记录 `editor.backend = "controlled_patch"`，方便后续接入其他 backend 后仍能按同一产物形态审计。
+预留的 `external_agent` backend 在当前版本不能执行。它只会为未来 Codex / Claude / OpenCode adapter 构建可审查 invocation plan，其中包含 provider、command preview、blocked read patterns、timeout、network/shell permissions、log path 和 diff path。未来外部 agent 的结果也必须先变成 captured diff/proposal，再经过 SimpleAutoResearch 的 validation、benchmark 和 summary。
 V2.2 还会在模型返回 JSON 后执行本地编辑预算检查。超预算 proposal 会写入 warnings 和 rejected edits，而不是直接应用；如果 proposal 仍在 larger review budget 内，审核 JSON 后再显式使用 `--allow-large-edits`。
 
 应用已审核 edits：
@@ -392,6 +426,7 @@ uv run simple-ar code-task apply-edits runs/<run-id>
 ```
 
 `apply-edits` 只修改 `code_task/workspace/`，写入 `code_task/patch.diff` 和 `code_task/meta/applied_edits.json`，并重建 codebase index。如果 edit 无法唯一匹配，会在写文件前停止。
+`applied_edits.json` 会记录实际应用的 proposal path 和 editor backend，包括手动提供的 edits file 或 repair proposal。
 
 验证并运行 patched benchmark：
 
@@ -490,6 +525,12 @@ patched benchmark 通过，但 objective 是 `regressed` 或 `mixed`：
 - 先阅读 `code_task/meta/proposed_edits.json`，以及 `code_task/meta/` 或最新 `code_task/attempts/.../batch-NNN/` 下的 `proposal_warnings.json`。
 - 如果确认这是必要的大修改，再加 `--allow-large-edits`。不要只为了绕过模型输出异常而使用这个参数。
 
+Proposal 只覆盖了联动计划的第一部分：
+
+- 先检查 `code_task/work_plan.md` 和最新的 `code_task/attempts/.../batch_state.json`。如果计划是 feature -> model -> config 这类串行联动，active batch 应该在 `work_item.source_work_item_ids` 中列出合并的 item id，并在 `work_item.target_files` 中列出所有允许修改的文件。
+- 对于旧 run，如果 batch 是在这次行为更新前创建的，可以重新创建批次并重新生成 proposal：`uv run simple-ar code-task batch $RUN --work-item W1 --force`，然后 `uv run simple-ar code-task propose-edits $RUN --force`。
+- 如果合并后的 batch 被标记为 `large`，先审核完整 proposal，再决定是否使用 `--allow-large-edits`。
+
 `uv run` 出现本地 cache 权限错误：
 
 - 这是本机环境问题，不是 run artifact 问题。可以修复 uv cache 权限，或者在 PowerShell 中直接使用项目虚拟环境入口，例如 `.\.venv\Scripts\simple-ar.exe ...`。
@@ -550,7 +591,7 @@ uv run simple-ar run \
 
 这种模式下，`05-design` 会从前面研究阶段的产物和紧凑代码摘要中写出 `generated_code_task.md` 和 `generated_code_task_meta.json`，`06-code` 再把生成任务作为普通 `code_task/task.md` 输入。
 
-`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、运行 baseline、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁并验证。`07-run` 运行 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分。
+`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、运行 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁并验证。`07-run` 运行 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
 
 这个路径方便端到端实验，但会牺牲 standalone workflow 的人工暂停点。对安全敏感或难调试项目，建议先用 standalone `code-task execute` 或手动 primitive 路径。
 

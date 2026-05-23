@@ -590,6 +590,7 @@ dependencies = [
     { name = "openai" },
     { name = "python-dotenv" },
     { name = "scikit-learn" },
+    { name = "tqdm" },
 ]
 
 [package.metadata]
@@ -598,6 +599,7 @@ requires-dist = [
     { name = "openai", specifier = ">=2.34.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "scikit-learn", specifier = ">=1.8.0" },
+    { name = "tqdm", specifier = ">=4.67.3" },
 ]
 
 [[package]]

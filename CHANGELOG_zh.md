@@ -4,6 +4,31 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-05-23
+
+### Changed
+
+- 内嵌 8 阶段 `code_task_project` run 现在在 `06-code` 使用 V2.2 的
+  code-task 执行形态：repo map / context pack、LLM work plan、attempt/batch
+  state、patch plan、受控 edit proposal、apply 和 validation。最终报告证据
+  除了 summary、diff、comparison，也会指向 work-plan 和 batch artifacts。
+- 新增 medium review pipeline code-task 示例，包含 `main.py` 入口、JSON config、
+  多模块 feature/model/metric 结构、可见进度输出，以及启用 streamed benchmark
+  output 的 TOML task config。
+- `code-task execute --config` 现在可通过 `[execute].stream_benchmark_output = true`
+  在 baseline 和 patched benchmark 运行时转发 stdout/stderr。
+- Benchmark streaming 现在支持 `"auto"`、`"line"` 和 `"summary"` 等字符串模式；
+  `"auto"` 同时兼容普通逐行日志和 `tqdm` 这类 carriage-return 进度输出。
+- 文档已把内嵌 research-to-code 路径从旧的直接 patch-plan 流程更新为
+  work-plan / batch based flow。
+- Work-plan batch 创建现在会把小型串行依赖链合并成一个受控执行批次，例如
+  feature producer -> model consumer -> config switch。拆分后的审核项仍然保留，
+  `batch_state.json.work_item.source_work_item_ids` 会记录合并范围；如果合并批次
+  触发 large budget，应用前仍需要显式审核和 `--allow-large-edits`。
+- 应用已审核 large proposal 时，现在会把 apply-time approval 记录到
+  `applied_edits.json` 和 `manifest.json.patch.budget`；executor benchmark
+  路径也会避免写入重复的 validation history。
+
 ## 2026-05-22
 
 ### Changed
@@ -15,6 +40,8 @@
 - Failure analysis 现在会捕获 metric floor 和 timing budget 信号，例如 `accuracy below benchmark floor`、`macro_f1` 和 `train_time_sec`。
 - 文档补充说明了 objective verdict、implementation-batch selection、repair application state，以及 benchmark pass 但指标退化时应该如何判断。
 - `README.md` / `README_zh.md` 和 `docs/USAGE.md` / `docs/USAGE_zh.md` 现在把 TOML + `code-task execute` 作为主要 code-task 使用路径，primitive commands 下沉为高级调试步骤。
+- 新增 V2.2 editor backend interface，并把默认 controlled old/new patch 路径迁移到 `controlled_patch` backend 后面，同时保持现有 CLI/API 兼容。proposal、batch、apply、manifest 和 status 产物现在会暴露 backend metadata。
+- 新增预留的 `external_agent` editor 边界，为后续 Codex / Claude / OpenCode adapter 做准备。当前包含 provider 规范化、保守权限策略、secret/home 读取阻断规则和可审查 invocation-plan artifact，但默认仍不可执行。
 
 ## 2026-05-21
 
@@ -77,7 +104,6 @@
 ### Added
 
 - 为内嵌 `code_task_project` run 添加 research-first task generation：如果没有 task file，`05-design` 会从前面研究产物和紧凑代码摘要生成 `generated_code_task.md`，再由 `06-code` 作为 code-task prompt 使用。
-- 添加 `docs/CODE_TASK_WORKSPACE.md`，记录 V2.1 workspace/copy 数据流、隐含假设和 V2.2 workspace-mode 替换点。
 
 ### Changed
 

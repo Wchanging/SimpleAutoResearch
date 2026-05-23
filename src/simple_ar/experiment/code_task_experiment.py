@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from simple_ar.artifacts import read_json, write_json
 from simple_ar.code_task import (
     apply_patch_edits,
+    build_code_task_context_pack,
+    create_code_task_batch,
     generate_patch_plan,
+    generate_code_task_work_plan,
     initialize_code_task,
     load_code_task_init_options,
     probe_code_task_environment,
@@ -96,6 +99,20 @@ class CodeTaskExperimentResult:
         baseline_status: Baseline benchmark status before patching.
         environment_report_path: Optional environment probe report.
         baseline_report_path: Optional baseline execution report.
+        repo_map_path: Optional repo-map JSON generated during initialization.
+        repo_map_summary_path: Optional repo-map Markdown summary.
+        context_pack_path: Optional prompt-ready local context pack.
+        context_prompt_path: Optional rendered context prompt.
+        context_snippets_path: Optional selected source snippets JSONL.
+        work_plan_path: Optional batch-oriented work plan JSON.
+        work_plan_markdown_path: Optional human-readable work plan.
+        work_plan_mode: ``llm`` when the model generated the work plan.
+        work_plan_item_count: Number of normalized work items.
+        attempt_id: Active attempt id used for the embedded patch.
+        attempt_state_path: Optional attempt state JSON.
+        batch_id: Active batch id used for the embedded patch.
+        batch_state_path: Optional batch state JSON.
+        work_item_id: Work-plan item represented by the active batch.
         summary_path: Optional code-task summary artifact.
     """
 
@@ -114,6 +131,20 @@ class CodeTaskExperimentResult:
     baseline_status: str = ""
     environment_report_path: Path | None = None
     baseline_report_path: Path | None = None
+    repo_map_path: Path | None = None
+    repo_map_summary_path: Path | None = None
+    context_pack_path: Path | None = None
+    context_prompt_path: Path | None = None
+    context_snippets_path: Path | None = None
+    work_plan_path: Path | None = None
+    work_plan_markdown_path: Path | None = None
+    work_plan_mode: str = ""
+    work_plan_item_count: int = 0
+    attempt_id: str = ""
+    attempt_state_path: Path | None = None
+    batch_id: str = ""
+    batch_state_path: Path | None = None
+    work_item_id: str = ""
     summary_path: Path | None = None
 
 
@@ -280,6 +311,32 @@ def prepare_code_task_experiment(
         python_executable=spec.python_executable,
     )
 
+    _emit(message_callback, "Building prompt-ready code-task context pack.")
+    context_pack = build_code_task_context_pack(
+        run_dir,
+        max_files=8,
+        max_source_chars_per_file=4000,
+        max_total_chars=20_000,
+    )
+
+    _emit(message_callback, "Calling LLM for batch-oriented code-task work plan.")
+    work_plan = generate_code_task_work_plan(
+        run_dir,
+        model=model,
+        use_llm=True,
+        max_files=8,
+        max_source_chars_per_file=3000,
+        message_callback=message_callback,
+    )
+    if work_plan.mode != "llm":
+        raise RuntimeError(
+            "Code-task work planning did not use the LLM. "
+            "Check SIMPLE_AR_API_KEY, SIMPLE_AR_BASE_URL, and SIMPLE_AR_MODEL."
+        )
+    work_item_id = _first_executable_work_item_id(work_plan.work_plan_path)
+    _emit(message_callback, f"Creating code-task attempt/batch state for {work_item_id}.")
+    batch = create_code_task_batch(run_dir, work_item_id=work_item_id)
+
     _emit(message_callback, "Calling LLM for code-task patch plan.")
     plan = generate_patch_plan(
         run_dir,
@@ -344,6 +401,20 @@ def prepare_code_task_experiment(
         baseline_status=baseline.status,
         environment_report_path=environment.report_path,
         baseline_report_path=baseline.report_path,
+        repo_map_path=init.repo_map_path,
+        repo_map_summary_path=init.repo_map_summary_path,
+        context_pack_path=context_pack.context_pack_path,
+        context_prompt_path=context_pack.prompt_context_path,
+        context_snippets_path=context_pack.snippets_path,
+        work_plan_path=work_plan.work_plan_path,
+        work_plan_markdown_path=work_plan.work_plan_markdown_path,
+        work_plan_mode=work_plan.mode,
+        work_plan_item_count=work_plan.item_count,
+        attempt_id=batch.attempt_id,
+        attempt_state_path=batch.attempt_state_path,
+        batch_id=batch.batch_id,
+        batch_state_path=batch.batch_state_path,
+        work_item_id=batch.work_item_id,
         summary_path=run_dir / "code_task" / "summary.md",
     )
 
@@ -353,6 +424,9 @@ def write_code_task_experiment_meta(path: Path, result: CodeTaskExperimentResult
     usage_summary_path = result.code_task_run_dir / "code_task" / "meta" / "llm_usage_summary.json"
     usage_summary = read_json(usage_summary_path) if usage_summary_path.exists() else {}
     comparison_path = result.code_task_run_dir / "code_task" / "run" / "comparison.json"
+    manifest = _read_optional_dict(result.code_task_run_dir / "manifest.json")
+    batch_state = _read_optional_dict(result.batch_state_path)
+    attempt_state = _read_optional_dict(result.attempt_state_path)
     write_json(
         path,
         {
@@ -360,6 +434,30 @@ def write_code_task_experiment_meta(path: Path, result: CodeTaskExperimentResult
             "template": result.template,
             "code_task_run_dir": str(result.code_task_run_dir),
             "workspace": _relative_or_string(path.parent, result.workspace_dir),
+            "repo_map": _optional_relative(path.parent, result.repo_map_path),
+            "repo_map_summary": _optional_relative(path.parent, result.repo_map_summary_path),
+            "context_pack": {
+                "path": _optional_relative(path.parent, result.context_pack_path),
+                "prompt_context": _optional_relative(path.parent, result.context_prompt_path),
+                "selected_snippets": _optional_relative(path.parent, result.context_snippets_path),
+            },
+            "work_plan": _optional_relative(path.parent, result.work_plan_path),
+            "work_plan_markdown": _optional_relative(path.parent, result.work_plan_markdown_path),
+            "work_plan_mode": result.work_plan_mode,
+            "work_plan_item_count": result.work_plan_item_count,
+            "attempt": {
+                "id": result.attempt_id,
+                "state": attempt_state.get("state", ""),
+                "state_path": _optional_relative(path.parent, result.attempt_state_path),
+            },
+            "batch": {
+                "id": result.batch_id,
+                "state": batch_state.get("state", ""),
+                "state_path": _optional_relative(path.parent, result.batch_state_path),
+                "work_item_id": result.work_item_id,
+                "kind": batch_state.get("kind", ""),
+                "artifacts": batch_state.get("artifacts", {}),
+            },
             "patch_plan": _relative_or_string(path.parent, result.patch_plan_path),
             "proposed_edits": _relative_or_string(path.parent, result.proposed_edits_path),
             "patch_diff": _relative_or_string(path.parent, result.patch_diff_path),
@@ -374,6 +472,8 @@ def write_code_task_experiment_meta(path: Path, result: CodeTaskExperimentResult
             "changed_files": list(result.changed_files),
             "baseline_status": result.baseline_status,
             "validation_status": result.validation_status,
+            "editor_backend": _manifest_editor_backend(manifest),
+            "active_attempt": _manifest_active_attempt(manifest),
             "llm_usage_summary": usage_summary,
         },
     )
@@ -443,6 +543,60 @@ def _optional_relative(root: Path, path: Path | None) -> str | None:
     if path is None or not path.exists():
         return None
     return _relative_or_string(root, path)
+
+
+def _first_executable_work_item_id(work_plan_path: Path) -> str:
+    """Return the first work item with editable target files.
+
+    The embedded 8-stage pipeline has no interactive work-item selection, so it
+    chooses the first actionable item instead of an inspection-only placeholder.
+    This mirrors the standalone execute path while keeping the experiment helper
+    independent from CLI orchestration internals.
+    """
+
+    data = read_json(work_plan_path)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Expected JSON object in {work_plan_path}")
+    items = [item for item in data.get("items", []) if isinstance(item, dict)]
+    for item in items:
+        if _work_item_target_files(item):
+            item_id = str(item.get("id") or "").strip()
+            if item_id:
+                return item_id
+    raise RuntimeError(f"Work plan has no executable items: {work_plan_path}")
+
+
+def _work_item_target_files(item: dict[str, Any]) -> list[str]:
+    value = item.get("target_files")
+    if not isinstance(value, list):
+        return []
+    return [path for path in value if isinstance(path, str) and path.strip()]
+
+
+def _read_optional_dict(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return {}
+    data = read_json(path)
+    return data if isinstance(data, dict) else {}
+
+
+def _manifest_editor_backend(manifest: dict[str, Any]) -> str:
+    patch = manifest.get("patch")
+    if not isinstance(patch, dict):
+        return ""
+    backend = patch.get("editor_backend")
+    return backend if isinstance(backend, str) else ""
+
+
+def _manifest_active_attempt(manifest: dict[str, Any]) -> dict[str, Any]:
+    attempts = manifest.get("attempts")
+    if not isinstance(attempts, dict):
+        return {}
+    return {
+        "active": attempts.get("active", ""),
+        "latest_attempt": attempts.get("latest_attempt", ""),
+        "latest_batch": attempts.get("latest_batch", ""),
+    }
 
 
 def _resolve_user_path(value: str) -> Path:

@@ -15,6 +15,9 @@ from simple_ar.code_task.state import (
 )
 
 
+MAX_MERGED_BATCH_ITEMS = 3
+MAX_MERGED_BATCH_TARGET_FILES = 4
+
 ATTEMPT_STATES = {
     "created",
     "work_plan_ready",
@@ -113,6 +116,7 @@ def create_code_task_batch(
     if work_item is None:
         available = ", ".join(_work_item_ids(work_plan)) or "none"
         raise ValueError(f"Unknown work item `{work_item_id}`. Available: {available}")
+    execution_item = _execution_work_item(work_plan, work_item)
 
     attempt = _ensure_attempt(
         root,
@@ -157,7 +161,7 @@ def create_code_task_batch(
                 "reason": "Batch initialized from work_plan item.",
             }
         ],
-        "work_item": work_item,
+        "work_item": execution_item,
         "artifacts": {
             "batch_state": _relative_to_run(root, batch_state_path),
             "batch_context": "",
@@ -256,7 +260,8 @@ def update_code_task_batch_state(
         history = data.get("state_history")
         if not isinstance(history, list):
             history = []
-        history.append({"state": state, "at": now, "reason": detail})
+        if not history or history[-1].get("state") != state or history[-1].get("reason") != detail:
+            history.append({"state": state, "at": now, "reason": detail})
         data["state_history"] = history
     data["updated_at"] = now
     if artifacts:
@@ -361,6 +366,196 @@ def _find_existing_batch(
         if item.get("work_item_id") == work_item_id and item.get("kind", "implementation") == kind:
             return item
     return None
+
+
+def _execution_work_item(work_plan: dict[str, Any], work_item: dict[str, Any]) -> dict[str, Any]:
+    chain = _dependent_work_item_chain(work_plan, work_item)
+    if len(chain) <= 1:
+        result = dict(work_item)
+        result.setdefault("source_work_item_ids", [str(work_item.get("id", ""))])
+        return result
+    return _merge_work_items(chain)
+
+
+def _dependent_work_item_chain(work_plan: dict[str, Any], first: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return a small serial dependency chain that should execute together.
+
+    Work plans are still reviewed as separate items, but tightly coupled source
+    changes are often not useful unless they land in the same patch. This helper
+    merges only a narrow chain: one direct downstream item at a time, no
+    parallel branches, and a strict file budget.
+    """
+
+    items = _object_list(work_plan.get("items"))
+    by_id = {str(item.get("id", "")): item for item in items if item.get("id")}
+    source_ids = [str(first.get("id", ""))]
+    chain = [first]
+    target_files = _ordered_unique(_string_list(first.get("target_files")))
+    while len(chain) < MAX_MERGED_BATCH_ITEMS:
+        last_id = source_ids[-1]
+        candidates = [
+            item for item in items
+            if _is_merge_candidate(item, last_id=last_id, source_ids=set(source_ids))
+        ]
+        if len(candidates) != 1:
+            break
+        candidate = candidates[0]
+        candidate_id = str(candidate.get("id", ""))
+        if not candidate_id or candidate_id not in by_id:
+            break
+        next_targets = _ordered_unique([*target_files, *_string_list(candidate.get("target_files"))])
+        if len(next_targets) > MAX_MERGED_BATCH_TARGET_FILES:
+            break
+        chain.append(candidate)
+        source_ids.append(candidate_id)
+        target_files = next_targets
+    return chain
+
+
+def _is_merge_candidate(item: dict[str, Any], *, last_id: str, source_ids: set[str]) -> bool:
+    item_id = str(item.get("id", ""))
+    if not item_id or item_id in source_ids:
+        return False
+    if item.get("parallelizable") is True:
+        return False
+    status = str(item.get("status", "pending")).lower()
+    if status not in {"", "pending", "ready"}:
+        return False
+    target_files = _string_list(item.get("target_files"))
+    if not target_files:
+        return False
+    depends_on = _string_list(item.get("depends_on"))
+    if last_id not in depends_on:
+        return False
+    return set(depends_on).issubset(source_ids)
+
+
+def _merge_work_items(items: list[dict[str, Any]]) -> dict[str, Any]:
+    first = items[0]
+    source_ids = [str(item.get("id", "")) for item in items if item.get("id")]
+    target_files = _ordered_unique(
+        path
+        for item in items
+        for path in _string_list(item.get("target_files"))
+    )
+    evidence = _ordered_unique(
+        path
+        for item in items
+        for path in _string_list(item.get("read_only_evidence"))
+    )
+    validation = _ordered_unique(
+        value
+        for item in items
+        for value in _string_list(item.get("validation"))
+    )
+    done_criteria = _ordered_unique(
+        f"{str(item.get('id', ''))}: {criterion}"
+        for item in items
+        for criterion in _string_list(item.get("done_criteria"))
+    )
+    objectives = [
+        f"{str(item.get('id', ''))}: {str(item.get('objective', '')).strip()}"
+        for item in items
+        if str(item.get("objective", "")).strip()
+    ]
+    budget_profile = _merged_budget_profile(items, target_files)
+    context_files = _ordered_unique(
+        path
+        for item in items
+        for path in _context_request_files(item.get("context_request"))
+    )
+    symbols = _ordered_unique(
+        symbol
+        for item in items
+        for symbol in _context_request_symbols(item.get("context_request"))
+    )
+    merged = dict(first)
+    merged.update(
+        {
+            "id": first.get("id"),
+            "source_work_item_ids": source_ids,
+            "execution_scope": "merged_dependent_chain",
+            "objective": "Execute tightly coupled work items together: " + " / ".join(objectives),
+            "target_files": target_files,
+            "read_only_evidence": evidence,
+            "depends_on": _string_list(first.get("depends_on")),
+            "validation": validation or ["Run the recorded benchmark after applying this merged batch."],
+            "done_criteria": done_criteria,
+            "risk": _merged_risk(items),
+            "parallelizable": False,
+            "budget_profile": budget_profile,
+            "requires_budget_override": (
+                budget_profile != "normal"
+                or any(bool(item.get("requires_budget_override")) for item in items)
+            ),
+            "suggested_budget_override": _merged_budget_note(items, budget_profile),
+            "context_request": {
+                "query": "Inspect the coupled definition, caller, and configuration files before editing.",
+                "files": context_files or _ordered_unique([*target_files, *evidence]),
+                "symbols": symbols,
+            },
+        }
+    )
+    return merged
+
+
+def _merged_budget_profile(items: list[dict[str, Any]], target_files: list[str]) -> str:
+    profiles = [_string(item.get("budget_profile")).lower() for item in items]
+    if "absolute" in profiles:
+        return "absolute"
+    if "large" in profiles or len(target_files) > 2 or len(items) > 1:
+        return "large"
+    return "normal"
+
+
+def _merged_risk(items: list[dict[str, Any]]) -> str:
+    risks = [
+        f"{str(item.get('id', ''))}: {str(item.get('risk', '')).strip()}"
+        for item in items
+        if str(item.get("risk", "")).strip()
+    ]
+    return "Merged dependent batch; validate all coupled files together. " + " ".join(risks)
+
+
+def _merged_budget_note(items: list[dict[str, Any]], budget_profile: str) -> str:
+    notes = _ordered_unique(
+        _string(item.get("suggested_budget_override"))
+        for item in items
+        if _string(item.get("suggested_budget_override"))
+    )
+    if notes:
+        return " ".join(notes)
+    if budget_profile == "large":
+        return "Merged dependent work items require a larger review gate but should remain a cohesive small patch."
+    if budget_profile == "absolute":
+        return "Merged batch inherited an absolute budget profile; review carefully before applying."
+    return ""
+
+
+def _context_request_files(value: object) -> list[str]:
+    data = value if isinstance(value, dict) else {}
+    return _string_list(data.get("files"))
+
+
+def _context_request_symbols(value: object) -> list[str]:
+    data = value if isinstance(value, dict) else {}
+    return _string_list(data.get("symbols"))
+
+
+def _ordered_unique(values: object) -> list[str]:
+    if isinstance(values, str):
+        iterable = [values]
+    else:
+        try:
+            iterable = list(values)  # type: ignore[arg-type]
+        except TypeError:
+            iterable = []
+    result: list[str] = []
+    for value in iterable:
+        text = _string(value)
+        if text and text not in result:
+            result.append(text)
+    return result
 
 
 def _sync_batch_ref(run_dir: Path, batch_state: dict[str, Any], batch_state_path: Path) -> None:
@@ -590,3 +785,13 @@ def _object_list(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _string(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [_string(item) for item in value if _string(item)]

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import codecs
 import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from simple_ar.artifacts import write_json, write_text
 from simple_ar.code_task.attempts import (
@@ -30,6 +32,28 @@ from simple_ar.metrics import parse_metric_lines
 
 CONTROL_TOKENS = {"|", "||", "&&", ";", "<", ">", ">>", "2>", "2>>"}
 OUTPUT_CHAR_LIMIT = 200_000
+OutputCallback = Callable[[str, str], None]
+StreamOutputMode = str
+STREAM_OUTPUT_ALIASES = {
+    "0": "off",
+    "1": "auto",
+    "false": "off",
+    "no": "off",
+    "off": "off",
+    "none": "off",
+    "true": "auto",
+    "yes": "auto",
+    "on": "auto",
+    "line": "line",
+    "lines": "line",
+    "auto": "auto",
+    "tqdm": "auto",
+    "progress": "auto",
+    "summary": "summary",
+    "tail": "summary",
+}
+PROGRESS_RELAY_MIN_INTERVAL_SEC = 0.5
+SUMMARY_TAIL_LINES = 12
 
 
 class CodeTaskRunError(RuntimeError):
@@ -78,6 +102,8 @@ def run_code_task_benchmark(
     run_label: str = "patched",
     env_mode: str | None = None,
     python_executable: str | Path | None = None,
+    stream_output: bool | str = False,
+    output_callback: OutputCallback | None = None,
 ) -> CodeTaskRunResult:
     """Run the recorded benchmark command inside the copied workspace.
 
@@ -92,6 +118,12 @@ def run_code_task_benchmark(
         env_mode: Optional execution environment mode override.
         python_executable: External interpreter path or executable name when
             ``env_mode`` is ``external``.
+        stream_output: Whether and how to relay subprocess output while it
+            runs. ``True`` is treated as ``"auto"`` for progress-bar friendly
+            output; supported string modes are ``off``, ``line``, ``auto``,
+            and ``summary``.
+        output_callback: Callback receiving ``("stdout"|"stderr", line)`` when
+            streaming is enabled.
 
     Returns:
         Execution artifacts and status.
@@ -140,14 +172,12 @@ def run_code_task_benchmark(
 
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        completed = _run_command(
             command_args,
             cwd=paths.workspace_dir,
-            env=_safe_env(paths.workspace_dir),
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            check=False,
+            timeout_sec=timeout_sec,
+            stream_output=stream_output,
+            output_callback=output_callback,
         )
         duration_sec = round(time.monotonic() - started, 3)
         stdout, stdout_truncated = _clip_output(completed.stdout)
@@ -209,6 +239,8 @@ def run_code_task_baseline(
     skip_validation: bool = False,
     env_mode: str | None = None,
     python_executable: str | Path | None = None,
+    stream_output: bool | str = False,
+    output_callback: OutputCallback | None = None,
 ) -> CodeTaskRunResult:
     """Run the recorded benchmark as the pre-patch baseline.
 
@@ -220,6 +252,10 @@ def run_code_task_baseline(
         env_mode: Optional execution environment mode override.
         python_executable: External interpreter path or executable name when
             ``env_mode`` is ``external``.
+        stream_output: Whether and how to relay subprocess output while it
+            runs. ``True`` is treated as ``"auto"``.
+        output_callback: Callback receiving ``("stdout"|"stderr", line)`` when
+            streaming is enabled.
 
     Returns:
         Baseline execution artifacts and status.
@@ -232,7 +268,199 @@ def run_code_task_baseline(
         run_label="baseline",
         env_mode=env_mode,
         python_executable=python_executable,
+        stream_output=stream_output,
+        output_callback=output_callback,
     )
+
+
+def _run_command(
+    command_args: list[str],
+    *,
+    cwd: Path,
+    timeout_sec: int,
+    stream_output: bool | str,
+    output_callback: OutputCallback | None,
+) -> subprocess.CompletedProcess[str]:
+    mode = normalize_stream_output_mode(stream_output)
+    if mode in {"off", "summary"}:
+        completed = subprocess.run(
+            command_args,
+            cwd=cwd,
+            env=_safe_env(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+        if mode == "summary" and output_callback is not None:
+            _emit_output_summary(completed.stdout, completed.stderr, output_callback)
+        return completed
+
+    process = subprocess.Popen(
+        command_args,
+        cwd=cwd,
+        env=_safe_env(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_thread = threading.Thread(
+        target=_read_stream,
+        args=(process.stdout, "stdout", stdout_chunks, output_callback, mode),
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_read_stream,
+        args=(process.stderr, "stderr", stderr_chunks, output_callback, mode),
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = process.wait(timeout=timeout_sec)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        raise subprocess.TimeoutExpired(
+            command_args,
+            timeout_sec,
+            output="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
+        )
+    stdout_thread.join(timeout=2)
+    stderr_thread.join(timeout=2)
+    return subprocess.CompletedProcess(
+        command_args,
+        returncode,
+        stdout="".join(stdout_chunks),
+        stderr="".join(stderr_chunks),
+    )
+
+
+def normalize_stream_output_mode(value: bool | str) -> StreamOutputMode:
+    """Normalize benchmark output relay mode.
+
+    ``True`` maps to ``auto`` so existing configs keep working while gaining
+    carriage-return progress support for tools such as tqdm.
+    """
+
+    if isinstance(value, bool):
+        return "auto" if value else "off"
+    text = str(value).strip().lower()
+    if text in STREAM_OUTPUT_ALIASES:
+        return STREAM_OUTPUT_ALIASES[text]
+    raise ValueError(
+        "stream_output must be one of: false, true, off, line, auto, summary"
+    )
+
+
+def _read_stream(
+    stream: Any,
+    stream_name: str,
+    chunks: list[str],
+    callback: OutputCallback | None,
+    mode: StreamOutputMode,
+) -> None:
+    if stream is None:
+        return
+    buffer: list[str] = []
+    last_progress = ""
+    last_progress_time = 0.0
+    pending_progress = ""
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+    def emit(text: str, *, progress: bool = False, force: bool = False) -> bool:
+        nonlocal last_progress, last_progress_time
+        if callback is None:
+            return False
+        display = _display_stream_text(text)
+        if not display:
+            return False
+        if progress:
+            now = time.monotonic()
+            if not force:
+                if display == last_progress:
+                    return False
+                if now - last_progress_time < PROGRESS_RELAY_MIN_INTERVAL_SEC:
+                    return False
+            last_progress = display
+            last_progress_time = now
+        try:
+            callback(stream_name, display)
+        except Exception:
+            pass
+        return True
+
+    try:
+        while True:
+            raw = stream.read(1)
+            if not raw:
+                break
+            char = decoder.decode(raw)
+            if not char:
+                continue
+            chunks.append(char)
+            if char == "\n":
+                line = "".join(buffer)
+                if pending_progress:
+                    if _display_stream_text(pending_progress) != _display_stream_text(line):
+                        emit(pending_progress, progress=True, force=True)
+                    pending_progress = ""
+                emit(line, force=True)
+                buffer.clear()
+            elif char == "\r":
+                if mode == "auto":
+                    text = "".join(buffer)
+                    if not emit(text, progress=True):
+                        pending_progress = text
+                    buffer.clear()
+                else:
+                    buffer.append(char)
+            else:
+                buffer.append(char)
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            chunks.append(tail)
+            buffer.append(tail)
+        if buffer:
+            if pending_progress:
+                if _display_stream_text(pending_progress) != _display_stream_text("".join(buffer)):
+                    emit(pending_progress, progress=True, force=True)
+                pending_progress = ""
+            emit("".join(buffer), force=True)
+        elif pending_progress:
+            emit(pending_progress, progress=True, force=True)
+    finally:
+        stream.close()
+
+
+def _display_stream_text(text: str) -> str:
+    """Return a terminal-friendly representation of captured stream text."""
+
+    return text.replace("\r", "").strip()
+
+
+def _emit_output_summary(
+    stdout: str,
+    stderr: str,
+    callback: OutputCallback,
+) -> None:
+    for stream_name, text in (("stdout", stdout), ("stderr", stderr)):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            continue
+        omitted = max(0, len(lines) - SUMMARY_TAIL_LINES)
+        if omitted:
+            callback(stream_name, f"... {omitted} earlier line(s) omitted ...")
+        for line in lines[-SUMMARY_TAIL_LINES:]:
+            callback(stream_name, line)
 
 
 def _write_blocked_result(
@@ -496,6 +724,8 @@ def _safe_env(workspace_dir: Path) -> dict[str, str]:
     if existing:
         python_paths.append(existing)
     env["PYTHONPATH"] = os.pathsep.join(python_paths)
+    env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     env["SIMPLE_AR_CODE_TASK"] = "1"
     return env
 

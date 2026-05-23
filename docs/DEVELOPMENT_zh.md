@@ -2,7 +2,7 @@
 
 [English version](DEVELOPMENT.md)
 
-本文面向想扩展 SimpleAutoResearch 的贡献者。命令细节见 [CLI 参考](CLI_REFERENCE_zh.md)，安装 walkthrough 见 [使用与配置](USAGE_zh.md)，工作流概念和产物见 [工作流与产物](WORKFLOWS_zh.md)，当前 code-task workspace 流程和 V2.2 替换点见 [Code Task Workspace 笔记](CODE_TASK_WORKSPACE_zh.md)。
+本文面向想扩展 SimpleAutoResearch 的贡献者。命令细节见 [CLI 参考](CLI_REFERENCE_zh.md)，安装 walkthrough 见 [使用与配置](USAGE_zh.md)，工作流概念和产物见 [工作流与产物](WORKFLOWS_zh.md)。
 
 ## 项目形态
 
@@ -51,7 +51,7 @@ SimpleAutoResearch 故意保持 file-first：
 Code-task workflow 拆分成小模块：
 
 - `workspace.py`：安全源码复制实现。
-- `workspace_modes.py`：workspace strategy dispatcher，支持 `copy`、`git_worktree`、实验性 `sparse_copy` 和未来模式。修改 workspace layout 或 creation behavior 前请阅读 [Code Task Workspace 笔记](CODE_TASK_WORKSPACE_zh.md)。
+- `workspace_modes.py`：workspace strategy dispatcher，支持 `copy`、`git_worktree`、实验性 `sparse_copy` 和未来模式。修改 workspace layout 或 creation behavior 时，应保持和 [工作流与产物](WORKFLOWS_zh.md) 中记录的 artifact 结构兼容。
 - `config.py`：code-task init 的 TOML config 和 CLI override 解析。
 - `environment.py`：环境观察和执行解释器策略。
 - `index.py`：代码清单和 Python AST summaries。
@@ -101,7 +101,6 @@ Metric comparison 应保持保守。未知数值指标可以记录 delta，但�
 - `docs/CLI_REFERENCE.md` / `docs/CLI_REFERENCE_zh.md`：命令组、参数表和配置 schema。
 - `docs/WORKFLOWS.md` / `docs/WORKFLOWS_zh.md`：每个 workflow/stage 做什么，以及产物结构。
 - `docs/DEVELOPMENT.md` / `docs/DEVELOPMENT_zh.md`：贡献者指南。
-- `docs/CODE_TASK_WORKSPACE.md` / `docs/CODE_TASK_WORKSPACE_zh.md`：workspace mode 和替换点说明。
 - `CHANGELOG.md`：按时间记录开发进展。
 - `MDfiles/`：私有或学习型规划笔记，通常不提交 GitHub。
 

@@ -73,6 +73,7 @@ class CodeTaskExecuteOptions:
     skip_validation: bool
     strict_validation: bool
     validation_max_file_bytes: int
+    stream_benchmark_output: str
     apply_proposed_edits: bool
     allow_large_edits: bool
     repair_rounds: int
@@ -185,6 +186,7 @@ def load_code_task_execute_options(
             or _config_int(safety.get("validation_max_file_bytes")),
             500_000,
         ),
+        stream_benchmark_output=_stream_output_mode(execute.get("stream_benchmark_output")),
         apply_proposed_edits=_resolve_bool(
             override=None,
             value=execute.get("apply_proposed_edits"),
@@ -389,6 +391,47 @@ def _resolve_bool(*, override: bool | None, value: object, default: bool) -> boo
     if isinstance(value, bool):
         return value
     return default
+
+
+def _stream_output_mode(value: object) -> str:
+    """Resolve benchmark output relay mode from TOML.
+
+    ``true`` remains supported and maps to ``auto`` so older configs gain
+    carriage-return progress support without changing their files.
+    """
+
+    if value is None:
+        return "off"
+    if isinstance(value, bool):
+        return "auto" if value else "off"
+    text = _config_string(value)
+    if text is None:
+        return "off"
+    aliases = {
+        "0": "off",
+        "1": "auto",
+        "false": "off",
+        "no": "off",
+        "off": "off",
+        "none": "off",
+        "true": "auto",
+        "yes": "auto",
+        "on": "auto",
+        "line": "line",
+        "lines": "line",
+        "auto": "auto",
+        "tqdm": "auto",
+        "progress": "auto",
+        "summary": "summary",
+        "tail": "summary",
+    }
+    normalized = aliases.get(text.lower())
+    if normalized is None:
+        raise CodeTaskConfigError(
+            "Unsupported [execute].stream_benchmark_output. Expected boolean "
+            "or one of: off, line, auto, summary."
+        )
+    return normalized
 
 
 def _resolve_string_list(

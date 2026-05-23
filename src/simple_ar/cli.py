@@ -1066,6 +1066,12 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
     if isinstance(patch, dict) and patch:
         print("Patch:")
         print(f"- status: {patch.get('status', 'unknown')}")
+        editor = patch.get("editor")
+        backend = patch.get("editor_backend")
+        if not backend and isinstance(editor, dict):
+            backend = editor.get("backend")
+        if backend:
+            print(f"- editor backend: {backend}")
         if patch.get("proposed_edits"):
             print(f"- proposed edits: {run_dir / str(patch.get('proposed_edits'))}")
         if patch.get("patch_diff"):
@@ -1695,6 +1701,7 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
         python_executable=python_executable,
         strict_validation=args.strict_validation or options.strict_validation,
         validation_max_file_bytes=validation_max_file_bytes,
+        stream_benchmark_output=options.stream_benchmark_output,
         apply_proposed_edits=args.apply_proposed_edits or options.apply_proposed_edits,
         allow_large_edits=args.allow_large_edits or options.allow_large_edits,
         repair_rounds=repair_rounds,

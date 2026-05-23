@@ -84,7 +84,7 @@ to_stage = "report"
 [llm]
 # true: use configured OpenAI-compatible LLM calls.
 # false: use deterministic fallbacks where possible. code_task_project requires
-# LLM mode for real patch planning/edit proposal.
+# LLM mode for real work planning, patch planning, and edit proposal.
 enabled = true
 
 # Optional model override. When omitted, SIMPLE_AR_MODEL / provider default is used.
@@ -244,7 +244,8 @@ uv run simple-ar run \
 | `--primary-metric NAME` | Primary metric for before/after verdicts. |
 | `--metric-direction NAME=DIRECTION` | Metric interpretation for embedded comparison. Repeatable. |
 
-The generic embedded path auto-approves the generated patch plan inside the
+The generic embedded path builds a repo map/context pack, work plan, and active
+attempt/batch state, then auto-approves the generated patch plan inside the
 pipeline workspace so `run --to-stage report` can finish. Use standalone
 `code-task` commands when you need manual review before each transition.
 
@@ -498,6 +499,14 @@ inspection-only items. If a generated work plan still starts with an
 analysis-only item, `code-task execute` selects the first later item that looks
 like a concrete code change before creating the active batch.
 
+For a serial dependency chain where the downstream items are not useful unless
+the previous source edits also land, `batch` may merge a small chain into one
+execution item. Inspect `batch_state.json.work_item.source_work_item_ids` to see
+which reviewed items were merged; the editable target list is the merged
+`target_files` union. This is deliberately capped and normally moves the batch
+to the `large` budget profile, so application still needs explicit
+`--allow-large-edits` after review.
+
 ### Manual Command Path
 
 Use the manual path when you want to run and inspect each primitive step
@@ -621,6 +630,7 @@ timeout_sec = 60
 repair_rounds = 1
 max_files = 8
 max_source_chars_per_file = 4000
+stream_benchmark_output = "off"
 apply_proposed_edits = false
 allow_large_edits = false
 
@@ -649,6 +659,16 @@ The edit budget is enforced after the model returns JSON. Over-budget proposals
 are written with warnings and rejected edits instead of being applied. If a
 proposal fits the large profile, rerun with `--allow-large-edits` only after
 reviewing the generated JSON and patch intent.
+
+`stream_benchmark_output` controls how baseline/patched benchmark stdout and
+stderr are relayed through `code-task execute` while still writing the complete
+captured streams to `code_task/run/<label>/stdout.txt` and `stderr.txt`.
+Supported values are `false`/`"off"`, `true`/`"auto"`, `"line"`, and
+`"summary"`. Use `"auto"` for most real projects: it keeps normal line output
+readable and treats carriage-return progress output from tools such as `tqdm`
+as progress updates instead of waiting for a final newline. Use `"line"` for
+plain newline logs, and `"summary"` when live progress is too noisy and you only
+want the tail after the benchmark finishes.
 
 Dry-run preview:
 
@@ -687,6 +707,14 @@ consistent state artifacts.
 Each edit is applied against the current in-memory text, and each `old` block
 must match exactly once. Invalid proposals stop before file writes; under
 `execute`, this appears as `patch_apply_failed`.
+
+The default editor backend is `controlled_patch`. `propose-edits` and
+`apply-edits` now use the editor backend interface internally while preserving
+the same CLI commands and JSON compatibility. The proposal, batch state,
+applied edit record, and manifest patch section record backend metadata for
+auditability. The reserved `external_agent` backend is not executable yet; it
+currently defines a permission policy and reviewable invocation-plan artifact
+for future Codex/Claude/OpenCode adapters.
 
 The proposal format is structured JSON, not a unified diff. `old` and `new`
 must contain exact file text. Do not include diff markers such as `+`, `-`,
@@ -748,6 +776,6 @@ For code-task runs, status prints environment, plan, patch, validation,
 benchmark, primary metric, metric directions, comparison deltas,
 failure-analysis, repair pointers, and the `code_task/summary.md` path when
 available.
-When available, it also prints the top-level objective verdict. Resolved
+When available, it also prints the patch editor backend and top-level objective verdict. Resolved
 failure/repair sections are omitted from the compact status output so older
 failed attempts do not obscure the current run state.

@@ -1271,7 +1271,9 @@ def _method_markdown(plan: dict[str, Any]) -> str:
             f"The experiment uses the `{plan.get('template')}` embedded code-task "
             "template. Instead of generating a script from scratch, the code stage "
             f"prepares an existing project (`{scope}`) inside an isolated workspace, "
-            "runs a baseline benchmark, asks the LLM for a reviewable patch plan, "
+            "runs a baseline benchmark, builds a local context pack, asks the LLM "
+            "for a batch-oriented work plan, creates an attempt/batch record for "
+            "the first executable work item, asks for a reviewable patch plan, "
             "auto-approves that plan only inside the pipeline workspace, asks the "
             "LLM for controlled old/new edits, and applies the patch after "
             "validation. The recorded benchmark command "
@@ -1357,11 +1359,26 @@ def _code_task_evidence_markdown(ctx: Context, plan: dict[str, Any]) -> str:
     benchmark = code_task.get("benchmark_command") if isinstance(code_task, dict) else ""
     lines = [
         "The code-task experiment is backed by nested artifacts under `06-code/code_task_run`, "
-        "which contains the isolated workspace, patch plan, controlled edit proposal, diff, "
-        "validation report, baseline run, and patched benchmark run.",
+        "which contains the isolated workspace, repo map, context pack, work plan, "
+        "attempt/batch state, patch plan, controlled edit proposal, diff, validation "
+        "report, baseline run, and patched benchmark run.",
         f"The benchmark command was `{benchmark or 'not specified'}`.",
         f"Changed workspace files: {changed_text}.",
     ]
+    work_plan = meta.get("work_plan")
+    batch = meta.get("batch")
+    if work_plan or isinstance(batch, dict):
+        batch_text = ""
+        if isinstance(batch, dict) and batch:
+            batch_text = (
+                f" The active batch was `{batch.get('id', 'unknown')}` for "
+                f"work item `{batch.get('work_item_id', 'unknown')}` with final "
+                f"state `{batch.get('state', 'unknown')}`."
+            )
+        lines.append(
+            f"The embedded code path used a batch-oriented work plan artifact "
+            f"`{work_plan or 'not recorded'}` before proposing edits.{batch_text}"
+        )
     risky_files = _review_sensitive_changed_files(changed_files)
     if risky_files:
         lines.append(
