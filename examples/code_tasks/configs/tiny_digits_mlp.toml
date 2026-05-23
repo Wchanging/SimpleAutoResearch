@@ -18,6 +18,47 @@ params = "resource"
 [environment]
 mode = "current"
 
+[execute]
+# Optional convenience settings for `simple-ar code-task execute --config`.
+to_step = "run"
+use_llm = true
+timeout_sec = 60
+repair_rounds = 1
+max_files = 8
+max_source_chars_per_file = 6000
+apply_proposed_edits = false
+allow_large_edits = false
+
+[models.code_task]
+# Leave these empty to use SIMPLE_AR_MODEL or --model for all steps.
+# planner = "gpt-5.1"
+# editor = "gpt-5.1"
+# repair = "gpt-5.1"
+# summarizer = "gpt-5.1"
+
+[budget]
+profile = "normal"
+max_batches = 3
+# cost_cap_usd is enforced only when the provider reports estimated cost.
+# cost_cap_usd = 2.0
+
+[budget.normal]
+max_files = 2
+max_edits = 4
+max_old_chars = 3000
+max_new_chars = 6000
+max_total_edit_chars = 12000
+max_proposal_chars = 24000
+
+[workspace]
+# copy is the safest default. git_worktree is available for repo-root projects.
+# sparse_copy is experimental; when used, add include/exclude patterns here.
+mode = "copy"
+# include = ["digits_mlp/**", "tests/**", "benchmark.py", "pyproject.toml"]
+# exclude = ["data/**", "models/**"]
+reuse_source_venv = false
+setup_hook = ""
+
 [safety]
 # Tests and benchmark files remain read-only patch evidence by default.
 max_file_bytes = 2000000

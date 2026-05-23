@@ -1,5 +1,7 @@
 # Development Guide
 
+[中文版本](DEVELOPMENT_zh.md)
+
 This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
 
 ## Project Shape
@@ -9,7 +11,8 @@ SimpleAutoResearch is intentionally file-first:
 - stages read and write concrete files;
 - workflow state is visible in run directories;
 - tests verify artifacts instead of hidden in-memory state;
-- risky code changes happen in copied workspaces.
+- risky code changes happen in isolated editable workspaces, usually a guarded
+  copy, optionally a detached git worktree, and experimentally a sparse copy.
 
 This keeps the project easier to learn, debug, and refactor.
 
@@ -60,14 +63,25 @@ standalone code-task modules rather than a separate coding implementation.
 
 The code-task workflow is split into small modules:
 
-- `workspace.py`: safe source copy.
+- `workspace.py`: safe source copy implementation.
+- `workspace_modes.py`: workspace strategy dispatcher for `copy`,
+  `git_worktree`, experimental `sparse_copy`, and future workspace modes.
+  Keep workspace layout and creation behavior compatible with the artifact
+  structure documented in [Workflows And Artifacts](WORKFLOWS.md).
 - `config.py`: TOML config and CLI override resolution for code-task init.
 - `environment.py`: environment observation and execution-interpreter policy.
 - `index.py`: codebase inventory and Python AST summaries.
-- `planning.py`: patch planning and HITL decisions.
-- `patching.py`: controlled old/new edit proposal and application.
+- `repo_map.py`: layered repo map derived from the index.
+- `locate.py`: deterministic ranking of editable targets and read-only
+  evidence from the repo map.
+- `context.py`: bounded context-pack generation from locate results and
+  workspace snippets.
+- `planning.py`: patch planning and HITL decisions. It uses the latest context
+  pack when available, with index-selection fallback.
+- `patching.py`: controlled old/new edit proposal and application. It uses
+  only editable context-pack snippets for model edit proposals.
 - `validation.py`: syntax and static safety checks.
-- `runner.py`: benchmark execution in the copied workspace.
+- `runner.py`: benchmark execution in the editable workspace.
 - `comparison.py`: baseline-vs-patched metric comparison.
 - `failure.py`: deterministic failure analysis.
 - `repair.py`: bounded repair proposal generation.
@@ -90,12 +104,13 @@ convention is common enough to be unsurprising.
 
 ### Code-Task Environment Policy
 
-The current V2.1 code-task runner has workspace isolation, command timeouts,
-captured stdout/stderr, a restricted environment map, and an explicit execution
-interpreter policy. It supports `current` and `external` modes, but it does not
-yet create or install into a separate Python environment. Unless a future
-feature explicitly changes this, do not install user project dependencies into
-SimpleAutoResearch's own `.venv` by default.
+The current V2.2 code-task runner has workspace isolation through `copy`,
+`git_worktree`, or experimental `sparse_copy`, command timeouts, optional
+streamed benchmark output, captured stdout/stderr, a restricted environment
+map, and an explicit execution interpreter policy. It supports `current` and
+`external` modes, but it does not yet create or install into a separate Python
+environment. Unless a future feature explicitly changes this, do not install
+user project dependencies into SimpleAutoResearch's own `.venv` by default.
 
 Environment support should evolve in layers:
 
@@ -133,7 +148,36 @@ Use the docs this way:
 
 ## Tests
 
-Run the full test suite:
+Use layered checks during development:
+
+```bash
+uv run simple-ar-checks --list
+uv run simple-ar-checks quick
+uv run simple-ar-checks code-task
+uv run simple-ar-checks pipeline
+uv run simple-ar-checks research
+uv run simple-ar-checks code-task-examples
+```
+
+The same runner can be called without the console script:
+
+```bash
+uv run python scripts/run_checks.py code-task
+```
+
+Recommended validation layers:
+
+| Change area | Suggested check |
+| --- | --- |
+| Docs only | `git diff --check` plus manual link review. |
+| Small parser, prompt, metric, or CLI changes | `uv run simple-ar-checks quick`. |
+| Code-task internals, workspace, repo-map, patching, validation, runner, repair | `uv run simple-ar-checks code-task`. |
+| Bundled code-task examples or benchmark examples | `uv run simple-ar-checks code-task-examples`. |
+| Pipeline, stages, experiment templates, run config | `uv run simple-ar-checks pipeline`. |
+| Literature, retrieval, evidence ledger, report generation, LLM adapter | `uv run simple-ar-checks research`. |
+| Before commit/push or broad refactors | `uv run simple-ar-checks all`. |
+
+Run the full test suite directly when needed:
 
 ```bash
 uv run python -m unittest discover -s tests

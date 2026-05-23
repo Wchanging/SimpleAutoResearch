@@ -1,0 +1,55 @@
+[code_task]
+code_root = "examples/code_tasks/medium_review_pipeline_project"
+task_file = "examples/code_tasks/tasks/improve_medium_review_pipeline.md"
+output_root = "runs"
+name = "medium-review-pipeline"
+
+[benchmark]
+command = "python main.py --config configs/experiment.json --show-progress"
+primary_metric = "accuracy"
+
+[benchmark.metric_directions]
+accuracy = "higher"
+macro_f1 = "higher"
+train_time_sec = "resource"
+inference_time_ms = "resource"
+model_size = "resource"
+feature_family_count = "resource"
+eval_examples = "ignore"
+
+[environment]
+mode = "current"
+
+[execute]
+to_step = "run"
+use_llm = true
+timeout_sec = 60
+repair_rounds = 1
+max_files = 10
+max_source_chars_per_file = 7000
+stream_benchmark_output = "auto"
+apply_proposed_edits = false
+allow_large_edits = false
+
+[models.code_task]
+# Leave empty to use SIMPLE_AR_MODEL or --model.
+
+[budget]
+profile = "large"
+max_batches = 4
+
+[budget.large]
+max_files = 4
+max_edits = 8
+max_old_chars = 7000
+max_new_chars = 12000
+max_total_edit_chars = 24000
+max_proposal_chars = 42000
+
+[workspace]
+mode = "copy"
+reuse_source_venv = false
+setup_hook = ""
+
+[safety]
+max_file_bytes = 2000000

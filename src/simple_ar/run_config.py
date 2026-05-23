@@ -109,7 +109,7 @@ def _set_bool(result: dict[str, object], key: str, value: object) -> None:
 
 
 def _contains_code_task_config(data: dict[str, Any]) -> bool:
-    for section in ("code_task", "benchmark", "metrics", "environment", "safety"):
+    for section in ("code_task", "benchmark", "metrics", "environment", "workspace", "safety"):
         value = data.get(section)
         if isinstance(value, dict) and value:
             return True

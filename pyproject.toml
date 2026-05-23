@@ -9,10 +9,12 @@ dependencies = [
     "openai>=2.34.0",
     "python-dotenv>=1.2.2",
     "scikit-learn>=1.8.0",
+    "tqdm>=4.67.3",
 ]
 
 [project.scripts]
 simple-ar = "simple_ar.cli:main"
+simple-ar-checks = "simple_ar.dev_checks:main"
 
 [build-system]
 requires = ["hatchling"]

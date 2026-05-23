@@ -1,6 +1,194 @@
 # Changelog
 
+[中文版本](CHANGELOG_zh.md)
+
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
+
+## 2026-05-23
+
+### Changed
+
+- Embedded 8-stage `code_task_project` runs now use the V2.2 code-task
+  execution shape during `06-code`: repo map/context pack, LLM work plan,
+  attempt/batch state, patch plan, controlled edit proposal, apply, and
+  validation. The final report evidence now points to work-plan and batch
+  artifacts in addition to summary, diff, and comparison outputs.
+- Added the medium review pipeline code-task example with a `main.py` entrypoint,
+  JSON config, multi-module feature/model/metric structure, visible progress
+  output, and a TOML task config that enables streamed benchmark output.
+- `code-task execute --config` can now relay benchmark stdout/stderr during
+  baseline and patched runs via `[execute].stream_benchmark_output = true`.
+- Benchmark streaming now supports string modes including `"auto"`, `"line"`,
+  and `"summary"`; `"auto"` is compatible with normal line logs and
+  carriage-return progress output from tools such as `tqdm`.
+- Documentation now describes the embedded research-to-code path as a
+  work-plan/batch-based flow instead of the older direct patch-plan flow.
+- Work-plan batch creation now merges small serial dependency chains, such as
+  feature producer -> model consumer -> config switch, into one bounded
+  execution batch. The reviewed items remain visible, while
+  `batch_state.json.work_item.source_work_item_ids` records the merged scope and
+  the larger batch still requires explicit large-edit review when applicable.
+- Applying a reviewed large proposal now records apply-time approval in
+  `applied_edits.json` and `manifest.json.patch.budget`, and executor benchmark
+  runs avoid duplicate validation history entries.
+- Public docs now keep README as a concise project entry point, move the full
+  code-task executor sequence into Usage, replace long PowerShell run-directory
+  selectors with `runs/<run-id>` placeholders, and surface `copy`,
+  `git_worktree`, and `sparse_copy` as first-class workspace strategies.
+
+## 2026-05-22
+
+### Changed
+
+- Code-task patched runs now record a separate `objective.status` from
+  baseline-vs-patched comparison, so a passing benchmark can still be reported
+  as `regressed`, `mixed`, or `inconclusive` when the measured goal was not met.
+- `code-task execute` now prefers the first executable implementation work item
+  instead of blindly batching an inspection-only first work-plan item.
+- Manual `code-task validate` and `code-task run` now synchronize latest
+  batch/attempt/work-plan state after a patch has been applied, matching the
+  executor path more closely.
+- Applying repair proposals now records the actual repair proposal path as the
+  latest applied proposal, and later passing patched benchmarks resolve stale
+  failure/repair sections in status and summaries.
+- Failure analysis now captures metric-floor and timing-budget signals such as
+  `accuracy below benchmark floor`, `macro_f1`, and `train_time_sec`.
+- Documentation now explains objective verdicts, implementation-batch selection,
+  repair application state, and how to handle benchmark pass with metric
+  regression.
+- `README.md` and `docs/USAGE.md` now present the TOML + `code-task execute`
+  route as the primary code-task workflow, with primitive commands moved later
+  as advanced debugging steps.
+- Added the V2.2 editor backend interface and migrated the default controlled
+  old/new patch path behind the `controlled_patch` backend while preserving the
+  existing CLI/API surface. Proposal, batch, apply, manifest, and status
+  artifacts now expose backend metadata.
+- Added the reserved `external_agent` editor boundary for future
+  Codex/Claude/OpenCode adapters. It now has provider normalization,
+  conservative permissions, blocked secret/home read patterns, and a reviewable
+  invocation-plan artifact, but it remains non-executable by default.
+
+## 2026-05-21
+
+### Added
+
+- Added Day 17-20 V2.2 batch-level edit budget enforcement for code-task
+  proposals, including normal/large/absolute profiles and explicit
+  `--allow-large-edits` review gates.
+- Added per-batch artifacts under
+  `code_task/attempts/attempt-NNN/batches/batch-NNN/`, including batch context,
+  proposal warnings, usage summaries, validation links, benchmark links, and
+  repair proposal links.
+- Added `code-task execute --config` support for `[execute]`,
+  `[models.code_task]`, and `[budget]` settings, so model routing and budget
+  caps can live in TOML instead of long CLI commands.
+
+### Changed
+
+- `code-task execute` now routes work-plan/patch-plan, edit proposal, and repair
+  steps through planner/editor/repair model slots when configured.
+- Active work-item batches now constrain LLM edit proposals to the batch target
+  files; protected tests and benchmark files still remain read-only evidence.
+- Validation, benchmark, and repair steps now update the active batch state so
+  interrupted or failed attempts are easier to inspect and resume manually.
+- Large or over-budget model outputs are normalized into warnings/rejected edits
+  instead of being applied implicitly.
+- Documentation now shows the correct reviewed executor sequence with
+  `execute --to-step propose-edits`, and adds troubleshooting notes for missing
+  proposals, benchmark regressions, repair proposals, exact-text patch failures,
+  large-edit approval, and local `uv` cache permission issues.
+- Repair and edit proposal handling now rejects accidental unified-diff
+  fragments inside structured `old`/`new` JSON fields, and `apply-edits` reports
+  patch validation failures without a Python traceback.
+
+## 2026-05-20
+
+### Added
+
+- Added Day 8 V2.2 layered repo-map artifacts for code-task runs:
+  `code_task/meta/repo_map.json` and `code_task/meta/repo_map_summary.md`.
+- Added project, directory, file, symbol, entrypoint, test, benchmark, config,
+  and prompt-budget layers to the repo-map schema while preserving
+  `codebase_index.json` for compatibility.
+- Added `simple-ar code-task map` to rebuild repo-map artifacts from the
+  current workspace as a standalone step.
+- Added `simple-ar code-task locate` to rank likely editable targets and
+  protected read-only evidence from the repo map.
+- Added `simple-ar code-task context` to build bounded prompt context packs
+  under `code_task/context_packs/context-NNN/`.
+- Added Day 15-16 V2.2 work-plan artifacts:
+  `code_task/work_plan.json` and `code_task/work_plan.md`, plus
+  `simple-ar code-task work-plan`.
+- Added initial attempt/batch state directories under
+  `code_task/attempts/attempt-NNN/batches/batch-NNN/`, plus
+  `simple-ar code-task batch --work-item W1`.
+- Added `simple-ar-checks` and `scripts/run_checks.py` for layered developer
+  validation groups such as `quick`, `code-task`, `pipeline`, `research`, and
+  `all`.
+
+### Changed
+
+- Code-task initialization now writes both the legacy codebase index and the
+  new repo map, and patch application rebuilds both artifacts after edits.
+- Code-task docs now describe the map -> locate -> context path before
+  planning/editing for larger projects.
+- Patch planning now uses the latest context pack when available, while
+  controlled edit proposals use only editable context-pack snippets and keep
+  protected files as read-only evidence.
+- Code-task planning now has a higher-level work-plan layer for splitting
+  broad tasks into small batches before asking for patch proposals.
+- `code-task execute` now includes the work-plan and batch setup steps in its
+  normal path, using the configured LLM unless `--no-llm` is set.
+- Development docs now recommend targeted check groups during iteration and
+  reserving full test discovery for commits, pushes, or broad refactors.
+- V2.2 planning and workspace docs now record the Day 14 real-LLM smoke finding:
+  ordinary JSON patch proposals can trigger very long completions, so the next
+  editor-backend work should add bounded proposal contracts, context-request
+  artifacts, multi-round attempts, and future external coding-agent routing.
+
+## 2026-05-19
+
+### Added
+
+- Added V2.2 code-task workspace modes: `copy` remains the default, and
+  `git_worktree` can create a detached worktree at `code_task/workspace` for
+  repo-root git projects.
+- Added experimental `sparse_copy` workspace mode with include/exclude patterns,
+  built-in exclusions for data/model/cache/secret-like paths, and manifest
+  pattern/risk recording.
+- Added `[workspace]` config support plus CLI flags for standalone and embedded
+  code-task runs: workspace mode, source virtualenv reuse, and recorded setup
+  hooks.
+- Added a structured `workspace` section to code-task `manifest.json` while
+  preserving the old `copy` section for compatibility.
+
+### Changed
+
+- Code-task initialization now goes through a workspace dispatcher instead of
+  calling the copy routine directly.
+- `code-task init` now reports workspace and task-file setup problems with
+  user-facing next-step checklists instead of raw Python tracebacks.
+- Codebase indexing now skips `.git`, `.env`, virtualenv, and cache metadata so
+  worktree mode does not leak git metadata or secret-like files into model
+  context.
+- Default edit scope now also protects `.env` and secret/credential-looking
+  paths from automated patch proposals.
+
+## 2026-05-18
+
+### Added
+
+- Added research-first task generation for embedded `code_task_project` runs:
+  when no task file is provided, `05-design` writes `generated_code_task.md`
+  from the prior research artifacts and a compact codebase summary, then
+  `06-code` uses it as the normal code-task prompt.
+
+### Changed
+
+- Made `[code_task].task_file` optional for 8-stage embedded code-task runs
+  while keeping it required for standalone `simple-ar code-task init`.
+- Updated README, usage, workflow, and CLI reference docs to distinguish
+  explicit user-authored task files from generated research-first task files.
 
 ## 2026-05-17
 

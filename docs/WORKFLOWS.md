@@ -1,5 +1,7 @@
 # Workflows And Artifacts
 
+[中文版本](WORKFLOWS_zh.md)
+
 This document explains what SimpleAutoResearch is doing internally: workflow presets, pipeline stages, stage outputs, and run artifact layout. For concrete commands, see [CLI Reference](CLI_REFERENCE.md); for setup and walkthroughs, see [Usage And Configuration](USAGE.md).
 
 ## Workflow Presets
@@ -29,7 +31,8 @@ Use this when you already have code and want a focused modification, optimizatio
 Conceptual flow:
 
 ```text
-init workspace -> probe environment -> index code -> run baseline
+init workspace -> index code -> map repo -> probe environment
+-> run baseline -> build context pack -> work-plan -> create batch
 -> plan patch -> approve -> propose edits -> apply edits
 -> validate -> run patched benchmark -> compare results
 -> analyze failure -> repair proposal
@@ -37,19 +40,45 @@ init workspace -> probe environment -> index code -> run baseline
 
 Key boundaries:
 
-- The source project is copied into `code_task/workspace`; the original code is never modified.
+- The source project is prepared under `code_task/workspace`; default `copy`
+  mode creates a guarded physical copy, while `git_worktree` creates a detached
+  worktree for repo-root git projects. Experimental `sparse_copy` copies only
+  configured include patterns and always excludes data/model/cache/secret-like
+  paths. The original code is never modified.
 - Patch application is gated by an explicit human approval step.
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
+- The default editor backend is `controlled_patch`; the backend interface is
+  now explicit so future external agents can plug in behind the same safety and
+  review gates.
 - Multiple ordered edits may target one file, but every `old` block must remain
   uniquely matchable; invalid proposals stop before workspace files are written.
 - `code-task execute` can run the next safe steps, but it stops at plan approval
   and proposal review unless the user explicitly continues.
-- Current execution uses workspace isolation plus an explicit interpreter policy. It supports `current` and `external`; managed environment creation is planned later.
+- Work-plan items are meant to be executable implementation batches. The
+  executor skips obvious analysis-only items when choosing the first active
+  batch, so an LLM-generated "inspect the project" item does not constrain the
+  edit stage by accident.
+- When several reviewed work-plan items form a small serial dependency chain
+  that must land together, such as feature producer, model consumer, and config
+  switch, the active batch may merge them. The separate plan remains visible,
+  while `batch_state.json.work_item.source_work_item_ids` and `target_files`
+  show the bounded execution scope used by the edit proposal.
+- A benchmark-passing repair is not automatically a task success. The
+  before/after verdict comes from `code_task/run/comparison.json`; if patched
+  metrics remain below baseline, the system has recovered execution but has not
+  achieved an improvement objective yet.
+- Current execution uses workspace isolation plus an explicit interpreter
+  policy. It supports `current` and `external`; managed environment creation is
+  planned later. `workspace.reuse_source_venv` can point a worktree/copy/sparse
+  run at an existing source `.venv` Python without installing dependencies.
 
 Bundled examples:
 
 - `toy_spam_project`: tiny rule-based classifier, useful for patch and failure-analysis smoke tests.
 - `tiny_digits_mlp_project`: lightweight NumPy MLP over scikit-learn's bundled digits dataset, useful for realistic local ML benchmark experiments without GPU or downloads.
+- `medium_review_pipeline_project`: multi-module review classifier with a `main.py`
+  entrypoint, JSON config, visible progress output, and a task that naturally
+  touches feature extraction, model scoring, and configuration.
 
 ### 3. Research With Experiment
 
@@ -65,10 +94,13 @@ plan -> search -> read -> synthesize -> design experiment
 Current status:
 
 - `06-code` normally generates a whitelisted template experiment.
-- `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, `--task-file`, and `--benchmark-command` flags.
+- `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, optional `--task-file`, and `--benchmark-command` flags. If no task file is supplied, `05-design` generates `generated_code_task.md` from the earlier research artifacts and a compact codebase summary.
 - `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
 - `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
-- The embedded path is end-to-end: it auto-approves the patch plan inside the copied workspace. The standalone code-task workflow remains the safer human-review path.
+- The embedded path is end-to-end: it builds the same repo-map/context-pack,
+  work-plan, and attempt/batch evidence as standalone code tasks, then
+  auto-approves the patch plan inside the prepared workspace. The standalone
+  code-task workflow remains the safer human-review path.
 - Report generation is guarded: LLM drafts are accepted only when citations, metric visibility, fixture disclosure, and toy-demo boundaries pass rule-based checks.
 
 ## Default 8-Stage Pipeline
@@ -146,14 +178,20 @@ Root-level files:
 - `source_plan.json`: source plan describing which artifacts each stage should consult.
 - `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
+- `05-design/generated_code_task.md`: generated only when an embedded `code_task_project` run omits a task file.
+- `05-design/generated_code_task_meta.json`: provenance for that generated task file.
 - `06-code/code_task_experiment.json`: present for embedded code-task templates such as `code_task_project` and `llm_code_task_toy_spam`.
 
 Nested embedded code-task files:
 
 - `06-code/code_task_run/code_task/summary.md`: consolidated nested code-task outcome.
+- `06-code/code_task_run/code_task/meta/repo_map.json`: layered repo map for the prepared workspace.
+- `06-code/code_task_run/code_task/context_packs/context-001/`: prompt-ready context pack used by planning/editing.
+- `06-code/code_task_run/code_task/work_plan.md`: batch-oriented implementation plan.
+- `06-code/code_task_run/code_task/attempts/attempt-001/batches/batch-001/batch_state.json`: active embedded batch state.
 - `06-code/code_task_run/code_task/patch_plan.md`: LLM patch plan auto-approved by the pipeline.
 - `06-code/code_task_run/code_task/meta/proposed_edits.json`: controlled old/new edit proposal.
-- `06-code/code_task_run/code_task/patch.diff`: applied patch inside the copied workspace.
+- `06-code/code_task_run/code_task/patch.diff`: applied patch inside the prepared workspace.
 - `06-code/code_task_run/code_task/run/baseline/`: pre-patch benchmark artifacts.
 - `06-code/code_task_run/code_task/run/patched/`: patched benchmark artifacts.
 - `06-code/code_task_run/code_task/run/comparison.json`: before/after comparison when both runs exist.
@@ -175,12 +213,17 @@ runs/<run-id>/
   code_task/
     task.md
     summary.md
+    work_plan.md
     patch_plan.md
     patch.diff
     workspace/
     meta/
       environment_report.json
       codebase_index.json
+      repo_map.json
+      repo_map_summary.md
+      locate_results.json
+      locate_results.md
       hitl_decisions.jsonl
       proposed_edits.json
       applied_edits.json
@@ -188,6 +231,20 @@ runs/<run-id>/
       failure_analysis.md        # validation-only failure diagnosis
       llm_usage.jsonl
       llm_usage_summary.json
+    context_packs/
+      context-001/
+        context_pack.json
+        prompt_context.md
+        selected_snippets.jsonl
+    attempts/
+      attempt-001/
+        attempt_state.json
+        batches/
+          batch-001/
+            batch_state.json
+            batch_context.json
+            proposed_edits.json
+            proposal_warnings.json
     run/
       comparison.json
       baseline/
@@ -209,7 +266,9 @@ runs/<run-id>/
 Important directories:
 
 - `workspace/`: editable copy of the source project.
-- `meta/`: environment reports, indexes, decisions, proposed edits, applied edit summaries, validation reports, validation-only failure analysis, and LLM usage.
+- `meta/`: environment reports, indexes, locate results, decisions, proposed edits, applied edit summaries, validation reports, validation-only failure analysis, and LLM usage.
+- `context_packs/`: bounded prompt context packs derived from locate results and workspace snippets.
+- `attempts/`: durable work-plan attempt and batch state for bounded implementation or repair loops.
 - `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, before/after comparison, and benchmark failure analysis.
 - `repairs/`: bounded repair proposals grouped by attempt. Each proposal records the source analysis path and selected repair context.
 
@@ -220,18 +279,36 @@ Important user-facing code-task files:
   be indexed as read-only evidence, but `propose-edits`, `repair`, and
   `apply-edits` should not modify them.
 - `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
+- `meta/repo_map.json`: layered project/directory/file/symbol/entrypoint/test/benchmark/config map derived from `codebase_index.json`.
+- `meta/repo_map_summary.md`: compact human-readable repo-map summary and prompt-budget note.
+- `meta/locate_results.json`: deterministic ranking of likely editable targets and protected read-only evidence.
+- `meta/locate_results.md`: human-readable locate summary for review before building prompt context.
+- `context_packs/context-NNN/context_pack.json`: selected files, budgets, source references, and omitted-file accounting.
+- `context_packs/context-NNN/prompt_context.md`: prompt-ready Markdown grouped into editable targets and read-only evidence.
+- `context_packs/context-NNN/selected_snippets.jsonl`: clipped source snippets, one selected file per row.
+- `work_plan.md`: batch-oriented implementation plan above the narrower patch plan.
+- `attempts/attempt-NNN/attempt_state.json`: attempt lifecycle state derived from work-plan and batch outcomes.
+- `attempts/attempt-NNN/batches/batch-NNN/batch_state.json`: active work item, allowed target files, batch artifacts, and final batch state.
 - `run/baseline/execution_report.json`: pre-patch benchmark result.
 - `run/patched/execution_report.json`: post-patch benchmark result.
 - `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist. Explicit `primary_metric` and `metric_directions` from the manifest are used before heuristic metric-name rules.
+- `manifest.json.objective`: current task-objective verdict derived from
+  comparison when patched benchmark artifacts exist. This separates "the code
+  ran" from "the measured goal improved."
 - `patch_plan.md`: human-reviewable plan before edits, including recorded environment, validation, and baseline context when available.
+- When a latest context pack exists, `patch_plan.md` records its path and uses
+  its selected snippets instead of the older index-only file selector.
 - `patch.diff`: applied patch for review.
-- `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch.
+- `meta/proposed_edits.json`: reviewable edit proposal plus editor backend metadata.
+- `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch, including the proposal path and editor backend actually applied. For repair proposals this is the `code_task/repairs/repair-NNN/proposed_edits.json` path.
 
 ## Code-Task Environment Strategy
 
 Environment handling is intentionally separated from source-code isolation:
 
-- Source-code isolation means user code is copied to `code_task/workspace` before any patch is applied.
+- Source-code isolation means user code is prepared under `code_task/workspace`
+  before any patch is applied. In default `copy` mode that is a physical copy;
+  in `git_worktree` mode it is a detached worktree.
 - Execution isolation means benchmarks run with a selected Python/runtime environment.
 
 Today, code-task has the first kind of isolation and records environment signals

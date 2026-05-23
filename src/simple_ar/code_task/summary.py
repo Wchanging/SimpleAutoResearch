@@ -77,6 +77,7 @@ def _render_summary(
 ) -> str:
     changed_files = _changed_files(manifest)
     repair = manifest.get("repair", {})
+    active_repair = _active_repair(repair)
     lines = [
         "# Code Task Summary",
         "",
@@ -134,7 +135,7 @@ def _render_summary(
                 _clip(_strip_heading(failure), max_chars=1800),
             ]
         )
-    if isinstance(repair, dict) and repair:
+    if active_repair:
         lines.extend(
             [
                 "",
@@ -589,6 +590,8 @@ def _read_run_json(run_dir: Path, label: str, filename: str) -> dict[str, Any]:
 def _read_latest_failure(run_dir: Path, manifest: dict[str, Any]) -> str:
     failure = manifest.get("failure_analysis", {})
     if isinstance(failure, dict):
+        if failure.get("status") in {"no_failure", "resolved"}:
+            return ""
         path = failure.get("analysis")
         if path:
             root = run_dir.parent.parent
@@ -598,6 +601,12 @@ def _read_latest_failure(run_dir: Path, manifest: dict[str, Any]) -> str:
         if text:
             return text
     return _read_optional(run_dir / "failure_analysis.md")
+
+
+def _active_repair(repair: object) -> bool:
+    if not isinstance(repair, dict) or not repair:
+        return False
+    return repair.get("status") not in {"benchmark_passed", "resolved"}
 
 
 def _clip(text: str, *, max_chars: int) -> str:

@@ -10,9 +10,14 @@ from simple_ar.artifacts import read_json, read_text
 from simple_ar.code_task import (
     analyze_code_task_failure,
     apply_patch_edits,
+    build_code_task_context_pack,
+    build_code_task_repo_map,
+    create_code_task_batch,
     execute_code_task,
+    generate_code_task_work_plan,
     generate_patch_plan,
     initialize_code_task,
+    locate_code_task_context,
     probe_code_task_environment,
     propose_patch_edits,
     propose_repair_edits,
@@ -20,10 +25,13 @@ from simple_ar.code_task import (
     run_code_task_baseline,
     run_code_task_benchmark,
     validate_code_task,
+    PatchValidationError,
+    WorkspaceModeError,
 )
 from simple_ar.code_task.config import (
     CodeTaskConfigError,
     load_code_task_init_options,
+    load_code_task_execute_options,
     parse_metric_direction_arg,
 )
 from simple_ar.pipeline import Context, PipelineRunner
@@ -105,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     code_task_init = code_task_subparsers.add_parser(
         "init",
-        help="Copy a codebase into a code-task workspace and build a code index.",
+        help="Prepare a code-task workspace and build a code index.",
     )
     code_task_init.add_argument(
         "--config",
@@ -137,18 +145,144 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_code_task_env_args(code_task_init)
+    _add_code_task_workspace_args(code_task_init)
     code_task_init.add_argument(
         "--max-file-bytes",
         type=int,
         default=None,
-        help="Maximum file size copied into the workspace. Use 0 to disable.",
+        help="Maximum file size copied in copy/sparse modes. Use 0 to disable.",
     )
     code_task_probe = code_task_subparsers.add_parser(
         "probe",
-        help="Inspect the copied workspace runtime and project environment.",
+        help="Inspect the workspace runtime and project environment.",
     )
     code_task_probe.add_argument("run_dir")
     _add_code_task_env_args(code_task_probe)
+
+    code_task_map = code_task_subparsers.add_parser(
+        "map",
+        help="Build or refresh layered repo-map artifacts for a code-task run.",
+    )
+    code_task_map.add_argument("run_dir")
+    code_task_map.add_argument(
+        "--no-refresh-index",
+        action="store_true",
+        help="Reuse the existing codebase_index.json instead of scanning the current workspace.",
+    )
+    code_task_map.add_argument(
+        "--show-summary",
+        action="store_true",
+        help="Print repo_map_summary.md after writing it.",
+    )
+
+    code_task_locate = code_task_subparsers.add_parser(
+        "locate",
+        help="Rank likely editable files and read-only evidence from the repo map.",
+    )
+    code_task_locate.add_argument("run_dir")
+    code_task_locate.add_argument(
+        "--query",
+        default=None,
+        help="Optional locate query. Defaults to code_task/task.md.",
+    )
+    code_task_locate.add_argument(
+        "--top-k",
+        type=int,
+        default=8,
+        help="Maximum candidates kept in each editable/evidence group.",
+    )
+    code_task_locate.add_argument(
+        "--refresh-map",
+        action="store_true",
+        help="Rebuild codebase_index.json and repo_map.json before locating files.",
+    )
+    code_task_locate.add_argument(
+        "--no-read-only",
+        action="store_true",
+        help="Omit protected read-only evidence files from locate results.",
+    )
+    code_task_locate.add_argument(
+        "--show-summary",
+        action="store_true",
+        help="Print locate_results.md after writing it.",
+    )
+
+    code_task_context = code_task_subparsers.add_parser(
+        "context",
+        help="Build a bounded prompt context pack from locate results.",
+    )
+    code_task_context.add_argument("run_dir")
+    code_task_context.add_argument(
+        "--query",
+        default=None,
+        help="Optional locate query. Defaults to code_task/task.md.",
+    )
+    code_task_context.add_argument(
+        "--top-k",
+        type=int,
+        default=8,
+        help="Candidate budget passed to locate for each candidate group.",
+    )
+    code_task_context.add_argument(
+        "--max-files",
+        type=int,
+        default=8,
+        help="Maximum snippets included in the context pack.",
+    )
+    code_task_context.add_argument(
+        "--max-source-chars-per-file",
+        type=int,
+        default=4000,
+        help="Per-file source snippet character budget.",
+    )
+    code_task_context.add_argument(
+        "--max-total-chars",
+        type=int,
+        default=20000,
+        help="Total source snippet character budget.",
+    )
+    code_task_context.add_argument(
+        "--refresh-map",
+        action="store_true",
+        help="Rebuild codebase_index.json and repo_map.json before locating files.",
+    )
+    code_task_context.add_argument(
+        "--show-prompt",
+        action="store_true",
+        help="Print prompt_context.md after writing it.",
+    )
+
+    code_task_work_plan = code_task_subparsers.add_parser(
+        "work-plan",
+        help="Generate a batch-oriented implementation work plan for a code-task run.",
+    )
+    code_task_work_plan.add_argument("run_dir")
+    code_task_work_plan.add_argument("--model", default=None)
+    code_task_work_plan.add_argument("--no-llm", action="store_true")
+    code_task_work_plan.add_argument("--force", action="store_true")
+    code_task_work_plan.add_argument("--max-files", type=int, default=8)
+    code_task_work_plan.add_argument("--max-source-chars-per-file", type=int, default=2500)
+
+    code_task_batch = code_task_subparsers.add_parser(
+        "batch",
+        help="Create an attempt/batch state directory for one work-plan item.",
+    )
+    code_task_batch.add_argument("run_dir")
+    code_task_batch.add_argument(
+        "--work-item",
+        required=True,
+        help="Work-plan item id to execute, for example W1.",
+    )
+    code_task_batch.add_argument(
+        "--attempt-id",
+        default=None,
+        help="Optional attempt id such as attempt-001. Defaults to the active attempt.",
+    )
+    code_task_batch.add_argument(
+        "--force",
+        action="store_true",
+        help="Create a new batch even if the active attempt already has one for this item.",
+    )
 
     code_task_plan = code_task_subparsers.add_parser(
         "plan",
@@ -184,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
     code_task_propose.add_argument("--force", action="store_true")
     code_task_propose.add_argument("--max-files", type=int, default=8)
     code_task_propose.add_argument("--max-source-chars-per-file", type=int, default=4000)
+    code_task_propose.add_argument(
+        "--allow-large-edits",
+        action="store_true",
+        help="Accept proposals that exceed the normal budget but fit the large budget.",
+    )
 
     code_task_apply = code_task_subparsers.add_parser(
         "apply-edits",
@@ -195,6 +334,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-unapproved-plan",
         action="store_true",
         help="Bypass the human approval gate. Intended only for local experiments/tests.",
+    )
+    code_task_apply.add_argument(
+        "--allow-large-edits",
+        action="store_true",
+        help="Apply a reviewed proposal that requires large-edit approval.",
     )
 
     code_task_validate = code_task_subparsers.add_parser(
@@ -247,10 +391,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     code_task_execute.add_argument("run_dir")
     code_task_execute.add_argument(
+        "--config",
+        default=None,
+        help="Optional TOML config for execute model, budget, and runtime settings.",
+    )
+    code_task_execute.add_argument(
         "--to-step",
         choices=(
             "probe",
             "baseline",
+            "work-plan",
+            "batch",
             "plan",
             "propose-edits",
             "apply-edits",
@@ -259,7 +410,7 @@ def build_parser() -> argparse.ArgumentParser:
             "analyze-failure",
             "repair",
         ),
-        default="run",
+        default=None,
         help="Last step execute may attempt.",
     )
     code_task_execute.add_argument("--dry-run", action="store_true")
@@ -273,6 +424,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply-proposed-edits",
         action="store_true",
         help="Apply reviewed proposed_edits.json after plan approval.",
+    )
+    code_task_execute.add_argument(
+        "--allow-large-edits",
+        action="store_true",
+        help="Allow execute to accept/apply proposals that exceed the normal edit budget.",
     )
     code_task_execute.add_argument("--repair-rounds", type=int, default=0)
     code_task_execute.add_argument("--max-files", type=int, default=8)
@@ -318,6 +474,55 @@ def _add_code_task_env_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_code_task_workspace_args(parser: argparse.ArgumentParser) -> None:
+    """Add shared code-task workspace creation arguments."""
+    parser.add_argument(
+        "--workspace-mode",
+        choices=("copy", "git_worktree", "sparse_copy"),
+        default=None,
+        help=(
+            "Workspace strategy. `copy` copies a guarded source tree; "
+            "`git_worktree` creates a detached git worktree for repo-root projects; "
+            "`sparse_copy` is experimental and copies selected patterns."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-include",
+        action="append",
+        default=None,
+        help=(
+            "POSIX glob copied by --workspace-mode sparse_copy. Repeatable. "
+            "Prefer TOML [workspace].include for multiple patterns."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-exclude",
+        action="append",
+        default=None,
+        help=(
+            "Additional POSIX glob skipped by --workspace-mode sparse_copy. "
+            "Repeatable."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-reuse-source-venv",
+        action="store_true",
+        default=None,
+        help=(
+            "When a source .venv is detected, record and use its Python "
+            "interpreter as the initial external execution policy."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-setup-hook",
+        default=None,
+        help=(
+            "Record a project setup command for future managed environments. "
+            "The hook is not executed during init."
+        ),
+    )
+
+
 def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
     """Add optional 8-stage code-task experiment configuration arguments."""
     parser.add_argument(
@@ -329,7 +534,7 @@ def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
         "--code-root",
         dest="code_task_code_root",
         default=None,
-        help="Source project copied by --experiment-template code_task_project.",
+        help="Source project prepared by --experiment-template code_task_project.",
     )
     parser.add_argument(
         "--task-file",
@@ -352,7 +557,24 @@ def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
         "--code-task-max-file-bytes",
         type=int,
         default=None,
-        help="Maximum source file size copied into the embedded code-task workspace.",
+        help="Maximum source file size copied in embedded copy/sparse modes.",
+    )
+    parser.add_argument(
+        "--code-task-workspace-mode",
+        choices=("copy", "git_worktree", "sparse_copy"),
+        default=None,
+        help="Embedded code-task workspace strategy.",
+    )
+    parser.add_argument(
+        "--code-task-workspace-reuse-source-venv",
+        action="store_true",
+        default=None,
+        help="Use a detected source .venv Python for the embedded code task.",
+    )
+    parser.add_argument(
+        "--code-task-workspace-setup-hook",
+        default=None,
+        help="Record a setup command for the embedded code-task workspace.",
     )
     parser.add_argument(
         "--code-task-env-mode",
@@ -451,6 +673,21 @@ def main(argv: Sequence[str] | None = None) -> None:
             return
         if args.code_task_command == "probe":
             _print_code_task_probe(args)
+            return
+        if args.code_task_command == "map":
+            _print_code_task_map(args)
+            return
+        if args.code_task_command == "locate":
+            _print_code_task_locate(args)
+            return
+        if args.code_task_command == "context":
+            _print_code_task_context(args)
+            return
+        if args.code_task_command == "work-plan":
+            _print_code_task_work_plan(args)
+            return
+        if args.code_task_command == "batch":
+            _print_code_task_batch(args)
             return
         if args.code_task_command == "plan":
             _print_code_task_plan(args)
@@ -644,6 +881,9 @@ def _pipeline_code_task_config(args: argparse.Namespace) -> dict[str, object]:
         "code_task_benchmark_command": "code_task_benchmark_command",
         "code_task_name": "code_task_name",
         "code_task_max_file_bytes": "code_task_max_file_bytes",
+        "code_task_workspace_mode": "code_task_workspace_mode",
+        "code_task_workspace_reuse_source_venv": "code_task_workspace_reuse_source_venv",
+        "code_task_workspace_setup_hook": "code_task_workspace_setup_hook",
         "code_task_env_mode": "code_task_env_mode",
         "code_task_python_executable": "code_task_python_executable",
         "code_task_primary_metric": "code_task_primary_metric",
@@ -739,14 +979,33 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
     print(f"Run: {run_dir}")
     print(f"Workflow: {manifest.get('workflow', 'code_task')}")
     print(f"Status: {manifest.get('status', 'unknown')}")
+    objective = manifest.get("objective", {})
+    if isinstance(objective, dict) and objective:
+        print(f"Objective: {objective.get('status', 'unknown')}")
 
     layout = manifest.get("layout", {})
     if isinstance(layout, dict):
         print("Layout:")
-        for key in ("summary", "task", "workspace", "meta", "codebase_index"):
+        for key in (
+            "summary",
+            "task",
+            "workspace",
+            "meta",
+            "codebase_index",
+            "work_plan",
+            "attempts",
+        ):
             value = layout.get(key)
             if value:
                 print(f"- {key}: {run_dir / str(value)}")
+
+    workspace = manifest.get("workspace", {})
+    if isinstance(workspace, dict) and workspace:
+        print("Workspace:")
+        print(f"- mode: {workspace.get('mode', 'copy')}")
+        cleanup = workspace.get("cleanup_hint")
+        if cleanup:
+            print(f"- cleanup: {cleanup}")
 
     codebase = manifest.get("codebase", {})
     if isinstance(codebase, dict):
@@ -762,6 +1021,24 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
         print(f"- mode: {plan.get('mode', 'unknown')}")
         if plan.get("patch_plan"):
             print(f"- patch plan: {run_dir / str(plan.get('patch_plan'))}")
+
+    work_plan = manifest.get("work_plan", {})
+    if isinstance(work_plan, dict) and work_plan:
+        print("Work Plan:")
+        print(f"- status: {work_plan.get('status', 'unknown')}")
+        print(f"- mode: {work_plan.get('mode', 'unknown')}")
+        print(f"- items: {work_plan.get('item_count', 0)}")
+        if work_plan.get("path"):
+            print(f"- json: {run_dir / str(work_plan.get('path'))}")
+        if work_plan.get("markdown"):
+            print(f"- markdown: {run_dir / str(work_plan.get('markdown'))}")
+
+    attempts = manifest.get("attempts", {})
+    if isinstance(attempts, dict) and attempts:
+        print("Attempts:")
+        print(f"- active: {attempts.get('active', '')}")
+        if attempts.get("latest_batch"):
+            print(f"- latest batch: {run_dir / str(attempts.get('latest_batch'))}")
 
     environment = manifest.get("environment", {})
     if isinstance(environment, dict) and environment:
@@ -789,6 +1066,12 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
     if isinstance(patch, dict) and patch:
         print("Patch:")
         print(f"- status: {patch.get('status', 'unknown')}")
+        editor = patch.get("editor")
+        backend = patch.get("editor_backend")
+        if not backend and isinstance(editor, dict):
+            backend = editor.get("backend")
+        if backend:
+            print(f"- editor backend: {backend}")
         if patch.get("proposed_edits"):
             print(f"- proposed edits: {run_dir / str(patch.get('proposed_edits'))}")
         if patch.get("patch_diff"):
@@ -847,20 +1130,22 @@ def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:
 
     failure = manifest.get("failure_analysis", {})
     if isinstance(failure, dict) and failure:
-        print("Failure Analysis:")
-        print(f"- status: {failure.get('status', 'unknown')}")
-        if failure.get("source"):
-            print(f"- source: {failure.get('source')}")
-        if failure.get("analysis"):
-            print(f"- analysis: {run_dir / str(failure.get('analysis'))}")
+        if failure.get("status") not in {"no_failure", "resolved"}:
+            print("Failure Analysis:")
+            print(f"- status: {failure.get('status', 'unknown')}")
+            if failure.get("source"):
+                print(f"- source: {failure.get('source')}")
+            if failure.get("analysis"):
+                print(f"- analysis: {run_dir / str(failure.get('analysis'))}")
 
     repair = manifest.get("repair", {})
     if isinstance(repair, dict) and repair:
-        print("Repair:")
-        print(f"- status: {repair.get('status', 'unknown')}")
-        print(f"- attempts: {repair.get('repair_count', 0)}")
-        if repair.get("latest_proposed_edits"):
-            print(f"- latest proposal: {run_dir / str(repair.get('latest_proposed_edits'))}")
+        if repair.get("status") not in {"benchmark_passed", "resolved"}:
+            print("Repair:")
+            print(f"- status: {repair.get('status', 'unknown')}")
+            print(f"- attempts: {repair.get('repair_count', 0)}")
+            if repair.get("latest_proposed_edits"):
+                print(f"- latest proposal: {run_dir / str(repair.get('latest_proposed_edits'))}")
 
 
 def _print_inspect(run_dir: Path) -> None:
@@ -936,6 +1221,11 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
             name=args.name,
             benchmark_command=args.benchmark_command,
             max_file_bytes=args.max_file_bytes,
+            workspace_mode=args.workspace_mode,
+            workspace_include=args.workspace_include,
+            workspace_exclude=args.workspace_exclude,
+            workspace_reuse_source_venv=args.workspace_reuse_source_venv,
+            workspace_setup_hook=args.workspace_setup_hook,
             env_mode=args.env_mode,
             python_executable=args.python_executable,
             primary_metric=args.primary_metric,
@@ -944,30 +1234,52 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     except CodeTaskConfigError as exc:
         raise SystemExit(str(exc)) from exc
     code_root = Path(options.code_root)
+    if options.task_file is None:
+        raise SystemExit("Missing task file. Pass --task-file or set [code_task].task_file.")
     task_file = Path(options.task_file)
     name = options.name or f"code-task-{code_root.resolve().name}"
     run_dir = _new_run_dir(Path(options.output_root), name)
-    result = initialize_code_task(
-        run_dir=run_dir,
-        code_root=code_root,
-        task_file=task_file,
-        benchmark_command=options.benchmark_command,
-        max_file_bytes=options.max_file_bytes,
-        env_mode=options.env_mode,
-        python_executable=options.python_executable,
-        primary_metric=options.primary_metric,
-        metric_directions=options.metric_directions,
-    )
+    try:
+        result = initialize_code_task(
+            run_dir=run_dir,
+            code_root=code_root,
+            task_file=task_file,
+            benchmark_command=options.benchmark_command,
+            max_file_bytes=options.max_file_bytes,
+            workspace_mode=options.workspace_mode,
+            workspace_include=options.workspace_include,
+            workspace_exclude=options.workspace_exclude,
+            workspace_reuse_source_venv=options.workspace_reuse_source_venv,
+            workspace_setup_hook=options.workspace_setup_hook,
+            env_mode=options.env_mode,
+            python_executable=options.python_executable,
+            primary_metric=options.primary_metric,
+            metric_directions=options.metric_directions,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        ValueError,
+        WorkspaceModeError,
+    ) as exc:
+        raise SystemExit(_code_task_init_error_message(exc, options=options)) from exc
     project = result.codebase_index.get("project", {})
     print(f"Code task run: {result.run_dir}")
     print(f"Workspace: {result.workspace_dir}")
+    print(f"Workspace mode: {result.workspace.mode}")
     print(f"Task: {result.task_dir / 'task.md'}")
     print(f"Index: {result.codebase_index_path}")
-    print(
-        "Files copied: "
-        f"{result.copy_report.files_copied} "
-        f"({result.copy_report.skipped_count} skipped)"
-    )
+    print(f"Repo map: {result.repo_map_path}")
+    if result.workspace.mode in {"copy", "sparse_copy"}:
+        label = "Files copied" if result.workspace.mode == "copy" else "Files selected"
+        print(
+            f"{label}: "
+            f"{result.copy_report.files_copied} "
+            f"({result.copy_report.skipped_count} skipped)"
+        )
+    else:
+        print(f"Workspace created with {result.workspace.mode}; source copy skipped.")
     print(
         "Indexed: "
         f"{project.get('file_count', 0)} file(s), "
@@ -988,8 +1300,52 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     print(f"Python executable: {result.environment_policy.get('python_executable', '')}")
 
 
+def _code_task_init_error_message(
+    exc: Exception,
+    *,
+    options: object,
+) -> str:
+    """Return a user-facing init error with likely next steps."""
+    workspace_mode = getattr(options, "workspace_mode", "copy")
+    code_root = getattr(options, "code_root", "")
+    task_file = getattr(options, "task_file", "")
+    lines = [f"Could not initialize code task: {exc}"]
+    if isinstance(exc, FileNotFoundError) and "Task file" in str(exc):
+        lines.extend(
+            [
+                "",
+                "Check the task file path:",
+                f"- configured task_file: {task_file or '(missing)'}",
+                "- Pass --task-file path\\to\\task.md, or set [code_task].task_file in TOML.",
+                "- For embedded 8-stage code_task_project runs, omit task_file only if you want 05-design to generate one.",
+            ]
+        )
+    elif isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+        lines.extend(
+            [
+                "",
+                "Check the code root path:",
+                f"- configured code_root: {code_root or '(missing)'}",
+                "- It should point to the baseline project directory, not the task file.",
+                "- If you use git_worktree, code_root must be the baseline git repository root.",
+            ]
+        )
+    elif isinstance(exc, WorkspaceModeError) and workspace_mode == "git_worktree":
+        lines.extend(
+            [
+                "",
+                "git_worktree quick checklist:",
+                "- code_root should be the baseline repository root.",
+                "- The repository needs at least one local commit.",
+                "- GitHub or any remote is not required.",
+                "- Use --workspace-mode copy when the baseline is not a git repository.",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def _print_code_task_probe(args: argparse.Namespace) -> None:
-    """Probe the copied workspace environment and print a compact summary."""
+    """Probe the workspace environment and print a compact summary."""
     result = probe_code_task_environment(
         Path(args.run_dir),
         env_mode=args.env_mode,
@@ -1011,6 +1367,132 @@ def _print_code_task_probe(args: argparse.Namespace) -> None:
         print("Warnings:")
         for warning in result.warnings:
             print(f"- {warning}")
+
+
+def _print_code_task_map(args: argparse.Namespace) -> None:
+    """Build repo-map artifacts and print the resulting project summary."""
+    result = build_code_task_repo_map(
+        Path(args.run_dir),
+        refresh_index=not args.no_refresh_index,
+    )
+    project = result.repo_map.get("project", {})
+    if not isinstance(project, dict):
+        project = {}
+    print(f"Code task run: {result.run_dir}")
+    print(f"Repo map: {result.repo_map_path}")
+    print(f"Summary: {result.summary_path}")
+    print(f"Index: {result.codebase_index_path}")
+    print(f"Index refreshed: {result.refreshed_index}")
+    print(
+        "Mapped: "
+        f"{project.get('file_count', 0)} file(s), "
+        f"{project.get('directory_count', 0)} directory group(s), "
+        f"{project.get('symbol_count', 0)} symbol(s)"
+    )
+    print(
+        "Roles: "
+        f"{project.get('test_file_count', 0)} test file(s), "
+        f"{project.get('benchmark_file_count', 0)} benchmark file(s), "
+        f"{project.get('config_file_count', 0)} config file(s)"
+    )
+    entrypoints = result.repo_map.get("entrypoints", [])
+    if isinstance(entrypoints, list) and entrypoints:
+        print("Entrypoints:")
+        for item in entrypoints[:8]:
+            if isinstance(item, dict):
+                symbol = item.get("symbol")
+                suffix = f"::{symbol}" if symbol else ""
+                print(f"- {item.get('path', '')}{suffix}")
+    if args.show_summary:
+        print("")
+        print(read_text(result.summary_path))
+
+
+def _print_code_task_locate(args: argparse.Namespace) -> None:
+    """Rank likely code-task context files and print a compact summary."""
+    result = locate_code_task_context(
+        Path(args.run_dir),
+        query=args.query,
+        top_k=args.top_k,
+        refresh_map=args.refresh_map,
+        include_read_only=not args.no_read_only,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Locate results: {result.results_path}")
+    print(f"Summary: {result.summary_path}")
+    print(f"Editable targets: {len(result.editable_targets)}")
+    for row in result.editable_targets[:8]:
+        print(f"- {row.get('path', '')} (score {row.get('score', 0)})")
+    print(f"Read-only evidence: {len(result.read_only_evidence)}")
+    for row in result.read_only_evidence[:8]:
+        print(f"- {row.get('path', '')} (score {row.get('score', 0)})")
+    if args.show_summary:
+        print("")
+        print(read_text(result.summary_path))
+
+
+def _print_code_task_context(args: argparse.Namespace) -> None:
+    """Build a bounded code-task context pack and print artifact paths."""
+    result = build_code_task_context_pack(
+        Path(args.run_dir),
+        query=args.query,
+        top_k=args.top_k,
+        max_files=args.max_files,
+        max_source_chars_per_file=args.max_source_chars_per_file,
+        max_total_chars=args.max_total_chars,
+        refresh_map=args.refresh_map,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Context directory: {result.context_dir}")
+    print(f"Context pack: {result.context_pack_path}")
+    print(f"Prompt context: {result.prompt_context_path}")
+    print(f"Snippets: {result.snippets_path}")
+    print(f"Locate results: {result.locate_results_path}")
+    print(f"Selected files: {len(result.selected_files)}")
+    for path in result.selected_files[:12]:
+        print(f"- {path}")
+    if args.show_prompt:
+        print("")
+        print(read_text(result.prompt_context_path))
+
+
+def _print_code_task_work_plan(args: argparse.Namespace) -> None:
+    """Generate a batch-oriented work plan and print artifact paths."""
+    result = generate_code_task_work_plan(
+        Path(args.run_dir),
+        model=args.model,
+        use_llm=not args.no_llm,
+        force=args.force,
+        max_files=args.max_files,
+        max_source_chars_per_file=args.max_source_chars_per_file,
+        message_callback=lambda message: print(f"  - {message}"),
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Work plan: {result.work_plan_path}")
+    print(f"Work plan markdown: {result.work_plan_markdown_path}")
+    print(f"Mode: {result.mode}")
+    print(f"Items: {result.item_count}")
+    print(f"Pending approval: {result.pending_approval}")
+    print(f"Context files: {len(result.selected_files)}")
+    for path in result.selected_files:
+        print(f"- {path}")
+
+
+def _print_code_task_batch(args: argparse.Namespace) -> None:
+    """Create attempt/batch state for a reviewed work item."""
+    result = create_code_task_batch(
+        Path(args.run_dir),
+        work_item_id=args.work_item,
+        attempt_id=args.attempt_id,
+        force=args.force,
+    )
+    print(f"Code task run: {result.run_dir}")
+    print(f"Attempt: {result.attempt_id}")
+    print(f"Batch: {result.batch_id}")
+    print(f"Work item: {result.work_item_id}")
+    print(f"State: {result.state}")
+    print(f"Attempt state: {result.attempt_state_path}")
+    print(f"Batch state: {result.batch_state_path}")
 
 
 def _print_code_task_plan(args: argparse.Namespace) -> None:
@@ -1055,6 +1537,7 @@ def _print_code_task_propose_edits(args: argparse.Namespace) -> None:
         force=args.force,
         max_files=args.max_files,
         max_source_chars_per_file=args.max_source_chars_per_file,
+        allow_large_edits=args.allow_large_edits,
         message_callback=lambda message: print(f"  - {message}"),
     )
     print(f"Code task run: {result.run_dir}")
@@ -1068,11 +1551,17 @@ def _print_code_task_propose_edits(args: argparse.Namespace) -> None:
 
 def _print_code_task_apply_edits(args: argparse.Namespace) -> None:
     """Safely apply controlled edits and print changed files."""
-    result = apply_patch_edits(
-        Path(args.run_dir),
-        edits_file=Path(args.edits_file) if args.edits_file else None,
-        allow_unapproved_plan=args.allow_unapproved_plan,
-    )
+    try:
+        result = apply_patch_edits(
+            Path(args.run_dir),
+            edits_file=Path(args.edits_file) if args.edits_file else None,
+            allow_unapproved_plan=args.allow_unapproved_plan,
+            allow_large_edits=args.allow_large_edits,
+        )
+    except PatchValidationError as exc:
+        print("Patch validation failed; no workspace files were changed.")
+        print(str(exc))
+        raise SystemExit(1) from exc
     print(f"Code task run: {result.run_dir}")
     print(f"Patch diff: {result.patch_diff_path}")
     print(f"Applied edits: {result.applied_edits_path}")
@@ -1176,22 +1665,52 @@ def _print_code_task_repair(args: argparse.Namespace) -> None:
 
 def _print_code_task_execute(args: argparse.Namespace) -> None:
     """Run the state-aware code-task orchestrator and print step decisions."""
+    try:
+        options = load_code_task_execute_options(config_path=args.config)
+    except CodeTaskConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+    model = args.model or options.model
+    use_llm = False if args.no_llm else options.use_llm
+    timeout = args.timeout if args.timeout != 60 else options.timeout_sec
+    repair_rounds = args.repair_rounds if args.repair_rounds != 0 else options.repair_rounds
+    max_files = args.max_files if args.max_files != 8 else options.max_files
+    max_source_chars = (
+        args.max_source_chars_per_file
+        if args.max_source_chars_per_file != 4000
+        else options.max_source_chars_per_file
+    )
+    validation_max_file_bytes = (
+        args.validation_max_file_bytes
+        if args.validation_max_file_bytes != 500_000
+        else options.validation_max_file_bytes
+    )
+    env_mode = args.env_mode or options.env_mode
+    python_executable = args.python_executable or options.python_executable
     result = execute_code_task(
         Path(args.run_dir),
-        to_step=args.to_step,
+        to_step=args.to_step or options.to_step,
         dry_run=args.dry_run,
-        model=args.model,
-        use_llm=not args.no_llm,
-        timeout_sec=args.timeout,
-        skip_validation=args.skip_validation,
-        env_mode=args.env_mode,
-        python_executable=args.python_executable,
-        strict_validation=args.strict_validation,
-        validation_max_file_bytes=args.validation_max_file_bytes,
-        apply_proposed_edits=args.apply_proposed_edits,
-        repair_rounds=args.repair_rounds,
-        max_files=args.max_files,
-        max_source_chars_per_file=args.max_source_chars_per_file,
+        model=model,
+        planner_model=options.planner_model,
+        editor_model=options.editor_model,
+        repair_model=options.repair_model,
+        use_llm=use_llm,
+        timeout_sec=timeout,
+        skip_validation=args.skip_validation or options.skip_validation,
+        env_mode=env_mode,
+        python_executable=python_executable,
+        strict_validation=args.strict_validation or options.strict_validation,
+        validation_max_file_bytes=validation_max_file_bytes,
+        stream_benchmark_output=options.stream_benchmark_output,
+        apply_proposed_edits=args.apply_proposed_edits or options.apply_proposed_edits,
+        allow_large_edits=args.allow_large_edits or options.allow_large_edits,
+        repair_rounds=repair_rounds,
+        budget_profile=options.budget_profile,
+        edit_budget_overrides=options.edit_budget_overrides,
+        max_batches=options.max_batches,
+        cost_cap_usd=options.cost_cap_usd,
+        max_files=max_files,
+        max_source_chars_per_file=max_source_chars,
         message_callback=lambda message: print(f"  - {message}"),
     )
     print(f"Code task run: {result.run_dir}")

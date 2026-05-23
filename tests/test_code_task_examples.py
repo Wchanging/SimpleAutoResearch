@@ -7,6 +7,7 @@ from pathlib import Path
 from simple_ar.artifacts import read_json, read_text, write_json
 from simple_ar.code_task import (
     apply_patch_edits,
+    execute_code_task,
     generate_patch_plan,
     initialize_code_task,
     probe_code_task_environment,
@@ -24,6 +25,10 @@ TASK_FILE = REPO_ROOT / "examples" / "code_tasks" / "tasks" / "improve_toy_spam_
 TINY_DIGITS_ROOT = REPO_ROOT / "examples" / "code_tasks" / "tiny_digits_mlp_project"
 TINY_DIGITS_TASK_FILE = (
     REPO_ROOT / "examples" / "code_tasks" / "tasks" / "improve_tiny_digits_mlp.md"
+)
+MEDIUM_REVIEW_ROOT = REPO_ROOT / "examples" / "code_tasks" / "medium_review_pipeline_project"
+MEDIUM_REVIEW_TASK_FILE = (
+    REPO_ROOT / "examples" / "code_tasks" / "tasks" / "improve_medium_review_pipeline.md"
 )
 
 
@@ -61,13 +66,13 @@ class CodeTaskExampleTests(unittest.TestCase):
             self.assertTrue(summary_path.is_file())
             summary_text = read_text(summary_path)
             self.assertIn("# Code Task Summary", summary_text)
-            self.assertIn("Status: `benchmark_passed`", summary_text)
+            self.assertIn("Status: `objective_improved`", summary_text)
             self.assertIn("spamfilter/rules.py", summary_text)
             workspace_rules = run_dir / "code_task" / "workspace" / "spamfilter" / "rules.py"
             self.assertIn('"lottery"', read_text(workspace_rules))
             self.assertNotIn('"lottery"', read_text(EXAMPLE_ROOT / "spamfilter" / "rules.py"))
             manifest = read_json(run_dir / "manifest.json")
-            self.assertEqual(manifest["status"], "benchmark_passed")
+            self.assertEqual(manifest["status"], "objective_improved")
             self.assertEqual(manifest["benchmark"]["last_status"], "passed")
             self.assertEqual(manifest["benchmark"]["runs"]["baseline"]["status"], "failed")
             self.assertEqual(manifest["benchmark"]["runs"]["patched"]["status"], "passed")
@@ -103,6 +108,99 @@ class CodeTaskExampleTests(unittest.TestCase):
             self.assertIn("### Baseline", summary)
             self.assertIn("accuracy", summary)
             self.assertFalse((run_dir / "code_task" / "run" / "comparison.json").exists())
+
+    def test_medium_review_pipeline_example_has_visible_progress_and_metrics(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "runs" / "medium-review-pipeline-code-task"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=MEDIUM_REVIEW_ROOT,
+                task_file=MEDIUM_REVIEW_TASK_FILE,
+                benchmark_command="python main.py --config configs/experiment.json --show-progress",
+            )
+
+            messages: list[str] = []
+            result = execute_code_task(
+                run_dir,
+                to_step="plan",
+                use_llm=False,
+                timeout_sec=30,
+                stream_benchmark_output=True,
+                message_callback=messages.append,
+            )
+
+            self.assertEqual(result.stop_reason, "approval_required")
+            self.assertTrue(any("benchmark stdout: round 1/4" in item for item in messages))
+            baseline_metrics = read_json(run_dir / "code_task" / "run" / "baseline" / "metrics.json")
+            self.assertIn("accuracy", baseline_metrics)
+            self.assertIn("macro_f1", baseline_metrics)
+            self.assertGreaterEqual(baseline_metrics["accuracy"], 0.60)
+            self.assertLess(baseline_metrics["accuracy"], 0.95)
+            stdout = read_text(run_dir / "code_task" / "run" / "baseline" / "stdout.txt")
+            self.assertIn("round 1/4", stdout)
+            self.assertIn("features=word", stdout)
+            report = read_json(run_dir / "code_task" / "run" / "baseline" / "execution_report.json")
+            self.assertEqual(
+                report["command_text"],
+                "python main.py --config configs/experiment.json --show-progress",
+            )
+            index = read_json(run_dir / "code_task" / "meta" / "codebase_index.json")
+            indexed_paths = {
+                item.get("path")
+                for item in index.get("files", [])
+                if isinstance(item, dict)
+            }
+            self.assertIn("main.py", indexed_paths)
+            self.assertIn("configs/experiment.json", indexed_paths)
+
+    def test_auto_stream_mode_handles_carriage_return_progress(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "progress_project"
+            project.mkdir()
+            (project / "progress_benchmark.py").write_text(
+                "\n".join(
+                    [
+                        "import sys",
+                        "for step in range(1, 4):",
+                        "    sys.stdout.write(f'progress {step}/3\\r')",
+                        "    sys.stdout.flush()",
+                        "print('progress 3/3')",
+                        "print('accuracy: 1.0')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            task_file = root / "task.md"
+            task_file.write_text("Keep the progress benchmark working.\n", encoding="utf-8")
+            run_dir = root / "runs" / "progress-code-task"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=project,
+                task_file=task_file,
+                benchmark_command="python progress_benchmark.py",
+            )
+
+            messages: list[str] = []
+            result = execute_code_task(
+                run_dir,
+                to_step="baseline",
+                use_llm=False,
+                timeout_sec=10,
+                stream_benchmark_output="auto",
+                message_callback=messages.append,
+            )
+
+            self.assertEqual(result.stop_reason, "stop_point")
+            self.assertTrue(any("benchmark stdout: progress 3/3" in item for item in messages))
+            self.assertTrue(any("benchmark stdout: accuracy: 1.0" in item for item in messages))
+            stdout = read_text(run_dir / "code_task" / "run" / "baseline" / "stdout.txt")
+            self.assertIn("progress 1/3", stdout)
+            self.assertIn("progress 3/3", stdout)
+            metrics = read_json(run_dir / "code_task" / "run" / "baseline" / "metrics.json")
+            self.assertEqual(metrics["accuracy"], 1.0)
 
 
 def _write_keyword_patch(run_dir: Path) -> Path:

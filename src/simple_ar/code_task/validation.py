@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.artifacts import write_json
+from simple_ar.code_task.attempts import (
+    load_latest_code_task_batch,
+    update_code_task_batch_state,
+)
 from simple_ar.code_task.state import (
     code_task_paths,
     load_code_task_manifest,
@@ -154,6 +158,8 @@ def validate_code_task(
         error_count=error_count,
         warning_count=warning_count,
     )
+    if _patch_applied(manifest):
+        _update_latest_batch_after_validation(run_dir, report_path, status)
     return CodeTaskValidationResult(
         run_dir=paths.run_dir,
         report_path=report_path,
@@ -331,3 +337,29 @@ def _update_manifest_after_validation(
     manifest["validation"] = validation
     manifest["status"] = "validated" if status == "passed" else "validation_failed"
     save_code_task_manifest(run_dir, manifest)
+
+
+def _update_latest_batch_after_validation(run_dir: Path, report_path: Path, status: str) -> None:
+    batch = load_latest_code_task_batch(run_dir)
+    if batch is None:
+        return
+    update_code_task_batch_state(
+        run_dir,
+        batch.batch_state_path,
+        state="failed" if status == "failed" else "validating",
+        artifacts={"validation_report": _relative_to_run(run_dir, report_path)},
+        detail=f"Static validation {status}.",
+        extra={"validation_status": status},
+    )
+
+
+def _relative_to_run(run_dir: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(Path(run_dir).resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _patch_applied(manifest: dict[str, Any]) -> bool:
+    patch = manifest.get("patch")
+    return isinstance(patch, dict) and patch.get("status") == "applied"

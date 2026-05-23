@@ -20,6 +20,12 @@ REPORT_SYSTEM = (
     "experimental results."
 )
 
+CODE_TASK_DESIGN_SYSTEM = (
+    "You translate research synthesis into a concrete, bounded code-improvement "
+    "task for an existing local project. Prefer small, benchmarkable changes "
+    "over broad rewrites."
+)
+
 
 def plan_user_prompt(topic: str) -> str:
     """Build the planning prompt for a user-provided research topic.
@@ -105,6 +111,65 @@ def synthesize_user_prompt(
         f"Notes Markdown:\n{notes_markdown}\n\n"
         f"Structured Notes JSON:\n{paper_notes_json}"
         f"{evidence_block}"
+    )
+
+
+def code_task_design_user_prompt(
+    *,
+    topic: str,
+    goal_markdown: str,
+    problem_markdown: str,
+    synthesis_markdown: str,
+    hypothesis_markdown: str,
+    codebase_summary_json: str,
+    benchmark_command: str,
+    primary_metric: str,
+) -> str:
+    """Build the prompt that turns research artifacts into a code task.
+
+    Args:
+        topic: Original research topic.
+        goal_markdown: Goal produced by the plan stage.
+        problem_markdown: Problem produced by the plan stage.
+        synthesis_markdown: Literature synthesis produced by the synthesize stage.
+        hypothesis_markdown: Testable hypothesis produced by the synthesize stage.
+        codebase_summary_json: Compact JSON summary of the target codebase.
+        benchmark_command: Benchmark command that will validate the patch.
+        primary_metric: Optional primary metric name.
+
+    Returns:
+        Prompt requesting a Markdown task file suitable for code-task planning.
+    """
+    metric = primary_metric or "the configured benchmark metrics"
+    command = benchmark_command or "the configured benchmark command"
+    return (
+        "Write JSON with one string field: `task_markdown`.\n\n"
+        "The value will be saved as `code_task/task.md` and given to a coding "
+        "agent. It must be concrete enough to guide code modification without "
+        "assuming the user already knows the implementation plan.\n\n"
+        "Required Markdown structure:\n"
+        "# Code Task\n"
+        "## Objective\n"
+        "## Research Motivation\n"
+        "## Target Codebase Signals\n"
+        "## Constraints\n"
+        "## Success Criteria\n"
+        "## Suggested Investigation Steps\n\n"
+        "Rules:\n"
+        "- Derive the task from the research artifacts and the codebase summary.\n"
+        "- Keep the requested change small enough for a local benchmark run.\n"
+        "- Do not instruct the agent to edit tests, benchmark files, or validation targets.\n"
+        "- Mention the benchmark command and the primary metric or metric family.\n"
+        "- State that the patch should preserve public APIs unless the task explicitly requires otherwise.\n"
+        "- If the research artifacts are thin, write a conservative exploratory-improvement task rather than inventing paper details.\n\n"
+        f"Topic:\n{topic}\n\n"
+        f"Goal Markdown:\n{goal_markdown}\n\n"
+        f"Problem Markdown:\n{problem_markdown}\n\n"
+        f"Synthesis Markdown:\n{synthesis_markdown}\n\n"
+        f"Hypothesis Markdown:\n{hypothesis_markdown}\n\n"
+        f"Codebase Summary JSON:\n{codebase_summary_json}\n\n"
+        f"Benchmark Command:\n{command}\n\n"
+        f"Primary Metric:\n{metric}\n"
     )
 
 

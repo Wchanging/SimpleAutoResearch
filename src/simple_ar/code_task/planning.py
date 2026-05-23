@@ -19,6 +19,10 @@ from simple_ar.code_task.edit_scope import (
     is_protected_edit_path,
     protected_patterns_from_manifest,
 )
+from simple_ar.code_task.context import (
+    LoadedCodeTaskContextPack,
+    load_latest_code_task_context_pack,
+)
 from simple_ar.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.usage import summarize_usage
 
@@ -99,13 +103,34 @@ def generate_patch_plan(
     task_text = _read_required_text(task_dir / "task.md")
     index = _read_required_json(meta_dir / "codebase_index.json")
     protected_patterns = protected_patterns_from_manifest(manifest)
-    selected = select_relevant_files(index, task_text, max_files=max_files)
     run_context = _collect_run_context(root, manifest)
-    snippets = _source_snippets(
-        workspace_dir,
-        selected,
-        max_chars_per_file=max_source_chars_per_file,
-    )
+    loaded_context = load_latest_code_task_context_pack(root)
+    context_pack_ref: dict[str, Any] | None = None
+    if loaded_context is not None and loaded_context.selected_files:
+        selected = _context_pack_selected_files(loaded_context, max_files=max_files)
+        snippets = _context_pack_snippets(
+            loaded_context,
+            max_files=max_files,
+            max_chars_per_file=max_source_chars_per_file,
+            include_read_only=True,
+        )
+        context_pack_ref = _context_pack_manifest_ref(root, loaded_context)
+        _emit(message_callback, f"Using code-task context pack: {context_pack_ref['path']}")
+        if not snippets:
+            _emit(message_callback, "Context pack has no readable snippets; falling back to index selection.")
+            selected = []
+            context_pack_ref = None
+    else:
+        selected = []
+        snippets = []
+
+    if not selected:
+        selected = select_relevant_files(index, task_text, max_files=max_files)
+        snippets = _source_snippets(
+            workspace_dir,
+            selected,
+            max_chars_per_file=max_source_chars_per_file,
+        )
 
     mode = "offline"
     plan_data: dict[str, Any] | None = None
@@ -148,6 +173,7 @@ def generate_patch_plan(
         task_text=task_text,
         selected_files=selected,
         run_context=run_context,
+        context_pack=context_pack_ref,
         mode=mode,
     )
     write_text(patch_plan_path, markdown)
@@ -156,6 +182,7 @@ def generate_patch_plan(
         manifest,
         selected_files=selected,
         run_context=run_context,
+        context_pack=context_pack_ref,
         mode=mode,
     )
     return PatchPlanResult(
@@ -223,6 +250,21 @@ def record_plan_decision(
     plan["status"] = status_by_decision[normalized]
     plan["last_decision"] = row
     manifest["plan"] = plan
+    work_plan = manifest.get("work_plan")
+    if isinstance(work_plan, dict):
+        approval = work_plan.get("approval")
+        if not isinstance(approval, dict):
+            approval = {}
+        approval["status"] = status_by_decision[normalized]
+        approval["last_decision"] = row
+        work_plan["approval"] = approval
+        if normalized == "approve" and work_plan.get("status") == "pending_approval":
+            work_plan["status"] = "ready"
+        elif normalized == "reject":
+            work_plan["status"] = "rejected"
+        elif normalized == "revise":
+            work_plan["status"] = "revision_requested"
+        manifest["work_plan"] = work_plan
     manifest["status"] = "plan_" + status_by_decision[normalized]
     write_json(manifest_path, manifest)
     return row
@@ -282,7 +324,7 @@ def _ask_llm_for_plan(
     *,
     task_text: str,
     index: dict[str, Any],
-    snippets: list[dict[str, str]],
+    snippets: list[dict[str, Any]],
     benchmark_command: str,
     run_context: dict[str, Any],
     protected_patterns: tuple[str, ...],
@@ -303,14 +345,16 @@ def _plan_user_prompt(
     *,
     task_text: str,
     index: dict[str, Any],
-    snippets: list[dict[str, str]],
+    snippets: list[dict[str, Any]],
     benchmark_command: str,
     run_context: dict[str, Any],
     protected_patterns: tuple[str, ...],
 ) -> str:
     compact_index = _compact_codebase_index(index, protected_patterns=protected_patterns)
     snippet_text = "\n\n".join(
-        f"### {item['path']}\n```text\n{item['text']}\n```"
+        f"### {item.get('path', '')} "
+        f"({item.get('access_role', 'editable')})\n"
+        f"```text\n{item.get('text', '')}\n```"
         for item in snippets
     )
     return (
@@ -437,6 +481,7 @@ def _render_patch_plan(
     task_text: str,
     selected_files: list[str],
     run_context: dict[str, Any],
+    context_pack: dict[str, Any] | None,
     mode: str,
 ) -> str:
     sections = [
@@ -461,6 +506,8 @@ def _render_patch_plan(
         _bullet_list(_string_list(plan.get("goals"))),
         "",
         "## Context Used",
+        "",
+        _context_pack_markdown(context_pack),
         "",
         _bullet_list([f"`{path}`" for path in selected_files]) or "- No files selected.",
         "",
@@ -668,6 +715,23 @@ def _run_context_markdown(run_context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _context_pack_markdown(context_pack: dict[str, Any] | None) -> str:
+    if not context_pack:
+        return "- Context pack: none; selected files came from the fallback index selector."
+    lines = [
+        f"- Context pack: `{context_pack.get('path', '')}`",
+        f"- Prompt context: `{context_pack.get('prompt_context', '')}`",
+    ]
+    budget = context_pack.get("budget")
+    if isinstance(budget, dict):
+        lines.append(
+            "- Context budget: "
+            f"files=`{len(context_pack.get('selected_files', []))}` "
+            f"chars=`{budget.get('used_chars', 0)}`/`{budget.get('max_total_chars', '')}`"
+        )
+    return "\n".join(lines)
+
+
 def _metric_inline(metrics: dict[str, Any]) -> str:
     return ", ".join(f"`{key}`={value}" for key, value in sorted(metrics.items()))
 
@@ -704,6 +768,7 @@ def _update_manifest_after_plan(
     *,
     selected_files: list[str],
     run_context: dict[str, Any],
+    context_pack: dict[str, Any] | None,
     mode: str,
 ) -> None:
     plan = _dict_value(manifest, "plan")
@@ -714,6 +779,7 @@ def _update_manifest_after_plan(
             "generated_at": _utcnow_iso(),
             "patch_plan": "code_task/patch_plan.md",
             "selected_files": selected_files,
+            "context_pack": context_pack,
             "context": _manifest_plan_context(run_context),
         }
     )
@@ -751,8 +817,8 @@ def _source_snippets(
     selected_files: list[str],
     *,
     max_chars_per_file: int,
-) -> list[dict[str, str]]:
-    snippets: list[dict[str, str]] = []
+) -> list[dict[str, Any]]:
+    snippets: list[dict[str, Any]] = []
     workspace = workspace_dir.resolve()
     for rel_path in selected_files:
         path = (workspace / rel_path).resolve()
@@ -765,10 +831,77 @@ def _source_snippets(
         snippets.append(
             {
                 "path": rel_path,
+                "access_role": "editable",
                 "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
             }
         )
     return snippets
+
+
+def _context_pack_selected_files(
+    loaded: LoadedCodeTaskContextPack,
+    *,
+    max_files: int,
+) -> list[str]:
+    selected: list[str] = []
+    for path in loaded.selected_files:
+        if path not in selected:
+            selected.append(path)
+        if len(selected) >= max(1, max_files):
+            break
+    return selected
+
+
+def _context_pack_snippets(
+    loaded: LoadedCodeTaskContextPack,
+    *,
+    max_files: int,
+    max_chars_per_file: int,
+    include_read_only: bool,
+) -> list[dict[str, Any]]:
+    snippets: list[dict[str, Any]] = []
+    for row in loaded.snippets:
+        role = str(row.get("access_role", "editable"))
+        if not include_read_only and role != "editable":
+            continue
+        path = _string(row.get("path"))
+        text = row.get("text")
+        if not path or not isinstance(text, str):
+            continue
+        snippets.append(
+            {
+                "path": path,
+                "access_role": role,
+                "score": row.get("score", 0),
+                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
+            }
+        )
+        if len(snippets) >= max(1, max_files):
+            break
+    return snippets
+
+
+def _context_pack_manifest_ref(
+    run_dir: Path,
+    loaded: LoadedCodeTaskContextPack,
+) -> dict[str, Any]:
+    budget = loaded.context_pack.get("budget")
+    if not isinstance(budget, dict):
+        budget = {}
+    return {
+        "path": _relative_to_run(run_dir, loaded.context_pack_path),
+        "prompt_context": _relative_to_run(run_dir, loaded.prompt_context_path),
+        "snippets": _relative_to_run(run_dir, loaded.snippets_path),
+        "selected_files": list(loaded.selected_files),
+        "budget": budget,
+    }
+
+
+def _relative_to_run(run_dir: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(run_dir.resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _compact_codebase_index(
