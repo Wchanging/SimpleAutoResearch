@@ -28,6 +28,10 @@
 - 应用已审核 large proposal 时，现在会把 apply-time approval 记录到
   `applied_edits.json` 和 `manifest.json.patch.budget`；executor benchmark
   路径也会避免写入重复的 validation history。
+- 公开文档现在把 README 保持为更简洁的项目入口，把完整 code-task executor
+  链路下沉到 Usage，移除冗长的 PowerShell run 目录选择脚本，统一使用
+  `runs/<run-id>` 占位符，并把 `copy`、`git_worktree`、`sparse_copy` 作为一等
+  workspace 策略展示。
 
 ## 2026-05-22
 

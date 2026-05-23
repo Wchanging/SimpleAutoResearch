@@ -2,17 +2,42 @@
 
 [中文版本](README_zh.md)
 
-SimpleAutoResearch is a teaching-first, lightweight auto-research project inspired by [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw). It explores how an automated research assistant can move from a topic to literature notes, small experiments, executable results, code-task workflows, and Markdown reports while keeping the process visible and hackable.
+SimpleAutoResearch is a teaching-first, lightweight auto-research project
+inspired by [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw).
+It explores how an automated research assistant can move from a topic to
+literature notes, small experiments, existing-code improvement tasks,
+executable results, and Markdown reports while keeping the process visible and
+hackable.
 
-The goal is not to reproduce every feature of a large agent framework. The goal is to build a clear, inspectable version that is useful for learning, experimentation, and gradual extension.
+The goal is not to reproduce every feature of a large agent framework. The goal
+is to build a clear, inspectable version that is useful for learning,
+experimentation, and gradual extension.
 
 ## Goals
 
 - Keep research steps explicit and file-based.
 - Make runs easy to inspect, resume, and debug.
-- Support both literature/report workflows and existing-code improvement workflows.
-- Prefer controlled, reproducible experiments over unconstrained code generation.
+- Support both literature/report workflows and existing-code improvement
+  workflows.
+- Prefer controlled, reproducible experiments over unconstrained code
+  generation.
 - Keep the codebase small enough for learners and contributors to understand.
+
+## What Works Today
+
+- **Research reports**: run a visible staged pipeline from topic to literature
+  notes, synthesis, and report artifacts.
+- **Code tasks**: improve an existing codebase inside an isolated editable
+  workspace with LLM planning, review gates, controlled patch proposals,
+  validation, benchmark execution, and metric comparison.
+- **Workspace strategies**: use `copy` for the safest isolated copy,
+  `git_worktree` for larger git repositories where full copying is wasteful,
+  or experimental `sparse_copy` for small allowlisted subsets.
+- **Research-to-code runs**: embed a code task inside the 8-stage pipeline with
+  repo maps, context packs, work plans, patch evidence, benchmark metrics, and
+  report evidence.
+- **Reviewable artifacts**: each run writes inspectable files under `runs/`
+  instead of hiding decisions inside process memory.
 
 ## Install And Configure
 
@@ -41,7 +66,7 @@ On PowerShell:
 Copy-Item .env.example .env
 ```
 
-Edit `.env` (required for LLM-backed stages):
+Edit `.env` for LLM-backed stages:
 
 ```bash
 OPENAI_API_KEY=your_api_key
@@ -53,200 +78,187 @@ SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
 
-For third-party OpenAI-compatible providers, set `OPENAI_BASE_URL` to that provider's `/v1` endpoint. `SIMPLE_AR_LLM_TIMEOUT_SEC` bounds each provider request, and `SIMPLE_AR_MAX_OUTPUT_TOKENS` keeps oversized generations under control. Price fields are optional; when unset, SimpleAutoResearch records token counts but leaves estimated cost as `null`.
+For third-party OpenAI-compatible providers, set `OPENAI_BASE_URL` to that
+provider's `/v1` endpoint. Price fields are optional; when unset,
+SimpleAutoResearch records token counts but leaves estimated cost as `null`.
 
-## Quickstart (Pick A Workflow)
+## Quickstart
 
-### 1. Research Report (Literature-First)
+### 1. Research Report
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
 ```
 
-The default 8-stage pipeline always includes design/code/run stages when you reach `report`. For a literature-only pass, stop earlier:
+For a literature-only pass, stop at `synthesize`, then resume report generation
+from the printed run directory:
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage synthesize
-```
-
-Then generate a literature-only report from the existing artifacts:
-
-```bash
-uv run simple-ar resume runs/<run-id> --from-stage report
-```
-
-You can also force a report mode:
-
-```bash
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
-uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experiment
 ```
 
-### 2. Code Task (Existing Codebase)
+### 2. Existing-Code Code Task
 
-Use this when you already have a baseline project and want an LLM to propose a
-reviewable improvement inside an isolated workspace. The recommended path is a
-TOML config plus the state-aware executor:
+Use this when you already have a project and want the model to propose a
+reviewable improvement. First write a small task file, for example
+`tasks/improve_model.md`, that says what should change and what benchmark should
+improve. Then create a TOML config for your project:
+
+```toml
+[code_task]
+code_root = "path/to/your/project"
+task_file = "tasks/improve_model.md"
+output_root = "runs"
+name = "my-code-task"
+
+[benchmark]
+command = "python benchmark.py"
+primary_metric = "accuracy"
+
+[benchmark.metric_directions]
+accuracy = "higher"
+latency_ms = "resource"
+
+[workspace]
+mode = "copy"  # copy | git_worktree | sparse_copy
+```
+
+Then run the reviewed flow. `init` prints a run directory such as
+`runs/20260523-xxxx-my-code-task`; use that path in place of `runs/<run-id>`.
 
 ```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task init --config path/to/your_code_task.toml
+uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
+uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml --to-step propose-edits
+uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml --apply-proposed-edits --timeout 60
+uv run simple-ar status runs/<run-id>
 ```
 
-For copyable PowerShell commands, set `RUN` to the latest matching run
-directory:
+That sequence prepares an isolated workspace, runs the baseline benchmark,
+builds a work plan, stops for patch-plan review, generates
+`code_task/meta/proposed_edits.json`, applies the reviewed proposal, validates
+the patched workspace, runs the patched benchmark, and writes the final status.
+If the result needs a bounded follow-up, use the repair path documented in
+[Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
 
-```powershell
-$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
-  Where-Object { $_.Name -like "*tiny-digits-mlp*" } |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -First 1).Name)
-```
-
-Run the reviewed executor flow:
-
-```powershell
-uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml
-
-# Approve the plan after reading code_task/patch_plan.md.
-uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
-
-# Continue explicitly to edit proposal review.
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step propose-edits
-
-# Apply the reviewed proposal and run validation/benchmark.
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --apply-proposed-edits `
-  --timeout 60
-
-uv run simple-ar status $RUN
-```
-
-The first `execute` stops at `approval_required` after writing environment,
-baseline, work-plan, batch-state, and patch-plan artifacts. The second executor
-call writes `code_task/meta/proposed_edits.json` for review. The final executor
-call applies the reviewed proposal, validates the workspace, runs the patched
-benchmark, writes `code_task/run/comparison.json`, and refreshes
-`code_task/summary.md`. Treat `objective_improved` as the normal success signal;
-if the benchmark passes but the objective is `regressed` or `mixed`, revise the
-plan/proposal instead of marking the task complete.
-The default editor backend is `controlled_patch`, which produces bounded
-old/new replacements and records backend metadata in proposal, apply, batch,
-and manifest artifacts.
-
-For a more realistic multi-file example with `main.py`, JSON config, progress
-output, and cross-module feature/model wiring, use:
-
-```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/medium_review_pipeline.toml
-```
-
-Then follow the same executor sequence above with the medium config path and a
-`*medium-review-pipeline*` `$RUN` filter. Because that config enables streamed
-benchmark output, `execute` will relay progress lines while still saving the
-full logs under `code_task/run/<label>/`. The medium task usually merges
-feature, model, and config changes into one reviewed `large` batch, so the final
-apply command should include `--allow-large-edits` only after reviewing
-`code_task/meta/proposed_edits.json`.
-
-If the patch needs repair, request one bounded repair proposal:
-
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step repair `
-  --repair-rounds 1 `
-  --timeout 60
-```
-
-Detailed primitive commands, explicit CLI-flag initialization, artifact
-descriptions, and troubleshooting notes live in
-[Usage And Configuration](docs/USAGE.md#code-task-workflow) and
-[CLI Reference](docs/CLI_REFERENCE.md#code-task-commands).
+Bundled demo configs such as `tiny_digits_mlp.toml` and
+`medium_review_pipeline.toml` are documented in
+[Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
 
 ### 3. Research With Experiment
 
-Use a user project through the generic embedded code-task template. The shortest
-form is a top-level run config:
+Use this when you want the research pipeline to produce literature context,
+derive or use a code task, run an experiment, and include the code evidence in
+the final report. For your own project, create a top-level run config:
 
-```bash
-uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+```toml
+[run]
+topic = "research and improve my model"
+output_root = "runs"
+to_stage = "report"
+
+[llm]
+enabled = true
+
+[search]
+offline = false
+max_papers = 5
+
+[experiment]
+template = "code_task_project"
+timeout = 120
+
+[code_task]
+code_root = "path/to/your/project"
+# Optional. If omitted, 05-design generates a task file from research artifacts
+# and a compact codebase summary.
+task_file = "tasks/improve_model.md"
+name = "my-research-code-task"
+
+[benchmark]
+command = "python benchmark.py"
+primary_metric = "accuracy"
+
+[benchmark.metric_directions]
+accuracy = "higher"
+latency_ms = "resource"
+
+[workspace]
+mode = "copy"  # copy | git_worktree | sparse_copy
+
+[environment]
+mode = "current"
 ```
 
-The same run can be expressed with CLI flags when you want quick overrides:
+Then run the full pipeline:
 
 ```bash
-uv run simple-ar run \
-  --topic "improve tiny digits MLP" \
-  --to-stage report \
-  --experiment-template code_task_project \
-  --code-task-config examples/code_tasks/configs/tiny_digits_mlp.toml \
-  --offline-search \
-  --experiment-timeout 60
+uv run simple-ar run --config path/to/your_pipeline.toml
 ```
 
-This prepares the configured project under `06-code/code_task_run/code_task/workspace`, runs a baseline benchmark, builds a repo map/context pack, asks the LLM for a batch-oriented work plan, creates an attempt/batch record, asks for a patch plan and controlled edits, applies the patch inside that isolated workspace, runs the patched benchmark, and writes code-task evidence into the final report. If no task file is supplied for `code_task_project`, `05-design` now derives `generated_code_task.md` from the earlier research artifacts and a compact codebase summary, then `06-code` uses it as the normal `code_task/task.md`. Because the 8-stage pipeline must finish end to end, it auto-approves the patch plan inside that isolated workspace. Use standalone `code-task` commands when you want explicit human approval before each step.
+This creates a normal 8-stage run. During `06-code`, it prepares the configured
+project under `06-code/code_task_run/code_task/workspace`, builds repo maps and
+context packs, asks the LLM for a work plan and patch proposal, applies the
+patch inside the isolated workspace, and validates it. During `07-run`, it runs
+the patched benchmark and compares metrics. During `08-report`, it writes a
+report with deterministic code-task evidence pointing back to the nested work
+plan, patch, benchmark, and comparison artifacts.
 
-There is also a legacy bundled toy-spam smoke test, kept mostly for quick regression checks:
+The embedded path is designed to finish end to end, so it auto-approves the
+patch plan inside the isolated workspace. Use standalone `code-task` commands
+when you want explicit human approval before each step. A bundled demo config is
+available at `examples/run_configs/tiny_digits_mlp_pipeline.toml`; full embedded
+workflow details are in [Usage And Configuration](docs/USAGE.md#embedded-code-task-in-the-8-stage-pipeline).
 
-```bash
-uv run simple-ar run \
-  --topic "LLM-guided improvement of a toy spam baseline" \
-  --to-stage report \
-  --experiment-template llm_code_task_toy_spam \
-  --offline-search \
-  --experiment-timeout 60
-```
+## Capability Boundaries
 
-The toy template is useful for smoke testing because it has a tiny deterministic benchmark.
+SimpleAutoResearch is useful as a learning and prototyping framework, but it is
+still intentionally conservative.
 
-## Current Capability Boundaries
-
-SimpleAutoResearch is usable as a learning and prototyping framework, but it is still intentionally conservative.
-
-What works today:
-
-- Topic-to-report runs with visible 8-stage artifacts and resumable execution.
-- OpenAI-compatible LLM calls for planning, paper notes, synthesis, report drafting, and code-task patch planning.
-- Literature-first report mode: stop at `synthesize`, then resume `report` to produce a survey-style report without experiment claims.
-- Existing-code code tasks as a standalone workflow: prepare a source project with `copy`, `git_worktree`, or experimental `sparse_copy`, probe the environment, index files, build repo maps, locate likely files, package bounded context, run a baseline benchmark, generate a context-aware patch plan, require human approval, call the default `controlled_patch` editor backend for bounded edits, apply edits in the isolated workspace, validate, run a patched benchmark, and compare before/after metrics.
-- Default code-task edit scope: tests, benchmark files, and secret-like paths are read-only evidence, so the model can use allowed context but cannot patch them to improve metrics.
-- Configurable benchmark metric interpretation for code tasks through `--primary-metric` and repeated `--metric-direction METRIC=DIRECTION` flags.
-- Embedded 8-stage code-task experiments through `--experiment-template code_task_project` plus a code-task TOML config or explicit code-root/benchmark flags. A task file can be provided by the user or generated during `05-design`; `06-code` then uses the same repo-map, context-pack, work-plan, and attempt/batch evidence model as standalone code tasks.
-- One bundled 8-stage smoke-test demo through `--experiment-template llm_code_task_toy_spam`.
-- Citation, report-boundary, runtime-limit, and metric-visibility checks in the final report package.
-
-Important limits:
-
-- The generic 8-stage code-task path is real but still conservative. It can prepare a user project with copy mode, repo-root `git_worktree` mode, or experimental sparse-copy mode and run one bounded LLM work-plan/batch/patch pass, but it is not yet a full autonomous coding agent with deep multi-round planning, dependency installation, Docker/Conda setup, or large experiment scheduling.
-- The 8-stage code-task path auto-approves the model patch plan inside the isolated workspace so the pipeline can complete end to end. Use standalone `code-task` for stronger human-in-the-loop review.
-- Code edits are controlled old/new replacements. This keeps patches auditable, but it is weaker than a full coding agent that can plan and edit many files across multiple autonomous rounds.
-- The editor backend interface now exists. The reserved `external_agent` backend
-  has a design-time permission model and invocation-plan artifact, but
-  Codex/Claude/OpenCode adapters are not executable yet.
-- Large code-edit proposals can still produce very long LLM completions. V2.2 treats this as an editor-backend design target: bounded proposal contracts, context requests, multi-round attempts, and future external coding-agent adapters are planned before recommending the tool for large unattended refactors.
-- Reviewed proposals may contain multiple ordered edits in one file, but invalid old/new replacements are rejected before workspace files are changed.
-- By default, code-task patches reject protected paths such as `tests/**`, `test_*.py`, `benchmark.py`, and `*benchmark*.py`. If the real task is to update tests or benchmarks, handle that as a separate human-reviewed repository change rather than an automated metric-improvement patch.
-- The tool does not install project dependencies, manage Docker/Conda/GPU/Slurm environments, or schedule large experiments.
-- Literature search currently works from metadata and local artifact snippets. It is not yet a full PDF-reading or vector-RAG survey system.
-- LLM-written reports are guarded. If the draft invents citations, omits required citations, or overstates toy evidence, SimpleAutoResearch falls back to a structured deterministic report.
-
-V2.2 development has started with workspace-mode abstraction, minimal git worktree support, experimental sparse-copy support, layered repo-map artifacts, deterministic locate results, and bounded context packs. The next focus is deeper coding loops: multi-round attempts, stronger task decomposition, managed environments, and a clearer human-in-the-loop path from existing research code to reproducible results.
+- Code edits use controlled old/new replacements. This keeps patches auditable,
+  but it is weaker than a full autonomous coding agent.
+- The default edit scope protects tests, benchmark files, and secret-like paths
+  from automated patching.
+- `git_worktree` requires a git repository root with at least one local commit;
+  it does not require a GitHub remote.
+- `sparse_copy` is experimental and can omit runtime dependencies if the
+  allowlist is too narrow.
+- The tool does not yet install project dependencies or manage
+  Docker/Conda/GPU/Slurm environments.
+- Large code-edit proposals may still produce long LLM completions. V2.2 is
+  adding bounded proposal contracts, context requests, multi-round attempts, and
+  future external coding-agent adapters before recommending unattended large
+  refactors.
+- Literature search is metadata and artifact based. It is not yet a full
+  PDF-reading or vector-RAG survey system.
+- LLM-written reports are guarded by citation, metric, and boundary checks; when
+  a draft fails these checks, the tool falls back to a structured deterministic
+  report.
 
 ## Documentation
 
-- [Usage And Configuration](docs/USAGE.md): installation, environment variables, commands, and examples.
-- [CLI Reference](docs/CLI_REFERENCE.md): command groups, options, and code-task init config schema.
-- [Workflows And Artifacts](docs/WORKFLOWS.md): workflow presets, the 8-stage pipeline, and artifact layouts.
-- [Development Guide](docs/DEVELOPMENT.md): how to extend stages, templates, and code-task modules.
+- [Usage And Configuration](docs/USAGE.md): setup, workflow-oriented examples,
+  artifacts, and troubleshooting.
+- [CLI Reference](docs/CLI_REFERENCE.md): command groups, options, and config
+  schemas.
+- [Workflows And Artifacts](docs/WORKFLOWS.md): workflow presets, the 8-stage
+  pipeline, and artifact layouts.
+- [Development Guide](docs/DEVELOPMENT.md): how to extend stages, templates, and
+  code-task modules.
 - [Changelog](CHANGELOG.md): chronological development progress.
 
 ## Reference
 
-The main reference project is [aiming-lab/AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw). SimpleAutoResearch borrows the staged research idea, but keeps the implementation intentionally compact and learning-friendly.
+The main reference project is
+[aiming-lab/AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw).
+SimpleAutoResearch borrows the staged research idea, but keeps the
+implementation intentionally compact and learning-friendly.
 
 ## Community
 
-This is an early learning-oriented project. Issues, suggestions, experiments, and small focused pull requests are welcome, especially around coding-agent workflows, reproducible experiment execution, report quality, and documentation clarity.
+This is an early learning-oriented project. Issues, suggestions, experiments,
+and small focused pull requests are welcome, especially around coding-agent
+workflows, reproducible experiment execution, report quality, and documentation
+clarity.

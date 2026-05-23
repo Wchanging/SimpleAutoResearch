@@ -104,12 +104,13 @@ convention is common enough to be unsurprising.
 
 ### Code-Task Environment Policy
 
-The current V2.1 code-task runner has workspace isolation, command timeouts,
-captured stdout/stderr, a restricted environment map, and an explicit execution
-interpreter policy. It supports `current` and `external` modes, but it does not
-yet create or install into a separate Python environment. Unless a future
-feature explicitly changes this, do not install user project dependencies into
-SimpleAutoResearch's own `.venv` by default.
+The current V2.2 code-task runner has workspace isolation through `copy`,
+`git_worktree`, or experimental `sparse_copy`, command timeouts, optional
+streamed benchmark output, captured stdout/stderr, a restricted environment
+map, and an explicit execution interpreter policy. It supports `current` and
+`external` modes, but it does not yet create or install into a separate Python
+environment. Unless a future feature explicitly changes this, do not install
+user project dependencies into SimpleAutoResearch's own `.venv` by default.
 
 Environment support should evolve in layers:
 

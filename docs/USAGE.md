@@ -230,44 +230,21 @@ config schema.
 
 For normal use, prefer a TOML config plus the state-aware executor. This keeps
 commands short while preserving review gates for the patch plan and edit
-proposal.
+proposal. The examples below use the tiny digits MLP config; replace the config
+path with `examples/code_tasks/configs/medium_review_pipeline.toml` when you
+want the larger multi-file example with visible benchmark progress.
 
-Start a run:
+1. Initialize a run:
 
 ```bash
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-The commands below use the tiny digits MLP config. To run the Day27 medium
-review pipeline with visible benchmark progress, replace the config path with
-`examples/code_tasks/configs/medium_review_pipeline.toml` and use the run-name
-filter `*medium-review-pipeline*` when setting `$RUN`. During `execute`, you
-should see relayed lines such as `benchmark stdout: round 1/4 ...` while the
-same output is captured under `code_task/run/<label>/stdout.txt`. Because the
-medium task naturally touches feature extraction, model scoring, and config, it
-usually produces a reviewed `large` batch; add `--allow-large-edits` to the
-final apply command only after inspecting the proposal.
+The command prints a run directory such as
+`runs/20260523-xxxx-tiny-digits-mlp`. Replace `runs/<run-id>` in the following
+commands with that printed path.
 
-For the medium example, the matching PowerShell run selector is:
-
-```powershell
-$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
-  Where-Object { $_.Name -like "*medium-review-pipeline*" } |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -First 1).Name)
-```
-
-Set `RUN` to the newest matching run directory if you want copyable commands:
-
-```powershell
-$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
-  Where-Object { $_.Name -like "*tiny-digits-mlp*" } |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -First 1).Name)
-```
-
-`init` writes the isolated workspace and static project map. The important
-artifacts are:
+`init` writes the isolated workspace and static project map:
 
 - `code_task/workspace/`: editable copy/worktree used by the model.
 - `code_task/task.md`: the task prompt copied from the config.
@@ -275,10 +252,20 @@ artifacts are:
 - `code_task/meta/repo_map.json` and `repo_map_summary.md`: layered project map.
 - `manifest.json`: benchmark, workspace, environment, and safety policy.
 
-Continue to the first human review gate:
+> Tip: The medium review pipeline runs `python main.py --config
+> configs/experiment.json --show-progress` and can relay progress lines such as
+> `benchmark stdout: round 1/4 ...` while still saving the full log under
+> `code_task/run/<label>/stdout.txt`.
 
-```powershell
-uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml
+> Note: The medium task often touches feature extraction, model scoring, and
+> config together, so it may create a reviewed `large` batch. Add
+> `--allow-large-edits` to the final apply command only after inspecting
+> `code_task/meta/proposed_edits.json`.
+
+2. Continue to the first human review gate:
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
 This usually writes:
@@ -289,19 +276,17 @@ This usually writes:
 - `code_task/attempts/attempt-001/batches/batch-001/batch_state.json`: active batch state.
 - `code_task/patch_plan.md`: reviewable patch plan.
 
-Read `code_task/work_plan.md` and `code_task/patch_plan.md`. If the plan is
+3. Read `code_task/work_plan.md` and `code_task/patch_plan.md`. If the plan is
 reasonable, approve it:
 
-```powershell
-uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
+```bash
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
 ```
 
-Generate an edit proposal, but do not apply it yet:
+4. Generate an edit proposal, but do not apply it yet:
 
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step propose-edits
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
 ```
 
 Review:
@@ -315,19 +300,16 @@ The default editor backend is `controlled_patch`. Its metadata is recorded in
 `manifest.json.patch`. The backend does not run benchmarks, approve plans, or
 write reports; those gates remain owned by the code-task workflow.
 
-Apply the reviewed proposal and evaluate the patched workspace:
+5. Apply the reviewed proposal and evaluate the patched workspace:
 
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --apply-proposed-edits `
-  --timeout 60
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --apply-proposed-edits --timeout 60
 ```
 
-Then inspect the result:
+6. Inspect the result:
 
-```powershell
-uv run simple-ar status $RUN
+```bash
+uv run simple-ar status runs/<run-id>
 ```
 
 Key output files:
@@ -344,31 +326,26 @@ success signal. A patched benchmark can pass while `objective.status` is
 `regressed` or `mixed`; in that case, the code ran but the measured task goal
 was not really met.
 
-If the proposal needs repair, ask for one bounded repair proposal:
+7. If the proposal needs repair, ask for one bounded repair proposal:
 
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step repair `
-  --repair-rounds 1 `
-  --timeout 60
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step repair --repair-rounds 1 --timeout 60
 ```
 
 Review the newest `code_task/repairs/repair-NNN/proposed_edits.json`, then
 apply it explicitly:
 
-```powershell
-uv run simple-ar code-task apply-edits $RUN `
-  --edits-file "$RUN\code_task\repairs\repair-NNN\proposed_edits.json"
-uv run simple-ar code-task validate $RUN
-uv run simple-ar code-task run $RUN --timeout 60
-uv run simple-ar status $RUN
+```bash
+uv run simple-ar code-task apply-edits runs/<run-id> --edits-file runs/<run-id>/code_task/repairs/repair-NNN/proposed_edits.json
+uv run simple-ar code-task validate runs/<run-id>
+uv run simple-ar code-task run runs/<run-id> --timeout 60
+uv run simple-ar status runs/<run-id>
 ```
 
 Preview the next executor action without writing artifacts:
 
-```powershell
-uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml --dry-run
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --dry-run
 ```
 
 ### Optional Mapping And Context Tools
@@ -606,11 +583,9 @@ than an older failed attempt.
   `approval_required` after writing `code_task/patch_plan.md`.
 - Review `code_task/patch_plan.md`, then run:
 
-```powershell
-uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step propose-edits
+```bash
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
 ```
 
 - Check `manifest.json`: `plan.status` should be `approved`. The decision log
@@ -631,22 +606,17 @@ code_task/summary.md
 
 - Ask for a bounded repair proposal:
 
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step repair `
-  --repair-rounds 1 `
-  --timeout 60
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step repair --repair-rounds 1 --timeout 60
 ```
 
 - Review the newest `code_task/repairs/repair-NNN/proposed_edits.json`, then
   apply it explicitly:
 
-```powershell
-uv run simple-ar code-task apply-edits $RUN `
-  --edits-file "$RUN\code_task\repairs\repair-NNN\proposed_edits.json"
-uv run simple-ar code-task validate $RUN
-uv run simple-ar code-task run $RUN --timeout 60
+```bash
+uv run simple-ar code-task apply-edits runs/<run-id> --edits-file runs/<run-id>/code_task/repairs/repair-NNN/proposed_edits.json
+uv run simple-ar code-task validate runs/<run-id>
+uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
 - A repair can make the benchmark pass without truly improving over baseline.
@@ -690,8 +660,9 @@ Proposal covers only the first part of a coupled plan:
   feature -> model -> config, the active batch should list all coupled ids in
   `work_item.source_work_item_ids` and all editable files in `work_item.target_files`.
 - For older runs created before this behavior, create a fresh batch with
-  `uv run simple-ar code-task batch $RUN --work-item W1 --force`, then regenerate
-  the proposal with `uv run simple-ar code-task propose-edits $RUN --force`.
+  `uv run simple-ar code-task batch runs/<run-id> --work-item W1 --force`, then
+  regenerate the proposal with
+  `uv run simple-ar code-task propose-edits runs/<run-id> --force`.
 - If the merged batch is marked `large`, review the full proposal before using
   `--allow-large-edits`.
 

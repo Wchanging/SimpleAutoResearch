@@ -184,42 +184,17 @@ benchmark 最好输出 `name: value` 数值行。自定义指标推荐在 TOML �
 
 ### 推荐路径：TOML + Execute
 
-正常使用时，推荐把项目路径、benchmark、指标方向、模型路由和预算放进 TOML，然后用 `code-task execute` 推进。这样命令更短，但仍然保留 patch plan 和 edit proposal 两个审核点。
+正常使用时，推荐把项目路径、benchmark、指标方向、模型路由和预算放进 TOML，然后用 `code-task execute` 推进。这样命令更短，但仍然保留 patch plan 和 edit proposal 两个审核点。下面示例默认使用 tiny digits MLP 配置；如果要运行带进度输出的多文件 medium 示例，把 config 路径替换为 `examples/code_tasks/configs/medium_review_pipeline.toml`。
 
-先初始化：
+1. 初始化 run：
 
 ```bash
 uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-下面的命令默认使用 tiny digits MLP 配置。如果要运行 Day27 的 medium
-review pipeline，并在 benchmark 运行时看到进度输出，把 config 路径替换为
-`examples/code_tasks/configs/medium_review_pipeline.toml`，并在设置 `$RUN`
-时把筛选条件改成 `*medium-review-pipeline*`。执行 `execute` 时应该能看到
-类似 `benchmark stdout: round 1/4 ...` 的转发行，同时完整 stdout 仍会保存到
-`code_task/run/<label>/stdout.txt`。由于 medium 任务自然会联动 feature
-extraction、model scoring 和 config，通常会生成一个已审核的 `large` batch；
-最后应用 proposal 时，只有在检查 proposal 后才应加入 `--allow-large-edits`。
+这个命令会打印一个 run 目录，例如 `runs/20260523-xxxx-tiny-digits-mlp`。下面命令中的 `runs/<run-id>` 都替换成这个实际路径即可。
 
-medium 示例对应的 PowerShell run selector 是：
-
-```powershell
-$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
-  Where-Object { $_.Name -like "*medium-review-pipeline*" } |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -First 1).Name)
-```
-
-如果想在 PowerShell 里复制后续命令，可以把最新 run 目录保存到 `$RUN`：
-
-```powershell
-$RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
-  Where-Object { $_.Name -like "*tiny-digits-mlp*" } |
-  Sort-Object LastWriteTime -Descending |
-  Select-Object -First 1).Name)
-```
-
-`init` 会写入隔离 workspace 和静态项目地图，重点产物是：
+`init` 会写入隔离 workspace 和静态项目地图：
 
 - `code_task/workspace/`：模型可以修改的隔离副本或 worktree。
 - `code_task/task.md`：从配置复制进来的任务说明。
@@ -227,10 +202,14 @@ $RUN = Join-Path "runs" ((Get-ChildItem .\runs -Directory |
 - `code_task/meta/repo_map.json` 和 `repo_map_summary.md`：分层项目地图。
 - `manifest.json`：benchmark、workspace、environment 和 safety policy。
 
-推进到第一个人工审核点：
+> Tip：medium review pipeline 会运行 `python main.py --config configs/experiment.json --show-progress`。执行时可以看到类似 `benchmark stdout: round 1/4 ...` 的转发行，同时完整 stdout 仍会保存到 `code_task/run/<label>/stdout.txt`。
 
-```powershell
-uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml
+> Note：medium 任务通常会联动 feature extraction、model scoring 和 config，因此可能生成一个已审核的 `large` batch。只有在检查 `code_task/meta/proposed_edits.json` 后，最后应用 proposal 时才应加入 `--allow-large-edits`。
+
+2. 推进到第一个人工审核点：
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
 这一步通常会生成：
@@ -241,18 +220,16 @@ uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tin
 - `code_task/attempts/attempt-001/batches/batch-001/batch_state.json`：当前 active batch 状态。
 - `code_task/patch_plan.md`：需要人工审核的 patch plan。
 
-阅读 `code_task/work_plan.md` 和 `code_task/patch_plan.md`。如果计划合理，批准它：
+3. 阅读 `code_task/work_plan.md` 和 `code_task/patch_plan.md`。如果计划合理，批准它：
 
-```powershell
-uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
+```bash
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
 ```
 
-生成 edit proposal，但先不要应用：
+4. 生成 edit proposal，但先不要应用：
 
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step propose-edits
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
 ```
 
 重点审核：
@@ -265,19 +242,16 @@ uv run simple-ar code-task execute $RUN `
 `proposed_edits.json`、active batch state、`applied_edits.json` 和
 `manifest.json.patch` 中。backend 不负责运行 benchmark、批准计划或写报告；这些 gate 仍由 code-task workflow 管理。
 
-确认 proposal 后，应用补丁并运行验证和 patched benchmark：
+5. 确认 proposal 后，应用补丁并运行验证和 patched benchmark：
 
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --apply-proposed-edits `
-  --timeout 60
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --apply-proposed-edits --timeout 60
 ```
 
-然后查看整体状态：
+6. 查看整体状态：
 
-```powershell
-uv run simple-ar status $RUN
+```bash
+uv run simple-ar status runs/<run-id>
 ```
 
 关键结果文件：
@@ -291,30 +265,25 @@ uv run simple-ar status $RUN
 
 正常成功信号是 `objective_improved` 或 `objective.status = "improved"`。patched benchmark 通过并不等于任务目标一定完成；如果 objective 是 `regressed` 或 `mixed`，说明代码能跑，但指标目标没有真正达成。
 
-如果需要修复，先请求一个有限范围的 repair proposal：
+7. 如果需要修复，先请求一个有限范围的 repair proposal：
 
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step repair `
-  --repair-rounds 1 `
-  --timeout 60
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step repair --repair-rounds 1 --timeout 60
 ```
 
 审核最新的 `code_task/repairs/repair-NNN/proposed_edits.json`，再显式应用：
 
-```powershell
-uv run simple-ar code-task apply-edits $RUN `
-  --edits-file "$RUN\code_task\repairs\repair-NNN\proposed_edits.json"
-uv run simple-ar code-task validate $RUN
-uv run simple-ar code-task run $RUN --timeout 60
-uv run simple-ar status $RUN
+```bash
+uv run simple-ar code-task apply-edits runs/<run-id> --edits-file runs/<run-id>/code_task/repairs/repair-NNN/proposed_edits.json
+uv run simple-ar code-task validate runs/<run-id>
+uv run simple-ar code-task run runs/<run-id> --timeout 60
+uv run simple-ar status runs/<run-id>
 ```
 
 如果只想预览下一步，不写任何产物：
 
-```powershell
-uv run simple-ar code-task execute $RUN --config examples/code_tasks/configs/tiny_digits_mlp.toml --dry-run
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --dry-run
 ```
 
 ### 可选的代码地图和上下文工具
@@ -466,11 +435,9 @@ uv run simple-ar code-task apply-edits runs/<run-id> \
 - 这是第一次 executor 调用后的正常情况。fresh run 会先停在 `approval_required`，此时应该已经有 `code_task/patch_plan.md`。
 - 先审核并批准计划，再明确推进到 proposal：
 
-```powershell
-uv run simple-ar code-task decide-plan $RUN --decision approve --note "reviewed"
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step propose-edits
+```bash
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
 ```
 
 - 可检查 `manifest.json` 中的 `plan.status` 是否为 `approved`；人工决策记录在 `code_task/meta/hitl_decisions.jsonl`。
@@ -489,21 +456,16 @@ code_task/summary.md
 
 - 请求一个有限范围的修复 proposal：
 
-```powershell
-uv run simple-ar code-task execute $RUN `
-  --config examples/code_tasks/configs/tiny_digits_mlp.toml `
-  --to-step repair `
-  --repair-rounds 1 `
-  --timeout 60
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step repair --repair-rounds 1 --timeout 60
 ```
 
 - 审核最新的 `code_task/repairs/repair-NNN/proposed_edits.json`，再显式应用、验证和重跑：
 
-```powershell
-uv run simple-ar code-task apply-edits $RUN `
-  --edits-file "$RUN\code_task\repairs\repair-NNN\proposed_edits.json"
-uv run simple-ar code-task validate $RUN
-uv run simple-ar code-task run $RUN --timeout 60
+```bash
+uv run simple-ar code-task apply-edits runs/<run-id> --edits-file runs/<run-id>/code_task/repairs/repair-NNN/proposed_edits.json
+uv run simple-ar code-task validate runs/<run-id>
+uv run simple-ar code-task run runs/<run-id> --timeout 60
 ```
 
 - 修复后 benchmark pass 不等于任务真正完成。比如修复可能只是恢复到可运行或接近 baseline；是否真的 improved 要看 `code_task/run/comparison.json`、`manifest.json.objective.status` 和 `simple-ar status`。
@@ -528,7 +490,7 @@ patched benchmark 通过，但 objective 是 `regressed` 或 `mixed`：
 Proposal 只覆盖了联动计划的第一部分：
 
 - 先检查 `code_task/work_plan.md` 和最新的 `code_task/attempts/.../batch_state.json`。如果计划是 feature -> model -> config 这类串行联动，active batch 应该在 `work_item.source_work_item_ids` 中列出合并的 item id，并在 `work_item.target_files` 中列出所有允许修改的文件。
-- 对于旧 run，如果 batch 是在这次行为更新前创建的，可以重新创建批次并重新生成 proposal：`uv run simple-ar code-task batch $RUN --work-item W1 --force`，然后 `uv run simple-ar code-task propose-edits $RUN --force`。
+- 对于旧 run，如果 batch 是在这次行为更新前创建的，可以重新创建批次并重新生成 proposal：`uv run simple-ar code-task batch runs/<run-id> --work-item W1 --force`，然后 `uv run simple-ar code-task propose-edits runs/<run-id> --force`。
 - 如果合并后的 batch 被标记为 `large`，先审核完整 proposal，再决定是否使用 `--allow-large-edits`。
 
 `uv run` 出现本地 cache 权限错误：

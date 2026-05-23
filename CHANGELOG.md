@@ -31,6 +31,10 @@ This file records user-visible project changes in reverse chronological order. P
 - Applying a reviewed large proposal now records apply-time approval in
   `applied_edits.json` and `manifest.json.patch.budget`, and executor benchmark
   runs avoid duplicate validation history entries.
+- Public docs now keep README as a concise project entry point, move the full
+  code-task executor sequence into Usage, replace long PowerShell run-directory
+  selectors with `runs/<run-id>` placeholders, and surface `copy`,
+  `git_worktree`, and `sparse_copy` as first-class workspace strategies.
 
 ## 2026-05-22
 
