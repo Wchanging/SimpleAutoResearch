@@ -2,7 +2,7 @@
 
 [English version](USAGE.md)
 
-本文说明如何安装、配置和运行 SimpleAutoResearch。它是面向用户的实践指南；工作流概念和产物结构见 [工作流与产物](WORKFLOWS_zh.md)，完整命令表见 [CLI 参考](CLI_REFERENCE_zh.md)。
+本文说明如何安装、配置和运行 SimpleAutoResearch。它是面向用户的实践指南；工作流概念和产物结构见 [工作流与产物](WORKFLOWS_zh.md)，完整命令表见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML 字段见 [配置参考](CONFIG_REFERENCE_zh.md)。
 
 ## 环境要求
 
@@ -80,7 +80,7 @@ uv run simple-ar run --topic "toy topic" --to-stage report
 uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
 ```
 
-配置文件可以包含 `[run]`、`[llm]`、`[search]`、`[retrieval]`、`[experiment]`、`[report]`，也可以包含和 `code-task init --config` 相同的 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[workspace]`、`[safety]`。显式 CLI 参数会覆盖配置文件。完整示例和字段解释见 [CLI 参考](CLI_REFERENCE_zh.md#run-config)。
+配置文件可以包含 `[run]`、`[llm]`、`[search]`、`[research]`、`[retrieval]`、`[experiment]`、`[report]`，也可以包含和 `code-task init --config` 相同的 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[workspace]`、`[safety]`。显式 CLI 参数会覆盖配置文件。完整示例和字段解释见 [配置参考](CONFIG_REFERENCE_zh.md#完整-pipeline-config)。
 
 只做文献分析时，可以先停在 `synthesize`：
 
@@ -113,7 +113,8 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 默认搜索行为：
 
-- `search` 先查 OpenAlex，再查 arXiv。
+- `search` 会先生成 `02-search/source_plan.json`，记录本次计划使用的 query、source、模式和预算。
+- 如果没有额外配置，`search` 先查 OpenAlex，再查 arXiv。
 - 如果 live provider 失败且没有设置 `--strict-search`，会优先使用本地 cache。
 
 常用控制：
@@ -127,6 +128,45 @@ uv run simple-ar run --topic "agent simulation" --to-stage report --offline-sear
 - `--strict-search` 禁用 cache/fixture fallback，live provider 失败就让 run 失败。
 - `--allow-fixture-fallback` 允许 live provider 和 cache 都失败后使用 fixture metadata。
 - `--offline-search` 跳过 live provider，直接使用 fixture metadata。
+
+如果希望把检索源、query、cache 和预算写成可复用配置，可以在 run config 里加入 `[research]`：
+
+```toml
+[search]
+offline = false
+max_papers = 5
+query = "agent simulation evaluation"
+
+[research]
+# lite：元数据/本地笔记；standard：cache/index-ready；strong：后续全文/向量路径。
+mode = "standard"
+sources = ["openalex", "arxiv"]
+queries = ["agent simulation evaluation", "multi-agent simulation benchmark"]
+use_fulltext = false
+allow_pdf_download = false
+cache = true
+index_backend = "sqlite_fts"
+
+[research.budget]
+max_documents = 20
+max_chunks = 200
+max_context_tokens = 12000
+max_llm_calls = 8
+```
+
+搜索阶段会写出：
+
+- `02-search/source_plan.json`：计划中的 queries、sources、检索模式、本地文档、cache/index 偏好和预算。
+- `02-search/search_meta.json`：provider 尝试记录、最终选用 source、状态和返回数量。
+- `02-search/papers.jsonl`：传给 `read` 阶段的标准化论文 metadata。
+
+本地 Markdown/text 笔记也可以作为保守的研究源使用，不需要调用 live literature provider：
+
+```bash
+uv run simple-ar run --config examples/run_configs/local_research_report.toml
+```
+
+这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。V2.3 Day2 的 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取；PDF 解析、文档切块和向量检索会放在后续 evidence engine 中继续实现。
 
 ### 恢复和查看状态
 
@@ -180,7 +220,7 @@ uv run simple-ar code-task init --config examples/code_tasks/configs/medium_revi
 
 如果使用 `workspace.mode = "sparse_copy"` 或 `--workspace-mode sparse_copy`，只会复制匹配 include pattern 的文件，同时始终排除 `.git`、virtualenv、`runs`、cache/build、`data`、`models`、`.env` 和 secret-like 路径。这个模式适合你明确知道需要哪些文件的小型实验；通用项目仍建议 `copy` 或 `git_worktree`。
 
-benchmark 最好输出 `name: value` 数值行。自定义指标推荐在 TOML 中声明解释方向。显式 CLI 参数仍然支持，适合临时实验和快速测试，但公开使用路径建议优先用 TOML。完整参数表见 [CLI 参考](CLI_REFERENCE_zh.md#init)，配置 schema 见 [CLI 参考](CLI_REFERENCE_zh.md#init-config)。
+benchmark 最好输出 `name: value` 数值行。自定义指标推荐在 TOML 中声明解释方向。显式 CLI 参数仍然支持，适合临时实验和快速测试，但公开使用路径建议优先用 TOML。完整参数表见 [CLI 参考](CLI_REFERENCE_zh.md#simple-ar-code-task-init)，配置 schema 见 [配置参考](CONFIG_REFERENCE_zh.md#standalone-code-task-config)。
 
 ### 推荐路径：TOML + Execute
 

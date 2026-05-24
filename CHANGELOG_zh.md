@@ -4,6 +4,30 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-05-24
+
+### Added
+
+- 添加 V2.3 research source-planning 基础：`02-search` 现在会写出
+  `source_plan.json`，记录计划 query、source 顺序、research mode、
+  本地文档、cache/index 偏好和轻量预算。
+- 顶层 run config 现在支持 `[research]`，包括 `sources`、`queries`、
+  `local_documents`、`cache`、`index_backend` 和 `[research.budget]`。
+- 新增本地研究源示例 `examples/run_configs/local_research_report.toml`，
+  并在 `examples/research/` 下提供配套 Markdown notes。
+
+### Changed
+
+- 搜索执行现在通过 research connector wrapper 调用 OpenAlex、arXiv 和本地
+  Markdown/text 文件源，同时保留已有 fixture 与 cache fallback 行为。
+- 拆分公开命令和配置文档：`CLI_REFERENCE_zh.md` 现在只聚焦命令语法、参数表和产物；
+  新增 `CONFIG_REFERENCE_zh.md` 集中说明 TOML schema、完整配置和 workspace 模式变体。
+- 配置文档补充了更完整的 inline comments 和关键字段说明，便于理解 `max_papers`、
+  research budgets、workspace modes 和 execute budgets 等不够自解释的设置。
+- README、Usage、CLI Reference 和 Workflows 文档已补充
+  `02-search/source_plan.json`、`[research]` 配置、本地文件源，以及当前
+  V2.3 边界：PDF 解析和向量检索还未启用。
+
 ## 2026-05-23
 
 ### Changed

@@ -2,7 +2,7 @@
 
 [English version](DEVELOPMENT.md)
 
-本文面向想扩展 SimpleAutoResearch 的贡献者。命令细节见 [CLI 参考](CLI_REFERENCE_zh.md)，安装 walkthrough 见 [使用与配置](USAGE_zh.md)，工作流概念和产物见 [工作流与产物](WORKFLOWS_zh.md)。
+本文面向想扩展 SimpleAutoResearch 的贡献者。命令细节见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML schema 见 [配置参考](CONFIG_REFERENCE_zh.md)，安装 walkthrough 见 [使用与配置](USAGE_zh.md)，工作流概念和产物见 [工作流与产物](WORKFLOWS_zh.md)。
 
 ## 项目形态
 
@@ -98,7 +98,8 @@ Metric comparison 应保持保守。未知数值指标可以记录 delta，但�
 
 - `README.md` / `README_zh.md`：项目入口、安装、quickstart、workflow 概览和链接。
 - `docs/USAGE.md` / `docs/USAGE_zh.md`：安装、环境变量和 workflow walkthrough。
-- `docs/CLI_REFERENCE.md` / `docs/CLI_REFERENCE_zh.md`：命令组、参数表和配置 schema。
+- `docs/CLI_REFERENCE.md` / `docs/CLI_REFERENCE_zh.md`：命令组和参数表。
+- `docs/CONFIG_REFERENCE.md` / `docs/CONFIG_REFERENCE_zh.md`：TOML schema 和配置示例。
 - `docs/WORKFLOWS.md` / `docs/WORKFLOWS_zh.md`：每个 workflow/stage 做什么，以及产物结构。
 - `docs/DEVELOPMENT.md` / `docs/DEVELOPMENT_zh.md`：贡献者指南。
 - `CHANGELOG.md`：按时间记录开发进展。

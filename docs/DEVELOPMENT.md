@@ -2,7 +2,7 @@
 
 [中文版本](DEVELOPMENT_zh.md)
 
-This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
+This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For TOML schema details, see [Configuration Reference](CONFIG_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
 
 ## Project Shape
 
@@ -140,7 +140,8 @@ Use the docs this way:
 
 - `README.md`: project entry, setup, quickstart, workflow overview, links.
 - `docs/USAGE.md`: installation, env configuration, and workflow walkthroughs.
-- `docs/CLI_REFERENCE.md`: command groups, option tables, and config schema.
+- `docs/CLI_REFERENCE.md`: command groups and option tables.
+- `docs/CONFIG_REFERENCE.md`: TOML schema and configuration examples.
 - `docs/WORKFLOWS.md`: what each workflow/stage does and what files it produces.
 - `docs/DEVELOPMENT.md`: contributor guidance.
 - `CHANGELOG.md`: chronological development progress.

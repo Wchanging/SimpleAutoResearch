@@ -18,6 +18,7 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
 ## 当前可用能力
 
 - **研究报告**：从主题出发，运行可见的阶段式流程，生成文献笔记、综合分析和报告产物。
+- **研究源规划**：每次 `02-search` 会写入 `source_plan.json`，记录 OpenAlex/arXiv/本地文件源、query 列表、检索模式、cache 策略和轻量预算。
 - **Code Task**：在隔离可编辑 workspace 中改进已有代码库，支持 LLM 规划、人工审核点、受控补丁 proposal、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：可以把 code task 嵌入 8 阶段流程，生成 repo map、context pack、work plan、patch 证据、benchmark 指标和报告证据。
@@ -70,6 +71,12 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
+```
+
+如果希望把搜索源、query 和本地资料写成可复用配置，可以使用 run config。下面这个本地示例会把 Markdown 笔记作为研究源，并在 `02-search/source_plan.json` 中记录本次检索策略：
+
+```bash
+uv run simple-ar run --config examples/run_configs/local_research_report.toml
 ```
 
 如果只想做文献综述，可以先停在 `synthesize`，再从打印出的 run 目录生成研究报告：
@@ -135,6 +142,13 @@ enabled = true
 offline = false
 max_papers = 5
 
+[research]
+# 可选：02-search 的 source planner。
+mode = "standard"  # lite | standard | strong
+sources = ["openalex", "arxiv"]
+queries = ["research and improve my model"]
+cache = true
+
 [experiment]
 template = "code_task_project"
 timeout = 120
@@ -180,13 +194,14 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 - `sparse_copy` 仍是实验性功能，如果 include 范围过窄，可能漏掉运行依赖。
 - 目前不会自动安装项目依赖，也不会自动管理 Docker/Conda/GPU/Slurm 环境。
 - 较大的代码修改 proposal 仍可能触发很长的 LLM completion。V2.2 会继续加入 bounded proposal contract、context request、多轮 attempt 和未来 external coding-agent adapter；在这些能力成熟前，不建议把它当作大型无人值守重构工具。
-- 文献检索主要基于元数据和本地产物片段，还不是完整 PDF 阅读或向量 RAG survey 系统。
+- 文献检索现在会写入可审计的 source plan，并支持 OpenAlex、arXiv 和本地 Markdown/text 笔记，但还不是完整 PDF 解析、parser-backed 或向量 RAG survey 系统。
 - LLM 报告有引用、指标和边界规则保护；如果草稿不合格，会回退到结构化 deterministic report。
 
 ## 文档
 
 - [使用与配置](docs/USAGE_zh.md)：安装、工作流示例、产物说明和排错流程。
-- [CLI 参考](docs/CLI_REFERENCE_zh.md)：命令组、参数表和配置 schema。
+- [CLI 参考](docs/CLI_REFERENCE_zh.md)：命令组和参数表。
+- [配置参考](docs/CONFIG_REFERENCE_zh.md)：TOML section、完整配置示例和 workspace 模式变体。
 - [工作流与产物](docs/WORKFLOWS_zh.md)：预设工作流、8 阶段流程和产物布局。
 - [开发指南](docs/DEVELOPMENT_zh.md)：如何扩展 stage、template 和 code-task 模块。
 - [Changelog](CHANGELOG_zh.md)：按时间记录的开发进展。

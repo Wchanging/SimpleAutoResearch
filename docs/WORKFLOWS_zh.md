@@ -2,7 +2,7 @@
 
 [English version](WORKFLOWS.md)
 
-本文说明 SimpleAutoResearch 内部在做什么：工作流预设、pipeline 阶段、阶段输出和 run artifact 布局。具体命令见 [CLI 参考](CLI_REFERENCE_zh.md)，安装和 walkthrough 见 [使用与配置](USAGE_zh.md)。
+本文说明 SimpleAutoResearch 内部在做什么：工作流预设、pipeline 阶段、阶段输出和 run artifact 布局。具体命令见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML 字段见 [配置参考](CONFIG_REFERENCE_zh.md)，安装和 walkthrough 见 [使用与配置](USAGE_zh.md)。
 
 ## 工作流预设
 
@@ -91,7 +91,7 @@ plan -> search -> read -> synthesize -> design experiment
 | 阶段 | 主要输出 | 目的 |
 | --- | --- | --- |
 | `plan` | `goal.md`, `problem.md` | 把主题收束成具体研究问题；启用 LLM 时由 LLM 支持。 |
-| `search` | `papers.jsonl`, `search_meta.json` | 收集 OpenAlex/arXiv metadata 或 fixture rows。 |
+| `search` | `papers.jsonl`, `search_meta.json`, `source_plan.json` | 规划并收集来自配置源的文献 metadata。 |
 | `read` | `paper_notes.json`, `notes.md` | 把论文 metadata 转成结构化 notes；启用 LLM 时由 LLM 支持。 |
 | `synthesize` | `synthesis.md`, `hypothesis.md` | 产出有边界的 synthesis 和可测试假设。 |
 | `design` | `experiment_plan.json` | 选择安全实验模板和参数。 |
@@ -101,7 +101,9 @@ plan -> search -> read -> synthesize -> design experiment
 
 ## Search 与 LLM 边界
 
-- Live search 先用 OpenAlex，再用 arXiv。未设置 `--strict-search` 时，live 失败后会使用缓存 metadata。
+- `02-search/source_plan.json` 会记录本次计划使用的 query、source 顺序、本地文档、检索模式、cache/index hints 和预算。
+- Live search 使用配置中的 source 顺序。默认先用 OpenAlex，再用 arXiv。未设置 `--strict-search` 且 source plan 允许 cache 时，live 失败后会使用缓存 metadata。
+- `local_files` 可以把用户提供的 Markdown/text 笔记作为保守的 metadata-like records。当前还不解析 PDF。
 - `--offline-search` 会跳过 live provider，直接使用 fixture metadata。
 - `--allow-fixture-fallback` 只在 live 和 cache 都失败后允许 fixture metadata。
 - `--no-llm` 会让 plan/read/synthesize/report 使用 deterministic fallback。
@@ -127,6 +129,9 @@ runs/<run-id>/
   evidence_ledger.jsonl
   01-plan/
   02-search/
+    source_plan.json
+    papers.jsonl
+    search_meta.json
   03-read/
   04-synthesize/
   05-design/
@@ -147,9 +152,12 @@ runs/<run-id>/
 - `artifact_index.json`：由 `inspect` 或 `search-artifacts` 生成的本地 artifact index。
 - `artifact_chunks.jsonl`：用于本地 retrieval 的 line-addressable chunks。
 - `artifact_search_results.json`：最近一次 artifact search 结果，只由 artifact search 命令生成。
-- `source_plan.json`：描述每个阶段应该参考哪些 artifacts 的 source plan。
+- `source_plan.json`：artifact-retrieval source plan，描述每个阶段应该参考哪些 run artifacts；它和 `02-search/source_plan.json` 不是同一个文件。
 - `activity_log.jsonl`：source planning 和 retrieval actions 的结构化日志。
 - `evidence_ledger.jsonl`：阶段使用的 snippets，包含 path 和 line range。
+- `02-search/source_plan.json`：本次运行的文献 source plan，包含 provider 顺序、本地文档路径、query 列表、检索模式和预算。
+- `02-search/search_meta.json`：provider 尝试记录和最终选用 source。
+- `02-search/papers.jsonl`：传给 `03-read` 的标准化 metadata rows。
 - `05-design/generated_code_task.md`：仅当内嵌 `code_task_project` 没有 task file 时生成。
 - `05-design/generated_code_task_meta.json`：生成 task file 的 provenance。
 - `06-code/code_task_experiment.json`：内嵌 code-task templates 的阶段产物。

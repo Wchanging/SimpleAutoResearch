@@ -4,6 +4,37 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-24
+
+### Added
+
+- Added the V2.3 research source-planning foundation. `02-search` now writes
+  `source_plan.json` with planned queries, source order, research mode,
+  local-document hints, cache/index preferences, and lightweight budgets.
+- Added `[research]` support in top-level run configs, including `sources`,
+  `queries`, `local_documents`, `cache`, `index_backend`, and
+  `[research.budget]` fields.
+- Added a local research-source example at
+  `examples/run_configs/local_research_report.toml` with supporting notes under
+  `examples/research/`.
+
+### Changed
+
+- Search execution now runs through research connector wrappers for OpenAlex,
+  arXiv, and local Markdown/text files while preserving existing fixture and
+  cache fallback behavior.
+- Split public command and configuration documentation: `CLI_REFERENCE.md` now
+  focuses on command syntax/options/artifacts, while the new
+  `CONFIG_REFERENCE.md` centralizes TOML schema, complete configs, and
+  workspace-mode variants.
+- Expanded configuration docs with inline comments and key-field notes so less
+  obvious settings such as `max_papers`, research budgets, workspace modes, and
+  execute budgets are easier to understand.
+- Public README, Usage, CLI reference, and workflow docs now describe
+  `02-search/source_plan.json`, `[research]` config, local-file sources, and
+  the current V2.3 boundary that PDF parsing/vector retrieval are not active
+  yet.
+
 ## 2026-05-23
 
 ### Changed

@@ -2,7 +2,11 @@
 
 [中文版本](USAGE_zh.md)
 
-This document explains how to install, configure, and run SimpleAutoResearch. It is the practical user guide; workflow concepts and artifact details live in [Workflows And Artifacts](WORKFLOWS.md).
+This document explains how to install, configure, and run SimpleAutoResearch.
+It is the practical user guide; workflow concepts and artifact details live in
+[Workflows And Artifacts](WORKFLOWS.md), command details live in
+[CLI Reference](CLI_REFERENCE.md), and TOML fields live in
+[Configuration Reference](CONFIG_REFERENCE.md).
 
 ## Requirements
 
@@ -82,11 +86,12 @@ For repeatable multi-option runs, use a top-level TOML config:
 uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
 ```
 
-The config can provide `[run]`, `[llm]`, `[search]`, `[retrieval]`,
-`[experiment]`, `[report]`, and the same `[code_task]`/`[benchmark]`/`[metrics]`
-sections used by `code-task init --config`. Explicit CLI flags override config
-values. See [CLI Reference](CLI_REFERENCE.md#run-config) for a complete
-commented config and field-by-field explanation.
+The config can provide `[run]`, `[llm]`, `[search]`, `[research]`,
+`[retrieval]`, `[experiment]`, `[report]`, and the same
+`[code_task]`/`[benchmark]`/`[metrics]` sections used by
+`code-task init --config`. Explicit CLI flags override config values. See
+[Configuration Reference](CONFIG_REFERENCE.md#complete-pipeline-config) for a
+complete commented config and field-by-field explanation.
 
 Stop early for a literature-only pass (no experiment code/run artifacts):
 
@@ -120,7 +125,8 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 Default search behavior:
 
-- `search` queries OpenAlex first, then arXiv.
+- `search` builds `02-search/source_plan.json` before querying providers.
+- Unless configured otherwise, `search` queries OpenAlex first, then arXiv.
 - If a live provider fails and `--strict-search` is not set, cached metadata is used when available.
 
 Explicit search controls:
@@ -134,6 +140,53 @@ uv run simple-ar run --topic "agent simulation" --to-stage report --offline-sear
 - `--strict-search` disables cache fallback for live providers.
 - `--allow-fixture-fallback` allows placeholder metadata when live providers and cache fail.
 - `--offline-search` skips live providers and uses fixture metadata immediately.
+
+For repeatable research-source settings, use the `[research]` section in a run
+config:
+
+```toml
+[search]
+offline = false
+max_papers = 5
+query = "agent simulation evaluation"
+
+[research]
+# lite: metadata/local notes; standard: cache/index-ready; strong: future full-text/vector path.
+mode = "standard"
+sources = ["openalex", "arxiv"]
+queries = ["agent simulation evaluation", "multi-agent simulation benchmark"]
+use_fulltext = false
+allow_pdf_download = false
+cache = true
+index_backend = "sqlite_fts"
+
+[research.budget]
+max_documents = 20
+max_chunks = 200
+max_context_tokens = 12000
+max_llm_calls = 8
+```
+
+The search stage writes:
+
+- `02-search/source_plan.json`: planned queries, sources, retrieval mode, local
+  document hints, cache/index preferences, and budget.
+- `02-search/search_meta.json`: provider attempts, selected source, status,
+  and returned-paper count.
+- `02-search/papers.jsonl`: normalized paper metadata passed to `read`.
+
+Local Markdown/text notes can be used as a conservative source without live
+literature-provider calls:
+
+```bash
+uv run simple-ar run --config examples/run_configs/local_research_report.toml
+```
+
+That example config sets `[research].sources = ["local_files"]` and points
+`[research].local_documents` at `examples/research/local_agent_simulation_notes.md`.
+The local-file connector is intentionally simple in V2.3 Day2: it reads `.md`
+and `.txt` files as metadata-like records. PDF parsing, document chunking, and
+vector retrieval are planned later in the V2.3 evidence engine.
 
 ### Resume And Status
 
@@ -222,9 +275,10 @@ omit runtime dependencies; prefer `copy` or `git_worktree` for general projects.
 Benchmarks should print numeric metric lines as `name: value`. Custom metric
 names work when you declare their direction in TOML. Explicit CLI flags are
 still supported for experiments and quick tests, but the TOML path is the
-recommended public workflow. See [CLI Reference](CLI_REFERENCE.md#init) for the
-full option table and [CLI Reference](CLI_REFERENCE.md#init-config) for the
-config schema.
+recommended public workflow. See
+[CLI Reference](CLI_REFERENCE.md#simple-ar-code-task-init) for the full option
+table and [Configuration Reference](CONFIG_REFERENCE.md#standalone-code-task-config)
+for the config schema.
 
 ### Recommended Path: TOML + Execute
 
@@ -685,7 +739,7 @@ uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
 
 The example config is intentionally complete: it includes the outer pipeline
 settings and the embedded code-task settings in one file. See
-[CLI Reference](CLI_REFERENCE.md#run-config) before adapting it to your own
+[Configuration Reference](CONFIG_REFERENCE.md#complete-pipeline-config) before adapting it to your own
 project.
 
 The equivalent split config form points the pipeline at a standalone code-task

@@ -17,6 +17,22 @@ enabled = true
 offline = true
 max_papers = 5
 
+[research]
+# V2.3 source planner settings for 02-search. Because this is an offline
+# coding-focused demo, the plan records fixture metadata rather than live
+# provider calls.
+mode = "lite"
+sources = ["fixture"]
+queries = ["tiny digits MLP baseline improvement"]
+cache = true
+index_backend = "keyword"
+
+[research.budget]
+max_documents = 5
+max_chunks = 50
+max_context_tokens = 6000
+max_llm_calls = 4
+
 [experiment]
 # Generic embedded existing-code workflow.
 template = "code_task_project"

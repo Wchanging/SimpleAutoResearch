@@ -1,0 +1,38 @@
+[run]
+topic = "agent simulation evaluation notes"
+output_root = "runs"
+to_stage = "report"
+
+[llm]
+# Set to true if you want LLM-backed notes and synthesis for the local document.
+enabled = false
+
+[search]
+# The research section below supplies a local source, so this config does not
+# need live OpenAlex/arXiv calls.
+offline = true
+max_papers = 3
+query = "agent simulation evaluation"
+
+[research]
+mode = "lite"
+sources = ["local_files"]
+queries = ["agent simulation evaluation"]
+local_documents = ["../research/local_agent_simulation_notes.md"]
+use_fulltext = false
+allow_pdf_download = false
+cache = false
+index_backend = "keyword"
+
+[research.budget]
+max_documents = 3
+max_chunks = 20
+max_context_tokens = 4000
+max_llm_calls = 4
+
+[retrieval]
+enabled = true
+top_k = 4
+
+[report]
+mode = "research_only"

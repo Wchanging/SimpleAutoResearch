@@ -49,6 +49,21 @@ def load_pipeline_run_config(config_path: str | None) -> dict[str, object]:
     _set_bool(result, "allow_fixture_fallback", search.get("allow_fixture_fallback"))
     _set_bool(result, "strict_search", search.get("strict"))
 
+    research = _table(data, "research")
+    _set_string(result, "research_mode", research.get("mode"))
+    _set_string_list(result, "research_sources", research.get("sources"))
+    _set_string_list(result, "research_queries", research.get("queries"))
+    _set_bool(result, "research_use_fulltext", research.get("use_fulltext"))
+    _set_bool(result, "research_allow_pdf_download", research.get("allow_pdf_download"))
+    _set_bool(result, "research_cache", research.get("cache"))
+    _set_string(result, "research_index_backend", research.get("index_backend"))
+    _set_resolved_string_list(result, "research_local_documents", research.get("local_documents"), path)
+    research_budget = _table(research, "budget")
+    _set_int(result, "research_max_documents", research_budget.get("max_documents"))
+    _set_int(result, "research_max_chunks", research_budget.get("max_chunks"))
+    _set_int(result, "research_max_context_tokens", research_budget.get("max_context_tokens"))
+    _set_int(result, "research_max_llm_calls", research_budget.get("max_llm_calls"))
+
     retrieval = _table(data, "retrieval")
     _set_bool(result, "use_retrieval", retrieval.get("enabled"))
     _set_int(result, "retrieval_top_k", retrieval.get("top_k"))
@@ -106,6 +121,31 @@ def _set_int(result: dict[str, object], key: str, value: object) -> None:
 def _set_bool(result: dict[str, object], key: str, value: object) -> None:
     if isinstance(value, bool):
         result[key] = value
+
+
+def _set_string_list(result: dict[str, object], key: str, value: object) -> None:
+    if not isinstance(value, list):
+        return
+    items = [item.strip() for item in (str(item) for item in value) if item.strip()]
+    if items:
+        result[key] = items
+
+
+def _set_resolved_string_list(
+    result: dict[str, object],
+    key: str,
+    value: object,
+    config_path: Path,
+) -> None:
+    if not isinstance(value, list):
+        return
+    paths = [
+        str(_resolve_relative(config_path, item.strip()))
+        for item in (str(item) for item in value)
+        if item.strip()
+    ]
+    if paths:
+        result[key] = paths
 
 
 def _contains_code_task_config(data: dict[str, Any]) -> bool:

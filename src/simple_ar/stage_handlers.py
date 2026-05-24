@@ -26,6 +26,8 @@ from simple_ar.literature.openalex_client import OpenAlexSearchClient, OpenAlexS
 from simple_ar.literature.verify import CitationError, validate_citations
 from simple_ar.llm import LLMClient, LLMError, LLMRequest
 from simple_ar.pipeline import Context, utcnow_iso
+from simple_ar.research.connectors import ArxivConnector, LocalFileConnector, OpenAlexConnector
+from simple_ar.research.contracts import SourcePlan
 from simple_ar.research.prompts import (
     CODE_TASK_DESIGN_SYSTEM,
     PLAN_SYSTEM,
@@ -38,6 +40,7 @@ from simple_ar.research.prompts import (
     report_user_prompt,
     synthesize_user_prompt,
 )
+from simple_ar.research.sources import SearchQuery, build_source_plan, primary_query
 from simple_ar.report_quality import build_report_quality
 from simple_ar.retrieval.evidence import collect_stage_evidence, format_evidence_snippets
 from simple_ar.usage import record_llm_usage
@@ -86,16 +89,28 @@ def execute_search(ctx: Context) -> None:
     problem = read_text(ctx.find_artifact("problem.md") or ctx.artifact_path("problem.md"))
     query = _search_query(ctx, problem)
     max_papers = _max_papers(ctx)
+    source_plan = build_source_plan(
+        topic=ctx.topic,
+        problem_markdown=problem,
+        config=ctx.config,
+        default_query=query,
+        default_max_results=max_papers,
+    )
+    write_json(ctx.artifact_path("source_plan.json"), source_plan.to_row())
+    planned_query = primary_query(source_plan) or query
 
     papers: list[Paper]
     meta: dict[str, object] = {
-        "query": query,
+        "query": planned_query,
+        "queries": list(source_plan.queries),
         "max_papers": max_papers,
+        "sources": list(source_plan.sources),
         "source": "arxiv" if ctx.config.get("use_arxiv") is True else "fixture",
+        "source_plan": "source_plan.json",
         "status": "pending",
     }
-    if ctx.config.get("use_arxiv") is True:
-        papers, meta_update = _live_literature_search(ctx, query, max_papers, problem)
+    if _should_use_source_plan(ctx, source_plan):
+        papers, meta_update = _live_literature_search(ctx, source_plan, problem)
         meta.update(meta_update)
     else:
         ctx.emit("stage_message", "Using fixture paper metadata because --offline-search is enabled.")
@@ -108,16 +123,14 @@ def execute_search(ctx: Context) -> None:
 
 def _live_literature_search(
     ctx: Context,
-    query: str,
-    max_papers: int,
+    source_plan: SourcePlan,
     problem: str,
 ) -> tuple[list[Paper], dict[str, object]]:
     """Search real literature sources before considering explicit fixture fallback.
 
     Args:
         ctx: Current pipeline context.
-        query: Literature query.
-        max_papers: Result limit per provider.
+        source_plan: Planned queries, providers, local documents, and budget.
         problem: Problem artifact used only for explicit fixture fallback.
 
     Returns:
@@ -128,26 +141,40 @@ def _live_literature_search(
             fixture fallback has not been explicitly enabled.
     """
     attempts: list[dict[str, object]] = []
+    query = primary_query(source_plan)
+    max_papers = source_plan.max_results_per_query
 
-    openalex_result = _try_openalex(ctx, query, max_papers, attempts)
-    if openalex_result is not None:
-        papers, source = openalex_result
-        return papers, {
-            "source": source,
-            "status": "ok" if source == "openalex" else "cache",
-            "returned": len(papers),
-            "attempts": attempts,
-        }
-
-    arxiv_result = _try_arxiv(ctx, query, max_papers, attempts)
-    if arxiv_result is not None:
-        papers, source = arxiv_result
-        return papers, {
-            "source": source,
-            "status": "ok" if source == "arxiv" else "cache",
-            "returned": len(papers),
-            "attempts": attempts,
-        }
+    for source in source_plan.sources:
+        result: tuple[list[Paper], str] | None
+        if source == "local_files":
+            result = _try_local_files(ctx, source_plan, attempts)
+        elif source == "openalex":
+            result = _try_openalex(
+                ctx,
+                query,
+                max_papers,
+                attempts,
+                cache_enabled=source_plan.cache_enabled,
+            )
+        elif source == "arxiv":
+            result = _try_arxiv(
+                ctx,
+                query,
+                max_papers,
+                attempts,
+                cache_enabled=source_plan.cache_enabled,
+            )
+        else:
+            attempts.append({"source": source, "status": "unsupported"})
+            continue
+        if result is not None:
+            papers, returned_source = result
+            return papers, {
+                "source": returned_source,
+                "status": "ok" if returned_source in {"local_files", "openalex", "arxiv"} else "cache",
+                "returned": len(papers),
+                "attempts": attempts,
+            }
 
     if _allow_fixture_fallback(ctx):
         ctx.emit(
@@ -172,11 +199,16 @@ def _try_openalex(
     query: str,
     max_papers: int,
     attempts: list[dict[str, object]],
+    *,
+    cache_enabled: bool,
 ) -> tuple[list[Paper], str] | None:
     """Try OpenAlex live search and, if allowed, its cache."""
     try:
         ctx.emit("stage_message", f"Searching OpenAlex for up to {max_papers} paper(s).")
-        papers = OpenAlexSearchClient().search(query, max_results=max_papers)
+        response = OpenAlexConnector(OpenAlexSearchClient()).search(
+            SearchQuery(query=query, max_results=max_papers)
+        )
+        papers = response.papers
         if papers:
             put_cache(query, "openalex", max_papers, [paper.to_row() for paper in papers])
             attempts.append({"source": "openalex", "status": "ok", "returned": len(papers)})
@@ -186,7 +218,7 @@ def _try_openalex(
         attempts.append({"source": "openalex", "status": "error", "error": str(exc)})
         ctx.emit("stage_message", f"OpenAlex search failed. {exc}")
 
-    if ctx.config.get("strict_search") is True:
+    if ctx.config.get("strict_search") is True or not cache_enabled:
         return None
     cached = _cached_papers(ctx, query, max_papers, source="openalex")
     if cached is not None:
@@ -200,11 +232,16 @@ def _try_arxiv(
     query: str,
     max_papers: int,
     attempts: list[dict[str, object]],
+    *,
+    cache_enabled: bool,
 ) -> tuple[list[Paper], str] | None:
     """Try arXiv live search and, if allowed, its cache."""
     try:
         ctx.emit("stage_message", f"Searching arXiv for up to {max_papers} paper(s).")
-        papers = ArxivSearchClient(page_size=max_papers).search(query, max_results=max_papers)
+        response = ArxivConnector(ArxivSearchClient(page_size=max_papers)).search(
+            SearchQuery(query=query, max_results=max_papers)
+        )
+        papers = response.papers
         if papers:
             put_cache(query, "arxiv", max_papers, [paper.to_row() for paper in papers])
             attempts.append({"source": "arxiv", "status": "ok", "returned": len(papers)})
@@ -217,13 +254,39 @@ def _try_arxiv(
         attempts.append({"source": "arxiv", "status": "error", "error": str(exc)})
         ctx.emit("stage_message", f"arXiv search failed. {exc}")
 
-    if ctx.config.get("strict_search") is True:
+    if ctx.config.get("strict_search") is True or not cache_enabled:
         return None
     cached = _cached_papers(ctx, query, max_papers, source="arxiv")
     if cached is not None:
         attempts.append({"source": "arxiv_cache", "status": "cache", "returned": len(cached)})
         return cached, "arxiv_cache"
     return None
+
+
+def _try_local_files(
+    ctx: Context,
+    source_plan: SourcePlan,
+    attempts: list[dict[str, object]],
+) -> tuple[list[Paper], str] | None:
+    """Try user-provided local Markdown/text documents as metadata records."""
+    if not source_plan.local_documents:
+        attempts.append(
+            {"source": "local_files", "status": "skipped", "reason": "no local_documents"}
+        )
+        return None
+    query = primary_query(source_plan)
+    ctx.emit(
+        "stage_message",
+        f"Searching {len(source_plan.local_documents)} local document(s) for research metadata.",
+    )
+    response = LocalFileConnector(source_plan.local_documents).search(
+        SearchQuery(query=query, max_results=source_plan.max_results_per_query)
+    )
+    papers = response.papers
+    attempts.append(
+        {"source": "local_files", "status": "ok" if papers else "empty", "returned": len(papers)}
+    )
+    return (papers, "local_files") if papers else None
 
 
 def _cached_papers(
@@ -262,6 +325,13 @@ def _cached_papers(
 def _allow_fixture_fallback(ctx: Context) -> bool:
     """Return whether live search failures may fall back to fixture metadata."""
     return ctx.config.get("allow_fixture_fallback") is True
+
+
+def _should_use_source_plan(ctx: Context, source_plan: SourcePlan) -> bool:
+    """Return whether search should execute planned sources instead of fixture rows."""
+    if ctx.config.get("use_arxiv") is True:
+        return True
+    return any(source == "local_files" for source in source_plan.sources)
 
 
 def _live_search_failure_message(attempts: list[dict[str, object]]) -> str:

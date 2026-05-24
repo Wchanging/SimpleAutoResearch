@@ -57,10 +57,14 @@ class SourcePlan:
     queries: list[str]
     sources: list[str] = field(default_factory=lambda: ["openalex", "arxiv"])
     max_results_per_query: int = 10
+    mode: ResearchMode = "standard"
     require_fulltext: bool = False
     allow_pdf_download: bool = False
     local_documents: list[str] = field(default_factory=list)
+    cache_enabled: bool = True
+    index_backend: str = "keyword"
     filters: dict[str, Any] = field(default_factory=dict)
+    budget: dict[str, Any] = field(default_factory=dict)
     rationale: str = ""
     schema_version: str = "source_plan.v1"
 

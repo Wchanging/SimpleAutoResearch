@@ -38,10 +38,13 @@ class SearchStageTests(unittest.TestCase):
 
             papers = read_jsonl(ctx.run_dir / "02-search" / "papers.jsonl")
             meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
+            source_plan = read_json(ctx.run_dir / "02-search" / "source_plan.json")
 
             self.assertEqual(papers[0]["source"], "fixture")
             self.assertEqual(meta["status"], "fixture_fallback")
             self.assertTrue(meta["allow_fixture_fallback"])
+            self.assertEqual(source_plan["schema_version"], "source_plan.v1")
+            self.assertEqual(source_plan["sources"], ["openalex", "arxiv"])
 
     def test_openalex_success_is_used_before_arxiv(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -56,10 +59,44 @@ class SearchStageTests(unittest.TestCase):
 
             papers = read_jsonl(ctx.run_dir / "02-search" / "papers.jsonl")
             meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
+            source_plan = read_json(ctx.run_dir / "02-search" / "source_plan.json")
 
             self.assertEqual(papers[0]["source"], "openalex")
             self.assertEqual(meta["source"], "openalex")
             self.assertEqual(meta["status"], "ok")
+            self.assertEqual(meta["source_plan"], "source_plan.json")
+            self.assertEqual(source_plan["sources"], ["openalex", "arxiv"])
+
+    def test_local_file_source_can_drive_search_stage(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            local_note = root / "agent_notes.md"
+            write_text(
+                local_note,
+                "# Agent Simulation Notes\n\nAgent simulation benchmarks need grounded evaluation.",
+            )
+            ctx = _search_context(root, allow_fixture_fallback=False)
+            ctx.config.update(
+                {
+                    "use_arxiv": False,
+                    "research_sources": ["local_files"],
+                    "research_queries": ["agent simulation"],
+                    "research_local_documents": [str(local_note)],
+                }
+            )
+
+            execute_search(ctx)
+
+            papers = read_jsonl(ctx.run_dir / "02-search" / "papers.jsonl")
+            meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
+            source_plan = read_json(ctx.run_dir / "02-search" / "source_plan.json")
+
+            self.assertEqual(papers[0]["source"], "local_files")
+            self.assertEqual(meta["source"], "local_files")
+            self.assertEqual(meta["status"], "ok")
+            self.assertEqual(source_plan["sources"], ["local_files"])
+            self.assertEqual(source_plan["local_documents"], [str(local_note)])
 
 
 class _RateLimitedClient:

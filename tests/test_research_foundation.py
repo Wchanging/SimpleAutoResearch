@@ -11,7 +11,7 @@ from simple_ar.research.contracts import (
     ResearchContract,
     SourcePlan,
 )
-from simple_ar.research.sources import SearchQuery
+from simple_ar.research.sources import SearchQuery, build_source_plan, primary_query
 from simple_ar.research.connectors.local_files import LocalFileConnector
 from simple_ar.research.prompts import report_user_prompt
 from simple_ar.prompts import report_user_prompt as compat_report_user_prompt
@@ -37,6 +37,30 @@ class ResearchFoundationTests(unittest.TestCase):
 
         self.assertEqual(artifacts[0]["schema_version"], "source_plan.v1")
         self.assertEqual(artifacts[-1]["schema_version"], "experiment_contract.v1")
+
+    def test_source_plan_builder_records_research_mode_and_budget(self) -> None:
+        plan = build_source_plan(
+            topic="agent simulation",
+            problem_markdown="# Problem\nStudy agent simulation.",
+            config={
+                "research_mode": "strong",
+                "research_sources": ["local_files", "openalex"],
+                "research_queries": ["agent simulation benchmarks"],
+                "research_local_documents": ["notes.md"],
+                "research_index_backend": "sqlite_fts",
+                "research_max_documents": 7,
+                "research_max_chunks": 50,
+            },
+            default_query="agent simulation",
+            default_max_results=4,
+        )
+
+        self.assertEqual(plan.mode, "strong")
+        self.assertEqual(plan.sources, ["local_files", "openalex"])
+        self.assertEqual(primary_query(plan), "agent simulation benchmarks")
+        self.assertEqual(plan.local_documents, ["notes.md"])
+        self.assertEqual(plan.budget["max_documents"], 7)
+        self.assertEqual(plan.budget["max_chunks"], 50)
 
     def test_local_file_connector_returns_matching_text_documents(self) -> None:
         connector = LocalFileConnector(paths=[])

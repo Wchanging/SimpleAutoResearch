@@ -2,780 +2,748 @@
 
 [中文版本](CLI_REFERENCE_zh.md)
 
-This document is the command lookup for SimpleAutoResearch. For installation
-and workflow walkthroughs, see [Usage And Configuration](USAGE.md). For stage
-concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
+This page is a command lookup for SimpleAutoResearch. It intentionally focuses
+on command syntax, options, outputs, and short operational notes.
 
-## Top-Level Commands
+- Installation and walkthroughs: [Usage And Configuration](USAGE.md)
+- Workflow concepts and artifacts: [Workflows And Artifacts](WORKFLOWS.md)
+- TOML schema and examples: [Configuration Reference](CONFIG_REFERENCE.md)
+
+## Command Overview
 
 | Command | Purpose |
 | --- | --- |
 | `simple-ar run` | Start a new 8-stage research pipeline run. |
 | `simple-ar resume` | Continue an existing research pipeline run. |
-| `simple-ar status` | Print status for either a research run or code-task run. |
+| `simple-ar status` | Print status for a research run or code-task run. |
 | `simple-ar inspect` | Build a local artifact index for a run. |
-| `simple-ar search-artifacts` | Search indexed run artifacts with lexical retrieval. |
+| `simple-ar search-artifacts` | Search indexed run artifacts. |
 | `simple-ar code-task ...` | Work with an existing codebase in an isolated editable workspace. |
 
 ## Research Pipeline
 
-Start a run:
+### `simple-ar run`
+
+**Purpose**: start a new 8-stage research pipeline run.
+
+**Usage**:
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report
+uv run simple-ar run --config examples/run_configs/local_research_report.toml
 ```
 
-Common options:
+**Options**:
 
-| Option | Meaning |
-| --- | --- |
-| `--config PATH` | TOML config for a repeatable run. Explicit CLI flags override config values. |
-| `--topic TEXT` | Research topic. Required unless `[run].topic` is set in `--config`. |
-| `--output-root DIR` | Where run directories are created. Default: `runs`. |
-| `--from-stage NAME` | First stage to execute. Default: `plan`. |
-| `--to-stage NAME` | Last stage to execute. Default: `report`. |
-| `--model NAME` | Override the LLM model. |
-| `--llm-workers N` | Parallel LLM workers for supported stages. |
-| `--max-papers N` | Literature search result limit. |
-| `--search-query TEXT` | Override the generated search query. |
-| `--experiment-template NAME` | Experiment template name. |
-| `--experiment-timeout N` | Subprocess timeout for experiment execution. |
-| `--report-mode auto / research_only / experiment` | Report structure mode. |
-| `--no-llm` | Use deterministic fallback text instead of LLM calls. |
-| `--offline-search` | Skip live literature providers. |
-| `--allow-fixture-fallback` | Allow placeholder metadata after live/cache failures. |
-| `--strict-search` | Fail instead of using cache/fixture fallback. |
-| `--no-retrieval` | Disable local artifact retrieval context. |
-| `--retrieval-top-k N` | Number of local artifact chunks to retrieve. |
-| `--quiet` | Suppress progress logs. |
-
-Experiment templates:
-
-| Template | Meaning |
-| --- | --- |
-| `toy_text_classification` | Default deterministic teaching experiment. |
-| `llm_code_task_toy_spam` | Bundled toy code-task smoke test. |
-| `code_task_project` | Embedded code-task experiment for a user-provided project. |
-
-### Run Config
-
-For multi-option runs, prefer a TOML config over a long CLI command:
-
-```bash
-uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
-```
-
-The complete config below is equivalent to a full `code_task_project` pipeline
-run. It includes both outer research-pipeline settings and embedded code-task
-settings in one file:
-
-```toml
-[run]
-# Required unless --topic is supplied.
-topic = "improve tiny digits MLP"
-
-# Where timestamped run directories are created.
-output_root = "runs"
-
-# Optional. Default from_stage is "plan"; default to_stage is "report".
-from_stage = "plan"
-to_stage = "report"
-
-[llm]
-# true: use configured OpenAI-compatible LLM calls.
-# false: use deterministic fallbacks where possible. code_task_project requires
-# LLM mode for real work planning, patch planning, and edit proposal.
-enabled = true
-
-# Optional model override. When omitted, SIMPLE_AR_MODEL / provider default is used.
-model = "gpt-4o-mini"
-
-# Parallel LLM workers for supported stages such as paper note generation.
-workers = 4
-
-[search]
-# true: skip live OpenAlex/arXiv and use fixture metadata.
-# Useful for local coding smoke tests where literature quality is not the focus.
-offline = true
-
-# Maximum paper metadata rows requested from live providers or fixture fallback.
-max_papers = 1
-
-# Optional manual search query. When omitted, the topic is used.
-query = "tiny digits MLP"
-
-# Optional. When true, allow fixture rows after live/cache search failures.
-allow_fixture_fallback = false
-
-# Optional. When true, fail instead of using cache/fixture fallback.
-strict = false
-
-[retrieval]
-# Whether report/read/synthesize stages may retrieve snippets from local artifacts.
-enabled = true
-top_k = 4
-
-[experiment]
-# "toy_text_classification": deterministic teaching experiment.
-# "code_task_project": embedded existing-code workflow.
-# "llm_code_task_toy_spam": legacy bundled smoke test.
-template = "code_task_project"
-
-# Timeout for 07-run experiment.py. For code_task_project this also constrains
-# nested baseline/patched benchmark calls.
-timeout = 60
-
-# Optional. Instead of putting [code_task]/[benchmark]/[environment]/[safety] in
-# this same file, point to a standalone code-task config.
-# code_task_config = "examples/code_tasks/configs/tiny_digits_mlp.toml"
-
-[report]
-# "auto": experiment report if results.json exists, research_only otherwise.
-# "research_only": survey-style report without experiment claims.
-# "experiment": require results.json and use experiment sections.
-mode = "auto"
-
-[code_task]
-# Source project prepared under 06-code/code_task_run/code_task/workspace.
-code_root = "examples/code_tasks/tiny_digits_mlp_project"
-
-# Optional for embedded 8-stage runs. If omitted, 05-design generates
-# generated_code_task.md from goal/problem/synthesis/hypothesis plus the
-# codebase summary, then 06-code copies that into code_task/task.md.
-# Standalone `simple-ar code-task init` still requires a task file.
-task_file = "examples/code_tasks/tasks/improve_tiny_digits_mlp.md"
-
-# Optional display name stored in experiment_plan.json and nested manifest.
-name = "tiny-digits-mlp-pipeline"
-
-[benchmark]
-# Command executed inside the editable workspace before and after the patch.
-command = "python benchmark.py"
-
-# Optional primary metric for before/after verdicts.
-primary_metric = "accuracy"
-
-[benchmark.metric_directions]
-# Directions may be higher, lower, resource, or ignore.
-# Unknown metric names are still recorded as deltas, but they do not decide
-# improved/regressed unless direction is configured or heuristically known.
-accuracy = "higher"
-macro_f1 = "higher"
-train_time_sec = "resource"
-inference_time_ms = "resource"
-params = "resource"
-
-[environment]
-# current: use the active SimpleAutoResearch Python.
-# external: use the interpreter given by python.
-mode = "current"
-# python = "C:/path/to/python.exe"
-
-[workspace]
-# copy: guarded physical copy, safest default.
-# git_worktree: detached worktree for repo-root git projects, useful when the
-# repository is too large to copy every run.
-# sparse_copy: experimental allowlist copy for small known subsets.
-mode = "copy"
-
-# Used only by sparse_copy. Defaults are conservative source/config/test globs.
-include = ["src/**", "tests/**", "benchmark.py", "pyproject.toml"]
-exclude = ["data/**", "models/**"]
-
-# If true and code_root has .venv/ or venv/, init records and uses that Python
-# as an external execution policy. No dependency installation is performed.
-reuse_source_venv = false
-
-# Recorded for future managed setup support; not executed during init.
-setup_hook = ""
-
-[safety]
-# Maximum source file size copied in copy/sparse modes. Use 0 to disable.
-max_file_bytes = 2000000
-```
-
-Section summary:
-
-| Section | Used by | Meaning |
+| Option | Type | Description |
 | --- | --- | --- |
-| `[run]` | outer pipeline | Topic, run directory, and stage range. |
-| `[llm]` | outer pipeline and code task | LLM enablement, model override, and worker count. |
-| `[search]` | `02-search` | Literature provider behavior and fallback policy. |
-| `[retrieval]` | read/synthesize/report helpers | Local artifact retrieval context. |
-| `[experiment]` | `05-design` to `07-run` | Experiment template, timeout, and optional nested code-task config path. |
-| `[report]` | `08-report` | Report structure mode. |
-| `[code_task]` | embedded or standalone code task | Source project, optional embedded task file, and display name. |
-| `[benchmark]` | code task | Benchmark command and primary metric. |
-| `[benchmark.metric_directions]` | code task comparison | Metric interpretation rules. |
-| `[environment]` | code task execution | Interpreter policy for probe/baseline/patched runs. |
-| `[workspace]` | code task init | Workspace mode, source venv reuse, and recorded setup hook. |
-| `[safety]` | code task workspace/validation | Copy/sparse file-size guard and future safety settings. |
+| `--config PATH` | path | TOML config for a repeatable run. CLI flags override config values. |
+| `--topic TEXT` | string | Research topic. Required unless `[run].topic` is set in config. |
+| `--output-root DIR` | path | Directory where timestamped run directories are created. |
+| `--from-stage NAME` | stage | First stage to execute. Default: `plan`. |
+| `--to-stage NAME` | stage | Last stage to execute. Default: `report`. |
+| `--model NAME` | string | LLM model override. |
+| `--llm-workers N` | int | Parallel LLM workers for supported stages. |
+| `--max-papers N` | int | Literature metadata limit. |
+| `--search-query TEXT` | string | Override the generated search query. |
+| `--experiment-template NAME` | string | Experiment template, such as `code_task_project`. |
+| `--experiment-timeout N` | int | Subprocess timeout for experiment execution. |
+| `--report-mode MODE` | enum | `auto`, `research_only`, or `experiment`. |
+| `--no-llm` | flag | Use deterministic fallback text where possible. |
+| `--offline-search` | flag | Skip live literature providers. |
+| `--allow-fixture-fallback` | flag | Allow fixture metadata after live/cache failures. |
+| `--strict-search` | flag | Fail instead of using cache/fixture fallback. |
+| `--no-retrieval` | flag | Disable local artifact retrieval context. |
+| `--retrieval-top-k N` | int | Number of local artifact chunks to retrieve. |
+| `--quiet` | flag | Suppress progress logs. |
 
-When a run config contains `[code_task]`, `[benchmark]`, `[metrics]`,
-`[environment]`, `[workspace]`, or `[safety]`, the same file is reused as the embedded
-code-task config. Alternatively, keep code-task settings in a separate file and
-set `[experiment].code_task_config`.
+**Code-task pipeline options**:
 
-Explicit CLI flags override config values. For example, this keeps the config
-but changes the stage range and disables LLM calls:
+| Option | Type | Description |
+| --- | --- | --- |
+| `--code-task-config PATH` | path | Code-task TOML for `--experiment-template code_task_project`. |
+| `--code-root DIR` | path | Source project prepared under the embedded code-task workspace. |
+| `--task-file PATH` | path | Task file. Optional for embedded runs; if omitted, stage `05-design` generates one. |
+| `--benchmark-command TEXT` | string | Benchmark command run before and after edits. |
+| `--code-task-name TEXT` | string | Display name for the embedded code-task experiment. |
+| `--code-task-max-file-bytes N` | int | Max copied file size for embedded copy/sparse modes. |
+| `--code-task-workspace-mode MODE` | enum | `copy`, `git_worktree`, or `sparse_copy`. |
+| `--code-task-workspace-reuse-source-venv` | flag | Use a detected source `.venv` Python. |
+| `--code-task-workspace-setup-hook TEXT` | string | Record a setup command for future managed environments. |
+| `--code-task-env-mode MODE` | enum | `current` or `external`. |
+| `--code-task-python PATH` | path | Python executable for external env mode. |
+| `--primary-metric NAME` | string | Primary benchmark metric for comparison. |
+| `--metric-direction NAME=DIRECTION` | repeatable | Metric direction: `higher`, `lower`, `resource`, or `ignore`. |
 
-```bash
-uv run simple-ar run \
-  --config examples/run_configs/tiny_digits_mlp_pipeline.toml \
-  --to-stage design \
-  --no-llm
-```
+**Outputs**:
 
-`code_task_project` options for `run` and `resume`:
+- `runs/<run-id>/manifest.json`
+- `runs/<run-id>/config_snapshot.json`
+- numbered stage directories such as `01-plan/`, `02-search/`, `08-report/`
 
-| Option | Meaning |
-| --- | --- |
-| `--code-task-config PATH` | TOML config using the same schema as `code-task init --config`. |
-| `--code-root DIR` | Source project prepared under `06-code/code_task_run/code_task/workspace`. |
-| `--task-file PATH` | Markdown/text task description. Optional for embedded 8-stage runs; if omitted, `05-design` writes `generated_code_task.md` from the research artifacts. |
-| `--benchmark-command TEXT` | Benchmark run before and after the patch. |
-| `--code-task-name TEXT` | Optional display name stored in `experiment_plan.json`. |
-| `--code-task-max-file-bytes N` | Maximum source file size copied in `copy` or `sparse_copy` mode. |
-| `--code-task-workspace-mode copy / git_worktree / sparse_copy` | Workspace strategy for the nested code task. Use TOML for sparse include/exclude patterns. |
-| `--code-task-workspace-reuse-source-venv` | Use a detected source `.venv` Python for the nested execution policy. |
-| `--code-task-workspace-setup-hook TEXT` | Record a setup command for future managed environment support. |
-| `--code-task-env-mode current / external` | Interpreter policy for nested probe/baseline/run steps. |
-| `--code-task-python PATH` | Interpreter path for `--code-task-env-mode external`. |
-| `--primary-metric NAME` | Primary metric for before/after verdicts. |
-| `--metric-direction NAME=DIRECTION` | Metric interpretation for embedded comparison. Repeatable. |
+**Notes**:
 
-The generic embedded path builds a repo map/context pack, work plan, and active
-attempt/batch state, then auto-approves the generated patch plan inside the
-pipeline workspace so `run --to-stage report` can finish. Use standalone
-`code-task` commands when you need manual review before each transition.
+Use a TOML config for real runs with many options. See the
+[Configuration Reference](CONFIG_REFERENCE.md#complete-pipeline-config).
 
-Resume:
+### `simple-ar resume`
+
+**Purpose**: continue an existing research pipeline run.
+
+**Usage**:
 
 ```bash
 uv run simple-ar resume runs/<run-id>
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
 ```
 
-Resume supports most `run` options as overrides. Omitted values are preserved
-from `config_snapshot.json` when available.
+**Options**:
 
-## Artifact Tools
+`resume` accepts `RUN_DIR` plus most `run` options as overrides, including
+`--config`, stage range, LLM/search/report options, and embedded code-task
+options.
 
-```bash
-uv run simple-ar inspect runs/<run-id>
-uv run simple-ar search-artifacts runs/<run-id> "accuracy"
-uv run simple-ar search-artifacts runs/<run-id> "timeout" --include-operational
-```
+**Outputs**:
 
-| Command | Purpose |
-| --- | --- |
-| `inspect RUN_DIR` | Build `artifact_index.json` and print a compact artifact summary. |
-| `search-artifacts RUN_DIR QUERY` | Search local artifact chunks. |
-| `--top-k N` | Number of search results. Default: `8`. |
-| `--include-operational` | Also search manifests, runner metadata, and other operational files. |
+- updates the existing run directory
+- appends stage execution state to `manifest.json`
 
-## Code Task Commands
+**Notes**:
 
-The code-task workflow prepares an existing project under `code_task/workspace`.
-By default this is a guarded copy; `git_worktree` can create a detached git
-worktree for larger repo-root projects; `sparse_copy` is an experimental
-allowlist copy for small, well-understood subsets. Later steps mutate only that
-workspace, not the original codebase.
+When `config_snapshot.json` exists, omitted values are preserved from the
+original run.
 
-When init cannot prepare the workspace, the CLI reports the failed path and a
-short checklist. For `git_worktree`, the common fixes are to pass the baseline
-git repository root, make an initial local commit, or choose `copy` mode.
+### `simple-ar status`
 
-Recommended order:
+**Purpose**: print compact status for either a research run or a code-task run.
 
-```text
-init -> map -> locate -> context -> probe -> baseline -> plan -> decide-plan
--> propose-edits -> apply-edits -> validate -> run
--> analyze-failure -> repair
-```
-
-### Init
-
-Minimal:
-
-```bash
-uv run simple-ar code-task init \
-  --code-root path/to/project \
-  --task-file task.md \
-  --benchmark-command "python benchmark.py"
-```
-
-Config-driven:
-
-```bash
-uv run simple-ar code-task init --config code_task.toml
-```
-
-Options:
-
-| Option | Meaning |
-| --- | --- |
-| `--config PATH` | TOML config for init settings. CLI flags override config values. |
-| `--code-root DIR` | Source project to copy. Required unless set in config. |
-| `--task-file PATH` | Markdown/text task description. Required unless set in config. |
-| `--output-root DIR` | Where the run directory is created. Default: `runs`. |
-| `--name TEXT` | Run name suffix. Default: based on `code-root`. |
-| `--benchmark-command TEXT` | Command to run inside the editable workspace. |
-| `--max-file-bytes N` | Maximum copied file size. Use `0` to disable. |
-| `--workspace-mode copy / git_worktree / sparse_copy` | Workspace strategy. `copy` is safest; `git_worktree` requires `--code-root` to be the git repository root; `sparse_copy` copies selected patterns. |
-| `--workspace-include GLOB` | Sparse-copy include pattern. Repeatable; TOML is clearer for multiple patterns. |
-| `--workspace-exclude GLOB` | Additional sparse-copy exclude pattern. Repeatable. |
-| `--workspace-reuse-source-venv` | If a source `.venv` or `venv` exists, record and use its Python as the initial external execution policy. |
-| `--workspace-setup-hook TEXT` | Record a setup command. It is not executed during init. |
-| `--env-mode current / external` | Execution interpreter policy. |
-| `--python PATH` | Interpreter path for `--env-mode external`. |
-| `--primary-metric NAME` | Main metric for before/after verdicts. |
-| `--metric-direction NAME=DIRECTION` | Metric interpretation. Repeatable. |
-
-Metric directions:
-
-| Direction | Meaning |
-| --- | --- |
-| `higher` | Larger is better, such as accuracy/F1/reward. |
-| `lower` | Smaller is better, such as loss/error/perplexity. |
-| `resource` | Runtime/cost/resource metric; shown but not used for verdict. |
-| `ignore` | Record but do not interpret. |
-
-### Init Config
-
-```toml
-[code_task]
-code_root = "path/to/project"
-task_file = "task.md"
-output_root = "runs"
-name = "my-code-task"
-
-[benchmark]
-command = "python benchmark.py"
-primary_metric = "accuracy"
-
-[benchmark.metric_directions]
-accuracy = "higher"
-macro_f1 = "higher"
-latency_ms = "resource"
-val_loss = "lower"
-
-[environment]
-mode = "current"  # current | external
-python = ""       # optional when mode = "external"
-
-[workspace]
-mode = "copy"                  # copy | git_worktree | sparse_copy
-include = ["src/**", "tests/**", "benchmark.py", "pyproject.toml"]
-exclude = ["data/**", "models/**"]
-reuse_source_venv = false      # use source .venv Python if detected
-setup_hook = ""                # recorded only; not executed during init
-
-[safety]
-max_file_bytes = 2000000
-```
-
-`sparse_copy` always applies built-in exclusions for `.git`, virtualenvs,
-`runs`, cache/build directories, `data`, `models`, `.env`, and secret-like
-paths before user patterns. It is useful for small allowlisted experiments, but
-it can omit runtime dependencies; prefer `copy` or `git_worktree` for general
-projects.
-
-Code-task runs also record an `edit_scope` in `manifest.json`. The current
-default treats tests, benchmark files, `.env`, and secret/credential-looking
-paths as read-only evidence for patching:
-`tests/**`, `test_*.py`, `*_test.py`, `conftest.py`, `benchmark.py`,
-`bench.py`, `*benchmark*.py`, `.env*`, `*secret*`, and `*credential*`.
-These files may be indexed for planning when appropriate, but they are omitted
-from editable snippets and rejected by `apply-edits`.
-
-Bundled example:
-
-```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
-```
-
-### Map
-
-Build or refresh layered repo-map artifacts from the current editable workspace:
-
-```bash
-uv run simple-ar code-task map runs/<run-id>
-```
-
-| Command/Option | Meaning |
-| --- | --- |
-| `map RUN_DIR` | Rebuild `code_task/meta/codebase_index.json`, `repo_map.json`, and `repo_map_summary.md` from `code_task/workspace/`. |
-| `--no-refresh-index` | Reuse the existing `codebase_index.json` instead of scanning the current workspace first. |
-| `--show-summary` | Print `repo_map_summary.md` after writing it. |
-
-`map` is deterministic. It does not call the LLM, run project code, install
-dependencies, or patch files. Its purpose is to make project structure
-inspectable and to provide the base artifact for locate/context-pack steps.
-
-### Locate And Context Pack
-
-Rank likely files before asking the model to plan or edit:
-
-```bash
-uv run simple-ar code-task locate runs/<run-id> --query "improve spam keyword prediction"
-```
-
-| Command/Option | Meaning |
-| --- | --- |
-| `locate RUN_DIR` | Write `code_task/meta/locate_results.json` and `locate_results.md`. |
-| `--query TEXT` | Optional locate query. Defaults to `code_task/task.md`. |
-| `--top-k N` | Maximum candidates kept in each editable/evidence group. Default: `8`. |
-| `--refresh-map` | Rebuild the codebase index and repo map before ranking files. |
-| `--no-read-only` | Omit protected read-only evidence such as tests and benchmarks. |
-| `--show-summary` | Print `locate_results.md` after writing it. |
-
-`locate` is deterministic. It scores path names, summaries, imports, role tags,
-and symbol names from `repo_map.json`, then separates editable targets from
-read-only evidence. It is meant to answer "where should a coding agent look
-first?" without reading every source file into the prompt.
-
-Build a bounded prompt-ready context pack:
-
-```bash
-uv run simple-ar code-task context runs/<run-id> \
-  --query "improve spam keyword prediction" \
-  --max-files 8 \
-  --max-total-chars 20000
-```
-
-| Command/Option | Meaning |
-| --- | --- |
-| `context RUN_DIR` | Write a new `code_task/context_packs/context-NNN/` directory. |
-| `--query TEXT` | Optional locate query. Defaults to `code_task/task.md`. |
-| `--top-k N` | Locate candidate budget per group. Default: `8`. |
-| `--max-files N` | Maximum snippets included across editable and read-only files. |
-| `--max-source-chars-per-file N` | Per-file snippet character budget. |
-| `--max-total-chars N` | Total source snippet character budget. |
-| `--refresh-map` | Rebuild the map before locating and packing context. |
-| `--show-prompt` | Print the generated `prompt_context.md`. |
-
-`context` writes:
-
-- `context_pack.json`: budget, selected files, omitted files, and source artifact references.
-- `prompt_context.md`: Markdown context grouped into editable targets and read-only evidence.
-- `selected_snippets.jsonl`: the actual clipped source snippets, one file per row.
-
-This command does not call the LLM or modify files. When a latest context pack
-exists, `plan` reads it for planning context and `propose-edits` reads only its
-editable snippets while keeping protected files as read-only evidence.
-
-Generate a batch-oriented work plan:
-
-```bash
-uv run simple-ar code-task work-plan runs/<run-id>
-uv run simple-ar code-task batch runs/<run-id> --work-item W1
-```
-
-| Command/Option | Meaning |
-| --- | --- |
-| `work-plan RUN_DIR` | Write `code_task/work_plan.json` and `code_task/work_plan.md`. |
-| `--model NAME` | Override the model used for work-plan generation. |
-| `--no-llm` | Use the deterministic fallback planner. |
-| `--force` | Regenerate existing work-plan artifacts. |
-| `--max-files N` | Maximum selected context files for planning. |
-| `--max-source-chars-per-file N` | Per-file source snippet budget. |
-| `batch RUN_DIR --work-item W1` | Create an attempt/batch state directory for one work-plan item. |
-| `--attempt-id attempt-001` | Reuse or create a specific attempt id. |
-| `--force` | Create another batch for the same work item instead of reusing the existing one. |
-
-`work-plan` is the V2.2 bridge between a broad task and bounded edit batches.
-It writes work items with target files, read-only evidence, validation hints,
-context requests, and budget profiles. `batch` writes durable state under
-`code_task/attempts/attempt-NNN/batches/batch-NNN/`; it does not call the LLM
-or modify files yet. Later edit proposals for an active batch are constrained
-to that batch's target files and write per-batch artifacts such as
-`batch_context.json`, `proposed_edits.json`, `proposal_warnings.json`, and
-`usage_summary.json`.
-
-Work-plan items should be implementation batches. The planner prompt now asks
-models to put inspection needs in `context_request` rather than creating
-inspection-only items. If a generated work plan still starts with an
-analysis-only item, `code-task execute` selects the first later item that looks
-like a concrete code change before creating the active batch.
-
-For a serial dependency chain where the downstream items are not useful unless
-the previous source edits also land, `batch` may merge a small chain into one
-execution item. Inspect `batch_state.json.work_item.source_work_item_ids` to see
-which reviewed items were merged; the editable target list is the merged
-`target_files` union. This is deliberately capped and normally moves the batch
-to the `large` budget profile, so application still needs explicit
-`--allow-large-edits` after review.
-
-### Manual Command Path
-
-Use the manual path when you want to run and inspect each primitive step
-yourself:
-
-```bash
-uv run simple-ar code-task map runs/<run-id>
-uv run simple-ar code-task locate runs/<run-id>
-uv run simple-ar code-task context runs/<run-id>
-uv run simple-ar code-task probe runs/<run-id>
-uv run simple-ar code-task baseline runs/<run-id> --timeout 60
-uv run simple-ar code-task work-plan runs/<run-id>
-uv run simple-ar code-task batch runs/<run-id> --work-item W1
-uv run simple-ar code-task plan runs/<run-id>
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-uv run simple-ar code-task propose-edits runs/<run-id>
-uv run simple-ar code-task apply-edits runs/<run-id>
-uv run simple-ar code-task validate runs/<run-id>
-uv run simple-ar code-task run runs/<run-id> --timeout 60
-```
-
-The following sections describe each primitive command.
-
-#### Environment And Baseline
-
-```bash
-uv run simple-ar code-task probe runs/<run-id>
-uv run simple-ar code-task baseline runs/<run-id> --timeout 60
-```
-
-| Command/Option | Meaning |
-| --- | --- |
-| `probe RUN_DIR` | Write `code_task/meta/environment_report.json`. |
-| `baseline RUN_DIR` | Run benchmark before patching under `code_task/run/baseline/`. |
-| `--command TEXT` | Override the recorded benchmark command for this run. |
-| `--timeout N` | Benchmark timeout in seconds. |
-| `--skip-validation` | Run benchmark even when static validation has not passed. |
-| `--env-mode`, `--python` | Override execution interpreter policy. |
-
-#### Planning And Approval
-
-```bash
-uv run simple-ar code-task work-plan runs/<run-id>
-uv run simple-ar code-task batch runs/<run-id> --work-item W1
-uv run simple-ar code-task plan runs/<run-id>
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-```
-
-| Command/Option | Meaning |
-| --- | --- |
-| `plan RUN_DIR` | Generate `code_task/patch_plan.md`. |
-| `--model NAME` | Override model for planning. |
-| `--no-llm` | Write deterministic fallback plan. |
-| `--force` | Regenerate an existing plan. |
-| `--max-files N` | Maximum selected context files. |
-| `--max-source-chars-per-file N` | Source snippet budget per file. |
-| `work-plan RUN_DIR` | Generate `code_task/work_plan.json` and `work_plan.md` for batch execution. |
-| `batch RUN_DIR --work-item W1` | Create `code_task/attempts/attempt-NNN/batches/batch-NNN/batch_state.json`. |
-| `decide-plan RUN_DIR` | Record plan approval/rejection/revision. |
-| `--decision approve / reject / revise` | Required decision value. |
-| `--note TEXT` | Optional review note. |
-| `--reviewer TEXT` | Reviewer label. Default: `user`. |
-
-### Executor Path
-
-Use the executor path when you want the CLI to continue to the next safe stop:
-
-```bash
-# Continue to plan review.
-uv run simple-ar code-task execute runs/<run-id>
-
-# Approve the plan after reading code_task/patch_plan.md.
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
-
-# Continue explicitly to edit proposal review.
-uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
-
-# Apply the reviewed proposal and run validation/benchmark.
-uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
-```
-
-Repeated `execute` calls are expected. The command is state-aware: it reads the
-run artifacts, performs the next safe work, and stops at review boundaries.
-
-| Command/Option | Meaning |
-| --- | --- |
-| `execute RUN_DIR` | Run the next safe code-task steps based on current artifacts. |
-| `--config PATH` | Optional TOML config for execute model routing, budget, and runtime settings. |
-| `--to-step STEP` | Stop no later than `probe`, `baseline`, `work-plan`, `batch`, `plan`, `propose-edits`, `apply-edits`, `validate`, `run`, `analyze-failure`, or `repair`. |
-| `--dry-run` | Print the next action without writing artifacts. |
-| `--no-llm`, `--model NAME` | Control LLM use for plan/proposal/repair steps. |
-| `--apply-proposed-edits` | Allow execute to apply reviewed `proposed_edits.json` after plan approval. |
-| `--allow-large-edits` | Accept and apply a reviewed proposal that exceeds the normal edit budget but fits the large budget. |
-| `--repair-rounds N` | Maximum bounded repair proposals after validation/benchmark failure. Repair proposals are not auto-applied. |
-| `--timeout N` | Benchmark timeout for baseline and patched runs. |
-| `--strict-validation`, `--validation-max-file-bytes N` | Validation controls used by the orchestrated validate step. |
-| `--env-mode`, `--python` | Override execution interpreter policy for probe and benchmark runs. |
-
-Review gates are preserved. A fresh run also creates the real `work_plan.json`
-using the configured LLM unless `--no-llm` is set, then creates the first
-attempt/batch state before stopping after `patch_plan.md` with
-`approval_required`. After approval, run
-`execute --to-step propose-edits` to make the proposal generation step explicit.
-The command stops again with `proposal_review_required` unless
-`--apply-proposed-edits` is set.
-
-When the patched benchmark passes, `execute` still checks the baseline-vs-
-patched comparison. `manifest.json.objective.status`, `simple-ar status`, and
-`code_task/summary.md` distinguish benchmark success from objective success:
-`regressed` or `mixed` means the code ran but the metric goal was not actually
-met.
-
-`execute --config` can reuse the same TOML file as `code-task init --config`
-and read these extra sections:
-
-```toml
-[execute]
-to_step = "run"
-use_llm = true
-timeout_sec = 60
-repair_rounds = 1
-max_files = 8
-max_source_chars_per_file = 4000
-stream_benchmark_output = "off"
-apply_proposed_edits = false
-allow_large_edits = false
-
-[models.code_task]
-# If omitted, SIMPLE_AR_MODEL or --model is used.
-planner = "gpt-5.1"
-editor = "gpt-5.1"
-repair = "gpt-5.1"
-summarizer = "gpt-5.1"
-
-[budget]
-profile = "normal"       # normal | large | absolute
-max_batches = 3
-cost_cap_usd = 2.0       # only enforced when provider usage includes cost
-
-[budget.normal]
-max_files = 2
-max_edits = 4
-max_old_chars = 3000
-max_new_chars = 4000
-max_total_edit_chars = 12000
-max_proposal_chars = 24000
-```
-
-The edit budget is enforced after the model returns JSON. Over-budget proposals
-are written with warnings and rejected edits instead of being applied. If a
-proposal fits the large profile, rerun with `--allow-large-edits` only after
-reviewing the generated JSON and patch intent.
-
-`stream_benchmark_output` controls how baseline/patched benchmark stdout and
-stderr are relayed through `code-task execute` while still writing the complete
-captured streams to `code_task/run/<label>/stdout.txt` and `stderr.txt`.
-Supported values are `false`/`"off"`, `true`/`"auto"`, `"line"`, and
-`"summary"`. Use `"auto"` for most real projects: it keeps normal line output
-readable and treats carriage-return progress output from tools such as `tqdm`
-as progress updates instead of waiting for a final newline. Use `"line"` for
-plain newline logs, and `"summary"` when live progress is too noisy and you only
-want the tail after the benchmark finishes.
-
-Dry-run preview:
-
-```bash
-uv run simple-ar code-task execute runs/<run-id> --dry-run
-```
-
-#### Patch, Validate, Run
-
-```bash
-uv run simple-ar code-task propose-edits runs/<run-id>
-uv run simple-ar code-task apply-edits runs/<run-id>
-uv run simple-ar code-task validate runs/<run-id>
-uv run simple-ar code-task run runs/<run-id> --timeout 60
-```
-
-| Command/Option | Meaning |
-| --- | --- |
-| `propose-edits RUN_DIR` | Ask the model for controlled old/new replacements. |
-| `--allow-large-edits` | Accept a large but bounded proposal after explicit review. |
-| `apply-edits RUN_DIR` | Apply approved edit proposals inside workspace. |
-| `--edits-file PATH` | Apply a specific proposal file. |
-| `--allow-unapproved-plan` | Bypass approval gate for local tests/demos. |
-| `--allow-large-edits` | Apply a reviewed proposal marked as requiring large-edit approval. |
-| `validate RUN_DIR` | Run syntax/static safety checks. |
-| `--strict` | Treat higher-risk validation warnings as errors. |
-| `run RUN_DIR` | Run patched benchmark under `code_task/run/patched/`. |
-
-When both baseline and patched runs exist, SimpleAutoResearch writes
-`code_task/run/comparison.json` and updates `code_task/summary.md`.
-Primitive `validate` and `run` also synchronize the latest batch/attempt state
-after a patch has been applied, so manual step-by-step runs and `execute` leave
-consistent state artifacts.
-
-`proposed_edits.json` may contain multiple ordered edits for the same file.
-Each edit is applied against the current in-memory text, and each `old` block
-must match exactly once. Invalid proposals stop before file writes; under
-`execute`, this appears as `patch_apply_failed`.
-
-The default editor backend is `controlled_patch`. `propose-edits` and
-`apply-edits` now use the editor backend interface internally while preserving
-the same CLI commands and JSON compatibility. The proposal, batch state,
-applied edit record, and manifest patch section record backend metadata for
-auditability. The reserved `external_agent` backend is not executable yet; it
-currently defines a permission policy and reviewable invocation-plan artifact
-for future Codex/Claude/OpenCode adapters.
-
-The proposal format is structured JSON, not a unified diff. `old` and `new`
-must contain exact file text. Do not include diff markers such as `+`, `-`,
-`@@`, `---`, or `+++` inside those fields. When the model returns those markers
-in a repair proposal, the normalizer drops that edit with a warning; when a
-manual proposal does not match the current workspace, `apply-edits` exits with
-a concise validation error and leaves files unchanged.
-
-Edit-scope validation is checked twice: model proposals for protected paths are
-dropped from `proposed_edits.json`, and `apply-edits` rejects protected paths
-again for both model-generated and manually supplied edit files.
-
-#### Failure And Repair
-
-```bash
-uv run simple-ar code-task analyze-failure runs/<run-id>
-uv run simple-ar code-task repair runs/<run-id>
-```
-
-| Command/Option | Meaning |
-| --- | --- |
-| `analyze-failure RUN_DIR` | Summarize the latest failed benchmark or validation result. |
-| `repair RUN_DIR` | Propose bounded repair edits from failure context. |
-| `--model NAME` | Override repair model. |
-| `--no-llm` | Write deterministic empty repair proposal. |
-| `--max-files N` | Maximum context files. |
-| `--max-source-chars-per-file N` | Source snippet budget per file. |
-
-Repair proposals are not applied automatically. Review them, then apply with:
-
-`analyze-failure` writes `failure_analysis.md` beside the failed benchmark run,
-or under `code_task/meta/` when static validation failed before benchmark
-launch. `repair` writes a proposal JSON with `source_analysis`,
-`selected_files`, `constraints`, normalized `edits`, and `warnings`; edits
-outside the selected repair context are dropped. It also refreshes
-`code_task/summary.md` with a Repair section.
-
-A repair proposal is still only a proposal. Apply it explicitly, validate, and
-rerun the benchmark. A successful repair can restore the benchmark floor while
-still being worse than the original baseline, so use `run/comparison.json` to
-decide whether the task objective was actually achieved.
-Applying a repair proposal records the actual proposal path in
-`patch.latest_applied_proposal` and `meta/applied_edits.json`; once a later
-patched benchmark passes, stale failure-analysis and repair sections are marked
-resolved in summaries/status output.
-
-```bash
-uv run simple-ar code-task apply-edits runs/<run-id> \
-  --edits-file runs/<run-id>/code_task/repairs/repair-001/proposed_edits.json
-```
-
-## Status
+**Usage**:
 
 ```bash
 uv run simple-ar status runs/<run-id>
 ```
 
-For code-task runs, status prints environment, plan, patch, validation,
-benchmark, primary metric, metric directions, comparison deltas,
-failure-analysis, repair pointers, and the `code_task/summary.md` path when
-available.
-When available, it also prints the patch editor backend and top-level objective verdict. Resolved
-failure/repair sections are omitted from the compact status output so older
-failed attempts do not obscure the current run state.
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Research or code-task run directory. |
+
+**Outputs**:
+
+- prints stage status for pipeline runs
+- prints environment, plan, patch, validation, benchmark, comparison, and repair state for code-task runs
+
+**Notes**:
+
+This command is read-only.
+
+## Artifact Tools
+
+### `simple-ar inspect`
+
+**Purpose**: index and summarize local run artifacts.
+
+**Usage**:
+
+```bash
+uv run simple-ar inspect runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Run directory to inspect. |
+
+**Outputs**:
+
+- `artifact_index.json`
+- `artifact_chunks.jsonl`
+
+**Notes**:
+
+Operational metadata is indexed separately from user-facing artifacts.
+
+### `simple-ar search-artifacts`
+
+**Purpose**: search indexed run artifacts with lexical retrieval.
+
+**Usage**:
+
+```bash
+uv run simple-ar search-artifacts runs/<run-id> "accuracy" --top-k 5
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Run directory. |
+| `QUERY` | string | Search query. |
+| `--top-k N` | int | Number of results. Default: `8`. |
+| `--include-operational` | flag | Also search manifests, runner metadata, and other operational files. |
+
+**Outputs**:
+
+- prints matching artifact chunks and their source paths
+
+**Notes**:
+
+Run `inspect` first when the artifact index is missing or stale.
+
+## Code Task Commands
+
+Code-task commands prepare an existing project under
+`runs/<run-id>/code_task/workspace`. Later edits are applied to that isolated
+workspace, not to the original project.
+
+For normal use, start with the high-level orchestration commands. The low-level
+primitive commands are mainly for debugging, learning, or fine-grained human
+intervention.
+
+### High-Level Orchestration
+
+#### `simple-ar code-task init`
+
+**Purpose**: create a code-task run, prepare the editable workspace, and build
+the first code index.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task init --code-root path/to/project --task-file task.md --benchmark-command "python main.py"
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `--config PATH` | path | TOML config for init settings. CLI flags override config values. |
+| `--code-root DIR` | path | Source project. Required unless set in config. |
+| `--task-file PATH` | path | Markdown/text task description. Required unless set in config. |
+| `--output-root DIR` | path | Directory where the code-task run is created. |
+| `--name TEXT` | string | Run name suffix. |
+| `--benchmark-command TEXT` | string | Command run inside the workspace before and after edits. |
+| `--primary-metric NAME` | string | Primary metric for before/after verdicts. |
+| `--metric-direction NAME=DIRECTION` | repeatable | Metric direction: `higher`, `lower`, `resource`, or `ignore`. |
+| `--env-mode MODE` | enum | `current` or `external`. |
+| `--python PATH` | path | Python executable for `--env-mode external`. |
+| `--workspace-mode MODE` | enum | `copy`, `git_worktree`, or `sparse_copy`. |
+| `--workspace-include GLOB` | repeatable | Include pattern for `sparse_copy`. |
+| `--workspace-exclude GLOB` | repeatable | Additional exclude pattern for `sparse_copy`. |
+| `--workspace-reuse-source-venv` | flag | Reuse a detected source `.venv` Python as external execution policy. |
+| `--workspace-setup-hook TEXT` | string | Record a setup command; it is not executed during init. |
+| `--max-file-bytes N` | int | Maximum copied file size in copy/sparse modes. Use `0` to disable. |
+
+**Outputs**:
+
+- `code_task/manifest.json`
+- `code_task/task.md`
+- `code_task/workspace/`
+- `code_task/meta/codebase_index.json`
+- `code_task/meta/repo_map.json`
+- `code_task/meta/repo_map_summary.md`
+
+**Notes**:
+
+For reusable settings, prefer TOML. See
+[Configuration Reference](CONFIG_REFERENCE.md#standalone-code-task-config).
+
+#### `simple-ar code-task execute`
+
+**Purpose**: advance a code-task run to the next safe stop based on current
+artifacts.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
+uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--config PATH` | path | Optional TOML for model routing, budget, and runtime settings. |
+| `--to-step STEP` | enum | Stop no later than `probe`, `baseline`, `work-plan`, `batch`, `plan`, `propose-edits`, `apply-edits`, `validate`, `run`, `analyze-failure`, or `repair`. |
+| `--dry-run` | flag | Print the next action without writing artifacts. |
+| `--model NAME` | string | Model override for LLM-backed steps. |
+| `--no-llm` | flag | Use deterministic fallbacks where possible. |
+| `--timeout N` | int | Benchmark timeout. |
+| `--skip-validation` | flag | Run benchmark even when static validation has not passed. |
+| `--strict-validation` | flag | Treat higher-risk validation warnings as errors. |
+| `--validation-max-file-bytes N` | int | Max file size scanned by static validation. |
+| `--apply-proposed-edits` | flag | Apply reviewed `proposed_edits.json` after plan approval. |
+| `--allow-large-edits` | flag | Allow a reviewed proposal that exceeds the normal edit budget. |
+| `--repair-rounds N` | int | Number of bounded repair proposals after failure. |
+| `--max-files N` | int | Context file budget for LLM steps. |
+| `--max-source-chars-per-file N` | int | Per-file source context budget. |
+| `--env-mode MODE` | enum | `current` or `external`. |
+| `--python PATH` | path | Python executable for external env mode. |
+
+**Outputs**:
+
+- `code_task/work_plan.md` and `work_plan.json`
+- `code_task/attempts/attempt-*/batches/batch-*/batch_state.json`
+- `code_task/patch_plan.md`
+- `code_task/meta/proposed_edits.json`
+- `code_task/meta/applied_edits.json`
+- `code_task/meta/validation_report.json`
+- `code_task/run/baseline/`, `code_task/run/patched/`, `code_task/run/comparison.json`
+- `code_task/summary.md`
+
+**Notes**:
+
+`execute` preserves review gates. It normally stops after `patch_plan.md`, then
+again after `proposed_edits.json`. Full workflow walkthroughs live in
+[Usage And Configuration](USAGE.md#recommended-path-toml--execute).
+
+#### `simple-ar code-task decide-plan`
+
+**Purpose**: record a human decision for the current patch plan.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task decide-plan runs/<run-id> --decision approve
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--decision VALUE` | enum | `approve`, `reject`, or `revise`. Required. |
+| `--note TEXT` | string | Optional review note. |
+| `--reviewer TEXT` | string | Reviewer label. Default: `user`. |
+
+**Outputs**:
+
+- updates plan decision state in `manifest.json`
+
+**Notes**:
+
+Use `revise` or `reject` when the patch plan should not proceed to edit
+proposal generation.
+
+### Low-Level Primitives
+
+The following commands are usually called by `execute`. Use them when you want
+manual control or need to debug a specific stage.
+
+#### `simple-ar code-task map`
+
+**Purpose**: rebuild repo-map artifacts from the editable workspace.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task map runs/<run-id> --show-summary
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--no-refresh-index` | flag | Reuse the existing `codebase_index.json`. |
+| `--show-summary` | flag | Print `repo_map_summary.md`. |
+
+**Outputs**:
+
+- `code_task/meta/codebase_index.json`
+- `code_task/meta/repo_map.json`
+- `code_task/meta/repo_map_summary.md`
+
+**Notes**:
+
+This command is deterministic and does not call the LLM.
+
+#### `simple-ar code-task locate`
+
+**Purpose**: rank likely editable files and read-only evidence from the repo map.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task locate runs/<run-id> --query "improve classifier"
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--query TEXT` | string | Locate query. Defaults to `code_task/task.md`. |
+| `--top-k N` | int | Candidate count per group. Default: `8`. |
+| `--refresh-map` | flag | Rebuild index and repo map before ranking. |
+| `--no-read-only` | flag | Omit protected read-only evidence files. |
+| `--show-summary` | flag | Print `locate_results.md`. |
+
+**Outputs**:
+
+- `code_task/meta/locate_results.json`
+- `code_task/meta/locate_results.md`
+
+**Notes**:
+
+Protected evidence such as tests and benchmarks can inform planning but is not
+editable by default.
+
+#### `simple-ar code-task context`
+
+**Purpose**: build a bounded prompt-ready context pack.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task context runs/<run-id> --max-files 8 --max-total-chars 20000
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--query TEXT` | string | Locate query. Defaults to `task.md`. |
+| `--top-k N` | int | Locate candidate budget. |
+| `--max-files N` | int | Maximum snippets included. |
+| `--max-source-chars-per-file N` | int | Per-file snippet budget. |
+| `--max-total-chars N` | int | Total snippet budget. |
+| `--refresh-map` | flag | Rebuild map before packing context. |
+| `--show-prompt` | flag | Print `prompt_context.md`. |
+
+**Outputs**:
+
+- `code_task/context_packs/context-NNN/context_pack.json`
+- `code_task/context_packs/context-NNN/prompt_context.md`
+- `code_task/context_packs/context-NNN/selected_snippets.jsonl`
+
+**Notes**:
+
+This command does not modify files.
+
+#### `simple-ar code-task probe`
+
+**Purpose**: inspect runtime and project environment signals.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task probe runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--env-mode MODE` | enum | `current` or `external`. |
+| `--python PATH` | path | Python executable for external env mode. |
+
+**Outputs**:
+
+- `code_task/meta/environment_report.json`
+
+**Notes**:
+
+`probe` does not install dependencies or run project benchmark code.
+
+#### `simple-ar code-task baseline`
+
+**Purpose**: run the recorded benchmark before applying edits.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task baseline runs/<run-id> --timeout 60
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--command TEXT` | string | Override the benchmark command for this run. |
+| `--timeout N` | int | Benchmark timeout. |
+| `--skip-validation` | flag | Run even when static validation has not passed. |
+| `--env-mode MODE` | enum | `current` or `external`. |
+| `--python PATH` | path | Python executable for external env mode. |
+
+**Outputs**:
+
+- `code_task/run/baseline/execution_report.json`
+- `code_task/run/baseline/stdout.txt`
+- `code_task/run/baseline/stderr.txt`
+- `code_task/run/baseline/metrics.json`
+
+**Notes**:
+
+The benchmark command runs inside `code_task/workspace`.
+
+#### `simple-ar code-task work-plan`
+
+**Purpose**: generate a batch-oriented implementation work plan.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task work-plan runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--model NAME` | string | Model override. |
+| `--no-llm` | flag | Use fallback planning. |
+| `--force` | flag | Regenerate existing work-plan artifacts. |
+| `--max-files N` | int | Planning context file budget. |
+| `--max-source-chars-per-file N` | int | Per-file source context budget. |
+
+**Outputs**:
+
+- `code_task/work_plan.json`
+- `code_task/work_plan.md`
+
+**Notes**:
+
+Work-plan target files become part of the later edit-scope check.
+
+#### `simple-ar code-task batch`
+
+**Purpose**: create an attempt/batch state directory for one work-plan item.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task batch runs/<run-id> --work-item W1
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--work-item ID` | string | Work-plan item id, such as `W1`. Required. |
+| `--attempt-id ID` | string | Optional attempt id, such as `attempt-001`. |
+| `--force` | flag | Create a new batch even when one already exists. |
+
+**Outputs**:
+
+- `code_task/attempts/attempt-NNN/attempt_state.json`
+- `code_task/attempts/attempt-NNN/batches/batch-NNN/batch_state.json`
+
+**Notes**:
+
+`batch` does not call the LLM or edit files.
+
+#### `simple-ar code-task plan`
+
+**Purpose**: generate a human-reviewable patch plan for the active batch.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task plan runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--model NAME` | string | Model override. |
+| `--no-llm` | flag | Use fallback plan. |
+| `--force` | flag | Regenerate existing plan. |
+| `--max-files N` | int | Context file budget. |
+| `--max-source-chars-per-file N` | int | Per-file source context budget. |
+
+**Outputs**:
+
+- `code_task/patch_plan.md`
+
+**Notes**:
+
+Run `decide-plan` before generating edit proposals.
+
+#### `simple-ar code-task propose-edits`
+
+**Purpose**: ask the model to produce controlled old/new text edits.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task propose-edits runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--model NAME` | string | Model override. |
+| `--no-llm` | flag | Write deterministic empty proposal. |
+| `--force` | flag | Regenerate existing proposal. |
+| `--max-files N` | int | Editable context file budget. |
+| `--max-source-chars-per-file N` | int | Per-file source context budget. |
+| `--allow-large-edits` | flag | Accept a large but bounded proposal after review. |
+
+**Outputs**:
+
+- `code_task/meta/proposed_edits.json`
+- `code_task/meta/proposal_warnings.json`
+- per-batch proposal artifacts when an active batch exists
+
+**Notes**:
+
+The proposal format is structured JSON, not a unified diff.
+
+#### `simple-ar code-task apply-edits`
+
+**Purpose**: safely apply controlled old/new text edits inside the workspace.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task apply-edits runs/<run-id>
+uv run simple-ar code-task apply-edits runs/<run-id> --edits-file runs/<run-id>/code_task/repairs/repair-001/proposed_edits.json
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--edits-file PATH` | path | Specific proposal file to apply. |
+| `--allow-unapproved-plan` | flag | Bypass plan approval for local tests/demos. |
+| `--allow-large-edits` | flag | Apply a reviewed proposal that requires large-edit approval. |
+
+**Outputs**:
+
+- modifies files under `code_task/workspace`
+- `code_task/meta/applied_edits.json`
+- `code_task/patch.diff`
+
+**Notes**:
+
+Path, edit-scope, old-text, and large-edit checks run before file writes.
+
+#### `simple-ar code-task validate`
+
+**Purpose**: run lightweight static validation over the workspace.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task validate runs/<run-id> --strict
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--strict` | flag | Treat higher-risk warnings as errors. |
+| `--max-file-bytes N` | int | Maximum file size scanned. |
+
+**Outputs**:
+
+- `code_task/meta/validation_report.json`
+
+**Notes**:
+
+Validation is static and intentionally conservative.
+
+#### `simple-ar code-task run`
+
+**Purpose**: run the benchmark after edits.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task run runs/<run-id> --timeout 60
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--command TEXT` | string | Override recorded benchmark command. |
+| `--timeout N` | int | Benchmark timeout. |
+| `--skip-validation` | flag | Run even when static validation has not passed. |
+| `--env-mode MODE` | enum | `current` or `external`. |
+| `--python PATH` | path | Python executable for external env mode. |
+
+**Outputs**:
+
+- `code_task/run/patched/execution_report.json`
+- `code_task/run/patched/stdout.txt`
+- `code_task/run/patched/stderr.txt`
+- `code_task/run/patched/metrics.json`
+- `code_task/run/comparison.json` when baseline metrics also exist
+
+**Notes**:
+
+Metric comparison distinguishes "benchmark passed" from "objective improved."
+
+#### `simple-ar code-task analyze-failure`
+
+**Purpose**: summarize the latest failed validation or benchmark result.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task analyze-failure runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+
+**Outputs**:
+
+- `code_task/run/patched/failure_analysis.md` or `code_task/meta/failure_analysis.md`
+
+**Notes**:
+
+This command is deterministic and does not modify source files.
+
+#### `simple-ar code-task repair`
+
+**Purpose**: propose bounded repair edits from the latest failure context.
+
+**Usage**:
+
+```bash
+uv run simple-ar code-task repair runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Code-task run directory. |
+| `--model NAME` | string | Model override. |
+| `--no-llm` | flag | Write deterministic empty repair proposal. |
+| `--max-files N` | int | Repair context file budget. |
+| `--max-source-chars-per-file N` | int | Per-file source context budget. |
+
+**Outputs**:
+
+- `code_task/repairs/repair-NNN/proposed_edits.json`
+- updates `code_task/summary.md`
+
+**Notes**:
+
+Repair proposals are not applied automatically. Review and apply them with
+`apply-edits --edits-file ...`.

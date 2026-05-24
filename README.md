@@ -27,6 +27,9 @@ experimentation, and gradual extension.
 
 - **Research reports**: run a visible staged pipeline from topic to literature
   notes, synthesis, and report artifacts.
+- **Research source planning**: write `02-search/source_plan.json` for each
+  run, with configurable OpenAlex/arXiv/local-file sources, query lists,
+  retrieval mode, cache policy, and lightweight budgets.
 - **Code tasks**: improve an existing codebase inside an isolated editable
   workspace with LLM planning, review gates, controlled patch proposals,
   validation, benchmark execution, and metric comparison.
@@ -88,6 +91,14 @@ SimpleAutoResearch records token counts but leaves estimated cost as `null`.
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
+```
+
+For repeatable source settings, use a run config. This local example uses a
+Markdown note as a research source and writes the planned source strategy to
+`02-search/source_plan.json`:
+
+```bash
+uv run simple-ar run --config examples/run_configs/local_research_report.toml
 ```
 
 For a literature-only pass, stop at `synthesize`, then resume report generation
@@ -166,6 +177,13 @@ enabled = true
 offline = false
 max_papers = 5
 
+[research]
+# Optional source planner for 02-search.
+mode = "standard"  # lite | standard | strong
+sources = ["openalex", "arxiv"]
+queries = ["research and improve my model"]
+cache = true
+
 [experiment]
 template = "code_task_project"
 timeout = 120
@@ -231,8 +249,9 @@ still intentionally conservative.
   adding bounded proposal contracts, context requests, multi-round attempts, and
   future external coding-agent adapters before recommending unattended large
   refactors.
-- Literature search is metadata and artifact based. It is not yet a full
-  PDF-reading or vector-RAG survey system.
+- Literature search now has an auditable source plan and can use OpenAlex,
+  arXiv, or local Markdown/text notes, but it is not yet a full PDF-reading,
+  parser-backed, or vector-RAG survey system.
 - LLM-written reports are guarded by citation, metric, and boundary checks; when
   a draft fails these checks, the tool falls back to a structured deterministic
   report.
@@ -241,8 +260,9 @@ still intentionally conservative.
 
 - [Usage And Configuration](docs/USAGE.md): setup, workflow-oriented examples,
   artifacts, and troubleshooting.
-- [CLI Reference](docs/CLI_REFERENCE.md): command groups, options, and config
-  schemas.
+- [CLI Reference](docs/CLI_REFERENCE.md): command groups and option tables.
+- [Configuration Reference](docs/CONFIG_REFERENCE.md): TOML sections, complete
+  config examples, and workspace-mode variants.
 - [Workflows And Artifacts](docs/WORKFLOWS.md): workflow presets, the 8-stage
   pipeline, and artifact layouts.
 - [Development Guide](docs/DEVELOPMENT.md): how to extend stages, templates, and
