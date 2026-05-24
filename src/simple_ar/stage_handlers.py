@@ -26,7 +26,7 @@ from simple_ar.literature.openalex_client import OpenAlexSearchClient, OpenAlexS
 from simple_ar.literature.verify import CitationError, validate_citations
 from simple_ar.llm import LLMClient, LLMError, LLMRequest
 from simple_ar.pipeline import Context, utcnow_iso
-from simple_ar.prompts import (
+from simple_ar.research.prompts import (
     CODE_TASK_DESIGN_SYSTEM,
     PLAN_SYSTEM,
     READ_SYSTEM,
