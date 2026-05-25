@@ -10,7 +10,9 @@ from simple_ar.research.contracts import (
     MethodCard,
     NoveltyCheck,
     PaperCard,
+    QueryPlan,
     ResearchContract,
+    ResearchQuestion,
     SourcePlan,
     TextChunk,
 )
@@ -25,7 +27,9 @@ __all__ = [
     "MethodCard",
     "NoveltyCheck",
     "PaperCard",
+    "QueryPlan",
     "ResearchContract",
+    "ResearchQuestion",
     "SourcePlan",
     "TextChunk",
 ]

@@ -28,6 +28,13 @@ CODE_TASK_DESIGN_SYSTEM = (
     "over broad rewrites."
 )
 
+RESEARCH_PLANNER_SYSTEM = (
+    "You are a careful research retrieval planner. Break a topic into scoped "
+    "research questions, expand search queries with useful terminology, and "
+    "state out-of-scope boundaries. Do not claim that papers exist. Only plan "
+    "what evidence should be searched for."
+)
+
 
 def plan_user_prompt(topic: str) -> str:
     """Build the planning prompt for a user-provided research topic.
@@ -42,6 +49,75 @@ def plan_user_prompt(topic: str) -> str:
         "Given this research topic, write JSON with two string fields: "
         "`goal_markdown` and `problem_markdown`.\n\n"
         f"Topic:\n{topic}"
+    )
+
+
+def research_planner_user_prompt(
+    *,
+    topic: str,
+    problem_markdown: str,
+    seed_queries_json: str,
+    required_facets_json: str,
+    max_queries: int,
+    max_rounds: int,
+    mode: str,
+) -> str:
+    """Build the prompt for LLM-backed research-question and query planning.
+
+    Args:
+        topic: User-provided research topic.
+        problem_markdown: Problem artifact produced by the plan stage.
+        seed_queries_json: JSON list of configured seed queries.
+        required_facets_json: JSON list of facets requested by config.
+        max_queries: Maximum number of executable queries to return.
+        max_rounds: Planned retrieval-round budget.
+        mode: Research mode, such as ``lite``, ``standard``, or ``strong``.
+
+    Returns:
+        Prompt requesting bounded JSON fields for retrieval planning.
+    """
+    return (
+        "Create a retrieval plan for this research topic. Return JSON with "
+        "these fields:\n"
+        "- `questions`: list of objects with `question`, `facet`, `rationale`, "
+        "`required`, `negative_scope`, and `success_criteria`.\n"
+        "- `query_specs`: ordered objects capped by `max_queries`. Each object "
+        "must include `facet`, `title_keywords`, `abstract_keywords`, and "
+        "`rationale`.\n"
+        "- `queries`: optional fallback list of short paper-search keyword "
+        "queries derived from `query_specs`.\n"
+        "- `required_facets`: evidence facets to cover.\n"
+        "- `negative_terms`: terms or scopes that should be avoided.\n"
+        "- `rationale`: one short explanation of the plan.\n\n"
+        "Guidelines:\n"
+        "- Include at least one overview question, then method/benchmark/"
+        "dataset/code/limitation questions when relevant.\n"
+        "- Expand beyond the user's exact keywords with synonyms and likely "
+        "paper terminology, but keep queries specific.\n"
+        "- Think like scholarly search over paper title and abstract fields. "
+        "`title_keywords` should be 2-5 high-signal title terms or short "
+        "phrases. `abstract_keywords` should be 3-8 supporting terms likely to "
+        "appear in abstracts.\n"
+        "- Query strings must be compact paper-search keyword queries suitable "
+        "for OpenAlex/Semantic Scholar/arXiv/BM25, not browser questions. Prefer combinations "
+        "such as `multi-agent code generation`, `LLM software engineering "
+        "agents`, `agentic software engineering benchmark`, `program repair "
+        "LLM agents`, or `LLM debugging unit tests`.\n"
+        "- Avoid procedural words that are unlikely to be paper metadata terms "
+        "unless paired with the domain, such as standalone `planner`, "
+        "`implementer`, `handoff`, or `reviewer`.\n"
+        "- Generate multiple focused title/abstract keyword combinations "
+        "instead of one long descriptive query.\n"
+        "- Do not invent paper titles, citations, datasets, or repositories.\n"
+        "- Prefer queries that can help later screening and coverage checks.\n"
+        "- Keep every string concise.\n\n"
+        f"Topic:\n{topic}\n\n"
+        f"Problem artifact:\n{problem_markdown}\n\n"
+        f"Seed queries JSON:\n{seed_queries_json}\n\n"
+        f"Required facets JSON:\n{required_facets_json}\n\n"
+        f"Research mode: {mode}\n"
+        f"max_queries: {max_queries}\n"
+        f"max_rounds: {max_rounds}\n"
     )
 
 

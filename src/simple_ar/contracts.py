@@ -24,8 +24,16 @@ CONTRACTS: dict[Stage, StageContract] = {
     Stage.SEARCH: StageContract(
         stage=Stage.SEARCH,
         inputs=("problem.md",),
-        outputs=("papers.jsonl", "search_meta.json", "source_plan.json"),
-        description="Collect paper metadata.",
+        outputs=(
+            "research_questions.json",
+            "query_plan.json",
+            "source_plan.json",
+            "retrieval_rounds.jsonl",
+            "screening_decisions.jsonl",
+            "papers.jsonl",
+            "search_meta.json",
+        ),
+        description="Plan research questions, retrieve candidates, screen metadata, and collect papers.",
     ),
     Stage.READ: StageContract(
         stage=Stage.READ,

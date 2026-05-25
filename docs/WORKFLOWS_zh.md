@@ -91,7 +91,7 @@ plan -> search -> read -> synthesize -> design experiment
 | 阶段 | 主要输出 | 目的 |
 | --- | --- | --- |
 | `plan` | `goal.md`, `problem.md` | 把主题收束成具体研究问题；启用 LLM 时由 LLM 支持。 |
-| `search` | `papers.jsonl`, `search_meta.json`, `source_plan.json` | 规划并收集来自配置源的文献 metadata。 |
+| `search` | `research_questions.json`, `query_plan.json`, `source_plan.json`, `retrieval_rounds.jsonl`, `screening_decisions.jsonl`, `papers.jsonl`, `search_meta.json` | 拆解主题、执行首轮检索、去重/筛选 metadata，并从配置源收集文献记录。 |
 | `read` | `paper_notes.json`, `notes.md` | 把论文 metadata 转成结构化 notes；启用 LLM 时由 LLM 支持。 |
 | `synthesize` | `synthesis.md`, `hypothesis.md` | 产出有边界的 synthesis 和可测试假设。 |
 | `design` | `experiment_plan.json` | 选择安全实验模板和参数。 |
@@ -102,7 +102,12 @@ plan -> search -> read -> synthesize -> design experiment
 ## Search 与 LLM 边界
 
 - `02-search/source_plan.json` 会记录本次计划使用的 query、source 顺序、本地文档、检索模式、cache/index hints 和预算。
-- Live search 使用配置中的 source 顺序。默认先用 OpenAlex，再用 arXiv。未设置 `--strict-search` 且 source plan 允许 cache 时，live 失败后会使用缓存 metadata。
+- `02-search/research_questions.json` 会记录子问题和需要覆盖的 evidence facets，例如 method、benchmark、dataset 和 code link。LLM 关闭时使用 deterministic planner；`[research].planner = "auto"` 或 `"llm"` 时可由模型参与生成。
+- `02-search/query_plan.json` 会记录 seed queries、planner 生成的 follow-up queries、结构化 title/abstract keyword hints 和计划 retrieval-round 预算。
+- `02-search/retrieval_rounds.jsonl` 会记录实际执行的 source/query 尝试。Day4 会执行第一轮检索，并把 normalized query、facet、title/abstract keyword 意图写入 trace；后续轮次仍由 query plan 预算显式保留。
+- `02-search/screening_decisions.jsonl` 会记录写入 `papers.jsonl` 前的去重和轻量相关性筛选决策。
+- Live search 使用配置中的 source 顺序。默认先用 OpenAlex，再用 Semantic Scholar，最后用 arXiv。未设置 `--strict-search` 且 source plan 允许 cache 时，live 失败后会使用缓存 metadata。
+- 当前 source strategy 是 ordered fallback，不是 full source union：同一个 query 只要某个 provider 返回候选，后续 provider 就不会继续调用。
 - `local_files` 可以把用户提供的 Markdown/text 笔记作为保守的 metadata-like records。当前还不解析 PDF。
 - `--offline-search` 会跳过 live provider，直接使用 fixture metadata。
 - `--allow-fixture-fallback` 只在 live 和 cache 都失败后允许 fixture metadata。
@@ -129,7 +134,11 @@ runs/<run-id>/
   evidence_ledger.jsonl
   01-plan/
   02-search/
+    research_questions.json
+    query_plan.json
     source_plan.json
+    retrieval_rounds.jsonl
+    screening_decisions.jsonl
     papers.jsonl
     search_meta.json
   03-read/
@@ -156,6 +165,10 @@ runs/<run-id>/
 - `activity_log.jsonl`：source planning 和 retrieval actions 的结构化日志。
 - `evidence_ledger.jsonl`：阶段使用的 snippets，包含 path 和 line range。
 - `02-search/source_plan.json`：本次运行的文献 source plan，包含 provider 顺序、本地文档路径、query 列表、检索模式和预算。
+- `02-search/research_questions.json`：用于避免只依赖用户初始关键词的研究问题拆解。
+- `02-search/query_plan.json`：包含 seed/follow-up queries，以及为后续 source-specific normalization 保留 title/abstract keyword 意图的 `query_specs`。
+- `02-search/retrieval_rounds.jsonl`：实际执行的 source/query 尝试，包含返回数量、错误和简洁 query 意图 trace。
+- `02-search/screening_decisions.jsonl`：retrieved metadata candidates 的 keep/discard 决策。
 - `02-search/search_meta.json`：provider 尝试记录和最终选用 source。
 - `02-search/papers.jsonl`：传给 `03-read` 的标准化 metadata rows。
 - `05-design/generated_code_task.md`：仅当内嵌 `code_task_project` 没有 task file 时生成。

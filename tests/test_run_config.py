@@ -26,8 +26,13 @@ topic = "agent simulation"
 
 [research]
 mode = "strong"
+planner = "llm"
 sources = ["local_files", "openalex"]
 queries = ["agent simulation benchmark"]
+auto_query_expansion = true
+max_retrieval_rounds = 3
+max_queries = 6
+required_facets = ["method", "benchmark", "code_link"]
 use_fulltext = true
 allow_pdf_download = false
 cache = true
@@ -47,8 +52,13 @@ max_llm_calls = 8
 
             self.assertEqual(parsed["topic"], "agent simulation")
             self.assertEqual(parsed["research_mode"], "strong")
+            self.assertEqual(parsed["research_planner"], "llm")
             self.assertEqual(parsed["research_sources"], ["local_files", "openalex"])
             self.assertEqual(parsed["research_queries"], ["agent simulation benchmark"])
+            self.assertEqual(parsed["research_auto_query_expansion"], True)
+            self.assertEqual(parsed["research_max_retrieval_rounds"], 3)
+            self.assertEqual(parsed["research_max_queries"], 6)
+            self.assertEqual(parsed["research_required_facets"], ["method", "benchmark", "code_link"])
             self.assertEqual(parsed["research_use_fulltext"], True)
             self.assertEqual(parsed["research_allow_pdf_download"], False)
             self.assertEqual(parsed["research_cache"], True)

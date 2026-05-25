@@ -51,8 +51,13 @@ def load_pipeline_run_config(config_path: str | None) -> dict[str, object]:
 
     research = _table(data, "research")
     _set_string(result, "research_mode", research.get("mode"))
+    _set_string(result, "research_planner", research.get("planner"))
     _set_string_list(result, "research_sources", research.get("sources"))
     _set_string_list(result, "research_queries", research.get("queries"))
+    _set_bool(result, "research_auto_query_expansion", research.get("auto_query_expansion"))
+    _set_int(result, "research_max_retrieval_rounds", research.get("max_retrieval_rounds"))
+    _set_int(result, "research_max_queries", research.get("max_queries"))
+    _set_string_list(result, "research_required_facets", research.get("required_facets"))
     _set_bool(result, "research_use_fulltext", research.get("use_fulltext"))
     _set_bool(result, "research_allow_pdf_download", research.get("allow_pdf_download"))
     _set_bool(result, "research_cache", research.get("cache"))

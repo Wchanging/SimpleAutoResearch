@@ -55,7 +55,7 @@ class SourcePlan:
     """Planned retrieval strategy for a research run."""
 
     queries: list[str]
-    sources: list[str] = field(default_factory=lambda: ["openalex", "arxiv"])
+    sources: list[str] = field(default_factory=lambda: ["openalex", "semantic_scholar", "arxiv"])
     max_results_per_query: int = 10
     mode: ResearchMode = "standard"
     require_fulltext: bool = False
@@ -67,6 +67,73 @@ class SourcePlan:
     budget: dict[str, Any] = field(default_factory=dict)
     rationale: str = ""
     schema_version: str = "source_plan.v1"
+
+    def to_row(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ResearchQuestion:
+    """One scoped sub-question used for retrieval planning.
+
+    Args:
+        question_id: Stable identifier such as ``RQ1``.
+        question: Natural-language question to answer with evidence.
+        facet: Evidence facet, such as ``method`` or ``benchmark``.
+        rationale: Why this question is useful for the topic.
+        required: Whether the coverage checker should treat this question as
+            required evidence.
+        negative_scope: Topics or claims this question should avoid.
+        success_criteria: Signals that would make the answer useful.
+    """
+
+    question_id: str
+    question: str
+    facet: str = "general"
+    rationale: str = ""
+    required: bool = True
+    negative_scope: list[str] = field(default_factory=list)
+    success_criteria: list[str] = field(default_factory=list)
+    schema_version: str = "research_question.v1"
+
+    def to_row(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class QueryPlan:
+    """Seed and follow-up queries derived from research questions.
+
+    Args:
+        topic: Original research topic.
+        seed_queries: User or topic-derived queries.
+        follow_up_queries: Facet-driven query expansions.
+        queries: Executable query order used by the source planner.
+        query_specs: Structured paper-search query intents used to derive
+            source-friendly keyword queries.
+        required_facets: Facets the evidence search should try to cover.
+        negative_terms: Terms that should be treated as out-of-scope hints.
+        max_rounds: Planned retrieval rounds for later DeepResearch loops.
+        auto_expansion: Whether query expansion was enabled.
+        rationale: Human-readable provenance for why the plan was generated.
+        planner: Planner backend that produced the plan, such as
+            ``deterministic`` or ``llm``.
+    """
+
+    topic: str
+    seed_queries: list[str]
+    follow_up_queries: list[str] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    query_specs: list[dict[str, Any]] = field(default_factory=list)
+    required_facets: list[str] = field(default_factory=list)
+    negative_terms: list[str] = field(default_factory=list)
+    max_rounds: int = 1
+    auto_expansion: bool = True
+    rationale: str = ""
+    planner: str = "deterministic"
+    schema_version: str = "query_plan.v1"
 
     def to_row(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""

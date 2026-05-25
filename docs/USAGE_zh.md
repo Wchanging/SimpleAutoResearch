@@ -114,7 +114,9 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 默认搜索行为：
 
 - `search` 会先生成 `02-search/source_plan.json`，记录本次计划使用的 query、source、模式和预算。
-- 如果没有额外配置，`search` 先查 OpenAlex，再查 arXiv。
+- 如果没有额外配置，`search` 先查 OpenAlex，再查 Semantic Scholar，最后查 arXiv。
+- 当前默认是按顺序补偿：同一个计划 query 一旦某个 live source 返回候选文献，
+  后续 source 会跳过，以减少限流压力和重复噪声。
 - 如果 live provider 失败且没有设置 `--strict-search`，会优先使用本地 cache。
 
 常用控制：
@@ -140,8 +142,13 @@ query = "agent simulation evaluation"
 [research]
 # lite：元数据/本地笔记；standard：cache/index-ready；strong：后续全文/向量路径。
 mode = "standard"
-sources = ["openalex", "arxiv"]
+planner = "auto"
+sources = ["openalex", "semantic_scholar", "arxiv"]
 queries = ["agent simulation evaluation", "multi-agent simulation benchmark"]
+auto_query_expansion = true
+max_retrieval_rounds = 2
+max_queries = 6
+required_facets = ["method", "benchmark", "dataset", "code_link"]
 use_fulltext = false
 allow_pdf_download = false
 cache = true
@@ -156,9 +163,18 @@ max_llm_calls = 8
 
 搜索阶段会写出：
 
+- `02-search/research_questions.json`：从 topic 和 problem artifact 拆出的子问题和需要覆盖的 evidence facets。
+- `02-search/query_plan.json`：seed queries、planner 生成的 follow-up queries、带 title/abstract keyword hints 的 `query_specs`、required facets 和计划 retrieval-round 预算。
 - `02-search/source_plan.json`：计划中的 queries、sources、检索模式、本地文档、cache/index 偏好和预算。
+- `02-search/retrieval_rounds.jsonl`：每次实际执行的 source/query 尝试，包括状态、返回数量、错误/cache 命中，以及 facet、title/abstract keywords 等简洁 query 意图 trace。
+- `02-search/screening_decisions.jsonl`：对返回 metadata 的去重和轻量 relevance screening 决策。
 - `02-search/search_meta.json`：provider 尝试记录、最终选用 source、状态和返回数量。
 - `02-search/papers.jsonl`：传给 `read` 阶段的标准化论文 metadata。
+
+`[research].planner = "auto"` 会在 `[llm].enabled = true` 时调用 LLM planner，
+用于生成更强的 research questions 和 query expansion；provider 不可用时会回退到
+deterministic planning。想要完全可复现、无额外 LLM 调用时设为 `"deterministic"`；
+明确希望模型参与检索规划时设为 `"llm"`。
 
 本地 Markdown/text 笔记也可以作为保守的研究源使用，不需要调用 live literature provider：
 
@@ -166,7 +182,7 @@ max_llm_calls = 8
 uv run simple-ar run --config examples/run_configs/local_research_report.toml
 ```
 
-这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。V2.3 Day2 的 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取；PDF 解析、文档切块和向量检索会放在后续 evidence engine 中继续实现。
+这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。当前 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取，并使用轻量 keyword-overlap 匹配，而不是要求完整 query 字符串逐字出现；PDF 解析、文档切块和向量检索会放在后续 evidence engine 中继续实现。
 
 ### 恢复和查看状态
 

@@ -126,7 +126,11 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 Default search behavior:
 
 - `search` builds `02-search/source_plan.json` before querying providers.
-- Unless configured otherwise, `search` queries OpenAlex first, then arXiv.
+- Unless configured otherwise, `search` queries OpenAlex first, then Semantic
+  Scholar, then arXiv.
+- For each planned query, the current default is ordered fallback: once a live
+  source returns candidates, downstream sources are skipped for that query to
+  reduce rate-limit pressure and duplicate noise.
 - If a live provider fails and `--strict-search` is not set, cached metadata is used when available.
 
 Explicit search controls:
@@ -153,8 +157,13 @@ query = "agent simulation evaluation"
 [research]
 # lite: metadata/local notes; standard: cache/index-ready; strong: future full-text/vector path.
 mode = "standard"
-sources = ["openalex", "arxiv"]
+planner = "auto"
+sources = ["openalex", "semantic_scholar", "arxiv"]
 queries = ["agent simulation evaluation", "multi-agent simulation benchmark"]
+auto_query_expansion = true
+max_retrieval_rounds = 2
+max_queries = 6
+required_facets = ["method", "benchmark", "dataset", "code_link"]
 use_fulltext = false
 allow_pdf_download = false
 cache = true
@@ -169,11 +178,27 @@ max_llm_calls = 8
 
 The search stage writes:
 
+- `02-search/research_questions.json`: scoped sub-questions and required
+  evidence facets derived from the topic and problem artifact.
+- `02-search/query_plan.json`: seed queries, planner-produced follow-up
+  queries, structured `query_specs` with title/abstract keyword hints,
+  required facets, and planned retrieval-round budget.
 - `02-search/source_plan.json`: planned queries, sources, retrieval mode, local
   document hints, cache/index preferences, and budget.
+- `02-search/retrieval_rounds.jsonl`: one row per executed source/query attempt,
+  including status, returned count, errors/cache hits, and compact query-intent
+  traces such as facet plus title/abstract keyword hints.
+- `02-search/screening_decisions.jsonl`: deduplication and lightweight
+  relevance-screening decisions for returned metadata.
 - `02-search/search_meta.json`: provider attempts, selected source, status,
   and returned-paper count.
 - `02-search/papers.jsonl`: normalized paper metadata passed to `read`.
+
+`[research].planner = "auto"` uses an LLM planner when `[llm].enabled = true`
+and falls back to deterministic planning when the provider is unavailable.
+Set it to `"deterministic"` when you want repeatable no-extra-LLM query
+planning, or `"llm"` when you explicitly want model-backed question and query
+expansion.
 
 Local Markdown/text notes can be used as a conservative source without live
 literature-provider calls:
@@ -184,9 +209,10 @@ uv run simple-ar run --config examples/run_configs/local_research_report.toml
 
 That example config sets `[research].sources = ["local_files"]` and points
 `[research].local_documents` at `examples/research/local_agent_simulation_notes.md`.
-The local-file connector is intentionally simple in V2.3 Day2: it reads `.md`
-and `.txt` files as metadata-like records. PDF parsing, document chunking, and
-vector retrieval are planned later in the V2.3 evidence engine.
+The local-file connector is intentionally conservative: it reads `.md` and
+`.txt` files as metadata-like records and uses lightweight keyword-overlap
+matching rather than exact query-string matching. PDF parsing, document
+chunking, and vector retrieval are planned later in the V2.3 evidence engine.
 
 ### Resume And Status
 

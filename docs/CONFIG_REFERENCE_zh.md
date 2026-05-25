@@ -67,23 +67,39 @@ strict = false
 # 写入 source_plan.json 的检索策略档位；全文解析能力仍是后续规划。
 mode = "lite"                 # lite | standard | strong
 
-# 02-search 的 provider 顺序。
-sources = ["fixture"]         # openalex | arxiv | local_files | fixture
+# research-question/query planner。auto 会在 [llm].enabled = true 时调用 LLM；
+# provider 不可用时回退到 deterministic planning。
+planner = "auto"              # auto | llm | deterministic
 
-# evidence planning 的 query 列表；当前 provider 调用使用第一个非空 query。
+# 02-search 的 provider 顺序。
+sources = ["fixture"]         # openalex | semantic_scholar | arxiv | local_files | fixture
+
+# evidence planning 的 query 列表；Day4 会按顺序执行 planned queries，直到达到文档预算。
 queries = ["tiny digits MLP baseline improvement"]
+
+# 是否根据 topic 和 research questions 生成 facet-driven follow-up queries。
+auto_query_expansion = true
+
+# 后续多轮 retrieval loop 的计划轮数。
+max_retrieval_rounds = 2
+
+# query_plan.json 中最多保留多少个 seed + expanded queries。
+max_queries = 6
+
+# planner 应尝试覆盖的 evidence facets。
+required_facets = ["method", "benchmark", "dataset", "code_link"]
 
 # 作为本地研究记录读取的 Markdown/text 文件；路径相对当前 config 解析。
 local_documents = []
 
-# 后续全文 evidence 工作流的意图开关；V2.3 Day2 还不会下载或解析 PDF。
+# 后续全文 evidence 工作流的意图开关；当前 V2.3 search 还不会下载或解析 PDF。
 use_fulltext = false
 allow_pdf_download = false
 
 # live provider 失败后是否允许使用 cached metadata。
 cache = true
 
-# 计划使用的本地索引后端；当前 Day2 先记录选择，后续 ingestion 再真正使用。
+# 计划使用的本地索引后端；当前 V2.3 search 先记录选择，后续 ingestion 再真正使用。
 index_backend = "keyword"     # keyword | sqlite_fts | hybrid
 
 [research.budget]
@@ -250,7 +266,7 @@ max_proposal_chars = 42000
 | `[run]` | `run`, `resume` | topic、输出目录、阶段范围和 quiet 模式。 |
 | `[llm]` | pipeline 和 code task | LLM 是否启用、默认模型和 worker 数。 |
 | `[search]` | `02-search` | provider 行为、fallback 策略、结果数量和手动 query。 |
-| `[research]` | `02-search` | source-plan 模式、provider 顺序、query 列表、本地文档、cache/index hints。 |
+| `[research]` | `02-search` | research-question 规划、query expansion、provider 顺序、本地文档、cache/index hints。 |
 | `[research.budget]` | `02-search` 和后续 evidence stages | 写入 `source_plan.json` 的轻量预算上限。 |
 | `[retrieval]` | read/synthesize/report helpers | 本地 artifact retrieval 上下文。 |
 | `[experiment]` | `05-design` 到 `07-run` | 实验模板、timeout 和可选嵌套 code-task config 路径。 |
@@ -291,8 +307,13 @@ max_proposal_chars = 42000
 | 字段 | 含义 |
 | --- | --- |
 | `[research].mode` | 记录计划中的 evidence 深度：`lite` 表示 metadata/本地笔记，`standard` 表示 cache/index-ready，`strong` 预留给全文/向量工作流。 |
-| `[research].sources` | search 阶段 provider 顺序。当前 connector 支持 `openalex`、`arxiv` 和 `local_files`；`fixture` 用于记录离线 fixture。 |
-| `[research].queries` | 写入 `02-search/source_plan.json` 的 query 列表。V2.3 Day2 provider 调用使用第一个非空 query；后续 evidence 阶段可用于扩展和筛选。 |
+| `[research].planner` | research-question 和 query-expansion 后端。`auto` 会在 `[llm].enabled = true` 时调用 LLM，并在 provider 不可用时回退；`llm` 显式要求走该路径；`deterministic` 禁用额外 LLM planner 调用。 |
+| `[research].sources` | search 阶段 provider 顺序。当前 connector 支持 `openalex`、`semantic_scholar`、`arxiv` 和 `local_files`；`fixture` 用于记录离线 fixture。 |
+| `[research].queries` | 作为 seed queries 写入 `query_plan.json`，再同步到 `02-search/source_plan.json`。Day4 会在第一轮检索中按顺序执行 planned queries，直到达到文档预算；后续 coverage 工作可继续使用剩余轮次预算做 follow-up search。LLM planner 还会记录带 title/abstract keyword hints 的 `query_specs`。 |
+| `[research].auto_query_expansion` | 是否启用 facet-driven follow-up queries。deterministic 模式下为规则扩展；LLM planner 模式下模型可以在相同 query 预算内补充更强术语。想完全使用手写 query 时可以设为 false。 |
+| `[research].max_retrieval_rounds` | DeepResearch loop 计划运行的 retrieval/screening 轮数。Day4 已执行第一轮，并把后续轮次预算留给 coverage/follow-up 阶段。 |
+| `[research].max_queries` | `query_plan.json` 和 `source_plan.json` 中最多保留多少个 seed + expanded queries。 |
+| `[research].required_facets` | 希望覆盖的 evidence facets，例如 `method`、`benchmark`、`dataset`、`code_link` 或 `limitation`。这些会驱动 research questions 和 query expansion。 |
 | `[research].local_documents` | 作为本地研究记录读取的 Markdown/text 文件，路径相对配置文件解析。 |
 | `[research].use_fulltext` | 后续全文 evidence 工作流的意图开关。当前不会下载或解析 PDF。 |
 | `[research].allow_pdf_download` | 后续 PDF 下载器的权限开关。除非后续 parser/downloader 已启用，否则保持 false。 |
@@ -349,7 +370,7 @@ max_proposal_chars = 42000
 
 ## Research Source Variants
 
-### Live OpenAlex/arXiv Metadata
+### Live OpenAlex/Semantic Scholar/arXiv Metadata
 
 ```toml
 [search]
@@ -361,11 +382,16 @@ strict = false
 
 [research]
 mode = "standard"
-sources = ["openalex", "arxiv"]
+planner = "auto"
+sources = ["openalex", "semantic_scholar", "arxiv"]
 queries = [
   "multi-agent collaboration for code generation",
   "LLM agents software engineering benchmark",
 ]
+auto_query_expansion = true
+max_retrieval_rounds = 2
+max_queries = 6
+required_facets = ["method", "benchmark", "dataset", "code_link"]
 cache = true
 index_backend = "keyword"
 use_fulltext = false
@@ -381,8 +407,13 @@ max_papers = 5
 
 [research]
 mode = "lite"
+planner = "deterministic"
 sources = ["local_files"]
 queries = ["agent simulation evaluation"]
+auto_query_expansion = true
+max_retrieval_rounds = 1
+max_queries = 4
+required_facets = ["overview", "method", "benchmark"]
 local_documents = [
   "../research/local_agent_simulation_notes.md",
 ]
@@ -399,8 +430,12 @@ max_papers = 3
 
 [research]
 mode = "lite"
+planner = "deterministic"
 sources = ["fixture"]
 queries = ["tiny digits MLP baseline improvement"]
+auto_query_expansion = true
+max_retrieval_rounds = 1
+max_queries = 4
 ```
 
 ## Workspace Mode Variants

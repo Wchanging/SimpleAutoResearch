@@ -22,8 +22,13 @@ max_papers = 5
 # coding-focused demo, the plan records fixture metadata rather than live
 # provider calls.
 mode = "lite"
+planner = "auto"
 sources = ["fixture"]
 queries = ["tiny digits MLP baseline improvement"]
+auto_query_expansion = true
+max_retrieval_rounds = 1
+max_queries = 4
+required_facets = ["method", "benchmark", "dataset"]
 cache = true
 index_backend = "keyword"
 

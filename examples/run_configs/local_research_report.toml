@@ -9,15 +9,20 @@ enabled = false
 
 [search]
 # The research section below supplies a local source, so this config does not
-# need live OpenAlex/arXiv calls.
+# need live OpenAlex/Semantic Scholar/arXiv calls.
 offline = true
 max_papers = 3
 query = "agent simulation evaluation"
 
 [research]
 mode = "lite"
+planner = "auto"
 sources = ["local_files"]
 queries = ["agent simulation evaluation"]
+auto_query_expansion = true
+max_retrieval_rounds = 1
+max_queries = 4
+required_facets = ["overview", "method", "benchmark"]
 local_documents = ["../research/local_agent_simulation_notes.md"]
 use_fulltext = false
 allow_pdf_download = false

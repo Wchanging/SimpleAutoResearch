@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from simple_ar.prompts import paper_note_user_prompt, report_user_prompt, synthesize_user_prompt
+from simple_ar.prompts import (
+    paper_note_user_prompt,
+    report_user_prompt,
+    research_planner_user_prompt,
+    synthesize_user_prompt,
+)
 
 
 class PromptTests(unittest.TestCase):
@@ -73,6 +78,23 @@ class PromptTests(unittest.TestCase):
         self.assertIn("02-search/papers.jsonl:1-1", read_prompt)
         self.assertIn("Retrieved Evidence Snippets", synth_prompt)
         self.assertIn("trace", synth_prompt)
+
+    def test_research_planner_prompt_requests_short_source_queries(self) -> None:
+        prompt = research_planner_user_prompt(
+            topic="multi-agent coding",
+            problem_markdown="# Problem\nStudy coding agents.",
+            seed_queries_json='["multi-agent coding agents"]',
+            required_facets_json='["method", "benchmark"]',
+            max_queries=6,
+            max_rounds=2,
+            mode="standard",
+        )
+
+        self.assertIn("title_keywords", prompt)
+        self.assertIn("abstract_keywords", prompt)
+        self.assertIn("arXiv", prompt)
+        self.assertIn("paper title and abstract fields", prompt)
+        self.assertIn("not browser questions", prompt)
 
 
 if __name__ == "__main__":

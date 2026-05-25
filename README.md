@@ -27,9 +27,11 @@ experimentation, and gradual extension.
 
 - **Research reports**: run a visible staged pipeline from topic to literature
   notes, synthesis, and report artifacts.
-- **Research source planning**: write `02-search/source_plan.json` for each
-  run, with configurable OpenAlex/arXiv/local-file sources, query lists,
-  retrieval mode, cache policy, and lightweight budgets.
+- **Research source planning**: write `02-search/research_questions.json`,
+  `query_plan.json`, and `source_plan.json` for each run, with configurable
+  OpenAlex/Semantic Scholar/arXiv/local-file sources, optional LLM-backed
+  query planning, facet-driven query expansion, retrieval-round traces,
+  screening decisions, cache policy, and lightweight budgets.
 - **Code tasks**: improve an existing codebase inside an isolated editable
   workspace with LLM planning, review gates, controlled patch proposals,
   validation, benchmark execution, and metric comparison.
@@ -180,7 +182,7 @@ max_papers = 5
 [research]
 # Optional source planner for 02-search.
 mode = "standard"  # lite | standard | strong
-sources = ["openalex", "arxiv"]
+sources = ["openalex", "semantic_scholar", "arxiv"]
 queries = ["research and improve my model"]
 cache = true
 
@@ -250,7 +252,7 @@ still intentionally conservative.
   future external coding-agent adapters before recommending unattended large
   refactors.
 - Literature search now has an auditable source plan and can use OpenAlex,
-  arXiv, or local Markdown/text notes, but it is not yet a full PDF-reading,
+  Semantic Scholar, arXiv, or local Markdown/text notes, but it is not yet a full PDF-reading,
   parser-backed, or vector-RAG survey system.
 - LLM-written reports are guarded by citation, metric, and boundary checks; when
   a draft fails these checks, the tool falls back to a structured deterministic

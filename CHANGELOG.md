@@ -14,6 +14,22 @@ This file records user-visible project changes in reverse chronological order. P
 - Added `[research]` support in top-level run configs, including `sources`,
   `queries`, `local_documents`, `cache`, `index_backend`, and
   `[research.budget]` fields.
+- Added V2.3 Day 3 research-question and query-plan artifacts:
+  `02-search/research_questions.json` and `02-search/query_plan.json`.
+- Added optional LLM-backed research planning via `[research].planner`, with
+  deterministic planning kept as a fallback for offline or provider-failure
+  cases.
+- Added structured `query_specs` in `query_plan.json` so LLM research planning
+  can preserve title/abstract keyword intent instead of only emitting browser-
+  style query strings.
+- Added V2.3 Day 4 retrieval trace artifacts:
+  `02-search/retrieval_rounds.jsonl` and
+  `02-search/screening_decisions.jsonl`, including executed source/query
+  attempts, compact query-intent traces, deduplication, and lightweight
+  relevance decisions before `papers.jsonl` is written.
+- Added a Semantic Scholar live metadata connector between OpenAlex and arXiv,
+  giving V2.3 research search a broader default source order without relying on
+  fixture metadata.
 - Added a local research-source example at
   `examples/run_configs/local_research_report.toml` with supporting notes under
   `examples/research/`.
@@ -21,8 +37,15 @@ This file records user-visible project changes in reverse chronological order. P
 ### Changed
 
 - Search execution now runs through research connector wrappers for OpenAlex,
-  arXiv, and local Markdown/text files while preserving existing fixture and
-  cache fallback behavior.
+  Semantic Scholar, arXiv, and local Markdown/text files while preserving
+  existing fixture and cache fallback behavior.
+- The search stage now expands configured seed queries into bounded
+  facet-driven follow-up queries before building `source_plan.json`; when LLM
+  mode is enabled, `planner = "auto"` can use the model for stronger question
+  decomposition and query terminology.
+- Local Markdown/text search now uses lightweight keyword-overlap matching
+  rather than exact query-string matching, which makes normalized paper-search
+  queries work better with short local notes.
 - Split public command and configuration documentation: `CLI_REFERENCE.md` now
   focuses on command syntax/options/artifacts, while the new
   `CONFIG_REFERENCE.md` centralizes TOML schema, complete configs, and

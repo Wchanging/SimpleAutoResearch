@@ -105,7 +105,7 @@ def _sources(config: dict[str, object]) -> list[str]:
         return configured
     if config.get("use_arxiv") is False:
         return ["fixture"]
-    return ["openalex", "arxiv"]
+    return ["openalex", "semantic_scholar", "arxiv"]
 
 
 def _budget(config: dict[str, object]) -> dict[str, object]:

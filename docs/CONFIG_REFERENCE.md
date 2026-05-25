@@ -69,23 +69,39 @@ strict = false
 # Search strategy profile recorded in source_plan.json. Full-text behavior is still future-facing.
 mode = "lite"                 # lite | standard | strong
 
-# Provider order for 02-search.
-sources = ["fixture"]         # openalex | arxiv | local_files | fixture
+# Research-question/query planner. auto uses LLM when [llm].enabled is true,
+# then falls back to deterministic planning if the provider is unavailable.
+planner = "auto"              # auto | llm | deterministic
 
-# Query list recorded for evidence planning. Current providers use the first non-empty query.
+# Provider order for 02-search.
+sources = ["fixture"]         # openalex | semantic_scholar | arxiv | local_files | fixture
+
+# Query list recorded for evidence planning. Day4 runs planned queries until the document budget is reached.
 queries = ["tiny digits MLP baseline improvement"]
+
+# Generate facet-driven follow-up queries from the topic and research questions.
+auto_query_expansion = true
+
+# Planned retrieval loop depth for later multi-round retrieval.
+max_retrieval_rounds = 2
+
+# Maximum number of seed + expanded queries kept in query_plan.json.
+max_queries = 6
+
+# Evidence facets the planner should try to cover.
+required_facets = ["method", "benchmark", "dataset", "code_link"]
 
 # Markdown/text files to expose as local research records; resolved relative to this config.
 local_documents = []
 
-# Intent flags for later evidence stages. V2.3 Day2 does not download or parse PDFs yet.
+# Intent flags for later evidence stages. Current V2.3 search does not download or parse PDFs yet.
 use_fulltext = false
 allow_pdf_download = false
 
 # Whether live-provider failures may use cached metadata.
 cache = true
 
-# Planned local index backend. Current Day2 behavior records this choice for later ingestion.
+# Planned local index backend. Current V2.3 search records this choice for later ingestion.
 index_backend = "keyword"     # keyword | sqlite_fts | hybrid
 
 [research.budget]
@@ -252,7 +268,7 @@ max_proposal_chars = 42000
 | `[run]` | `run`, `resume` | Topic, output root, stage range, and quiet mode. |
 | `[llm]` | pipeline and code task | LLM enablement, default model, and worker count. |
 | `[search]` | `02-search` | Provider behavior, fallback policy, result limit, and manual query. |
-| `[research]` | `02-search` | Source-plan mode, provider order, query list, local documents, cache/index hints. |
+| `[research]` | `02-search` | Research-question planning, query expansion, provider order, local documents, cache/index hints. |
 | `[research.budget]` | `02-search` and future evidence stages | Lightweight caps written to `source_plan.json`. |
 | `[retrieval]` | read/synthesize/report helpers | Local artifact retrieval context. |
 | `[experiment]` | `05-design` to `07-run` | Experiment template, timeout, and optional nested code-task config path. |
@@ -293,8 +309,13 @@ max_proposal_chars = 42000
 | Field | Meaning |
 | --- | --- |
 | `[research].mode` | Records intended evidence depth: `lite` for metadata/local notes, `standard` for cache/index-ready use, `strong` for future full-text/vector workflows. |
-| `[research].sources` | Provider order for the search stage. Supported connector names today are `openalex`, `arxiv`, and `local_files`; `fixture` records offline fixture use. |
-| `[research].queries` | Query list written to `02-search/source_plan.json`. V2.3 Day2 provider calls use the first non-empty query; later evidence stages can use the rest for expansion and screening. |
+| `[research].planner` | Research-question and query-expansion backend. `auto` calls the LLM when `[llm].enabled = true` and falls back to deterministic planning; `llm` explicitly requests that path; `deterministic` disables the extra LLM planner call. |
+| `[research].sources` | Provider order for the search stage. Supported connector names today are `openalex`, `semantic_scholar`, `arxiv`, and `local_files`; `fixture` records offline fixture use. |
+| `[research].queries` | Seed query list written through `query_plan.json` into `02-search/source_plan.json`. Day4 executes planned queries in the first retrieval round until the document budget is reached; later coverage work can use the remaining round budget for follow-up search. LLM planner output also records `query_specs` with title/abstract keyword hints. |
+| `[research].auto_query_expansion` | Enables facet-driven follow-up queries from `research_questions.json`. In deterministic mode these are rule-based; in LLM planner mode the model can add stronger terminology within the same query budget. Disable it when you want only hand-written queries. |
+| `[research].max_retrieval_rounds` | Planned number of retrieval/screening rounds for the DeepResearch loop. Day4 executes the first round and records later-round budget for follow-up coverage work. |
+| `[research].max_queries` | Maximum seed + expanded queries kept in `query_plan.json` and copied into `source_plan.json`. |
+| `[research].required_facets` | Evidence facets to cover, such as `method`, `benchmark`, `dataset`, `code_link`, or `limitation`. These drive research questions and query expansion. |
 | `[research].local_documents` | Markdown/text files treated as local research records. These paths are resolved relative to the config file. |
 | `[research].use_fulltext` | Intent flag for future full-text evidence workflows. It does not currently download or parse PDFs. |
 | `[research].allow_pdf_download` | Future-facing permission flag for PDF download. Keep false unless a later parser/downloader is enabled. |
@@ -351,7 +372,7 @@ max_proposal_chars = 42000
 
 ## Research Source Variants
 
-### Live OpenAlex/arXiv Metadata
+### Live OpenAlex/Semantic Scholar/arXiv Metadata
 
 ```toml
 [search]
@@ -363,11 +384,16 @@ strict = false
 
 [research]
 mode = "standard"
-sources = ["openalex", "arxiv"]
+planner = "auto"
+sources = ["openalex", "semantic_scholar", "arxiv"]
 queries = [
   "multi-agent collaboration for code generation",
   "LLM agents software engineering benchmark",
 ]
+auto_query_expansion = true
+max_retrieval_rounds = 2
+max_queries = 6
+required_facets = ["method", "benchmark", "dataset", "code_link"]
 cache = true
 index_backend = "keyword"
 use_fulltext = false
@@ -383,8 +409,13 @@ max_papers = 5
 
 [research]
 mode = "lite"
+planner = "deterministic"
 sources = ["local_files"]
 queries = ["agent simulation evaluation"]
+auto_query_expansion = true
+max_retrieval_rounds = 1
+max_queries = 4
+required_facets = ["overview", "method", "benchmark"]
 local_documents = [
   "../research/local_agent_simulation_notes.md",
 ]
@@ -401,8 +432,12 @@ max_papers = 3
 
 [research]
 mode = "lite"
+planner = "deterministic"
 sources = ["fixture"]
 queries = ["tiny digits MLP baseline improvement"]
+auto_query_expansion = true
+max_retrieval_rounds = 1
+max_queries = 4
 ```
 
 ## Workspace Mode Variants

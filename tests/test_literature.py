@@ -9,6 +9,7 @@ from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.cache import get_cached, put_cache
 from simple_ar.literature.models import Paper, normalize_paper_id
 from simple_ar.literature.openalex_client import _paper_from_work
+from simple_ar.literature.semantic_scholar_client import _paper_from_row as _s2_paper_from_row
 from simple_ar.literature.verify import CitationError, validate_citations
 
 
@@ -70,6 +71,27 @@ class LiteratureTests(unittest.TestCase):
         self.assertEqual(paper.authors, ["Ada Lovelace"])
         self.assertEqual(paper.abstract, "Retrieval works")
         self.assertEqual(paper.doi, "10.1234/example")
+
+    def test_semantic_scholar_row_parses_to_project_paper_schema(self) -> None:
+        paper = _s2_paper_from_row(
+            {
+                "paperId": "abc123",
+                "title": "A Semantic Scholar Paper",
+                "abstract": "Search metadata.",
+                "year": 2025,
+                "venue": "ACL",
+                "authors": [{"name": "Grace Hopper"}],
+                "externalIds": {"DOI": "10.1234/s2", "ArXiv": "2501.00001"},
+                "url": "https://www.semanticscholar.org/paper/abc123",
+            }
+        )
+
+        self.assertEqual(paper.id, "s2-abc123")
+        self.assertEqual(paper.source, "semantic_scholar")
+        self.assertEqual(paper.authors, ["Grace Hopper"])
+        self.assertEqual(paper.published, "2025")
+        self.assertEqual(paper.categories, ["ACL"])
+        self.assertEqual(paper.doi, "10.1234/s2")
 
 
 if __name__ == "__main__":

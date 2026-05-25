@@ -1,0 +1,559 @@
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable
+
+from simple_ar.research.contracts import QueryPlan, ResearchQuestion
+
+
+DEFAULT_REQUIRED_FACETS = ("method", "benchmark", "dataset", "code_link")
+VALID_FACETS = {"overview", "method", "benchmark", "dataset", "code_link", "limitation"}
+STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "by",
+    "for",
+    "from",
+    "how",
+    "in",
+    "is",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+}
+MAX_QUERY_TERMS = 8
+
+
+def build_research_questions(
+    *,
+    topic: str,
+    problem_markdown: str,
+    config: dict[str, object],
+) -> list[ResearchQuestion]:
+    """Create bounded research questions for retrieval planning.
+
+    The implementation is intentionally deterministic for Day 3. It avoids
+    spending another LLM call in the search stage while still creating auditable
+    structure that later query expansion, screening, and coverage checks can
+    consume.
+    """
+
+    phrase = _topic_phrase(topic, problem_markdown)
+    negative_scope = _negative_scope(problem_markdown)
+    facets = _required_facets(config)
+    questions: list[ResearchQuestion] = [
+        ResearchQuestion(
+            question_id="RQ1",
+            question=f"What is the current research landscape for {phrase}?",
+            facet="overview",
+            rationale="Establish the scope and terminology before selecting technical papers.",
+            negative_scope=negative_scope,
+            success_criteria=[
+                "Find recent metadata or notes that define the problem setting.",
+                "Identify at least one approach family or evaluation setting.",
+            ],
+        )
+    ]
+    next_id = 2
+    for facet in facets:
+        if facet == "overview":
+            continue
+        if facet == "method":
+            question = f"Which methods or system designs are used for {phrase}?"
+            criteria = ["Identify concrete method names, architectures, or agent roles."]
+        elif facet == "benchmark":
+            question = f"How is {phrase} evaluated, and which benchmarks or metrics are used?"
+            criteria = ["Find evaluation protocols, metrics, or benchmark datasets."]
+        elif facet == "dataset":
+            question = f"What datasets, tasks, or experimental settings are used for {phrase}?"
+            criteria = ["Identify datasets, task definitions, or reproducible settings."]
+        elif facet == "code_link":
+            question = f"Are there reusable codebases, repositories, or implementation hints for {phrase}?"
+            criteria = ["Find code links, reproducibility notes, or implementation details."]
+        elif facet == "limitation":
+            question = f"What limitations and open problems are reported for {phrase}?"
+            criteria = ["Find limitations, failure modes, or gaps that can motivate an experiment."]
+        else:
+            question = f"What evidence is available for the {facet} aspect of {phrase}?"
+            criteria = [f"Find records that cover the {facet} facet."]
+        questions.append(
+            ResearchQuestion(
+                question_id=f"RQ{next_id}",
+                question=question,
+                facet=facet,
+                rationale=f"Cover the `{facet}` facet required by the research config.",
+                negative_scope=negative_scope,
+                success_criteria=criteria,
+            )
+        )
+        next_id += 1
+    return questions
+
+
+def build_query_plan(
+    *,
+    topic: str,
+    problem_markdown: str,
+    config: dict[str, object],
+    default_query: str,
+    questions: list[ResearchQuestion],
+) -> QueryPlan:
+    """Build seed and follow-up queries from a topic and question set."""
+
+    configured = _string_list(config.get("research_queries"))
+    seed_queries = _unique(configured or [default_query or topic])
+    auto_expansion = _bool(config.get("research_auto_query_expansion"), True)
+    max_rounds = _max_rounds(config)
+    required_facets = _required_facets(config)
+    follow_ups = _follow_up_queries(
+        topic=topic,
+        problem_markdown=problem_markdown,
+        questions=questions,
+        enabled=auto_expansion,
+    )
+    query_budget = _query_budget(config, len(seed_queries))
+    queries = _normalize_paper_queries(seed_queries + follow_ups, limit=query_budget)
+    return QueryPlan(
+        topic=topic,
+        seed_queries=seed_queries,
+        follow_up_queries=[query for query in queries if query.lower() not in {seed.lower() for seed in seed_queries}],
+        queries=queries,
+        query_specs=_query_specs_from_queries(queries),
+        required_facets=required_facets,
+        negative_terms=_negative_scope(problem_markdown),
+        max_rounds=max_rounds,
+        auto_expansion=auto_expansion,
+        rationale=(
+            "Generated by deterministic V2.3 query planning from the topic, "
+            "problem artifact, configured seed queries, and required evidence facets."
+        ),
+        planner="deterministic",
+    )
+
+
+def build_llm_research_plan(
+    *,
+    topic: str,
+    problem_markdown: str,
+    config: dict[str, object],
+    default_query: str,
+    data: dict[str, object],
+) -> tuple[list[ResearchQuestion], QueryPlan]:
+    """Normalize an LLM research-planner response into stable artifacts.
+
+    The LLM is allowed to improve question decomposition and terminology, but
+    this function keeps schema, budgets, and allowed facets under code control.
+    Invalid or empty responses raise ``ValueError`` so callers can fall back to
+    deterministic planning without leaving half-valid artifacts.
+    """
+
+    seed_queries = _unique(_string_list(config.get("research_queries")) or [default_query or topic])
+    max_queries = _query_budget(config, len(seed_queries))
+    max_rounds = _max_rounds(config)
+    configured_facets = _required_facets(config)
+    questions = _questions_from_llm_rows(
+        topic=topic,
+        problem_markdown=problem_markdown,
+        config=config,
+        rows=data.get("questions"),
+    )
+    llm_queries = _string_list(data.get("queries"))
+    if not llm_queries:
+        llm_queries = _queries_from_llm_specs(data.get("query_specs"))
+    queries = _normalize_paper_queries(seed_queries + llm_queries, limit=max_queries)
+    if not queries:
+        raise ValueError("LLM research planner produced no usable queries")
+    query_specs = _complete_query_specs(_query_specs_from_llm(data.get("query_specs"), queries), queries)
+
+    llm_facets = [facet for facet in _string_list(data.get("required_facets")) if facet in VALID_FACETS]
+    required_facets = _unique(configured_facets + llm_facets)
+    if not any(question.facet == "overview" for question in questions):
+        questions = [
+            ResearchQuestion(
+                question_id="RQ1",
+                question=f"What is the current research landscape for {_topic_phrase(topic, problem_markdown)}?",
+                facet="overview",
+                rationale="Added by schema normalization because the LLM did not include an overview question.",
+                negative_scope=_negative_scope(problem_markdown),
+                success_criteria=[
+                    "Find recent metadata or notes that define the problem setting.",
+                    "Identify at least one approach family or evaluation setting.",
+                ],
+            )
+        ] + [
+            _renumber_question(question, index + 2)
+            for index, question in enumerate(questions)
+        ]
+    else:
+        questions = [_renumber_question(question, index + 1) for index, question in enumerate(questions)]
+    questions = _ensure_required_question_facets(
+        questions=questions,
+        required_facets=required_facets,
+        topic=topic,
+        problem_markdown=problem_markdown,
+    )
+
+    return questions[: max(1, min(12, len(questions)))], QueryPlan(
+        topic=topic,
+        seed_queries=seed_queries,
+        follow_up_queries=[query for query in queries if query.lower() not in {seed.lower() for seed in seed_queries}],
+        queries=queries,
+        query_specs=query_specs,
+        required_facets=required_facets,
+        negative_terms=_unique(_string_list(data.get("negative_terms")) + _negative_scope(problem_markdown))[:8],
+        max_rounds=max_rounds,
+        auto_expansion=True,
+        rationale=_short_text(data.get("rationale"))
+        or "Generated by an LLM research planner and normalized by V2.3 schema guards.",
+        planner="llm",
+    )
+
+
+def _follow_up_queries(
+    *,
+    topic: str,
+    problem_markdown: str,
+    questions: list[ResearchQuestion],
+    enabled: bool,
+) -> list[str]:
+    if not enabled:
+        return []
+    phrase = _topic_phrase(topic, problem_markdown)
+    keywords = _keywords(f"{topic} {problem_markdown}")
+    base = phrase if phrase else " ".join(keywords[:5])
+    queries: list[str] = []
+    for question in questions:
+        if question.facet == "overview":
+            queries.append(f"{base} survey")
+        elif question.facet == "method":
+            queries.append(f"{base} method architecture")
+        elif question.facet == "benchmark":
+            queries.append(f"{base} benchmark evaluation metrics")
+        elif question.facet == "dataset":
+            queries.append(f"{base} dataset task setting")
+        elif question.facet == "code_link":
+            queries.append(f"{base} github code implementation")
+        elif question.facet == "limitation":
+            queries.append(f"{base} limitation open problem")
+    if keywords:
+        queries.append(" ".join(keywords[:6]))
+    return _unique(queries)
+
+
+def _queries_from_llm_specs(value: object) -> list[str]:
+    specs = _query_specs_from_llm(value, [])
+    return [_string(spec.get("query")) for spec in specs if _string(spec.get("query"))]
+
+
+def _query_specs_from_llm(value: object, queries: list[str]) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return _query_specs_from_queries(queries)
+    specs: list[dict[str, object]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        title_keywords = _keyword_list(raw.get("title_keywords"), max_items=5)
+        abstract_keywords = _keyword_list(raw.get("abstract_keywords"), max_items=8)
+        query = _paper_query_from_keywords(title_keywords, abstract_keywords)
+        if not query:
+            query = _paper_query_from_text(_short_text(raw.get("query")), max_terms=MAX_QUERY_TERMS)
+        if not query:
+            continue
+        facet = _short_text(raw.get("facet"), limit=40).lower()
+        if facet not in VALID_FACETS:
+            facet = "overview"
+        specs.append(
+            {
+                "query": query,
+                "facet": facet,
+                "title_keywords": title_keywords,
+                "abstract_keywords": abstract_keywords,
+                "rationale": _short_text(raw.get("rationale"), limit=220),
+                "source_hint": _string_list(raw.get("source_hint"))[:4],
+            }
+        )
+    if not specs:
+        return _query_specs_from_queries(queries)
+    return specs
+
+
+def _complete_query_specs(specs: list[dict[str, object]], queries: list[str]) -> list[dict[str, object]]:
+    """Return one query spec per executable query, preserving query order."""
+    by_query = {
+        str(spec.get("query") or "").strip().lower(): spec
+        for spec in specs
+        if str(spec.get("query") or "").strip()
+    }
+    fallback = {
+        str(spec.get("query") or "").strip().lower(): spec
+        for spec in _query_specs_from_queries(queries)
+        if str(spec.get("query") or "").strip()
+    }
+    ordered: list[dict[str, object]] = []
+    for query in queries:
+        key = query.strip().lower()
+        if key in by_query:
+            ordered.append(by_query[key])
+        elif key in fallback:
+            ordered.append(fallback[key])
+    return ordered
+
+
+def _query_specs_from_queries(queries: list[str]) -> list[dict[str, object]]:
+    specs: list[dict[str, object]] = []
+    for query in queries:
+        keywords = _keywords(query)[:MAX_QUERY_TERMS]
+        specs.append(
+            {
+                "query": query,
+                "facet": _infer_query_facet(query),
+                "title_keywords": keywords[:5],
+                "abstract_keywords": keywords[2:MAX_QUERY_TERMS] or keywords[:MAX_QUERY_TERMS],
+                "rationale": "Derived from a seed or deterministic follow-up query.",
+                "source_hint": ["openalex", "semantic_scholar", "arxiv", "local_files"],
+            }
+        )
+    return specs
+
+
+def _infer_query_facet(query: str) -> str:
+    terms = set(_keywords(query))
+    if terms & {"survey", "overview", "landscape"}:
+        return "overview"
+    if terms & {"method", "architecture", "system", "design"}:
+        return "method"
+    if terms & {"benchmark", "evaluation", "metric", "metrics"}:
+        return "benchmark"
+    if terms & {"dataset", "datasets", "task", "tasks", "setting"}:
+        return "dataset"
+    if terms & {"github", "code", "implementation", "repository", "repositories"}:
+        return "code_link"
+    if terms & {"limitation", "limitations", "problem", "failure", "risk"}:
+        return "limitation"
+    return "overview"
+
+
+def _normalize_paper_queries(values: list[str], *, limit: int) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        query = _paper_query_from_text(value, max_terms=MAX_QUERY_TERMS)
+        if query:
+            normalized.append(query)
+    return _unique(normalized)[:limit]
+
+
+def _paper_query_from_keywords(title_keywords: list[str], abstract_keywords: list[str]) -> str:
+    terms: list[str] = []
+    for keyword in title_keywords + abstract_keywords:
+        terms.extend(_keyword_terms(keyword))
+    return " ".join(_unique(terms)[:MAX_QUERY_TERMS])
+
+
+def _paper_query_from_text(text: str, *, max_terms: int) -> str:
+    terms = _keyword_terms(text)
+    return " ".join(_unique(terms)[:max_terms])
+
+
+def _keyword_list(value: object, *, max_items: int) -> list[str]:
+    if isinstance(value, list):
+        return [_short_text(item, limit=80) for item in value if _short_text(item, limit=80)][:max_items]
+    text = _short_text(value, limit=300)
+    return [text] if text else []
+
+
+def _keyword_terms(text: str) -> list[str]:
+    return [
+        word
+        for word in re.findall(r"[A-Za-z][A-Za-z0-9_+-]{1,}", text.lower())
+        if word not in STOPWORDS and len(word) > 1
+    ]
+
+
+def _query_budget(config: dict[str, object], seed_count: int) -> int:
+    value = config.get("research_max_queries")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return min(max(seed_count, value), 12)
+    documents = config.get("research_max_documents")
+    if isinstance(documents, int) and not isinstance(documents, bool):
+        return min(max(seed_count, documents), 8)
+    return 6
+
+
+def _max_rounds(config: dict[str, object]) -> int:
+    value = config.get("research_max_retrieval_rounds")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return min(max(1, value), 5)
+    mode = str(config.get("research_mode") or "standard")
+    if mode == "lite":
+        return 1
+    if mode == "strong":
+        return 3
+    return 2
+
+
+def _questions_from_llm_rows(
+    *,
+    topic: str,
+    problem_markdown: str,
+    config: dict[str, object],
+    rows: object,
+) -> list[ResearchQuestion]:
+    if not isinstance(rows, list):
+        raise ValueError("LLM research planner did not return a questions list")
+    negative_scope = _negative_scope(problem_markdown)
+    fallback_facets = _required_facets(config)
+    questions: list[ResearchQuestion] = []
+    for index, raw in enumerate(rows[:8], start=1):
+        if not isinstance(raw, dict):
+            continue
+        question = _short_text(raw.get("question"), limit=240)
+        if not question:
+            continue
+        facet = _short_text(raw.get("facet"), limit=40).lower() or fallback_facets[
+            min(index - 1, len(fallback_facets) - 1)
+        ]
+        if facet not in VALID_FACETS:
+            facet = "overview" if index == 1 else "method"
+        row_negative_scope = _string_list(raw.get("negative_scope"))[:5] or negative_scope
+        criteria = _string_list(raw.get("success_criteria"))[:5]
+        questions.append(
+            ResearchQuestion(
+                question_id=f"RQ{index}",
+                question=question,
+                facet=facet,
+                rationale=_short_text(raw.get("rationale"), limit=220)
+                or f"Cover the `{facet}` facet for {_topic_phrase(topic, problem_markdown)}.",
+                required=_bool(raw.get("required"), True),
+                negative_scope=[text[:180] for text in row_negative_scope],
+                success_criteria=[text[:180] for text in criteria]
+                or [f"Find evidence that answers the {facet} facet."],
+            )
+        )
+    if not questions:
+        raise ValueError("LLM research planner returned no usable questions")
+    return questions
+
+
+def _required_facets(config: dict[str, object]) -> list[str]:
+    configured = _string_list(config.get("research_required_facets"))
+    facets = [facet for facet in configured if facet in VALID_FACETS]
+    if not facets:
+        facets = list(DEFAULT_REQUIRED_FACETS)
+    return _unique(facets)
+
+
+def _ensure_required_question_facets(
+    *,
+    questions: list[ResearchQuestion],
+    required_facets: list[str],
+    topic: str,
+    problem_markdown: str,
+) -> list[ResearchQuestion]:
+    covered = {question.facet for question in questions}
+    missing = [facet for facet in required_facets if facet not in covered]
+    if not missing:
+        return questions
+    result = list(questions)
+    phrase = _topic_phrase(topic, problem_markdown)
+    for facet in missing:
+        if facet == "overview":
+            continue
+        result.append(
+            ResearchQuestion(
+                question_id=f"RQ{len(result) + 1}",
+                question=_facet_question(facet, phrase),
+                facet=facet,
+                rationale=(
+                    f"Added by schema normalization because the configured "
+                    f"required facet `{facet}` was missing from the LLM plan."
+                ),
+                negative_scope=_negative_scope(problem_markdown),
+                success_criteria=[f"Find evidence that covers the {facet} facet."],
+            )
+        )
+    return [_renumber_question(question, index + 1) for index, question in enumerate(result)]
+
+
+def _facet_question(facet: str, phrase: str) -> str:
+    if facet == "method":
+        return f"Which methods or system designs are used for {phrase}?"
+    if facet == "benchmark":
+        return f"How is {phrase} evaluated, and which benchmarks or metrics are used?"
+    if facet == "dataset":
+        return f"What datasets, tasks, or experimental settings are used for {phrase}?"
+    if facet == "code_link":
+        return f"Are there reusable codebases, repositories, or implementation hints for {phrase}?"
+    if facet == "limitation":
+        return f"What limitations, failure modes, and open problems are reported for {phrase}?"
+    return f"What evidence is available for the {facet} aspect of {phrase}?"
+
+
+def _renumber_question(question: ResearchQuestion, number: int) -> ResearchQuestion:
+    return ResearchQuestion(
+        question_id=f"RQ{number}",
+        question=question.question,
+        facet=question.facet,
+        rationale=question.rationale,
+        required=question.required,
+        negative_scope=question.negative_scope,
+        success_criteria=question.success_criteria,
+    )
+
+
+def _topic_phrase(topic: str, problem_markdown: str) -> str:
+    cleaned = " ".join(topic.strip().split())
+    if cleaned:
+        return cleaned[:160]
+    words = _keywords(problem_markdown)
+    return " ".join(words[:8]) or "the research topic"
+
+
+def _negative_scope(problem_markdown: str) -> list[str]:
+    lines = []
+    for line in problem_markdown.splitlines():
+        lowered = line.strip().lower()
+        if any(marker in lowered for marker in ("non-goal", "out of scope", "exclude", "not ")):
+            lines.append(" ".join(line.strip("#-* ").split())[:180])
+    return _unique(lines[:5])
+
+
+def _keywords(text: str) -> list[str]:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_+-]{2,}", text.lower())
+    return _unique(word for word in words if word not in STOPWORDS)
+
+
+def _unique(values: Iterable[object]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in values:
+        text = str(raw).strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            result.append(text)
+    return result
+
+
+def _bool(value: object, default: bool) -> bool:
+    return bool(value) if isinstance(value, bool) else default
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _string(value: object) -> str:
+    return str(value).strip() if value is not None and str(value).strip() else ""
+
+
+def _short_text(value: object, *, limit: int = 500) -> str:
+    return " ".join(str(value or "").split())[:limit]

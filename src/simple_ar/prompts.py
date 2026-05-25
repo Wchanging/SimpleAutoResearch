@@ -10,6 +10,7 @@ from simple_ar.research.prompts import (
     CODE_TASK_DESIGN_SYSTEM,
     PLAN_SYSTEM,
     READ_SYSTEM,
+    RESEARCH_PLANNER_SYSTEM,
     REPORT_SYSTEM,
     SYNTHESIZE_SYSTEM,
     code_task_design_user_prompt,
@@ -17,6 +18,7 @@ from simple_ar.research.prompts import (
     plan_user_prompt,
     read_user_prompt,
     report_user_prompt,
+    research_planner_user_prompt,
     synthesize_user_prompt,
 )
 
@@ -24,6 +26,7 @@ __all__ = [
     "CODE_TASK_DESIGN_SYSTEM",
     "PLAN_SYSTEM",
     "READ_SYSTEM",
+    "RESEARCH_PLANNER_SYSTEM",
     "REPORT_SYSTEM",
     "SYNTHESIZE_SYSTEM",
     "code_task_design_user_prompt",
@@ -31,5 +34,6 @@ __all__ = [
     "plan_user_prompt",
     "read_user_prompt",
     "report_user_prompt",
+    "research_planner_user_prompt",
     "synthesize_user_prompt",
 ]

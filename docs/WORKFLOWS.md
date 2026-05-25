@@ -123,7 +123,7 @@ Current status:
 | Stage | Main outputs | Purpose |
 | --- | --- | --- |
 | `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question (LLM-backed when enabled). |
-| `search` | `papers.jsonl`, `search_meta.json`, `source_plan.json` | Plan and collect literature metadata from configured sources. |
+| `search` | `research_questions.json`, `query_plan.json`, `source_plan.json`, `retrieval_rounds.jsonl`, `screening_decisions.jsonl`, `papers.jsonl`, `search_meta.json` | Decompose the topic, retrieve candidates, deduplicate/screen metadata, then collect literature records. |
 | `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes (LLM-backed when enabled). |
 | `synthesize` | `synthesis.md`, `hypothesis.md` | Produce a bounded synthesis and testable hypothesis (LLM-backed when enabled). |
 | `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
@@ -135,9 +135,24 @@ Current status:
 
 - `02-search/source_plan.json` records the planned queries, source order,
   local documents, retrieval mode, cache/index hints, and budget.
+- `02-search/research_questions.json` records scoped sub-questions and evidence
+  facets such as method, benchmark, dataset, and code-link coverage. It is
+  deterministic by default when LLM mode is disabled, and can be LLM-backed via
+  `[research].planner = "auto"` or `"llm"`.
+- `02-search/query_plan.json` records seed queries, planner-produced follow-up
+  queries, structured title/abstract keyword hints, and planned
+  retrieval-round budget.
+- `02-search/retrieval_rounds.jsonl` records executed source/query attempts.
+  Day4 runs the first retrieval round, records the normalized query plus
+  facet/title/abstract keyword intent, and keeps later follow-up rounds
+  explicit in the query plan budget.
+- `02-search/screening_decisions.jsonl` records deduplication and lightweight
+  relevance-screening decisions before papers are written.
 - Live search uses the configured source order. By default it tries OpenAlex
-  first, then arXiv. When `--strict-search` is not set and source-plan cache is
-  enabled, cached metadata is used after live failures.
+  first, then Semantic Scholar, then arXiv. When `--strict-search` is not set
+  and source-plan cache is enabled, cached metadata is used after live failures.
+- The default source strategy is ordered fallback rather than full source union:
+  a successful provider stops downstream provider calls for that query.
 - `local_files` can expose user-provided Markdown/text notes as conservative
   metadata-like records. It does not parse PDFs yet.
 - `--offline-search` skips live providers and uses fixture metadata immediately.
@@ -165,7 +180,11 @@ runs/<run-id>/
   evidence_ledger.jsonl
   01-plan/
   02-search/
+    research_questions.json
+    query_plan.json
     source_plan.json
+    retrieval_rounds.jsonl
+    screening_decisions.jsonl
     papers.jsonl
     search_meta.json
   03-read/
@@ -195,6 +214,15 @@ Root-level files:
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
 - `02-search/source_plan.json`: literature source plan for that run, including
   provider order, local document paths, query list, retrieval mode, and budget.
+- `02-search/research_questions.json`: question decomposition used to avoid
+  relying only on the user's initial keyword string.
+- `02-search/query_plan.json`: executable query plan with seed/follow-up
+  queries and `query_specs` that preserve title/abstract keyword intent for
+  later source-specific normalization.
+- `02-search/retrieval_rounds.jsonl`: executed source/query attempts with
+  returned counts, errors, and compact query-intent traces.
+- `02-search/screening_decisions.jsonl`: keep/discard rows for retrieved
+  metadata candidates.
 - `02-search/search_meta.json`: provider attempts and final selected source.
 - `02-search/papers.jsonl`: normalized metadata rows consumed by `03-read`.
 - `05-design/generated_code_task.md`: generated only when an embedded `code_task_project` run omits a task file.

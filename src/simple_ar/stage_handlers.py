@@ -23,23 +23,33 @@ from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.cache import get_cached, put_cache
 from simple_ar.literature.models import Paper
 from simple_ar.literature.openalex_client import OpenAlexSearchClient, OpenAlexSearchError
+from simple_ar.literature.semantic_scholar_client import SemanticScholarSearchClient, SemanticScholarSearchError
 from simple_ar.literature.verify import CitationError, validate_citations
 from simple_ar.llm import LLMClient, LLMError, LLMRequest
 from simple_ar.pipeline import Context, utcnow_iso
-from simple_ar.research.connectors import ArxivConnector, LocalFileConnector, OpenAlexConnector
-from simple_ar.research.contracts import SourcePlan
+from simple_ar.research.connectors import (
+    ArxivConnector,
+    LocalFileConnector,
+    OpenAlexConnector,
+    SemanticScholarConnector,
+)
+from simple_ar.research.contracts import QueryPlan, ResearchQuestion, SourcePlan
 from simple_ar.research.prompts import (
     CODE_TASK_DESIGN_SYSTEM,
     PLAN_SYSTEM,
     READ_SYSTEM,
+    RESEARCH_PLANNER_SYSTEM,
     REPORT_SYSTEM,
     SYNTHESIZE_SYSTEM,
     code_task_design_user_prompt,
     paper_note_user_prompt,
     plan_user_prompt,
+    research_planner_user_prompt,
     report_user_prompt,
     synthesize_user_prompt,
 )
+from simple_ar.research.planning import build_llm_research_plan, build_query_plan, build_research_questions
+from simple_ar.research.retrieval import RetrievalCandidate, screen_retrieval_candidates
 from simple_ar.research.sources import SearchQuery, build_source_plan, primary_query
 from simple_ar.report_quality import build_report_quality
 from simple_ar.retrieval.evidence import collect_stage_evidence, format_evidence_snippets
@@ -89,10 +99,23 @@ def execute_search(ctx: Context) -> None:
     problem = read_text(ctx.find_artifact("problem.md") or ctx.artifact_path("problem.md"))
     query = _search_query(ctx, problem)
     max_papers = _max_papers(ctx)
+    research_questions, query_plan = _plan_research_retrieval(ctx, problem, query)
+    write_json(
+        ctx.artifact_path("research_questions.json"),
+        {
+            "schema_version": "research_questions.v1",
+            "planner": query_plan.planner,
+            "questions": [question.to_row() for question in research_questions],
+        },
+    )
+    write_json(ctx.artifact_path("query_plan.json"), query_plan.to_row())
+    source_config = dict(ctx.config)
+    if query_plan.queries:
+        source_config["research_queries"] = list(query_plan.queries)
     source_plan = build_source_plan(
         topic=ctx.topic,
         problem_markdown=problem,
-        config=ctx.config,
+        config=source_config,
         default_query=query,
         default_max_results=max_papers,
     )
@@ -107,24 +130,139 @@ def execute_search(ctx: Context) -> None:
         "sources": list(source_plan.sources),
         "source": "arxiv" if ctx.config.get("use_arxiv") is True else "fixture",
         "source_plan": "source_plan.json",
+        "research_questions": "research_questions.json",
+        "query_plan": "query_plan.json",
+        "research_planner": query_plan.planner,
+        "query_plan_max_rounds": query_plan.max_rounds,
+        "query_plan_auto_expansion": query_plan.auto_expansion,
+        "required_facets": list(query_plan.required_facets),
         "status": "pending",
     }
     if _should_use_source_plan(ctx, source_plan):
-        papers, meta_update = _live_literature_search(ctx, source_plan, problem)
+        papers, meta_update = _live_literature_search(ctx, source_plan, problem, query_plan)
         meta.update(meta_update)
     else:
         ctx.emit("stage_message", "Using fixture paper metadata because --offline-search is enabled.")
         papers = _fixture_papers(problem)
-        meta.update({"source": "fixture", "status": "offline_fixture", "returned": len(papers)})
+        retrieval_rows = [
+            _retrieval_round_row(
+                round_index=1,
+                query_index=1,
+                query=planned_query,
+                source="fixture",
+                status="offline_fixture",
+                returned=len(papers),
+            )
+        ]
+        candidates = [
+            RetrievalCandidate(
+                paper=paper,
+                source="fixture",
+                query=planned_query,
+                query_index=1,
+                round_index=1,
+                returned_source="fixture",
+            )
+            for paper in papers
+        ]
+        papers, screening_rows = screen_retrieval_candidates(
+            candidates,
+            max_documents=max_papers,
+            negative_terms=query_plan.negative_terms,
+        )
+        write_jsonl(ctx.artifact_path("retrieval_rounds.jsonl"), retrieval_rows)
+        write_jsonl(ctx.artifact_path("screening_decisions.jsonl"), screening_rows)
+        meta.update(
+            {
+                "source": "fixture",
+                "status": "offline_fixture",
+                "returned": len(papers),
+                "attempts": retrieval_rows,
+                "retrieval_rounds": "retrieval_rounds.jsonl",
+                "screening_decisions": "screening_decisions.jsonl",
+                "screened_candidates": len(screening_rows),
+                "kept_after_screening": len(papers),
+            }
+        )
 
     write_jsonl(ctx.artifact_path("papers.jsonl"), [paper.to_row() for paper in papers])
     write_json(ctx.artifact_path("search_meta.json"), meta)
+
+
+def _plan_research_retrieval(
+    ctx: Context,
+    problem: str,
+    query: str,
+) -> tuple[list[ResearchQuestion], QueryPlan]:
+    """Create research questions and query plan, using LLM planning when enabled."""
+    deterministic_questions = build_research_questions(
+        topic=ctx.topic,
+        problem_markdown=problem,
+        config=ctx.config,
+    )
+    deterministic_plan = build_query_plan(
+        topic=ctx.topic,
+        problem_markdown=problem,
+        config=ctx.config,
+        default_query=query,
+        questions=deterministic_questions,
+    )
+    planner_mode = _research_planner_mode(ctx.config.get("research_planner"))
+    if deterministic_plan.auto_expansion is False:
+        return deterministic_questions, deterministic_plan
+    if planner_mode == "deterministic":
+        return deterministic_questions, deterministic_plan
+    if ctx.config.get("use_llm") is not True:
+        return deterministic_questions, deterministic_plan
+
+    client = _llm_client(ctx)
+    if client is None:
+        return deterministic_questions, deterministic_plan
+
+    ctx.emit("stage_message", "Calling LLM for research question and query planning.")
+    try:
+        response = client.ask_json(
+            RESEARCH_PLANNER_SYSTEM,
+            research_planner_user_prompt(
+                topic=ctx.topic,
+                problem_markdown=problem,
+                seed_queries_json=json.dumps(deterministic_plan.seed_queries, ensure_ascii=False),
+                required_facets_json=json.dumps(deterministic_plan.required_facets, ensure_ascii=False),
+                max_queries=_research_query_cap(ctx.config, len(deterministic_plan.queries)),
+                max_rounds=deterministic_plan.max_rounds,
+                mode=str(ctx.config.get("research_mode") or "standard"),
+            ),
+            label="research-planner",
+        )
+        return build_llm_research_plan(
+            topic=ctx.topic,
+            problem_markdown=problem,
+            config=ctx.config,
+            default_query=query,
+            data=response,
+        )
+    except (LLMError, ValueError) as exc:
+        ctx.emit("stage_message", f"LLM research planning failed; using deterministic fallback. {exc}")
+        return deterministic_questions, deterministic_plan
+
+
+def _research_planner_mode(value: object) -> str:
+    text = str(value or "auto").strip().lower()
+    return text if text in {"auto", "llm", "deterministic"} else "auto"
+
+
+def _research_query_cap(config: dict[str, object], default: int) -> int:
+    value = config.get("research_max_queries")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return min(value, 12)
+    return min(max(default, 1), 12)
 
 
 def _live_literature_search(
     ctx: Context,
     source_plan: SourcePlan,
     problem: str,
+    query_plan: QueryPlan,
 ) -> tuple[list[Paper], dict[str, object]]:
     """Search real literature sources before considering explicit fixture fallback.
 
@@ -140,41 +278,66 @@ def _live_literature_search(
         LiteratureSearchError: If no live or cached metadata is available and
             fixture fallback has not been explicitly enabled.
     """
-    attempts: list[dict[str, object]] = []
-    query = primary_query(source_plan)
     max_papers = source_plan.max_results_per_query
+    max_documents = _research_document_cap(source_plan, max_papers)
+    retrieval_rows: list[dict[str, object]] = []
+    candidates: list[RetrievalCandidate] = []
+    query_specs = _query_specs_by_query(query_plan)
+    query_attempts = _planned_query_attempts(source_plan)
 
-    for source in source_plan.sources:
-        result: tuple[list[Paper], str] | None
-        if source == "local_files":
-            result = _try_local_files(ctx, source_plan, attempts)
-        elif source == "openalex":
-            result = _try_openalex(
+    for query_index, query in enumerate(query_attempts, start=1):
+        query_spec = query_specs.get(query, {})
+        facet = str(query_spec.get("facet") or "")
+        for source in source_plan.sources:
+            papers, attempt = _search_source_once(
                 ctx,
-                query,
-                max_papers,
-                attempts,
-                cache_enabled=source_plan.cache_enabled,
+                source_plan,
+                source=source,
+                query=query,
+                query_index=query_index,
+                round_index=1,
             )
-        elif source == "arxiv":
-            result = _try_arxiv(
-                ctx,
-                query,
-                max_papers,
-                attempts,
-                cache_enabled=source_plan.cache_enabled,
-            )
-        else:
-            attempts.append({"source": source, "status": "unsupported"})
-            continue
-        if result is not None:
-            papers, returned_source = result
-            return papers, {
-                "source": returned_source,
-                "status": "ok" if returned_source in {"local_files", "openalex", "arxiv"} else "cache",
-                "returned": len(papers),
-                "attempts": attempts,
-            }
+            _attach_query_trace(attempt, query_spec)
+            retrieval_rows.append(attempt)
+            for paper in papers:
+                candidates.append(
+                    RetrievalCandidate(
+                        paper=paper,
+                        source=str(attempt.get("source") or source),
+                        query=query,
+                        query_index=query_index,
+                        round_index=1,
+                        facet=facet,
+                        returned_source=str(attempt.get("returned_source") or attempt.get("source") or source),
+                    )
+                )
+            if papers:
+                break
+        if len({candidate.paper.id for candidate in candidates}) >= max_documents:
+            break
+
+    if candidates:
+        papers, screening_rows = screen_retrieval_candidates(
+            candidates,
+            max_documents=max_documents,
+            negative_terms=query_plan.negative_terms,
+        )
+        write_jsonl(ctx.artifact_path("retrieval_rounds.jsonl"), retrieval_rows)
+        write_jsonl(ctx.artifact_path("screening_decisions.jsonl"), screening_rows)
+        selected_sources = sorted({paper.source for paper in papers}) or ["unknown"]
+        return papers, {
+            "source": selected_sources[0] if len(selected_sources) == 1 else "mixed",
+            "sources_used": selected_sources,
+            "status": "ok",
+            "returned": len(papers),
+            "attempts": retrieval_rows,
+            "retrieval_rounds": "retrieval_rounds.jsonl",
+            "screening_decisions": "screening_decisions.jsonl",
+            "screened_candidates": len(screening_rows),
+            "kept_after_screening": len(papers),
+            "executed_retrieval_rounds": 1,
+            "planned_retrieval_rounds": query_plan.max_rounds,
+        }
 
     if _allow_fixture_fallback(ctx):
         ctx.emit(
@@ -182,16 +345,362 @@ def _live_literature_search(
             "No live or cached literature metadata available; using fixture metadata because "
             "--allow-fixture-fallback is enabled.",
         )
-        papers = _fixture_papers(problem)
+        fixture_papers = _fixture_papers(problem)
+        fixture_query = primary_query(source_plan)
+        fixture_candidates = [
+            RetrievalCandidate(
+                paper=paper,
+                source="fixture",
+                query=fixture_query,
+                query_index=1,
+                round_index=1,
+                returned_source="fixture",
+            )
+            for paper in fixture_papers
+        ]
+        papers, screening_rows = screen_retrieval_candidates(
+            fixture_candidates,
+            max_documents=max_documents,
+            negative_terms=query_plan.negative_terms,
+        )
+        retrieval_rows.append(
+            _retrieval_round_row(
+                round_index=1,
+                query_index=1,
+                query=fixture_query,
+                source="fixture",
+                status="fixture_fallback",
+                returned=len(fixture_papers),
+            )
+        )
+        write_jsonl(ctx.artifact_path("retrieval_rounds.jsonl"), retrieval_rows)
+        write_jsonl(ctx.artifact_path("screening_decisions.jsonl"), screening_rows)
         return papers, {
             "source": "fixture",
             "status": "fixture_fallback",
             "allow_fixture_fallback": True,
             "returned": len(papers),
-            "attempts": attempts,
+            "attempts": retrieval_rows,
+            "retrieval_rounds": "retrieval_rounds.jsonl",
+            "screening_decisions": "screening_decisions.jsonl",
+            "screened_candidates": len(screening_rows),
+            "kept_after_screening": len(papers),
         }
 
-    raise LiteratureSearchError(_live_search_failure_message(attempts))
+    write_jsonl(ctx.artifact_path("retrieval_rounds.jsonl"), retrieval_rows)
+    write_jsonl(ctx.artifact_path("screening_decisions.jsonl"), [])
+    raise LiteratureSearchError(_live_search_failure_message(retrieval_rows))
+
+
+def _search_source_once(
+    ctx: Context,
+    source_plan: SourcePlan,
+    *,
+    source: str,
+    query: str,
+    query_index: int,
+    round_index: int,
+) -> tuple[list[Paper], dict[str, object]]:
+    max_papers = source_plan.max_results_per_query
+    if source == "local_files":
+        return _search_local_files_once(ctx, source_plan, query, query_index, round_index)
+    if source == "openalex":
+        return _search_openalex_once(
+            ctx,
+            query,
+            max_papers,
+            query_index=query_index,
+            round_index=round_index,
+            cache_enabled=source_plan.cache_enabled,
+        )
+    if source == "semantic_scholar":
+        return _search_semantic_scholar_once(
+            ctx,
+            query,
+            max_papers,
+            query_index=query_index,
+            round_index=round_index,
+            cache_enabled=source_plan.cache_enabled,
+        )
+    if source == "arxiv":
+        return _search_arxiv_once(
+            ctx,
+            query,
+            max_papers,
+            query_index=query_index,
+            round_index=round_index,
+            cache_enabled=source_plan.cache_enabled,
+        )
+    return [], _retrieval_round_row(
+        round_index=round_index,
+        query_index=query_index,
+        query=query,
+        source=source,
+        status="unsupported",
+        returned=0,
+    )
+
+
+def _search_local_files_once(
+    ctx: Context,
+    source_plan: SourcePlan,
+    query: str,
+    query_index: int,
+    round_index: int,
+) -> tuple[list[Paper], dict[str, object]]:
+    if not source_plan.local_documents:
+        return [], _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source="local_files",
+            status="skipped",
+            returned=0,
+            reason="no local_documents",
+        )
+    ctx.emit(
+        "stage_message",
+        f"Searching {len(source_plan.local_documents)} local document(s) for `{query}`.",
+    )
+    response = LocalFileConnector(source_plan.local_documents).search(
+        SearchQuery(query=query, max_results=source_plan.max_results_per_query)
+    )
+    status = "ok" if response.papers else "empty"
+    return response.papers, _retrieval_round_row(
+        round_index=round_index,
+        query_index=query_index,
+        query=query,
+        source="local_files",
+        status=status,
+        returned=len(response.papers),
+    )
+
+
+def _search_openalex_once(
+    ctx: Context,
+    query: str,
+    max_papers: int,
+    *,
+    query_index: int,
+    round_index: int,
+    cache_enabled: bool,
+) -> tuple[list[Paper], dict[str, object]]:
+    try:
+        ctx.emit("stage_message", f"Searching OpenAlex for up to {max_papers} paper(s) with `{query}`.")
+        response = OpenAlexConnector(OpenAlexSearchClient()).search(
+            SearchQuery(query=query, max_results=max_papers)
+        )
+        papers = response.papers
+        if papers:
+            put_cache(query, "openalex", max_papers, [paper.to_row() for paper in papers])
+        return papers, _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source="openalex",
+            status="ok" if papers else "empty",
+            returned=len(papers),
+        )
+    except OpenAlexSearchError as exc:
+        ctx.emit("stage_message", f"OpenAlex search failed. {exc}")
+        if ctx.config.get("strict_search") is not True and cache_enabled:
+            cached = _cached_papers(ctx, query, max_papers, source="openalex")
+            if cached is not None:
+                return cached, _retrieval_round_row(
+                    round_index=round_index,
+                    query_index=query_index,
+                    query=query,
+                    source="openalex",
+                    returned_source="openalex_cache",
+                    status="cache",
+                    returned=len(cached),
+                )
+        return [], _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source="openalex",
+            status="error",
+            returned=0,
+            error=str(exc),
+        )
+
+
+def _search_semantic_scholar_once(
+    ctx: Context,
+    query: str,
+    max_papers: int,
+    *,
+    query_index: int,
+    round_index: int,
+    cache_enabled: bool,
+) -> tuple[list[Paper], dict[str, object]]:
+    try:
+        ctx.emit("stage_message", f"Searching Semantic Scholar for up to {max_papers} paper(s) with `{query}`.")
+        response = SemanticScholarConnector(SemanticScholarSearchClient()).search(
+            SearchQuery(query=query, max_results=max_papers)
+        )
+        papers = response.papers
+        if papers:
+            put_cache(query, "semantic_scholar", max_papers, [paper.to_row() for paper in papers])
+        return papers, _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source="semantic_scholar",
+            status="ok" if papers else "empty",
+            returned=len(papers),
+        )
+    except SemanticScholarSearchError as exc:
+        ctx.emit("stage_message", f"Semantic Scholar search failed. {exc}")
+        if ctx.config.get("strict_search") is not True and cache_enabled:
+            cached = _cached_papers(ctx, query, max_papers, source="semantic_scholar")
+            if cached is not None:
+                return cached, _retrieval_round_row(
+                    round_index=round_index,
+                    query_index=query_index,
+                    query=query,
+                    source="semantic_scholar",
+                    returned_source="semantic_scholar_cache",
+                    status="cache",
+                    returned=len(cached),
+                )
+        return [], _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source="semantic_scholar",
+            status="error",
+            returned=0,
+            error=str(exc),
+        )
+
+
+def _search_arxiv_once(
+    ctx: Context,
+    query: str,
+    max_papers: int,
+    *,
+    query_index: int,
+    round_index: int,
+    cache_enabled: bool,
+) -> tuple[list[Paper], dict[str, object]]:
+    try:
+        ctx.emit("stage_message", f"Searching arXiv for up to {max_papers} paper(s) with `{query}`.")
+        response = ArxivConnector(ArxivSearchClient(page_size=max_papers)).search(
+            SearchQuery(query=query, max_results=max_papers)
+        )
+        papers = response.papers
+        if papers:
+            put_cache(query, "arxiv", max_papers, [paper.to_row() for paper in papers])
+        return papers, _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source="arxiv",
+            status="ok" if papers else "empty",
+            returned=len(papers),
+        )
+    except ArxivRateLimitError as exc:
+        ctx.emit("stage_message", "arXiv rate limit hit; checking local cache.")
+        status = "rate_limited"
+        error = str(exc)
+    except LiteratureSearchError as exc:
+        ctx.emit("stage_message", f"arXiv search failed. {exc}")
+        status = "error"
+        error = str(exc)
+    if ctx.config.get("strict_search") is not True and cache_enabled:
+        cached = _cached_papers(ctx, query, max_papers, source="arxiv")
+        if cached is not None:
+            return cached, _retrieval_round_row(
+                round_index=round_index,
+                query_index=query_index,
+                query=query,
+                source="arxiv",
+                returned_source="arxiv_cache",
+                status="cache",
+                returned=len(cached),
+            )
+    return [], _retrieval_round_row(
+        round_index=round_index,
+        query_index=query_index,
+        query=query,
+        source="arxiv",
+        status=status,
+        returned=0,
+        error=error,
+    )
+
+
+def _retrieval_round_row(
+    *,
+    round_index: int,
+    query_index: int,
+    query: str,
+    source: str,
+    status: str,
+    returned: int,
+    returned_source: str | None = None,
+    reason: str | None = None,
+    error: str | None = None,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "schema_version": "retrieval_round.v1",
+        "round": round_index,
+        "query_index": query_index,
+        "query": query,
+        "source": source,
+        "status": status,
+        "returned": returned,
+    }
+    if returned_source:
+        row["returned_source"] = returned_source
+    if reason:
+        row["reason"] = reason
+    if error:
+        row["error"] = error
+    return row
+
+
+def _research_document_cap(source_plan: SourcePlan, default: int) -> int:
+    value = source_plan.budget.get("max_documents")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return max(1, default)
+
+
+def _planned_query_attempts(source_plan: SourcePlan) -> list[str]:
+    queries = [query.strip() for query in source_plan.queries if query.strip()]
+    return queries or [primary_query(source_plan)]
+
+
+def _query_specs_by_query(query_plan: QueryPlan) -> dict[str, dict[str, object]]:
+    specs: dict[str, dict[str, object]] = {}
+    for spec in query_plan.query_specs:
+        if not isinstance(spec, dict):
+            continue
+        query = str(spec.get("query") or "").strip()
+        if query:
+            specs[query] = spec
+    return specs
+
+
+def _attach_query_trace(row: dict[str, object], query_spec: dict[str, object]) -> None:
+    """Add compact query-intent metadata to a retrieval attempt row."""
+    if not query_spec:
+        return
+    facet = str(query_spec.get("facet") or "").strip()
+    if facet:
+        row["facet"] = facet
+    title_keywords = query_spec.get("title_keywords")
+    if isinstance(title_keywords, list) and title_keywords:
+        row["title_keywords"] = [str(item) for item in title_keywords[:5]]
+    abstract_keywords = query_spec.get("abstract_keywords")
+    if isinstance(abstract_keywords, list) and abstract_keywords:
+        row["abstract_keywords"] = [str(item) for item in abstract_keywords[:8]]
+    rationale = str(query_spec.get("rationale") or "").strip()
+    if rationale:
+        row["query_rationale"] = rationale[:240]
 
 
 def _try_openalex(
@@ -1841,6 +2350,10 @@ def _source_artifacts(ctx: Context) -> dict[str, str]:
         "papers.jsonl",
         "search_meta.json",
         "source_plan.json",
+        "research_questions.json",
+        "query_plan.json",
+        "retrieval_rounds.jsonl",
+        "screening_decisions.jsonl",
         "activity_log.jsonl",
         "evidence_ledger.jsonl",
         "artifact_index.json",

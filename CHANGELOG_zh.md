@@ -13,13 +13,30 @@
   本地文档、cache/index 偏好和轻量预算。
 - 顶层 run config 现在支持 `[research]`，包括 `sources`、`queries`、
   `local_documents`、`cache`、`index_backend` 和 `[research.budget]`。
+- 新增 V2.3 Day 3 research-question 和 query-plan 产物：
+  `02-search/research_questions.json` 与 `02-search/query_plan.json`。
+- 新增可选 LLM-backed research planning，可通过 `[research].planner` 控制；
+  离线或 provider 失败时仍保留 deterministic planning 兜底。
+- `query_plan.json` 新增结构化 `query_specs`，让 LLM research planner 保留
+  title/abstract keyword 意图，而不是只输出偏浏览器搜索风格的 query 字符串。
+- 新增 V2.3 Day 4 检索 trace 产物：
+  `02-search/retrieval_rounds.jsonl` 和
+  `02-search/screening_decisions.jsonl`，记录实际执行的 source/query 尝试、
+  简洁 query 意图 trace、去重和轻量相关性筛选决策，再写入 `papers.jsonl`。
+- 新增 Semantic Scholar 在线 metadata connector，默认位于 OpenAlex 和 arXiv
+  之间，让 V2.3 research search 不依赖 fixture metadata 时也有更广的论文来源。
 - 新增本地研究源示例 `examples/run_configs/local_research_report.toml`，
   并在 `examples/research/` 下提供配套 Markdown notes。
 
 ### Changed
 
-- 搜索执行现在通过 research connector wrapper 调用 OpenAlex、arXiv 和本地
-  Markdown/text 文件源，同时保留已有 fixture 与 cache fallback 行为。
+- 搜索执行现在通过 research connector wrapper 调用 OpenAlex、Semantic Scholar、
+  arXiv 和本地 Markdown/text 文件源，同时保留已有 fixture 与 cache fallback 行为。
+- search 阶段现在会先把 seed queries 扩展成受限的 facet-driven follow-up queries，
+  再构建 `source_plan.json`；LLM 开启时，`planner = "auto"` 可以让模型参与
+  更强的 question decomposition 和 query 术语扩展。
+- 本地 Markdown/text 搜索现在使用轻量 keyword-overlap 匹配，而不是要求
+  query 字符串逐字出现，使规范化后的 paper-search query 更适合短笔记源。
 - 拆分公开命令和配置文档：`CLI_REFERENCE_zh.md` 现在只聚焦命令语法、参数表和产物；
   新增 `CONFIG_REFERENCE_zh.md` 集中说明 TOML schema、完整配置和 workspace 模式变体。
 - 配置文档补充了更完整的 inline comments 和关键字段说明，便于理解 `max_papers`、
