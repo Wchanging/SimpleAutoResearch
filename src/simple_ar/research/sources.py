@@ -114,12 +114,21 @@ def _budget(config: dict[str, object]) -> dict[str, object]:
         "research_max_chunks": "max_chunks",
         "research_max_context_tokens": "max_context_tokens",
         "research_max_llm_calls": "max_llm_calls",
+        "research_max_follow_up_queries": "max_follow_up_queries",
+        "research_max_fulltext_documents": "max_fulltext_documents",
+        "research_max_pdf_mb": "max_pdf_mb",
     }
     budget: dict[str, object] = {}
     for config_key, budget_key in keys.items():
         value = config.get(config_key)
         if isinstance(value, int) and not isinstance(value, bool):
             budget[budget_key] = value
+    keep_raw_pdf = config.get("research_keep_raw_pdf")
+    if isinstance(keep_raw_pdf, bool):
+        budget["keep_raw_pdf"] = keep_raw_pdf
+    parser_backend = _string(config.get("research_parser_backend"))
+    if parser_backend:
+        budget["parser_backend"] = parser_backend
     return budget
 
 

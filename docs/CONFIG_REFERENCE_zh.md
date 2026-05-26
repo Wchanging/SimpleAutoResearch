@@ -64,7 +64,7 @@ allow_fixture_fallback = false
 strict = false
 
 [research]
-# 写入 source_plan.json 的检索策略档位；全文解析能力仍是后续规划。
+# 写入 planning/research_plan.json 的检索策略档位；全文解析能力仍是后续规划。
 mode = "lite"                 # lite | standard | strong
 
 # research-question/query planner。auto 会在 [llm].enabled = true 时调用 LLM；
@@ -74,16 +74,16 @@ planner = "auto"              # auto | llm | deterministic
 # 02-search 的 provider 顺序。
 sources = ["fixture"]         # openalex | semantic_scholar | arxiv | local_files | fixture
 
-# evidence planning 的 query 列表；Day4 会按顺序执行 planned queries，直到达到文档预算。
+# evidence planning 的 query 列表；search 可针对未覆盖 facets 执行 follow-up round。
 queries = ["tiny digits MLP baseline improvement"]
 
 # 是否根据 topic 和 research questions 生成 facet-driven follow-up queries。
 auto_query_expansion = true
 
-# 后续多轮 retrieval loop 的计划轮数。
+# retrieval loop 的计划轮数；大于 1 时允许 coverage-driven follow-up search。
 max_retrieval_rounds = 2
 
-# query_plan.json 中最多保留多少个 seed + expanded queries。
+# research plan 中最多保留多少个 seed + expanded queries。
 max_queries = 6
 
 # planner 应尝试覆盖的 evidence facets。
@@ -92,9 +92,14 @@ required_facets = ["method", "benchmark", "dataset", "code_link"]
 # 作为本地研究记录读取的 Markdown/text 文件；路径相对当前 config 解析。
 local_documents = []
 
-# 后续全文 evidence 工作流的意图开关；当前 V2.3 search 还不会下载或解析 PDF。
+# full-text evidence 的意图与预算开关。Day9 只记录 hint 和预算决策；
+# 远程下载和解析仍由后续受控步骤处理。
 use_fulltext = false
 allow_pdf_download = false
+max_fulltext_documents = 6
+max_pdf_mb = 20
+keep_raw_pdf = false
+parser_backend = "basic"
 
 # live provider 失败后是否允许使用 cached metadata。
 cache = true
@@ -114,6 +119,9 @@ max_context_tokens = 6000
 
 # research 侧 query expansion/screening 等 LLM 调用上限。
 max_llm_calls = 4
+
+# 第二轮 coverage-driven follow-up retrieval 最多尝试几个 query。
+max_follow_up_queries = 3
 
 [retrieval]
 # read/synthesize/report helper 是否启用本地 artifact retrieval。
@@ -267,7 +275,7 @@ max_proposal_chars = 42000
 | `[llm]` | pipeline 和 code task | LLM 是否启用、默认模型和 worker 数。 |
 | `[search]` | `02-search` | provider 行为、fallback 策略、结果数量和手动 query。 |
 | `[research]` | `02-search` | research-question 规划、query expansion、provider 顺序、本地文档、cache/index hints。 |
-| `[research.budget]` | `02-search` 和后续 evidence stages | 写入 `source_plan.json` 的轻量预算上限。 |
+| `[research.budget]` | `02-search` 和后续 evidence stages | 写入 `planning/research_plan.json` 的轻量预算上限。 |
 | `[retrieval]` | read/synthesize/report helpers | 本地 artifact retrieval 上下文。 |
 | `[experiment]` | `05-design` 到 `07-run` | 实验模板、timeout 和可选嵌套 code-task config 路径。 |
 | `[report]` | `08-report` | 报告结构模式。 |
@@ -309,20 +317,25 @@ max_proposal_chars = 42000
 | `[research].mode` | 记录计划中的 evidence 深度：`lite` 表示 metadata/本地笔记，`standard` 表示 cache/index-ready，`strong` 预留给全文/向量工作流。 |
 | `[research].planner` | research-question 和 query-expansion 后端。`auto` 会在 `[llm].enabled = true` 时调用 LLM，并在 provider 不可用时回退；`llm` 显式要求走该路径；`deterministic` 禁用额外 LLM planner 调用。 |
 | `[research].sources` | search 阶段 provider 顺序。当前 connector 支持 `openalex`、`semantic_scholar`、`arxiv` 和 `local_files`；`fixture` 用于记录离线 fixture。 |
-| `[research].queries` | 作为 seed queries 写入 `query_plan.json`，再同步到 `02-search/source_plan.json`。Day4 会在第一轮检索中按顺序执行 planned queries，直到达到文档预算；后续 coverage 工作可继续使用剩余轮次预算做 follow-up search。LLM planner 还会记录带 title/abstract keyword hints 的 `query_specs`。 |
+| `[research].queries` | 作为 seed queries 写入 `02-search/planning/research_plan.json`。Search 会按 ordered-fallback rounds 执行 planned queries，并可把后续轮次预算用于未覆盖 facets。LLM planner 还会记录带 title/abstract keyword hints 的 `query_specs`。 |
 | `[research].auto_query_expansion` | 是否启用 facet-driven follow-up queries。deterministic 模式下为规则扩展；LLM planner 模式下模型可以在相同 query 预算内补充更强术语。想完全使用手写 query 时可以设为 false。 |
-| `[research].max_retrieval_rounds` | DeepResearch loop 计划运行的 retrieval/screening 轮数。Day4 已执行第一轮，并把后续轮次预算留给 coverage/follow-up 阶段。 |
-| `[research].max_queries` | `query_plan.json` 和 `source_plan.json` 中最多保留多少个 seed + expanded queries。 |
+| `[research].max_retrieval_rounds` | DeepResearch loop 计划运行的 retrieval/screening 轮数。大于 `1` 时允许在最终写出 `papers.jsonl` 前执行 coverage-driven follow-up retrieval。 |
+| `[research].max_queries` | `planning/research_plan.json` 的 `query_plan` section 中最多保留多少个 seed + expanded queries。 |
 | `[research].required_facets` | 希望覆盖的 evidence facets，例如 `method`、`benchmark`、`dataset`、`code_link` 或 `limitation`。这些会驱动 research questions 和 query expansion。 |
-| `[research].local_documents` | 作为本地研究记录读取的 Markdown/text 文件，路径相对配置文件解析。 |
-| `[research].use_fulltext` | 后续全文 evidence 工作流的意图开关。当前不会下载或解析 PDF。 |
-| `[research].allow_pdf_download` | 后续 PDF 下载器的权限开关。除非后续 parser/downloader 已启用，否则保持 false。 |
+| `[research].local_documents` | 作为本地研究记录读取的 Markdown/text 文件，路径相对配置文件解析，并会写入 `02-search/documents/documents.jsonl`，记录 parser/hash 状态。 |
+| `[research].use_fulltext` | 全文 evidence 工作流的意图开关。开启后，`documents/fulltext_manifest.json` 会在预算内选择可用的本地/远程全文 hint。Day9 仍不会下载远程文件。 |
+| `[research].allow_pdf_download` | 后续远程 PDF 下载步骤的权限开关。除非明确需要 parser-backed full-text handling，否则保持 false。 |
+| `[research].max_fulltext_documents` | 后续全文获取/解析最多选择多少篇文档。它不同于 `[research.budget].max_documents`，后者控制保留多少条 metadata/document record。 |
+| `[research].max_pdf_mb` | 单个 PDF 的大小上限。超过该限制的本地 PDF 会被跳过，后续远程下载器也应遵守这个限制。 |
+| `[research].keep_raw_pdf` | 后续 fetch/parser 是否保留原始 PDF。只需要 parsed text 和 section chunks 时建议保持 false。 |
+| `[research].parser_backend` | 计划使用的 parser 后端，例如 `basic`、`pypdf`、`pymupdf` 或 `external`。Day9 只记录该选择，供后续解析阶段使用。 |
 | `[research].cache` | live provider 失败后是否允许使用 cached metadata。 |
-| `[research].index_backend` | 后续 evidence ingestion 计划使用的索引后端。当前会记录为 `keyword`、`sqlite_fts` 或 `hybrid`。 |
+| `[research].index_backend` | 本地索引后端。`keyword` 只写可移植 chunks；`sqlite_fts` 会额外写 SQLite FTS 数据库；`hybrid` 预留给 FTS + 后续更强 adapter。 |
 | `[research.budget].max_documents` | evidence 阶段从所有 source 中最多保留多少条记录。 |
 | `[research.budget].max_chunks` | 后续全文/本地文档 ingestion 后最多保留多少 chunk。 |
 | `[research.budget].max_context_tokens` | evidence retrieval 放入 prompt 的计划 token 预算。 |
 | `[research.budget].max_llm_calls` | research 侧 query expansion、screening 等 LLM 操作的计划调用上限。 |
+| `[research.budget].max_follow_up_queries` | 第二轮 coverage-driven follow-up retrieval 最多尝试几个 query。 |
 
 ### Code-Task 字段
 
@@ -396,6 +409,10 @@ cache = true
 index_backend = "keyword"
 use_fulltext = false
 allow_pdf_download = false
+max_fulltext_documents = 6
+max_pdf_mb = 20
+keep_raw_pdf = false
+parser_backend = "basic"
 ```
 
 ### Local Notes Only

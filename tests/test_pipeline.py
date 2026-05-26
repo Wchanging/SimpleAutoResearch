@@ -52,8 +52,7 @@ class PipelineTests(unittest.TestCase):
             executions = PipelineRunner(handlers()).run(ctx)
 
             self.assertEqual(len(executions), 8)
-            self.assertTrue((ctx.run_dir / "02-search" / "research_questions.json").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "query_plan.json").is_file())
+            self.assertTrue((ctx.run_dir / "02-search" / "planning" / "research_plan.json").is_file())
             self.assertTrue((ctx.run_dir / "02-search" / "search_meta.json").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "report.md").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "references.bib").is_file())

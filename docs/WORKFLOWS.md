@@ -123,7 +123,7 @@ Current status:
 | Stage | Main outputs | Purpose |
 | --- | --- | --- |
 | `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question (LLM-backed when enabled). |
-| `search` | `research_questions.json`, `query_plan.json`, `source_plan.json`, `retrieval_rounds.jsonl`, `screening_decisions.jsonl`, `papers.jsonl`, `search_meta.json` | Decompose the topic, retrieve candidates, deduplicate/screen metadata, then collect literature records. |
+| `search` | `planning/`, `traces/`, `review/`, `papers.jsonl`, `search_meta.json` | Decompose the topic, retrieve candidates, deduplicate/screen metadata, check coverage, then collect literature records. |
 | `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes (LLM-backed when enabled). |
 | `synthesize` | `synthesis.md`, `hypothesis.md` | Produce a bounded synthesis and testable hypothesis (LLM-backed when enabled). |
 | `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
@@ -133,21 +133,35 @@ Current status:
 
 ## Search And LLM Boundaries
 
-- `02-search/source_plan.json` records the planned queries, source order,
-  local documents, retrieval mode, cache/index hints, and budget.
-- `02-search/research_questions.json` records scoped sub-questions and evidence
-  facets such as method, benchmark, dataset, and code-link coverage. It is
-  deterministic by default when LLM mode is disabled, and can be LLM-backed via
-  `[research].planner = "auto"` or `"llm"`.
-- `02-search/query_plan.json` records seed queries, planner-produced follow-up
-  queries, structured title/abstract keyword hints, and planned
-  retrieval-round budget.
-- `02-search/retrieval_rounds.jsonl` records executed source/query attempts.
-  Day4 runs the first retrieval round, records the normalized query plus
-  facet/title/abstract keyword intent, and keeps later follow-up rounds
-  explicit in the query plan budget.
-- `02-search/screening_decisions.jsonl` records deduplication and lightweight
+- `02-search/planning/research_plan.json` records scoped sub-questions, evidence
+  facets, seed and expanded queries, structured title/abstract keyword hints,
+  source order, local documents, retrieval mode, cache/index hints, and budget
+  in one compact planning artifact. It is deterministic by default when LLM mode
+  is disabled, and can be LLM-backed via `[research].planner = "auto"` or
+  `"llm"`.
+- `02-search/traces/retrieval_rounds.jsonl` records executed source/query attempts.
+  The first pass records the normalized query plus facet/title/abstract keyword
+  intent; coverage-driven follow-up rounds reuse the same trace format.
+- `02-search/traces/screening_decisions.jsonl` records deduplication and lightweight
   relevance-screening decisions before papers are written.
+- `02-search/review/coverage_report.json` and `02-search/review/coverage_report.md`
+  record required-facet coverage and missing questions. If round budget remains,
+  the search stage can run a bounded follow-up round for uncovered facets before
+  writing the final paper list.
+- `02-search/documents/documents.jsonl` records selected metadata and configured
+  local files as document records with extraction status. Metadata-only sources
+  stay `metadata_only`; local Markdown/text can become `parsed`; unsupported or
+  unavailable files are recorded as `skipped` or `failed`.
+- `02-search/documents/cache_manifest.json` summarizes cache/index intent,
+  extraction statuses, and source counts.
+- `02-search/documents/fulltext_manifest.json` records arXiv/OpenAlex/local
+  full-text hints and fetch-budget decisions. Day9 does not download remote
+  PDFs; later parser stages will consume this manifest.
+- `02-search/research_index/chunks.jsonl` stores portable local chunks from
+  abstracts and parsed local files. This is the source of truth for later
+  evidence-card extraction.
+- `02-search/research_index/index_meta.json` records the selected local index
+  backend and optional SQLite FTS status.
 - Live search uses the configured source order. By default it tries OpenAlex
   first, then Semantic Scholar, then arXiv. When `--strict-search` is not set
   and source-plan cache is enabled, cached metadata is used after live failures.
@@ -180,13 +194,27 @@ runs/<run-id>/
   evidence_ledger.jsonl
   01-plan/
   02-search/
-    research_questions.json
-    query_plan.json
-    source_plan.json
-    retrieval_rounds.jsonl
-    screening_decisions.jsonl
     papers.jsonl
     search_meta.json
+    planning/
+      research_plan.json
+    documents/
+      documents.jsonl
+      cache_manifest.json
+      fulltext_manifest.json
+    research_index/
+      chunks.jsonl
+      index_meta.json
+      sqlite_fts.db  # only when sqlite_fts/hybrid indexing succeeds
+    cards/
+      paper_cards.jsonl
+      claim_cards.jsonl
+    traces/
+      retrieval_rounds.jsonl
+      screening_decisions.jsonl
+    review/
+      coverage_report.json
+      coverage_report.md
   03-read/
   04-synthesize/
   05-design/
@@ -209,21 +237,34 @@ Root-level files:
 - `artifact_search_results.json`: last artifact search result; generated only by the artifact search command.
 - `source_plan.json`: artifact-retrieval source plan describing which run
   artifacts each stage should consult; this is distinct from
-  `02-search/source_plan.json`.
+  the literature `source_plan` section inside `02-search/planning/research_plan.json`.
 - `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
-- `02-search/source_plan.json`: literature source plan for that run, including
-  provider order, local document paths, query list, retrieval mode, and budget.
-- `02-search/research_questions.json`: question decomposition used to avoid
-  relying only on the user's initial keyword string.
-- `02-search/query_plan.json`: executable query plan with seed/follow-up
-  queries and `query_specs` that preserve title/abstract keyword intent for
-  later source-specific normalization.
-- `02-search/retrieval_rounds.jsonl`: executed source/query attempts with
+- `02-search/planning/research_plan.json`: compact search planning artifact with
+  research question decomposition, executable query plan, and literature source
+  plan sections.
+- `02-search/traces/retrieval_rounds.jsonl`: executed source/query attempts with
   returned counts, errors, and compact query-intent traces.
-- `02-search/screening_decisions.jsonl`: keep/discard rows for retrieved
+- `02-search/traces/screening_decisions.jsonl`: keep/discard rows for retrieved
   metadata candidates.
-- `02-search/search_meta.json`: provider attempts and final selected source.
+- `02-search/review/coverage_report.json` / `coverage_report.md`: required-facet
+  coverage, missing question status, and follow-up query decisions.
+- `02-search/documents/documents.jsonl`: normalized document records for metadata
+  and local files, including hash and parser status when available.
+- `02-search/documents/cache_manifest.json`: cache, index, full-text, and
+  extraction-status summary.
+- `02-search/documents/fulltext_manifest.json`: full-text hints, selected
+  candidates, blocked/skipped reasons, and parser/fetch budget settings.
+- `02-search/research_index/chunks.jsonl`: portable local chunk store for later
+  retrieval, evidence-card extraction, and report grounding.
+- `02-search/research_index/index_meta.json`: local index backend and optional
+  SQLite FTS status.
+- `02-search/cards/paper_cards.jsonl`: deterministic paper cards with evidence
+  refs used by later gap, idea, and report stages.
+- `02-search/cards/claim_cards.jsonl`: conservative claim cards grounded in
+  chunk ids. Later report audit should still verify them before final use.
+- `02-search/search_meta.json`: final selected source, status, counts, and
+  pointers to planning/trace/review artifacts.
 - `02-search/papers.jsonl`: normalized metadata rows consumed by `03-read`.
 - `05-design/generated_code_task.md`: generated only when an embedded `code_task_project` run omits a task file.
 - `05-design/generated_code_task_meta.json`: provenance for that generated task file.

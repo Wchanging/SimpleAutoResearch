@@ -35,6 +35,10 @@ max_queries = 6
 required_facets = ["method", "benchmark", "code_link"]
 use_fulltext = true
 allow_pdf_download = false
+max_fulltext_documents = 5
+max_pdf_mb = 12
+keep_raw_pdf = true
+parser_backend = "basic"
 cache = true
 index_backend = "sqlite_fts"
 local_documents = ["notes/local.md"]
@@ -44,6 +48,7 @@ max_documents = 12
 max_chunks = 80
 max_context_tokens = 6000
 max_llm_calls = 8
+max_follow_up_queries = 4
 """.strip(),
                 encoding="utf-8",
             )
@@ -61,6 +66,10 @@ max_llm_calls = 8
             self.assertEqual(parsed["research_required_facets"], ["method", "benchmark", "code_link"])
             self.assertEqual(parsed["research_use_fulltext"], True)
             self.assertEqual(parsed["research_allow_pdf_download"], False)
+            self.assertEqual(parsed["research_max_fulltext_documents"], 5)
+            self.assertEqual(parsed["research_max_pdf_mb"], 12)
+            self.assertEqual(parsed["research_keep_raw_pdf"], True)
+            self.assertEqual(parsed["research_parser_backend"], "basic")
             self.assertEqual(parsed["research_cache"], True)
             self.assertEqual(parsed["research_index_backend"], "sqlite_fts")
             self.assertEqual(parsed["research_local_documents"], [str(notes.resolve())])
@@ -68,6 +77,7 @@ max_llm_calls = 8
             self.assertEqual(parsed["research_max_chunks"], 80)
             self.assertEqual(parsed["research_max_context_tokens"], 6000)
             self.assertEqual(parsed["research_max_llm_calls"], 8)
+            self.assertEqual(parsed["research_max_follow_up_queries"], 4)
 
 
 if __name__ == "__main__":

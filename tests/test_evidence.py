@@ -62,12 +62,32 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             run_dir = Path(tmp) / "run"
             write_text(run_dir / "01-plan" / "goal.md", "# Goal\n\nMeasure accuracy.\n")
+            write_json(run_dir / "02-search" / "planning" / "research_plan.json", {"query_plan": {}})
+            write_jsonl(run_dir / "02-search" / "documents" / "documents.jsonl", [{"document_id": "doc-1"}])
+            write_json(run_dir / "02-search" / "documents" / "cache_manifest.json", {"document_count": 1})
+            write_jsonl(run_dir / "02-search" / "research_index" / "chunks.jsonl", [{"chunk_id": "chunk-1"}])
+            write_json(run_dir / "02-search" / "research_index" / "index_meta.json", {"chunk_count": 1})
+            write_jsonl(run_dir / "02-search" / "cards" / "paper_cards.jsonl", [{"paper_id": "paper-1"}])
+            write_jsonl(run_dir / "02-search" / "cards" / "claim_cards.jsonl", [{"claim_id": "claim-1"}])
+            write_jsonl(run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl", [{"status": "ok"}])
+            write_jsonl(run_dir / "02-search" / "traces" / "screening_decisions.jsonl", [{"decision": "keep"}])
+            write_json(run_dir / "02-search" / "review" / "coverage_report.json", {"status": "partial"})
             collect_stage_evidence(run_dir, "toy topic", "read", queries=["accuracy"], top_k=1)
 
             index = build_artifact_index(run_dir, write=False)
             paths = {item["path"] for item in index["artifacts"]}
 
             self.assertIn("01-plan/goal.md", paths)
+            self.assertNotIn("02-search/planning/research_plan.json", paths)
+            self.assertNotIn("02-search/documents/documents.jsonl", paths)
+            self.assertNotIn("02-search/documents/cache_manifest.json", paths)
+            self.assertNotIn("02-search/research_index/chunks.jsonl", paths)
+            self.assertNotIn("02-search/research_index/index_meta.json", paths)
+            self.assertNotIn("02-search/cards/paper_cards.jsonl", paths)
+            self.assertNotIn("02-search/cards/claim_cards.jsonl", paths)
+            self.assertNotIn("02-search/traces/retrieval_rounds.jsonl", paths)
+            self.assertNotIn("02-search/traces/screening_decisions.jsonl", paths)
+            self.assertNotIn("02-search/review/coverage_report.json", paths)
             self.assertNotIn("source_plan.json", paths)
             self.assertNotIn("activity_log.jsonl", paths)
             self.assertNotIn("evidence_ledger.jsonl", paths)

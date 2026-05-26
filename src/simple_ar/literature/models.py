@@ -20,6 +20,7 @@ class Paper:
         source: Metadata source name.
         source_id: Original provider identifier before normalization.
         doi: DOI when available.
+        fulltext_url: Optional direct full-text URL or provider open-access hint.
     """
 
     id: str
@@ -32,6 +33,7 @@ class Paper:
     source: str = "arxiv"
     source_id: str | None = None
     doi: str | None = None
+    fulltext_url: str | None = None
 
     def to_row(self) -> dict[str, Any]:
         """Convert paper metadata into a JSON-serializable row."""
@@ -46,6 +48,7 @@ class Paper:
             "source": self.source,
             "source_id": self.source_id,
             "doi": self.doi,
+            "fulltext_url": self.fulltext_url,
         }
 
     @classmethod
@@ -62,6 +65,7 @@ class Paper:
             source=str(row.get("source", "unknown")),
             source_id=str(row["source_id"]) if row.get("source_id") else None,
             doi=str(row["doi"]) if row.get("doi") else None,
+            fulltext_url=str(row["fulltext_url"]) if row.get("fulltext_url") else None,
         )
 
 

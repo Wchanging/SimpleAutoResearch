@@ -91,7 +91,7 @@ plan -> search -> read -> synthesize -> design experiment
 | 阶段 | 主要输出 | 目的 |
 | --- | --- | --- |
 | `plan` | `goal.md`, `problem.md` | 把主题收束成具体研究问题；启用 LLM 时由 LLM 支持。 |
-| `search` | `research_questions.json`, `query_plan.json`, `source_plan.json`, `retrieval_rounds.jsonl`, `screening_decisions.jsonl`, `papers.jsonl`, `search_meta.json` | 拆解主题、执行首轮检索、去重/筛选 metadata，并从配置源收集文献记录。 |
+| `search` | `planning/`、`traces/`、`review/`、`papers.jsonl`、`search_meta.json` | 拆解主题、执行检索、去重/筛选 metadata、检查覆盖度，并从配置源收集文献记录。 |
 | `read` | `paper_notes.json`, `notes.md` | 把论文 metadata 转成结构化 notes；启用 LLM 时由 LLM 支持。 |
 | `synthesize` | `synthesis.md`, `hypothesis.md` | 产出有边界的 synthesis 和可测试假设。 |
 | `design` | `experiment_plan.json` | 选择安全实验模板和参数。 |
@@ -101,11 +101,15 @@ plan -> search -> read -> synthesize -> design experiment
 
 ## Search 与 LLM 边界
 
-- `02-search/source_plan.json` 会记录本次计划使用的 query、source 顺序、本地文档、检索模式、cache/index hints 和预算。
-- `02-search/research_questions.json` 会记录子问题和需要覆盖的 evidence facets，例如 method、benchmark、dataset 和 code link。LLM 关闭时使用 deterministic planner；`[research].planner = "auto"` 或 `"llm"` 时可由模型参与生成。
-- `02-search/query_plan.json` 会记录 seed queries、planner 生成的 follow-up queries、结构化 title/abstract keyword hints 和计划 retrieval-round 预算。
-- `02-search/retrieval_rounds.jsonl` 会记录实际执行的 source/query 尝试。Day4 会执行第一轮检索，并把 normalized query、facet、title/abstract keyword 意图写入 trace；后续轮次仍由 query plan 预算显式保留。
-- `02-search/screening_decisions.jsonl` 会记录写入 `papers.jsonl` 前的去重和轻量相关性筛选决策。
+- `02-search/planning/research_plan.json` 会在一个紧凑 artifact 中记录子问题、需要覆盖的 evidence facets、seed/expanded queries、结构化 title/abstract keyword hints、source 顺序、本地文档、检索模式、cache/index hints 和预算。LLM 关闭时使用 deterministic planner；`[research].planner = "auto"` 或 `"llm"` 时可由模型参与生成。
+- `02-search/traces/retrieval_rounds.jsonl` 会记录实际执行的 source/query 尝试。第一轮会把 normalized query、facet、title/abstract keyword 意图写入 trace；coverage-driven follow-up rounds 复用同一 trace 格式。
+- `02-search/traces/screening_decisions.jsonl` 会记录写入 `papers.jsonl` 前的去重和轻量相关性筛选决策。
+- `02-search/review/coverage_report.json` 和 `02-search/review/coverage_report.md` 会记录 required facets 覆盖情况和缺失问题；如果还有轮次预算，search 阶段会先为未覆盖 facets 跑一个有界 follow-up round，再写出最终论文列表。
+- `02-search/documents/documents.jsonl` 会把已选 metadata 和配置的本地文件统一记录为 document records，并保存 extraction status。在线 metadata 通常是 `metadata_only`；本地 Markdown/text 可以是 `parsed`；不支持或不可用文件会记录为 `skipped` 或 `failed`。
+- `02-search/documents/cache_manifest.json` 会汇总 cache/index 意图、extraction status 和 source counts。
+- `02-search/documents/fulltext_manifest.json` 会记录 arXiv/OpenAlex/local-file 全文 hints 和 fetch 预算决策。Day9 不下载远程 PDF；后续 parser 阶段会消费这个 manifest。
+- `02-search/research_index/chunks.jsonl` 会保存从摘要和已解析本地文件生成的可移植 chunks，是后续 evidence-card 抽取的 source of truth。
+- `02-search/research_index/index_meta.json` 会记录本地 index backend，以及可选 SQLite FTS 状态。
 - Live search 使用配置中的 source 顺序。默认先用 OpenAlex，再用 Semantic Scholar，最后用 arXiv。未设置 `--strict-search` 且 source plan 允许 cache 时，live 失败后会使用缓存 metadata。
 - 当前 source strategy 是 ordered fallback，不是 full source union：同一个 query 只要某个 provider 返回候选，后续 provider 就不会继续调用。
 - `local_files` 可以把用户提供的 Markdown/text 笔记作为保守的 metadata-like records。当前还不解析 PDF。
@@ -134,13 +138,27 @@ runs/<run-id>/
   evidence_ledger.jsonl
   01-plan/
   02-search/
-    research_questions.json
-    query_plan.json
-    source_plan.json
-    retrieval_rounds.jsonl
-    screening_decisions.jsonl
     papers.jsonl
     search_meta.json
+    planning/
+      research_plan.json
+    documents/
+      documents.jsonl
+      cache_manifest.json
+      fulltext_manifest.json
+    research_index/
+      chunks.jsonl
+      index_meta.json
+      sqlite_fts.db  # 仅 sqlite_fts/hybrid index 成功时出现
+    cards/
+      paper_cards.jsonl
+      claim_cards.jsonl
+    traces/
+      retrieval_rounds.jsonl
+      screening_decisions.jsonl
+    review/
+      coverage_report.json
+      coverage_report.md
   03-read/
   04-synthesize/
   05-design/
@@ -161,15 +179,21 @@ runs/<run-id>/
 - `artifact_index.json`：由 `inspect` 或 `search-artifacts` 生成的本地 artifact index。
 - `artifact_chunks.jsonl`：用于本地 retrieval 的 line-addressable chunks。
 - `artifact_search_results.json`：最近一次 artifact search 结果，只由 artifact search 命令生成。
-- `source_plan.json`：artifact-retrieval source plan，描述每个阶段应该参考哪些 run artifacts；它和 `02-search/source_plan.json` 不是同一个文件。
+- `source_plan.json`：artifact-retrieval source plan，描述每个阶段应该参考哪些 run artifacts；它和 `02-search/planning/research_plan.json` 内部的文献 `source_plan` section 不是同一个东西。
 - `activity_log.jsonl`：source planning 和 retrieval actions 的结构化日志。
 - `evidence_ledger.jsonl`：阶段使用的 snippets，包含 path 和 line range。
-- `02-search/source_plan.json`：本次运行的文献 source plan，包含 provider 顺序、本地文档路径、query 列表、检索模式和预算。
-- `02-search/research_questions.json`：用于避免只依赖用户初始关键词的研究问题拆解。
-- `02-search/query_plan.json`：包含 seed/follow-up queries，以及为后续 source-specific normalization 保留 title/abstract keyword 意图的 `query_specs`。
-- `02-search/retrieval_rounds.jsonl`：实际执行的 source/query 尝试，包含返回数量、错误和简洁 query 意图 trace。
-- `02-search/screening_decisions.jsonl`：retrieved metadata candidates 的 keep/discard 决策。
-- `02-search/search_meta.json`：provider 尝试记录和最终选用 source。
+- `02-search/planning/research_plan.json`：紧凑的 search planning artifact，内部包含研究问题拆解、可执行 query plan 和文献 source plan sections。
+- `02-search/traces/retrieval_rounds.jsonl`：实际执行的 source/query 尝试，包含返回数量、错误和简洁 query 意图 trace。
+- `02-search/traces/screening_decisions.jsonl`：retrieved metadata candidates 的 keep/discard 决策。
+- `02-search/review/coverage_report.json` / `coverage_report.md`：required facets 覆盖情况、缺失问题状态和 follow-up query 决策。
+- `02-search/documents/documents.jsonl`：metadata 和本地文件的标准化 document records；可用时包含 hash 和 parser status。
+- `02-search/documents/cache_manifest.json`：cache、index、full-text 和 extraction-status 汇总。
+- `02-search/documents/fulltext_manifest.json`：全文 hints、候选选择、blocked/skipped 原因，以及 parser/fetch 预算设置。
+- `02-search/research_index/chunks.jsonl`：后续 retrieval、evidence-card extraction 和 report grounding 使用的可移植本地 chunk store。
+- `02-search/research_index/index_meta.json`：本地 index backend 和可选 SQLite FTS 状态。
+- `02-search/cards/paper_cards.jsonl`：deterministic paper cards，带 evidence refs，供后续 gap、idea 和 report stages 使用。
+- `02-search/cards/claim_cards.jsonl`：绑定 chunk id 的保守 claim cards；最终报告使用前仍应经过 report audit。
+- `02-search/search_meta.json`：最终选用 source、状态、数量，以及 planning/trace/review artifact 路径。
 - `02-search/papers.jsonl`：传给 `03-read` 的标准化 metadata rows。
 - `05-design/generated_code_task.md`：仅当内嵌 `code_task_project` 没有 task file 时生成。
 - `05-design/generated_code_task_meta.json`：生成 task file 的 provenance。

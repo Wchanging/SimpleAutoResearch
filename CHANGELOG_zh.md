@@ -9,20 +9,36 @@
 ### Added
 
 - 添加 V2.3 research source-planning 基础：`02-search` 现在会写出
-  `source_plan.json`，记录计划 query、source 顺序、research mode、
-  本地文档、cache/index 偏好和轻量预算。
+  `planning/research_plan.json`，记录研究问题、计划 query、source 顺序、
+  research mode、本地文档、cache/index 偏好和轻量预算。
 - 顶层 run config 现在支持 `[research]`，包括 `sources`、`queries`、
   `local_documents`、`cache`、`index_backend` 和 `[research.budget]`。
-- 新增 V2.3 Day 3 research-question 和 query-plan 产物：
-  `02-search/research_questions.json` 与 `02-search/query_plan.json`。
+- 新增 V2.3 Day 3 research-question 和 query-plan sections，统一放在
+  `02-search/planning/research_plan.json` 中。
 - 新增可选 LLM-backed research planning，可通过 `[research].planner` 控制；
   离线或 provider 失败时仍保留 deterministic planning 兜底。
-- `query_plan.json` 新增结构化 `query_specs`，让 LLM research planner 保留
+- research plan 中新增结构化 `query_specs`，让 LLM research planner 保留
   title/abstract keyword 意图，而不是只输出偏浏览器搜索风格的 query 字符串。
 - 新增 V2.3 Day 4 检索 trace 产物：
-  `02-search/retrieval_rounds.jsonl` 和
-  `02-search/screening_decisions.jsonl`，记录实际执行的 source/query 尝试、
+  `02-search/traces/retrieval_rounds.jsonl` 和
+  `02-search/traces/screening_decisions.jsonl`，记录实际执行的 source/query 尝试、
   简洁 query 意图 trace、去重和轻量相关性筛选决策，再写入 `papers.jsonl`。
+- 新增 V2.3 Day 5 coverage 产物：
+  `02-search/review/coverage_report.json` 和 `02-search/review/coverage_report.md`，
+  记录 required facets 覆盖情况、缺失 facets、问题覆盖度和预算内 follow-up query 建议。
+- 新增 V2.3 Day 6 document-store 产物：
+  `02-search/documents/documents.jsonl` 和
+  `02-search/documents/cache_manifest.json`，记录已选 metadata、配置的本地文件、
+  extraction status、source counts，以及 cache/full-text 意图，不下载受限全文。
+- 新增 V2.3 Day 7 本地 research-index 产物：
+  `02-search/research_index/chunks.jsonl` 和
+  `02-search/research_index/index_meta.json`；在 `sqlite_fts` / `hybrid` 模式下可选生成 SQLite FTS。
+- 新增 V2.3 Day 8 deterministic evidence-card 产物：
+  `02-search/cards/paper_cards.jsonl` 和
+  `02-search/cards/claim_cards.jsonl`，基于 document chunks 生成，并带 evidence refs 供后续 audit 使用。
+- 新增 V2.3 Day 9 full-text planning 产物：
+  `02-search/documents/fulltext_manifest.json`，记录 arXiv/OpenAlex/local-file 全文 hints、
+  fetch 预算决策，以及 blocked/skipped 原因；当前不会下载远程 PDF。
 - 新增 Semantic Scholar 在线 metadata connector，默认位于 OpenAlex 和 arXiv
   之间，让 V2.3 research search 不依赖 fixture metadata 时也有更广的论文来源。
 - 新增本地研究源示例 `examples/run_configs/local_research_report.toml`，
@@ -33,16 +49,30 @@
 - 搜索执行现在通过 research connector wrapper 调用 OpenAlex、Semantic Scholar、
   arXiv 和本地 Markdown/text 文件源，同时保留已有 fixture 与 cache fallback 行为。
 - search 阶段现在会先把 seed queries 扩展成受限的 facet-driven follow-up queries，
-  再构建 `source_plan.json`；LLM 开启时，`planner = "auto"` 可以让模型参与
+  再构建 `research_plan.json`；LLM 开启时，`planner = "auto"` 可以让模型参与
   更强的 question decomposition 和 query 术语扩展。
+- 当 coverage 仍有缺口且 retrieval-round 预算允许时，search 会继续跑第二轮
+  ordered-fallback follow-up retrieval，并重新筛选候选文献。
+- Search 阶段的 planning、trace 和 review 产物现在分别放在
+  `02-search/planning/`、`02-search/traces/` 和 `02-search/review/` 下，
+  避免较大的 research run 把所有中间文件平铺在阶段目录根部。
+- research planning 现在合并为一个 `planning/research_plan.json`，避免把研究问题、
+  query plan 和 source plan 拆成三个小 JSON，同时保留可审查的内部 sections。
 - 本地 Markdown/text 搜索现在使用轻量 keyword-overlap 匹配，而不是要求
   query 字符串逐字出现，使规范化后的 paper-search query 更适合短笔记源。
+- 本地 Markdown/text 文档现在会生成带 content hash 的 parsed document record；
+  PDF 输入会先记录为 skipped 或 failed，除非明确启用 full-text 意图且可选 parser 可用。
+- 摘要和已解析本地文件现在会切成可移植本地 index chunks，为后续 evidence cards
+  和 RAG-style retrieval 提供稳定输入，不需要现在就引入 embedding。
+- OpenAlex metadata 现在会尽量保留 open-access URL hints；arXiv records 也能推导 provider
+  PDF hints，供后续受控全文获取/解析阶段使用。
+- search 阶段现在会在 `search_meta.json` 中记录 paper/claim card 数量，方便检查 evidence layer 是否生成完整。
 - 拆分公开命令和配置文档：`CLI_REFERENCE_zh.md` 现在只聚焦命令语法、参数表和产物；
   新增 `CONFIG_REFERENCE_zh.md` 集中说明 TOML schema、完整配置和 workspace 模式变体。
 - 配置文档补充了更完整的 inline comments 和关键字段说明，便于理解 `max_papers`、
   research budgets、workspace modes 和 execute budgets 等不够自解释的设置。
 - README、Usage、CLI Reference 和 Workflows 文档已补充
-  `02-search/source_plan.json`、`[research]` 配置、本地文件源，以及当前
+  `02-search/planning/research_plan.json`、`[research]` 配置、本地文件源，以及当前
   V2.3 边界：PDF 解析和向量检索还未启用。
 
 ## 2026-05-23

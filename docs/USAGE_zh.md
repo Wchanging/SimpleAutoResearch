@@ -113,7 +113,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 默认搜索行为：
 
-- `search` 会先生成 `02-search/source_plan.json`，记录本次计划使用的 query、source、模式和预算。
+- `search` 会先生成 `02-search/planning/research_plan.json`，记录本次计划使用的研究问题、query、source、模式和预算。
 - 如果没有额外配置，`search` 先查 OpenAlex，再查 Semantic Scholar，最后查 arXiv。
 - 当前默认是按顺序补偿：同一个计划 query 一旦某个 live source 返回候选文献，
   后续 source 会跳过，以减少限流压力和重复噪声。
@@ -151,6 +151,10 @@ max_queries = 6
 required_facets = ["method", "benchmark", "dataset", "code_link"]
 use_fulltext = false
 allow_pdf_download = false
+max_fulltext_documents = 6
+max_pdf_mb = 20
+keep_raw_pdf = false
+parser_backend = "basic"
 cache = true
 index_backend = "sqlite_fts"
 
@@ -163,12 +167,18 @@ max_llm_calls = 8
 
 搜索阶段会写出：
 
-- `02-search/research_questions.json`：从 topic 和 problem artifact 拆出的子问题和需要覆盖的 evidence facets。
-- `02-search/query_plan.json`：seed queries、planner 生成的 follow-up queries、带 title/abstract keyword hints 的 `query_specs`、required facets 和计划 retrieval-round 预算。
-- `02-search/source_plan.json`：计划中的 queries、sources、检索模式、本地文档、cache/index 偏好和预算。
-- `02-search/retrieval_rounds.jsonl`：每次实际执行的 source/query 尝试，包括状态、返回数量、错误/cache 命中，以及 facet、title/abstract keywords 等简洁 query 意图 trace。
-- `02-search/screening_decisions.jsonl`：对返回 metadata 的去重和轻量 relevance screening 决策。
-- `02-search/search_meta.json`：provider 尝试记录、最终选用 source、状态和返回数量。
+- `02-search/planning/research_plan.json`：一个紧凑的计划产物，内部包含 `research_questions`、`query_plan` 和 `source_plan` 三个 section，记录子问题、seed/expanded queries、带 title/abstract keyword hints 的 `query_specs`、计划 sources、检索模式、本地文档、cache/index 偏好和预算。
+- `02-search/traces/retrieval_rounds.jsonl`：每次实际执行的 source/query 尝试，包括状态、返回数量、错误/cache 命中，以及 facet、title/abstract keywords 等简洁 query 意图 trace。
+- `02-search/traces/screening_decisions.jsonl`：对返回 metadata 的去重和轻量 relevance screening 决策。
+- `02-search/review/coverage_report.json` 和 `02-search/review/coverage_report.md`：required facets 覆盖情况、缺失研究问题和 follow-up query 决策。
+- `02-search/documents/documents.jsonl`：标准化 document records，覆盖已选 metadata 和配置的本地文件，并记录 `metadata_only`、`parsed`、`skipped`、`failed` 等 extraction status。
+- `02-search/documents/cache_manifest.json`：cache/extraction 汇总，包含 source counts、status counts 和 full-text/PDF 意图开关。
+- `02-search/documents/fulltext_manifest.json`：全文 hint 和 fetch 预算决策。Day9 会记录 arXiv/OpenAlex/local-file hints，但不会下载远程 PDF。
+- `02-search/research_index/chunks.jsonl`：从摘要和已解析本地文件生成的可移植本地 chunks。
+- `02-search/research_index/index_meta.json`：本地 index 汇总；在 `sqlite_fts` 或 `hybrid` 模式下还会记录可选 SQLite FTS 状态。
+- `02-search/cards/paper_cards.jsonl`：deterministic paper-level evidence cards，包含 problem/method/metric/limitation hints 和 source chunk refs。
+- `02-search/cards/claim_cards.jsonl`：保守的 claim cards，每条都绑定 chunk id。这些还不是最终报告 claim，后续 report 阶段仍需要 audit 后再使用。
+- `02-search/search_meta.json`：最终选用 source、状态、返回数量，以及 planning/trace/review artifact 路径。
 - `02-search/papers.jsonl`：传给 `read` 阶段的标准化论文 metadata。
 
 `[research].planner = "auto"` 会在 `[llm].enabled = true` 时调用 LLM planner，
@@ -176,13 +186,16 @@ max_llm_calls = 8
 deterministic planning。想要完全可复现、无额外 LLM 调用时设为 `"deterministic"`；
 明确希望模型参与检索规划时设为 `"llm"`。
 
+当 `[research].max_retrieval_rounds` 大于 `1` 时，search 阶段会根据仍未覆盖的
+required facets，在写出最终 `papers.jsonl` 前执行一个有预算限制的第二轮 follow-up 检索。
+
 本地 Markdown/text 笔记也可以作为保守的研究源使用，不需要调用 live literature provider：
 
 ```bash
 uv run simple-ar run --config examples/run_configs/local_research_report.toml
 ```
 
-这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。当前 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取，并使用轻量 keyword-overlap 匹配，而不是要求完整 query 字符串逐字出现；PDF 解析、文档切块和向量检索会放在后续 evidence engine 中继续实现。
+这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。当前 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取，并使用轻量 keyword-overlap 匹配，而不是要求完整 query 字符串逐字出现。Day6 document store 会把本地文件 hash 和 extraction status 写入 `documents/documents.jsonl`；PDF 输入会先记录为 skipped/failed，除非后续接入可用 parser 且明确启用 full-text 意图。文档切块和向量检索会放在后续 evidence engine 中继续实现。
 
 ### 恢复和查看状态
 

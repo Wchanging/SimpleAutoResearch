@@ -60,6 +60,10 @@ def load_pipeline_run_config(config_path: str | None) -> dict[str, object]:
     _set_string_list(result, "research_required_facets", research.get("required_facets"))
     _set_bool(result, "research_use_fulltext", research.get("use_fulltext"))
     _set_bool(result, "research_allow_pdf_download", research.get("allow_pdf_download"))
+    _set_int(result, "research_max_fulltext_documents", research.get("max_fulltext_documents"))
+    _set_int(result, "research_max_pdf_mb", research.get("max_pdf_mb"))
+    _set_bool(result, "research_keep_raw_pdf", research.get("keep_raw_pdf"))
+    _set_string(result, "research_parser_backend", research.get("parser_backend"))
     _set_bool(result, "research_cache", research.get("cache"))
     _set_string(result, "research_index_backend", research.get("index_backend"))
     _set_resolved_string_list(result, "research_local_documents", research.get("local_documents"), path)
@@ -68,6 +72,7 @@ def load_pipeline_run_config(config_path: str | None) -> dict[str, object]:
     _set_int(result, "research_max_chunks", research_budget.get("max_chunks"))
     _set_int(result, "research_max_context_tokens", research_budget.get("max_context_tokens"))
     _set_int(result, "research_max_llm_calls", research_budget.get("max_llm_calls"))
+    _set_int(result, "research_max_follow_up_queries", research_budget.get("max_follow_up_queries"))
 
     retrieval = _table(data, "retrieval")
     _set_bool(result, "use_retrieval", retrieval.get("enabled"))

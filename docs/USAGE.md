@@ -125,7 +125,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 Default search behavior:
 
-- `search` builds `02-search/source_plan.json` before querying providers.
+- `search` builds `02-search/planning/research_plan.json` before querying providers.
 - Unless configured otherwise, `search` queries OpenAlex first, then Semantic
   Scholar, then arXiv.
 - For each planned query, the current default is ordered fallback: once a live
@@ -166,6 +166,10 @@ max_queries = 6
 required_facets = ["method", "benchmark", "dataset", "code_link"]
 use_fulltext = false
 allow_pdf_download = false
+max_fulltext_documents = 6
+max_pdf_mb = 20
+keep_raw_pdf = false
+parser_backend = "basic"
 cache = true
 index_backend = "sqlite_fts"
 
@@ -178,20 +182,36 @@ max_llm_calls = 8
 
 The search stage writes:
 
-- `02-search/research_questions.json`: scoped sub-questions and required
-  evidence facets derived from the topic and problem artifact.
-- `02-search/query_plan.json`: seed queries, planner-produced follow-up
-  queries, structured `query_specs` with title/abstract keyword hints,
-  required facets, and planned retrieval-round budget.
-- `02-search/source_plan.json`: planned queries, sources, retrieval mode, local
-  document hints, cache/index preferences, and budget.
-- `02-search/retrieval_rounds.jsonl`: one row per executed source/query attempt,
+- `02-search/planning/research_plan.json`: one compact planning artifact with
+  `research_questions`, `query_plan`, and `source_plan` sections. It records
+  scoped sub-questions, seed and expanded queries, source order, retrieval mode,
+  local document hints, cache/index preferences, and lightweight budgets.
+- `02-search/traces/retrieval_rounds.jsonl`: one row per executed source/query attempt,
   including status, returned count, errors/cache hits, and compact query-intent
   traces such as facet plus title/abstract keyword hints.
-- `02-search/screening_decisions.jsonl`: deduplication and lightweight
+- `02-search/traces/screening_decisions.jsonl`: deduplication and lightweight
   relevance-screening decisions for returned metadata.
-- `02-search/search_meta.json`: provider attempts, selected source, status,
-  and returned-paper count.
+- `02-search/review/coverage_report.json` and `02-search/review/coverage_report.md`:
+  required facet coverage, missing research questions, and follow-up query decisions.
+- `02-search/documents/documents.jsonl`: normalized document records for selected
+  metadata and configured local files, with extraction status such as
+  `metadata_only`, `parsed`, `skipped`, or `failed`.
+- `02-search/documents/cache_manifest.json`: cache/extraction summary, source
+  counts, status counts, and full-text/PDF intent flags.
+- `02-search/documents/fulltext_manifest.json`: full-text hints and fetch
+  budget decisions. Day9 records arXiv/OpenAlex/local-file hints without
+  downloading remote PDFs.
+- `02-search/research_index/chunks.jsonl`: portable local chunks built from
+  abstracts and parsed local files.
+- `02-search/research_index/index_meta.json`: local index summary. In
+  `sqlite_fts` or `hybrid` mode it also records the optional SQLite FTS status.
+- `02-search/cards/paper_cards.jsonl`: deterministic paper-level evidence
+  cards with problem/method/metric/limitation hints and source chunk refs.
+- `02-search/cards/claim_cards.jsonl`: conservative claim cards grounded in
+  chunk ids. These are not final paper claims; later report stages still audit
+  them before use.
+- `02-search/search_meta.json`: selected source, status, returned-paper count,
+  and pointers to planning/trace/review artifacts.
 - `02-search/papers.jsonl`: normalized paper metadata passed to `read`.
 
 `[research].planner = "auto"` uses an LLM planner when `[llm].enabled = true`
@@ -199,6 +219,10 @@ and falls back to deterministic planning when the provider is unavailable.
 Set it to `"deterministic"` when you want repeatable no-extra-LLM query
 planning, or `"llm"` when you explicitly want model-backed question and query
 expansion.
+
+When `[research].max_retrieval_rounds` is greater than `1`, the search stage can
+use uncovered required facets to run a bounded second follow-up round before it
+writes the final `papers.jsonl`.
 
 Local Markdown/text notes can be used as a conservative source without live
 literature-provider calls:
@@ -211,8 +235,11 @@ That example config sets `[research].sources = ["local_files"]` and points
 `[research].local_documents` at `examples/research/local_agent_simulation_notes.md`.
 The local-file connector is intentionally conservative: it reads `.md` and
 `.txt` files as metadata-like records and uses lightweight keyword-overlap
-matching rather than exact query-string matching. PDF parsing, document
-chunking, and vector retrieval are planned later in the V2.3 evidence engine.
+matching rather than exact query-string matching. The Day6 document store also
+records local file hashes and extraction status in `documents/documents.jsonl`.
+PDF inputs are recorded as skipped/failed unless an optional parser is available
+and full-text intent is enabled; stronger chunking and vector retrieval are
+planned later in the V2.3 evidence engine.
 
 ### Resume And Status
 

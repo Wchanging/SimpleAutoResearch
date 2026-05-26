@@ -34,6 +34,24 @@ from simple_ar.research.connectors import (
     SemanticScholarConnector,
 )
 from simple_ar.research.contracts import QueryPlan, ResearchQuestion, SourcePlan
+from simple_ar.research.coverage import build_coverage_report, coverage_report_markdown
+from simple_ar.research.artifacts import (
+    SEARCH_CACHE_MANIFEST,
+    SEARCH_CHUNKS,
+    SEARCH_CLAIM_CARDS,
+    SEARCH_COVERAGE_JSON,
+    SEARCH_COVERAGE_MD,
+    SEARCH_DOCUMENTS,
+    SEARCH_INDEX_META,
+    SEARCH_META,
+    SEARCH_PAPERS,
+    SEARCH_PAPER_CARDS,
+    SEARCH_RESEARCH_PLAN,
+    SEARCH_RETRIEVAL_ROUNDS,
+    SEARCH_SCREENING_DECISIONS,
+    build_research_plan_artifact,
+    write_search_document_artifacts,
+)
 from simple_ar.research.prompts import (
     CODE_TASK_DESIGN_SYSTEM,
     PLAN_SYSTEM,
@@ -100,15 +118,6 @@ def execute_search(ctx: Context) -> None:
     query = _search_query(ctx, problem)
     max_papers = _max_papers(ctx)
     research_questions, query_plan = _plan_research_retrieval(ctx, problem, query)
-    write_json(
-        ctx.artifact_path("research_questions.json"),
-        {
-            "schema_version": "research_questions.v1",
-            "planner": query_plan.planner,
-            "questions": [question.to_row() for question in research_questions],
-        },
-    )
-    write_json(ctx.artifact_path("query_plan.json"), query_plan.to_row())
     source_config = dict(ctx.config)
     if query_plan.queries:
         source_config["research_queries"] = list(query_plan.queries)
@@ -119,7 +128,14 @@ def execute_search(ctx: Context) -> None:
         default_query=query,
         default_max_results=max_papers,
     )
-    write_json(ctx.artifact_path("source_plan.json"), source_plan.to_row())
+    write_json(
+        ctx.artifact_path(SEARCH_RESEARCH_PLAN),
+        build_research_plan_artifact(
+            questions=research_questions,
+            query_plan=query_plan,
+            source_plan=source_plan,
+        ),
+    )
     planned_query = primary_query(source_plan) or query
 
     papers: list[Paper]
@@ -129,9 +145,7 @@ def execute_search(ctx: Context) -> None:
         "max_papers": max_papers,
         "sources": list(source_plan.sources),
         "source": "arxiv" if ctx.config.get("use_arxiv") is True else "fixture",
-        "source_plan": "source_plan.json",
-        "research_questions": "research_questions.json",
-        "query_plan": "query_plan.json",
+        "research_plan": SEARCH_RESEARCH_PLAN,
         "research_planner": query_plan.planner,
         "query_plan_max_rounds": query_plan.max_rounds,
         "query_plan_auto_expansion": query_plan.auto_expansion,
@@ -139,7 +153,7 @@ def execute_search(ctx: Context) -> None:
         "status": "pending",
     }
     if _should_use_source_plan(ctx, source_plan):
-        papers, meta_update = _live_literature_search(ctx, source_plan, problem, query_plan)
+        papers, meta_update = _live_literature_search(ctx, source_plan, problem, query_plan, research_questions)
         meta.update(meta_update)
     else:
         ctx.emit("stage_message", "Using fixture paper metadata because --offline-search is enabled.")
@@ -170,23 +184,41 @@ def execute_search(ctx: Context) -> None:
             max_documents=max_papers,
             negative_terms=query_plan.negative_terms,
         )
-        write_jsonl(ctx.artifact_path("retrieval_rounds.jsonl"), retrieval_rows)
-        write_jsonl(ctx.artifact_path("screening_decisions.jsonl"), screening_rows)
+        coverage_report = build_coverage_report(
+            topic=ctx.topic,
+            questions=research_questions,
+            query_plan=query_plan,
+            screening_rows=screening_rows,
+            retrieval_rows=retrieval_rows,
+            max_documents=max_papers,
+            next_query_limit=0,
+        )
+        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
+        write_jsonl(ctx.artifact_path(SEARCH_SCREENING_DECISIONS), screening_rows)
+        _write_coverage_artifacts(ctx, coverage_report)
         meta.update(
             {
                 "source": "fixture",
                 "status": "offline_fixture",
                 "returned": len(papers),
-                "attempts": retrieval_rows,
-                "retrieval_rounds": "retrieval_rounds.jsonl",
-                "screening_decisions": "screening_decisions.jsonl",
+                "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
+                "screening_decisions": SEARCH_SCREENING_DECISIONS,
+                "coverage_report": SEARCH_COVERAGE_JSON,
+                "attempt_count": len(retrieval_rows),
                 "screened_candidates": len(screening_rows),
                 "kept_after_screening": len(papers),
             }
         )
 
-    write_jsonl(ctx.artifact_path("papers.jsonl"), [paper.to_row() for paper in papers])
-    write_json(ctx.artifact_path("search_meta.json"), meta)
+    meta.update(
+        write_search_document_artifacts(
+            stage_dir=ctx.stage_dir(),
+            papers=papers,
+            source_plan=source_plan,
+        )
+    )
+    write_jsonl(ctx.artifact_path(SEARCH_PAPERS), [paper.to_row() for paper in papers])
+    write_json(ctx.artifact_path(SEARCH_META), meta)
 
 
 def _plan_research_retrieval(
@@ -263,6 +295,7 @@ def _live_literature_search(
     source_plan: SourcePlan,
     problem: str,
     query_plan: QueryPlan,
+    research_questions: list[ResearchQuestion],
 ) -> tuple[list[Paper], dict[str, object]]:
     """Search real literature sources before considering explicit fixture fallback.
 
@@ -285,36 +318,16 @@ def _live_literature_search(
     query_specs = _query_specs_by_query(query_plan)
     query_attempts = _planned_query_attempts(source_plan)
 
-    for query_index, query in enumerate(query_attempts, start=1):
-        query_spec = query_specs.get(query, {})
-        facet = str(query_spec.get("facet") or "")
-        for source in source_plan.sources:
-            papers, attempt = _search_source_once(
-                ctx,
-                source_plan,
-                source=source,
-                query=query,
-                query_index=query_index,
-                round_index=1,
-            )
-            _attach_query_trace(attempt, query_spec)
-            retrieval_rows.append(attempt)
-            for paper in papers:
-                candidates.append(
-                    RetrievalCandidate(
-                        paper=paper,
-                        source=str(attempt.get("source") or source),
-                        query=query,
-                        query_index=query_index,
-                        round_index=1,
-                        facet=facet,
-                        returned_source=str(attempt.get("returned_source") or attempt.get("source") or source),
-                    )
-                )
-            if papers:
-                break
-        if len({candidate.paper.id for candidate in candidates}) >= max_documents:
-            break
+    _collect_retrieval_round(
+        ctx,
+        source_plan,
+        queries=query_attempts,
+        query_specs=query_specs,
+        retrieval_rows=retrieval_rows,
+        candidates=candidates,
+        round_index=1,
+        max_documents=max_documents,
+    )
 
     if candidates:
         papers, screening_rows = screen_retrieval_candidates(
@@ -322,20 +335,67 @@ def _live_literature_search(
             max_documents=max_documents,
             negative_terms=query_plan.negative_terms,
         )
-        write_jsonl(ctx.artifact_path("retrieval_rounds.jsonl"), retrieval_rows)
-        write_jsonl(ctx.artifact_path("screening_decisions.jsonl"), screening_rows)
+        coverage_report = build_coverage_report(
+            topic=ctx.topic,
+            questions=research_questions,
+            query_plan=query_plan,
+            screening_rows=screening_rows,
+            retrieval_rows=retrieval_rows,
+            max_documents=max_documents,
+            next_query_limit=_follow_up_query_limit(source_plan),
+        )
+        follow_up_queries = _coverage_follow_up_queries(coverage_report)
+        if query_plan.max_rounds > 1 and follow_up_queries:
+            ctx.emit(
+                "stage_message",
+                f"Coverage gaps remain; running {len(follow_up_queries)} follow-up query attempt(s).",
+            )
+            follow_up_specs = _coverage_follow_up_specs(coverage_report)
+            _collect_retrieval_round(
+                ctx,
+                source_plan,
+                queries=follow_up_queries,
+                query_specs=follow_up_specs,
+                retrieval_rows=retrieval_rows,
+                candidates=candidates,
+                round_index=2,
+                max_documents=max_documents * 2,
+                start_query_index=len(query_attempts) + 1,
+            )
+            papers, screening_rows = screen_retrieval_candidates(
+                candidates,
+                max_documents=max_documents,
+                negative_terms=query_plan.negative_terms,
+            )
+            coverage_report = build_coverage_report(
+                topic=ctx.topic,
+                questions=research_questions,
+                query_plan=query_plan,
+                screening_rows=screening_rows,
+                retrieval_rows=retrieval_rows,
+                max_documents=max_documents,
+                next_query_limit=0,
+            )
+        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
+        write_jsonl(ctx.artifact_path(SEARCH_SCREENING_DECISIONS), screening_rows)
+        _write_coverage_artifacts(ctx, coverage_report)
         selected_sources = sorted({paper.source for paper in papers}) or ["unknown"]
         return papers, {
             "source": selected_sources[0] if len(selected_sources) == 1 else "mixed",
             "sources_used": selected_sources,
             "status": "ok",
             "returned": len(papers),
-            "attempts": retrieval_rows,
-            "retrieval_rounds": "retrieval_rounds.jsonl",
-            "screening_decisions": "screening_decisions.jsonl",
+            "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
+            "screening_decisions": SEARCH_SCREENING_DECISIONS,
+            "coverage_report": SEARCH_COVERAGE_JSON,
+            "coverage_status": coverage_report.get("status"),
+            "missing_facets": coverage_report.get("missing_facets", []),
+            "attempt_count": len(retrieval_rows),
             "screened_candidates": len(screening_rows),
             "kept_after_screening": len(papers),
-            "executed_retrieval_rounds": 1,
+            "executed_retrieval_rounds": coverage_report.get("retrieval", {}).get("executed_rounds", 1)
+            if isinstance(coverage_report.get("retrieval"), dict)
+            else 1,
             "planned_retrieval_rounds": query_plan.max_rounds,
         }
 
@@ -373,23 +433,129 @@ def _live_literature_search(
                 returned=len(fixture_papers),
             )
         )
-        write_jsonl(ctx.artifact_path("retrieval_rounds.jsonl"), retrieval_rows)
-        write_jsonl(ctx.artifact_path("screening_decisions.jsonl"), screening_rows)
+        coverage_report = build_coverage_report(
+            topic=ctx.topic,
+            questions=research_questions,
+            query_plan=query_plan,
+            screening_rows=screening_rows,
+            retrieval_rows=retrieval_rows,
+            max_documents=max_documents,
+            next_query_limit=0,
+        )
+        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
+        write_jsonl(ctx.artifact_path(SEARCH_SCREENING_DECISIONS), screening_rows)
+        _write_coverage_artifacts(ctx, coverage_report)
         return papers, {
             "source": "fixture",
             "status": "fixture_fallback",
             "allow_fixture_fallback": True,
             "returned": len(papers),
-            "attempts": retrieval_rows,
-            "retrieval_rounds": "retrieval_rounds.jsonl",
-            "screening_decisions": "screening_decisions.jsonl",
+            "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
+            "screening_decisions": SEARCH_SCREENING_DECISIONS,
+            "coverage_report": SEARCH_COVERAGE_JSON,
+            "coverage_status": coverage_report.get("status"),
+            "missing_facets": coverage_report.get("missing_facets", []),
+            "attempt_count": len(retrieval_rows),
             "screened_candidates": len(screening_rows),
             "kept_after_screening": len(papers),
         }
 
-    write_jsonl(ctx.artifact_path("retrieval_rounds.jsonl"), retrieval_rows)
-    write_jsonl(ctx.artifact_path("screening_decisions.jsonl"), [])
+    write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
+    write_jsonl(ctx.artifact_path(SEARCH_SCREENING_DECISIONS), [])
     raise LiteratureSearchError(_live_search_failure_message(retrieval_rows))
+
+
+def _collect_retrieval_round(
+    ctx: Context,
+    source_plan: SourcePlan,
+    *,
+    queries: list[str],
+    query_specs: dict[str, dict[str, object]],
+    retrieval_rows: list[dict[str, object]],
+    candidates: list[RetrievalCandidate],
+    round_index: int,
+    max_documents: int,
+    start_query_index: int = 1,
+) -> None:
+    """Run one bounded retrieval round and append traces/candidates in place."""
+    unique_seen = {candidate.paper.id for candidate in candidates}
+    for offset, query in enumerate(queries):
+        query_index = start_query_index + offset
+        query_spec = query_specs.get(query, {})
+        facet = str(query_spec.get("facet") or "")
+        for source in source_plan.sources:
+            papers, attempt = _search_source_once(
+                ctx,
+                source_plan,
+                source=source,
+                query=query,
+                query_index=query_index,
+                round_index=round_index,
+            )
+            _attach_query_trace(attempt, query_spec)
+            retrieval_rows.append(attempt)
+            for paper in papers:
+                candidates.append(
+                    RetrievalCandidate(
+                        paper=paper,
+                        source=str(attempt.get("source") or source),
+                        query=query,
+                        query_index=query_index,
+                        round_index=round_index,
+                        facet=facet,
+                        returned_source=str(attempt.get("returned_source") or attempt.get("source") or source),
+                    )
+                )
+                unique_seen.add(paper.id)
+            if papers:
+                break
+        if len(unique_seen) >= max_documents:
+            break
+
+
+def _write_coverage_artifacts(ctx: Context, report: dict[str, object]) -> None:
+    write_json(ctx.artifact_path(SEARCH_COVERAGE_JSON), report)
+    write_text(ctx.artifact_path(SEARCH_COVERAGE_MD), coverage_report_markdown(report))
+
+
+def _coverage_follow_up_queries(report: dict[str, object]) -> list[str]:
+    rows = report.get("follow_up_queries")
+    if not isinstance(rows, list):
+        return []
+    queries: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        query = str(row.get("query") or "").strip()
+        if query:
+            queries.append(query)
+    return queries
+
+
+def _coverage_follow_up_specs(report: dict[str, object]) -> dict[str, dict[str, object]]:
+    rows = report.get("follow_up_queries")
+    if not isinstance(rows, list):
+        return {}
+    specs: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        query = str(row.get("query") or "").strip()
+        if not query:
+            continue
+        specs[query] = {
+            "query": query,
+            "facet": str(row.get("facet") or ""),
+            "rationale": str(row.get("reason") or "coverage_follow_up"),
+        }
+    return specs
+
+
+def _follow_up_query_limit(source_plan: SourcePlan) -> int:
+    value = source_plan.budget.get("max_follow_up_queries")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return min(value, 5)
+    return 3
 
 
 def _search_source_once(
@@ -2349,11 +2515,17 @@ def _source_artifacts(ctx: Context) -> dict[str, str]:
         "problem.md",
         "papers.jsonl",
         "search_meta.json",
-        "source_plan.json",
-        "research_questions.json",
-        "query_plan.json",
-        "retrieval_rounds.jsonl",
-        "screening_decisions.jsonl",
+        SEARCH_RESEARCH_PLAN,
+        SEARCH_RETRIEVAL_ROUNDS,
+        SEARCH_SCREENING_DECISIONS,
+        SEARCH_COVERAGE_JSON,
+        SEARCH_COVERAGE_MD,
+        SEARCH_DOCUMENTS,
+        SEARCH_CACHE_MANIFEST,
+        SEARCH_CHUNKS,
+        SEARCH_INDEX_META,
+        SEARCH_PAPER_CARDS,
+        SEARCH_CLAIM_CARDS,
         "activity_log.jsonl",
         "evidence_ledger.jsonl",
         "artifact_index.json",

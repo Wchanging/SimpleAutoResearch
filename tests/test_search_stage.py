@@ -39,15 +39,32 @@ class SearchStageTests(unittest.TestCase):
 
             papers = read_jsonl(ctx.run_dir / "02-search" / "papers.jsonl")
             meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
-            source_plan = read_json(ctx.run_dir / "02-search" / "source_plan.json")
+            research_plan = read_json(ctx.run_dir / "02-search" / "planning" / "research_plan.json")
+            source_plan = research_plan["source_plan"]
+            documents = read_jsonl(ctx.run_dir / "02-search" / "documents" / "documents.jsonl")
+            cache_manifest = read_json(ctx.run_dir / "02-search" / "documents" / "cache_manifest.json")
+            fulltext_manifest = read_json(ctx.run_dir / "02-search" / "documents" / "fulltext_manifest.json")
+            chunks = read_jsonl(ctx.run_dir / "02-search" / "research_index" / "chunks.jsonl")
+            index_meta = read_json(ctx.run_dir / "02-search" / "research_index" / "index_meta.json")
+            paper_cards = read_jsonl(ctx.run_dir / "02-search" / "cards" / "paper_cards.jsonl")
+            claim_cards = read_jsonl(ctx.run_dir / "02-search" / "cards" / "claim_cards.jsonl")
 
             self.assertEqual(papers[0]["source"], "fixture")
             self.assertEqual(meta["status"], "fixture_fallback")
             self.assertTrue(meta["allow_fixture_fallback"])
+            self.assertEqual(research_plan["schema_version"], "research_plan.v1")
             self.assertEqual(source_plan["schema_version"], "source_plan.v1")
             self.assertEqual(source_plan["sources"], ["openalex", "semantic_scholar", "arxiv"])
-            self.assertTrue((ctx.run_dir / "02-search" / "research_questions.json").exists())
-            self.assertTrue((ctx.run_dir / "02-search" / "query_plan.json").exists())
+            self.assertEqual(meta["documents"], "documents/documents.jsonl")
+            self.assertEqual(documents[0]["extraction_status"], "metadata_only")
+            self.assertEqual(cache_manifest["document_count"], len(documents))
+            self.assertEqual(meta["fulltext_manifest"], "documents/fulltext_manifest.json")
+            self.assertEqual(fulltext_manifest["document_count"], len(documents))
+            self.assertEqual(meta["chunks"], "research_index/chunks.jsonl")
+            self.assertEqual(index_meta["chunk_count"], len(chunks))
+            self.assertEqual(meta["paper_cards"], "cards/paper_cards.jsonl")
+            self.assertEqual(meta["paper_card_count"], len(paper_cards))
+            self.assertEqual(meta["claim_card_count"], len(claim_cards))
 
     def test_openalex_success_is_used_before_arxiv(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -62,13 +79,13 @@ class SearchStageTests(unittest.TestCase):
 
             papers = read_jsonl(ctx.run_dir / "02-search" / "papers.jsonl")
             meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
-            source_plan = read_json(ctx.run_dir / "02-search" / "source_plan.json")
+            research_plan = read_json(ctx.run_dir / "02-search" / "planning" / "research_plan.json")
+            source_plan = research_plan["source_plan"]
 
             self.assertEqual(papers[0]["source"], "openalex")
             self.assertEqual(meta["source"], "openalex")
             self.assertEqual(meta["status"], "ok")
-            self.assertEqual(meta["source_plan"], "source_plan.json")
-            self.assertEqual(meta["query_plan"], "query_plan.json")
+            self.assertEqual(meta["research_plan"], "planning/research_plan.json")
             self.assertEqual(source_plan["sources"], ["openalex", "semantic_scholar", "arxiv"])
             self.assertGreaterEqual(len(source_plan["queries"]), 1)
 
@@ -89,7 +106,7 @@ class SearchStageTests(unittest.TestCase):
 
             papers = read_jsonl(ctx.run_dir / "02-search" / "papers.jsonl")
             meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
-            retrieval_rounds = read_jsonl(ctx.run_dir / "02-search" / "retrieval_rounds.jsonl")
+            retrieval_rounds = read_jsonl(ctx.run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl")
 
             self.assertEqual(papers[0]["source"], "semantic_scholar")
             self.assertEqual(meta["source"], "semantic_scholar")
@@ -119,21 +136,37 @@ class SearchStageTests(unittest.TestCase):
 
             papers = read_jsonl(ctx.run_dir / "02-search" / "papers.jsonl")
             meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
-            source_plan = read_json(ctx.run_dir / "02-search" / "source_plan.json")
-            retrieval_rounds = read_jsonl(ctx.run_dir / "02-search" / "retrieval_rounds.jsonl")
-            screening = read_jsonl(ctx.run_dir / "02-search" / "screening_decisions.jsonl")
+            research_plan = read_json(ctx.run_dir / "02-search" / "planning" / "research_plan.json")
+            source_plan = research_plan["source_plan"]
+            retrieval_rounds = read_jsonl(ctx.run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl")
+            screening = read_jsonl(ctx.run_dir / "02-search" / "traces" / "screening_decisions.jsonl")
+            documents = read_jsonl(ctx.run_dir / "02-search" / "documents" / "documents.jsonl")
+            chunks = read_jsonl(ctx.run_dir / "02-search" / "research_index" / "chunks.jsonl")
+            index_meta = read_json(ctx.run_dir / "02-search" / "research_index" / "index_meta.json")
+            paper_cards = read_jsonl(ctx.run_dir / "02-search" / "cards" / "paper_cards.jsonl")
+            claim_cards = read_jsonl(ctx.run_dir / "02-search" / "cards" / "claim_cards.jsonl")
+            fulltext_manifest = read_json(ctx.run_dir / "02-search" / "documents" / "fulltext_manifest.json")
 
             self.assertEqual(papers[0]["source"], "local_files")
             self.assertEqual(meta["source"], "local_files")
             self.assertEqual(meta["status"], "ok")
-            self.assertEqual(meta["retrieval_rounds"], "retrieval_rounds.jsonl")
-            self.assertEqual(meta["screening_decisions"], "screening_decisions.jsonl")
+            self.assertEqual(meta["retrieval_rounds"], "traces/retrieval_rounds.jsonl")
+            self.assertEqual(meta["screening_decisions"], "traces/screening_decisions.jsonl")
             self.assertEqual(source_plan["sources"], ["local_files"])
             self.assertEqual(source_plan["local_documents"], [str(local_note)])
-            self.assertIn("research_questions", meta)
+            self.assertIn("research_plan", meta)
             self.assertGreaterEqual(len(retrieval_rounds), 1)
             self.assertIn("title_keywords", retrieval_rounds[0])
             self.assertTrue(any(row["decision"] == "keep" for row in screening))
+            self.assertEqual(documents[0]["extraction_status"], "parsed")
+            self.assertEqual(documents[0]["parser"], "plain_text")
+            self.assertGreaterEqual(len(chunks), 1)
+            self.assertEqual(index_meta["backend"], "sqlite_fts")
+            self.assertEqual(paper_cards[0]["schema_version"], "paper_card.v1")
+            self.assertTrue(paper_cards[0]["evidence_refs"])
+            self.assertTrue(claim_cards)
+            self.assertTrue(claim_cards[0]["evidence_refs"])
+            self.assertEqual(fulltext_manifest["documents"][0]["hints"][0]["status"], "hint_only")
 
     def test_llm_research_planner_can_expand_queries_before_source_plan(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -158,9 +191,10 @@ class SearchStageTests(unittest.TestCase):
             with patch("simple_ar.stage_handlers._llm_client", return_value=_FakeResearchPlanner()):
                 execute_search(ctx)
 
-            questions = read_json(ctx.run_dir / "02-search" / "research_questions.json")
-            query_plan = read_json(ctx.run_dir / "02-search" / "query_plan.json")
-            source_plan = read_json(ctx.run_dir / "02-search" / "source_plan.json")
+            research_plan = read_json(ctx.run_dir / "02-search" / "planning" / "research_plan.json")
+            questions = research_plan["research_questions"]
+            query_plan = research_plan["query_plan"]
+            source_plan = research_plan["source_plan"]
             meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
 
             self.assertEqual(questions["planner"], "llm")
@@ -172,8 +206,36 @@ class SearchStageTests(unittest.TestCase):
             self.assertTrue(query_plan["query_specs"])
             self.assertIn("title_keywords", query_plan["query_specs"][0])
             self.assertEqual(meta["research_planner"], "llm")
-            self.assertTrue((ctx.run_dir / "02-search" / "retrieval_rounds.jsonl").exists())
-            self.assertTrue((ctx.run_dir / "02-search" / "screening_decisions.jsonl").exists())
+            self.assertTrue((ctx.run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl").exists())
+            self.assertTrue((ctx.run_dir / "02-search" / "traces" / "screening_decisions.jsonl").exists())
+
+    def test_coverage_gap_can_trigger_follow_up_retrieval_round(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            ctx = _search_context(Path(tmp), allow_fixture_fallback=False)
+            ctx.config.update(
+                {
+                    "research_sources": ["openalex"],
+                    "research_queries": ["agent overview"],
+                    "research_required_facets": ["overview", "method"],
+                    "research_max_retrieval_rounds": 2,
+                    "research_max_documents": 1,
+                    "research_max_queries": 3,
+                }
+            )
+
+            with patch("simple_ar.stage_handlers.OpenAlexSearchClient", _CoverageOpenAlexClient), patch(
+                "simple_ar.stage_handlers.put_cache", return_value=None
+            ):
+                execute_search(ctx)
+
+            retrieval_rounds = read_jsonl(ctx.run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl")
+            coverage = read_json(ctx.run_dir / "02-search" / "review" / "coverage_report.json")
+            meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
+
+            self.assertTrue(any(row["round"] == 2 for row in retrieval_rounds))
+            self.assertIn("coverage_report", meta)
+            self.assertEqual(coverage["retrieval"]["executed_rounds"], 2)
 
 
 class _RateLimitedClient:
@@ -218,6 +280,33 @@ class _OpenAlexSuccessClient:
                 authors=["Ada Lovelace"],
                 abstract="OpenAlex metadata.",
                 url="https://openalex.org/W1",
+                source="openalex",
+                source_id="W1",
+            )
+        ]
+
+
+class _CoverageOpenAlexClient:
+    def search(self, query: str, *, max_results: int) -> list[Paper]:
+        if "method" in query or "architecture" in query:
+            return [
+                Paper(
+                    id="method-paper",
+                    title="Agent Method Architecture",
+                    authors=[],
+                    abstract="A method architecture for agent systems.",
+                    url="https://example.test/method",
+                    source="openalex",
+                    source_id="W2",
+                )
+            ]
+        return [
+            Paper(
+                id="overview-paper",
+                title="Agent Overview",
+                authors=[],
+                abstract="An overview of agent systems.",
+                url="https://example.test/overview",
                 source="openalex",
                 source_id="W1",
             )

@@ -27,11 +27,12 @@ experimentation, and gradual extension.
 
 - **Research reports**: run a visible staged pipeline from topic to literature
   notes, synthesis, and report artifacts.
-- **Research source planning**: write `02-search/research_questions.json`,
-  `query_plan.json`, and `source_plan.json` for each run, with configurable
+- **Research source planning**: write a compact
+  `02-search/planning/research_plan.json` for each run, with configurable
   OpenAlex/Semantic Scholar/arXiv/local-file sources, optional LLM-backed
   query planning, facet-driven query expansion, retrieval-round traces,
-  screening decisions, cache policy, and lightweight budgets.
+  screening decisions, coverage reports, follow-up retrieval rounds, document
+  records, cache policy, and lightweight budgets.
 - **Code tasks**: improve an existing codebase inside an isolated editable
   workspace with LLM planning, review gates, controlled patch proposals,
   validation, benchmark execution, and metric comparison.
@@ -97,7 +98,7 @@ uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
 
 For repeatable source settings, use a run config. This local example uses a
 Markdown note as a research source and writes the planned source strategy to
-`02-search/source_plan.json`:
+`02-search/planning/research_plan.json`:
 
 ```bash
 uv run simple-ar run --config examples/run_configs/local_research_report.toml
@@ -251,9 +252,10 @@ still intentionally conservative.
   adding bounded proposal contracts, context requests, multi-round attempts, and
   future external coding-agent adapters before recommending unattended large
   refactors.
-- Literature search now has an auditable source plan and can use OpenAlex,
-  Semantic Scholar, arXiv, or local Markdown/text notes, but it is not yet a full PDF-reading,
-  parser-backed, or vector-RAG survey system.
+- Literature search now has an auditable source plan and document-store
+  metadata, and can use OpenAlex, Semantic Scholar, arXiv, or local
+  Markdown/text notes, but it is not yet a full PDF-reading, parser-backed, or
+  vector-RAG survey system.
 - LLM-written reports are guarded by citation, metric, and boundary checks; when
   a draft fails these checks, the tool falls back to a structured deterministic
   report.

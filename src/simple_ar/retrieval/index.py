@@ -31,7 +31,18 @@ IGNORED_FILE_NAMES = {
     "artifact_chunks.jsonl",
     "artifact_index.json",
     "artifact_search_results.json",
+    "cache_manifest.json",
+    "fulltext_manifest.json",
+    "claim_cards.jsonl",
+    "chunks.jsonl",
+    "coverage_report.json",
+    "documents.jsonl",
     "evidence_ledger.jsonl",
+    "index_meta.json",
+    "paper_cards.jsonl",
+    "research_plan.json",
+    "retrieval_rounds.jsonl",
+    "screening_decisions.jsonl",
     "source_plan.json",
 }
 

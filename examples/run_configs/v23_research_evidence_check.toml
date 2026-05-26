@@ -1,7 +1,7 @@
 [run]
 # V2.3 research/evidence check config.
-# Default scope is Day3/Day4-friendly: stop at search so you can inspect the
-# research-question, query-plan, and source-plan artifacts quickly.
+# Default scope is Day3-Day5 friendly: stop at search so you can inspect the
+# research-question, query-plan, source-plan, retrieval, screening, and coverage artifacts quickly.
 topic = "multi-agent collaboration for coding agents"
 output_root = ".tmp_tests/v23-research-evidence-check"
 to_stage = "search"
@@ -44,7 +44,7 @@ planner = "llm"
 # and set [search].offline = true.
 sources = ["openalex", "semantic_scholar", "arxiv"]
 
-# Seed queries are preserved in query_plan.json before LLM/planner expansion.
+# Seed queries are preserved in planning/research_plan.json before LLM/planner expansion.
 queries = [
   "multi-agent collaboration for coding agents",
   "LLM agents software engineering benchmark",
@@ -59,10 +59,15 @@ required_facets = ["overview", "method", "benchmark", "dataset", "code_link", "l
 # `local_files`; kept here so the config can be switched back to local mode.
 local_documents = ["../research/local_multi_agent_coding_notes.md"]
 
-# These flags are recorded as intent for later V2.3 ingestion work. Current
-# search does not download or parse PDFs.
+# These flags are recorded in documents/cache_manifest.json and
+# documents/fulltext_manifest.json. Day9 records full-text hints and fetch
+# budgets; remote PDF download and parsing are later guarded steps.
 use_fulltext = false
 allow_pdf_download = false
+max_fulltext_documents = 3
+max_pdf_mb = 20
+keep_raw_pdf = false
+parser_backend = "basic"
 cache = true
 index_backend = "sqlite_fts"
 
@@ -71,6 +76,7 @@ max_documents = 5
 max_chunks = 120
 max_context_tokens = 8000
 max_llm_calls = 6
+max_follow_up_queries = 3
 
 [retrieval]
 enabled = true

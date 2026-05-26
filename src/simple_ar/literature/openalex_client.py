@@ -84,7 +84,7 @@ class OpenAlexSearchClient:
             "search": query,
             "per-page": str(min(max_results, _MAX_RESULTS)),
             "mailto": self.mailto,
-            "select": "id,title,display_name,authorships,publication_year,publication_date,primary_location,doi,ids,abstract_inverted_index",
+            "select": "id,title,display_name,authorships,publication_year,publication_date,primary_location,doi,ids,abstract_inverted_index,open_access,best_oa_location",
         }
         return f"{_BASE_URL}?{urllib.parse.urlencode(params)}"
 
@@ -95,7 +95,8 @@ def _paper_from_work(item: dict[str, Any]) -> Paper:
     openalex_id = str(ids.get("openalex") or item.get("id") or "").strip()
     doi = _normalize_doi(str(item.get("doi") or ids.get("doi") or "").strip())
     arxiv_url = str(ids.get("arxiv") or "").strip()
-    url = arxiv_url or (f"https://doi.org/{doi}" if doi else openalex_id)
+    fulltext_url = _fulltext_url_from_openalex(item)
+    url = arxiv_url or fulltext_url or (f"https://doi.org/{doi}" if doi else openalex_id)
     source_id = openalex_id.rsplit("/", maxsplit=1)[-1] if openalex_id else title[:40]
     authors = _authors_from_authorships(item.get("authorships"))
     categories = _categories_from_location(item.get("primary_location"))
@@ -110,6 +111,7 @@ def _paper_from_work(item: dict[str, Any]) -> Paper:
         source="openalex",
         source_id=source_id,
         doi=doi or None,
+        fulltext_url=fulltext_url,
     )
 
 
@@ -158,6 +160,21 @@ def _abstract_from_inverted_index(value: object) -> str:
 
 def _normalize_doi(value: str) -> str:
     return value.replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
+
+
+def _fulltext_url_from_openalex(item: dict[str, Any]) -> str | None:
+    open_access = item.get("open_access")
+    if isinstance(open_access, dict):
+        oa_url = str(open_access.get("oa_url") or "").strip()
+        if oa_url:
+            return oa_url
+    best_location = item.get("best_oa_location")
+    if isinstance(best_location, dict):
+        for key in ("pdf_url", "landing_page_url"):
+            url = str(best_location.get(key) or "").strip()
+            if url:
+                return url
+    return None
 
 
 def _dedupe_papers(papers: list[Paper] | Any) -> list[Paper]:

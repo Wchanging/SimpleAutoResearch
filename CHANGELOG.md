@@ -9,24 +9,46 @@ This file records user-visible project changes in reverse chronological order. P
 ### Added
 
 - Added the V2.3 research source-planning foundation. `02-search` now writes
-  `source_plan.json` with planned queries, source order, research mode,
-  local-document hints, cache/index preferences, and lightweight budgets.
+  `planning/research_plan.json` with research questions, planned queries,
+  source order, research mode, local-document hints, cache/index preferences,
+  and lightweight budgets.
 - Added `[research]` support in top-level run configs, including `sources`,
   `queries`, `local_documents`, `cache`, `index_backend`, and
   `[research.budget]` fields.
-- Added V2.3 Day 3 research-question and query-plan artifacts:
-  `02-search/research_questions.json` and `02-search/query_plan.json`.
+- Added V2.3 Day 3 research-question and query-plan sections under
+  `02-search/planning/research_plan.json`.
 - Added optional LLM-backed research planning via `[research].planner`, with
   deterministic planning kept as a fallback for offline or provider-failure
   cases.
-- Added structured `query_specs` in `query_plan.json` so LLM research planning
+- Added structured `query_specs` in the research plan so LLM research planning
   can preserve title/abstract keyword intent instead of only emitting browser-
   style query strings.
 - Added V2.3 Day 4 retrieval trace artifacts:
-  `02-search/retrieval_rounds.jsonl` and
-  `02-search/screening_decisions.jsonl`, including executed source/query
+  `02-search/traces/retrieval_rounds.jsonl` and
+  `02-search/traces/screening_decisions.jsonl`, including executed source/query
   attempts, compact query-intent traces, deduplication, and lightweight
   relevance decisions before `papers.jsonl` is written.
+- Added V2.3 Day 5 coverage artifacts:
+  `02-search/review/coverage_report.json` and `02-search/review/coverage_report.md`,
+  including required-facet coverage, missing facets, question coverage, and
+  budgeted follow-up query recommendations.
+- Added V2.3 Day 6 document-store artifacts:
+  `02-search/documents/documents.jsonl` and
+  `02-search/documents/cache_manifest.json`, recording selected metadata,
+  configured local files, extraction status, source counts, and cache/full-text
+  intent without downloading restricted full text.
+- Added V2.3 Day 7 local research-index artifacts:
+  `02-search/research_index/chunks.jsonl` and
+  `02-search/research_index/index_meta.json`, with optional SQLite FTS creation
+  for `sqlite_fts`/`hybrid` modes.
+- Added V2.3 Day 8 deterministic evidence-card artifacts:
+  `02-search/cards/paper_cards.jsonl` and
+  `02-search/cards/claim_cards.jsonl`, grounded in document chunks and marked
+  with evidence refs for later audit.
+- Added V2.3 Day 9 full-text planning artifacts:
+  `02-search/documents/fulltext_manifest.json`, recording arXiv/OpenAlex/local
+  full-text hints, fetch-budget decisions, and blocked/skipped reasons without
+  downloading remote PDFs yet.
 - Added a Semantic Scholar live metadata connector between OpenAlex and arXiv,
   giving V2.3 research search a broader default source order without relying on
   fixture metadata.
@@ -40,12 +62,31 @@ This file records user-visible project changes in reverse chronological order. P
   Semantic Scholar, arXiv, and local Markdown/text files while preserving
   existing fixture and cache fallback behavior.
 - The search stage now expands configured seed queries into bounded
-  facet-driven follow-up queries before building `source_plan.json`; when LLM
+  facet-driven follow-up queries before building `research_plan.json`; when LLM
   mode is enabled, `planner = "auto"` can use the model for stronger question
   decomposition and query terminology.
+- When coverage gaps remain and retrieval-round budget is available, search can
+  run a second ordered-fallback retrieval round and then re-screen candidates.
+- Search-stage planning, trace, and review artifacts are now grouped under
+  `02-search/planning/`, `02-search/traces/`, and `02-search/review/` so larger
+  research runs do not leave every intermediate file at the stage root.
+- Research planning is consolidated into one `planning/research_plan.json`
+  instead of three small JSON files, keeping the stage inspectable without
+  increasing artifact sprawl.
 - Local Markdown/text search now uses lightweight keyword-overlap matching
   rather than exact query-string matching, which makes normalized paper-search
   queries work better with short local notes.
+- Local Markdown/text documents now produce parsed document records with content
+  hashes; PDF inputs are recorded as skipped or failed unless optional parsing
+  is explicitly available and full-text intent is enabled.
+- Abstracts and parsed local files are now chunked into a portable local index
+  layer, giving later evidence cards and RAG-style retrieval a stable input
+  without requiring embeddings yet.
+- OpenAlex metadata now preserves open-access URL hints when available, and
+  arXiv records can derive provider PDF hints for later controlled full-text
+  fetch/parse stages.
+- Search-stage evidence artifacts now provide paper/claim card counts in
+  `search_meta.json`, making the research evidence layer easier to inspect.
 - Split public command and configuration documentation: `CLI_REFERENCE.md` now
   focuses on command syntax/options/artifacts, while the new
   `CONFIG_REFERENCE.md` centralizes TOML schema, complete configs, and
@@ -54,7 +95,7 @@ This file records user-visible project changes in reverse chronological order. P
   obvious settings such as `max_papers`, research budgets, workspace modes, and
   execute budgets are easier to understand.
 - Public README, Usage, CLI reference, and workflow docs now describe
-  `02-search/source_plan.json`, `[research]` config, local-file sources, and
+  `02-search/planning/research_plan.json`, `[research]` config, local-file sources, and
   the current V2.3 boundary that PDF parsing/vector retrieval are not active
   yet.
 

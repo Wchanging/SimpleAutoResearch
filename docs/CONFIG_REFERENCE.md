@@ -66,7 +66,7 @@ allow_fixture_fallback = false
 strict = false
 
 [research]
-# Search strategy profile recorded in source_plan.json. Full-text behavior is still future-facing.
+# Search strategy profile recorded in planning/research_plan.json. Full-text behavior is still future-facing.
 mode = "lite"                 # lite | standard | strong
 
 # Research-question/query planner. auto uses LLM when [llm].enabled is true,
@@ -76,16 +76,16 @@ planner = "auto"              # auto | llm | deterministic
 # Provider order for 02-search.
 sources = ["fixture"]         # openalex | semantic_scholar | arxiv | local_files | fixture
 
-# Query list recorded for evidence planning. Day4 runs planned queries until the document budget is reached.
+# Query list recorded for evidence planning. Search can run follow-up rounds for uncovered facets.
 queries = ["tiny digits MLP baseline improvement"]
 
 # Generate facet-driven follow-up queries from the topic and research questions.
 auto_query_expansion = true
 
-# Planned retrieval loop depth for later multi-round retrieval.
+# Planned retrieval loop depth. Values above 1 allow coverage-driven follow-up search.
 max_retrieval_rounds = 2
 
-# Maximum number of seed + expanded queries kept in query_plan.json.
+# Maximum number of seed + expanded queries kept in the research plan.
 max_queries = 6
 
 # Evidence facets the planner should try to cover.
@@ -94,9 +94,14 @@ required_facets = ["method", "benchmark", "dataset", "code_link"]
 # Markdown/text files to expose as local research records; resolved relative to this config.
 local_documents = []
 
-# Intent flags for later evidence stages. Current V2.3 search does not download or parse PDFs yet.
+# Intent and budget flags for full-text evidence. Day9 records hints and
+# budget decisions; remote fetching/parsing remains guarded by later steps.
 use_fulltext = false
 allow_pdf_download = false
+max_fulltext_documents = 6
+max_pdf_mb = 20
+keep_raw_pdf = false
+parser_backend = "basic"
 
 # Whether live-provider failures may use cached metadata.
 cache = true
@@ -116,6 +121,9 @@ max_context_tokens = 6000
 
 # Planned LLM-call cap for research-side query expansion/screening.
 max_llm_calls = 4
+
+# Maximum coverage-driven follow-up queries attempted in a second retrieval round.
+max_follow_up_queries = 3
 
 [retrieval]
 # Enables local artifact retrieval for read/synthesize/report helpers.
@@ -269,7 +277,7 @@ max_proposal_chars = 42000
 | `[llm]` | pipeline and code task | LLM enablement, default model, and worker count. |
 | `[search]` | `02-search` | Provider behavior, fallback policy, result limit, and manual query. |
 | `[research]` | `02-search` | Research-question planning, query expansion, provider order, local documents, cache/index hints. |
-| `[research.budget]` | `02-search` and future evidence stages | Lightweight caps written to `source_plan.json`. |
+| `[research.budget]` | `02-search` and future evidence stages | Lightweight caps written to `planning/research_plan.json`. |
 | `[retrieval]` | read/synthesize/report helpers | Local artifact retrieval context. |
 | `[experiment]` | `05-design` to `07-run` | Experiment template, timeout, and optional nested code-task config path. |
 | `[report]` | `08-report` | Report structure mode. |
@@ -311,20 +319,25 @@ max_proposal_chars = 42000
 | `[research].mode` | Records intended evidence depth: `lite` for metadata/local notes, `standard` for cache/index-ready use, `strong` for future full-text/vector workflows. |
 | `[research].planner` | Research-question and query-expansion backend. `auto` calls the LLM when `[llm].enabled = true` and falls back to deterministic planning; `llm` explicitly requests that path; `deterministic` disables the extra LLM planner call. |
 | `[research].sources` | Provider order for the search stage. Supported connector names today are `openalex`, `semantic_scholar`, `arxiv`, and `local_files`; `fixture` records offline fixture use. |
-| `[research].queries` | Seed query list written through `query_plan.json` into `02-search/source_plan.json`. Day4 executes planned queries in the first retrieval round until the document budget is reached; later coverage work can use the remaining round budget for follow-up search. LLM planner output also records `query_specs` with title/abstract keyword hints. |
-| `[research].auto_query_expansion` | Enables facet-driven follow-up queries from `research_questions.json`. In deterministic mode these are rule-based; in LLM planner mode the model can add stronger terminology within the same query budget. Disable it when you want only hand-written queries. |
-| `[research].max_retrieval_rounds` | Planned number of retrieval/screening rounds for the DeepResearch loop. Day4 executes the first round and records later-round budget for follow-up coverage work. |
-| `[research].max_queries` | Maximum seed + expanded queries kept in `query_plan.json` and copied into `source_plan.json`. |
+| `[research].queries` | Seed query list written into `02-search/planning/research_plan.json`. Search executes planned queries in ordered-fallback rounds and can spend later round budget on uncovered facets. LLM planner output also records `query_specs` with title/abstract keyword hints. |
+| `[research].auto_query_expansion` | Enables facet-driven follow-up queries from the `research_questions` section of `planning/research_plan.json`. In deterministic mode these are rule-based; in LLM planner mode the model can add stronger terminology within the same query budget. Disable it when you want only hand-written queries. |
+| `[research].max_retrieval_rounds` | Planned number of retrieval/screening rounds for the DeepResearch loop. Values above `1` allow coverage-driven follow-up retrieval before `papers.jsonl` is finalized. |
+| `[research].max_queries` | Maximum seed + expanded queries kept in the `query_plan` section of `planning/research_plan.json`. |
 | `[research].required_facets` | Evidence facets to cover, such as `method`, `benchmark`, `dataset`, `code_link`, or `limitation`. These drive research questions and query expansion. |
-| `[research].local_documents` | Markdown/text files treated as local research records. These paths are resolved relative to the config file. |
-| `[research].use_fulltext` | Intent flag for future full-text evidence workflows. It does not currently download or parse PDFs. |
-| `[research].allow_pdf_download` | Future-facing permission flag for PDF download. Keep false unless a later parser/downloader is enabled. |
+| `[research].local_documents` | Markdown/text files treated as local research records. These paths are resolved relative to the config file and are also written to `02-search/documents/documents.jsonl` with parser/hash status. |
+| `[research].use_fulltext` | Intent flag for full-text evidence workflows. When true, `documents/fulltext_manifest.json` can select eligible local/remote full-text hints within budget. Day9 still does not download remote files. |
+| `[research].allow_pdf_download` | Permission flag for future remote PDF download steps. Keep false unless you explicitly want parser-backed full-text handling. |
+| `[research].max_fulltext_documents` | Maximum number of documents that can be selected for future full-text fetch/parse work. This is separate from `[research.budget].max_documents`, which caps kept metadata records. |
+| `[research].max_pdf_mb` | Per-PDF size ceiling used by full-text planning. Local PDFs above this limit are skipped; future remote fetchers should enforce the same cap. |
+| `[research].keep_raw_pdf` | Whether future fetch/parsing steps should retain raw PDF files in cache. Keep false when you only need parsed text and section chunks. |
+| `[research].parser_backend` | Planned parser backend, such as `basic`, `pypdf`, `pymupdf`, or `external`. Day9 records the choice for later parsing stages. |
 | `[research].cache` | Allows live-provider failures to fall back to cached metadata when available. |
-| `[research].index_backend` | Planned index backend for later evidence ingestion. Current options are recorded as `keyword`, `sqlite_fts`, or `hybrid`. |
+| `[research].index_backend` | Local index backend. `keyword` writes portable chunks only; `sqlite_fts` writes chunks plus a SQLite FTS database; `hybrid` is reserved for FTS plus future stronger adapters. |
 | `[research.budget].max_documents` | Max records the evidence stage should keep from all sources. |
 | `[research.budget].max_chunks` | Planned cap for chunks after later full-text/local-document ingestion. |
 | `[research.budget].max_context_tokens` | Planned prompt budget for evidence retrieval context. |
 | `[research.budget].max_llm_calls` | Planned cap for research-side LLM actions such as query expansion and screening. |
+| `[research.budget].max_follow_up_queries` | Maximum coverage-driven follow-up queries attempted in a second retrieval round. |
 
 ### Code-Task Fields
 
@@ -398,6 +411,10 @@ cache = true
 index_backend = "keyword"
 use_fulltext = false
 allow_pdf_download = false
+max_fulltext_documents = 6
+max_pdf_mb = 20
+keep_raw_pdf = false
+parser_backend = "basic"
 ```
 
 ### Local Notes Only

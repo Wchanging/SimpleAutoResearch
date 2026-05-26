@@ -172,6 +172,40 @@ class DocumentRecord:
 
 
 @dataclass(frozen=True)
+class FulltextHint:
+    """A non-destructive full-text access hint for one document.
+
+    Args:
+        document_id: Document this hint belongs to.
+        kind: Resource type, such as ``pdf``, ``html``, ``text``, or ``landing``.
+        source: Where the hint came from, such as ``arxiv`` or ``openalex``.
+        url: Remote URL when available.
+        local_path: Local file path when available.
+        access: Access class, such as ``open``, ``local``, ``restricted``, or
+            ``unknown``.
+        status: Planner status. Day9 records hints and budget decisions but
+            does not download remote files yet.
+        reason: Short explanation for the status.
+        size_bytes: Local file size when known.
+    """
+
+    document_id: str
+    kind: str
+    source: str
+    url: str | None = None
+    local_path: str | None = None
+    access: str = "unknown"
+    status: str = "hint_only"
+    reason: str = ""
+    size_bytes: int | None = None
+    schema_version: str = "fulltext_hint.v1"
+
+    def to_row(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class TextChunk:
     """A source-labelled text span used by local retrieval and evidence cards."""
 
