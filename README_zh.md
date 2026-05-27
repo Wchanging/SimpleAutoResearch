@@ -194,7 +194,7 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 - `sparse_copy` 仍是实验性功能，如果 include 范围过窄，可能漏掉运行依赖。
 - 目前不会自动安装项目依赖，也不会自动管理 Docker/Conda/GPU/Slurm 环境。
 - 较大的代码修改 proposal 仍可能触发很长的 LLM completion。V2.2 会继续加入 bounded proposal contract、context request、多轮 attempt 和未来 external coding-agent adapter；在这些能力成熟前，不建议把它当作大型无人值守重构工具。
-- 文献检索现在会写入可审计的 source plan 和 document-store metadata，并支持 OpenAlex、Semantic Scholar、arXiv 和本地 Markdown/text 笔记，但还不是完整 PDF 解析、parser-backed 或向量 RAG survey 系统。
+- 文献检索现在会写入可审计的 source plan 和 document-store metadata，并支持 OpenAlex、Semantic Scholar、arXiv 和本地 Markdown/text 笔记。它可以解析本地/缓存的 Markdown、text、基础 HTML，以及可选 `pypdf` 可用时的 PDF，但还不是完整 section-aware PDF parser 或向量 RAG survey 系统。
 - LLM 报告有引用、指标和边界规则保护；如果草稿不合格，会回退到结构化 deterministic report。
 
 ## 文档

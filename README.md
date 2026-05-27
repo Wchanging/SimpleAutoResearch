@@ -254,7 +254,8 @@ still intentionally conservative.
   refactors.
 - Literature search now has an auditable source plan and document-store
   metadata, and can use OpenAlex, Semantic Scholar, arXiv, or local
-  Markdown/text notes, but it is not yet a full PDF-reading, parser-backed, or
+  Markdown/text notes. It can parse local/cached Markdown, text, basic HTML, and
+  optional `pypdf` PDFs, but it is not yet a full section-aware PDF parser or
   vector-RAG survey system.
 - LLM-written reports are guarded by citation, metric, and boundary checks; when
   a draft fails these checks, the tool falls back to a structured deterministic

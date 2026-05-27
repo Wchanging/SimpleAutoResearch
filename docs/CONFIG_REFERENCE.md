@@ -94,8 +94,8 @@ required_facets = ["method", "benchmark", "dataset", "code_link"]
 # Markdown/text files to expose as local research records; resolved relative to this config.
 local_documents = []
 
-# Intent and budget flags for full-text evidence. Day9 records hints and
-# budget decisions; remote fetching/parsing remains guarded by later steps.
+# Intent and budget flags for full-text evidence. Remote PDF fetching is
+# guarded by these settings; parsing remains a later controlled step.
 use_fulltext = false
 allow_pdf_download = false
 max_fulltext_documents = 6
@@ -325,12 +325,12 @@ max_proposal_chars = 42000
 | `[research].max_queries` | Maximum seed + expanded queries kept in the `query_plan` section of `planning/research_plan.json`. |
 | `[research].required_facets` | Evidence facets to cover, such as `method`, `benchmark`, `dataset`, `code_link`, or `limitation`. These drive research questions and query expansion. |
 | `[research].local_documents` | Markdown/text files treated as local research records. These paths are resolved relative to the config file and are also written to `02-search/documents/documents.jsonl` with parser/hash status. |
-| `[research].use_fulltext` | Intent flag for full-text evidence workflows. When true, `documents/fulltext_manifest.json` can select eligible local/remote full-text hints within budget. Day9 still does not download remote files. |
-| `[research].allow_pdf_download` | Permission flag for future remote PDF download steps. Keep false unless you explicitly want parser-backed full-text handling. |
-| `[research].max_fulltext_documents` | Maximum number of documents that can be selected for future full-text fetch/parse work. This is separate from `[research.budget].max_documents`, which caps kept metadata records. |
+| `[research].use_fulltext` | Intent flag for full-text evidence workflows. When true, `documents/fulltext_manifest.json` can select eligible local/remote full-text hints within budget, and `documents/fulltext_extraction.json` records parser outcomes for cached/local inputs. |
+| `[research].allow_pdf_download` | Permission flag for guarded remote PDF fetching. Keep false unless you explicitly want parser-backed full-text handling. |
+| `[research].max_fulltext_documents` | Maximum number of documents that can be selected for full-text fetch/parse work. This is separate from `[research.budget].max_documents`, which caps kept metadata records. |
 | `[research].max_pdf_mb` | Per-PDF size ceiling used by full-text planning. Local PDFs above this limit are skipped; future remote fetchers should enforce the same cap. |
-| `[research].keep_raw_pdf` | Whether future fetch/parsing steps should retain raw PDF files in cache. Keep false when you only need parsed text and section chunks. |
-| `[research].parser_backend` | Planned parser backend, such as `basic`, `pypdf`, `pymupdf`, or `external`. Day9 records the choice for later parsing stages. |
+| `[research].keep_raw_pdf` | Whether fetch/parsing steps should retain raw PDF files in cache. Keep false when you only need parsed text and section chunks. |
+| `[research].parser_backend` | Parser backend hint, such as `basic`, `pypdf`, `pymupdf`, or `external`. The current implementation parses Markdown/text and basic HTML directly, and uses optional `pypdf` for PDFs when available. |
 | `[research].cache` | Allows live-provider failures to fall back to cached metadata when available. |
 | `[research].index_backend` | Local index backend. `keyword` writes portable chunks only; `sqlite_fts` writes chunks plus a SQLite FTS database; `hybrid` is reserved for FTS plus future stronger adapters. |
 | `[research.budget].max_documents` | Max records the evidence stage should keep from all sources. |

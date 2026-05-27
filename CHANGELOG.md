@@ -4,17 +4,33 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
-## 2026-05-24
+## 2026-05-27
 
 ### Added
 
-- Added the V2.3 research source-planning foundation. `02-search` now writes
-  `planning/research_plan.json` with research questions, planned queries,
-  source order, research mode, local-document hints, cache/index preferences,
-  and lightweight budgets.
-- Added `[research]` support in top-level run configs, including `sources`,
-  `queries`, `local_documents`, `cache`, `index_backend`, and
-  `[research.budget]` fields.
+- Added V2.3 Day 10 failure-safe full-text caching: selected local full-text
+  resources are marked as cached, guarded remote fetch failures are recorded in
+  `fulltext_manifest.json`, and search continues on metadata/abstract evidence.
+- Added V2.3 Day 11 full-text extraction:
+  `02-search/documents/fulltext_extraction.json` now records parser outcomes
+  for cached/local full-text resources, and parsed text is fed into
+  `research_index/chunks.jsonl` before evidence cards are built.
+
+### Changed
+
+- The search-stage contract now declares `documents/fulltext_extraction.json`,
+  so completed stage output and `search_meta.json` expose the extraction
+  artifact.
+- The local research example now enables `use_fulltext = true` by default to
+  make the local Markdown/text parser -> chunk -> card path easier to inspect.
+- Public README, Usage, Configuration Reference, and workflow docs now describe
+  the current boundary: Markdown/text and basic HTML are parseable, PDF parsing
+  is best-effort, and vector retrieval is not active yet.
+
+## 2026-05-26
+
+### Added
+
 - Added V2.3 Day 3 research-question and query-plan sections under
   `02-search/planning/research_plan.json`.
 - Added optional LLM-backed research planning via `[research].planner`, with
@@ -47,8 +63,8 @@ This file records user-visible project changes in reverse chronological order. P
   with evidence refs for later audit.
 - Added V2.3 Day 9 full-text planning artifacts:
   `02-search/documents/fulltext_manifest.json`, recording arXiv/OpenAlex/local
-  full-text hints, fetch-budget decisions, and blocked/skipped reasons without
-  downloading remote PDFs yet.
+  full-text hints, fetch-budget decisions, and blocked/skipped reasons. Remote
+  PDF download remains off by default.
 - Added a Semantic Scholar live metadata connector between OpenAlex and arXiv,
   giving V2.3 research search a broader default source order without relying on
   fixture metadata.
@@ -94,10 +110,27 @@ This file records user-visible project changes in reverse chronological order. P
 - Expanded configuration docs with inline comments and key-field notes so less
   obvious settings such as `max_papers`, research budgets, workspace modes, and
   execute budgets are easier to understand.
-- Public README, Usage, CLI reference, and workflow docs now describe
-  `02-search/planning/research_plan.json`, `[research]` config, local-file sources, and
-  the current V2.3 boundary that PDF parsing/vector retrieval are not active
-  yet.
+
+## 2026-05-24
+
+### Added
+
+- Added the V2.3 research source-planning foundation. `02-search` now writes
+  `planning/research_plan.json` with research questions, planned queries,
+  source order, research mode, local-document hints, cache/index preferences,
+  and lightweight budgets.
+- Added `[research]` support in top-level run configs, including `sources`,
+  `queries`, `local_documents`, `cache`, `index_backend`, and
+  `[research.budget]` fields.
+
+### Changed
+
+- Search execution started routing through research connector wrappers for
+  OpenAlex, arXiv, and local Markdown/text files while preserving existing
+  fixture and cache fallback behavior.
+- Public README, Usage, CLI Reference, and Workflows docs started documenting
+  `02-search/planning/research_plan.json`, `[research]` config, and local-file
+  source settings.
 
 ## 2026-05-23
 

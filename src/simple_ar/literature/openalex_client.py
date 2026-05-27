@@ -163,17 +163,20 @@ def _normalize_doi(value: str) -> str:
 
 
 def _fulltext_url_from_openalex(item: dict[str, Any]) -> str | None:
+    best_location = item.get("best_oa_location")
+    if isinstance(best_location, dict):
+        pdf_url = str(best_location.get("pdf_url") or "").strip()
+        if pdf_url:
+            return pdf_url
     open_access = item.get("open_access")
     if isinstance(open_access, dict):
         oa_url = str(open_access.get("oa_url") or "").strip()
         if oa_url:
             return oa_url
-    best_location = item.get("best_oa_location")
     if isinstance(best_location, dict):
-        for key in ("pdf_url", "landing_page_url"):
-            url = str(best_location.get(key) or "").strip()
-            if url:
-                return url
+        landing_url = str(best_location.get("landing_page_url") or "").strip()
+        if landing_url:
+            return landing_url
     return None
 
 

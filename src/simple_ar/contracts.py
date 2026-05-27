@@ -33,6 +33,7 @@ CONTRACTS: dict[Stage, StageContract] = {
             "documents/documents.jsonl",
             "documents/cache_manifest.json",
             "documents/fulltext_manifest.json",
+            "documents/fulltext_extraction.json",
             "research_index/chunks.jsonl",
             "research_index/index_meta.json",
             "cards/paper_cards.jsonl",

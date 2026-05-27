@@ -133,6 +133,36 @@ Current status:
 
 ## Search And LLM Boundaries
 
+The search stage keeps planning, traces, review summaries, document records,
+local indexes, and evidence cards in separate folders:
+
+```text
+02-search/
+  papers.jsonl
+  search_meta.json
+  planning/
+    research_plan.json
+  traces/
+    retrieval_rounds.jsonl
+    screening_decisions.jsonl
+  review/
+    coverage_report.json
+    coverage_report.md
+  documents/
+    documents.jsonl
+    cache_manifest.json
+    fulltext_manifest.json
+    fulltext_extraction.json
+    extracted_text/
+  research_index/
+    chunks.jsonl
+    index_meta.json
+    sqlite_fts.db
+  cards/
+    paper_cards.jsonl
+    claim_cards.jsonl
+```
+
 - `02-search/planning/research_plan.json` records scoped sub-questions, evidence
   facets, seed and expanded queries, structured title/abstract keyword hints,
   source order, local documents, retrieval mode, cache/index hints, and budget
@@ -155,11 +185,15 @@ Current status:
 - `02-search/documents/cache_manifest.json` summarizes cache/index intent,
   extraction statuses, and source counts.
 - `02-search/documents/fulltext_manifest.json` records arXiv/OpenAlex/local
-  full-text hints and fetch-budget decisions. Day9 does not download remote
-  PDFs; later parser stages will consume this manifest.
+  full-text hints, fetch-budget decisions, cached local resources, and remote
+  fetch failures.
+- `02-search/documents/fulltext_extraction.json` records best-effort parser
+  results for cached/local full-text resources. Markdown/text and basic HTML
+  are parsed with the standard library; PDF parsing uses optional `pypdf` when
+  available and degrades to a manifest-only failure when unavailable.
 - `02-search/research_index/chunks.jsonl` stores portable local chunks from
-  abstracts and parsed local files. This is the source of truth for later
-  evidence-card extraction.
+  abstracts and parsed/extracted local or full-text files. This is the source
+  of truth for later evidence-card extraction.
 - `02-search/research_index/index_meta.json` records the selected local index
   backend and optional SQLite FTS status.
 - Live search uses the configured source order. By default it tries OpenAlex
@@ -168,7 +202,8 @@ Current status:
 - The default source strategy is ordered fallback rather than full source union:
   a successful provider stops downstream provider calls for that query.
 - `local_files` can expose user-provided Markdown/text notes as conservative
-  metadata-like records. It does not parse PDFs yet.
+  metadata-like records. Local PDFs are best-effort parser inputs only when
+  full-text intent is enabled and an optional parser is available.
 - `--offline-search` skips live providers and uses fixture metadata immediately.
 - `--allow-fixture-fallback` allows fixture metadata only after live and cache attempts fail.
 - `--no-llm` switches plan/read/synthesize/report to deterministic fallback text.
@@ -202,6 +237,8 @@ runs/<run-id>/
       documents.jsonl
       cache_manifest.json
       fulltext_manifest.json
+      fulltext_extraction.json
+      extracted_text/  # only when HTML/PDF-like resources are parsed to text
     research_index/
       chunks.jsonl
       index_meta.json
@@ -255,6 +292,9 @@ Root-level files:
   extraction-status summary.
 - `02-search/documents/fulltext_manifest.json`: full-text hints, selected
   candidates, blocked/skipped reasons, and parser/fetch budget settings.
+- `02-search/documents/fulltext_extraction.json`: parser outcomes for cached
+  local/remote full-text resources. Failed PDF or unsupported suffix parsing is
+  recorded here without failing the search stage.
 - `02-search/research_index/chunks.jsonl`: portable local chunk store for later
   retrieval, evidence-card extraction, and report grounding.
 - `02-search/research_index/index_meta.json`: local index backend and optional
@@ -270,7 +310,37 @@ Root-level files:
 - `05-design/generated_code_task_meta.json`: provenance for that generated task file.
 - `06-code/code_task_experiment.json`: present for embedded code-task templates such as `code_task_project` and `llm_code_task_toy_spam`.
 
-Nested embedded code-task files:
+Nested embedded code-task files have the same shape as standalone code-task
+runs, but live under `06-code/code_task_run/`:
+
+```text
+06-code/
+  code_task_run/
+    manifest.json
+    code_task/
+      summary.md
+      work_plan.md
+      patch_plan.md
+      patch.diff
+      workspace/
+      meta/
+        repo_map.json
+        proposed_edits.json
+        validation_report.json
+      context_packs/
+        context-001/
+      attempts/
+        attempt-001/
+          batches/
+            batch-001/
+              batch_state.json
+      run/
+        baseline/
+        patched/
+        comparison.json
+```
+
+Important nested files:
 
 - `06-code/code_task_run/code_task/summary.md`: consolidated nested code-task outcome.
 - `06-code/code_task_run/code_task/meta/repo_map.json`: layered repo map for the prepared workspace.

@@ -20,6 +20,7 @@ OPERATIONAL_FILENAMES = {
     "artifact_index.json",
     "artifact_search_results.json",
     "cache_manifest.json",
+    "fulltext_extraction.json",
     "fulltext_manifest.json",
     "claim_cards.jsonl",
     "chunks.jsonl",

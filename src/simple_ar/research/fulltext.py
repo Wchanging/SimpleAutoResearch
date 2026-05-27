@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from contextlib import suppress
 import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+import urllib.error
+import urllib.request
 
 from simple_ar.literature.models import Paper
 from simple_ar.research.contracts import DocumentRecord, FulltextHint, SourcePlan
@@ -13,6 +16,7 @@ from simple_ar.research.contracts import DocumentRecord, FulltextHint, SourcePla
 PDF_SUFFIX = ".pdf"
 TEXT_SUFFIXES = {".md", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
+_FETCH_TIMEOUT_SEC = 20
 
 
 def fulltext_hints_for_paper(paper: Paper, *, document_id: str) -> list[FulltextHint]:
@@ -50,16 +54,20 @@ def build_fulltext_manifest(
     *,
     records: list[DocumentRecord],
     source_plan: SourcePlan,
+    cache_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Build the Day9 full-text hint and fetch-budget manifest.
+    """Build the full-text hint, fetch-budget, and cache manifest.
 
     Args:
         records: Search document records.
         source_plan: Search source plan with full-text intent and budgets.
+        cache_dir: Optional run-local cache directory for selected local or
+            remote full-text resources.
 
     Returns:
         A JSON-friendly manifest describing full-text hints, selected candidates,
-        and skipped reasons. Remote content is not downloaded in Day9.
+        cached resources, and skipped/failed reasons. Remote downloads are only
+        attempted when full-text intent and permissions allow them.
     """
     max_documents = _positive_int(source_plan.budget.get("max_fulltext_documents"), default=0)
     max_pdf_bytes = _positive_int(source_plan.budget.get("max_pdf_mb"), default=0) * 1024 * 1024
@@ -68,6 +76,7 @@ def build_fulltext_manifest(
 
     rows: list[dict[str, Any]] = []
     selected_count = 0
+    cached_count = 0
     hint_count = 0
     for record in records:
         hints = _hints_for_record(record)
@@ -86,6 +95,15 @@ def build_fulltext_manifest(
             if planned.status == "selected":
                 selected_count += 1
                 selected_for_fetch = True
+                if cache_dir is not None:
+                    planned = _cache_selected_hint(
+                        planned,
+                        cache_dir=cache_dir,
+                        max_pdf_bytes=max_pdf_bytes,
+                        keep_raw_pdf=keep_raw_pdf,
+                    )
+            if planned.status == "cached":
+                cached_count += 1
             row_hints.append(planned.to_row())
         rows.append(
             {
@@ -108,6 +126,7 @@ def build_fulltext_manifest(
         "schema_version": "research_fulltext_manifest.v1",
         "enabled": source_plan.require_fulltext,
         "allow_pdf_download": source_plan.allow_pdf_download,
+        "cache_dir": str(cache_dir) if cache_dir else None,
         "budget": {
             "max_fulltext_documents": max_documents,
             "max_pdf_mb": _positive_int(source_plan.budget.get("max_pdf_mb"), default=0),
@@ -117,10 +136,11 @@ def build_fulltext_manifest(
         "document_count": len(records),
         "hint_count": hint_count,
         "selected_count": selected_count,
+        "cached_count": cached_count,
         "status_counts": dict(sorted(status_counts.items())),
         "documents": rows,
         "notes": [
-            "Day9 records full-text hints and budget decisions only; remote downloads are implemented later.",
+            "Full-text fetching is permissioned and failure-safe; failed fetches do not fail the search stage.",
             "Remote PDFs are selected only when both use_fulltext and allow_pdf_download are enabled.",
             "Local files can be used as full-text inputs without network access.",
         ],
@@ -169,6 +189,105 @@ def _plan_hint(
     if hint.kind in {"pdf", "html", "text"}:
         return _replace_hint(hint, status="selected", reason="within_fulltext_budget")
     return _replace_hint(hint, status="hint_only", reason="not_fetchable_by_day9")
+
+
+def _cache_selected_hint(
+    hint: FulltextHint,
+    *,
+    cache_dir: Path,
+    max_pdf_bytes: int,
+    keep_raw_pdf: bool,
+) -> FulltextHint:
+    if hint.local_path:
+        return _cache_local_hint(hint)
+    if not hint.url:
+        return _replace_hint(hint, status="failed", reason="missing_fulltext_url")
+    if hint.kind == "pdf" and not keep_raw_pdf:
+        return _replace_hint(hint, status="skipped", reason="raw_pdf_retention_disabled")
+    try:
+        cached = _fetch_remote_hint(hint, cache_dir=cache_dir, max_bytes=max_pdf_bytes if hint.kind == "pdf" else 0)
+    except Exception as exc:
+        return _replace_hint(hint, status="fetch_failed", reason=str(exc)[:300])
+    return cached
+
+
+def _cache_local_hint(hint: FulltextHint) -> FulltextHint:
+    path = Path(hint.local_path or "")
+    if not path.exists() or not path.is_file():
+        return _replace_hint(hint, status="failed", reason="local_file_not_found")
+    return FulltextHint(
+        document_id=hint.document_id,
+        kind=hint.kind,
+        source=hint.source,
+        url=hint.url,
+        local_path=str(path),
+        access=hint.access,
+        status="cached",
+        reason="local_fulltext_available",
+        size_bytes=path.stat().st_size,
+    )
+
+
+def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int) -> FulltextHint:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    suffix = _cache_suffix(hint)
+    cache_path = cache_dir / f"{_safe_name(hint.document_id)}-{_safe_name(hint.source)}{suffix}"
+    request = urllib.request.Request(
+        str(hint.url),
+        headers={"User-Agent": "SimpleAutoResearch/0.1"},
+    )
+    bytes_written = 0
+    try:
+        with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SEC) as response, cache_path.open("wb") as handle:
+            length = response.headers.get("Content-Length")
+            if max_bytes and length:
+                try:
+                    if int(length) > max_bytes:
+                        raise RuntimeError("remote_file_exceeds_max_pdf_mb")
+                except ValueError:
+                    pass
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if max_bytes and bytes_written > max_bytes:
+                    raise RuntimeError("remote_file_exceeds_max_pdf_mb")
+                handle.write(chunk)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError):
+        with suppress(OSError):
+            cache_path.unlink()
+        raise
+    if bytes_written == 0:
+        with suppress(OSError):
+            cache_path.unlink()
+        raise RuntimeError("empty_fulltext_fetch")
+    return FulltextHint(
+        document_id=hint.document_id,
+        kind=hint.kind,
+        source=hint.source,
+        url=hint.url,
+        local_path=str(cache_path),
+        access=hint.access,
+        status="cached",
+        reason="remote_fulltext_cached",
+        size_bytes=bytes_written,
+    )
+
+
+def _cache_suffix(hint: FulltextHint) -> str:
+    if hint.kind == "pdf":
+        return ".pdf"
+    if hint.kind == "html":
+        return ".html"
+    if hint.kind == "text":
+        return ".txt"
+    return ".bin"
+
+
+def _safe_name(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return text.strip("._")[:120] or "resource"
 
 
 def _hint_from_row(document_id: str, row: dict[str, Any]) -> FulltextHint | None:

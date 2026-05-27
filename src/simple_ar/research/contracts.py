@@ -183,8 +183,8 @@ class FulltextHint:
         local_path: Local file path when available.
         access: Access class, such as ``open``, ``local``, ``restricted``, or
             ``unknown``.
-        status: Planner status. Day9 records hints and budget decisions but
-            does not download remote files yet.
+        status: Planner/fetch status. Remote downloads are only attempted when
+            full-text intent, permissions, and budgets allow them.
         reason: Short explanation for the status.
         size_bytes: Local file size when known.
     """

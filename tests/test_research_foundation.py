@@ -4,8 +4,10 @@ from pathlib import Path
 import tempfile
 import unittest
 import sqlite3
+from unittest.mock import patch
 
 from simple_ar.literature.models import Paper
+from simple_ar.literature.openalex_client import _fulltext_url_from_openalex
 from simple_ar.research.contracts import (
     ClaimCard,
     DocumentRecord,
@@ -20,6 +22,7 @@ from simple_ar.research.cards import build_evidence_cards
 from simple_ar.research.coverage import build_coverage_report
 from simple_ar.research.chunking import build_text_chunks
 from simple_ar.research.documents import build_cache_manifest, build_document_records
+from simple_ar.research.extractors import apply_fulltext_extraction
 from simple_ar.research.fulltext import build_fulltext_manifest, fulltext_hints_for_paper
 from simple_ar.research.index import write_research_index
 from simple_ar.research.planning import build_query_plan, build_research_questions
@@ -206,6 +209,216 @@ class ResearchFoundationTests(unittest.TestCase):
         self.assertEqual(hint["status"], "blocked")
         self.assertEqual(hint["reason"], "pdf_download_disabled")
 
+    def test_local_fulltext_is_marked_cached_when_enabled(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            note = root / "agent_notes.md"
+            note.write_text("# Agent Notes\n\nLocal full text.\n", encoding="utf-8")
+            source_plan = build_source_plan(
+                topic="agent coding",
+                problem_markdown="",
+                config={
+                    "research_sources": ["local_files"],
+                    "research_local_documents": [str(note)],
+                    "research_use_fulltext": True,
+                    "research_allow_pdf_download": False,
+                },
+                default_query="agent coding",
+                default_max_results=3,
+            )
+            records = build_document_records(papers=[], source_plan=source_plan)
+            manifest = build_fulltext_manifest(
+                records=records,
+                source_plan=source_plan,
+                cache_dir=root / "fulltext_cache",
+            )
+
+            self.assertEqual(manifest["selected_count"], 1)
+            hint = manifest["documents"][0]["hints"][0]
+            self.assertEqual(hint["status"], "cached")
+            self.assertEqual(hint["reason"], "local_fulltext_available")
+            self.assertEqual(hint["local_path"], str(note))
+
+    def test_cached_text_fulltext_is_parsed_into_records(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            note = root / "agent_notes.txt"
+            note.write_text("This paper proposes a coding agent benchmark with runtime metrics.", encoding="utf-8")
+            source_plan = build_source_plan(
+                topic="agent coding",
+                problem_markdown="",
+                config={
+                    "research_sources": ["local_files"],
+                    "research_local_documents": [str(note)],
+                    "research_use_fulltext": True,
+                },
+                default_query="agent coding",
+                default_max_results=3,
+            )
+            records = build_document_records(papers=[], source_plan=source_plan)
+            fulltext_manifest = build_fulltext_manifest(
+                records=records,
+                source_plan=source_plan,
+                cache_dir=root / "fulltext_cache",
+            )
+
+            updated, extraction_manifest = apply_fulltext_extraction(
+                records=records,
+                fulltext_manifest=fulltext_manifest,
+                source_plan=source_plan,
+                extraction_dir=root / "extracted_text",
+            )
+
+            self.assertEqual(updated[0].extraction_status, "parsed")
+            self.assertEqual(updated[0].parser, "plain_text")
+            self.assertEqual(extraction_manifest["parsed_count"], 1)
+            self.assertEqual(extraction_manifest["documents"][0]["status"], "parsed")
+
+    def test_pdf_fulltext_parser_failure_is_manifest_only(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            pdf = root / "paper.pdf"
+            pdf.write_bytes(b"%PDF-1.4\nnot a real pdf")
+            record = DocumentRecord(
+                document_id="doc-pdf",
+                title="PDF Paper",
+                source="local_files",
+                local_path=str(pdf),
+                extraction_status="metadata_only",
+            )
+            source_plan = build_source_plan(
+                topic="agent coding",
+                problem_markdown="",
+                config={"research_sources": ["local_files"], "research_use_fulltext": True},
+                default_query="agent coding",
+                default_max_results=3,
+            )
+            fulltext_manifest = {
+                "enabled": True,
+                "documents": [
+                    {
+                        "document_id": "doc-pdf",
+                        "hints": [
+                            {
+                                "status": "cached",
+                                "kind": "pdf",
+                                "local_path": str(pdf),
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            with patch("simple_ar.research.extractors._read_pdf", side_effect=RuntimeError("parser failed")):
+                updated, extraction_manifest = apply_fulltext_extraction(
+                    records=[record],
+                    fulltext_manifest=fulltext_manifest,
+                    source_plan=source_plan,
+                    extraction_dir=root / "extracted_text",
+                )
+
+            self.assertEqual(updated[0].extraction_status, "metadata_only")
+            self.assertEqual(extraction_manifest["status_counts"], {"failed": 1})
+            self.assertIn("parser failed", extraction_manifest["documents"][0]["reason"])
+
+    def test_pdf_fulltext_extraction_repairs_common_mojibake(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            pdf = root / "paper.pdf"
+            pdf.write_bytes(b"%PDF-1.4\nmock")
+            record = DocumentRecord(
+                document_id="doc-pdf",
+                title="PDF Paper",
+                source="arxiv",
+                local_path=str(pdf),
+                extraction_status="metadata_only",
+            )
+            source_plan = build_source_plan(
+                topic="agent coding",
+                problem_markdown="",
+                config={"research_sources": ["arxiv"], "research_use_fulltext": True},
+                default_query="agent coding",
+                default_max_results=3,
+            )
+            fulltext_manifest = {
+                "enabled": True,
+                "documents": [
+                    {
+                        "document_id": "doc-pdf",
+                        "hints": [
+                            {
+                                "status": "cached",
+                                "kind": "pdf",
+                                "local_path": str(pdf),
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            with patch(
+                "simple_ar.research.extractors._read_pdf",
+                return_value="鈥淢orescient鈥? GAI improves Achilles鈥?heel cases.",
+            ):
+                updated, extraction_manifest = apply_fulltext_extraction(
+                    records=[record],
+                    fulltext_manifest=fulltext_manifest,
+                    source_plan=source_plan,
+                    extraction_dir=root / "extracted_text",
+                )
+
+            extracted = Path(updated[0].local_path).read_text(encoding="utf-8")
+            self.assertIn("“Morescient” GAI", extracted)
+            self.assertIn("Achilles’heel", extracted)
+            self.assertNotIn("鈥", extracted)
+            self.assertEqual(extraction_manifest["parsed_count"], 1)
+
+    def test_remote_fulltext_fetch_failure_is_recorded(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        paper = Paper(
+            id="openalex-W1",
+            title="An OpenAlex Paper",
+            authors=[],
+            abstract="abstract",
+            url="https://openalex.org/W1",
+            source="openalex",
+            source_id="W1",
+            fulltext_url="https://example.test/paper.pdf",
+        )
+        source_plan = build_source_plan(
+            topic="agent coding",
+            problem_markdown="",
+            config={
+                "research_sources": ["openalex"],
+                "research_use_fulltext": True,
+                "research_allow_pdf_download": True,
+                "research_keep_raw_pdf": True,
+                "research_max_fulltext_documents": 2,
+                "research_max_pdf_mb": 10,
+            },
+            default_query="agent coding",
+            default_max_results=3,
+        )
+        records = build_document_records(papers=[paper], source_plan=source_plan)
+
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp, patch(
+            "simple_ar.research.fulltext.urllib.request.urlopen",
+            side_effect=OSError("network unavailable"),
+        ):
+            manifest = build_fulltext_manifest(
+                records=records,
+                source_plan=source_plan,
+                cache_dir=Path(tmp) / "fulltext_cache",
+            )
+
+        hint = manifest["documents"][0]["hints"][0]
+        self.assertEqual(hint["status"], "fetch_failed")
+        self.assertIn("network unavailable", hint["reason"])
+
     def test_openalex_fulltext_url_hint_is_preserved(self) -> None:
         paper = Paper(
             id="openalex-W1",
@@ -224,6 +437,19 @@ class ResearchFoundationTests(unittest.TestCase):
         self.assertEqual(hints[0].kind, "pdf")
         self.assertEqual(hints[0].source, "openalex")
         self.assertEqual(hints[0].access, "open")
+
+    def test_openalex_fulltext_prefers_pdf_url_for_parsing(self) -> None:
+        url = _fulltext_url_from_openalex(
+            {
+                "open_access": {"oa_url": "https://example.test/landing"},
+                "best_oa_location": {
+                    "pdf_url": "https://example.test/paper.pdf",
+                    "landing_page_url": "https://example.test/landing-page",
+                },
+            }
+        )
+
+        self.assertEqual(url, "https://example.test/paper.pdf")
 
     def test_text_chunks_and_sqlite_index_are_written(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

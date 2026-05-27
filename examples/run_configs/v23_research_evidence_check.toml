@@ -60,8 +60,10 @@ required_facets = ["overview", "method", "benchmark", "dataset", "code_link", "l
 local_documents = ["../research/local_multi_agent_coding_notes.md"]
 
 # These flags are recorded in documents/cache_manifest.json and
-# documents/fulltext_manifest.json. Day9 records full-text hints and fetch
-# budgets; remote PDF download and parsing are later guarded steps.
+# documents/fulltext_manifest.json. Remote PDF download is guarded by
+# use_fulltext, allow_pdf_download, max_fulltext_documents, and max_pdf_mb.
+# Cached/local text and basic HTML are parsed into documents/fulltext_extraction.json;
+# PDFs remain best-effort and require an optional parser.
 use_fulltext = false
 allow_pdf_download = false
 max_fulltext_documents = 3

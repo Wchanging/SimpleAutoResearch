@@ -24,9 +24,11 @@ max_retrieval_rounds = 1
 max_queries = 4
 required_facets = ["overview", "method", "benchmark"]
 local_documents = ["../research/local_agent_simulation_notes.md"]
-use_fulltext = false
+use_fulltext = true
 allow_pdf_download = false
-cache = false
+max_fulltext_documents = 3
+parser_backend = "basic"
+cache = true
 index_backend = "keyword"
 
 [research.budget]

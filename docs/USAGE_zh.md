@@ -149,7 +149,7 @@ auto_query_expansion = true
 max_retrieval_rounds = 2
 max_queries = 6
 required_facets = ["method", "benchmark", "dataset", "code_link"]
-use_fulltext = false
+use_fulltext = true
 allow_pdf_download = false
 max_fulltext_documents = 6
 max_pdf_mb = 20
@@ -165,7 +165,36 @@ max_context_tokens = 12000
 max_llm_calls = 8
 ```
 
-搜索阶段会写出：
+搜索阶段主要会生成下面这棵 `02-search/` 结构：
+
+```text
+02-search/
+  papers.jsonl
+  search_meta.json
+  planning/
+    research_plan.json
+  traces/
+    retrieval_rounds.jsonl
+    screening_decisions.jsonl
+  review/
+    coverage_report.json
+    coverage_report.md
+  documents/
+    documents.jsonl
+    cache_manifest.json
+    fulltext_manifest.json
+    fulltext_extraction.json
+    extracted_text/  # 只有 HTML/PDF-like 资源被抽取成文本时出现
+  research_index/
+    chunks.jsonl
+    index_meta.json
+    sqlite_fts.db  # 仅 sqlite_fts/hybrid index 成功时出现
+  cards/
+    paper_cards.jsonl
+    claim_cards.jsonl
+```
+
+其中最重要的文件是：
 
 - `02-search/planning/research_plan.json`：一个紧凑的计划产物，内部包含 `research_questions`、`query_plan` 和 `source_plan` 三个 section，记录子问题、seed/expanded queries、带 title/abstract keyword hints 的 `query_specs`、计划 sources、检索模式、本地文档、cache/index 偏好和预算。
 - `02-search/traces/retrieval_rounds.jsonl`：每次实际执行的 source/query 尝试，包括状态、返回数量、错误/cache 命中，以及 facet、title/abstract keywords 等简洁 query 意图 trace。
@@ -173,8 +202,9 @@ max_llm_calls = 8
 - `02-search/review/coverage_report.json` 和 `02-search/review/coverage_report.md`：required facets 覆盖情况、缺失研究问题和 follow-up query 决策。
 - `02-search/documents/documents.jsonl`：标准化 document records，覆盖已选 metadata 和配置的本地文件，并记录 `metadata_only`、`parsed`、`skipped`、`failed` 等 extraction status。
 - `02-search/documents/cache_manifest.json`：cache/extraction 汇总，包含 source counts、status counts 和 full-text/PDF 意图开关。
-- `02-search/documents/fulltext_manifest.json`：全文 hint 和 fetch 预算决策。Day9 会记录 arXiv/OpenAlex/local-file hints，但不会下载远程 PDF。
-- `02-search/research_index/chunks.jsonl`：从摘要和已解析本地文件生成的可移植本地 chunks。
+- `02-search/documents/fulltext_manifest.json`：全文 hint 和 fetch 预算决策。远程获取失败会记录在该 manifest 中，不会让 search 阶段失败。
+- `02-search/documents/fulltext_extraction.json`：对已缓存/本地全文的 best-effort parser 结果。Markdown/text 和基础 HTML 不需要额外依赖；PDF 解析会在可用时使用可选 `pypdf`，失败也只记录状态。
+- `02-search/research_index/chunks.jsonl`：从摘要、已解析本地文件和已抽取全文生成的可移植本地 chunks。
 - `02-search/research_index/index_meta.json`：本地 index 汇总；在 `sqlite_fts` 或 `hybrid` 模式下还会记录可选 SQLite FTS 状态。
 - `02-search/cards/paper_cards.jsonl`：deterministic paper-level evidence cards，包含 problem/method/metric/limitation hints 和 source chunk refs。
 - `02-search/cards/claim_cards.jsonl`：保守的 claim cards，每条都绑定 chunk id。这些还不是最终报告 claim，后续 report 阶段仍需要 audit 后再使用。
@@ -195,7 +225,7 @@ required facets，在写出最终 `papers.jsonl` 前执行一个有预算限制�
 uv run simple-ar run --config examples/run_configs/local_research_report.toml
 ```
 
-这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。当前 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取，并使用轻量 keyword-overlap 匹配，而不是要求完整 query 字符串逐字出现。Day6 document store 会把本地文件 hash 和 extraction status 写入 `documents/documents.jsonl`；PDF 输入会先记录为 skipped/failed，除非后续接入可用 parser 且明确启用 full-text 意图。文档切块和向量检索会放在后续 evidence engine 中继续实现。
+这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。当前 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取，并使用轻量 keyword-overlap 匹配，而不是要求完整 query 字符串逐字出现。启用 `[research].use_fulltext = true` 后，search 阶段会把本地/缓存全文的 parser 结果写入 `documents/fulltext_extraction.json`，并在生成 evidence cards 前把抽取文本送入 `research_index/chunks.jsonl`。PDF 输入仍是 best-effort：只有在可选 parser 可用且明确启用 full-text 意图时才解析，失败不会中断 search。
 
 ### 恢复和查看状态
 
@@ -265,11 +295,21 @@ uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits
 
 `init` 会写入隔离 workspace 和静态项目地图：
 
-- `code_task/workspace/`：模型可以修改的隔离副本或 worktree。
-- `code_task/task.md`：从配置复制进来的任务说明。
-- `code_task/meta/codebase_index.json`：轻量文件索引。
-- `code_task/meta/repo_map.json` 和 `repo_map_summary.md`：分层项目地图。
-- `manifest.json`：benchmark、workspace、environment 和 safety policy。
+```text
+runs/<run-id>/
+  manifest.json
+  code_task/
+    task.md
+    workspace/
+    meta/
+      codebase_index.json
+      repo_map.json
+      repo_map_summary.md
+```
+
+`workspace/` 是唯一可编辑副本或 worktree，`task.md` 是任务说明，`meta/`
+里是初始代码地图，`manifest.json` 记录 benchmark、workspace、environment
+和 safety policy。
 
 > Tip：medium review pipeline 会运行 `python main.py --config configs/experiment.json --show-progress`。执行时可以看到类似 `benchmark stdout: round 1/4 ...` 的转发行，同时完整 stdout 仍会保存到 `code_task/run/<label>/stdout.txt`。
 
@@ -281,13 +321,25 @@ uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-这一步通常会生成：
+这一步通常会生成第一批执行产物：
 
-- `code_task/meta/environment_report.json`：OS、Python、GPU、依赖和测试目录信号。
-- `code_task/run/baseline/metrics.json`：baseline benchmark 指标。
-- `code_task/work_plan.md`：LLM 生成的实现批次计划。
-- `code_task/attempts/attempt-001/batches/batch-001/batch_state.json`：当前 active batch 状态。
-- `code_task/patch_plan.md`：需要人工审核的 patch plan。
+```text
+code_task/
+  work_plan.md
+  patch_plan.md
+  meta/
+    environment_report.json
+  attempts/
+    attempt-001/
+      batches/
+        batch-001/
+          batch_state.json
+  run/
+    baseline/
+      metrics.json
+```
+
+这时原始项目仍未被修改，workspace 也还没有应用模型 edits。
 
 3. 阅读 `code_task/work_plan.md` 和 `code_task/patch_plan.md`。如果计划合理，批准它：
 
@@ -325,12 +377,22 @@ uv run simple-ar status runs/<run-id>
 
 关键结果文件：
 
-- `code_task/patch.diff`：供人工审阅的 diff。
-- `code_task/meta/applied_edits.json`：实际应用的 proposal path 和修改文件 hash。
-- `code_task/meta/validation_report.json`：静态验证结果。
-- `code_task/run/patched/metrics.json`：patched benchmark 指标。
-- `code_task/run/comparison.json`：baseline-vs-patched verdict 和指标 delta。
-- `code_task/summary.md`：紧凑总结和下一步建议。
+```text
+code_task/
+  summary.md
+  patch.diff
+  meta/
+    applied_edits.json
+    validation_report.json
+  run/
+    patched/
+      metrics.json
+    comparison.json
+```
+
+`patch.diff` 和 `applied_edits.json` 说明改了什么，`validation_report.json`
+说明静态检查结果，`metrics.json` 是 patched run 指标，`comparison.json`
+是 baseline-vs-patched 的目标判断。
 
 正常成功信号是 `objective_improved` 或 `objective.status = "improved"`。patched benchmark 通过并不等于任务目标一定完成；如果 objective 是 `regressed` 或 `mixed`，说明代码能跑，但指标目标没有真正达成。
 
@@ -623,6 +685,37 @@ uv run simple-ar run \
 这种模式下，`05-design` 会从前面研究阶段的产物和紧凑代码摘要中写出 `generated_code_task.md` 和 `generated_code_task_meta.json`，`06-code` 再把生成任务作为普通 `code_task/task.md` 输入。
 
 `code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、运行 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁并验证。`07-run` 运行 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
+
+内嵌产物结构大致是：
+
+```text
+06-code/
+  code_task_experiment.json
+  code_task_run/
+    manifest.json
+    code_task/
+      task.md
+      workspace/
+      work_plan.md
+      patch_plan.md
+      patch.diff
+      summary.md
+      meta/
+        repo_map.json
+        proposed_edits.json
+        validation_report.json
+      run/
+        baseline/
+        patched/
+        comparison.json
+07-run/
+  results.json
+08-report/
+  report.md
+  references.bib
+  manifest.json
+  report_quality.json
+```
 
 这个路径方便端到端实验，但会牺牲 standalone workflow 的人工暂停点。对安全敏感或难调试项目，建议先用 standalone `code-task execute` 或手动 primitive 路径。
 

@@ -92,8 +92,8 @@ required_facets = ["method", "benchmark", "dataset", "code_link"]
 # 作为本地研究记录读取的 Markdown/text 文件；路径相对当前 config 解析。
 local_documents = []
 
-# full-text evidence 的意图与预算开关。Day9 只记录 hint 和预算决策；
-# 远程下载和解析仍由后续受控步骤处理。
+# full-text evidence 的意图与预算开关。远程 PDF 获取受这些设置保护；
+# 正文解析仍由后续受控步骤处理。
 use_fulltext = false
 allow_pdf_download = false
 max_fulltext_documents = 6
@@ -323,12 +323,12 @@ max_proposal_chars = 42000
 | `[research].max_queries` | `planning/research_plan.json` 的 `query_plan` section 中最多保留多少个 seed + expanded queries。 |
 | `[research].required_facets` | 希望覆盖的 evidence facets，例如 `method`、`benchmark`、`dataset`、`code_link` 或 `limitation`。这些会驱动 research questions 和 query expansion。 |
 | `[research].local_documents` | 作为本地研究记录读取的 Markdown/text 文件，路径相对配置文件解析，并会写入 `02-search/documents/documents.jsonl`，记录 parser/hash 状态。 |
-| `[research].use_fulltext` | 全文 evidence 工作流的意图开关。开启后，`documents/fulltext_manifest.json` 会在预算内选择可用的本地/远程全文 hint。Day9 仍不会下载远程文件。 |
-| `[research].allow_pdf_download` | 后续远程 PDF 下载步骤的权限开关。除非明确需要 parser-backed full-text handling，否则保持 false。 |
-| `[research].max_fulltext_documents` | 后续全文获取/解析最多选择多少篇文档。它不同于 `[research.budget].max_documents`，后者控制保留多少条 metadata/document record。 |
+| `[research].use_fulltext` | 全文 evidence 工作流的意图开关。开启后，`documents/fulltext_manifest.json` 会在预算内选择可用的本地/远程全文 hint，`documents/fulltext_extraction.json` 会记录已缓存/本地输入的 parser 结果。 |
+| `[research].allow_pdf_download` | 受控远程 PDF 获取步骤的权限开关。除非明确需要 parser-backed full-text handling，否则保持 false。 |
+| `[research].max_fulltext_documents` | 全文获取/解析最多选择多少篇文档。它不同于 `[research.budget].max_documents`，后者控制保留多少条 metadata/document record。 |
 | `[research].max_pdf_mb` | 单个 PDF 的大小上限。超过该限制的本地 PDF 会被跳过，后续远程下载器也应遵守这个限制。 |
-| `[research].keep_raw_pdf` | 后续 fetch/parser 是否保留原始 PDF。只需要 parsed text 和 section chunks 时建议保持 false。 |
-| `[research].parser_backend` | 计划使用的 parser 后端，例如 `basic`、`pypdf`、`pymupdf` 或 `external`。Day9 只记录该选择，供后续解析阶段使用。 |
+| `[research].keep_raw_pdf` | fetch/parser 是否保留原始 PDF。只需要 parsed text 和 section chunks 时建议保持 false。 |
+| `[research].parser_backend` | parser 后端提示，例如 `basic`、`pypdf`、`pymupdf` 或 `external`。当前实现会直接解析 Markdown/text 和基础 HTML；PDF 在可选 `pypdf` 可用时尝试解析。 |
 | `[research].cache` | live provider 失败后是否允许使用 cached metadata。 |
 | `[research].index_backend` | 本地索引后端。`keyword` 只写可移植 chunks；`sqlite_fts` 会额外写 SQLite FTS 数据库；`hybrid` 预留给 FTS + 后续更强 adapter。 |
 | `[research.budget].max_documents` | evidence 阶段从所有 source 中最多保留多少条记录。 |

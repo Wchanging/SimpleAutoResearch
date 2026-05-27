@@ -164,7 +164,7 @@ auto_query_expansion = true
 max_retrieval_rounds = 2
 max_queries = 6
 required_facets = ["method", "benchmark", "dataset", "code_link"]
-use_fulltext = false
+use_fulltext = true
 allow_pdf_download = false
 max_fulltext_documents = 6
 max_pdf_mb = 20
@@ -180,7 +180,36 @@ max_context_tokens = 12000
 max_llm_calls = 8
 ```
 
-The search stage writes:
+The search stage writes this main `02-search/` layout:
+
+```text
+02-search/
+  papers.jsonl
+  search_meta.json
+  planning/
+    research_plan.json
+  traces/
+    retrieval_rounds.jsonl
+    screening_decisions.jsonl
+  review/
+    coverage_report.json
+    coverage_report.md
+  documents/
+    documents.jsonl
+    cache_manifest.json
+    fulltext_manifest.json
+    fulltext_extraction.json
+    extracted_text/  # only when HTML/PDF-like resources are parsed to text
+  research_index/
+    chunks.jsonl
+    index_meta.json
+    sqlite_fts.db  # only when sqlite_fts/hybrid indexing succeeds
+  cards/
+    paper_cards.jsonl
+    claim_cards.jsonl
+```
+
+The most important files are:
 
 - `02-search/planning/research_plan.json`: one compact planning artifact with
   `research_questions`, `query_plan`, and `source_plan` sections. It records
@@ -199,10 +228,13 @@ The search stage writes:
 - `02-search/documents/cache_manifest.json`: cache/extraction summary, source
   counts, status counts, and full-text/PDF intent flags.
 - `02-search/documents/fulltext_manifest.json`: full-text hints and fetch
-  budget decisions. Day9 records arXiv/OpenAlex/local-file hints without
-  downloading remote PDFs.
+  budget decisions. Remote fetch failures are recorded in this manifest and do
+  not fail the search stage.
+- `02-search/documents/fulltext_extraction.json`: best-effort parser results
+  for cached/local full-text inputs. Markdown/text and basic HTML can be parsed
+  without extra dependencies; PDF parsing uses optional `pypdf` when available.
 - `02-search/research_index/chunks.jsonl`: portable local chunks built from
-  abstracts and parsed local files.
+  abstracts and parsed or extracted local/full-text files.
 - `02-search/research_index/index_meta.json`: local index summary. In
   `sqlite_fts` or `hybrid` mode it also records the optional SQLite FTS status.
 - `02-search/cards/paper_cards.jsonl`: deterministic paper-level evidence
@@ -235,11 +267,12 @@ That example config sets `[research].sources = ["local_files"]` and points
 `[research].local_documents` at `examples/research/local_agent_simulation_notes.md`.
 The local-file connector is intentionally conservative: it reads `.md` and
 `.txt` files as metadata-like records and uses lightweight keyword-overlap
-matching rather than exact query-string matching. The Day6 document store also
-records local file hashes and extraction status in `documents/documents.jsonl`.
-PDF inputs are recorded as skipped/failed unless an optional parser is available
-and full-text intent is enabled; stronger chunking and vector retrieval are
-planned later in the V2.3 evidence engine.
+matching rather than exact query-string matching. When
+`[research].use_fulltext = true`, the search stage also records local/cached
+parser outcomes in `documents/fulltext_extraction.json` and feeds extracted
+text into `research_index/chunks.jsonl` before building evidence cards. PDF
+inputs remain best-effort: they are parsed only when an optional parser is
+available and full-text intent is enabled.
 
 ### Resume And Status
 
@@ -353,11 +386,21 @@ commands with that printed path.
 
 `init` writes the isolated workspace and static project map:
 
-- `code_task/workspace/`: editable copy/worktree used by the model.
-- `code_task/task.md`: the task prompt copied from the config.
-- `code_task/meta/codebase_index.json`: lightweight file index.
-- `code_task/meta/repo_map.json` and `repo_map_summary.md`: layered project map.
-- `manifest.json`: benchmark, workspace, environment, and safety policy.
+```text
+runs/<run-id>/
+  manifest.json
+  code_task/
+    task.md
+    workspace/
+    meta/
+      codebase_index.json
+      repo_map.json
+      repo_map_summary.md
+```
+
+The workspace is the only editable copy/worktree. `task.md` is the task prompt,
+the `meta/` files are the initial code map, and `manifest.json` records
+benchmark, workspace, environment, and safety policy.
 
 > Tip: The medium review pipeline runs `python main.py --config
 > configs/experiment.json --show-progress` and can relay progress lines such as
@@ -375,13 +418,26 @@ commands with that printed path.
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-This usually writes:
+This usually writes the first execution artifacts:
 
-- `code_task/meta/environment_report.json`: OS, Python, GPU, dependency, and test signals.
-- `code_task/run/baseline/metrics.json`: baseline benchmark metrics.
-- `code_task/work_plan.md`: LLM-generated implementation batches.
-- `code_task/attempts/attempt-001/batches/batch-001/batch_state.json`: active batch state.
-- `code_task/patch_plan.md`: reviewable patch plan.
+```text
+code_task/
+  work_plan.md
+  patch_plan.md
+  meta/
+    environment_report.json
+  attempts/
+    attempt-001/
+      batches/
+        batch-001/
+          batch_state.json
+  run/
+    baseline/
+      metrics.json
+```
+
+At this point the original project is still untouched and the workspace has not
+received model edits.
 
 3. Read `code_task/work_plan.md` and `code_task/patch_plan.md`. If the plan is
 reasonable, approve it:
@@ -421,12 +477,22 @@ uv run simple-ar status runs/<run-id>
 
 Key output files:
 
-- `code_task/patch.diff`: readable diff for manual review.
-- `code_task/meta/applied_edits.json`: applied proposal path and changed file hashes.
-- `code_task/meta/validation_report.json`: static validation results.
-- `code_task/run/patched/metrics.json`: patched benchmark metrics.
-- `code_task/run/comparison.json`: baseline-vs-patched verdict and metric deltas.
-- `code_task/summary.md`: compact final summary and next-step guidance.
+```text
+code_task/
+  summary.md
+  patch.diff
+  meta/
+    applied_edits.json
+    validation_report.json
+  run/
+    patched/
+      metrics.json
+    comparison.json
+```
+
+`patch.diff` and `applied_edits.json` show what changed, `validation_report.json`
+shows static checks, `metrics.json` records the patched run, and
+`comparison.json` is the before/after objective verdict.
 
 Treat `objective_improved` or `objective.status = "improved"` as the normal
 success signal. A patched benchmark can pass while `objective.status` is
@@ -860,6 +926,37 @@ section pointing back to the nested work plan, batch state, summary, diff, and
 comparison artifacts. The embedded path uses the same edit-scope guard as the
 standalone workflow, so the patch cannot rewrite protected tests or benchmark
 files just to improve reported metrics.
+
+The embedded artifact layout is:
+
+```text
+06-code/
+  code_task_experiment.json
+  code_task_run/
+    manifest.json
+    code_task/
+      task.md
+      workspace/
+      work_plan.md
+      patch_plan.md
+      patch.diff
+      summary.md
+      meta/
+        repo_map.json
+        proposed_edits.json
+        validation_report.json
+      run/
+        baseline/
+        patched/
+        comparison.json
+07-run/
+  results.json
+08-report/
+  report.md
+  references.bib
+  manifest.json
+  report_quality.json
+```
 
 This path is convenient for end-to-end experiments, but it deliberately trades
 away the standalone workflow's review pauses. For safety-sensitive or

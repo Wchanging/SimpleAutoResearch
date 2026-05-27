@@ -4,15 +4,29 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
-## 2026-05-24
+## 2026-05-27
 
 ### Added
 
-- 添加 V2.3 research source-planning 基础：`02-search` 现在会写出
-  `planning/research_plan.json`，记录研究问题、计划 query、source 顺序、
-  research mode、本地文档、cache/index 偏好和轻量预算。
-- 顶层 run config 现在支持 `[research]`，包括 `sources`、`queries`、
-  `local_documents`、`cache`、`index_backend` 和 `[research.budget]`。
+- 新增 V2.3 Day 10 failure-safe full-text caching：被选中的本地全文会标记为 cached，
+  受控远程获取失败会记录到 `fulltext_manifest.json`，search 阶段继续使用 metadata/abstract evidence。
+- 新增 V2.3 Day 11 full-text extraction：
+  `02-search/documents/fulltext_extraction.json` 现在会记录已缓存/本地全文资源的 parser 结果，
+  并在生成 evidence cards 前把解析文本送入 `research_index/chunks.jsonl`。
+
+### Changed
+
+- Search 阶段 contract 现在声明 `documents/fulltext_extraction.json`，命令行完成输出和
+  `search_meta.json` 都能看到全文解析产物。
+- 本地 research 示例默认启用 `use_fulltext = true`，便于检查本地 Markdown/text 的
+  parser -> chunk -> card 链路。
+- README、Usage、Config Reference 和 Workflows 文档已更新当前边界：Markdown/text
+  和基础 HTML 可解析，PDF 解析是 best-effort，向量检索还未启用。
+
+## 2026-05-26
+
+### Added
+
 - 新增 V2.3 Day 3 research-question 和 query-plan sections，统一放在
   `02-search/planning/research_plan.json` 中。
 - 新增可选 LLM-backed research planning，可通过 `[research].planner` 控制；
@@ -38,7 +52,7 @@
   `02-search/cards/claim_cards.jsonl`，基于 document chunks 生成，并带 evidence refs 供后续 audit 使用。
 - 新增 V2.3 Day 9 full-text planning 产物：
   `02-search/documents/fulltext_manifest.json`，记录 arXiv/OpenAlex/local-file 全文 hints、
-  fetch 预算决策，以及 blocked/skipped 原因；当前不会下载远程 PDF。
+  fetch 预算决策，以及 blocked/skipped 原因；默认不会下载远程 PDF。
 - 新增 Semantic Scholar 在线 metadata connector，默认位于 OpenAlex 和 arXiv
   之间，让 V2.3 research search 不依赖 fixture metadata 时也有更广的论文来源。
 - 新增本地研究源示例 `examples/run_configs/local_research_report.toml`，
@@ -71,9 +85,23 @@
   新增 `CONFIG_REFERENCE_zh.md` 集中说明 TOML schema、完整配置和 workspace 模式变体。
 - 配置文档补充了更完整的 inline comments 和关键字段说明，便于理解 `max_papers`、
   research budgets、workspace modes 和 execute budgets 等不够自解释的设置。
-- README、Usage、CLI Reference 和 Workflows 文档已补充
-  `02-search/planning/research_plan.json`、`[research]` 配置、本地文件源，以及当前
-  V2.3 边界：PDF 解析和向量检索还未启用。
+
+## 2026-05-24
+
+### Added
+
+- 添加 V2.3 research source-planning 基础：`02-search` 现在会写出
+  `planning/research_plan.json`，记录研究问题、计划 query、source 顺序、
+  research mode、本地文档、cache/index 偏好和轻量预算。
+- 顶层 run config 现在支持 `[research]`，包括 `sources`、`queries`、
+  `local_documents`、`cache`、`index_backend` 和 `[research.budget]`。
+
+### Changed
+
+- 搜索执行开始通过 research connector wrapper 调用 OpenAlex、arXiv 和本地
+  Markdown/text 文件源，同时保留已有 fixture 与 cache fallback 行为。
+- README、Usage、CLI Reference 和 Workflows 文档开始补充
+  `02-search/planning/research_plan.json`、`[research]` 配置和本地文件源说明。
 
 ## 2026-05-23
 

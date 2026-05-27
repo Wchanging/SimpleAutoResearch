@@ -9,6 +9,7 @@ from simple_ar.research.contracts import QueryPlan, ResearchQuestion, SourcePlan
 from simple_ar.research.cards import build_evidence_cards
 from simple_ar.research.chunking import build_text_chunks
 from simple_ar.research.documents import build_cache_manifest, build_document_records
+from simple_ar.research.extractors import apply_fulltext_extraction
 from simple_ar.research.fulltext import build_fulltext_manifest
 from simple_ar.research.index import write_research_index
 
@@ -21,6 +22,7 @@ SEARCH_COVERAGE_MD = "review/coverage_report.md"
 SEARCH_DOCUMENTS = "documents/documents.jsonl"
 SEARCH_CACHE_MANIFEST = "documents/cache_manifest.json"
 SEARCH_FULLTEXT_MANIFEST = "documents/fulltext_manifest.json"
+SEARCH_FULLTEXT_EXTRACTION = "documents/fulltext_extraction.json"
 SEARCH_CHUNKS = "research_index/chunks.jsonl"
 SEARCH_INDEX_META = "research_index/index_meta.json"
 SEARCH_PAPER_CARDS = "cards/paper_cards.jsonl"
@@ -77,6 +79,17 @@ def write_search_document_artifacts(
         Metadata fields to merge into ``search_meta.json``.
     """
     documents = build_document_records(papers=papers, source_plan=source_plan)
+    fulltext_manifest = build_fulltext_manifest(
+        records=documents,
+        source_plan=source_plan,
+        cache_dir=stage_dir / "documents" / "fulltext_cache",
+    )
+    documents, fulltext_extraction = apply_fulltext_extraction(
+        records=documents,
+        fulltext_manifest=fulltext_manifest,
+        source_plan=source_plan,
+        extraction_dir=stage_dir / "documents" / "extracted_text",
+    )
     chunks = build_text_chunks(documents, max_chunks=_chunk_cap(source_plan))
     index_meta = write_research_index(
         index_dir=stage_dir / Path(SEARCH_INDEX_META).parent,
@@ -86,13 +99,15 @@ def write_search_document_artifacts(
     paper_cards, claim_cards = build_evidence_cards(documents=documents, chunks=chunks)
     write_jsonl(stage_dir / SEARCH_DOCUMENTS, [record.to_row() for record in documents])
     write_json(stage_dir / SEARCH_CACHE_MANIFEST, build_cache_manifest(records=documents, source_plan=source_plan))
-    write_json(stage_dir / SEARCH_FULLTEXT_MANIFEST, build_fulltext_manifest(records=documents, source_plan=source_plan))
+    write_json(stage_dir / SEARCH_FULLTEXT_MANIFEST, fulltext_manifest)
+    write_json(stage_dir / SEARCH_FULLTEXT_EXTRACTION, fulltext_extraction)
     write_jsonl(stage_dir / SEARCH_PAPER_CARDS, [card.to_row() for card in paper_cards])
     write_jsonl(stage_dir / SEARCH_CLAIM_CARDS, [card.to_row() for card in claim_cards])
     return {
         "documents": SEARCH_DOCUMENTS,
         "cache_manifest": SEARCH_CACHE_MANIFEST,
         "fulltext_manifest": SEARCH_FULLTEXT_MANIFEST,
+        "fulltext_extraction": SEARCH_FULLTEXT_EXTRACTION,
         "chunks": SEARCH_CHUNKS,
         "index_meta": SEARCH_INDEX_META,
         "paper_cards": SEARCH_PAPER_CARDS,

@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "arxiv>=3.0.0",
     "openai>=2.34.0",
+    "pypdf>=6.12.2",
     "python-dotenv>=1.2.2",
     "scikit-learn>=1.8.0",
     "tqdm>=4.67.3",
