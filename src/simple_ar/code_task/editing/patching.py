@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import difflib
 import hashlib
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.artifacts import (
+from simple_ar.core.artifacts import (
     append_jsonl,
     read_json,
     read_jsonl,
@@ -44,8 +44,8 @@ from simple_ar.code_task.editing.editor import (
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.editing.planning import select_relevant_files
 from simple_ar.code_task.analysis.repo_map import build_repo_map
-from simple_ar.llm import LLMClient, LLMError, LLMUsage
-from simple_ar.usage import summarize_usage
+from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
+from simple_ar.app.usage import summarize_usage
 
 
 CODE_TASK_EDIT_SYSTEM = (

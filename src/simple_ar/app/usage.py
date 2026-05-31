@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from simple_ar.artifacts import append_jsonl, read_jsonl, write_json
-from simple_ar.llm import LLMUsage
-from simple_ar.pipeline import Context
+from simple_ar.core.artifacts import append_jsonl, read_jsonl, write_json
+from simple_ar.integrations.llm import LLMUsage
+from simple_ar.core.pipeline import Context
 
 
 def record_llm_usage(ctx: Context, usage: LLMUsage) -> None:

@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.artifacts import read_json, write_json
+from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.code_task import (
     apply_patch_edits,
     build_code_task_context_pack,

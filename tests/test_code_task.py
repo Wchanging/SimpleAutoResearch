@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import contextlib
 import io
@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_text
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json, write_text
 from simple_ar.cli import main
 from simple_ar.code_task import (
     PatchValidationError,

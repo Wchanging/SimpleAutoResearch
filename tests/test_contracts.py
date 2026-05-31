@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from simple_ar.contracts import CONTRACTS
-from simple_ar.stages import Stage
+from simple_ar.core.contracts import CONTRACTS
+from simple_ar.core.stages import Stage
 
 
 class ContractTests(unittest.TestCase):

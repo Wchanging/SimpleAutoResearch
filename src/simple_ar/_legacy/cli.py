@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import re
@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
-from simple_ar.artifacts import read_json, read_text
+from simple_ar.core.artifacts import read_json, read_text
 from simple_ar.code_task import (
     analyze_code_task_failure,
     apply_patch_edits,
@@ -34,14 +34,14 @@ from simple_ar.code_task.runtime.config import (
     load_code_task_execute_options,
     parse_metric_direction_arg,
 )
-from simple_ar.console import print_line
-from simple_ar.pipeline import Context, PipelineRunner
-from simple_ar.reporting import ConsoleReporter
+from simple_ar.core.console import print_line
+from simple_ar.core.pipeline import Context, PipelineRunner
+from simple_ar.core.reporting import ConsoleReporter
 from simple_ar.retrieval.index import build_artifact_index
 from simple_ar.retrieval.search import search_artifacts
-from simple_ar.run_config import RunConfigError, load_pipeline_run_config
-from simple_ar.stage_handlers import HANDLERS
-from simple_ar.stages import Stage
+from simple_ar.app.run_config import RunConfigError, load_pipeline_run_config
+from simple_ar._legacy.stage_handlers import HANDLERS
+from simple_ar.core.stages import Stage
 
 
 def build_parser() -> argparse.ArgumentParser:

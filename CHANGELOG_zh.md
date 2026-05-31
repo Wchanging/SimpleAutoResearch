@@ -31,14 +31,19 @@
   `[run].debug_artifacts = true`。
 - 紧凑 search run 现在会同步清理 `search_meta.json` 中指向已删除诊断产物的路径，
   避免 metadata 指向不存在的 planning/trace/review 文件。
-- 原本巨大的 `stage_handlers.py` 和 `cli.py` 已移动到 `src/simple_ar/legacy/`，
+- 原本巨大的 `stage_handlers.py` 和 `cli.py` 已移动到私有 `src/simple_ar/_legacy/`，
   对外 import path 只保留小型 compatibility wrapper，便于后续逐步拆掉巨石实现。
-- Experiment runner/template helpers 已迁移到 `src/simple_ar/coding/`；
-  `src/simple_ar/experiment/` 现在保留兼容 wrapper，后续以 coding domain 为主要实现位置。
+- Experiment runner/template helpers 现在直接放在 `src/simple_ar/experiment/`；
+  冗余的 `src/simple_ar/coding/` 包已移除，避免模板实验和 code-task 自动化同时抢占
+  “coding” 这个领域名。
 - Research 模块现在按生命周期分组到 `planning/`、`sources/`、`documents/`、
   `store/`、`evidence/` 和 `outputs/`，不再把所有检索/证据文件平铺在同一目录。
 - Code-task 模块现在按生命周期分组到 `runtime/`、`workspace/`、`analysis/`、
   `editing/`、`execution/` 和 `orchestration/`，收缩原先 25 个左右文件平铺的包表面。
+- 顶层实现文件已收束到明确的领域包：`core/` 放 pipeline primitives，
+  `app/` 放 config/state/usage/dev checks，`integrations/` 放 LLM provider，
+  `experiment/` 放模板实验与 metrics，`report/` 放报告审计工具。此前宽泛的
+  `simple_ar.pipeline`、`simple_ar.artifacts`、`simple_ar.prompts` 等 facade 文件已移除。
 - README、Usage、Workflow 和 Config Reference 已说明 `unstructured` 与 LanceDB 是可选后端，而不是基础安装强依赖。
 
 ## 2026-05-27

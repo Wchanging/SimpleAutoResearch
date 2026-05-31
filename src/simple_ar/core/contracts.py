@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from simple_ar.stages import Stage
+from simple_ar.core.stages import Stage
 
 
 @dataclass(frozen=True)

@@ -88,4 +88,3 @@ def relative_to_run(run_dir: Path, path: Path | None) -> str | None:
         return str(path.relative_to(run_dir)).replace("\\", "/")
     except ValueError:
         return str(path)
-

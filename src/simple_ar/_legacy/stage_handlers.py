@@ -1,14 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json, write_jsonl, write_text
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.editing.scope import is_protected_edit_path
-from simple_ar.coding.runner import run_experiment
+from simple_ar.experiment.runner import run_experiment
 from simple_ar.experiment.code_task_experiment import (
     CODE_TASK_PROJECT_TEMPLATE,
     build_code_task_experiment_script,
@@ -17,7 +17,7 @@ from simple_ar.experiment.code_task_experiment import (
     prepare_code_task_experiment,
     write_code_task_experiment_meta,
 )
-from simple_ar.coding.templates import build_experiment_code
+from simple_ar.experiment.templates import build_experiment_code
 from simple_ar.literature.arxiv_client import ArxivRateLimitError, ArxivSearchClient, LiteratureSearchError
 from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.cache import get_cached, put_cache
@@ -25,8 +25,8 @@ from simple_ar.literature.models import Paper
 from simple_ar.literature.openalex_client import OpenAlexSearchClient, OpenAlexSearchError
 from simple_ar.literature.semantic_scholar_client import SemanticScholarSearchClient, SemanticScholarSearchError
 from simple_ar.literature.verify import CitationError, validate_citations
-from simple_ar.llm import LLMClient, LLMError, LLMRequest
-from simple_ar.pipeline import Context, utcnow_iso
+from simple_ar.integrations.llm import LLMClient, LLMError, LLMRequest
+from simple_ar.core.pipeline import Context, utcnow_iso
 from simple_ar.research.connectors import (
     ArxivConnector,
     LocalFileConnector,
@@ -78,10 +78,10 @@ from simple_ar.research.service import (
     safe_read_json_artifact,
 )
 from simple_ar.research.sources.base import SearchQuery, build_source_plan, primary_query
-from simple_ar.report_quality import build_report_quality
+from simple_ar.report.quality import build_report_quality
 from simple_ar.retrieval.evidence import collect_stage_evidence, format_evidence_snippets
-from simple_ar.coding.service import load_experiment_plan, load_experiment_script_path
-from simple_ar.usage import record_llm_usage
+from simple_ar.experiment.service import load_experiment_plan, load_experiment_script_path
+from simple_ar.app.usage import record_llm_usage
 
 
 def execute_plan(ctx: Context) -> None:

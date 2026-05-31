@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 
-from simple_ar.dev_checks import CHECK_GROUPS, build_unittest_command, parse_args
+from simple_ar.app.dev_checks import CHECK_GROUPS, build_unittest_command, parse_args
 
 
 class DevChecksTests(unittest.TestCase):

@@ -1,11 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.artifacts import read_json
+from simple_ar.core.artifacts import read_json
 from simple_ar.code_task.editing.attempts import (
     LoadedCodeTaskBatch,
     create_code_task_batch,

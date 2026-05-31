@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import fnmatch
 import shutil
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import write_json
+from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.editing.editor import (
     ApplyEditRequest,
     ApplyEditResult,

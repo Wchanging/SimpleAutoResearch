@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from simple_ar.artifacts import read_json, write_json
+from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     load_code_task_manifest,

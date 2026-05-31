@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from simple_ar.app.config import AppConfigSnapshot
-from simple_ar.stages import STAGE_SLUGS, Stage
+from simple_ar.core.stages import STAGE_SLUGS, Stage
 
 
 StageStatus = Literal["pending", "running", "failed", "completed"]

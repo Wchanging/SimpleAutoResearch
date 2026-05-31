@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import write_jsonl
+from simple_ar.core.artifacts import write_jsonl
 from simple_ar.retrieval.index import build_artifact_index
 
 

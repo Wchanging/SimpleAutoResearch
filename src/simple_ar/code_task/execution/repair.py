@@ -1,11 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
+from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
 from simple_ar.code_task.editing.scope import (
     editable_paths,
     is_protected_edit_path,
@@ -22,8 +22,8 @@ from simple_ar.code_task.runtime.state import (
     workspace_file,
 )
 from simple_ar.code_task.execution.summary import write_code_task_summary
-from simple_ar.llm import LLMClient, LLMError, LLMUsage
-from simple_ar.usage import summarize_usage
+from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
+from simple_ar.app.usage import summarize_usage
 
 
 CODE_TASK_REPAIR_SYSTEM = (

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from simple_ar.artifacts import read_json, read_text, write_json
+from simple_ar.core.artifacts import read_json, read_text, write_json
 from simple_ar.code_task import (
     apply_patch_edits,
     execute_code_task,

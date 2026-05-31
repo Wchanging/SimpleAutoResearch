@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import read_json, read_jsonl, read_text
-from simple_ar.pipeline import Context
-from simple_ar.stages import Stage
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text
+from simple_ar.core.pipeline import Context
+from simple_ar.core.stages import Stage
 
 
 def load_problem_markdown(ctx: Context) -> str:

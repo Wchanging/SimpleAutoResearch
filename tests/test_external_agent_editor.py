@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 import unittest
 from pathlib import Path
 
-from simple_ar.artifacts import read_json
+from simple_ar.core.artifacts import read_json
 from simple_ar.code_task import (
     ExternalAgentAdapterSpec,
     ExternalAgentDisabledError,

@@ -1,4 +1,4 @@
-﻿from simple_ar.code_task.editing.attempts import (
+from simple_ar.code_task.editing.attempts import (
     CodeTaskBatchResult,
     LoadedCodeTaskBatch,
     create_code_task_batch,

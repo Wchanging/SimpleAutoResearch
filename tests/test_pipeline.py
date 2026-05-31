@@ -5,15 +5,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from simple_ar.artifacts import read_json, read_text
+from simple_ar.core.artifacts import read_json, read_text
 from simple_ar.experiment.code_task_experiment import (
     CODE_TASK_PROJECT_TEMPLATE,
     CODE_TASK_TOY_SPAM_TEMPLATE,
     CodeTaskExperimentResult,
 )
-from simple_ar.pipeline import Context, MissingInputError, PipelineEvent, PipelineRunner
-from simple_ar.stage_handlers import HANDLERS, execute_code, execute_design
-from simple_ar.stages import Stage
+from simple_ar.core.pipeline import Context, MissingInputError, PipelineEvent, PipelineRunner
+from simple_ar._legacy.stage_handlers import HANDLERS, execute_code, execute_design
+from simple_ar.core.stages import Stage
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
@@ -191,7 +191,7 @@ class PipelineTests(unittest.TestCase):
             ctx.current_stage = Stage.CODE
             ctx.stage_dir().mkdir(parents=True)
             with patch(
-                "simple_ar.stage_handlers.prepare_code_task_experiment",
+                "simple_ar._legacy.stage_handlers.prepare_code_task_experiment",
                 return_value=fake_result,
             ):
                 execute_code(ctx)
@@ -260,7 +260,7 @@ class PipelineTests(unittest.TestCase):
             ctx.current_stage = Stage.CODE
             ctx.stage_dir().mkdir(parents=True)
             with patch(
-                "simple_ar.stage_handlers.prepare_code_task_experiment",
+                "simple_ar._legacy.stage_handlers.prepare_code_task_experiment",
                 return_value=fake_result,
             ):
                 execute_code(ctx)

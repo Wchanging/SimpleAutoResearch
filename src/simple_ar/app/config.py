@@ -18,4 +18,3 @@ class AppConfigSnapshot(BaseModel):
 
     def to_runtime_config(self) -> dict[str, object]:
         return dict(self.values)
-

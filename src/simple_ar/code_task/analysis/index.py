@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import write_json
+from simple_ar.core.artifacts import write_json
 from simple_ar.retrieval.index import kind_for_path
 
 

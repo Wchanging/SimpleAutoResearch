@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from simple_ar.run_config import RunConfigError, load_pipeline_run_config
+from simple_ar.app.run_config import RunConfigError, load_pipeline_run_config
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"

@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import write_json, write_jsonl
+from simple_ar.core.artifacts import write_json, write_jsonl
 from simple_ar.literature.models import Paper
 from simple_ar.research.contracts import QueryPlan, ResearchQuestion, SourcePlan
 from simple_ar.research.evidence.cards import build_evidence_cards

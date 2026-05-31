@@ -22,7 +22,7 @@ from simple_ar.core.artifacts import (
 )
 from simple_ar.core.contracts import CONTRACTS, StageContract
 from simple_ar.core.stage_results import collect_stage_result
-from simple_ar.stages import STAGE_SEQUENCE, Stage, parse_stage, stage_dir_name, stage_range
+from simple_ar.core.stages import STAGE_SEQUENCE, Stage, parse_stage, stage_dir_name, stage_range
 
 
 class PipelineError(RuntimeError):

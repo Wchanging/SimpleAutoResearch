@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +28,7 @@ from simple_ar.research.outputs.artifacts import (
     SEARCH_PAPERS,
     SEARCH_RESEARCH_PLAN,
 )
-from simple_ar.stages import Stage
+from simple_ar.core.stages import Stage
 
 if TYPE_CHECKING:
     from simple_ar.core.pipeline import Context

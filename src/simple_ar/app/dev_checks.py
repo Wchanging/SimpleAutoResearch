@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from typing import Sequence
 
-from simple_ar.console import print_line
+from simple_ar.core.console import print_line
 
 
 @dataclass(frozen=True)

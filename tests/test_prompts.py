@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from simple_ar.prompts import (
+from simple_ar.research.prompts import (
     paper_note_user_prompt,
     report_user_prompt,
     research_planner_user_prompt,

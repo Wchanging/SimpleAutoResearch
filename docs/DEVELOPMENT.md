@@ -16,10 +16,15 @@ SimpleAutoResearch is now file-first plus state-backed:
 
 This keeps the project easier to learn, debug, and refactor.
 
-The old monolithic CLI and stage handler modules live under
-`src/simple_ar/legacy/` during the reboot. Public imports still work through
+The old monolithic CLI and stage handler modules live under private
+`src/simple_ar/_legacy/` during the reboot. Public imports still work through
 small compatibility wrappers, but new behavior should be implemented in the
-domain modules under `core/`, `research/`, `coding/`, and `code_task/`.
+domain modules under `core/`, `research/`, `experiment/`, and `code_task/`.
+
+Top-level implementation modules have been collapsed into domain packages.
+Prefer direct imports from `core/*`, `app/*`, `integrations/*`, `research/*`,
+`experiment/*`, `report/*`, or `code_task/*`. Do not reintroduce broad
+compatibility facades for new code.
 
 Research code is grouped by evidence lifecycle:
 
@@ -41,13 +46,14 @@ the old flat `research/*.py` layout.
 
 To add a stage to the default research pipeline, update these places together:
 
-1. Add the enum value in `src/simple_ar/stages.py`.
+1. Add the enum value in `src/simple_ar/core/stages.py`.
 2. Add or extend the typed state/contract models in `src/simple_ar/app/state.py`
    and `src/simple_ar/core/contracts.py`.
 3. Implement stage behavior in the responsible domain service, for example
-   `src/simple_ar/research/service.py` or `src/simple_ar/coding/service.py`.
-4. Add a thin adapter in `src/simple_ar/stage_handlers.py` only when the
-   pipeline registry needs a public handler function.
+   `src/simple_ar/research/service.py` or `src/simple_ar/experiment/service.py`.
+4. Add a thin adapter in the pipeline registry. During the reboot this still
+   means `src/simple_ar/_legacy/stage_handlers.py`; once that file is retired,
+   use the new domain registry instead.
 5. Register the handler in `HANDLERS`.
 6. Add a focused test that checks state updates and declared outputs.
 
@@ -57,16 +63,16 @@ exists for legacy fallback only.
 
 ## Adding An Experiment Template
 
-Fixed script templates primarily live in `src/simple_ar/coding/templates.py`.
+Fixed script templates primarily live in `src/simple_ar/experiment/templates.py`.
 Embedded 8-stage code-task templates live in
 `src/simple_ar/experiment/code_task_experiment.py` because they prepare an existing
 workspace before writing the run harness.
 
-`src/simple_ar/experiment/templates.py` and `src/simple_ar/experiment/runner.py`
-are compatibility wrappers over `src/simple_ar/coding/`. Prefer the coding
-package for new template/runner work.
+Use `src/simple_ar/experiment/runner.py` for fixed generated-template
+subprocesses. Use `src/simple_ar/code_task/` for LLM-guided project editing,
+workspace isolation, patching, validation, and benchmark comparison.
 
-Top-level run config parsing lives in `src/simple_ar/run_config.py`. Keep it as
+Top-level run config parsing lives in `src/simple_ar/app/run_config.py`. Keep it as
 a thin TOML-to-runtime-options layer; code-task-specific config semantics should
 continue to live in `src/simple_ar/code_task/runtime/config.py` so standalone
 and embedded code-task runs do not drift apart.
@@ -77,7 +83,7 @@ A new template should:
 - generate a complete standalone `experiment.py`;
 - use only dependencies declared in `pyproject.toml`;
 - print machine-parseable metric lines like `metric_name: 0.123`, parsed by
-  `src/simple_ar/metrics.py`;
+  `src/simple_ar/experiment/metrics.py`;
 - avoid network access and uncontrolled downloads;
 - have a test in `tests/test_experiment_runner.py`.
 

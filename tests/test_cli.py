@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from simple_ar.artifacts import read_json, write_json
+from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.cli import _resume_config, main
 
 

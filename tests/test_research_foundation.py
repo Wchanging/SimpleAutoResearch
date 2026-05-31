@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 import tempfile
@@ -31,7 +31,7 @@ from simple_ar.research.evidence.retrieval import RetrievalCandidate, relevance_
 from simple_ar.research.sources.base import SearchQuery, build_source_plan, primary_query
 from simple_ar.research.connectors.local_files import LocalFileConnector
 from simple_ar.research.prompts import report_user_prompt
-from simple_ar.prompts import report_user_prompt as compat_report_user_prompt
+from simple_ar.research.prompts import report_user_prompt as compat_report_user_prompt
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"

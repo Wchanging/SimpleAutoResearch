@@ -1,11 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import read_json, read_text, write_text
+from simple_ar.core.artifacts import read_json, read_text, write_text
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     is_relative_to,

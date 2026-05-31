@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import read_json, read_text, write_text
+from simple_ar.core.artifacts import read_json, read_text, write_text
 from simple_ar.code_task.editing.scope import is_protected_edit_path
 from simple_ar.code_task.runtime.state import (
     code_task_paths,

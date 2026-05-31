@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import append_jsonl, read_json, read_jsonl, write_json
+from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, write_json
 from simple_ar.retrieval.chunking import build_artifact_chunks
 from simple_ar.retrieval.index import build_artifact_index
 from simple_ar.retrieval.search import search_chunks

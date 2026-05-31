@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from simple_ar.llm import LLMClient, LLMError, LLMRequest, estimate_tokens, parse_json_object
+from simple_ar.integrations.llm import LLMClient, LLMError, LLMRequest, estimate_tokens, parse_json_object
 
 
 class LLMParsingTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class LLMParsingTests(unittest.TestCase):
                 "SIMPLE_AR_MAX_OUTPUT_TOKENS": "1234",
             },
             clear=True,
-        ), patch("simple_ar.llm.litellm.completion") as completion:
+        ), patch("simple_ar.integrations.llm.litellm.completion") as completion:
             client = LLMClient.from_env()
 
         self.assertEqual(client.model, "test-model")

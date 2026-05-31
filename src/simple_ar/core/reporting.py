@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from simple_ar.console import print_line
-from simple_ar.pipeline import PipelineEvent
+from simple_ar.core.console import print_line
+from simple_ar.core.pipeline import PipelineEvent
 
 
 class ConsoleReporter:

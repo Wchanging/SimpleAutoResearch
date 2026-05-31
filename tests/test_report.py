@@ -5,9 +5,9 @@ from pathlib import Path
 
 from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
-from simple_ar.pipeline import Context
-from simple_ar.report_quality import build_report_quality
-from simple_ar.stage_handlers import (
+from simple_ar.core.pipeline import Context
+from simple_ar.report.quality import build_report_quality
+from simple_ar._legacy.stage_handlers import (
     _append_references_section,
     _build_research_report,
     _build_report,

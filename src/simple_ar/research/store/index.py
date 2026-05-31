@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import write_json, write_jsonl
+from simple_ar.core.artifacts import write_json, write_jsonl
 from simple_ar.research.contracts import TextChunk
 
 

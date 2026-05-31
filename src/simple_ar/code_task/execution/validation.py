@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import ast
 import importlib.util
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from simple_ar.artifacts import write_json
+from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.editing.attempts import (
     load_latest_code_task_batch,
     update_code_task_batch_state,

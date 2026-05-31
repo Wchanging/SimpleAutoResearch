@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from simple_ar.artifacts import read_json, read_jsonl, write_json, write_jsonl, write_text
+from simple_ar.core.artifacts import read_json, read_jsonl, write_json, write_jsonl, write_text
 from simple_ar.retrieval.evidence import collect_stage_evidence, format_evidence_snippets
 from simple_ar.retrieval.index import build_artifact_index
 

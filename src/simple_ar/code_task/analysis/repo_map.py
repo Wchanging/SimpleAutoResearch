@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -7,7 +7,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
-from simple_ar.artifacts import read_json, write_json, write_text
+from simple_ar.core.artifacts import read_json, write_json, write_text
 from simple_ar.code_task.editing.scope import (
     DEFAULT_PROTECTED_EDIT_PATTERNS,
     is_protected_edit_path,

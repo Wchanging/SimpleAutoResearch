@@ -15,10 +15,14 @@ SimpleAutoResearch 现在采用 file-first + state-backed 的形态：
 
 这样项目更容易学习、调试和重构。
 
-旧的巨型 CLI 和 stage handler 模块在 reboot 期间移动到
-`src/simple_ar/legacy/`。公开 import path 仍通过小型 compatibility wrapper
-工作，但新的行为应优先实现到 `core/`、`research/`、`coding/` 和
+旧的巨型 CLI 和 stage handler 模块在 reboot 期间移动到私有
+`src/simple_ar/_legacy/`。公开 import path 仍通过小型 compatibility wrapper
+工作，但新的行为应优先实现到 `core/`、`research/`、`experiment/` 和
 `code_task/` 这些领域模块中。
+
+顶层实现模块已经收束到领域包中。新代码应直接从 `core/*`、`app/*`、
+`integrations/*`、`research/*`、`experiment/*`、`report/*` 或 `code_task/*`
+导入，不再重新引入宽泛的 compatibility facade。
 
 Research 代码按 evidence 生命周期分组：
 
@@ -38,13 +42,13 @@ src/simple_ar/research/
 
 向默认 research pipeline 添加 stage 时，需要一起更新：
 
-1. 在 `src/simple_ar/stages.py` 中添加 enum value。
+1. 在 `src/simple_ar/core/stages.py` 中添加 enum value。
 2. 在 `src/simple_ar/app/state.py` 和 `src/simple_ar/core/contracts.py`
    中添加或扩展 typed state/contract models。
 3. 在对应领域 service 中实现阶段行为，例如
-   `src/simple_ar/research/service.py` 或 `src/simple_ar/coding/service.py`。
-4. 只有 pipeline registry 需要公开 handler 时，才在
-   `src/simple_ar/stage_handlers.py` 中添加薄 adapter。
+   `src/simple_ar/research/service.py` 或 `src/simple_ar/experiment/service.py`。
+4. 只有 pipeline registry 需要 handler 时，才添加薄 adapter。reboot 期间这仍然是
+   `src/simple_ar/_legacy/stage_handlers.py`；等它被拆完后，再切到新的领域 registry。
 5. 在 `HANDLERS` 中注册 handler。
 6. 添加聚焦测试，检查 state update 和 declared outputs。
 
@@ -53,22 +57,22 @@ src/simple_ar/research/
 
 ## 添加 Experiment Template
 
-固定脚本模板主要位于 `src/simple_ar/coding/templates.py`。内嵌 8 阶段
+固定脚本模板主要位于 `src/simple_ar/experiment/templates.py`。内嵌 8 阶段
 code-task templates 位于 `src/simple_ar/experiment/code_task_experiment.py`，
 因为它们会在写 run harness 前准备已有 workspace。
 
-`src/simple_ar/experiment/templates.py` 和 `src/simple_ar/experiment/runner.py`
-现在是指向 `src/simple_ar/coding/` 的兼容 wrapper。新增 template/runner
-能力时优先修改 coding package。
+`src/simple_ar/experiment/runner.py` 用于固定模板生成脚本的 subprocess 运行。
+`src/simple_ar/code_task/` 则负责 LLM-guided 项目编辑、workspace 隔离、patch、
+validation 和 benchmark comparison。
 
-顶层 run config 解析位于 `src/simple_ar/run_config.py`。它应该保持为薄的 TOML-to-runtime-options 层；code-task 专属 config 语义应继续放在 `src/simple_ar/code_task/runtime/config.py`，避免 standalone 和 embedded code-task 行为漂移。
+顶层 run config 解析位于 `src/simple_ar/app/run_config.py`。它应该保持为薄的 TOML-to-runtime-options 层；code-task 专属 config 语义应继续放在 `src/simple_ar/code_task/runtime/config.py`，避免 standalone 和 embedded code-task 行为漂移。
 
 新的 template 应满足：
 
 - 添加到 `SUPPORTED_TEMPLATES`；
 - 生成完整 standalone `experiment.py`；
 - 只使用 `pyproject.toml` 中声明的依赖；
-- 打印机器可解析指标行，例如 `metric_name: 0.123`，由 `src/simple_ar/metrics.py` 解析；
+- 打印机器可解析指标行，例如 `metric_name: 0.123`，由 `src/simple_ar/experiment/metrics.py` 解析；
 - 避免网络访问和不受控下载；
 - 在 `tests/test_experiment_runner.py` 中有测试。
 

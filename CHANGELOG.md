@@ -51,18 +51,25 @@ This file records user-visible project changes in reverse chronological order. P
 - Compact search runs now rewrite `search_meta.json` so it no longer points to
   diagnostic artifacts removed from the run directory.
 - The previous monolithic `stage_handlers.py` and `cli.py` entrypoints were
-  moved under `src/simple_ar/legacy/`, with small compatibility wrappers kept at
+  moved under private `src/simple_ar/_legacy/`, with small compatibility wrappers kept at
   the public import paths. This makes the active project shape easier to evolve
   without breaking existing tests and commands.
-- Experiment runner/template helpers now live under `src/simple_ar/coding/`;
-  `src/simple_ar/experiment/` keeps compatibility wrappers while the coding
-  domain becomes the primary implementation home.
+- Experiment runner/template helpers now live directly under
+  `src/simple_ar/experiment/`; the redundant `src/simple_ar/coding/` package was
+  removed so template experiments and code-task automation no longer compete for
+  the same "coding" name.
 - Research modules are now grouped by lifecycle under `planning/`, `sources/`,
   `documents/`, `store/`, `evidence/`, and `outputs/` instead of being a flat
   folder.
 - Code-task modules are now grouped by lifecycle under `runtime/`, `workspace/`,
   `analysis/`, `editing/`, `execution/`, and `orchestration/`, reducing the
   previous flat 25-file package surface.
+- Top-level implementation files were collapsed into explicit domain packages:
+  `core/` for pipeline primitives, `app/` for config/state/usage/dev checks,
+  `integrations/` for LLM providers, `experiment/` for template experiments and
+  metrics, and `report/` for report audit helpers. The previous broad facade
+  files such as `simple_ar.pipeline`, `simple_ar.artifacts`, and
+  `simple_ar.prompts` were removed.
 - Config, Usage, Workflow, and README docs now describe `unstructured` and
   LanceDB as optional backends rather than mandatory base dependencies.
 
