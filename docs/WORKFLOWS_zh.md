@@ -101,7 +101,7 @@ plan -> search -> read -> synthesize -> design experiment
 
 ## Search 与 LLM 边界
 
-默认情况下，普通 pipeline run 会在 search 阶段 contract 写出后保留紧凑输出：
+默认情况下，普通 pipeline run 会在 search 阶段 contract 写出后保留紧凑输出。紧凑模式会保留后续阶段需要的 evidence 产物，只删除 planning、trace 和 review 这类诊断目录：
 
 ```text
 02-search/
@@ -109,10 +109,22 @@ plan -> search -> read -> synthesize -> design experiment
   report.md
   papers.jsonl
   search_meta.json
+  documents/
+    documents.jsonl
+    cache_manifest.json
+    fulltext_manifest.json
+    fulltext_extraction.json
+    fulltext_cache/     # 只有远程全文被获取并保留时出现
+    extracted_text/     # 只有 parser 输出被物化为文本时出现
+  research_index/
+    chunks.jsonl
+    index_meta.json
+  cards/
+    paper_cards.jsonl
+    claim_cards.jsonl
 ```
 
-如果需要检查完整 planning、trace、documents、local-index、review 和 cards，
-可以设置 `[run].debug_artifacts = true`。此时 Search 阶段会分目录保留：
+如果还需要检查 planning、retrieval trace、screening 和 coverage-review 诊断信息，可以设置 `[run].debug_artifacts = true`：
 
 ```text
 02-search/
@@ -128,18 +140,6 @@ plan -> search -> read -> synthesize -> design experiment
   review/
     coverage_report.json
     coverage_report.md
-  documents/
-    documents.jsonl
-    cache_manifest.json
-    fulltext_manifest.json
-    fulltext_extraction.json
-    extracted_text/
-  research_index/
-    chunks.jsonl
-    index_meta.json
-  cards/
-    paper_cards.jsonl
-    claim_cards.jsonl
 ```
 
 共享加速索引默认写在 run 目录外：
@@ -196,16 +196,17 @@ runs/<run-id>/
     search_meta.json
     planning/       # 仅在 [run].debug_artifacts = true 时保留
       research_plan.json
-    documents/      # 仅在 [run].debug_artifacts = true 时保留
+    documents/
       documents.jsonl
       cache_manifest.json
       fulltext_manifest.json
       fulltext_extraction.json
+      fulltext_cache/  # 只有远程全文被获取并保留时出现
       extracted_text/  # 只有 HTML/PDF-like 资源被抽取成文本时出现
-    research_index/ # 仅在 [run].debug_artifacts = true 时保留
+    research_index/
       chunks.jsonl
       index_meta.json
-    cards/          # 仅在 [run].debug_artifacts = true 时保留
+    cards/
       paper_cards.jsonl
       claim_cards.jsonl
     traces/         # 仅在 [run].debug_artifacts = true 时保留
@@ -244,15 +245,15 @@ runs/<run-id>/
 - `02-search/traces/retrieval_rounds.jsonl`：实际执行的 source/query 尝试，包含返回数量、错误和简洁 query 意图 trace；debug artifact。
 - `02-search/traces/screening_decisions.jsonl`：retrieved metadata candidates 的 keep/discard 决策；debug artifact。
 - `02-search/review/coverage_report.json` / `coverage_report.md`：required facets 覆盖情况、缺失问题状态和 follow-up query 决策；debug artifact。
-- `02-search/documents/documents.jsonl`：metadata 和本地文件的标准化 document records；可用时包含 hash 和 parser status；debug artifact。
-- `02-search/documents/cache_manifest.json`：cache、index、full-text 和 extraction-status 汇总；debug artifact。
-- `02-search/documents/fulltext_manifest.json`：全文 hints、候选选择、blocked/skipped 原因，以及 parser/fetch 预算设置；debug artifact。
-- `02-search/documents/fulltext_extraction.json`：已缓存本地/远程全文资源的 parser 结果；PDF 或不支持后缀解析失败会记录在这里，不会让 search 阶段失败；debug artifact。
-- `02-search/research_index/chunks.jsonl`：后续 retrieval、evidence-card extraction 和 report grounding 使用的可移植本地 chunk store；run 目录下仅 debug 保留，共享加速索引在 `.simple_ar_cache/`。
-- `02-search/research_index/index_meta.json`：本地 index manifest，包含 backend、run id、可移植 chunk 路径和共享 SQLite / LanceDB 加速索引路径；debug artifact。
-- `02-search/cards/paper_cards.jsonl`：deterministic paper cards，带 evidence refs，供后续 gap、idea 和 report stages 使用；debug artifact。
-- `02-search/cards/claim_cards.jsonl`：绑定 chunk id 的保守 claim cards；最终报告使用前仍应经过 report audit；debug artifact。
-- `02-search/search_meta.json`：最终选用 source、状态、数量，以及 planning/trace/review artifact 路径。
+- `02-search/documents/documents.jsonl`：metadata 和本地文件的标准化 document records；可用时包含 hash 和 parser status。
+- `02-search/documents/cache_manifest.json`：cache、index、full-text 和 extraction-status 汇总。
+- `02-search/documents/fulltext_manifest.json`：全文 hints、候选选择、blocked/skipped 原因，以及 parser/fetch 预算设置。
+- `02-search/documents/fulltext_extraction.json`：已缓存本地/远程全文资源的 parser 结果；PDF 或不支持后缀解析失败会记录在这里，不会让 search 阶段失败。
+- `02-search/research_index/chunks.jsonl`：后续 retrieval、evidence-card extraction 和 report grounding 使用的可移植本地 chunk store；共享加速索引在 `.simple_ar_cache/`。
+- `02-search/research_index/index_meta.json`：本地 index manifest，包含 backend、run id、可移植 chunk 路径和共享 SQLite / LanceDB 加速索引路径。
+- `02-search/cards/paper_cards.jsonl`：deterministic paper cards，带 evidence refs，供后续 gap、idea 和 report stages 使用。
+- `02-search/cards/claim_cards.jsonl`：绑定 chunk id 的保守 claim cards；最终报告使用前仍应经过 report audit。
+- `02-search/search_meta.json`：最终选用 source、状态、数量，以及已保留 evidence artifact 路径；planning/trace/review 诊断路径只会在 `[run].debug_artifacts = true` 时保留。
 - `02-search/papers.jsonl`：传给 `03-read` 的标准化 metadata rows。
 - `05-design/generated_code_task.md`：仅当内嵌 `code_task_project` 没有 task file 时生成。
 - `05-design/generated_code_task_meta.json`：生成 task file 的 provenance。

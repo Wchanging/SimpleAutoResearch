@@ -25,9 +25,12 @@
 - Research SQLite FTS / LanceDB 加速索引默认共享在 `.simple_ar_cache/research_index`，run 目录只保留可审计的 `chunks.jsonl` 和 `index_meta.json`；共享数据库按 `run_id` 更新，避免每个 run 重复创建一份索引。
 - Pipeline 阶段依赖现在优先使用显式 `WorkspaceState` 指针，而不是通过
   `find_artifact` 反向扫描 run 目录；旧 helper 仅作为 legacy compatibility 保留。
-- 默认 pipeline run 会在 search 阶段 contract 写出后压缩 `02-search` 的 verbose
-  中间目录。需要保留 planning、trace、documents、cards、review 和 local-index
-  调试产物时，可设置 `[run].debug_artifacts = true`。
+- 默认 pipeline run 会在 search 阶段 contract 写出后只压缩 `02-search` 的诊断目录。
+  `documents/`、`research_index/` 和 `cards/` 等后续 grounding 需要的 evidence 产物会保留在 run 目录；
+  需要额外保留 planning、trace、screening 和 coverage-review 诊断产物时，可设置
+  `[run].debug_artifacts = true`。
+- 紧凑 search run 现在会同步清理 `search_meta.json` 中指向已删除诊断产物的路径，
+  避免 metadata 指向不存在的 planning/trace/review 文件。
 - 原本巨大的 `stage_handlers.py` 和 `cli.py` 已移动到 `src/simple_ar/legacy/`，
   对外 import path 只保留小型 compatibility wrapper，便于后续逐步拆掉巨石实现。
 - Experiment runner/template helpers 已迁移到 `src/simple_ar/coding/`；

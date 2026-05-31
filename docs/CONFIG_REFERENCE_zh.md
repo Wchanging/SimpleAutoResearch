@@ -38,8 +38,8 @@ to_stage = "report"
 # 是否减少命令行进度日志；最终路径和状态仍会输出。
 quiet = false
 
-# true 会在 run 目录中保留 search traces、document records、cards 和本地索引等详细中间产物；
-# 默认 false 会让普通运行更清爽，主要依赖 state.json、contract.json 和共享 store。
+# true 会在 run 目录中保留 planning、retrieval trace、screening 和 coverage review 等诊断目录；
+# 默认 false 只压缩诊断文件。documents、全文 manifest、chunks 和 cards 这类后续阶段需要的 evidence 产物仍会保留。
 debug_artifacts = false
 
 [llm]
@@ -308,6 +308,7 @@ max_proposal_chars = 42000
 | --- | --- |
 | `[run].topic` | 用户的主要研究/实验目标，会影响 planning、默认搜索 query 和报告表述。 |
 | `[run].from_stage` / `[run].to_stage` | 部分运行的阶段范围。可用于停在 `synthesize`、只重跑 `report`，或 resume 某一段。 |
+| `[run].debug_artifacts` | 是否保留 search 阶段的诊断目录，例如 planning、trace、screening 和 coverage review。默认 false 只压缩诊断文件；documents、全文 manifest、chunks 和 cards 仍会作为 evidence 产物保留。 |
 | `[llm].enabled` | 是否启用 LLM 支持的 planning、notes、synthesis、report 和 code-task 步骤。真实 code-task 通常需要 LLM 才有实际意义。 |
 | `[llm].workers` | 支持并发的 LLM 阶段使用的 worker 数；并不代表所有 pipeline 阶段都会并发。 |
 | `[search].offline` | 跳过 live literature provider，适合本地 demo 和 deterministic test。 |

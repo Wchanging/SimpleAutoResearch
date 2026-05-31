@@ -42,9 +42,10 @@ to_stage = "report"
 # Suppress progress logs while keeping final paths/status output.
 quiet = false
 
-# Keep verbose intermediate artifacts such as search traces, local document
-# records, cards, and local index files inside each run directory. The default
-# false keeps normal runs compact and relies on state.json plus shared stores.
+# Keep verbose search diagnostics such as planning, retrieval traces, screening,
+# and coverage-review folders inside each run directory. The default false keeps
+# diagnostics compact; evidence artifacts such as documents, full-text manifests,
+# chunks, and cards are still retained for downstream stages.
 debug_artifacts = false
 
 [llm]
@@ -314,7 +315,7 @@ max_proposal_chars = 42000
 | --- | --- |
 | `[run].topic` | Main user goal. It is used by planning, default search query generation, and report framing. |
 | `[run].from_stage` / `[run].to_stage` | Stage range for partial runs. Use these to stop at `synthesize`, rerun `report`, or resume a subset. |
-| `[run].debug_artifacts` | When `true`, keeps verbose intermediate search artifacts in the run directory. Keep it `false` for compact default runs. |
+| `[run].debug_artifacts` | When `true`, keeps verbose search diagnostics such as planning, trace, screening, and coverage-review folders in the run directory. Keep it `false` for compact default runs; operational evidence artifacts such as documents, full-text manifests, chunks, and cards are still retained. |
 | `[llm].enabled` | Turns LLM-backed planning/notes/synthesis/report/code-task steps on or off. Some real code-task steps need LLM mode to be useful. |
 | `[llm].workers` | Parallelism for supported LLM stages. It does not make every pipeline stage concurrent. |
 | `[search].offline` | Skips live literature providers. Useful for local demos and deterministic tests. |

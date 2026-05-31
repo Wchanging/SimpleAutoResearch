@@ -43,10 +43,13 @@ This file records user-visible project changes in reverse chronological order. P
 - Pipeline stage dependencies now prefer explicit `WorkspaceState` pointers
   over reverse-scanning run folders with `find_artifact`. The old lookup helper
   remains only for legacy compatibility.
-- Default pipeline runs now compact verbose `02-search` intermediate folders
-  after the stage contract is written. Set `[run].debug_artifacts = true` to
-  keep planning, trace, document, card, review, and local-index artifacts in the
-  run directory for debugging.
+- Default pipeline runs now compact only diagnostic `02-search` folders after
+  the stage contract is written. Operational evidence artifacts such as
+  `documents/`, `research_index/`, and `cards/` stay in the run directory for
+  downstream grounding; set `[run].debug_artifacts = true` to also keep
+  planning, trace, screening, and coverage-review diagnostics.
+- Compact search runs now rewrite `search_meta.json` so it no longer points to
+  diagnostic artifacts removed from the run directory.
 - The previous monolithic `stage_handlers.py` and `cli.py` entrypoints were
   moved under `src/simple_ar/legacy/`, with small compatibility wrappers kept at
   the public import paths. This makes the active project shape easier to evolve

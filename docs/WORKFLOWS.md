@@ -134,7 +134,8 @@ Current status:
 ## Search And LLM Boundaries
 
 By default, normal pipeline runs keep the search stage compact after the stage
-contract is written:
+contract is written. Compact mode keeps evidence artifacts that later stages
+need, but drops diagnostic planning/trace/review folders:
 
 ```text
 02-search/
@@ -142,10 +143,23 @@ contract is written:
   report.md
   papers.jsonl
   search_meta.json
+  documents/
+    documents.jsonl
+    cache_manifest.json
+    fulltext_manifest.json
+    fulltext_extraction.json
+    fulltext_cache/     # only when remote full text is fetched and retained
+    extracted_text/     # only when parser output is materialized
+  research_index/
+    chunks.jsonl
+    index_meta.json
+  cards/
+    paper_cards.jsonl
+    claim_cards.jsonl
 ```
 
-Set `[run].debug_artifacts = true` when you want to inspect the full planning,
-trace, document, local-index, review, and card layers in the run directory:
+Set `[run].debug_artifacts = true` when you also want to inspect planning,
+retrieval trace, screening, and coverage-review diagnostics:
 
 ```text
 02-search/
@@ -159,18 +173,6 @@ trace, document, local-index, review, and card layers in the run directory:
   review/
     coverage_report.json
     coverage_report.md
-  documents/
-    documents.jsonl
-    cache_manifest.json
-    fulltext_manifest.json
-    fulltext_extraction.json
-    extracted_text/
-  research_index/
-    chunks.jsonl
-    index_meta.json
-  cards/
-    paper_cards.jsonl
-    claim_cards.jsonl
 ```
 
 Shared accelerator stores are outside the run by default:
@@ -257,24 +259,25 @@ runs/<run-id>/
     report.md
     papers.jsonl
     search_meta.json
-    planning/       # kept only when [run].debug_artifacts = true
+    planning/       # only when [run].debug_artifacts = true
       research_plan.json
-    documents/      # kept only when [run].debug_artifacts = true
+    documents/
       documents.jsonl
       cache_manifest.json
       fulltext_manifest.json
       fulltext_extraction.json
+      fulltext_cache/  # only when remote full text is fetched and retained
       extracted_text/  # only when HTML/PDF-like resources are parsed to text
-    research_index/ # kept only when [run].debug_artifacts = true
+    research_index/
       chunks.jsonl
       index_meta.json
-    cards/          # kept only when [run].debug_artifacts = true
+    cards/
       paper_cards.jsonl
       claim_cards.jsonl
-    traces/         # kept only when [run].debug_artifacts = true
+    traces/         # only when [run].debug_artifacts = true
       retrieval_rounds.jsonl
       screening_decisions.jsonl
-    review/         # kept only when [run].debug_artifacts = true
+    review/         # only when [run].debug_artifacts = true
       coverage_report.json
       coverage_report.md
   03-read/
@@ -317,29 +320,27 @@ Root-level files:
   coverage, missing question status, and follow-up query decisions. Debug artifact
   only.
 - `02-search/documents/documents.jsonl`: normalized document records for metadata
-  and local files, including hash and parser status when available. Debug artifact
-  only.
+  and local files, including hash and parser status when available.
 - `02-search/documents/cache_manifest.json`: cache, index, full-text, and
-  extraction-status summary. Debug artifact only.
+  extraction-status summary.
 - `02-search/documents/fulltext_manifest.json`: full-text hints, selected
-  candidates, blocked/skipped reasons, and parser/fetch budget settings. Debug
-  artifact only.
+  candidates, blocked/skipped reasons, and parser/fetch budget settings.
 - `02-search/documents/fulltext_extraction.json`: parser outcomes for cached
   local/remote full-text resources. Failed PDF or unsupported suffix parsing is
-  recorded here without failing the search stage. Debug artifact only.
+  recorded here without failing the search stage.
 - `02-search/research_index/chunks.jsonl`: portable local chunk store for later
-  retrieval, evidence-card extraction, and report grounding. Debug artifact only
-  in the run directory; shared accelerators live under `.simple_ar_cache/`.
+  retrieval, evidence-card extraction, and report grounding. Shared accelerators
+  live under `.simple_ar_cache/`.
 - `02-search/research_index/index_meta.json`: local index manifest with backend,
   run id, portable chunk path, and shared SQLite FTS / LanceDB accelerator-store
-  paths. Debug artifact only.
+  paths.
 - `02-search/cards/paper_cards.jsonl`: deterministic paper cards with evidence
-  refs used by later gap, idea, and report stages. Debug artifact only.
+  refs used by later gap, idea, and report stages.
 - `02-search/cards/claim_cards.jsonl`: conservative claim cards grounded in
-  chunk ids. Later report audit should still verify them before final use. Debug
-  artifact only.
+  chunk ids. Later report audit should still verify them before final use.
 - `02-search/search_meta.json`: final selected source, status, counts, and
-  pointers to planning/trace/review artifacts.
+  pointers to retained evidence artifacts. Diagnostic planning/trace/review
+  pointers are present only when `[run].debug_artifacts = true`.
 - `02-search/papers.jsonl`: normalized metadata rows consumed by `03-read`.
 - `05-design/generated_code_task.md`: generated only when an embedded `code_task_project` run omits a task file.
 - `05-design/generated_code_task_meta.json`: provenance for that generated task file.

@@ -3,7 +3,7 @@
 # This run stops at search so you can inspect all V2.3 evidence artifacts
 # without running read/synthesize/report.
 topic = "multi-agent collaboration for coding agents"
-output_root = ".tmp_tests/v23-fulltext-arxiv-check"
+output_root = "runs/v23-fulltext-arxiv-check"
 to_stage = "search"
 debug_artifacts = false
 
