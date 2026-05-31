@@ -15,6 +15,7 @@
 - `simple-ar code-task init --config PATH` 读取 code-task 初始化配置。
 - `simple-ar code-task execute --config PATH` 读取 execute / model / budget 配置。
 - 显式 CLI 参数覆盖 TOML 值。
+- 顶层 pipeline TOML 和 code-task TOML 会先经过 Pydantic 校验，再 flatten 成运行时设置；section 类型写错时会更早失败，而不是被静默忽略。
 - 顶层 run config 中，相对路径会在解析器支持的字段上相对配置文件解析，例如 `[experiment].code_task_config` 和 `[research].local_documents`。
 - 当 run config 包含 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[workspace]` 或 `[safety]` 时，同一文件可被复用为 embedded code-task config。
 
@@ -36,6 +37,10 @@ to_stage = "report"
 
 # 是否减少命令行进度日志；最终路径和状态仍会输出。
 quiet = false
+
+# true 会在 run 目录中保留 search traces、document records、cards 和本地索引等详细中间产物；
+# 默认 false 会让普通运行更清爽，主要依赖 state.json、contract.json 和共享 store。
+debug_artifacts = false
 
 [llm]
 # true 使用 OpenAI-compatible 模型；false 尽量使用 deterministic fallback。
@@ -99,13 +104,16 @@ allow_pdf_download = false
 max_fulltext_documents = 6
 max_pdf_mb = 20
 keep_raw_pdf = false
-parser_backend = "basic"
+parser_backend = "basic"      # basic | pypdf | unstructured
 
 # live provider 失败后是否允许使用 cached metadata。
 cache = true
 
-# 计划使用的本地索引后端；当前 V2.3 search 先记录选择，后续 ingestion 再真正使用。
-index_backend = "keyword"     # keyword | sqlite_fts | hybrid
+# 本地索引后端；chunks.jsonl 总会写出，更强后端作为可选加速层。
+index_backend = "keyword"     # keyword | sqlite_fts | hybrid | lancedb | hybrid_lancedb
+
+# SQLite FTS / LanceDB 的共享加速索引目录；如需每个 run 自己保存数据库，可设为 "run" 或 "local"。
+index_root = ".simple_ar_cache/research_index"
 
 [research.budget]
 # evidence engine 最多保留多少条研究记录。
@@ -328,9 +336,10 @@ max_proposal_chars = 42000
 | `[research].max_fulltext_documents` | 全文获取/解析最多选择多少篇文档。它不同于 `[research.budget].max_documents`，后者控制保留多少条 metadata/document record。 |
 | `[research].max_pdf_mb` | 单个 PDF 的大小上限。超过该限制的本地 PDF 会被跳过，后续远程下载器也应遵守这个限制。 |
 | `[research].keep_raw_pdf` | fetch/parser 是否保留原始 PDF。只需要 parsed text 和 section chunks 时建议保持 false。 |
-| `[research].parser_backend` | parser 后端提示，例如 `basic`、`pypdf`、`pymupdf` 或 `external`。当前实现会直接解析 Markdown/text 和基础 HTML；PDF 在可选 `pypdf` 可用时尝试解析。 |
+| `[research].parser_backend` | parser 后端。`basic` 直接解析 Markdown/text 和基础 HTML；`pypdf` 使用轻量 PDF parser；`unstructured` 是可选的更强文档解析后端，未安装时只会在 manifest 中记录失败状态。 |
 | `[research].cache` | live provider 失败后是否允许使用 cached metadata。 |
-| `[research].index_backend` | 本地索引后端。`keyword` 只写可移植 chunks；`sqlite_fts` 会额外写 SQLite FTS 数据库；`hybrid` 预留给 FTS + 后续更强 adapter。 |
+| `[research].index_backend` | 本地索引后端。`keyword` 只写可移植 chunks；`sqlite_fts` / `hybrid` 会更新共享 SQLite FTS store；`lancedb` / `hybrid_lancedb` 会更新共享可选 LanceDB store，未安装 LanceDB 时只记录状态，不影响 `chunks.jsonl`。 |
+| `[research].index_root` | SQLite FTS / LanceDB 的共享加速索引目录。默认 `.simple_ar_cache/research_index`，也可通过 `SIMPLE_AR_RESEARCH_INDEX_ROOT` 覆盖。只有明确需要每个 run 自己保存数据库时，才设为 `run` 或 `local`。 |
 | `[research.budget].max_documents` | evidence 阶段从所有 source 中最多保留多少条记录。 |
 | `[research.budget].max_chunks` | 后续全文/本地文档 ingestion 后最多保留多少 chunk。 |
 | `[research.budget].max_context_tokens` | evidence retrieval 放入 prompt 的计划 token 预算。 |

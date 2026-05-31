@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from simple_ar.literature.arxiv_client import ArxivSearchClient
-from simple_ar.research.sources import SearchQuery, SearchResponse
+from simple_ar.research.sources.base import SearchQuery, SearchResponse
 
 
 class ArxivConnector:

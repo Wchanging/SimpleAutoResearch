@@ -133,8 +133,19 @@ Current status:
 
 ## Search And LLM Boundaries
 
-The search stage keeps planning, traces, review summaries, document records,
-local indexes, and evidence cards in separate folders:
+By default, normal pipeline runs keep the search stage compact after the stage
+contract is written:
+
+```text
+02-search/
+  contract.json
+  report.md
+  papers.jsonl
+  search_meta.json
+```
+
+Set `[run].debug_artifacts = true` when you want to inspect the full planning,
+trace, document, local-index, review, and card layers in the run directory:
 
 ```text
 02-search/
@@ -157,10 +168,18 @@ local indexes, and evidence cards in separate folders:
   research_index/
     chunks.jsonl
     index_meta.json
-    sqlite_fts.db
   cards/
     paper_cards.jsonl
     claim_cards.jsonl
+```
+
+Shared accelerator stores are outside the run by default:
+
+```text
+.simple_ar_cache/
+  research_index/
+    sqlite_fts.db
+    lancedb/
 ```
 
 - `02-search/planning/research_plan.json` records scoped sub-questions, evidence
@@ -189,13 +208,17 @@ local indexes, and evidence cards in separate folders:
   fetch failures.
 - `02-search/documents/fulltext_extraction.json` records best-effort parser
   results for cached/local full-text resources. Markdown/text and basic HTML
-  are parsed with the standard library; PDF parsing uses optional `pypdf` when
-  available and degrades to a manifest-only failure when unavailable.
+  are parsed with the standard library; PDF parsing uses lightweight `pypdf`;
+  optional `unstructured` can be selected for stronger local parsing and
+  degrades to a manifest-only failure when unavailable.
 - `02-search/research_index/chunks.jsonl` stores portable local chunks from
   abstracts and parsed/extracted local or full-text files. This is the source
   of truth for later evidence-card extraction.
 - `02-search/research_index/index_meta.json` records the selected local index
-  backend and optional SQLite FTS status.
+  backend, run id, portable chunk path, and shared SQLite FTS / LanceDB store
+  paths. SQLite and LanceDB live under `.simple_ar_cache/research_index` by
+  default so repeated runs can build toward a common research memory instead of
+  duplicating databases.
 - Live search uses the configured source order. By default it tries OpenAlex
   first, then Semantic Scholar, then arXiv. When `--strict-search` is not set
   and source-plan cache is enabled, cached metadata is used after live failures.
@@ -215,6 +238,7 @@ A completed research run can contain these files, depending on enabled options:
 
 ```text
 runs/<run-id>/
+  state.json
   manifest.json
   pipeline_state.json
   config_snapshot.json
@@ -229,27 +253,28 @@ runs/<run-id>/
   evidence_ledger.jsonl
   01-plan/
   02-search/
+    contract.json
+    report.md
     papers.jsonl
     search_meta.json
-    planning/
+    planning/       # kept only when [run].debug_artifacts = true
       research_plan.json
-    documents/
+    documents/      # kept only when [run].debug_artifacts = true
       documents.jsonl
       cache_manifest.json
       fulltext_manifest.json
       fulltext_extraction.json
       extracted_text/  # only when HTML/PDF-like resources are parsed to text
-    research_index/
+    research_index/ # kept only when [run].debug_artifacts = true
       chunks.jsonl
       index_meta.json
-      sqlite_fts.db  # only when sqlite_fts/hybrid indexing succeeds
-    cards/
+    cards/          # kept only when [run].debug_artifacts = true
       paper_cards.jsonl
       claim_cards.jsonl
-    traces/
+    traces/         # kept only when [run].debug_artifacts = true
       retrieval_rounds.jsonl
       screening_decisions.jsonl
-    review/
+    review/         # kept only when [run].debug_artifacts = true
       coverage_report.json
       coverage_report.md
   03-read/
@@ -264,6 +289,7 @@ runs/<run-id>/
 
 Root-level files:
 
+- `state.json`: typed workflow checkpoint used for resume and stage handoff.
 - `manifest.json`: stage status and declared outputs.
 - `pipeline_state.json`: last completed stage and next stage for resume.
 - `config_snapshot.json`: selected runtime configuration.
@@ -277,32 +303,41 @@ Root-level files:
   the literature `source_plan` section inside `02-search/planning/research_plan.json`.
 - `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
 - `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
+- `02-search/contract.json`: compact machine-readable search summary for stage
+  handoff.
+- `02-search/report.md`: compact human-readable search summary.
 - `02-search/planning/research_plan.json`: compact search planning artifact with
   research question decomposition, executable query plan, and literature source
-  plan sections.
+  plan sections. Kept in the run directory only when `[run].debug_artifacts = true`.
 - `02-search/traces/retrieval_rounds.jsonl`: executed source/query attempts with
-  returned counts, errors, and compact query-intent traces.
+  returned counts, errors, and compact query-intent traces. Debug artifact only.
 - `02-search/traces/screening_decisions.jsonl`: keep/discard rows for retrieved
-  metadata candidates.
+  metadata candidates. Debug artifact only.
 - `02-search/review/coverage_report.json` / `coverage_report.md`: required-facet
-  coverage, missing question status, and follow-up query decisions.
+  coverage, missing question status, and follow-up query decisions. Debug artifact
+  only.
 - `02-search/documents/documents.jsonl`: normalized document records for metadata
-  and local files, including hash and parser status when available.
+  and local files, including hash and parser status when available. Debug artifact
+  only.
 - `02-search/documents/cache_manifest.json`: cache, index, full-text, and
-  extraction-status summary.
+  extraction-status summary. Debug artifact only.
 - `02-search/documents/fulltext_manifest.json`: full-text hints, selected
-  candidates, blocked/skipped reasons, and parser/fetch budget settings.
+  candidates, blocked/skipped reasons, and parser/fetch budget settings. Debug
+  artifact only.
 - `02-search/documents/fulltext_extraction.json`: parser outcomes for cached
   local/remote full-text resources. Failed PDF or unsupported suffix parsing is
-  recorded here without failing the search stage.
+  recorded here without failing the search stage. Debug artifact only.
 - `02-search/research_index/chunks.jsonl`: portable local chunk store for later
-  retrieval, evidence-card extraction, and report grounding.
-- `02-search/research_index/index_meta.json`: local index backend and optional
-  SQLite FTS status.
+  retrieval, evidence-card extraction, and report grounding. Debug artifact only
+  in the run directory; shared accelerators live under `.simple_ar_cache/`.
+- `02-search/research_index/index_meta.json`: local index manifest with backend,
+  run id, portable chunk path, and shared SQLite FTS / LanceDB accelerator-store
+  paths. Debug artifact only.
 - `02-search/cards/paper_cards.jsonl`: deterministic paper cards with evidence
-  refs used by later gap, idea, and report stages.
+  refs used by later gap, idea, and report stages. Debug artifact only.
 - `02-search/cards/claim_cards.jsonl`: conservative claim cards grounded in
-  chunk ids. Later report audit should still verify them before final use.
+  chunk ids. Later report audit should still verify them before final use. Debug
+  artifact only.
 - `02-search/search_meta.json`: final selected source, status, counts, and
   pointers to planning/trace/review artifacts.
 - `02-search/papers.jsonl`: normalized metadata rows consumed by `03-read`.

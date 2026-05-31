@@ -44,6 +44,10 @@ experimentation, and gradual extension.
   report evidence.
 - **Reviewable artifacts**: each run writes inspectable files under `runs/`
   instead of hiding decisions inside process memory.
+- **Mature library foundation**: pipeline/code-task TOML configs are validated
+  through Pydantic, LLM calls go through LiteLLM, OpenAlex access goes through
+  pyalex, and terminal progress uses Rich as a first step toward cleaner
+  human-in-the-loop review.
 
 ## Install And Configure
 
@@ -255,8 +259,8 @@ still intentionally conservative.
 - Literature search now has an auditable source plan and document-store
   metadata, and can use OpenAlex, Semantic Scholar, arXiv, or local
   Markdown/text notes. It can parse local/cached Markdown, text, basic HTML, and
-  optional `pypdf` PDFs, but it is not yet a full section-aware PDF parser or
-  vector-RAG survey system.
+  lightweight `pypdf` PDFs. Optional `unstructured` and LanceDB hooks exist, but
+  it is not yet a full section-aware PDF parser or vector-RAG survey system.
 - LLM-written reports are guarded by citation, metric, and boundary checks; when
   a draft fails these checks, the tool falls back to a structured deterministic
   report.

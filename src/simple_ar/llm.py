@@ -8,8 +8,9 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence, TypeVar
 
+os.environ.setdefault("LITELLM_LOG", "ERROR")
+import litellm
 from dotenv import load_dotenv
-from openai import OpenAI
 
 
 T = TypeVar("T")
@@ -97,7 +98,7 @@ class LLMRequest:
 
 
 class LLMClient:
-    """Small OpenAI SDK wrapper used by the pipeline stages.
+    """Small LiteLLM-backed wrapper used by the pipeline stages.
 
     The wrapper keeps provider access explicit: one request in, one response
     out. Batch helpers only add bounded concurrency and preserve result order.
@@ -121,17 +122,12 @@ class LLMClient:
         """
         if not settings.api_key:
             raise LLMError("OPENAI_API_KEY is not configured")
-        kwargs: dict[str, Any] = {
-            "api_key": settings.api_key,
-            "timeout": settings.request_timeout_sec,
-        }
-        if settings.base_url:
-            kwargs["base_url"] = settings.base_url
-        self._client = OpenAI(**kwargs)
         self.model = settings.model
+        self._provider_model = _provider_model(settings)
         self._settings = settings
         self._usage_callback = usage_callback
         self._usage_lock = threading.Lock()
+        litellm.suppress_debug_info = True
 
     @classmethod
     def from_env(
@@ -174,49 +170,32 @@ class LLMClient:
             Model output with surrounding whitespace removed.
 
         Raises:
-            LLMError: If both the Responses API and chat-completions fallback
-                fail.
+            LLMError: If LiteLLM cannot complete the request.
         """
+        request: dict[str, Any] = {
+            "model": self._provider_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "api_key": self._settings.api_key,
+            "timeout": self._settings.request_timeout_sec,
+        }
+        if self._settings.base_url:
+            request["api_base"] = self._settings.base_url
+            request["base_url"] = self._settings.base_url
+        if self._settings.max_output_tokens is not None:
+            request["max_tokens"] = self._settings.max_output_tokens
         try:
-            request: dict[str, Any] = {
-                "model": self.model,
-                "input": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            }
-            if self._settings.max_output_tokens is not None:
-                request["max_output_tokens"] = self._settings.max_output_tokens
-            response = self._client.responses.create(**request)
-            text = getattr(response, "output_text", "")
-            if text:
-                output = str(text).strip()
-                self._record_usage(response, system, user, output, label=label)
-                return output
+            response = litellm.completion(**request)
         except Exception as exc:
             if _is_timeout_error(exc):
                 raise LLMError(f"LLM request timed out: {exc}") from exc
-            # Some OpenAI-compatible endpoints support chat completions but not
-            # the Responses API. Fall through to the compatibility path.
-            pass
-
-        try:
-            request = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            }
-            if self._settings.max_output_tokens is not None:
-                request["max_tokens"] = self._settings.max_output_tokens
-            response = self._client.chat.completions.create(**request)
-            content = response.choices[0].message.content or ""
-            output = content.strip()
-            self._record_usage(response, system, user, output, label=label)
-            return output
-        except Exception as exc:
             raise LLMError(f"LLM request failed: {exc}") from exc
+
+        output = _content_from_response(response).strip()
+        self._record_usage(response, system, user, output, label=label)
+        return output
 
     def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, Any]:
         """Send one request and parse the response as a JSON object.
@@ -431,19 +410,19 @@ def estimate_tokens(text: str) -> int:
 
 def _usage_from_response(response: object) -> tuple[int, int, int] | None:
     """Extract token usage from Responses or chat-completions response objects."""
-    usage = getattr(response, "usage", None)
+    usage = _get_value(response, "usage")
     if usage is None:
         return None
 
-    prompt_tokens = _int_attr(usage, "input_tokens")
+    prompt_tokens = _int_value(usage, "input_tokens")
     if prompt_tokens is None:
-        prompt_tokens = _int_attr(usage, "prompt_tokens")
+        prompt_tokens = _int_value(usage, "prompt_tokens")
 
-    completion_tokens = _int_attr(usage, "output_tokens")
+    completion_tokens = _int_value(usage, "output_tokens")
     if completion_tokens is None:
-        completion_tokens = _int_attr(usage, "completion_tokens")
+        completion_tokens = _int_value(usage, "completion_tokens")
 
-    total_tokens = _int_attr(usage, "total_tokens")
+    total_tokens = _int_value(usage, "total_tokens")
     if prompt_tokens is None or completion_tokens is None:
         return None
     if total_tokens is None:
@@ -451,11 +430,41 @@ def _usage_from_response(response: object) -> tuple[int, int, int] | None:
     return prompt_tokens, completion_tokens, total_tokens
 
 
-def _int_attr(obj: object, name: str) -> int | None:
-    value = getattr(obj, name, None)
+def _content_from_response(response: object) -> str:
+    choices = _get_value(response, "choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        message = _get_value(first, "message")
+        content = _get_value(message, "content") if message is not None else None
+        if content is not None:
+            return str(content)
+        text = _get_value(first, "text")
+        if text is not None:
+            return str(text)
+    return str(_get_value(response, "output_text") or "")
+
+
+def _int_value(obj: object, name: str) -> int | None:
+    value = _get_value(obj, name)
     if isinstance(value, int):
         return value
     return None
+
+
+def _get_value(obj: object, name: str) -> object | None:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _provider_model(settings: LLMSettings) -> str:
+    """Return the LiteLLM model string for default or custom OpenAI endpoints."""
+    model = settings.model.strip()
+    if settings.base_url and "/" not in model:
+        return f"openai/{model}"
+    return model
 
 
 def _optional_float(env_name: str) -> float | None:

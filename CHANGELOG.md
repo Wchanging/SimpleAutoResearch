@@ -4,6 +4,65 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-05-31
+
+### Added
+
+- Added direct Pydantic, Rich, LiteLLM, and pyalex dependencies as the
+  first infrastructure replacement batch.
+- Added a state-backed reboot core for pipeline execution. Runs now write a
+  top-level `state.json`, and completed stages can emit compact `contract.json`
+  / `report.md` summaries for machine-readable handoff and human review.
+- Added optional `unstructured` full-text parser backend support via
+  `[research].parser_backend = "unstructured"`. When the optional package is
+  not installed, the parser records a manifest failure instead of failing the
+  search stage.
+- Added optional LanceDB research-index backend status via
+  `[research].index_backend = "lancedb"` or `"hybrid_lancedb"`, while keeping
+  `chunks.jsonl` as the portable source of truth.
+
+### Changed
+
+- Top-level pipeline TOML loading now uses a Pydantic schema before flattening
+  into the existing runtime config dictionary, so malformed config types fail
+  earlier and with clearer errors.
+- Code-task TOML loading now also uses Pydantic section schemas for init and
+  execute options, replacing the previous free-form dict parsing path.
+- The LLM client now calls providers through LiteLLM instead of directly
+  constructing an OpenAI SDK client. OpenAI-compatible `OPENAI_BASE_URL`
+  endpoints are still supported through LiteLLM's OpenAI provider path.
+- OpenAlex search now uses pyalex instead of a hand-written urllib request
+  client while preserving the project `Paper` normalization layer.
+- Pipeline progress and developer-check output now route through a small Rich
+  console wrapper, keeping the CLI compatible while preparing for cleaner
+  review output.
+- Research SQLite FTS / LanceDB accelerators now use a shared store under
+  `.simple_ar_cache/research_index` by default. Run directories keep portable
+  `chunks.jsonl` plus `index_meta.json`, while reusable index databases are
+  keyed by `run_id` instead of duplicated per run.
+- Pipeline stage dependencies now prefer explicit `WorkspaceState` pointers
+  over reverse-scanning run folders with `find_artifact`. The old lookup helper
+  remains only for legacy compatibility.
+- Default pipeline runs now compact verbose `02-search` intermediate folders
+  after the stage contract is written. Set `[run].debug_artifacts = true` to
+  keep planning, trace, document, card, review, and local-index artifacts in the
+  run directory for debugging.
+- The previous monolithic `stage_handlers.py` and `cli.py` entrypoints were
+  moved under `src/simple_ar/legacy/`, with small compatibility wrappers kept at
+  the public import paths. This makes the active project shape easier to evolve
+  without breaking existing tests and commands.
+- Experiment runner/template helpers now live under `src/simple_ar/coding/`;
+  `src/simple_ar/experiment/` keeps compatibility wrappers while the coding
+  domain becomes the primary implementation home.
+- Research modules are now grouped by lifecycle under `planning/`, `sources/`,
+  `documents/`, `store/`, `evidence/`, and `outputs/` instead of being a flat
+  folder.
+- Code-task modules are now grouped by lifecycle under `runtime/`, `workspace/`,
+  `analysis/`, `editing/`, `execution/`, and `orchestration/`, reducing the
+  previous flat 25-file package surface.
+- Config, Usage, Workflow, and README docs now describe `unstructured` and
+  LanceDB as optional backends rather than mandatory base dependencies.
+
 ## 2026-05-27
 
 ### Added

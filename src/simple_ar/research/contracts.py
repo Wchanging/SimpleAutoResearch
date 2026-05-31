@@ -63,6 +63,7 @@ class SourcePlan:
     local_documents: list[str] = field(default_factory=list)
     cache_enabled: bool = True
     index_backend: str = "keyword"
+    index_root: str | None = None
     filters: dict[str, Any] = field(default_factory=dict)
     budget: dict[str, Any] = field(default_factory=dict)
     rationale: str = ""

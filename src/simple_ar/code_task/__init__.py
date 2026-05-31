@@ -1,16 +1,16 @@
-from simple_ar.code_task.attempts import (
+﻿from simple_ar.code_task.editing.attempts import (
     CodeTaskBatchResult,
     LoadedCodeTaskBatch,
     create_code_task_batch,
     load_latest_code_task_batch,
     update_code_task_batch_state,
 )
-from simple_ar.code_task.planning import (
+from simple_ar.code_task.editing.planning import (
     PatchPlanResult,
     generate_patch_plan,
     record_plan_decision,
 )
-from simple_ar.code_task.patching import (
+from simple_ar.code_task.editing.patching import (
     ControlledPatchEditorBackend,
     PatchApplyResult,
     PatchValidationError,
@@ -18,11 +18,11 @@ from simple_ar.code_task.patching import (
     apply_patch_edits,
     propose_patch_edits,
 )
-from simple_ar.code_task.environment import (
+from simple_ar.code_task.execution.environment import (
     CodeTaskEnvironmentResult,
     probe_code_task_environment,
 )
-from simple_ar.code_task.editor import (
+from simple_ar.code_task.editing.editor import (
     ApplyEditRequest,
     ApplyEditResult,
     EditRequest,
@@ -30,7 +30,7 @@ from simple_ar.code_task.editor import (
     EditorContext,
     EditorSafetyPolicy,
 )
-from simple_ar.code_task.external_agent import (
+from simple_ar.code_task.editing.external_agent import (
     EXTERNAL_AGENT_BACKEND,
     DEFAULT_BLOCKED_READ_PATTERNS,
     SUPPORTED_EXTERNAL_AGENT_PROVIDERS,
@@ -45,23 +45,23 @@ from simple_ar.code_task.external_agent import (
     is_blocked_external_agent_read_path,
     normalize_external_agent_provider,
 )
-from simple_ar.code_task.execute import (
+from simple_ar.code_task.orchestration.execute import (
     CodeTaskExecuteResult,
     ExecuteStepRecord,
     execute_code_task,
 )
-from simple_ar.code_task.comparison import (
+from simple_ar.code_task.execution.comparison import (
     CodeTaskComparisonResult,
     compare_code_task_runs,
 )
-from simple_ar.code_task.context import (
+from simple_ar.code_task.analysis.context import (
     CodeTaskContextPackResult,
     LoadedCodeTaskContextPack,
     build_code_task_context_pack,
     load_latest_code_task_context_pack,
     render_prompt_context,
 )
-from simple_ar.code_task.config import (
+from simple_ar.code_task.runtime.config import (
     CodeTaskConfigError,
     CodeTaskExecuteOptions,
     CodeTaskInitOptions,
@@ -69,37 +69,37 @@ from simple_ar.code_task.config import (
     load_code_task_init_options,
     parse_metric_direction_arg,
 )
-from simple_ar.code_task.failure import FailureAnalysisResult, analyze_code_task_failure
-from simple_ar.code_task.locate import (
+from simple_ar.code_task.execution.failure import FailureAnalysisResult, analyze_code_task_failure
+from simple_ar.code_task.analysis.locate import (
     CodeTaskLocateResult,
     locate_code_task_context,
     render_locate_summary,
 )
-from simple_ar.code_task.repair import RepairProposalResult, propose_repair_edits
-from simple_ar.code_task.repo_map import (
+from simple_ar.code_task.execution.repair import RepairProposalResult, propose_repair_edits
+from simple_ar.code_task.analysis.repo_map import (
     RepoMapBuildResult,
     build_code_task_repo_map,
     build_repo_map,
     render_repo_map_summary,
 )
-from simple_ar.code_task.runner import (
+from simple_ar.code_task.execution.runner import (
     CodeTaskRunError,
     CodeTaskRunResult,
     run_code_task_baseline,
     run_code_task_benchmark,
 )
-from simple_ar.code_task.validation import CodeTaskValidationResult, validate_code_task
-from simple_ar.code_task.work_plan import (
+from simple_ar.code_task.execution.validation import CodeTaskValidationResult, validate_code_task
+from simple_ar.code_task.editing.work_plan import (
     CodeTaskWorkPlanResult,
     generate_code_task_work_plan,
     render_work_plan_markdown,
 )
-from simple_ar.code_task.workspace_modes import (
+from simple_ar.code_task.workspace.modes import (
     WorkspaceModeError,
     WorkspaceResult,
     WorkspaceSpec,
 )
-from simple_ar.code_task.workflow import CodeTaskInitResult, initialize_code_task
+from simple_ar.code_task.orchestration.workflow import CodeTaskInitResult, initialize_code_task
 
 __all__ = [
     "CodeTaskInitResult",

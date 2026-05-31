@@ -169,9 +169,12 @@ allow_pdf_download = false
 max_fulltext_documents = 6
 max_pdf_mb = 20
 keep_raw_pdf = false
-parser_backend = "basic"
+parser_backend = "basic"      # basic | pypdf | unstructured
 cache = true
-index_backend = "sqlite_fts"
+index_backend = "sqlite_fts"  # keyword | sqlite_fts | hybrid | lancedb | hybrid_lancedb
+# Shared accelerator-store root for SQLite FTS / LanceDB. Use "run" or "local"
+# when you intentionally want per-run index databases.
+index_root = ".simple_ar_cache/research_index"
 
 [research.budget]
 max_documents = 20
@@ -203,10 +206,18 @@ The search stage writes this main `02-search/` layout:
   research_index/
     chunks.jsonl
     index_meta.json
-    sqlite_fts.db  # only when sqlite_fts/hybrid indexing succeeds
   cards/
     paper_cards.jsonl
     claim_cards.jsonl
+```
+
+Shared accelerator stores are written outside the run by default:
+
+```text
+.simple_ar_cache/
+  research_index/
+    sqlite_fts.db  # shared SQLite FTS rows, keyed by run_id
+    lancedb/       # shared LanceDB store when enabled and installed
 ```
 
 The most important files are:
@@ -232,11 +243,15 @@ The most important files are:
   not fail the search stage.
 - `02-search/documents/fulltext_extraction.json`: best-effort parser results
   for cached/local full-text inputs. Markdown/text and basic HTML can be parsed
-  without extra dependencies; PDF parsing uses optional `pypdf` when available.
+  without extra dependencies; PDF parsing uses lightweight `pypdf`; optional
+  `unstructured` can be selected with `parser_backend = "unstructured"`.
 - `02-search/research_index/chunks.jsonl`: portable local chunks built from
   abstracts and parsed or extracted local/full-text files.
-- `02-search/research_index/index_meta.json`: local index summary. In
-  `sqlite_fts` or `hybrid` mode it also records the optional SQLite FTS status.
+- `02-search/research_index/index_meta.json`: local index manifest. It records
+  the selected backend, run id, portable chunk path, and the shared SQLite FTS /
+  LanceDB store paths. SQLite and LanceDB are shared under
+  `.simple_ar_cache/research_index` by default, rather than copied into every
+  run directory.
 - `02-search/cards/paper_cards.jsonl`: deterministic paper-level evidence
   cards with problem/method/metric/limitation hints and source chunk refs.
 - `02-search/cards/claim_cards.jsonl`: conservative claim cards grounded in

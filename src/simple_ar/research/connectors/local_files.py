@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 import re
 
 from simple_ar.literature.models import Paper, normalize_paper_id
-from simple_ar.research.sources import SearchQuery, SearchResponse
+from simple_ar.research.sources.base import SearchQuery, SearchResponse
 
 
 class LocalFileConnector:

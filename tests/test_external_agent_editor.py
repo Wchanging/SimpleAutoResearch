@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import tempfile
 import unittest
@@ -14,7 +14,7 @@ from simple_ar.code_task import (
     is_blocked_external_agent_read_path,
     normalize_external_agent_provider,
 )
-from simple_ar.code_task.editor import EditRequest, EditorContext, EditorSafetyPolicy
+from simple_ar.code_task.editing.editor import EditRequest, EditorContext, EditorSafetyPolicy
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"

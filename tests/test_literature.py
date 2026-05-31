@@ -3,12 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from simple_ar.literature.arxiv_client import is_rate_limit_message
 from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.cache import get_cached, put_cache
 from simple_ar.literature.models import Paper, normalize_paper_id
-from simple_ar.literature.openalex_client import _paper_from_work
+from simple_ar.literature.openalex_client import OpenAlexSearchClient, _paper_from_work
 from simple_ar.literature.semantic_scholar_client import _paper_from_row as _s2_paper_from_row
 from simple_ar.literature.verify import CitationError, validate_citations
 
@@ -71,6 +72,39 @@ class LiteratureTests(unittest.TestCase):
         self.assertEqual(paper.authors, ["Ada Lovelace"])
         self.assertEqual(paper.abstract, "Retrieval works")
         self.assertEqual(paper.doi, "10.1234/example")
+
+    def test_openalex_search_uses_pyalex_query_chain(self) -> None:
+        class FakeWorks:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+
+            def search(self, query: str) -> "FakeWorks":
+                self.calls.append(("search", query))
+                return self
+
+            def select(self, fields: str) -> "FakeWorks":
+                self.calls.append(("select", fields))
+                return self
+
+            def get(self, *, per_page: int) -> list[dict[str, object]]:
+                self.calls.append(("get", per_page))
+                return [
+                    {
+                        "id": "https://openalex.org/W123",
+                        "title": "A Small Retrieval Paper",
+                        "authorships": [],
+                        "publication_year": 2024,
+                        "ids": {"openalex": "https://openalex.org/W123"},
+                    }
+                ]
+
+        fake = FakeWorks()
+        with patch("simple_ar.literature.openalex_client.Works", return_value=fake):
+            papers = OpenAlexSearchClient().search("agent coding", max_results=3)
+
+        self.assertEqual(papers[0].id, "openalex-W123")
+        self.assertIn(("search", "agent coding"), fake.calls)
+        self.assertIn(("get", 3), fake.calls)
 
     def test_semantic_scholar_row_parses_to_project_paper_schema(self) -> None:
         paper = _s2_paper_from_row(

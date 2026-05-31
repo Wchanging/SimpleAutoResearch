@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,8 +19,8 @@ from simple_ar.code_task import (
     run_code_task_baseline,
     validate_code_task,
 )
-from simple_ar.code_task.config import DEFAULT_MAX_FILE_BYTES, CodeTaskConfigError
-from simple_ar.code_task.edit_scope import is_protected_edit_path
+from simple_ar.code_task.runtime.config import DEFAULT_MAX_FILE_BYTES, CodeTaskConfigError
+from simple_ar.code_task.editing.scope import is_protected_edit_path
 
 
 CODE_TASK_TOY_SPAM_TEMPLATE = "llm_code_task_toy_spam"

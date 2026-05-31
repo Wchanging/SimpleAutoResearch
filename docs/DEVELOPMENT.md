@@ -6,39 +6,70 @@ This document is for contributors who want to extend SimpleAutoResearch. For com
 
 ## Project Shape
 
-SimpleAutoResearch is intentionally file-first:
+SimpleAutoResearch is now file-first plus state-backed:
 
 - stages read and write concrete files;
-- workflow state is visible in run directories;
-- tests verify artifacts instead of hidden in-memory state;
+- workflow state is visible in `state.json` and stage contracts;
+- tests verify contracts/artifacts instead of hidden in-memory state;
 - risky code changes happen in isolated editable workspaces, usually a guarded
   copy, optionally a detached git worktree, and experimentally a sparse copy.
 
 This keeps the project easier to learn, debug, and refactor.
+
+The old monolithic CLI and stage handler modules live under
+`src/simple_ar/legacy/` during the reboot. Public imports still work through
+small compatibility wrappers, but new behavior should be implemented in the
+domain modules under `core/`, `research/`, `coding/`, and `code_task/`.
+
+Research code is grouped by evidence lifecycle:
+
+```text
+src/simple_ar/research/
+  planning/    research questions and executable query plans
+  sources/     source plan contracts plus connector-neutral query objects
+  connectors/  OpenAlex, Semantic Scholar, arXiv, and local-file adapters
+  documents/   document records, full-text hints, parser/extractor helpers
+  store/       chunks and local index backends
+  evidence/    retrieval screening, coverage, paper cards, claim cards
+  outputs/     search-stage artifact writers
+```
+
+Keep new retrieval/evidence work inside these packages instead of returning to
+the old flat `research/*.py` layout.
 
 ## Adding A Pipeline Stage
 
 To add a stage to the default research pipeline, update these places together:
 
 1. Add the enum value in `src/simple_ar/stages.py`.
-2. Add a `StageContract` in `src/simple_ar/contracts.py`.
-3. Implement a handler function in `src/simple_ar/stage_handlers.py`.
-4. Register the handler in `HANDLERS`.
-5. Add a focused test that checks required inputs and declared outputs.
+2. Add or extend the typed state/contract models in `src/simple_ar/app/state.py`
+   and `src/simple_ar/core/contracts.py`.
+3. Implement stage behavior in the responsible domain service, for example
+   `src/simple_ar/research/service.py` or `src/simple_ar/coding/service.py`.
+4. Add a thin adapter in `src/simple_ar/stage_handlers.py` only when the
+   pipeline registry needs a public handler function.
+5. Register the handler in `HANDLERS`.
+6. Add a focused test that checks state updates and declared outputs.
 
-A new stage should read existing artifacts with `ctx.find_artifact(...)` and write its own outputs with `ctx.artifact_path(...)`.
+A new stage should prefer explicit `ctx.state.<stage>` pointers and compact
+stage contracts over reverse-scanning run folders. `ctx.find_artifact(...)`
+exists for legacy fallback only.
 
 ## Adding An Experiment Template
 
-Fixed script templates live in `src/simple_ar/experiment/templates.py`.
+Fixed script templates primarily live in `src/simple_ar/coding/templates.py`.
 Embedded 8-stage code-task templates live in
 `src/simple_ar/experiment/code_task_experiment.py` because they prepare an existing
 workspace before writing the run harness.
 
+`src/simple_ar/experiment/templates.py` and `src/simple_ar/experiment/runner.py`
+are compatibility wrappers over `src/simple_ar/coding/`. Prefer the coding
+package for new template/runner work.
+
 Top-level run config parsing lives in `src/simple_ar/run_config.py`. Keep it as
 a thin TOML-to-runtime-options layer; code-task-specific config semantics should
-continue to live in `src/simple_ar/code_task/config.py` so standalone and
-embedded code-task runs do not drift apart.
+continue to live in `src/simple_ar/code_task/runtime/config.py` so standalone
+and embedded code-task runs do not drift apart.
 
 A new template should:
 
@@ -61,32 +92,21 @@ standalone code-task modules rather than a separate coding implementation.
 
 ## Extending Code Task
 
-The code-task workflow is split into small modules:
+The code-task workflow is grouped by lifecycle rather than being a flat folder:
 
-- `workspace.py`: safe source copy implementation.
-- `workspace_modes.py`: workspace strategy dispatcher for `copy`,
-  `git_worktree`, experimental `sparse_copy`, and future workspace modes.
-  Keep workspace layout and creation behavior compatible with the artifact
-  structure documented in [Workflows And Artifacts](WORKFLOWS.md).
-- `config.py`: TOML config and CLI override resolution for code-task init.
-- `environment.py`: environment observation and execution-interpreter policy.
-- `index.py`: codebase inventory and Python AST summaries.
-- `repo_map.py`: layered repo map derived from the index.
-- `locate.py`: deterministic ranking of editable targets and read-only
-  evidence from the repo map.
-- `context.py`: bounded context-pack generation from locate results and
-  workspace snippets.
-- `planning.py`: patch planning and HITL decisions. It uses the latest context
-  pack when available, with index-selection fallback.
-- `patching.py`: controlled old/new edit proposal and application. It uses
-  only editable context-pack snippets for model edit proposals.
-- `validation.py`: syntax and static safety checks.
-- `runner.py`: benchmark execution in the editable workspace.
-- `comparison.py`: baseline-vs-patched metric comparison.
-- `failure.py`: deterministic failure analysis.
-- `repair.py`: bounded repair proposal generation.
-- `summary.py`: human-readable code-task status summaries.
-- `state.py`: shared paths, manifest helpers, and workspace path safety.
+```text
+src/simple_ar/code_task/
+  runtime/        config and path/manifest helpers
+  workspace/      copy, git worktree, sparse-copy preparation
+  analysis/       codebase index, repo map, locate, context packs
+  editing/        work plan, patch plan, edit budgets, patch proposal/application
+  execution/      environment probe, validation, benchmark, comparison, repair
+  orchestration/  init and execute flows that compose the lower-level modules
+```
+
+New code should go into the lifecycle package that owns the behavior. Avoid
+adding more flat files directly under `code_task/` unless the file is a public
+facade or a genuinely cross-cutting boundary.
 
 When adding a new code-task feature:
 

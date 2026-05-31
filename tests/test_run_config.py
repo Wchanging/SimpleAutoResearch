@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from simple_ar.run_config import load_pipeline_run_config
+from simple_ar.run_config import RunConfigError, load_pipeline_run_config
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
@@ -23,6 +23,7 @@ class RunConfigTests(unittest.TestCase):
                 """
 [run]
 topic = "agent simulation"
+debug_artifacts = true
 
 [research]
 mode = "strong"
@@ -41,6 +42,7 @@ keep_raw_pdf = true
 parser_backend = "basic"
 cache = true
 index_backend = "sqlite_fts"
+index_root = ".simple_ar_cache/research_index"
 local_documents = ["notes/local.md"]
 
 [research.budget]
@@ -56,6 +58,7 @@ max_follow_up_queries = 4
             parsed = load_pipeline_run_config(str(config))
 
             self.assertEqual(parsed["topic"], "agent simulation")
+            self.assertEqual(parsed["debug_artifacts"], True)
             self.assertEqual(parsed["research_mode"], "strong")
             self.assertEqual(parsed["research_planner"], "llm")
             self.assertEqual(parsed["research_sources"], ["local_files", "openalex"])
@@ -72,12 +75,34 @@ max_follow_up_queries = 4
             self.assertEqual(parsed["research_parser_backend"], "basic")
             self.assertEqual(parsed["research_cache"], True)
             self.assertEqual(parsed["research_index_backend"], "sqlite_fts")
+            self.assertEqual(parsed["research_index_root"], ".simple_ar_cache/research_index")
             self.assertEqual(parsed["research_local_documents"], [str(notes.resolve())])
             self.assertEqual(parsed["research_max_documents"], 12)
             self.assertEqual(parsed["research_max_chunks"], 80)
             self.assertEqual(parsed["research_max_context_tokens"], 6000)
             self.assertEqual(parsed["research_max_llm_calls"], 8)
             self.assertEqual(parsed["research_max_follow_up_queries"], 4)
+
+    def test_run_config_rejects_wrong_section_types(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            config = Path(tmp) / "pipeline.toml"
+            config.write_text(
+                """
+[run]
+topic = "agent simulation"
+
+[research]
+sources = "openalex"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(RunConfigError) as raised:
+                load_pipeline_run_config(str(config))
+
+            self.assertIn("Invalid run config", str(raised.exception))
+            self.assertIn("sources", str(raised.exception))
 
 
 if __name__ == "__main__":

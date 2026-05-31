@@ -154,9 +154,11 @@ allow_pdf_download = false
 max_fulltext_documents = 6
 max_pdf_mb = 20
 keep_raw_pdf = false
-parser_backend = "basic"
+parser_backend = "basic"      # basic | pypdf | unstructured
 cache = true
-index_backend = "sqlite_fts"
+index_backend = "sqlite_fts"  # keyword | sqlite_fts | hybrid | lancedb | hybrid_lancedb
+# SQLite FTS / LanceDB 的共享加速索引目录；如需每个 run 自己保存数据库，可设为 "run" 或 "local"。
+index_root = ".simple_ar_cache/research_index"
 
 [research.budget]
 max_documents = 20
@@ -188,10 +190,18 @@ max_llm_calls = 8
   research_index/
     chunks.jsonl
     index_meta.json
-    sqlite_fts.db  # 仅 sqlite_fts/hybrid index 成功时出现
   cards/
     paper_cards.jsonl
     claim_cards.jsonl
+```
+
+共享加速索引默认写在 run 目录外：
+
+```text
+.simple_ar_cache/
+  research_index/
+    sqlite_fts.db  # 按 run_id 区分 rows 的共享 SQLite FTS store
+    lancedb/       # 启用并安装 LanceDB 后使用的共享 LanceDB store
 ```
 
 其中最重要的文件是：
@@ -203,9 +213,9 @@ max_llm_calls = 8
 - `02-search/documents/documents.jsonl`：标准化 document records，覆盖已选 metadata 和配置的本地文件，并记录 `metadata_only`、`parsed`、`skipped`、`failed` 等 extraction status。
 - `02-search/documents/cache_manifest.json`：cache/extraction 汇总，包含 source counts、status counts 和 full-text/PDF 意图开关。
 - `02-search/documents/fulltext_manifest.json`：全文 hint 和 fetch 预算决策。远程获取失败会记录在该 manifest 中，不会让 search 阶段失败。
-- `02-search/documents/fulltext_extraction.json`：对已缓存/本地全文的 best-effort parser 结果。Markdown/text 和基础 HTML 不需要额外依赖；PDF 解析会在可用时使用可选 `pypdf`，失败也只记录状态。
+- `02-search/documents/fulltext_extraction.json`：对已缓存/本地全文的 best-effort parser 结果。Markdown/text 和基础 HTML 不需要额外依赖；PDF 解析默认使用轻量 `pypdf`；如果安装了可选依赖，也可以用 `parser_backend = "unstructured"`。
 - `02-search/research_index/chunks.jsonl`：从摘要、已解析本地文件和已抽取全文生成的可移植本地 chunks。
-- `02-search/research_index/index_meta.json`：本地 index 汇总；在 `sqlite_fts` 或 `hybrid` 模式下还会记录可选 SQLite FTS 状态。
+- `02-search/research_index/index_meta.json`：本地 index manifest，记录 backend、run id、可移植 chunk 路径，以及共享 SQLite FTS / LanceDB store 路径。SQLite 和 LanceDB 默认共享在 `.simple_ar_cache/research_index`，不会在每个 run 目录里复制一份数据库。
 - `02-search/cards/paper_cards.jsonl`：deterministic paper-level evidence cards，包含 problem/method/metric/limitation hints 和 source chunk refs。
 - `02-search/cards/claim_cards.jsonl`：保守的 claim cards，每条都绑定 chunk id。这些还不是最终报告 claim，后续 report 阶段仍需要 audit 后再使用。
 - `02-search/search_meta.json`：最终选用 source、状态、返回数量，以及 planning/trace/review artifact 路径。

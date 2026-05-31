@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import contextlib
 import io
@@ -32,6 +32,7 @@ from simple_ar.code_task import (
     run_code_task_benchmark,
     validate_code_task,
 )
+from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
 from simple_ar.experiment.code_task_experiment import (
     CodeTaskExperimentSpec,
     prepare_code_task_experiment,
@@ -879,7 +880,7 @@ class CodeTaskTests(unittest.TestCase):
                 }
             )
 
-            with patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client):
+            with patch("simple_ar.code_task.editing.patching.LLMClient.from_env", return_value=fake_client):
                 proposal = propose_patch_edits(run_dir, use_llm=True)
 
             self.assertEqual(proposal.edit_count, 1)
@@ -958,7 +959,7 @@ class CodeTaskTests(unittest.TestCase):
                 }
             )
 
-            with patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client):
+            with patch("simple_ar.code_task.editing.patching.LLMClient.from_env", return_value=fake_client):
                 blocked = propose_patch_edits(run_dir, use_llm=True)
 
             blocked_data = read_json(blocked.proposal_path)
@@ -967,7 +968,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertTrue(blocked_data["budget"]["requires_approval"])
             self.assertIn("Proposal exceeds the selected edit budget", blocked_data["warnings"][0])
 
-            with patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client):
+            with patch("simple_ar.code_task.editing.patching.LLMClient.from_env", return_value=fake_client):
                 approved = propose_patch_edits(
                     run_dir,
                     use_llm=True,
@@ -992,9 +993,9 @@ class CodeTaskTests(unittest.TestCase):
             fake_client = _FakeCodeTaskClient()
 
             with (
-                patch("simple_ar.code_task.work_plan.LLMClient.from_env", return_value=fake_client),
-                patch("simple_ar.code_task.planning.LLMClient.from_env", return_value=fake_client),
-                patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client),
+                patch("simple_ar.code_task.editing.work_plan.LLMClient.from_env", return_value=fake_client),
+                patch("simple_ar.code_task.editing.planning.LLMClient.from_env", return_value=fake_client),
+                patch("simple_ar.code_task.editing.patching.LLMClient.from_env", return_value=fake_client),
             ):
                 result = prepare_code_task_experiment(
                     code_task_run_dir=run_dir,
@@ -1409,7 +1410,7 @@ class CodeTaskTests(unittest.TestCase):
                 }
             )
 
-            with patch("simple_ar.code_task.patching.LLMClient.from_env", return_value=fake_client):
+            with patch("simple_ar.code_task.editing.patching.LLMClient.from_env", return_value=fake_client):
                 result = propose_patch_edits(run_dir, use_llm=True)
 
             proposal = read_json(result.proposal_path)
@@ -1910,6 +1911,26 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(manifest["copy"]["max_file_bytes"], 10000)
             self.assertIn("Config:", stdout.getvalue())
 
+    def test_code_task_config_rejects_wrong_section_types(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            config_file = root / "code_task.toml"
+            write_text(
+                config_file,
+                (
+                    "[code_task]\n"
+                    f'code_root = "{root.as_posix()}"\n'
+                    "task_file = [\"not\", \"a\", \"path\"]\n"
+                ),
+            )
+
+            with self.assertRaises(CodeTaskConfigError) as raised:
+                load_code_task_init_options(config_path=str(config_file))
+
+            self.assertIn("Invalid code-task config", str(raised.exception))
+            self.assertIn("task_file", str(raised.exception))
+
     def test_external_env_mode_records_python_policy_and_uses_it(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -2379,7 +2400,7 @@ class CodeTaskTests(unittest.TestCase):
                 }
             )
 
-            with patch("simple_ar.code_task.repair.LLMClient.from_env", return_value=fake_client):
+            with patch("simple_ar.code_task.execution.repair.LLMClient.from_env", return_value=fake_client):
                 repair = propose_repair_edits(run_dir, use_llm=True, max_files=1)
 
             proposal = read_json(repair.proposal_path)
@@ -2434,7 +2455,7 @@ class CodeTaskTests(unittest.TestCase):
                 }
             )
 
-            with patch("simple_ar.code_task.repair.LLMClient.from_env", return_value=fake_client):
+            with patch("simple_ar.code_task.execution.repair.LLMClient.from_env", return_value=fake_client):
                 repair = propose_repair_edits(run_dir, use_llm=True)
 
             proposal = read_json(repair.proposal_path)

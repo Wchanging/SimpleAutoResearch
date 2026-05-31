@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from simple_ar.literature.semantic_scholar_client import SemanticScholarSearchClient
-from simple_ar.research.sources import SearchQuery, SearchResponse
+from simple_ar.research.sources.base import SearchQuery, SearchResponse
 
 
 class SemanticScholarConnector:

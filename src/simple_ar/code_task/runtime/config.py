@@ -1,0 +1,664 @@
+﻿from __future__ import annotations
+
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from simple_ar.code_task.execution.comparison import normalize_metric_direction
+
+
+DEFAULT_OUTPUT_ROOT = "runs"
+DEFAULT_MAX_FILE_BYTES = 2_000_000
+DEFAULT_ENV_MODE = "current"
+DEFAULT_WORKSPACE_MODE = "copy"
+VALID_EXECUTE_STEPS = {
+    "probe",
+    "baseline",
+    "work-plan",
+    "batch",
+    "plan",
+    "propose-edits",
+    "apply-edits",
+    "validate",
+    "run",
+    "analyze-failure",
+    "repair",
+}
+
+
+class CodeTaskConfigError(RuntimeError):
+    """Raised when a code-task config file or override is invalid."""
+
+
+class _ConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+
+class CodeTaskSection(_ConfigModel):
+    code_root: str | None = None
+    task_file: str | None = None
+    output_root: str | None = None
+    name: str | None = None
+    max_file_bytes: int | None = None
+
+
+class BenchmarkSection(_ConfigModel):
+    command: str | None = None
+    timeout: int | None = None
+    primary_metric: str | None = None
+    metric_directions: dict[str, str] = Field(default_factory=dict)
+
+
+class MetricsSection(_ConfigModel):
+    primary: str | None = None
+    primary_metric: str | None = None
+    directions: dict[str, str] = Field(default_factory=dict)
+    metric_directions: dict[str, str] = Field(default_factory=dict)
+
+
+class EnvironmentSection(_ConfigModel):
+    mode: str | None = None
+    python: str | None = None
+    python_executable: str | None = None
+
+
+class WorkspaceSection(_ConfigModel):
+    mode: str | None = None
+    include: list[str] | None = None
+    exclude: list[str] | None = None
+    reuse_source_venv: bool | None = None
+    setup_hook: str | None = None
+
+
+class SafetySection(_ConfigModel):
+    max_file_bytes: int | None = None
+    validation_max_file_bytes: int | None = None
+
+
+class ExecuteSection(_ConfigModel):
+    to_step: str | None = None
+    model: str | None = None
+    use_llm: bool | None = None
+    timeout_sec: int | None = None
+    timeout: int | None = None
+    skip_validation: bool | None = None
+    strict_validation: bool | None = None
+    validation_max_file_bytes: int | None = None
+    stream_benchmark_output: str | bool | None = None
+    apply_proposed_edits: bool | None = None
+    allow_large_edits: bool | None = None
+    repair_rounds: int | None = None
+    budget_profile: str | None = None
+    max_batches: int | None = None
+    cost_cap_usd: float | None = None
+    max_files: int | None = None
+    max_source_chars_per_file: int | None = None
+
+
+class LLMSection(_ConfigModel):
+    enabled: bool | None = None
+    model: str | None = None
+
+
+class CodeTaskModelsSection(_ConfigModel):
+    default: str | None = None
+    planner: str | None = None
+    editor: str | None = None
+    repair: str | None = None
+    summarizer: str | None = None
+
+
+class ModelsSection(_ConfigModel):
+    default: str | None = None
+    code_task: CodeTaskModelsSection = Field(default_factory=CodeTaskModelsSection)
+
+
+class BudgetSection(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    profile: str | None = None
+    max_batches: int | None = None
+    cost_cap_usd: float | None = None
+    max_files: int | None = None
+    max_edits: int | None = None
+    max_old_chars: int | None = None
+    max_new_chars: int | None = None
+    max_total_edit_chars: int | None = None
+    max_proposal_chars: int | None = None
+
+
+class CodeTaskConfig(_ConfigModel):
+    code_task: CodeTaskSection = Field(default_factory=CodeTaskSection)
+    benchmark: BenchmarkSection = Field(default_factory=BenchmarkSection)
+    metrics: MetricsSection = Field(default_factory=MetricsSection)
+    environment: EnvironmentSection = Field(default_factory=EnvironmentSection)
+    workspace: WorkspaceSection = Field(default_factory=WorkspaceSection)
+    safety: SafetySection = Field(default_factory=SafetySection)
+    execute: ExecuteSection = Field(default_factory=ExecuteSection)
+    llm: LLMSection = Field(default_factory=LLMSection)
+    models: ModelsSection = Field(default_factory=ModelsSection)
+    budget: BudgetSection = Field(default_factory=BudgetSection)
+
+
+@dataclass(frozen=True)
+class CodeTaskInitOptions:
+    """Resolved options for ``code-task init`` after config/CLI merging."""
+
+    code_root: str
+    task_file: str | None
+    output_root: str
+    name: str | None
+    benchmark_command: str | None
+    max_file_bytes: int
+    workspace_mode: str
+    workspace_include: tuple[str, ...]
+    workspace_exclude: tuple[str, ...]
+    workspace_reuse_source_venv: bool
+    workspace_setup_hook: str
+    env_mode: str
+    python_executable: str | None
+    primary_metric: str | None
+    metric_directions: dict[str, str]
+    config_path: str | None
+
+
+@dataclass(frozen=True)
+class CodeTaskExecuteOptions:
+    """Resolved options for ``code-task execute`` from a TOML config.
+
+    The config is intentionally optional. It keeps the common long-tail knobs
+    out of the CLI happy path while preserving explicit CLI overrides in
+    ``cli.py``.
+    """
+
+    to_step: str
+    model: str | None
+    planner_model: str | None
+    editor_model: str | None
+    repair_model: str | None
+    summarizer_model: str | None
+    use_llm: bool
+    timeout_sec: int
+    skip_validation: bool
+    strict_validation: bool
+    validation_max_file_bytes: int
+    stream_benchmark_output: str
+    apply_proposed_edits: bool
+    allow_large_edits: bool
+    repair_rounds: int
+    budget_profile: str | None
+    edit_budget_overrides: dict[str, Any]
+    max_batches: int | None
+    cost_cap_usd: float | None
+    max_files: int
+    max_source_chars_per_file: int
+    env_mode: str | None
+    python_executable: str | None
+    config_path: str | None
+
+
+def parse_metric_direction_arg(value: str) -> tuple[str, str]:
+    """Parse and normalize ``METRIC=DIRECTION`` strings."""
+    separator = "=" if "=" in value else ":"
+    if separator not in value:
+        raise CodeTaskConfigError(
+            "Expected METRIC=DIRECTION, for example accuracy=higher"
+        )
+    name, direction = value.split(separator, 1)
+    name = name.strip()
+    direction = direction.strip()
+    if not name or not direction:
+        raise CodeTaskConfigError("Expected non-empty METRIC and DIRECTION values")
+    try:
+        normalized = normalize_metric_direction(direction)
+    except ValueError as exc:
+        raise CodeTaskConfigError(str(exc)) from exc
+    return name, normalized
+
+
+def load_code_task_execute_options(
+    *,
+    config_path: str | None = None,
+) -> CodeTaskExecuteOptions:
+    """Resolve optional ``code-task execute`` settings from TOML.
+
+    Supported sections:
+    - ``[execute]`` for orchestration knobs.
+    - ``[models.code_task]`` for planner/editor/repair/summarizer models.
+    - ``[budget]`` plus optional ``[budget.normal]``/``[budget.large]`` for
+      edit budget profile and caps.
+    - ``[environment]`` for env mode and Python executable.
+    """
+
+    config = _load_toml_config(config_path)
+    execute = config.execute
+    benchmark = config.benchmark
+    llm = config.llm
+    models = config.models
+    code_task_models = config.models.code_task
+    budget = config.budget
+    environment = config.environment
+    safety = config.safety
+
+    to_step = _config_string(execute.to_step) or "run"
+    if to_step not in VALID_EXECUTE_STEPS:
+        raise CodeTaskConfigError(
+            "Unsupported [execute].to_step. Expected one of: "
+            + ", ".join(sorted(VALID_EXECUTE_STEPS))
+        )
+    budget_profile = (
+        _config_string(execute.budget_profile)
+        or _config_string(budget.profile)
+    )
+    max_batches = _config_int(execute.max_batches)
+    if max_batches is None:
+        max_batches = _config_int(budget.max_batches)
+    cost_cap = _config_float(execute.cost_cap_usd)
+    if cost_cap is None:
+        cost_cap = _config_float(budget.cost_cap_usd)
+
+    return CodeTaskExecuteOptions(
+        to_step=to_step,
+        model=(
+            _config_string(execute.model)
+            or _config_string(code_task_models.default)
+            or _config_string(models.default)
+            or _config_string(llm.model)
+        ),
+        planner_model=_config_string(code_task_models.planner),
+        editor_model=_config_string(code_task_models.editor),
+        repair_model=_config_string(code_task_models.repair),
+        summarizer_model=_config_string(code_task_models.summarizer),
+        use_llm=_resolve_bool(
+            override=None,
+            value=execute.use_llm if execute.use_llm is not None else llm.enabled,
+            default=True,
+        ),
+        timeout_sec=_positive_int(
+            _config_int(execute.timeout_sec)
+            or _config_int(execute.timeout)
+            or _config_int(benchmark.timeout),
+            60,
+        ),
+        skip_validation=_resolve_bool(
+            override=None,
+            value=execute.skip_validation,
+            default=False,
+        ),
+        strict_validation=_resolve_bool(
+            override=None,
+            value=execute.strict_validation,
+            default=False,
+        ),
+        validation_max_file_bytes=_positive_int(
+            _config_int(execute.validation_max_file_bytes)
+            or _config_int(safety.validation_max_file_bytes),
+            500_000,
+        ),
+        stream_benchmark_output=_stream_output_mode(execute.stream_benchmark_output),
+        apply_proposed_edits=_resolve_bool(
+            override=None,
+            value=execute.apply_proposed_edits,
+            default=False,
+        ),
+        allow_large_edits=_resolve_bool(
+            override=None,
+            value=execute.allow_large_edits,
+            default=False,
+        ),
+        repair_rounds=_non_negative_int(_config_int(execute.repair_rounds), 0),
+        budget_profile=budget_profile,
+        edit_budget_overrides=_edit_budget_overrides(budget, budget_profile),
+        max_batches=max_batches if max_batches and max_batches > 0 else None,
+        cost_cap_usd=cost_cap if cost_cap is not None and cost_cap >= 0 else None,
+        max_files=_positive_int(_config_int(execute.max_files), 8),
+        max_source_chars_per_file=_positive_int(
+            _config_int(execute.max_source_chars_per_file),
+            4000,
+        ),
+        env_mode=_config_string(environment.mode),
+        python_executable=(
+            _config_string(environment.python)
+            or _config_string(environment.python_executable)
+        ),
+        config_path=config_path,
+    )
+
+
+def load_code_task_init_options(
+    *,
+    config_path: str | None = None,
+    code_root: str | None = None,
+    task_file: str | None = None,
+    output_root: str | None = None,
+    name: str | None = None,
+    benchmark_command: str | None = None,
+    max_file_bytes: int | None = None,
+    workspace_mode: str | None = None,
+    workspace_include: list[str] | tuple[str, ...] | None = None,
+    workspace_exclude: list[str] | tuple[str, ...] | None = None,
+    workspace_reuse_source_venv: bool | None = None,
+    workspace_setup_hook: str | None = None,
+    env_mode: str | None = None,
+    python_executable: str | None = None,
+    primary_metric: str | None = None,
+    metric_directions: list[tuple[str, str]] | dict[str, str] | None = None,
+    require_task_file: bool = True,
+) -> CodeTaskInitOptions:
+    """Resolve ``code-task init`` options from TOML config plus CLI overrides.
+
+    Explicit arguments take precedence over the config file. The resulting
+    object is intentionally small and maps directly to ``initialize_code_task``.
+    ``require_task_file`` stays true for standalone code-task runs; embedded
+    pipeline runs may generate a task file from earlier research artifacts.
+    """
+    config = _load_toml_config(config_path)
+    code_task = config.code_task
+    benchmark = config.benchmark
+    metrics = config.metrics
+    environment = config.environment
+    workspace = config.workspace
+    safety = config.safety
+
+    resolved_code_root = _config_string(code_root) or _config_string(
+        code_task.code_root
+    )
+    resolved_task_file = _config_string(task_file) or _config_string(
+        code_task.task_file
+    )
+    if not resolved_code_root:
+        raise CodeTaskConfigError(
+            "Missing code root. Pass --code-root or set [code_task].code_root."
+        )
+    if require_task_file and not resolved_task_file:
+        raise CodeTaskConfigError(
+            "Missing task file. Pass --task-file or set [code_task].task_file."
+        )
+
+    resolved_output_root = (
+        _config_string(output_root)
+        or _config_string(code_task.output_root)
+        or DEFAULT_OUTPUT_ROOT
+    )
+    resolved_name = _config_string(name) or _config_string(code_task.name)
+    resolved_benchmark_command = _config_string(benchmark_command) or _config_string(
+        benchmark.command
+    )
+    resolved_primary_metric = (
+        _config_string(primary_metric)
+        or _config_string(benchmark.primary_metric)
+        or _config_string(metrics.primary)
+        or _config_string(metrics.primary_metric)
+    )
+    resolved_env_mode = (
+        _config_string(env_mode)
+        or _config_string(environment.mode)
+        or DEFAULT_ENV_MODE
+    )
+    resolved_python = (
+        _config_string(python_executable)
+        or _config_string(environment.python)
+        or _config_string(environment.python_executable)
+    )
+    resolved_workspace_mode = (
+        _config_string(workspace_mode)
+        or _config_string(workspace.mode)
+        or DEFAULT_WORKSPACE_MODE
+    )
+    resolved_reuse_source_venv = _resolve_bool(
+        override=workspace_reuse_source_venv,
+        value=workspace.reuse_source_venv,
+        default=False,
+    )
+    resolved_setup_hook = _config_string(workspace_setup_hook) or _config_string(
+        workspace.setup_hook
+    )
+    resolved_workspace_include = _resolve_string_list(
+        override=workspace_include,
+        value=workspace.include,
+    )
+    resolved_workspace_exclude = _resolve_string_list(
+        override=workspace_exclude,
+        value=workspace.exclude,
+    )
+
+    return CodeTaskInitOptions(
+        code_root=resolved_code_root,
+        task_file=resolved_task_file,
+        output_root=resolved_output_root,
+        name=resolved_name,
+        benchmark_command=resolved_benchmark_command,
+        max_file_bytes=_resolve_max_file_bytes(
+            override=max_file_bytes,
+            code_task=code_task,
+            safety=safety,
+        ),
+        workspace_mode=resolved_workspace_mode,
+        workspace_include=resolved_workspace_include,
+        workspace_exclude=resolved_workspace_exclude,
+        workspace_reuse_source_venv=resolved_reuse_source_venv,
+        workspace_setup_hook=resolved_setup_hook or "",
+        env_mode=resolved_env_mode,
+        python_executable=resolved_python,
+        primary_metric=resolved_primary_metric,
+        metric_directions=_merge_metric_directions(
+            config=config,
+            cli_values=metric_directions,
+        ),
+        config_path=config_path,
+    )
+
+
+def _load_toml_config(path: str | None) -> CodeTaskConfig:
+    if not path:
+        return CodeTaskConfig()
+    config_path = Path(path)
+    try:
+        with config_path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except FileNotFoundError as exc:
+        raise CodeTaskConfigError(f"Config file not found: {config_path}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise CodeTaskConfigError(
+            f"Could not parse TOML config {config_path}: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise CodeTaskConfigError(f"Expected TOML table in config file: {config_path}")
+    try:
+        return CodeTaskConfig.model_validate(data)
+    except ValidationError as exc:
+        raise CodeTaskConfigError(f"Invalid code-task config {config_path}: {exc}") from exc
+
+
+def _config_string(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _config_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _config_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _resolve_bool(*, override: bool | None, value: object, default: bool) -> bool:
+    if override is not None:
+        return override
+    if isinstance(value, bool):
+        return value
+    return default
+
+
+def _stream_output_mode(value: object) -> str:
+    """Resolve benchmark output relay mode from TOML.
+
+    ``true`` remains supported and maps to ``auto`` so older configs gain
+    carriage-return progress support without changing their files.
+    """
+
+    if value is None:
+        return "off"
+    if isinstance(value, bool):
+        return "auto" if value else "off"
+    text = _config_string(value)
+    if text is None:
+        return "off"
+    aliases = {
+        "0": "off",
+        "1": "auto",
+        "false": "off",
+        "no": "off",
+        "off": "off",
+        "none": "off",
+        "true": "auto",
+        "yes": "auto",
+        "on": "auto",
+        "line": "line",
+        "lines": "line",
+        "auto": "auto",
+        "tqdm": "auto",
+        "progress": "auto",
+        "summary": "summary",
+        "tail": "summary",
+    }
+    normalized = aliases.get(text.lower())
+    if normalized is None:
+        raise CodeTaskConfigError(
+            "Unsupported [execute].stream_benchmark_output. Expected boolean "
+            "or one of: off, line, auto, summary."
+        )
+    return normalized
+
+
+def _resolve_string_list(
+    *,
+    override: list[str] | tuple[str, ...] | None,
+    value: object,
+) -> tuple[str, ...]:
+    if override is not None:
+        return _config_string_list(override)
+    return _config_string_list(value)
+
+
+def _config_string_list(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    result: list[str] = []
+    for item in value:
+        text = _config_string(item)
+        if text:
+            result.append(text)
+    return tuple(dict.fromkeys(result))
+
+
+def _resolve_max_file_bytes(
+    *,
+    override: int | None,
+    code_task: CodeTaskSection,
+    safety: SafetySection,
+) -> int:
+    if override is not None:
+        return override
+    configured = _config_int(code_task.max_file_bytes)
+    if configured is not None:
+        return configured
+    safety_value = _config_int(safety.max_file_bytes)
+    if safety_value is not None:
+        return safety_value
+    return DEFAULT_MAX_FILE_BYTES
+
+
+def _positive_int(value: int | None, default: int) -> int:
+    if isinstance(value, int) and value > 0:
+        return value
+    return default
+
+
+def _non_negative_int(value: int | None, default: int) -> int:
+    if isinstance(value, int) and value >= 0:
+        return value
+    return default
+
+
+def _edit_budget_overrides(
+    budget: BudgetSection,
+    profile: str | None,
+) -> dict[str, Any]:
+    """Return numeric edit budget overrides for the selected profile."""
+
+    keys = {
+        "max_files",
+        "max_edits",
+        "max_old_chars",
+        "max_new_chars",
+        "max_total_edit_chars",
+        "max_proposal_chars",
+    }
+    values: dict[str, Any] = {}
+    budget_data = budget.model_dump()
+    budget_extra = dict(budget.model_extra or {})
+    for key in keys:
+        value = budget_data.get(key)
+        if value is not None:
+            values[key] = value
+    selected_profile = (profile or _config_string(budget.profile) or "normal").strip().lower()
+    profile_table = budget_extra.get(selected_profile)
+    profile_data = profile_table if isinstance(profile_table, dict) else {}
+    for key in keys:
+        if key in profile_data:
+            values[key] = profile_data[key]
+    return values
+
+
+def _merge_metric_directions(
+    *,
+    config: CodeTaskConfig,
+    cli_values: list[tuple[str, str]] | dict[str, str] | None,
+) -> dict[str, str]:
+    directions: dict[str, str] = {}
+    for table in (
+        config.benchmark.metric_directions,
+        config.metrics.directions,
+        config.metrics.metric_directions,
+    ):
+        if isinstance(table, dict):
+            directions.update(_normalize_direction_table(table))
+    directions.update(_normalize_cli_directions(cli_values))
+    return directions
+
+
+def _normalize_direction_table(table: dict[str, object]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, value in table.items():
+        name = str(key).strip()
+        if not name:
+            continue
+        try:
+            result[name] = normalize_metric_direction(str(value))
+        except ValueError as exc:
+            raise CodeTaskConfigError(str(exc)) from exc
+    return result
+
+
+def _normalize_cli_directions(
+    value: list[tuple[str, str]] | dict[str, str] | None,
+) -> dict[str, str]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return _normalize_direction_table(value)
+    return _normalize_direction_table(dict(value))

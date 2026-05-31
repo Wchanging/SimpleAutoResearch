@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from simple_ar.console import print_line
 from simple_ar.pipeline import PipelineEvent
 
 
@@ -19,48 +20,44 @@ class ConsoleReporter:
             return
 
         if event.name == "pipeline_start":
-            print(f"Run directory: {event.data.get('run_dir', '')}", flush=True)
-            print(f"Topic: {event.data.get('topic', '')}", flush=True)
-            print(
+            print_line(f"Run directory: {event.data.get('run_dir', '')}")
+            print_line(f"Topic: {event.data.get('topic', '')}")
+            print_line(
                 "Stages: "
                 f"{event.data.get('from_stage', '')} -> {event.data.get('to_stage', '')}",
-                flush=True,
             )
             return
 
         if event.name == "stage_start":
-            print(f"{self._stage_prefix(event)} running", flush=True)
+            print_line(f"{self._stage_prefix(event)} running")
             return
 
         if event.name == "stage_message":
-            print(f"  - {event.message}", flush=True)
+            print_line(f"  - {event.message}")
             return
 
         if event.name == "llm_usage":
-            print(f"  - {event.message}", flush=True)
+            print_line(f"  - {event.message}")
             return
 
         if event.name == "stage_done":
             outputs = event.data.get("outputs", [])
             output_text = ", ".join(str(item) for item in outputs) if isinstance(outputs, list) else ""
             suffix = f" -> {output_text}" if output_text else ""
-            print(
+            print_line(
                 f"{self._stage_prefix(event)} done in {event.data.get('duration_sec', 0)}s{suffix}",
-                flush=True,
             )
             return
 
         if event.name == "stage_failed":
-            print(
+            print_line(
                 f"{self._stage_prefix(event)} failed: {event.data.get('error', '')}",
-                flush=True,
             )
             return
 
         if event.name == "pipeline_done":
-            print(
+            print_line(
                 f"Pipeline completed: {event.data.get('completed_stages', 0)} stage(s).",
-                flush=True,
             )
 
     @staticmethod

@@ -57,17 +57,14 @@ class LLMParsingTests(unittest.TestCase):
                 "SIMPLE_AR_MAX_OUTPUT_TOKENS": "1234",
             },
             clear=True,
-        ), patch("simple_ar.llm.OpenAI") as openai:
+        ), patch("simple_ar.llm.litellm.completion") as completion:
             client = LLMClient.from_env()
 
         self.assertEqual(client.model, "test-model")
+        self.assertEqual(client._provider_model, "openai/test-model")
         self.assertEqual(client._settings.request_timeout_sec, 42.5)
         self.assertEqual(client._settings.max_output_tokens, 1234)
-        openai.assert_called_once_with(
-            api_key="test-key",
-            timeout=42.5,
-            base_url="https://example.test/v1",
-        )
+        completion.assert_not_called()
 
     def test_estimate_tokens_is_deterministic_and_nonzero_for_text(self) -> None:
         self.assertEqual(estimate_tokens(""), 0)

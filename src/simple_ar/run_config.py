@@ -4,9 +4,169 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 
 class RunConfigError(RuntimeError):
     """Raised when a top-level run config file is missing or invalid."""
+
+
+class _ConfigModel(BaseModel):
+    """Base model for TOML sections.
+
+    Config files are user-facing and may contain future keys while the project
+    evolves. Unknown keys are ignored here and can be picked up by later
+    versions without breaking older installations.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class RunSection(_ConfigModel):
+    topic: str | None = None
+    output_root: str | None = None
+    from_stage: str | None = None
+    to_stage: str | None = None
+    quiet: bool | None = None
+    debug_artifacts: bool | None = None
+
+
+class LLMSection(_ConfigModel):
+    enabled: bool | None = None
+    model: str | None = None
+    workers: int | None = None
+
+
+class SearchSection(_ConfigModel):
+    offline: bool | None = None
+    max_papers: int | None = None
+    query: str | None = None
+    allow_fixture_fallback: bool | None = None
+    strict: bool | None = None
+
+
+class ResearchBudgetSection(_ConfigModel):
+    max_documents: int | None = None
+    max_chunks: int | None = None
+    max_context_tokens: int | None = None
+    max_llm_calls: int | None = None
+    max_follow_up_queries: int | None = None
+
+
+class ResearchSection(_ConfigModel):
+    mode: str | None = None
+    planner: str | None = None
+    sources: list[str] | None = None
+    queries: list[str] | None = None
+    auto_query_expansion: bool | None = None
+    max_retrieval_rounds: int | None = None
+    max_queries: int | None = None
+    required_facets: list[str] | None = None
+    use_fulltext: bool | None = None
+    allow_pdf_download: bool | None = None
+    max_fulltext_documents: int | None = None
+    max_pdf_mb: int | None = None
+    keep_raw_pdf: bool | None = None
+    parser_backend: str | None = None
+    cache: bool | None = None
+    index_backend: str | None = None
+    index_root: str | None = None
+    local_documents: list[str] | None = None
+    budget: ResearchBudgetSection = Field(default_factory=ResearchBudgetSection)
+
+
+class RetrievalSection(_ConfigModel):
+    enabled: bool | None = None
+    top_k: int | None = None
+
+
+class ExperimentSection(_ConfigModel):
+    template: str | None = None
+    timeout: int | None = None
+    code_task_config: str | None = None
+
+
+class ReportSection(_ConfigModel):
+    mode: str | None = None
+
+
+class PipelineRunConfig(_ConfigModel):
+    run: RunSection = Field(default_factory=RunSection)
+    llm: LLMSection = Field(default_factory=LLMSection)
+    search: SearchSection = Field(default_factory=SearchSection)
+    research: ResearchSection = Field(default_factory=ResearchSection)
+    retrieval: RetrievalSection = Field(default_factory=RetrievalSection)
+    experiment: ExperimentSection = Field(default_factory=ExperimentSection)
+    report: ReportSection = Field(default_factory=ReportSection)
+
+    def flatten(self, *, config_path: Path, raw_data: dict[str, Any]) -> dict[str, object]:
+        """Convert typed TOML sections to the existing runtime config dict."""
+        result: dict[str, object] = {}
+
+        _set_string(result, "topic", self.run.topic)
+        _set_string(result, "output_root", self.run.output_root)
+        _set_string(result, "from_stage", self.run.from_stage)
+        _set_string(result, "to_stage", self.run.to_stage)
+        _set_bool(result, "quiet", self.run.quiet)
+        _set_bool(result, "debug_artifacts", self.run.debug_artifacts)
+
+        if isinstance(self.llm.enabled, bool):
+            result["use_llm"] = self.llm.enabled
+            result["mode"] = "llm" if self.llm.enabled else "offline"
+        _set_string(result, "model", self.llm.model)
+        _set_int(result, "llm_max_workers", self.llm.workers)
+
+        _set_int(result, "max_papers", self.search.max_papers)
+        _set_string(result, "search_query", self.search.query)
+        if isinstance(self.search.offline, bool):
+            result["use_arxiv"] = not self.search.offline
+        _set_bool(result, "allow_fixture_fallback", self.search.allow_fixture_fallback)
+        _set_bool(result, "strict_search", self.search.strict)
+
+        _set_string(result, "research_mode", self.research.mode)
+        _set_string(result, "research_planner", self.research.planner)
+        _set_string_list(result, "research_sources", self.research.sources)
+        _set_string_list(result, "research_queries", self.research.queries)
+        _set_bool(result, "research_auto_query_expansion", self.research.auto_query_expansion)
+        _set_int(result, "research_max_retrieval_rounds", self.research.max_retrieval_rounds)
+        _set_int(result, "research_max_queries", self.research.max_queries)
+        _set_string_list(result, "research_required_facets", self.research.required_facets)
+        _set_bool(result, "research_use_fulltext", self.research.use_fulltext)
+        _set_bool(result, "research_allow_pdf_download", self.research.allow_pdf_download)
+        _set_int(result, "research_max_fulltext_documents", self.research.max_fulltext_documents)
+        _set_int(result, "research_max_pdf_mb", self.research.max_pdf_mb)
+        _set_bool(result, "research_keep_raw_pdf", self.research.keep_raw_pdf)
+        _set_string(result, "research_parser_backend", self.research.parser_backend)
+        _set_bool(result, "research_cache", self.research.cache)
+        _set_string(result, "research_index_backend", self.research.index_backend)
+        _set_string(result, "research_index_root", self.research.index_root)
+        _set_resolved_string_list(
+            result,
+            "research_local_documents",
+            self.research.local_documents,
+            config_path,
+        )
+
+        _set_int(result, "research_max_documents", self.research.budget.max_documents)
+        _set_int(result, "research_max_chunks", self.research.budget.max_chunks)
+        _set_int(result, "research_max_context_tokens", self.research.budget.max_context_tokens)
+        _set_int(result, "research_max_llm_calls", self.research.budget.max_llm_calls)
+        _set_int(result, "research_max_follow_up_queries", self.research.budget.max_follow_up_queries)
+
+        _set_bool(result, "use_retrieval", self.retrieval.enabled)
+        _set_int(result, "retrieval_top_k", self.retrieval.top_k)
+
+        _set_string(result, "experiment_template", self.experiment.template)
+        _set_int(result, "experiment_timeout_sec", self.experiment.timeout)
+        code_task_config = _string_value(self.experiment.code_task_config)
+        if code_task_config:
+            result["code_task_config"] = str(_resolve_relative(config_path, code_task_config))
+
+        _set_string(result, "report_mode", self.report.mode)
+
+        if "code_task_config" not in result and _contains_code_task_config(raw_data):
+            result["code_task_config"] = str(config_path.resolve())
+        return result
 
 
 def load_pipeline_run_config(config_path: str | None) -> dict[str, object]:
@@ -24,73 +184,11 @@ def load_pipeline_run_config(config_path: str | None) -> dict[str, object]:
         return {}
     path = Path(config_path)
     data = _load_toml(path)
-    result: dict[str, object] = {}
-
-    run = _table(data, "run")
-    _set_string(result, "topic", run.get("topic"))
-    _set_string(result, "output_root", run.get("output_root"))
-    _set_string(result, "from_stage", run.get("from_stage"))
-    _set_string(result, "to_stage", run.get("to_stage"))
-    _set_bool(result, "quiet", run.get("quiet"))
-
-    llm = _table(data, "llm")
-    if isinstance(llm.get("enabled"), bool):
-        enabled = bool(llm["enabled"])
-        result["use_llm"] = enabled
-        result["mode"] = "llm" if enabled else "offline"
-    _set_string(result, "model", llm.get("model"))
-    _set_int(result, "llm_max_workers", llm.get("workers"))
-
-    search = _table(data, "search")
-    _set_int(result, "max_papers", search.get("max_papers"))
-    _set_string(result, "search_query", search.get("query"))
-    if isinstance(search.get("offline"), bool):
-        result["use_arxiv"] = not bool(search["offline"])
-    _set_bool(result, "allow_fixture_fallback", search.get("allow_fixture_fallback"))
-    _set_bool(result, "strict_search", search.get("strict"))
-
-    research = _table(data, "research")
-    _set_string(result, "research_mode", research.get("mode"))
-    _set_string(result, "research_planner", research.get("planner"))
-    _set_string_list(result, "research_sources", research.get("sources"))
-    _set_string_list(result, "research_queries", research.get("queries"))
-    _set_bool(result, "research_auto_query_expansion", research.get("auto_query_expansion"))
-    _set_int(result, "research_max_retrieval_rounds", research.get("max_retrieval_rounds"))
-    _set_int(result, "research_max_queries", research.get("max_queries"))
-    _set_string_list(result, "research_required_facets", research.get("required_facets"))
-    _set_bool(result, "research_use_fulltext", research.get("use_fulltext"))
-    _set_bool(result, "research_allow_pdf_download", research.get("allow_pdf_download"))
-    _set_int(result, "research_max_fulltext_documents", research.get("max_fulltext_documents"))
-    _set_int(result, "research_max_pdf_mb", research.get("max_pdf_mb"))
-    _set_bool(result, "research_keep_raw_pdf", research.get("keep_raw_pdf"))
-    _set_string(result, "research_parser_backend", research.get("parser_backend"))
-    _set_bool(result, "research_cache", research.get("cache"))
-    _set_string(result, "research_index_backend", research.get("index_backend"))
-    _set_resolved_string_list(result, "research_local_documents", research.get("local_documents"), path)
-    research_budget = _table(research, "budget")
-    _set_int(result, "research_max_documents", research_budget.get("max_documents"))
-    _set_int(result, "research_max_chunks", research_budget.get("max_chunks"))
-    _set_int(result, "research_max_context_tokens", research_budget.get("max_context_tokens"))
-    _set_int(result, "research_max_llm_calls", research_budget.get("max_llm_calls"))
-    _set_int(result, "research_max_follow_up_queries", research_budget.get("max_follow_up_queries"))
-
-    retrieval = _table(data, "retrieval")
-    _set_bool(result, "use_retrieval", retrieval.get("enabled"))
-    _set_int(result, "retrieval_top_k", retrieval.get("top_k"))
-
-    experiment = _table(data, "experiment")
-    _set_string(result, "experiment_template", experiment.get("template"))
-    _set_int(result, "experiment_timeout_sec", experiment.get("timeout"))
-    code_task_config = _string_value(experiment.get("code_task_config"))
-    if code_task_config:
-        result["code_task_config"] = str(_resolve_relative(path, code_task_config))
-
-    report = _table(data, "report")
-    _set_string(result, "report_mode", report.get("mode"))
-
-    if "code_task_config" not in result and _contains_code_task_config(data):
-        result["code_task_config"] = str(path.resolve())
-    return result
+    try:
+        parsed = PipelineRunConfig.model_validate(data)
+    except ValidationError as exc:
+        raise RunConfigError(f"Invalid run config {path}: {exc}") from exc
+    return parsed.flatten(config_path=path, raw_data=data)
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -104,11 +202,6 @@ def _load_toml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise RunConfigError(f"Expected TOML table in run config: {path}")
     return data
-
-
-def _table(data: dict[str, Any], key: str) -> dict[str, Any]:
-    value = data.get(key)
-    return value if isinstance(value, dict) else {}
 
 
 def _set_string(result: dict[str, object], key: str, value: object) -> None:

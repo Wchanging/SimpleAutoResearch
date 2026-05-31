@@ -6,6 +6,8 @@ import sys
 from dataclasses import dataclass
 from typing import Sequence
 
+from simple_ar.console import print_line
+
 
 @dataclass(frozen=True)
 class CheckGroup:
@@ -122,7 +124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             verbose=bool(args.verbose),
             failfast=bool(args.failfast),
         )
-        print(f"[{group_name}] {' '.join(command)}")
+        print_line(f"[{group_name}] {' '.join(command)}")
         if args.dry_run:
             continue
         completed = subprocess.run(command, check=False)
@@ -132,9 +134,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _print_groups() -> None:
-    print("Available check groups:")
+    print_line("Available check groups:")
     for name, group in CHECK_GROUPS.items():
-        print(f"- {name}: {group.description}")
+        print_line(f"- {name}: {group.description}")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,10 @@ class PipelineTests(unittest.TestCase):
 
             self.assertTrue((ctx.run_dir / "01-plan" / "goal.md").is_file())
             self.assertTrue((ctx.run_dir / "01-plan" / "problem.md").is_file())
+            self.assertTrue((ctx.run_dir / "01-plan" / "contract.json").is_file())
+            self.assertTrue((ctx.run_dir / "01-plan" / "report.md").is_file())
             self.assertTrue((ctx.run_dir / "01-plan" / "stage_meta.json").is_file())
+            self.assertTrue((ctx.run_dir / "state.json").is_file())
 
     def test_missing_input_fails_clearly(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -52,19 +55,27 @@ class PipelineTests(unittest.TestCase):
             executions = PipelineRunner(handlers()).run(ctx)
 
             self.assertEqual(len(executions), 8)
-            self.assertTrue((ctx.run_dir / "02-search" / "planning" / "research_plan.json").is_file())
+            self.assertTrue((ctx.run_dir / "02-search" / "contract.json").is_file())
+            self.assertTrue((ctx.run_dir / "02-search" / "report.md").is_file())
             self.assertTrue((ctx.run_dir / "02-search" / "search_meta.json").is_file())
+            self.assertFalse((ctx.run_dir / "02-search" / "planning" / "research_plan.json").exists())
+            self.assertFalse((ctx.run_dir / "02-search" / "documents" / "documents.jsonl").exists())
             self.assertTrue((ctx.run_dir / "08-report" / "report.md").is_file())
+            self.assertTrue((ctx.run_dir / "08-report" / "contract.json").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "references.bib").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "manifest.json").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "report_quality.json").is_file())
             self.assertTrue((ctx.run_dir / "manifest.json").is_file())
+            self.assertTrue((ctx.run_dir / "state.json").is_file())
             self.assertTrue((ctx.run_dir / "source_plan.json").is_file())
             self.assertTrue((ctx.run_dir / "activity_log.jsonl").is_file())
             self.assertTrue((ctx.run_dir / "evidence_ledger.jsonl").is_file())
 
             manifest = read_json(ctx.run_dir / "manifest.json")
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertTrue(all(item["status"] == "done" for item in manifest["stages"]))
+            self.assertTrue(all(item["contract_path"] for item in manifest["stages"]))
+            self.assertTrue(all(item["report_path"] for item in manifest["stages"]))
 
             report_manifest = read_json(ctx.run_dir / "08-report" / "manifest.json")
             self.assertEqual(report_manifest["experiment"]["template"], "toy_text_classification")

@@ -101,10 +101,23 @@ plan -> search -> read -> synthesize -> design experiment
 
 ## Search 与 LLM 边界
 
-Search 阶段会把 planning、trace、review、document records、本地 index 和 evidence cards 分目录保存：
+默认情况下，普通 pipeline run 会在 search 阶段 contract 写出后保留紧凑输出：
 
 ```text
 02-search/
+  contract.json
+  report.md
+  papers.jsonl
+  search_meta.json
+```
+
+如果需要检查完整 planning、trace、documents、local-index、review 和 cards，
+可以设置 `[run].debug_artifacts = true`。此时 Search 阶段会分目录保留：
+
+```text
+02-search/
+  contract.json
+  report.md
   papers.jsonl
   search_meta.json
   planning/
@@ -124,10 +137,18 @@ Search 阶段会把 planning、trace、review、document records、本地 index 
   research_index/
     chunks.jsonl
     index_meta.json
-    sqlite_fts.db
   cards/
     paper_cards.jsonl
     claim_cards.jsonl
+```
+
+共享加速索引默认写在 run 目录外：
+
+```text
+.simple_ar_cache/
+  research_index/
+    sqlite_fts.db
+    lancedb/
 ```
 
 - `02-search/planning/research_plan.json` 会在一个紧凑 artifact 中记录子问题、需要覆盖的 evidence facets、seed/expanded queries、结构化 title/abstract keyword hints、source 顺序、本地文档、检索模式、cache/index hints 和预算。LLM 关闭时使用 deterministic planner；`[research].planner = "auto"` 或 `"llm"` 时可由模型参与生成。
@@ -137,9 +158,9 @@ Search 阶段会把 planning、trace、review、document records、本地 index 
 - `02-search/documents/documents.jsonl` 会把已选 metadata 和配置的本地文件统一记录为 document records，并保存 extraction status。在线 metadata 通常是 `metadata_only`；本地 Markdown/text 可以是 `parsed`；不支持或不可用文件会记录为 `skipped` 或 `failed`。
 - `02-search/documents/cache_manifest.json` 会汇总 cache/index 意图、extraction status 和 source counts。
 - `02-search/documents/fulltext_manifest.json` 会记录 arXiv/OpenAlex/local-file 全文 hints、fetch 预算决策、本地可用全文和远程获取失败。
-- `02-search/documents/fulltext_extraction.json` 会记录已缓存/本地全文的 best-effort parser 结果。Markdown/text 和基础 HTML 使用标准库解析；PDF 会在可选 `pypdf` 可用时尝试解析，不可用或失败时只写入 manifest，不让 search 阶段失败。
+- `02-search/documents/fulltext_extraction.json` 会记录已缓存/本地全文的 best-effort parser 结果。Markdown/text 和基础 HTML 使用标准库解析；PDF 默认使用轻量 `pypdf`；安装可选依赖后可以选择 `unstructured`，不可用或失败时只写入 manifest，不让 search 阶段失败。
 - `02-search/research_index/chunks.jsonl` 会保存从摘要、已解析本地文件和已抽取全文生成的可移植 chunks，是后续 evidence-card 抽取的 source of truth。
-- `02-search/research_index/index_meta.json` 会记录本地 index backend，以及可选 SQLite FTS 状态。
+- `02-search/research_index/index_meta.json` 会记录本地 index backend、run id、可移植 chunk 路径，以及共享 SQLite FTS / LanceDB store 路径。默认共享目录是 `.simple_ar_cache/research_index`，避免每个 run 重复创建数据库。
 - Live search 使用配置中的 source 顺序。默认先用 OpenAlex，再用 Semantic Scholar，最后用 arXiv。未设置 `--strict-search` 且 source plan 允许 cache 时，live 失败后会使用缓存 metadata。
 - 当前 source strategy 是 ordered fallback，不是 full source union：同一个 query 只要某个 provider 返回候选，后续 provider 就不会继续调用。
 - `local_files` 可以把用户提供的 Markdown/text 笔记作为保守的 metadata-like records。本地 PDF 只有在启用 full-text 意图且可选 parser 可用时，才会作为 best-effort 解析输入。
@@ -154,6 +175,7 @@ Search 阶段会把 planning、trace、review、document records、本地 index 
 
 ```text
 runs/<run-id>/
+  state.json
   manifest.json
   pipeline_state.json
   config_snapshot.json
@@ -168,27 +190,28 @@ runs/<run-id>/
   evidence_ledger.jsonl
   01-plan/
   02-search/
+    contract.json
+    report.md
     papers.jsonl
     search_meta.json
-    planning/
+    planning/       # 仅在 [run].debug_artifacts = true 时保留
       research_plan.json
-    documents/
+    documents/      # 仅在 [run].debug_artifacts = true 时保留
       documents.jsonl
       cache_manifest.json
       fulltext_manifest.json
       fulltext_extraction.json
       extracted_text/  # 只有 HTML/PDF-like 资源被抽取成文本时出现
-    research_index/
+    research_index/ # 仅在 [run].debug_artifacts = true 时保留
       chunks.jsonl
       index_meta.json
-      sqlite_fts.db  # 仅 sqlite_fts/hybrid index 成功时出现
-    cards/
+    cards/          # 仅在 [run].debug_artifacts = true 时保留
       paper_cards.jsonl
       claim_cards.jsonl
-    traces/
+    traces/         # 仅在 [run].debug_artifacts = true 时保留
       retrieval_rounds.jsonl
       screening_decisions.jsonl
-    review/
+    review/         # 仅在 [run].debug_artifacts = true 时保留
       coverage_report.json
       coverage_report.md
   03-read/
@@ -203,6 +226,7 @@ runs/<run-id>/
 
 根目录文件：
 
+- `state.json`：typed workflow checkpoint，用于 resume 和阶段间显式交接。
 - `manifest.json`：stage status 和声明输出。
 - `pipeline_state.json`：已完成阶段和 resume 的下一阶段。
 - `config_snapshot.json`：本次运行配置快照。
@@ -214,18 +238,20 @@ runs/<run-id>/
 - `source_plan.json`：artifact-retrieval source plan，描述每个阶段应该参考哪些 run artifacts；它和 `02-search/planning/research_plan.json` 内部的文献 `source_plan` section 不是同一个东西。
 - `activity_log.jsonl`：source planning 和 retrieval actions 的结构化日志。
 - `evidence_ledger.jsonl`：阶段使用的 snippets，包含 path 和 line range。
-- `02-search/planning/research_plan.json`：紧凑的 search planning artifact，内部包含研究问题拆解、可执行 query plan 和文献 source plan sections。
-- `02-search/traces/retrieval_rounds.jsonl`：实际执行的 source/query 尝试，包含返回数量、错误和简洁 query 意图 trace。
-- `02-search/traces/screening_decisions.jsonl`：retrieved metadata candidates 的 keep/discard 决策。
-- `02-search/review/coverage_report.json` / `coverage_report.md`：required facets 覆盖情况、缺失问题状态和 follow-up query 决策。
-- `02-search/documents/documents.jsonl`：metadata 和本地文件的标准化 document records；可用时包含 hash 和 parser status。
-- `02-search/documents/cache_manifest.json`：cache、index、full-text 和 extraction-status 汇总。
-- `02-search/documents/fulltext_manifest.json`：全文 hints、候选选择、blocked/skipped 原因，以及 parser/fetch 预算设置。
-- `02-search/documents/fulltext_extraction.json`：已缓存本地/远程全文资源的 parser 结果；PDF 或不支持后缀解析失败会记录在这里，不会让 search 阶段失败。
-- `02-search/research_index/chunks.jsonl`：后续 retrieval、evidence-card extraction 和 report grounding 使用的可移植本地 chunk store。
-- `02-search/research_index/index_meta.json`：本地 index backend 和可选 SQLite FTS 状态。
-- `02-search/cards/paper_cards.jsonl`：deterministic paper cards，带 evidence refs，供后续 gap、idea 和 report stages 使用。
-- `02-search/cards/claim_cards.jsonl`：绑定 chunk id 的保守 claim cards；最终报告使用前仍应经过 report audit。
+- `02-search/contract.json`：search 阶段的紧凑机器可读摘要，用于阶段交接。
+- `02-search/report.md`：search 阶段的紧凑人工可读摘要。
+- `02-search/planning/research_plan.json`：紧凑的 search planning artifact，内部包含研究问题拆解、可执行 query plan 和文献 source plan sections；仅在 `[run].debug_artifacts = true` 时保留在 run 目录。
+- `02-search/traces/retrieval_rounds.jsonl`：实际执行的 source/query 尝试，包含返回数量、错误和简洁 query 意图 trace；debug artifact。
+- `02-search/traces/screening_decisions.jsonl`：retrieved metadata candidates 的 keep/discard 决策；debug artifact。
+- `02-search/review/coverage_report.json` / `coverage_report.md`：required facets 覆盖情况、缺失问题状态和 follow-up query 决策；debug artifact。
+- `02-search/documents/documents.jsonl`：metadata 和本地文件的标准化 document records；可用时包含 hash 和 parser status；debug artifact。
+- `02-search/documents/cache_manifest.json`：cache、index、full-text 和 extraction-status 汇总；debug artifact。
+- `02-search/documents/fulltext_manifest.json`：全文 hints、候选选择、blocked/skipped 原因，以及 parser/fetch 预算设置；debug artifact。
+- `02-search/documents/fulltext_extraction.json`：已缓存本地/远程全文资源的 parser 结果；PDF 或不支持后缀解析失败会记录在这里，不会让 search 阶段失败；debug artifact。
+- `02-search/research_index/chunks.jsonl`：后续 retrieval、evidence-card extraction 和 report grounding 使用的可移植本地 chunk store；run 目录下仅 debug 保留，共享加速索引在 `.simple_ar_cache/`。
+- `02-search/research_index/index_meta.json`：本地 index manifest，包含 backend、run id、可移植 chunk 路径和共享 SQLite / LanceDB 加速索引路径；debug artifact。
+- `02-search/cards/paper_cards.jsonl`：deterministic paper cards，带 evidence refs，供后续 gap、idea 和 report stages 使用；debug artifact。
+- `02-search/cards/claim_cards.jsonl`：绑定 chunk id 的保守 claim cards；最终报告使用前仍应经过 report audit；debug artifact。
 - `02-search/search_meta.json`：最终选用 source、状态、数量，以及 planning/trace/review artifact 路径。
 - `02-search/papers.jsonl`：传给 `03-read` 的标准化 metadata rows。
 - `05-design/generated_code_task.md`：仅当内嵌 `code_task_project` 没有 task file 时生成。

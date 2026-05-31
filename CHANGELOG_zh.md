@@ -4,6 +4,40 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-05-31
+
+### Added
+
+- 将 Pydantic、Rich、LiteLLM、pyalex 加入直接依赖，作为第一批基础设施替换。
+- 新增基于 `WorkspaceState` 的 pipeline reboot core。运行目录现在会写入顶层
+  `state.json`，已完成阶段可以写出紧凑的 `contract.json` / `report.md`，
+  用于机器可读交接和人工审查。
+- 新增可选 `unstructured` 全文解析后端，可通过 `[research].parser_backend = "unstructured"` 启用；如果未安装该可选包，只会在 manifest 中记录失败，不会让 search 阶段失败。
+- 新增可选 LanceDB research-index 后端状态，可通过 `[research].index_backend = "lancedb"` 或 `"hybrid_lancedb"` 启用；`chunks.jsonl` 仍然是可移植 source of truth。
+
+### Changed
+
+- 顶层 pipeline TOML 现在先经过 Pydantic schema 校验，再 flatten 成现有运行时配置 dict，配置类型错误会更早、更明确地暴露。
+- Code-task TOML 现在也通过 Pydantic section schema 解析 init 和 execute options，替换之前的自由 dict 解析路径。
+- LLM client 现在通过 LiteLLM 调用 provider，不再直接构造 OpenAI SDK client；OpenAI-compatible `OPENAI_BASE_URL` 仍然通过 LiteLLM 的 OpenAI provider 路径支持。
+- OpenAlex 检索现在使用 pyalex，而不是手写 urllib request client；项目内仍保留 `Paper` normalization 层。
+- Pipeline 进度和 developer-check 输出现在通过一个轻量 Rich console wrapper，为后续更清晰的人工审核输出打基础，同时保持现有 CLI 兼容。
+- Research SQLite FTS / LanceDB 加速索引默认共享在 `.simple_ar_cache/research_index`，run 目录只保留可审计的 `chunks.jsonl` 和 `index_meta.json`；共享数据库按 `run_id` 更新，避免每个 run 重复创建一份索引。
+- Pipeline 阶段依赖现在优先使用显式 `WorkspaceState` 指针，而不是通过
+  `find_artifact` 反向扫描 run 目录；旧 helper 仅作为 legacy compatibility 保留。
+- 默认 pipeline run 会在 search 阶段 contract 写出后压缩 `02-search` 的 verbose
+  中间目录。需要保留 planning、trace、documents、cards、review 和 local-index
+  调试产物时，可设置 `[run].debug_artifacts = true`。
+- 原本巨大的 `stage_handlers.py` 和 `cli.py` 已移动到 `src/simple_ar/legacy/`，
+  对外 import path 只保留小型 compatibility wrapper，便于后续逐步拆掉巨石实现。
+- Experiment runner/template helpers 已迁移到 `src/simple_ar/coding/`；
+  `src/simple_ar/experiment/` 现在保留兼容 wrapper，后续以 coding domain 为主要实现位置。
+- Research 模块现在按生命周期分组到 `planning/`、`sources/`、`documents/`、
+  `store/`、`evidence/` 和 `outputs/`，不再把所有检索/证据文件平铺在同一目录。
+- Code-task 模块现在按生命周期分组到 `runtime/`、`workspace/`、`analysis/`、
+  `editing/`、`execution/` 和 `orchestration/`，收缩原先 25 个左右文件平铺的包表面。
+- README、Usage、Workflow 和 Config Reference 已说明 `unstructured` 与 LanceDB 是可选后端，而不是基础安装强依赖。
+
 ## 2026-05-27
 
 ### Added

@@ -5,6 +5,7 @@
 topic = "multi-agent collaboration for coding agents"
 output_root = ".tmp_tests/v23-fulltext-arxiv-check"
 to_stage = "search"
+debug_artifacts = false
 
 [llm]
 # Exercise the LLM-backed research-question and query planner.
@@ -22,7 +23,7 @@ allow_fixture_fallback = false
 
 # Keep this extremely small because arXiv can rate-limit repeated development
 # runs. This config is a Day11 full-text smoke, not a broad survey.
-max_papers = 1
+max_papers = 3
 query = "LLM agents software engineering"
 
 [research]
@@ -69,6 +70,9 @@ parser_backend = "pypdf"
 # downloaded PDF itself is still stored in the run-local fulltext_cache.
 cache = false
 index_backend = "sqlite_fts"
+# SQLite/LanceDB accelerator stores are shared by default. Keep this explicit
+# for the full-text check so repeated runs update one local research index.
+index_root = ".simple_ar_cache/research_index"
 
 [research.budget]
 max_documents = 3

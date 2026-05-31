@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 import tempfile
@@ -17,17 +17,18 @@ from simple_ar.research.contracts import (
     ResearchContract,
     ResearchQuestion,
     SourcePlan,
+    TextChunk,
 )
-from simple_ar.research.cards import build_evidence_cards
-from simple_ar.research.coverage import build_coverage_report
-from simple_ar.research.chunking import build_text_chunks
-from simple_ar.research.documents import build_cache_manifest, build_document_records
-from simple_ar.research.extractors import apply_fulltext_extraction
-from simple_ar.research.fulltext import build_fulltext_manifest, fulltext_hints_for_paper
-from simple_ar.research.index import write_research_index
-from simple_ar.research.planning import build_query_plan, build_research_questions
-from simple_ar.research.retrieval import RetrievalCandidate, relevance_score, screen_retrieval_candidates
-from simple_ar.research.sources import SearchQuery, build_source_plan, primary_query
+from simple_ar.research.evidence.cards import build_evidence_cards
+from simple_ar.research.evidence.coverage import build_coverage_report
+from simple_ar.research.store.chunking import build_text_chunks
+from simple_ar.research.documents.records import build_cache_manifest, build_document_records
+from simple_ar.research.documents.extractors import apply_fulltext_extraction
+from simple_ar.research.documents.fulltext import build_fulltext_manifest, fulltext_hints_for_paper
+from simple_ar.research.store.index import write_research_index
+from simple_ar.research.planning.planner import build_query_plan, build_research_questions
+from simple_ar.research.evidence.retrieval import RetrievalCandidate, relevance_score, screen_retrieval_candidates
+from simple_ar.research.sources.base import SearchQuery, build_source_plan, primary_query
 from simple_ar.research.connectors.local_files import LocalFileConnector
 from simple_ar.research.prompts import report_user_prompt
 from simple_ar.prompts import report_user_prompt as compat_report_user_prompt
@@ -67,6 +68,7 @@ class ResearchFoundationTests(unittest.TestCase):
                 "research_queries": ["agent simulation benchmarks"],
                 "research_local_documents": ["notes.md"],
                 "research_index_backend": "sqlite_fts",
+                "research_index_root": ".simple_ar_cache/research_index",
                 "research_max_documents": 7,
                 "research_max_chunks": 50,
             },
@@ -78,6 +80,7 @@ class ResearchFoundationTests(unittest.TestCase):
         self.assertEqual(plan.sources, ["local_files", "openalex"])
         self.assertEqual(primary_query(plan), "agent simulation benchmarks")
         self.assertEqual(plan.local_documents, ["notes.md"])
+        self.assertEqual(plan.index_root, ".simple_ar_cache/research_index")
         self.assertEqual(plan.budget["max_documents"], 7)
         self.assertEqual(plan.budget["max_chunks"], 50)
 
@@ -274,7 +277,58 @@ class ResearchFoundationTests(unittest.TestCase):
             self.assertEqual(updated[0].extraction_status, "parsed")
             self.assertEqual(updated[0].parser, "plain_text")
             self.assertEqual(extraction_manifest["parsed_count"], 1)
-            self.assertEqual(extraction_manifest["documents"][0]["status"], "parsed")
+
+    def test_unstructured_parser_backend_fails_manifest_only_when_missing(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            note = root / "paper.md"
+            note.write_text("# Paper\n\nFull text.", encoding="utf-8")
+            record = DocumentRecord(
+                document_id="doc-md",
+                title="Markdown Paper",
+                source="local_files",
+                local_path=str(note),
+                extraction_status="metadata_only",
+            )
+            source_plan = build_source_plan(
+                topic="agent coding",
+                problem_markdown="",
+                config={
+                    "research_sources": ["local_files"],
+                    "research_use_fulltext": True,
+                    "research_parser_backend": "unstructured",
+                },
+                default_query="agent coding",
+                default_max_results=3,
+            )
+            fulltext_manifest = {
+                "enabled": True,
+                "documents": [
+                    {
+                        "document_id": "doc-md",
+                        "hints": [
+                            {
+                                "status": "cached",
+                                "kind": "text",
+                                "local_path": str(note),
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            with patch.dict("sys.modules", {"unstructured": None}):
+                updated, extraction_manifest = apply_fulltext_extraction(
+                    records=[record],
+                    fulltext_manifest=fulltext_manifest,
+                    source_plan=source_plan,
+                    extraction_dir=root / "extracted_text",
+                )
+
+            self.assertEqual(updated[0].extraction_status, "metadata_only")
+            self.assertEqual(extraction_manifest["status_counts"], {"failed": 1})
+            self.assertIn("unstructured is not installed", extraction_manifest["documents"][0]["reason"])
 
     def test_pdf_fulltext_parser_failure_is_manifest_only(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -312,7 +366,7 @@ class ResearchFoundationTests(unittest.TestCase):
                 ],
             }
 
-            with patch("simple_ar.research.extractors._read_pdf", side_effect=RuntimeError("parser failed")):
+            with patch("simple_ar.research.documents.extractors._read_pdf", side_effect=RuntimeError("parser failed")):
                 updated, extraction_manifest = apply_fulltext_extraction(
                     records=[record],
                     fulltext_manifest=fulltext_manifest,
@@ -361,8 +415,8 @@ class ResearchFoundationTests(unittest.TestCase):
             }
 
             with patch(
-                "simple_ar.research.extractors._read_pdf",
-                return_value="鈥淢orescient鈥? GAI improves Achilles鈥?heel cases.",
+                "simple_ar.research.documents.extractors._read_pdf",
+                return_value="\u9225\u6de2orescient\u9225? GAI improves Achilles\u9225\u6a8beel cases.",
             ):
                 updated, extraction_manifest = apply_fulltext_extraction(
                     records=[record],
@@ -372,8 +426,8 @@ class ResearchFoundationTests(unittest.TestCase):
                 )
 
             extracted = Path(updated[0].local_path).read_text(encoding="utf-8")
-            self.assertIn("“Morescient” GAI", extracted)
-            self.assertIn("Achilles’heel", extracted)
+            self.assertIn("\u201cMorescient\u201d GAI", extracted)
+            self.assertIn("Achilles\u2019heel", extracted)
             self.assertNotIn("鈥", extracted)
             self.assertEqual(extraction_manifest["parsed_count"], 1)
 
@@ -406,7 +460,7 @@ class ResearchFoundationTests(unittest.TestCase):
         records = build_document_records(papers=[paper], source_plan=source_plan)
 
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp, patch(
-            "simple_ar.research.fulltext.urllib.request.urlopen",
+            "simple_ar.research.documents.fulltext.urllib.request.urlopen",
             side_effect=OSError("network unavailable"),
         ):
             manifest = build_fulltext_manifest(
@@ -472,23 +526,65 @@ class ResearchFoundationTests(unittest.TestCase):
             )
 
             chunks = build_text_chunks([record], max_chunks=4, chunk_chars=80, overlap_chars=10)
-            meta = write_research_index(index_dir=root / "research_index", chunks=chunks, backend="sqlite_fts")
+            shared_root = root / "shared_research_index"
+            meta = write_research_index(
+                index_dir=root / "research_index",
+                chunks=chunks,
+                backend="sqlite_fts",
+                run_id="test-run",
+                shared_root=shared_root,
+            )
 
             self.assertGreaterEqual(len(chunks), 1)
             self.assertEqual(chunks[0].document_id, "local-agent-notes")
             self.assertEqual(meta["backend"], "sqlite_fts")
+            self.assertEqual(meta["store"]["scope"], "shared")
+            self.assertEqual(meta["store"]["root"], str(shared_root))
             self.assertEqual(meta["sqlite_fts"]["status"], "ready")
             self.assertTrue((root / "research_index" / "chunks.jsonl").is_file())
             self.assertTrue((root / "research_index" / "index_meta.json").is_file())
-            conn = sqlite3.connect(root / "research_index" / "sqlite_fts.db")
+            self.assertFalse((root / "research_index" / "sqlite_fts.db").exists())
+            conn = sqlite3.connect(Path(str(meta["sqlite_fts"]["path"])))
             try:
                 rows = conn.execute(
-                    "SELECT chunk_id FROM chunks WHERE chunks MATCH ?",
+                    "SELECT chunk_id FROM chunks WHERE run_id = ? AND chunks MATCH ?",
+                    ("test-run", "repository"),
+                ).fetchall()
+                all_rows = conn.execute(
+                    "SELECT run_id, chunk_id FROM chunks WHERE chunks MATCH ?",
                     ("repository",),
                 ).fetchall()
             finally:
                 conn.close()
             self.assertGreaterEqual(len(rows), 1)
+            self.assertTrue(all(row[0] == "test-run" for row in all_rows))
+
+    def test_lancedb_index_backend_is_optional(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            chunks = [
+                TextChunk(
+                    chunk_id="doc-1#chunk-001",
+                    document_id="doc-1",
+                    text="agent coding evidence",
+                    metadata={"title": "Agent Coding", "source": "local_files"},
+                )
+            ]
+
+            with patch.dict("sys.modules", {"lancedb": None}):
+                meta = write_research_index(
+                    index_dir=root / "research_index",
+                    chunks=chunks,
+                    backend="lancedb",
+                    run_id="test-run",
+                    shared_root=root / "shared_research_index",
+                )
+
+            self.assertEqual(meta["backend"], "lancedb")
+            self.assertEqual(meta["lancedb"]["scope"], "shared")
+            self.assertTrue(str(meta["lancedb"]["status"]).startswith("failed:"))
+            self.assertTrue((root / "research_index" / "chunks.jsonl").is_file())
 
     def test_evidence_cards_are_grounded_in_chunks(self) -> None:
         document = DocumentRecord(

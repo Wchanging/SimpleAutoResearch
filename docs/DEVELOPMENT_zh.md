@@ -1,4 +1,4 @@
-# 开发指南
+﻿# 开发指南
 
 [English version](DEVELOPMENT.md)
 
@@ -6,32 +6,62 @@
 
 ## 项目形态
 
-SimpleAutoResearch 故意保持 file-first：
+SimpleAutoResearch 现在采用 file-first + state-backed 的形态：
 
 - stage 读取和写入具体文件；
-- workflow state 在 run 目录中可见；
-- 测试验证 artifacts，而不是依赖隐藏内存状态；
+- workflow state 通过 `state.json` 和阶段 contract 可见；
+- 测试验证 contract/artifact，而不是依赖隐藏内存状态；
 - 高风险代码修改发生在隔离 editable workspace 中，通常是受保护 copy，也可以是 detached git worktree，或实验性 sparse copy。
 
 这样项目更容易学习、调试和重构。
 
+旧的巨型 CLI 和 stage handler 模块在 reboot 期间移动到
+`src/simple_ar/legacy/`。公开 import path 仍通过小型 compatibility wrapper
+工作，但新的行为应优先实现到 `core/`、`research/`、`coding/` 和
+`code_task/` 这些领域模块中。
+
+Research 代码按 evidence 生命周期分组：
+
+```text
+src/simple_ar/research/
+  planning/    research questions 和可执行 query plans
+  sources/     source plan contracts 与 connector-neutral query objects
+  connectors/  OpenAlex、Semantic Scholar、arXiv、本地文件 adapters
+  documents/   document records、full-text hints、parser/extractor helpers
+  store/       chunks 与本地 index backends
+  evidence/    retrieval screening、coverage、paper cards、claim cards
+  outputs/     search-stage artifact writers
+```
+
+新的检索、全文、证据和 card 能力应放入这些包中，不再回到旧的 `research/*.py` 平铺结构。
 ## 添加 Pipeline Stage
 
 向默认 research pipeline 添加 stage 时，需要一起更新：
 
 1. 在 `src/simple_ar/stages.py` 中添加 enum value。
-2. 在 `src/simple_ar/contracts.py` 中添加 `StageContract`。
-3. 在 `src/simple_ar/stage_handlers.py` 中实现 handler function。
-4. 在 `HANDLERS` 中注册 handler。
-5. 添加聚焦测试，检查 required inputs 和 declared outputs。
+2. 在 `src/simple_ar/app/state.py` 和 `src/simple_ar/core/contracts.py`
+   中添加或扩展 typed state/contract models。
+3. 在对应领域 service 中实现阶段行为，例如
+   `src/simple_ar/research/service.py` 或 `src/simple_ar/coding/service.py`。
+4. 只有 pipeline registry 需要公开 handler 时，才在
+   `src/simple_ar/stage_handlers.py` 中添加薄 adapter。
+5. 在 `HANDLERS` 中注册 handler。
+6. 添加聚焦测试，检查 state update 和 declared outputs。
 
-新的 stage 应使用 `ctx.find_artifact(...)` 读取已有产物，用 `ctx.artifact_path(...)` 写自己的输出。
+新的 stage 应优先使用显式 `ctx.state.<stage>` 指针和紧凑 stage contract，
+而不是反向扫描 run 目录。`ctx.find_artifact(...)` 仅作为 legacy fallback 保留。
 
 ## 添加 Experiment Template
 
-固定脚本模板位于 `src/simple_ar/experiment/templates.py`。内嵌 8 阶段 code-task templates 位于 `src/simple_ar/experiment/code_task_experiment.py`，因为它们会在写 run harness 前准备已有 workspace。
+固定脚本模板主要位于 `src/simple_ar/coding/templates.py`。内嵌 8 阶段
+code-task templates 位于 `src/simple_ar/experiment/code_task_experiment.py`，
+因为它们会在写 run harness 前准备已有 workspace。
 
-顶层 run config 解析位于 `src/simple_ar/run_config.py`。它应该保持为薄的 TOML-to-runtime-options 层；code-task 专属 config 语义应继续放在 `src/simple_ar/code_task/config.py`，避免 standalone 和 embedded code-task 行为漂移。
+`src/simple_ar/experiment/templates.py` 和 `src/simple_ar/experiment/runner.py`
+现在是指向 `src/simple_ar/coding/` 的兼容 wrapper。新增 template/runner
+能力时优先修改 coding package。
+
+顶层 run config 解析位于 `src/simple_ar/run_config.py`。它应该保持为薄的 TOML-to-runtime-options 层；code-task 专属 config 语义应继续放在 `src/simple_ar/code_task/runtime/config.py`，避免 standalone 和 embedded code-task 行为漂移。
 
 新的 template 应满足：
 
@@ -48,25 +78,19 @@ SimpleAutoResearch 故意保持 file-first：
 
 ## 扩展 Code Task
 
-Code-task workflow 拆分成小模块：
+Code-task workflow 现在按生命周期分包，而不是把所有文件平铺在同一层：
 
-- `workspace.py`：安全源码复制实现。
-- `workspace_modes.py`：workspace strategy dispatcher，支持 `copy`、`git_worktree`、实验性 `sparse_copy` 和未来模式。修改 workspace layout 或 creation behavior 时，应保持和 [工作流与产物](WORKFLOWS_zh.md) 中记录的 artifact 结构兼容。
-- `config.py`：code-task init 的 TOML config 和 CLI override 解析。
-- `environment.py`：环境观察和执行解释器策略。
-- `index.py`：代码清单和 Python AST summaries。
-- `repo_map.py`：从 index 派生分层 repo map。
-- `locate.py`：基于 repo map 确定性排序 editable targets 和 read-only evidence。
-- `context.py`：从 locate results 和 workspace snippets 构建受预算限制的 context pack。
-- `planning.py`：patch planning 和 HITL decisions；存在 latest context pack 时优先使用它，否则回退到 index selector。
-- `patching.py`：controlled old/new edit proposal 与应用；proposal 阶段只使用 context pack 中的 editable snippets。
-- `validation.py`：语法和静态安全检查。
-- `runner.py`：在 editable workspace 中执行 benchmark。
-- `comparison.py`：baseline-vs-patched metric comparison。
-- `failure.py`：确定性 failure analysis。
-- `repair.py`：bounded repair proposal generation。
-- `summary.py`：人类可读 code-task status summary。
-- `state.py`：共享路径、manifest helpers 和 workspace path safety。
+```text
+src/simple_ar/code_task/
+  runtime/        config、path 和 manifest helpers
+  workspace/      copy、git worktree、sparse-copy 准备
+  analysis/       codebase index、repo map、locate、context packs
+  editing/        work plan、patch plan、edit budgets、patch proposal/application
+  execution/      environment probe、validation、benchmark、comparison、repair
+  orchestration/  init 和 execute 这类组合下层模块的流程
+```
+
+新增 code-task 能力时，应放入拥有该行为的生命周期包中。除非是 public facade 或真正跨切面的边界，不要继续在 `code_task/` 根目录新增平铺文件。
 
 新增 code-task 功能时：
 
@@ -74,10 +98,9 @@ Code-task workflow 拆分成小模块：
 - artifacts 写入 `code_task/meta`、`code_task/run` 或 `code_task/repairs`；
 - 底层行为稳定前，CLI 步骤应保持显式；
 - 适合时同时测试 library function 和 CLI path；
-- 优先用小而可组合的函数，不要过早塞进单个 agent loop。
+- 优先使用小而可组合的函数，不要过早塞进单个 agent loop。
 
-Metric comparison 应保持保守。未知数值指标可以记录 delta，但除非 manifest 显式配置方向或命中简单本地 heuristic，否则不应决定 improved/regressed verdict。只有当指标命名约定足够常见、不令人意外时，才添加新的默认 heuristic。
-
+Metric comparison 应保持保守。未知数值指标可以记录 delta，但除非 manifest 显式配置方向或命中简单本地 heuristic，否则不应用于 improved/regressed verdict。只有当指标命名约定足够常见、不令人意外时，才添加新的默认 heuristic。
 ### Code-Task Environment Policy
 
 当前 V2.2 code-task runner 通过 `copy`、`git_worktree` 或实验性 `sparse_copy` 提供 workspace isolation，并支持 command timeout、可选 benchmark output streaming、stdout/stderr 捕获、受限 environment map 和显式 execution interpreter policy。它支持 `current` 和 `external`，但还不会创建或安装到单独 Python environment。除非未来功能明确改变这一点，否则不要默认把用户项目依赖安装到 SimpleAutoResearch 自己的 `.venv`。

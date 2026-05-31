@@ -32,6 +32,7 @@ IGNORED_FILE_NAMES = {
     "artifact_index.json",
     "artifact_search_results.json",
     "cache_manifest.json",
+    "contract.json",
     "fulltext_manifest.json",
     "claim_cards.jsonl",
     "chunks.jsonl",
@@ -43,6 +44,7 @@ IGNORED_FILE_NAMES = {
     "research_plan.json",
     "retrieval_rounds.jsonl",
     "screening_decisions.jsonl",
+    "state.json",
     "source_plan.json",
 }
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from typing import Any
+
+import requests
+from pyalex import Works, config as pyalex_config
 
 from simple_ar.literature.models import Paper, normalize_paper_id
 
@@ -16,10 +15,13 @@ class OpenAlexSearchError(RuntimeError):
     """Raised when OpenAlex cannot return usable metadata."""
 
 
-_BASE_URL = "https://api.openalex.org/works"
 _MAX_RESULTS = 25
 _TIMEOUT_SEC = 20
 _REQUEST_GAP_SEC = 0.25
+_SELECT_FIELDS = (
+    "id,title,display_name,authorships,publication_year,publication_date,"
+    "primary_location,doi,ids,abstract_inverted_index,open_access,best_oa_location"
+)
 _last_request_at = 0.0
 _rate_lock = threading.Lock()
 
@@ -32,7 +34,8 @@ class OpenAlexSearchClient:
 
     Args:
         mailto: Optional polite-pool contact passed to OpenAlex.
-        timeout_sec: Request timeout in seconds.
+        timeout_sec: Retained for public API compatibility. The pyalex
+            transport manages request timing and retry behavior internally.
     """
 
     def __init__(self, *, mailto: str = "simple-autoresearch@example.com", timeout_sec: int = _TIMEOUT_SEC) -> None:
@@ -60,33 +63,20 @@ class OpenAlexSearchClient:
             raise OpenAlexSearchError("max_results must be at least 1")
 
         _respect_rate_limit()
-        url = self._url(query, max_results)
+        _configure_pyalex(self.mailto)
         try:
-            request = urllib.request.Request(
-                url,
-                headers={
-                    "Accept": "application/json",
-                    "User-Agent": f"SimpleAutoResearch/0.1 (mailto:{self.mailto})",
-                },
+            results = (
+                Works()
+                .search(query)
+                .select(_SELECT_FIELDS)
+                .get(per_page=min(max_results, _MAX_RESULTS))
             )
-            with urllib.request.urlopen(request, timeout=self.timeout_sec) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        except (requests.RequestException, ValueError, RuntimeError, KeyError) as exc:
             raise OpenAlexSearchError(f"OpenAlex search failed: {exc}") from exc
 
-        results = payload.get("results", [])
         if not isinstance(results, list):
             raise OpenAlexSearchError("OpenAlex response did not contain a results list")
         return _dedupe_papers(_paper_from_work(item) for item in results if isinstance(item, dict))
-
-    def _url(self, query: str, max_results: int) -> str:
-        params = {
-            "search": query,
-            "per-page": str(min(max_results, _MAX_RESULTS)),
-            "mailto": self.mailto,
-            "select": "id,title,display_name,authorships,publication_year,publication_date,primary_location,doi,ids,abstract_inverted_index,open_access,best_oa_location",
-        }
-        return f"{_BASE_URL}?{urllib.parse.urlencode(params)}"
 
 
 def _paper_from_work(item: dict[str, Any]) -> Paper:
@@ -202,3 +192,12 @@ def _respect_rate_limit() -> None:
         if elapsed < _REQUEST_GAP_SEC:
             time.sleep(_REQUEST_GAP_SEC - elapsed)
         _last_request_at = time.monotonic()
+
+
+def _configure_pyalex(mailto: str) -> None:
+    pyalex_config.email = mailto
+    pyalex_config.max_retries = max(int(pyalex_config.get("max_retries", 0) or 0), 1)
+    pyalex_config.retry_backoff_factor = max(
+        float(pyalex_config.get("retry_backoff_factor", 0.0) or 0.0),
+        0.25,
+    )

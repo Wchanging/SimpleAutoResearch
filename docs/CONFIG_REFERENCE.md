@@ -16,6 +16,9 @@ outer research pipeline config and standalone/embedded code-task config.
 - `simple-ar code-task init --config PATH` loads code-task initialization sections.
 - `simple-ar code-task execute --config PATH` loads execute/model/budget sections.
 - Explicit CLI flags override TOML values.
+- Top-level pipeline TOML and code-task TOML are validated with Pydantic before
+  they are flattened into runtime settings. Wrong section types now fail early
+  instead of being silently ignored.
 - Relative paths in top-level run config are resolved relative to the config file when the parser explicitly supports path resolution, such as `[experiment].code_task_config` and `[research].local_documents`.
 - When a run config contains `[code_task]`, `[benchmark]`, `[metrics]`, `[environment]`, `[workspace]`, or `[safety]`, the same file can be reused as the embedded code-task config.
 
@@ -38,6 +41,11 @@ to_stage = "report"
 
 # Suppress progress logs while keeping final paths/status output.
 quiet = false
+
+# Keep verbose intermediate artifacts such as search traces, local document
+# records, cards, and local index files inside each run directory. The default
+# false keeps normal runs compact and relies on state.json plus shared stores.
+debug_artifacts = false
 
 [llm]
 # true uses the configured OpenAI-compatible model; false uses deterministic fallbacks where possible.
@@ -66,7 +74,7 @@ allow_fixture_fallback = false
 strict = false
 
 [research]
-# Search strategy profile recorded in planning/research_plan.json. Full-text behavior is still future-facing.
+# Search strategy profile recorded in planning/research_plan.json.
 mode = "lite"                 # lite | standard | strong
 
 # Research-question/query planner. auto uses LLM when [llm].enabled is true,
@@ -101,13 +109,17 @@ allow_pdf_download = false
 max_fulltext_documents = 6
 max_pdf_mb = 20
 keep_raw_pdf = false
-parser_backend = "basic"
+parser_backend = "basic"      # basic | pypdf | unstructured
 
 # Whether live-provider failures may use cached metadata.
 cache = true
 
-# Planned local index backend. Current V2.3 search records this choice for later ingestion.
-index_backend = "keyword"     # keyword | sqlite_fts | hybrid
+# Local index backend. chunks.jsonl is always written; stronger backends are optional accelerators.
+index_backend = "keyword"     # keyword | sqlite_fts | hybrid | lancedb | hybrid_lancedb
+
+# Shared accelerator-store root for SQLite FTS / LanceDB. Use "run" or "local"
+# for per-run databases.
+index_root = ".simple_ar_cache/research_index"
 
 [research.budget]
 # Maximum research records the evidence engine should keep from all sources.
@@ -273,7 +285,7 @@ max_proposal_chars = 42000
 
 | Section | Used by | Meaning |
 | --- | --- | --- |
-| `[run]` | `run`, `resume` | Topic, output root, stage range, and quiet mode. |
+| `[run]` | `run`, `resume` | Topic, output root, stage range, quiet mode, and debug artifact retention. |
 | `[llm]` | pipeline and code task | LLM enablement, default model, and worker count. |
 | `[search]` | `02-search` | Provider behavior, fallback policy, result limit, and manual query. |
 | `[research]` | `02-search` | Research-question planning, query expansion, provider order, local documents, cache/index hints. |
@@ -302,6 +314,7 @@ max_proposal_chars = 42000
 | --- | --- |
 | `[run].topic` | Main user goal. It is used by planning, default search query generation, and report framing. |
 | `[run].from_stage` / `[run].to_stage` | Stage range for partial runs. Use these to stop at `synthesize`, rerun `report`, or resume a subset. |
+| `[run].debug_artifacts` | When `true`, keeps verbose intermediate search artifacts in the run directory. Keep it `false` for compact default runs. |
 | `[llm].enabled` | Turns LLM-backed planning/notes/synthesis/report/code-task steps on or off. Some real code-task steps need LLM mode to be useful. |
 | `[llm].workers` | Parallelism for supported LLM stages. It does not make every pipeline stage concurrent. |
 | `[search].offline` | Skips live literature providers. Useful for local demos and deterministic tests. |
@@ -330,9 +343,10 @@ max_proposal_chars = 42000
 | `[research].max_fulltext_documents` | Maximum number of documents that can be selected for full-text fetch/parse work. This is separate from `[research.budget].max_documents`, which caps kept metadata records. |
 | `[research].max_pdf_mb` | Per-PDF size ceiling used by full-text planning. Local PDFs above this limit are skipped; future remote fetchers should enforce the same cap. |
 | `[research].keep_raw_pdf` | Whether fetch/parsing steps should retain raw PDF files in cache. Keep false when you only need parsed text and section chunks. |
-| `[research].parser_backend` | Parser backend hint, such as `basic`, `pypdf`, `pymupdf`, or `external`. The current implementation parses Markdown/text and basic HTML directly, and uses optional `pypdf` for PDFs when available. |
+| `[research].parser_backend` | Parser backend. `basic` parses Markdown/text and simple HTML directly; `pypdf` uses the lightweight PDF parser when available; `unstructured` is an optional heavier parser backend and records a manifest failure if the package is not installed. |
 | `[research].cache` | Allows live-provider failures to fall back to cached metadata when available. |
-| `[research].index_backend` | Local index backend. `keyword` writes portable chunks only; `sqlite_fts` writes chunks plus a SQLite FTS database; `hybrid` is reserved for FTS plus future stronger adapters. |
+| `[research].index_backend` | Local index backend. `keyword` writes portable chunks only; `sqlite_fts` and `hybrid` update the shared SQLite FTS store; `lancedb` / `hybrid_lancedb` update the shared optional LanceDB store and degrade to a recorded status when LanceDB is not installed. |
+| `[research].index_root` | Shared accelerator-store root for SQLite FTS / LanceDB. Defaults to `.simple_ar_cache/research_index`, or `SIMPLE_AR_RESEARCH_INDEX_ROOT` when set. Use `run` or `local` only when you intentionally want per-run index databases under `02-search/research_index/`. |
 | `[research.budget].max_documents` | Max records the evidence stage should keep from all sources. |
 | `[research.budget].max_chunks` | Planned cap for chunks after later full-text/local-document ingestion. |
 | `[research.budget].max_context_tokens` | Planned prompt budget for evidence retrieval context. |
