@@ -50,6 +50,9 @@ class CodeTaskExperimentSpec:
             managed-environment support.
         env_mode: Code-task execution environment mode.
         python_executable: Optional external Python when ``env_mode=external``.
+        edit_scope_mode: Optional edit-scope mode label.
+        edit_scope_allowed_patterns: Optional workspace-relative edit allowlist.
+        edit_scope_protected_patterns: Additional read-only edit patterns.
         config_path: Optional TOML config path used to resolve this spec.
         name: Optional human-facing code-task name.
         allow_test_changes: Whether patches may modify test files. The
@@ -73,6 +76,9 @@ class CodeTaskExperimentSpec:
     workspace_setup_hook: str = ""
     env_mode: str = "current"
     python_executable: str | None = None
+    edit_scope_mode: str | None = None
+    edit_scope_allowed_patterns: tuple[str, ...] = ()
+    edit_scope_protected_patterns: tuple[str, ...] = ()
     config_path: str | None = None
     name: str | None = None
     allow_test_changes: bool = False
@@ -217,6 +223,9 @@ def code_task_project_spec(
         workspace_setup_hook=options.workspace_setup_hook,
         env_mode=options.env_mode,
         python_executable=options.python_executable,
+        edit_scope_mode=options.edit_scope_mode,
+        edit_scope_allowed_patterns=options.edit_scope_allowed_patterns,
+        edit_scope_protected_patterns=options.edit_scope_protected_patterns,
         config_path=options.config_path,
         name=options.name,
         allow_test_changes=False,
@@ -292,6 +301,9 @@ def prepare_code_task_experiment(
         workspace_setup_hook=spec.workspace_setup_hook,
         env_mode=spec.env_mode,
         python_executable=spec.python_executable,
+        edit_scope_mode=spec.edit_scope_mode,
+        edit_scope_allowed_patterns=spec.edit_scope_allowed_patterns,
+        edit_scope_protected_patterns=spec.edit_scope_protected_patterns,
         primary_metric=spec.primary_metric,
         metric_directions=spec.metric_directions,
     )

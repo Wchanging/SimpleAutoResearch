@@ -51,6 +51,7 @@ max_chunks = 80
 max_context_tokens = 6000
 max_llm_calls = 8
 max_follow_up_queries = 4
+novelty_backend = "local"
 """.strip(),
                 encoding="utf-8",
             )
@@ -82,6 +83,7 @@ max_follow_up_queries = 4
             self.assertEqual(parsed["research_max_context_tokens"], 6000)
             self.assertEqual(parsed["research_max_llm_calls"], 8)
             self.assertEqual(parsed["research_max_follow_up_queries"], 4)
+            self.assertEqual(parsed["research_novelty_backend"], "local")
 
     def test_run_config_rejects_wrong_section_types(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

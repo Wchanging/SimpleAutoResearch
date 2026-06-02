@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from simple_ar.research.contracts import DocumentRecord, TextChunk
+from simple_ar.research.contracts import DocumentRecord, DocumentSection, TextChunk
 
 
 DEFAULT_CHUNK_CHARS = 1400
@@ -13,6 +13,7 @@ DEFAULT_OVERLAP_CHARS = 180
 def build_text_chunks(
     records: Iterable[DocumentRecord],
     *,
+    sections: Iterable[DocumentSection] | None = None,
     max_chunks: int | None = None,
     chunk_chars: int = DEFAULT_CHUNK_CHARS,
     overlap_chars: int = DEFAULT_OVERLAP_CHARS,
@@ -21,6 +22,8 @@ def build_text_chunks(
 
     Args:
         records: Document records produced by the search/document-store stage.
+        sections: Optional section-aware text spans. When provided, chunks are
+            built from these spans and carry section metadata.
         max_chunks: Optional global cap. Keep this small for early V2.3 runs.
         chunk_chars: Target maximum characters per chunk.
         overlap_chars: Character overlap between adjacent long chunks.
@@ -30,6 +33,14 @@ def build_text_chunks(
         records contribute abstract chunks; parsed local text records contribute
         local-file text when available.
     """
+    if sections is not None:
+        return _chunks_from_sections(
+            sections,
+            max_chunks=max_chunks,
+            chunk_chars=chunk_chars,
+            overlap_chars=overlap_chars,
+        )
+
     chunks: list[TextChunk] = []
     for record in records:
         text, source_path = _record_text(record)
@@ -50,6 +61,41 @@ def build_text_chunks(
                         "source": record.source,
                         "extraction_status": record.extraction_status,
                         "parser": record.parser or "",
+                    },
+                )
+            )
+            if max_chunks is not None and len(chunks) >= max_chunks:
+                return chunks
+    return chunks
+
+
+def _chunks_from_sections(
+    sections: Iterable[DocumentSection],
+    *,
+    max_chunks: int | None,
+    chunk_chars: int,
+    overlap_chars: int,
+) -> list[TextChunk]:
+    chunks: list[TextChunk] = []
+    for section in sections:
+        text = section.text
+        if not text.strip():
+            continue
+        for index, span in enumerate(_split_text(text, chunk_chars=chunk_chars, overlap_chars=overlap_chars), start=1):
+            chunks.append(
+                TextChunk(
+                    chunk_id=f"{section.section_id}#chunk-{index:03d}",
+                    document_id=section.document_id,
+                    text=span,
+                    source_path=section.source_path,
+                    line_start=_section_line_start(section, text, span),
+                    line_end=None,
+                    token_estimate=max(1, len(span) // 4),
+                    metadata={
+                        **section.metadata,
+                        "section_id": section.section_id,
+                        "section": section.section,
+                        "heading": section.heading,
                     },
                 )
             )
@@ -93,6 +139,15 @@ def _line_start(text: str, span: str) -> int | None:
     if index < 0:
         return None
     return text[:index].count("\n") + 1
+
+
+def _section_line_start(section: DocumentSection, text: str, span: str) -> int | None:
+    local = _line_start(text, span)
+    if local is None:
+        return section.line_start
+    if section.line_start is None:
+        return local
+    return section.line_start + local - 1
 
 
 def _read_text(path: Path) -> str:

@@ -20,7 +20,8 @@ from simple_ar.code_task.analysis.context import (
     load_latest_code_task_context_pack,
 )
 from simple_ar.code_task.editing.scope import (
-    is_protected_edit_path,
+    allowed_patterns_from_manifest,
+    is_edit_allowed_path,
     protected_patterns_from_manifest,
 )
 from simple_ar.code_task.editing.planning import _collect_run_context, select_relevant_files
@@ -126,6 +127,7 @@ def generate_code_task_work_plan(
     manifest = load_code_task_manifest(root)
     task_text = _read_required_text(paths.task_dir / "task.md")
     index = _read_required_json(paths.meta_dir / "codebase_index.json")
+    allowed_patterns = allowed_patterns_from_manifest(manifest)
     protected_patterns = protected_patterns_from_manifest(manifest)
     run_context = _collect_run_context(root, manifest)
     context_pack_ref: dict[str, Any] | None = None
@@ -150,6 +152,7 @@ def generate_code_task_work_plan(
             paths.workspace_dir,
             selected,
             max_chars_per_file=max_source_chars_per_file,
+            allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
         )
         context_pack_ref = None
@@ -174,6 +177,7 @@ def generate_code_task_work_plan(
                 snippets=snippets,
                 benchmark_command=_benchmark_command(manifest),
                 run_context=run_context,
+                allowed_patterns=allowed_patterns,
                 protected_patterns=protected_patterns,
             )
             mode = "llm"
@@ -187,6 +191,7 @@ def generate_code_task_work_plan(
             selected_files=selected,
             benchmark_command=_benchmark_command(manifest),
             run_context=run_context,
+            allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
         )
 
@@ -199,6 +204,7 @@ def generate_code_task_work_plan(
         mode=mode,
         run_context=run_context,
         context_pack=context_pack_ref,
+        allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
     )
     write_json(work_plan_path, work_plan)
@@ -275,6 +281,7 @@ def _ask_llm_for_work_plan(
     snippets: list[dict[str, Any]],
     benchmark_command: str,
     run_context: dict[str, Any],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     prompt = _work_plan_user_prompt(
@@ -283,6 +290,7 @@ def _ask_llm_for_work_plan(
         snippets=snippets,
         benchmark_command=benchmark_command,
         run_context=run_context,
+        allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
     )
     response = client.ask_json(CODE_TASK_WORK_PLAN_SYSTEM, prompt, label="code-task-work-plan")
@@ -296,9 +304,14 @@ def _work_plan_user_prompt(
     snippets: list[dict[str, Any]],
     benchmark_command: str,
     run_context: dict[str, Any],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> str:
-    compact_index = _compact_codebase_index(index, protected_patterns=protected_patterns)
+    compact_index = _compact_codebase_index(
+        index,
+        allowed_patterns=allowed_patterns,
+        protected_patterns=protected_patterns,
+    )
     snippet_text = "\n\n".join(
         f"### {item.get('path', '')} ({item.get('access_role', 'editable')})\n"
         f"```text\n{item.get('text', '')}\n```"
@@ -365,18 +378,32 @@ def _offline_work_plan(
     selected_files: list[str],
     benchmark_command: str,
     run_context: dict[str, Any],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     editable = [
         path for path in selected_files
-        if path and not is_protected_edit_path(path, protected_patterns=protected_patterns)
+        if path and is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        )
     ]
     evidence = [
         path for path in selected_files
-        if path and is_protected_edit_path(path, protected_patterns=protected_patterns)
+        if path and not is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        )
     ]
     if not editable:
-        editable = _first_editable_files(index, protected_patterns=protected_patterns, limit=2)
+        editable = _first_editable_files(
+            index,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+            limit=2,
+        )
     validation = [benchmark_command] if benchmark_command else [
         "Run the recorded benchmark or the project's focused tests after applying edits."
     ]
@@ -437,6 +464,7 @@ def _normalize_work_plan_data(
     mode: str,
     run_context: dict[str, Any],
     context_pack: dict[str, Any] | None,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index) if item.get("path")}
@@ -444,6 +472,7 @@ def _normalize_work_plan_data(
         data.get("items"),
         known_paths,
         selected_files=selected_files,
+        allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
     )
     if not items:
@@ -453,12 +482,14 @@ def _normalize_work_plan_data(
             selected_files=selected_files,
             benchmark_command=benchmark_command or _benchmark_from_context(run_context),
             run_context=run_context,
+            allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
         )
         items = _normalize_work_items(
             fallback.get("items"),
             known_paths,
             selected_files=selected_files,
+            allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
         )
 
@@ -501,6 +532,7 @@ def _normalize_work_items(
     known_paths: set[str],
     *,
     selected_files: list[str],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     raw_items = value if isinstance(value, list) else []
@@ -511,17 +543,24 @@ def _normalize_work_items(
         target_files = _known_paths(
             raw.get("target_files"),
             known_paths,
+            allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
             editable_only=True,
         )
         if not target_files:
             target_files = [
                 path for path in selected_files
-                if path in known_paths and not is_protected_edit_path(path, protected_patterns=protected_patterns)
+                if path in known_paths
+                and is_edit_allowed_path(
+                    path,
+                    allowed_patterns=allowed_patterns,
+                    protected_patterns=protected_patterns,
+                )
             ][:2]
         evidence = _known_paths(
             raw.get("read_only_evidence"),
             known_paths,
+            allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
             editable_only=False,
         )
@@ -611,6 +650,7 @@ def _source_snippets(
     selected_files: list[str],
     *,
     max_chars_per_file: int,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     snippets: list[dict[str, Any]] = []
@@ -626,9 +666,13 @@ def _source_snippets(
             {
                 "path": rel_path,
                 "access_role": (
-                    "read_only"
-                    if is_protected_edit_path(rel_path, protected_patterns=protected_patterns)
-                    else "editable"
+                    "editable"
+                    if is_edit_allowed_path(
+                        rel_path,
+                        allowed_patterns=allowed_patterns,
+                        protected_patterns=protected_patterns,
+                    )
+                    else "read_only"
                 ),
                 "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
             }
@@ -690,6 +734,7 @@ def _context_pack_ref(run_dir: Path, loaded: LoadedCodeTaskContextPack) -> dict[
 def _compact_codebase_index(
     index: dict[str, Any],
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
@@ -701,9 +746,13 @@ def _compact_codebase_index(
             "kind": item.get("kind"),
             "role_tags": item.get("role_tags", []),
             "edit_role": (
-                "read_only"
-                if is_protected_edit_path(path, protected_patterns=protected_patterns)
-                else "editable"
+                "editable"
+                if is_edit_allowed_path(
+                    path,
+                    allowed_patterns=allowed_patterns,
+                    protected_patterns=protected_patterns,
+                )
+                else "read_only"
             ),
             "summary": item.get("summary", ""),
         }
@@ -795,6 +844,7 @@ def _known_paths(
     value: object,
     known_paths: set[str],
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
     editable_only: bool,
 ) -> list[str]:
@@ -802,8 +852,12 @@ def _known_paths(
     for raw in _string_list(value):
         if raw not in known_paths or raw in paths:
             continue
-        protected = is_protected_edit_path(raw, protected_patterns=protected_patterns)
-        if editable_only and protected:
+        editable = is_edit_allowed_path(
+            raw,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        )
+        if editable_only and not editable:
             continue
         paths.append(raw)
     return paths
@@ -880,13 +934,18 @@ def _offline_risk(run_context: dict[str, Any]) -> str:
 def _first_editable_files(
     index: dict[str, Any],
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
     limit: int,
 ) -> list[str]:
     result: list[str] = []
     for item in _index_files(index):
         path = str(item.get("path", ""))
-        if path and not is_protected_edit_path(path, protected_patterns=protected_patterns):
+        if path and is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        ):
             result.append(path)
         if len(result) >= limit:
             break

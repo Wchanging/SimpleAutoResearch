@@ -25,6 +25,7 @@ def screen_retrieval_candidates(
     *,
     max_documents: int,
     negative_terms: list[str] | None = None,
+    priority_facets: list[str] | None = None,
 ) -> tuple[list[Paper], list[dict[str, Any]]]:
     """Deduplicate, score, and keep the strongest retrieval candidates.
 
@@ -32,6 +33,10 @@ def screen_retrieval_candidates(
         candidates: Raw paper candidates from source/query attempts.
         max_documents: Maximum number of papers to keep after screening.
         negative_terms: Optional out-of-scope hints from query planning.
+        priority_facets: Optional required facets. When set, screening first
+            reserves one relevant candidate per facet when possible, then fills
+            the remaining budget by rank. This keeps coverage from collapsing
+            to a single high-scoring query family.
 
     Returns:
         A pair of ``(kept_papers, screening_decision_rows)``.
@@ -58,13 +63,41 @@ def screen_retrieval_candidates(
         key=lambda item: (item[1], bool(item[0].paper.abstract), item[0].paper.title.lower()),
         reverse=True,
     )
+    ranked_with_rank = [(rank, candidate, score) for rank, (candidate, score) in enumerate(ranked, start=1)]
+    selected_keys: set[str] = set()
+    kept_rows: list[tuple[int, RetrievalCandidate, int, str]] = []
+
+    for facet in _facet_priority(priority_facets):
+        if len(kept_rows) >= limit:
+            break
+        for rank, candidate, score in ranked_with_rank:
+            key = paper_identity_key(candidate.paper)
+            if key in selected_keys or candidate.facet != facet or score <= 0:
+                continue
+            selected_keys.add(key)
+            kept_rows.append((rank, candidate, score, "facet_coverage"))
+            break
+
+    for rank, candidate, score in ranked_with_rank:
+        if len(kept_rows) >= limit:
+            break
+        key = paper_identity_key(candidate.paper)
+        if key in selected_keys:
+            continue
+        if score > 0 or not kept_rows:
+            selected_keys.add(key)
+            kept_rows.append((rank, candidate, score, "top_ranked"))
+
     kept: list[Paper] = []
-    for rank, (candidate, score) in enumerate(ranked, start=1):
-        if len(kept) < limit and (score > 0 or not kept):
+    kept_by_key = {paper_identity_key(candidate.paper): (rank, candidate, score, reason) for rank, candidate, score, reason in kept_rows}
+    for rank, candidate, score in ranked_with_rank:
+        key = paper_identity_key(candidate.paper)
+        selected = kept_by_key.get(key)
+        if selected is not None:
             kept.append(candidate.paper)
-            decisions.append(_decision_row(candidate, score, "keep", "top_ranked", rank=rank))
+            decisions.append(_decision_row(candidate, score, "keep", selected[3], rank=rank))
         else:
-            reason = "below_document_budget" if len(kept) >= limit else "low_relevance"
+            reason = "below_document_budget" if len(kept_rows) >= limit else "low_relevance"
             decisions.append(_decision_row(candidate, score, "discard", reason, rank=rank))
 
     decisions.sort(key=lambda row: (row.get("decision") != "keep", row.get("rank") or 9999, row["paper_id"]))
@@ -107,6 +140,17 @@ def relevance_score(
             if alias in all_terms:
                 score -= 3
     return max(0, score)
+
+
+def _facet_priority(values: list[str] | None) -> list[str]:
+    """Return unique non-empty facet names in caller-provided order."""
+
+    result: list[str] = []
+    for value in values or []:
+        facet = str(value).strip()
+        if facet and facet not in result:
+            result.append(facet)
+    return result
 
 
 def _decision_row(

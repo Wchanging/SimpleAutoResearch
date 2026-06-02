@@ -71,6 +71,9 @@ def initialize_code_task(
     python_executable: str | Path | None = None,
     primary_metric: str | None = None,
     metric_directions: dict[str, str] | None = None,
+    edit_scope_mode: str | None = None,
+    edit_scope_allowed_patterns: tuple[str, ...] = (),
+    edit_scope_protected_patterns: tuple[str, ...] = (),
 ) -> CodeTaskInitResult:
     """Initialize a local code-task run without modifying the source project.
 
@@ -101,6 +104,11 @@ def initialize_code_task(
         metric_directions: Optional mapping from metric name to direction.
             Supported normalized directions are ``higher_is_better``,
             ``lower_is_better``, ``resource``, and ``ignore``.
+        edit_scope_mode: Optional edit-scope mode label stored in the manifest.
+        edit_scope_allowed_patterns: Optional allowlist of workspace-relative
+            glob patterns. Empty means any non-protected workspace path.
+        edit_scope_protected_patterns: Additional workspace-relative glob
+            patterns that are read-only for patch proposals and applications.
 
     Returns:
         Paths and metadata for the initialized code-task run.
@@ -144,7 +152,12 @@ def initialize_code_task(
     copy_report = workspace.copy_report
     codebase_index_path = meta_dir / "codebase_index.json"
     codebase_index = build_codebase_index(workspace_dir, output_path=codebase_index_path)
-    edit_scope = default_edit_scope()
+    edit_scope = default_edit_scope(
+        mode=edit_scope_mode,
+        allowed_patterns=edit_scope_allowed_patterns,
+        protected_patterns=edit_scope_protected_patterns,
+    )
+    allowed_patterns = tuple(str(item) for item in edit_scope["allowed_patterns"])
     protected_patterns = tuple(str(item) for item in edit_scope["protected_patterns"])
     repo_map_path = meta_dir / "repo_map.json"
     repo_map_summary_path = meta_dir / "repo_map_summary.md"
@@ -152,6 +165,7 @@ def initialize_code_task(
         codebase_index,
         output_path=repo_map_path,
         summary_path=repo_map_summary_path,
+        allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
     )
     resolved_env_mode = env_mode

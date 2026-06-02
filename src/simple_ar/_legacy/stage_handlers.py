@@ -41,14 +41,33 @@ from simple_ar.research.outputs.artifacts import (
     SEARCH_CLAIM_CARDS,
     SEARCH_COVERAGE_JSON,
     SEARCH_COVERAGE_MD,
+    SEARCH_DECISION_LOG,
     SEARCH_DOCUMENTS,
+    SEARCH_EVAL_JSON,
+    SEARCH_EVAL_MD,
+    SEARCH_EVIDENCE_PACK_JSON,
+    SEARCH_EVIDENCE_PACK_MD,
+    SEARCH_EVIDENCE_REVIEW_MD,
+    SEARCH_EXPERIMENT_CONTRACT_JSON,
+    SEARCH_EXPERIMENT_CONTRACT_MD,
+    SEARCH_FULLTEXT_EXTRACTION,
+    SEARCH_FULLTEXT_MANIFEST,
+    SEARCH_GAP_SUMMARY,
+    SEARCH_IDEA_CANDIDATES,
+    SEARCH_SECTIONS,
     SEARCH_INDEX_META,
     SEARCH_META,
+    SEARCH_NOVELTY_CHECKS,
     SEARCH_PAPERS,
     SEARCH_PAPER_CARDS,
+    SEARCH_METHOD_CARDS,
+    SEARCH_DATASET_CARDS,
+    SEARCH_CODE_LINKS,
     SEARCH_RESEARCH_PLAN,
     SEARCH_RETRIEVAL_ROUNDS,
     SEARCH_SCREENING_DECISIONS,
+    SEARCH_TOOL_CONTEXT_JSON,
+    SEARCH_TOOL_CONTEXT_MD,
     build_research_plan_artifact,
     write_search_document_artifacts,
 )
@@ -193,6 +212,7 @@ def execute_search(ctx: Context) -> None:
             candidates,
             max_documents=max_papers,
             negative_terms=query_plan.negative_terms,
+            priority_facets=query_plan.required_facets,
         )
         coverage_report = build_coverage_report(
             topic=ctx.topic,
@@ -223,6 +243,7 @@ def execute_search(ctx: Context) -> None:
     meta.update(
         write_search_document_artifacts(
             stage_dir=ctx.stage_dir(),
+            topic=ctx.topic,
             papers=papers,
             source_plan=source_plan,
         )
@@ -250,8 +271,6 @@ def _plan_research_retrieval(
         questions=deterministic_questions,
     )
     planner_mode = _research_planner_mode(ctx.config.get("research_planner"))
-    if deterministic_plan.auto_expansion is False:
-        return deterministic_questions, deterministic_plan
     if planner_mode == "deterministic":
         return deterministic_questions, deterministic_plan
     if ctx.config.get("use_llm") is not True:
@@ -344,6 +363,7 @@ def _live_literature_search(
             candidates,
             max_documents=max_documents,
             negative_terms=query_plan.negative_terms,
+            priority_facets=query_plan.required_facets,
         )
         coverage_report = build_coverage_report(
             topic=ctx.topic,
@@ -376,6 +396,7 @@ def _live_literature_search(
                 candidates,
                 max_documents=max_documents,
                 negative_terms=query_plan.negative_terms,
+                priority_facets=query_plan.required_facets,
             )
             coverage_report = build_coverage_report(
                 topic=ctx.topic,
@@ -432,6 +453,7 @@ def _live_literature_search(
             fixture_candidates,
             max_documents=max_documents,
             negative_terms=query_plan.negative_terms,
+            priority_facets=query_plan.required_facets,
         )
         retrieval_rows.append(
             _retrieval_round_row(
@@ -1440,6 +1462,7 @@ def execute_report(ctx: Context) -> None:
         )
     evidence = _stage_evidence(ctx, "report")
     evidence_snippets = format_evidence_snippets(evidence)
+    research_evidence_summary = _research_evidence_summary(ctx, papers)
     report = _report_with_llm(
         ctx,
         goal=goal,
@@ -1452,6 +1475,7 @@ def execute_report(ctx: Context) -> None:
         paper_rows=paper_rows,
         papers=papers,
         evidence_snippets=evidence_snippets,
+        research_evidence_summary=research_evidence_summary,
         report_mode=report_mode,
         results_present=results_present,
     )
@@ -1465,9 +1489,21 @@ def execute_report(ctx: Context) -> None:
                 synthesis,
                 hypothesis,
                 papers,
+                research_evidence_summary,
             )
         else:
-            report = _build_report(ctx, goal, problem, search_meta, synthesis, hypothesis, plan, results, papers)
+            report = _build_report(
+                ctx,
+                goal,
+                problem,
+                search_meta,
+                synthesis,
+                hypothesis,
+                plan,
+                results,
+                papers,
+                research_evidence_summary,
+            )
     report_body = _strip_references_section(report)
     report_body = _ensure_code_task_evidence_section(ctx, plan, report_body)
     cited_papers = _cited_papers(report_body, papers)
@@ -1568,6 +1604,89 @@ def _related_work_markdown(papers: list[Paper]) -> str:
     return "\n".join(lines)
 
 
+def _research_evidence_summary(ctx: Context, papers: list[Paper]) -> str:
+    """Build a compact, report-ready summary from structured search evidence."""
+    paper_cards = _read_jsonl_artifact(ctx, SEARCH_PAPER_CARDS)
+    claim_cards = _read_jsonl_artifact(ctx, SEARCH_CLAIM_CARDS)
+    method_cards = _read_jsonl_artifact(ctx, SEARCH_METHOD_CARDS)
+    dataset_cards = _read_jsonl_artifact(ctx, SEARCH_DATASET_CARDS)
+    code_links = _read_jsonl_artifact(ctx, SEARCH_CODE_LINKS)
+    sections = _read_jsonl_artifact(ctx, SEARCH_SECTIONS)
+    if not any((paper_cards, claim_cards, method_cards, dataset_cards, code_links, sections)):
+        return ""
+
+    section_counts: dict[str, int] = {}
+    for row in sections:
+        section = str(row.get("section") or "unknown")
+        section_counts[section] = section_counts.get(section, 0) + 1
+
+    lines = [
+        f"- Paper cards: {len(paper_cards)}; claim cards: {len(claim_cards)}; "
+        f"method cards: {len(method_cards)}; dataset cards: {len(dataset_cards)}; "
+        f"code links: {len(code_links)}.",
+    ]
+    if section_counts:
+        coverage = ", ".join(f"{name}={count}" for name, count in sorted(section_counts.items()))
+        lines.append(f"- Section coverage: {coverage}.")
+
+    paper_ids = {paper.id for paper in papers}
+    for row in paper_cards[:4]:
+        paper_id = str(row.get("paper_id") or "")
+        citation = f" [@{paper_id}]" if paper_id in paper_ids else ""
+        method = _compact_field(row.get("method_summary"), default="unknown method")
+        claims = _string_items(row.get("main_claims"), limit=1)
+        claim_text = f" Main claim: {claims[0]}" if claims else ""
+        evidence = _string_items(row.get("evidence_refs"), limit=2)
+        evidence_text = f" Evidence refs: {', '.join(evidence)}." if evidence else ""
+        lines.append(
+            f"- Paper card `{paper_id or 'unknown'}`{citation}: {method}.{claim_text}{evidence_text}"
+        )
+
+    for row in claim_cards[:5]:
+        paper_id = str(row.get("paper_id") or "")
+        citation = f" [@{paper_id}]" if paper_id in paper_ids else ""
+        claim = _compact_field(row.get("claim"), default="unknown claim")
+        scope = str(row.get("scope") or "unknown")
+        refs = _string_items(row.get("evidence_refs"), limit=2)
+        ref_text = f" refs={', '.join(refs)}" if refs else ""
+        lines.append(f"- Claim card `{scope}`{citation}: {claim}{ref_text}.")
+
+    if method_cards:
+        method_summaries = [
+            _compact_field(row.get("name"), default="unknown method")
+            for row in method_cards[:3]
+        ]
+        lines.append("- Method evidence: " + "; ".join(method_summaries) + ".")
+    if dataset_cards:
+        dataset_summaries = [
+            _compact_field(row.get("name"), default="unknown dataset")
+            for row in dataset_cards[:3]
+        ]
+        lines.append("- Dataset/metric evidence: " + "; ".join(dataset_summaries) + ".")
+    if code_links:
+        link_summaries = [
+            str(row.get("repository") or row.get("url") or "unknown link")
+            for row in code_links[:3]
+        ]
+        lines.append("- Code-link evidence: " + "; ".join(link_summaries) + ".")
+    return "\n".join(lines)
+
+
+def _report_evidence_summary_markdown(summary: str) -> str:
+    """Render structured evidence summary for fallback reports."""
+    if summary.strip():
+        return (
+            "The following structured evidence summary was generated from search-stage "
+            "paper cards, claim cards, section-aware chunks, and related artifacts. "
+            "It should be read as bounded evidence rather than a complete literature review.\n\n"
+            f"{summary.strip()}"
+        )
+    return (
+        "No structured evidence cards were available. The report therefore relies on "
+        "paper metadata, synthesis artifacts, and explicit limitations."
+    )
+
+
 def _report_with_llm(
     ctx: Context,
     *,
@@ -1581,6 +1700,7 @@ def _report_with_llm(
     paper_rows: list[dict[str, Any]],
     papers: list[Paper],
     evidence_snippets: str,
+    research_evidence_summary: str,
     report_mode: str,
     results_present: bool,
 ) -> str | None:
@@ -1623,6 +1743,7 @@ def _report_with_llm(
                 experiment_plan_json=json.dumps(plan, indent=2, ensure_ascii=False),
                 results_json=json.dumps(results, indent=2, ensure_ascii=False),
                 evidence_snippets=evidence_snippets,
+                research_evidence_summary=research_evidence_summary,
                 citation_instruction=_citation_instruction(papers),
                 report_mode=report_mode,
             ),
@@ -1660,6 +1781,7 @@ def _build_report(
     plan: dict[str, Any],
     results: dict[str, Any],
     papers: list[Paper],
+    research_evidence_summary: str = "",
 ) -> str:
     """Build the final Markdown report strictly from staged artifacts.
 
@@ -1685,6 +1807,8 @@ def _build_report(
         f"{_introduction_markdown(ctx, goal, problem, search_meta, papers)}\n\n"
         "## Related Work\n\n"
         f"{_related_work_markdown(papers)}\n\n"
+        "## Evidence Summary\n\n"
+        f"{_report_evidence_summary_markdown(research_evidence_summary)}\n\n"
         "## Method\n\n"
         f"{_method_markdown(plan)}\n\n"
         "## Experiments\n\n"
@@ -1710,6 +1834,7 @@ def _build_research_report(
     synthesis: str,
     hypothesis: str,
     papers: list[Paper],
+    research_evidence_summary: str = "",
 ) -> str:
     """Build a literature-only report when no experiment results exist."""
     return (
@@ -1720,6 +1845,8 @@ def _build_research_report(
         f"{_research_introduction_markdown(ctx, goal, problem, search_meta, papers)}\n\n"
         "## Search Scope\n\n"
         f"{_research_search_scope_markdown(search_meta, papers)}\n\n"
+        "## Evidence Summary\n\n"
+        f"{_report_evidence_summary_markdown(research_evidence_summary)}\n\n"
         "## Thematic Synthesis\n\n"
         f"{_synthesis_markdown(synthesis, hypothesis)}\n\n"
         "## Approach Patterns\n\n"
@@ -2529,10 +2656,29 @@ def _source_artifacts(ctx: Context) -> dict[str, str]:
         SEARCH_COVERAGE_MD,
         SEARCH_DOCUMENTS,
         SEARCH_CACHE_MANIFEST,
+        SEARCH_FULLTEXT_MANIFEST,
+        SEARCH_FULLTEXT_EXTRACTION,
+        SEARCH_SECTIONS,
         SEARCH_CHUNKS,
         SEARCH_INDEX_META,
         SEARCH_PAPER_CARDS,
         SEARCH_CLAIM_CARDS,
+        SEARCH_METHOD_CARDS,
+        SEARCH_DATASET_CARDS,
+        SEARCH_CODE_LINKS,
+        SEARCH_EVIDENCE_PACK_JSON,
+        SEARCH_EVIDENCE_PACK_MD,
+        SEARCH_GAP_SUMMARY,
+        SEARCH_IDEA_CANDIDATES,
+        SEARCH_NOVELTY_CHECKS,
+        SEARCH_EXPERIMENT_CONTRACT_JSON,
+        SEARCH_EXPERIMENT_CONTRACT_MD,
+        SEARCH_TOOL_CONTEXT_JSON,
+        SEARCH_TOOL_CONTEXT_MD,
+        SEARCH_EVIDENCE_REVIEW_MD,
+        SEARCH_DECISION_LOG,
+        SEARCH_EVAL_JSON,
+        SEARCH_EVAL_MD,
         "activity_log.jsonl",
         "evidence_ledger.jsonl",
         "artifact_index.json",
@@ -2564,6 +2710,40 @@ def _safe_read_artifact(ctx: Context, filename: str) -> str:
 def _safe_read_json_artifact(ctx: Context, filename: str) -> dict[str, Any]:
     """Read a JSON artifact as a dictionary when present."""
     return safe_read_json_artifact(ctx, filename)
+
+
+def _read_jsonl_artifact(ctx: Context, filename: str) -> list[dict[str, Any]]:
+    """Read a JSONL artifact when present, otherwise return an empty list."""
+    path = ctx.find_artifact(filename)
+    if path is None or not path.exists():
+        return []
+    try:
+        return read_jsonl(path)
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _compact_field(value: object, *, default: str, limit: int = 220) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() == "unknown":
+        return default
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rsplit(" ", 1)[0].strip() + "..."
+
+
+def _string_items(value: object, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    rows: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            rows.append(text)
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def _markdown_body(markdown: str) -> str:

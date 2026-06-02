@@ -65,6 +65,12 @@ mode = "copy"
 reuse_source_venv = false
 setup_hook = ""
 
+[edit_scope]
+# Embedded code-task runs reuse this scope when the same TOML is used as the
+# nested code-task config.
+allowed_patterns = ["digits_mlp/**"]
+protected_patterns = []
+
 [benchmark]
 # Runs inside the editable workspace before and after the patch.
 command = "python benchmark.py"

@@ -4,6 +4,61 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-02
+
+### Added
+
+- 新增 V2.3 Week 3 research-bridge 产物，统一放在 `02-search/evidence/`。
+  默认精简运行保留 `evidence_pack.json/md`、`gap_summary.md`、
+  `idea_candidates.jsonl`、`novelty_checks.jsonl` 和
+  `experiment_contract.json/md`；debug 运行还可以保留 `tool_context.json/md`、
+  `evidence_review.md`、`decision_log.jsonl` 和 `eval_report.json/md`。
+- 新增 `[research.budget].novelty_backend`，当前稳定支持 `local`，
+  用于基于当前 evidence pack 生成词面重合 novelty-risk hints。
+
+- 新增 V2.3 Day 12 section-aware document extraction。默认精简运行会用 section
+  spans 构建 chunks/cards；debug 运行可以额外保留
+  `02-search/documents/sections.jsonl` 供检查。
+- 当 section records 存在时，research chunks 会带上 `section`、`heading` 和
+  `section_id` provenance，让 `02-search/research_index/chunks.jsonl` 不再只是扁平文本切块。
+- 新增 V2.3 Day 13 扩展 evidence cards：
+  `02-search/cards/method_cards.jsonl`、`dataset_cards.jsonl` 和
+  `code_links.jsonl`。
+- 报告阶段新增紧凑 structured evidence summary。LLM report 和 fallback report
+  都可以使用 search 阶段的 paper cards、claim cards、section records 和扩展 cards 作为有边界的证据。
+- 新增可配置的 code-task `[edit_scope]` allowlist 和额外 protected patterns。
+  该 scope 会写入 `code_task/manifest.json`，并在 repo map、context、work-plan、
+  edit proposal、repair 和 apply-time patch validation 中重复生效。
+- 新增 debug-only 只读 Tool/MCP handoff 产物，位于 `02-search/tools/`：
+  `tool_adapter_contract.json/md`、`tool_trace.jsonl` 和
+  `external_agent_backend.md`。
+- 新增 debug-only `02-search/governance/artifact_retention_policy.json/md`，
+  用于把 search artifacts 区分为稳定 run outputs、evidence tables、cache、
+  trace、debug 诊断和可重建文件。
+- 新增 `simple-ar clean RUN_DIR`：先用 Rich tree 预览、再确认删除的缓存清理命令，
+  用于清理可重建 run-local 缓存和该 run 在共享 SQLite research index 中的 rows。
+
+### Changed
+
+- Paper cards 和 claim cards 现在会优先使用 section-aware 的 method、experiment、
+  result 和 limitation chunks，而不是把所有文本都当成扁平摘要处理。
+- Usage 文档已更新精简 `02-search/` 产物树，并区分默认 evidence artifacts、
+  debug-only 诊断文件和 tool handoff 草案。
+- Code-task 示例现在显式声明 edit scope：实现文件可编辑，tests、benchmark 和锁定配置仍作为只读证据。
+- LLM research planning 现在会在 query expansion 关闭时继续生效。`[research].max_queries`
+  仍然控制最终 query 数量，但 `[research].planner = "llm"` 不会再静默退回 deterministic planning。
+- Retrieval screening 现在会先尽量保留 required facets 的多样性，再用普通 rank 填满剩余文档预算，减少某一类高分 query 把 overview/benchmark/dataset 证据挤掉的情况。
+- V2.3 online check 配置现在默认使用 compact artifacts，并避免把本地 demo notes
+  混入在线 evidence check。需要 planning/traces/coverage/tool 草案时再设置
+  `[run].debug_artifacts = true`。
+- Evidence pack 现在保存 artifact refs 和 card ids，不再重复复制 `cards/*.jsonl`，
+  减少 search 阶段产物膨胀。
+- V2.3 release hardening 覆盖了分层检查、内置 code-task 示例、compact search
+  CLI run、medium code-task baseline CLI run，以及全量 unittest discovery。
+
+- Pipeline 进度输出现在使用克制的 Rich panel、阶段分隔线和状态/消息颜色分类，
+  让用户更容易看清当前阶段和关键事件，同时不改变 pipeline 执行逻辑。
+
 ## 2026-05-31
 
 ### Added

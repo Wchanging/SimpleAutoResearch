@@ -125,7 +125,9 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 Default search behavior:
 
-- `search` builds `02-search/planning/research_plan.json` before querying providers.
+- `search` builds an internal research plan before querying providers; the
+  `02-search/planning/research_plan.json` file is retained only when
+  `[run].debug_artifacts = true`.
 - Unless configured otherwise, `search` queries OpenAlex first, then Semantic
   Scholar, then arXiv.
 - For each planned query, the current default is ordered fallback: once a live
@@ -181,22 +183,15 @@ max_documents = 20
 max_chunks = 200
 max_context_tokens = 12000
 max_llm_calls = 8
+novelty_backend = "local"
 ```
 
-The search stage writes this main `02-search/` layout:
+The search stage writes this default compact `02-search/` layout:
 
 ```text
 02-search/
   papers.jsonl
   search_meta.json
-  planning/
-    research_plan.json
-  traces/
-    retrieval_rounds.jsonl
-    screening_decisions.jsonl
-  review/
-    coverage_report.json
-    coverage_report.md
   documents/
     documents.jsonl
     cache_manifest.json
@@ -209,6 +204,49 @@ The search stage writes this main `02-search/` layout:
   cards/
     paper_cards.jsonl
     claim_cards.jsonl
+    method_cards.jsonl
+    dataset_cards.jsonl
+    code_links.jsonl
+  evidence/
+    evidence_pack.json
+    evidence_pack.md
+    gap_summary.md
+    idea_candidates.jsonl
+    novelty_checks.jsonl
+    experiment_contract.json
+    experiment_contract.md
+```
+
+Set `[run].debug_artifacts = true` when you also want verbose diagnostics and
+future-tool handoff drafts:
+
+```text
+02-search/
+  planning/
+    research_plan.json
+  traces/
+    retrieval_rounds.jsonl
+    screening_decisions.jsonl
+  review/
+    coverage_report.json
+    coverage_report.md
+  documents/
+    sections.jsonl
+  evidence/
+    tool_context.json
+    tool_context.md
+    evidence_review.md
+    decision_log.jsonl
+    eval_report.json
+    eval_report.md
+  tools/
+    tool_adapter_contract.json
+    tool_adapter_contract.md
+    tool_trace.jsonl
+    external_agent_backend.md
+  governance/
+    artifact_retention_policy.json
+    artifact_retention_policy.md
 ```
 
 Shared accelerator stores are written outside the run by default:
@@ -220,46 +258,102 @@ Shared accelerator stores are written outside the run by default:
     lancedb/       # shared LanceDB store when enabled and installed
 ```
 
-The most important files are:
+To clean rebuildable cache data for one run, use the top-level clean command:
 
-- `02-search/planning/research_plan.json`: one compact planning artifact with
-  `research_questions`, `query_plan`, and `source_plan` sections. It records
-  scoped sub-questions, seed and expanded queries, source order, retrieval mode,
-  local document hints, cache/index preferences, and lightweight budgets.
-- `02-search/traces/retrieval_rounds.jsonl`: one row per executed source/query attempt,
-  including status, returned count, errors/cache hits, and compact query-intent
-  traces such as facet plus title/abstract keyword hints.
-- `02-search/traces/screening_decisions.jsonl`: deduplication and lightweight
-  relevance-screening decisions for returned metadata.
-- `02-search/review/coverage_report.json` and `02-search/review/coverage_report.md`:
-  required facet coverage, missing research questions, and follow-up query decisions.
-- `02-search/documents/documents.jsonl`: normalized document records for selected
-  metadata and configured local files, with extraction status such as
-  `metadata_only`, `parsed`, `skipped`, or `failed`.
-- `02-search/documents/cache_manifest.json`: cache/extraction summary, source
-  counts, status counts, and full-text/PDF intent flags.
-- `02-search/documents/fulltext_manifest.json`: full-text hints and fetch
-  budget decisions. Remote fetch failures are recorded in this manifest and do
-  not fail the search stage.
-- `02-search/documents/fulltext_extraction.json`: best-effort parser results
-  for cached/local full-text inputs. Markdown/text and basic HTML can be parsed
-  without extra dependencies; PDF parsing uses lightweight `pypdf`; optional
-  `unstructured` can be selected with `parser_backend = "unstructured"`.
-- `02-search/research_index/chunks.jsonl`: portable local chunks built from
-  abstracts and parsed or extracted local/full-text files.
-- `02-search/research_index/index_meta.json`: local index manifest. It records
-  the selected backend, run id, portable chunk path, and the shared SQLite FTS /
-  LanceDB store paths. SQLite and LanceDB are shared under
-  `.simple_ar_cache/research_index` by default, rather than copied into every
-  run directory.
-- `02-search/cards/paper_cards.jsonl`: deterministic paper-level evidence
-  cards with problem/method/metric/limitation hints and source chunk refs.
-- `02-search/cards/claim_cards.jsonl`: conservative claim cards grounded in
-  chunk ids. These are not final paper claims; later report stages still audit
-  them before use.
-- `02-search/search_meta.json`: selected source, status, returned-paper count,
-  and pointers to planning/trace/review artifacts.
-- `02-search/papers.jsonl`: normalized paper metadata passed to `read`.
+```bash
+uv run simple-ar clean runs/<run-id>
+```
+
+It first prints a Rich tree preview: red items will be deleted and green items
+will be kept. Type `yes` to proceed. By default, `clean` removes bulky
+run-local cache folders such as `02-search/documents/fulltext_cache/` and
+`02-search/documents/extracted_text/`, plus this run's rows in the shared
+SQLite research index. It keeps reports, manifests, normalized paper metadata,
+evidence cards, retained debug coverage reports when present, and portable
+`research_index/chunks.jsonl`.
+
+Key files, grouped by directory:
+
+- Root of `02-search/`
+  - `papers.jsonl`: normalized paper metadata passed to `read`.
+  - `search_meta.json`: selected source, status, returned-paper count, and
+    pointers to retained evidence artifacts.
+- `planning/` (debug-only)
+  - `research_plan.json`: compact plan with `research_questions`, `query_plan`,
+    and `source_plan`, including scoped sub-questions, seed/expanded queries,
+    source order, retrieval mode, local document hints, cache/index preferences,
+    and lightweight budgets.
+- `traces/` (debug-only)
+  - `retrieval_rounds.jsonl`: one row per source/query attempt, including
+    status, returned count, errors/cache hits, and compact query intent.
+  - `screening_decisions.jsonl`: deduplication and lightweight
+    relevance-screening decisions for returned metadata.
+- `review/` (debug-only)
+  - `coverage_report.json` / `.md`: required-facet coverage, missing research
+    questions, and follow-up query decisions.
+- `documents/`
+  - `documents.jsonl`: normalized records for selected metadata and configured
+    local files, with extraction status such as `metadata_only`, `parsed`,
+    `skipped`, or `failed`.
+  - `cache_manifest.json`: source counts, status counts, and full-text/PDF
+    intent flags.
+  - `fulltext_manifest.json`: full-text hints and fetch-budget decisions;
+    remote fetch failures are recorded here without failing the search stage.
+  - `fulltext_extraction.json`: best-effort parser results for cached/local
+    full-text inputs. Markdown/text and basic HTML parse without extra
+    dependencies; PDF parsing uses lightweight `pypdf`; optional `unstructured`
+    can be selected with `parser_backend = "unstructured"`.
+  - `sections.jsonl` (debug-only): conservative section-aware spans such as
+    `abstract`, `method`, `experiments`, `results`, and `limitations`.
+- `research_index/`
+  - `chunks.jsonl`: portable local chunks built from abstracts and parsed or
+    extracted full text. Section metadata is included when available.
+  - `index_meta.json`: backend/run manifest and shared SQLite FTS / LanceDB
+    store paths. Shared accelerators live under `.simple_ar_cache/research_index`
+    by default instead of being copied into every run.
+- `cards/`
+  - `paper_cards.jsonl`: deterministic paper-level evidence cards with
+    problem/method/metric/limitation hints and source chunk refs.
+  - `claim_cards.jsonl`: conservative claim cards grounded in chunk ids. They
+    are not final report claims until later audit.
+  - `method_cards.jsonl`, `dataset_cards.jsonl`, `code_links.jsonl`:
+    section-aware method, dataset/metric, and repository-link hints for later
+    experiment-contract, code-task, and report stages.
+- `evidence/`
+  - `evidence_pack.json` / `.md`: compact evidence handoff with counts,
+    artifact refs, coverage, parser/index provenance, and limitations. It
+    points to `cards/*.jsonl` instead of copying those tables again.
+  - `gap_summary.md`: conservative research brief derived from coverage and
+    card availability; it is not a novelty claim.
+  - `idea_candidates.jsonl`: bounded idea candidates grounded in evidence refs,
+    with expected outcome, required baselines/datasets, metrics, feasibility,
+    and risks.
+  - `novelty_checks.jsonl`: local lexical novelty-risk hints over the current
+    evidence pack; not a replacement for live novelty search or human review.
+  - `experiment_contract.json` / `.md`: bridge from literature evidence to a
+    future code-task or external coding agent, including hypothesis,
+    implementation scope, validation hints, budgets, risks, and report claim
+    rules.
+  - `tool_context.json` / `.md` (debug-only): read-only handoff for future
+    MCP/tool/agent integrations before any code workspace is opened.
+  - `evidence_review.md`, `decision_log.jsonl`, `eval_report.json` / `.md`
+    (debug-only): human-review checklist and simple research artifact quality
+    checks.
+- `tools/` (debug-only)
+  - `tool_adapter_contract.json` / `.md`: read-only Tool/MCP adapter contract
+    with allowed artifact reads, trace writes, forbidden actions, request/response
+    shape, and fallback rules.
+  - `tool_trace.jsonl`: append-only tool audit trace.
+  - `external_agent_backend.md`: boundary for Codex, Claude Code, OpenCode, and
+    similar external agent backends.
+- `governance/` (debug-only)
+  - `artifact_retention_policy.json` / `.md`: classifies stable outputs,
+    evidence tables, cache artifacts, traces, debug diagnostics, and rebuildable
+    files so cleanup stays explicit.
+- Later report stage
+  - `08-report/report.md`: when search evidence cards are available, both LLM
+    and fallback reports receive a compact evidence summary so Related Work,
+    Search Scope, and Limitations stay grounded.
 
 `[research].planner = "auto"` uses an LLM planner when `[llm].enabled = true`
 and falls back to deterministic planning when the provider is unavailable.
@@ -346,12 +440,21 @@ relays benchmark progress while still saving stdout/stderr artifacts. The
 `auto` mode handles both normal `print` logs and carriage-return progress
 output such as `tqdm`.
 
-`init` creates a new `runs/<run-id>/` directory, prepares the source project under
-`code_task/workspace/`, writes the task to `code_task/task.md`, builds
-`code_task/meta/codebase_index.json` plus the layered
-`code_task/meta/repo_map.json` / `repo_map_summary.md`, and records the
-benchmark/environment policy in `manifest.json`. It does not run code, call the
-LLM, or modify the original source project.
+`init` creates one run directory with this core layout:
+
+```text
+runs/<run-id>/
+  manifest.json                 # benchmark, workspace, environment, safety policy
+  code_task/
+    task.md                     # task prompt
+    workspace/                  # isolated editable copy or worktree
+    meta/
+      codebase_index.json       # file-level code index
+      repo_map.json             # layered symbol/repo map
+      repo_map_summary.md       # human-readable repo-map summary
+```
+
+It does not run code, call the LLM, or modify the original source project.
 
 When `workspace.mode = "git_worktree"` or `--workspace-mode git_worktree` is
 used, `init` creates a detached git worktree at the same
@@ -372,6 +475,20 @@ used, init copies only selected files. Configure patterns with
 `.git`, virtualenvs, `runs`, cache/build directories, `data`, `models`, `.env`,
 and secret-like paths. This mode is useful for small known subsets, but it can
 omit runtime dependencies; prefer `copy` or `git_worktree` for general projects.
+
+Use `[edit_scope]` when the workspace contains files that may be read but must
+not be changed by the model. `[workspace]` controls what is copied or mounted;
+`[edit_scope]` controls what later work-plan, proposal, repair, and apply gates
+may modify.
+
+```toml
+[edit_scope]
+# Empty allowed_patterns means every non-protected workspace path may be edited.
+allowed_patterns = ["review_pipeline/**", "main.py"]
+
+# These are added to the built-in protected tests/benchmarks/.env/secrets list.
+protected_patterns = ["configs/locked/**"]
+```
 
 Benchmarks should print numeric metric lines as `name: value`. Custom metric
 names work when you declare their direction in TOML. Explicit CLI flags are
@@ -544,11 +661,20 @@ Refresh the code map at any time:
 uv run simple-ar code-task map runs/<run-id>
 ```
 
-`map` scans the current `code_task/workspace/`, refreshes
-`code_task/meta/codebase_index.json`, writes `code_task/meta/repo_map.json` and
-`code_task/meta/repo_map_summary.md`, and updates `manifest.json`. It does not
-call the LLM, install dependencies, run benchmark code, or modify the original
-source project.
+`map` scans the current workspace and refreshes the static code-map artifacts:
+
+```text
+code_task/
+  workspace/                  # scanned source tree
+  meta/
+    codebase_index.json       # file-level code index
+    repo_map.json             # layered repo/symbol map
+    repo_map_summary.md       # human-readable summary
+manifest.json                 # updated map/workspace metadata
+```
+
+It does not call the LLM, install dependencies, run benchmark code, or modify
+the original source project.
 
 Locate likely files before planning or editing:
 

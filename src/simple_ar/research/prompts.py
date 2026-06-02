@@ -263,6 +263,7 @@ def report_user_prompt(
     experiment_plan_json: str,
     results_json: str,
     evidence_snippets: str = "",
+    research_evidence_summary: str = "",
     citation_instruction: str = "",
     report_mode: str = "experiment",
 ) -> str:
@@ -280,6 +281,8 @@ def report_user_prompt(
         results_json: Captured experiment results from the run stage.
         evidence_snippets: Optional source-labelled retrieval snippets selected
             for report drafting.
+        research_evidence_summary: Optional compact summary built from paper,
+            claim, method, dataset, code-link, and section artifacts.
         citation_instruction: Optional list of allowed citation keys and usage
             rules generated from ``papers.jsonl``.
         report_mode: Either ``research_only`` or ``experiment``.
@@ -347,6 +350,9 @@ def report_user_prompt(
         "- When `Retrieved Evidence Snippets` are provided, use them as the "
         "preferred source context and keep claims traceable to their labelled "
         "paths and line ranges.\n"
+        "- When `Research Evidence Summary` is provided, use it to structure "
+        "Related Work, Search Scope, Approach Patterns, and Limitations. Do not "
+        "invent evidence beyond those cards.\n"
         "- Do not repeat caveats throughout the paper. Put caveats in Limitations.\n"
         "- If the literature search used fixture metadata or cache fallback, state "
         "that provenance honestly in Limitations and avoid claiming a full review.\n"
@@ -392,6 +398,7 @@ def report_user_prompt(
         f"Experiment Plan JSON:\n{experiment_plan_json}\n\n"
         f"Results JSON:\n{results_json}\n"
         f"{citation_block}"
+        f"{_research_evidence_block(research_evidence_summary)}"
         f"{evidence_block}"
     )
 
@@ -414,3 +421,15 @@ def _citation_block(citation_instruction: str) -> str:
     if not stripped:
         return ""
     return f"\n\nAvailable Citation Keys:\n{stripped}"
+
+
+def _research_evidence_block(summary: str) -> str:
+    """Format compact research evidence cards for report drafting."""
+    stripped = summary.strip()
+    if not stripped:
+        return ""
+    return (
+        "\n\nResearch Evidence Summary:\n"
+        "This summary is generated from structured search-stage evidence artifacts.\n"
+        f"{stripped}"
+    )

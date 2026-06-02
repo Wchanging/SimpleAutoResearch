@@ -348,10 +348,22 @@ class PipelineRunner:
         if not isinstance(state, SearchState):
             return
         stage_dir = ctx.stage_dir(Stage.SEARCH)
-        for dirname in ("planning", "traces", "review"):
+        for dirname in ("planning", "traces", "review", "tools", "governance"):
             path = stage_dir / dirname
             if path.exists():
                 shutil.rmtree(path)
+        for relpath in (
+            "documents/sections.jsonl",
+            "evidence/tool_context.json",
+            "evidence/tool_context.md",
+            "evidence/evidence_review.md",
+            "evidence/decision_log.jsonl",
+            "evidence/eval_report.json",
+            "evidence/eval_report.md",
+        ):
+            path = stage_dir / relpath
+            if path.exists():
+                path.unlink()
         search_meta_path = stage_dir / "search_meta.json"
         if search_meta_path.exists():
             search_meta = read_json(search_meta_path)
@@ -360,6 +372,19 @@ class PipelineRunner:
                 "retrieval_rounds",
                 "screening_decisions",
                 "coverage_report",
+                "sections",
+                "tool_context",
+                "tool_context_markdown",
+                "evidence_review",
+                "decision_log",
+                "research_eval",
+                "research_eval_markdown",
+                "tool_adapter_contract",
+                "tool_adapter_contract_markdown",
+                "tool_trace",
+                "external_agent_backend",
+                "artifact_retention_policy",
+                "artifact_retention_policy_markdown",
             ):
                 search_meta.pop(key, None)
             search_meta["compact_artifacts"] = True
@@ -371,7 +396,17 @@ class PipelineRunner:
         state.legacy_outputs = {
             key: value
             for key, value in state.legacy_outputs.items()
-            if not key.startswith(("planning/", "traces/", "review/"))
+            if not key.startswith(("planning/", "traces/", "review/", "tools/", "governance/"))
+            and key
+            not in {
+                "documents/sections.jsonl",
+                "evidence/tool_context.json",
+                "evidence/tool_context.md",
+                "evidence/evidence_review.md",
+                "evidence/decision_log.jsonl",
+                "evidence/eval_report.json",
+                "evidence/eval_report.md",
+            }
         }
 
     def _write_stage_meta(self, stage_dir: Path, execution: StageExecution) -> None:

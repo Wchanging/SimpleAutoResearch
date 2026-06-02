@@ -9,8 +9,10 @@ from typing import Any, Iterable
 
 from simple_ar.core.artifacts import read_json, write_json, write_text
 from simple_ar.code_task.editing.scope import (
+    DEFAULT_ALLOWED_EDIT_PATTERNS,
     DEFAULT_PROTECTED_EDIT_PATTERNS,
-    is_protected_edit_path,
+    allowed_patterns_from_manifest,
+    is_edit_allowed_path,
     protected_patterns_from_manifest,
 )
 from simple_ar.code_task.analysis.index import build_codebase_index
@@ -56,6 +58,7 @@ def build_repo_map(
     *,
     output_path: Any | None = None,
     summary_path: Any | None = None,
+    allowed_patterns: Iterable[str] | None = None,
     protected_patterns: Iterable[str] | None = None,
     budget: dict[str, int] | None = None,
 ) -> dict[str, Any]:
@@ -65,6 +68,8 @@ def build_repo_map(
         codebase_index: Data produced by ``build_codebase_index``.
         output_path: Optional JSON destination for ``repo_map.json``.
         summary_path: Optional Markdown destination for ``repo_map_summary.md``.
+        allowed_patterns: Optional edit allowlist. Empty means any
+            non-protected workspace path can be editable.
         protected_patterns: Edit-scope patterns used to mark read-only evidence.
         budget: Optional prompt-rendering budget overrides for future context
             pack generation.
@@ -74,10 +79,15 @@ def build_repo_map(
         entrypoint, test, benchmark, and config layers.
     """
 
-    patterns = tuple(protected_patterns or DEFAULT_PROTECTED_EDIT_PATTERNS)
+    allowed = tuple(allowed_patterns or DEFAULT_ALLOWED_EDIT_PATTERNS)
+    protected = tuple(protected_patterns or DEFAULT_PROTECTED_EDIT_PATTERNS)
     resolved_budget = {**DEFAULT_REPO_MAP_BUDGET, **(budget or {})}
     index_files = _index_files(codebase_index)
-    files = _file_rows(index_files, protected_patterns=patterns)
+    files = _file_rows(
+        index_files,
+        allowed_patterns=allowed,
+        protected_patterns=protected,
+    )
     symbols = _symbol_rows(index_files, files)
     repo_map = {
         "schema_version": 1,
@@ -154,6 +164,7 @@ def build_code_task_repo_map(
         codebase_index,
         output_path=repo_map_path,
         summary_path=summary_path,
+        allowed_patterns=allowed_patterns_from_manifest(manifest),
         protected_patterns=protected_patterns_from_manifest(manifest),
     )
     _update_manifest_repo_map(root, manifest, repo_map)
@@ -276,6 +287,7 @@ def _repo_map_manifest_summary(repo_map: dict[str, Any]) -> dict[str, Any]:
 def _file_rows(
     index_files: list[dict[str, Any]],
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -285,9 +297,13 @@ def _file_rows(
             continue
         role_tags = _string_list(item.get("role_tags"))
         access_role = (
-            "read_only_evidence"
-            if is_protected_edit_path(path, protected_patterns=protected_patterns)
-            else "editable"
+            "editable"
+            if is_edit_allowed_path(
+                path,
+                allowed_patterns=allowed_patterns,
+                protected_patterns=protected_patterns,
+            )
+            else "read_only_evidence"
         )
         row = {
             "path": path,

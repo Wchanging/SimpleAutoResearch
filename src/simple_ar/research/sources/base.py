@@ -131,6 +131,12 @@ def _budget(config: dict[str, object]) -> dict[str, object]:
     parser_backend = _string(config.get("research_parser_backend"))
     if parser_backend:
         budget["parser_backend"] = parser_backend
+    novelty_backend = _string(config.get("research_novelty_backend"))
+    if novelty_backend:
+        budget["novelty_backend"] = novelty_backend
+    debug_artifacts = _bool(config.get("debug_artifacts"), False)
+    budget["debug_artifacts"] = debug_artifacts
+    budget["compact_artifacts"] = not debug_artifacts
     return budget
 
 

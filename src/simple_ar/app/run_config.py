@@ -51,6 +51,7 @@ class ResearchBudgetSection(_ConfigModel):
     max_context_tokens: int | None = None
     max_llm_calls: int | None = None
     max_follow_up_queries: int | None = None
+    novelty_backend: str | None = None
 
 
 class ResearchSection(_ConfigModel):
@@ -152,6 +153,7 @@ class PipelineRunConfig(_ConfigModel):
         _set_int(result, "research_max_context_tokens", self.research.budget.max_context_tokens)
         _set_int(result, "research_max_llm_calls", self.research.budget.max_llm_calls)
         _set_int(result, "research_max_follow_up_queries", self.research.budget.max_follow_up_queries)
+        _set_string(result, "research_novelty_backend", self.research.budget.novelty_backend)
 
         _set_bool(result, "use_retrieval", self.retrieval.enabled)
         _set_int(result, "retrieval_top_k", self.retrieval.top_k)
@@ -252,7 +254,15 @@ def _set_resolved_string_list(
 
 
 def _contains_code_task_config(data: dict[str, Any]) -> bool:
-    for section in ("code_task", "benchmark", "metrics", "environment", "workspace", "safety"):
+    for section in (
+        "code_task",
+        "benchmark",
+        "metrics",
+        "environment",
+        "workspace",
+        "safety",
+        "edit_scope",
+    ):
         value = data.get(section)
         if isinstance(value, dict) and value:
             return True

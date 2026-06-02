@@ -16,7 +16,8 @@ from simple_ar.core.artifacts import (
     write_text,
 )
 from simple_ar.code_task.editing.scope import (
-    is_protected_edit_path,
+    allowed_patterns_from_manifest,
+    is_edit_allowed_path,
     protected_patterns_from_manifest,
 )
 from simple_ar.code_task.analysis.context import (
@@ -102,6 +103,7 @@ def generate_patch_plan(
     manifest = _load_code_task_manifest(manifest_path)
     task_text = _read_required_text(task_dir / "task.md")
     index = _read_required_json(meta_dir / "codebase_index.json")
+    allowed_patterns = allowed_patterns_from_manifest(manifest)
     protected_patterns = protected_patterns_from_manifest(manifest)
     run_context = _collect_run_context(root, manifest)
     loaded_context = load_latest_code_task_context_pack(root)
@@ -152,6 +154,7 @@ def generate_patch_plan(
                 snippets=snippets,
                 benchmark_command=_benchmark_command(manifest),
                 run_context=run_context,
+                allowed_patterns=allowed_patterns,
                 protected_patterns=protected_patterns,
             )
             mode = "llm"
@@ -165,6 +168,7 @@ def generate_patch_plan(
             selected_files=selected,
             benchmark_command=_benchmark_command(manifest),
             run_context=run_context,
+            allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
         )
 
@@ -327,6 +331,7 @@ def _ask_llm_for_plan(
     snippets: list[dict[str, Any]],
     benchmark_command: str,
     run_context: dict[str, Any],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     prompt = _plan_user_prompt(
@@ -336,9 +341,15 @@ def _ask_llm_for_plan(
         benchmark_command=benchmark_command,
         run_context=run_context,
         protected_patterns=protected_patterns,
+        allowed_patterns=allowed_patterns,
     )
     response = client.ask_json(CODE_TASK_PLAN_SYSTEM, prompt, label="code-task-plan")
-    return _normalize_plan_data(response, index, protected_patterns=protected_patterns)
+    return _normalize_plan_data(
+        response,
+        index,
+        allowed_patterns=allowed_patterns,
+        protected_patterns=protected_patterns,
+    )
 
 
 def _plan_user_prompt(
@@ -348,9 +359,14 @@ def _plan_user_prompt(
     snippets: list[dict[str, Any]],
     benchmark_command: str,
     run_context: dict[str, Any],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> str:
-    compact_index = _compact_codebase_index(index, protected_patterns=protected_patterns)
+    compact_index = _compact_codebase_index(
+        index,
+        allowed_patterns=allowed_patterns,
+        protected_patterns=protected_patterns,
+    )
     snippet_text = "\n\n".join(
         f"### {item.get('path', '')} "
         f"({item.get('access_role', 'editable')})\n"
@@ -395,6 +411,7 @@ def _offline_plan(
     selected_files: list[str],
     benchmark_command: str,
     run_context: dict[str, Any],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     files_to_modify = [
@@ -404,7 +421,11 @@ def _offline_plan(
             "change_type": "inspect_then_edit",
         }
         for path in selected_files[:5]
-        if not is_protected_edit_path(path, protected_patterns=protected_patterns)
+        if is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        )
     ]
     validation = [benchmark_command] if benchmark_command else [
         "Run the project's existing tests or benchmark command after applying a patch."
@@ -446,6 +467,7 @@ def _normalize_plan_data(
     index: dict[str, Any],
     *,
     protected_patterns: tuple[str, ...],
+    allowed_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
     normalized = {
@@ -455,6 +477,7 @@ def _normalize_plan_data(
             data.get("files_to_modify"),
             known_paths,
             protected_patterns=protected_patterns,
+            allowed_patterns=allowed_patterns,
         ),
         "new_files": _new_file_plan_list(data.get("new_files")),
         "proposed_steps": _string_list(data.get("proposed_steps")),
@@ -907,6 +930,7 @@ def _relative_to_run(run_dir: Path, path: Path) -> str:
 def _compact_codebase_index(
     index: dict[str, Any],
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
@@ -917,9 +941,13 @@ def _compact_codebase_index(
             "kind": item.get("kind"),
             "role_tags": item.get("role_tags", []),
             "edit_role": (
-                "read_only"
-                if is_protected_edit_path(path, protected_patterns=protected_patterns)
-                else "editable"
+                "editable"
+                if is_edit_allowed_path(
+                    path,
+                    allowed_patterns=allowed_patterns,
+                    protected_patterns=protected_patterns,
+                )
+                else "read_only"
             ),
             "summary": item.get("summary", ""),
         }
@@ -1033,6 +1061,7 @@ def _file_plan_list(
     known_paths: set[str],
     *,
     protected_patterns: tuple[str, ...],
+    allowed_patterns: tuple[str, ...],
 ) -> list[dict[str, str]]:
     rows = value if isinstance(value, list) else []
     result: list[dict[str, str]] = []
@@ -1042,7 +1071,11 @@ def _file_plan_list(
         path = _string(item.get("path"))
         if not path or path not in known_paths:
             continue
-        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+        if not is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        ):
             continue
         result.append(
             {

@@ -27,12 +27,11 @@ experimentation, and gradual extension.
 
 - **Research reports**: run a visible staged pipeline from topic to literature
   notes, synthesis, and report artifacts.
-- **Research source planning**: write a compact
-  `02-search/planning/research_plan.json` for each run, with configurable
-  OpenAlex/Semantic Scholar/arXiv/local-file sources, optional LLM-backed
-  query planning, facet-driven query expansion, retrieval-round traces,
-  screening decisions, coverage reports, follow-up retrieval rounds, document
-  records, cache policy, and lightweight budgets.
+- **Research source planning**: plan OpenAlex/Semantic Scholar/arXiv/local-file
+  retrieval with optional LLM-backed query planning, facet-driven expansion,
+  screening, coverage checks, follow-up rounds, document records, cache policy,
+  and lightweight budgets. Normal runs keep compact evidence artifacts; set
+  `debug_artifacts = true` when you also need planning/traces/coverage files.
 - **Code tasks**: improve an existing codebase inside an isolated editable
   workspace with LLM planning, review gates, controlled patch proposals,
   validation, benchmark execution, and metric comparison.
@@ -101,8 +100,8 @@ uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
 ```
 
 For repeatable source settings, use a run config. This local example uses a
-Markdown note as a research source and writes the planned source strategy to
-`02-search/planning/research_plan.json`:
+Markdown note as a research source and keeps the search output compact by
+default:
 
 ```bash
 uv run simple-ar run --config examples/run_configs/local_research_report.toml

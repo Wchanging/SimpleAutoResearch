@@ -227,6 +227,32 @@ class TextChunk:
 
 
 @dataclass(frozen=True)
+class DocumentSection:
+    """A section-aware text span extracted from one document.
+
+    The section record is intentionally lightweight. It keeps enough structure
+    for cards, report drafting, and future parser backends without requiring a
+    heavy PDF/HTML layout model.
+    """
+
+    section_id: str
+    document_id: str
+    section: str
+    heading: str
+    text: str
+    source_path: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    token_estimate: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    schema_version: str = "document_section.v1"
+
+    def to_row(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class PaperCard:
     """Structured paper summary used by synthesis, contracts, and reports."""
 

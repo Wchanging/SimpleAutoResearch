@@ -51,5 +51,11 @@ mode = "copy"
 reuse_source_venv = false
 setup_hook = ""
 
+[edit_scope]
+# Keep benchmark config and tests as evidence while allowing the application
+# modules and entrypoint to change.
+allowed_patterns = ["review_pipeline/**", "main.py"]
+protected_patterns = ["configs/experiment.json"]
+
 [safety]
 max_file_bytes = 2000000

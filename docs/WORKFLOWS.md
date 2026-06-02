@@ -3,10 +3,11 @@
 [中文版本](WORKFLOWS_zh.md)
 
 This document explains what SimpleAutoResearch is doing internally: workflow
-presets, pipeline stages, stage outputs, and run artifact layout. For concrete
-commands, see [CLI Reference](CLI_REFERENCE.md); for TOML fields, see
-[Configuration Reference](CONFIG_REFERENCE.md); for setup and walkthroughs, see
-[Usage And Configuration](USAGE.md).
+presets, pipeline stages, artifact ownership, and module boundaries. It avoids
+duplicating the full artifact manual; for concrete commands and file trees, see
+[Usage And Configuration](USAGE.md). For command flags, see
+[CLI Reference](CLI_REFERENCE.md); for TOML fields, see
+[Configuration Reference](CONFIG_REFERENCE.md).
 
 ## Workflow Presets
 
@@ -133,368 +134,82 @@ Current status:
 
 ## Search And LLM Boundaries
 
-By default, normal pipeline runs keep the search stage compact after the stage
-contract is written. Compact mode keeps evidence artifacts that later stages
-need, but drops diagnostic planning/trace/review folders:
+Search is the evidence engine, not just a metadata lookup. It scopes research
+questions, chooses source order, retrieves and screens candidates, checks
+coverage, records document/full-text status, builds local chunks/cards, and emits
+a conservative evidence bridge for later report or code-task work.
+
+Normal runs keep compact artifacts by default:
 
 ```text
 02-search/
-  contract.json
-  report.md
-  papers.jsonl
-  search_meta.json
-  documents/
-    documents.jsonl
-    cache_manifest.json
-    fulltext_manifest.json
-    fulltext_extraction.json
-    fulltext_cache/     # only when remote full text is fetched and retained
-    extracted_text/     # only when parser output is materialized
-  research_index/
-    chunks.jsonl
-    index_meta.json
-  cards/
-    paper_cards.jsonl
-    claim_cards.jsonl
+  papers.jsonl / search_meta.json
+  documents/       # normalized document records and full-text/cache manifests
+  research_index/  # portable chunks and local-index metadata
+  cards/           # paper, claim, method, dataset, and code-link cards
+  evidence/        # evidence pack, gaps, ideas, novelty hints, experiment contract
 ```
 
-Set `[run].debug_artifacts = true` when you also want to inspect planning,
-retrieval trace, screening, and coverage-review diagnostics:
+When `[run].debug_artifacts = true`, search also keeps planning files, retrieval
+traces, screening decisions, coverage-review reports, section tables, read-only
+tool-context drafts, adapter/governance notes, and other diagnostic artifacts.
 
-```text
-02-search/
-  papers.jsonl
-  search_meta.json
-  planning/
-    research_plan.json
-  traces/
-    retrieval_rounds.jsonl
-    screening_decisions.jsonl
-  review/
-    coverage_report.json
-    coverage_report.md
-```
+Shared accelerator stores live outside the run by default under
+`.simple_ar_cache/research_index`, keyed by run/source metadata. Run-local cache
+folders such as downloaded PDFs and extracted text are rebuildable and can be
+previewed or cleaned with `simple-ar clean`.
 
-Shared accelerator stores are outside the run by default:
+LLM participation is bounded. The research planner can run in deterministic,
+`auto`, or LLM mode; lightweight coverage checks and local novelty checks are
+risk signals, not proof of originality. `--no-llm` keeps plan/read/synthesize/report
+on deterministic fallback text.
 
-```text
-.simple_ar_cache/
-  research_index/
-    sqlite_fts.db
-    lancedb/
-```
+For the full search-stage file tree and per-file descriptions, see
+[Usage And Configuration](USAGE.md). For search, cache, parser, and debug-artifact
+settings, see [Configuration Reference](CONFIG_REFERENCE.md).
 
-- `02-search/planning/research_plan.json` records scoped sub-questions, evidence
-  facets, seed and expanded queries, structured title/abstract keyword hints,
-  source order, local documents, retrieval mode, cache/index hints, and budget
-  in one compact planning artifact. It is deterministic by default when LLM mode
-  is disabled, and can be LLM-backed via `[research].planner = "auto"` or
-  `"llm"`.
-- `02-search/traces/retrieval_rounds.jsonl` records executed source/query attempts.
-  The first pass records the normalized query plus facet/title/abstract keyword
-  intent; coverage-driven follow-up rounds reuse the same trace format.
-- `02-search/traces/screening_decisions.jsonl` records deduplication and lightweight
-  relevance-screening decisions before papers are written.
-- `02-search/review/coverage_report.json` and `02-search/review/coverage_report.md`
-  record required-facet coverage and missing questions. If round budget remains,
-  the search stage can run a bounded follow-up round for uncovered facets before
-  writing the final paper list.
-- `02-search/documents/documents.jsonl` records selected metadata and configured
-  local files as document records with extraction status. Metadata-only sources
-  stay `metadata_only`; local Markdown/text can become `parsed`; unsupported or
-  unavailable files are recorded as `skipped` or `failed`.
-- `02-search/documents/cache_manifest.json` summarizes cache/index intent,
-  extraction statuses, and source counts.
-- `02-search/documents/fulltext_manifest.json` records arXiv/OpenAlex/local
-  full-text hints, fetch-budget decisions, cached local resources, and remote
-  fetch failures.
-- `02-search/documents/fulltext_extraction.json` records best-effort parser
-  results for cached/local full-text resources. Markdown/text and basic HTML
-  are parsed with the standard library; PDF parsing uses lightweight `pypdf`;
-  optional `unstructured` can be selected for stronger local parsing and
-  degrades to a manifest-only failure when unavailable.
-- `02-search/research_index/chunks.jsonl` stores portable local chunks from
-  abstracts and parsed/extracted local or full-text files. This is the source
-  of truth for later evidence-card extraction.
-- `02-search/research_index/index_meta.json` records the selected local index
-  backend, run id, portable chunk path, and shared SQLite FTS / LanceDB store
-  paths. SQLite and LanceDB live under `.simple_ar_cache/research_index` by
-  default so repeated runs can build toward a common research memory instead of
-  duplicating databases.
-- Live search uses the configured source order. By default it tries OpenAlex
-  first, then Semantic Scholar, then arXiv. When `--strict-search` is not set
-  and source-plan cache is enabled, cached metadata is used after live failures.
-- The default source strategy is ordered fallback rather than full source union:
-  a successful provider stops downstream provider calls for that query.
-- `local_files` can expose user-provided Markdown/text notes as conservative
-  metadata-like records. Local PDFs are best-effort parser inputs only when
-  full-text intent is enabled and an optional parser is available.
-- `--offline-search` skips live providers and uses fixture metadata immediately.
-- `--allow-fixture-fallback` allows fixture metadata only after live and cache attempts fail.
-- `--no-llm` switches plan/read/synthesize/report to deterministic fallback text.
-- Report drafting defaults to `auto`: if `results.json` exists the report uses experiment sections, otherwise it becomes literature-only.
+## Artifact Ownership Summary
 
-## Research Run Artifacts
+WORKFLOWS intentionally stays at the ownership level; the complete file tree lives
+in [Usage And Configuration](USAGE.md). At a high level:
 
-A completed research run can contain these files, depending on enabled options:
+- Root run files (`state.json`, `manifest.json`, `config_snapshot.json`, usage
+  logs, and optional artifact indexes) track resume state, configuration, and
+  observability.
+- Stage directories (`01-plan` through `08-report`) own their own contracts,
+  reports, and stable handoff artifacts.
+- `02-search` owns retrieval, document/full-text status, local chunks, evidence
+  cards, and the compact evidence bridge.
+- `06-code/code_task_run` embeds the same artifact shape as a standalone code
+  task when the research pipeline hands off to code execution.
+- `08-report` owns the final report package: report text, references, manifest,
+  and quality checks.
 
-```text
-runs/<run-id>/
-  state.json
-  manifest.json
-  pipeline_state.json
-  config_snapshot.json
-  topic.txt
-  llm_usage.jsonl
-  llm_usage_summary.json
-  artifact_index.json
-  artifact_chunks.jsonl
-  artifact_search_results.json  # only after explicit search-artifacts usage
-  source_plan.json
-  activity_log.jsonl
-  evidence_ledger.jsonl
-  01-plan/
-  02-search/
-    contract.json
-    report.md
-    papers.jsonl
-    search_meta.json
-    planning/       # only when [run].debug_artifacts = true
-      research_plan.json
-    documents/
-      documents.jsonl
-      cache_manifest.json
-      fulltext_manifest.json
-      fulltext_extraction.json
-      fulltext_cache/  # only when remote full text is fetched and retained
-      extracted_text/  # only when HTML/PDF-like resources are parsed to text
-    research_index/
-      chunks.jsonl
-      index_meta.json
-    cards/
-      paper_cards.jsonl
-      claim_cards.jsonl
-    traces/         # only when [run].debug_artifacts = true
-      retrieval_rounds.jsonl
-      screening_decisions.jsonl
-    review/         # only when [run].debug_artifacts = true
-      coverage_report.json
-      coverage_report.md
-  03-read/
-  04-synthesize/
-  05-design/
-  06-code/
-    code_task_experiment.json
-    code_task_run/
-  07-run/
-  08-report/
-```
+This split keeps detailed operational files available without forcing readers to
+learn every JSON/JSONL artifact before they understand the workflow. When a file
+is primarily diagnostic or rebuildable, it should either be gated by
+`debug_artifacts` or documented as cleanup-safe.
 
-Root-level files:
+## Code Task Artifact Boundaries
 
-- `state.json`: typed workflow checkpoint used for resume and stage handoff.
-- `manifest.json`: stage status and declared outputs.
-- `pipeline_state.json`: last completed stage and next stage for resume.
-- `config_snapshot.json`: selected runtime configuration.
-- `llm_usage.jsonl`: one row per successful LLM request.
-- `llm_usage_summary.json`: aggregate token counts and optional cost estimate.
-- `artifact_index.json`: local artifact index generated by `inspect` or `search-artifacts`.
-- `artifact_chunks.jsonl`: line-addressable chunks generated for local retrieval.
-- `artifact_search_results.json`: last artifact search result; generated only by the artifact search command.
-- `source_plan.json`: artifact-retrieval source plan describing which run
-  artifacts each stage should consult; this is distinct from
-  the literature `source_plan` section inside `02-search/planning/research_plan.json`.
-- `activity_log.jsonl`: structured activity log for source planning and retrieval actions.
-- `evidence_ledger.jsonl`: snippets used by stages, with path and line range.
-- `02-search/contract.json`: compact machine-readable search summary for stage
-  handoff.
-- `02-search/report.md`: compact human-readable search summary.
-- `02-search/planning/research_plan.json`: compact search planning artifact with
-  research question decomposition, executable query plan, and literature source
-  plan sections. Kept in the run directory only when `[run].debug_artifacts = true`.
-- `02-search/traces/retrieval_rounds.jsonl`: executed source/query attempts with
-  returned counts, errors, and compact query-intent traces. Debug artifact only.
-- `02-search/traces/screening_decisions.jsonl`: keep/discard rows for retrieved
-  metadata candidates. Debug artifact only.
-- `02-search/review/coverage_report.json` / `coverage_report.md`: required-facet
-  coverage, missing question status, and follow-up query decisions. Debug artifact
-  only.
-- `02-search/documents/documents.jsonl`: normalized document records for metadata
-  and local files, including hash and parser status when available.
-- `02-search/documents/cache_manifest.json`: cache, index, full-text, and
-  extraction-status summary.
-- `02-search/documents/fulltext_manifest.json`: full-text hints, selected
-  candidates, blocked/skipped reasons, and parser/fetch budget settings.
-- `02-search/documents/fulltext_extraction.json`: parser outcomes for cached
-  local/remote full-text resources. Failed PDF or unsupported suffix parsing is
-  recorded here without failing the search stage.
-- `02-search/research_index/chunks.jsonl`: portable local chunk store for later
-  retrieval, evidence-card extraction, and report grounding. Shared accelerators
-  live under `.simple_ar_cache/`.
-- `02-search/research_index/index_meta.json`: local index manifest with backend,
-  run id, portable chunk path, and shared SQLite FTS / LanceDB accelerator-store
-  paths.
-- `02-search/cards/paper_cards.jsonl`: deterministic paper cards with evidence
-  refs used by later gap, idea, and report stages.
-- `02-search/cards/claim_cards.jsonl`: conservative claim cards grounded in
-  chunk ids. Later report audit should still verify them before final use.
-- `02-search/search_meta.json`: final selected source, status, counts, and
-  pointers to retained evidence artifacts. Diagnostic planning/trace/review
-  pointers are present only when `[run].debug_artifacts = true`.
-- `02-search/papers.jsonl`: normalized metadata rows consumed by `03-read`.
-- `05-design/generated_code_task.md`: generated only when an embedded `code_task_project` run omits a task file.
-- `05-design/generated_code_task_meta.json`: provenance for that generated task file.
-- `06-code/code_task_experiment.json`: present for embedded code-task templates such as `code_task_project` and `llm_code_task_toy_spam`.
+Standalone code tasks and embedded pipeline code tasks use the same conceptual
+layout. The important boundary is what each group is responsible for:
 
-Nested embedded code-task files have the same shape as standalone code-task
-runs, but live under `06-code/code_task_run/`:
+- `workspace/`: isolated editable project copy, worktree, or sparse subset.
+- `meta/`: environment reports, repo maps, locate results, edit proposals,
+  validation reports, applied-edit summaries, and LLM usage.
+- `context_packs/`: bounded prompt context assembled from ranked editable files
+  and protected read-only evidence.
+- `attempts/`: durable work-plan and batch state for multi-step implementation
+  and repair loops.
+- `run/`: baseline/patched benchmark logs, metrics, execution reports, failure
+  analysis, and before/after comparison.
+- `repairs/`: bounded repair proposals grouped by repair attempt.
 
-```text
-06-code/
-  code_task_run/
-    manifest.json
-    code_task/
-      summary.md
-      work_plan.md
-      patch_plan.md
-      patch.diff
-      workspace/
-      meta/
-        repo_map.json
-        proposed_edits.json
-        validation_report.json
-      context_packs/
-        context-001/
-      attempts/
-        attempt-001/
-          batches/
-            batch-001/
-              batch_state.json
-      run/
-        baseline/
-        patched/
-        comparison.json
-```
-
-Important nested files:
-
-- `06-code/code_task_run/code_task/summary.md`: consolidated nested code-task outcome.
-- `06-code/code_task_run/code_task/meta/repo_map.json`: layered repo map for the prepared workspace.
-- `06-code/code_task_run/code_task/context_packs/context-001/`: prompt-ready context pack used by planning/editing.
-- `06-code/code_task_run/code_task/work_plan.md`: batch-oriented implementation plan.
-- `06-code/code_task_run/code_task/attempts/attempt-001/batches/batch-001/batch_state.json`: active embedded batch state.
-- `06-code/code_task_run/code_task/patch_plan.md`: LLM patch plan auto-approved by the pipeline.
-- `06-code/code_task_run/code_task/meta/proposed_edits.json`: controlled old/new edit proposal.
-- `06-code/code_task_run/code_task/patch.diff`: applied patch inside the prepared workspace.
-- `06-code/code_task_run/code_task/run/baseline/`: pre-patch benchmark artifacts.
-- `06-code/code_task_run/code_task/run/patched/`: patched benchmark artifacts.
-- `06-code/code_task_run/code_task/run/comparison.json`: before/after comparison when both runs exist.
-
-Report-stage files:
-
-- `08-report/report.md`: final Markdown report.
-- `08-report/references.bib`: BibTeX for papers cited in the report body.
-- `08-report/manifest.json`: report package and reproducibility metadata.
-- `08-report/report_quality.json`: rule-based checks for citations, metrics, and visible runtime limits.
-
-## Code Task Artifacts
-
-Code-task artifacts stay under `code_task/`:
-
-```text
-runs/<run-id>/
-  manifest.json
-  code_task/
-    task.md
-    summary.md
-    work_plan.md
-    patch_plan.md
-    patch.diff
-    workspace/
-    meta/
-      environment_report.json
-      codebase_index.json
-      repo_map.json
-      repo_map_summary.md
-      locate_results.json
-      locate_results.md
-      hitl_decisions.jsonl
-      proposed_edits.json
-      applied_edits.json
-      validation_report.json
-      failure_analysis.md        # validation-only failure diagnosis
-      llm_usage.jsonl
-      llm_usage_summary.json
-    context_packs/
-      context-001/
-        context_pack.json
-        prompt_context.md
-        selected_snippets.jsonl
-    attempts/
-      attempt-001/
-        attempt_state.json
-        batches/
-          batch-001/
-            batch_state.json
-            batch_context.json
-            proposed_edits.json
-            proposal_warnings.json
-    run/
-      comparison.json
-      baseline/
-        execution_report.json
-        stdout.txt
-        stderr.txt
-        metrics.json
-      patched/
-        execution_report.json
-        stdout.txt
-        stderr.txt
-        metrics.json
-        failure_analysis.md
-    repairs/
-      repair-001/
-        proposed_edits.json
-```
-
-Important directories:
-
-- `workspace/`: editable copy of the source project.
-- `meta/`: environment reports, indexes, locate results, decisions, proposed edits, applied edit summaries, validation reports, validation-only failure analysis, and LLM usage.
-- `context_packs/`: bounded prompt context packs derived from locate results and workspace snippets.
-- `attempts/`: durable work-plan attempt and batch state for bounded implementation or repair loops.
-- `run/`: labelled benchmark stdout/stderr, execution reports, parsed metrics, before/after comparison, and benchmark failure analysis.
-- `repairs/`: bounded repair proposals grouped by attempt. Each proposal records the source analysis path and selected repair context.
-
-Important user-facing code-task files:
-
-- `summary.md`: compact outcome, next-step guidance, task, patch, validation, benchmark, comparison, and failure-analysis summary.
-- Tests and benchmark files are protected by the default edit scope. They may
-  be indexed as read-only evidence, but `propose-edits`, `repair`, and
-  `apply-edits` should not modify them.
-- `meta/environment_report.json`: observational OS/Python/tool/GPU/project probe for planning and debugging.
-- `meta/repo_map.json`: layered project/directory/file/symbol/entrypoint/test/benchmark/config map derived from `codebase_index.json`.
-- `meta/repo_map_summary.md`: compact human-readable repo-map summary and prompt-budget note.
-- `meta/locate_results.json`: deterministic ranking of likely editable targets and protected read-only evidence.
-- `meta/locate_results.md`: human-readable locate summary for review before building prompt context.
-- `context_packs/context-NNN/context_pack.json`: selected files, budgets, source references, and omitted-file accounting.
-- `context_packs/context-NNN/prompt_context.md`: prompt-ready Markdown grouped into editable targets and read-only evidence.
-- `context_packs/context-NNN/selected_snippets.jsonl`: clipped source snippets, one selected file per row.
-- `work_plan.md`: batch-oriented implementation plan above the narrower patch plan.
-- `attempts/attempt-NNN/attempt_state.json`: attempt lifecycle state derived from work-plan and batch outcomes.
-- `attempts/attempt-NNN/batches/batch-NNN/batch_state.json`: active work item, allowed target files, batch artifacts, and final batch state.
-- `run/baseline/execution_report.json`: pre-patch benchmark result.
-- `run/patched/execution_report.json`: post-patch benchmark result.
-- `run/comparison.json`: before/after metric deltas and conservative verdict when both baseline and patched runs exist. Explicit `primary_metric` and `metric_directions` from the manifest are used before heuristic metric-name rules.
-- `manifest.json.objective`: current task-objective verdict derived from
-  comparison when patched benchmark artifacts exist. This separates "the code
-  ran" from "the measured goal improved."
-- `patch_plan.md`: human-reviewable plan before edits, including recorded environment, validation, and baseline context when available.
-- When a latest context pack exists, `patch_plan.md` records its path and uses
-  its selected snippets instead of the older index-only file selector.
-- `patch.diff`: applied patch for review.
-- `meta/proposed_edits.json`: reviewable edit proposal plus editor backend metadata.
-- `meta/applied_edits.json`: changed files plus before/after hashes for the files touched by the patch, including the proposal path and editor backend actually applied. For repair proposals this is the `code_task/repairs/repair-NNN/proposed_edits.json` path.
+Tests, benchmarks, environment files, secrets, and user-configured protected paths
+are indexed as read-only evidence by default and should not be edited by proposal,
+repair, or apply steps. Edit-scope behavior and full artifact paths are described
+in [Usage And Configuration](USAGE.md) and [Configuration Reference](CONFIG_REFERENCE.md).
 
 ## Code-Task Environment Strategy
 

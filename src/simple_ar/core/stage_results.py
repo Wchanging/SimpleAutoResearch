@@ -21,12 +21,31 @@ from simple_ar.research.outputs.artifacts import (
     SEARCH_CLAIM_CARDS,
     SEARCH_COVERAGE_JSON,
     SEARCH_COVERAGE_MD,
+    SEARCH_DECISION_LOG,
     SEARCH_DOCUMENTS,
+    SEARCH_EVAL_JSON,
+    SEARCH_EVAL_MD,
+    SEARCH_EVIDENCE_PACK_JSON,
+    SEARCH_EVIDENCE_PACK_MD,
+    SEARCH_EVIDENCE_REVIEW_MD,
+    SEARCH_EXTERNAL_AGENT_BACKEND,
+    SEARCH_EXPERIMENT_CONTRACT_JSON,
+    SEARCH_EXPERIMENT_CONTRACT_MD,
     SEARCH_INDEX_META,
+    SEARCH_GAP_SUMMARY,
+    SEARCH_IDEA_CANDIDATES,
     SEARCH_META,
+    SEARCH_NOVELTY_CHECKS,
     SEARCH_PAPER_CARDS,
     SEARCH_PAPERS,
     SEARCH_RESEARCH_PLAN,
+    SEARCH_TOOL_CONTEXT_JSON,
+    SEARCH_TOOL_CONTEXT_MD,
+    SEARCH_TOOL_ADAPTER_CONTRACT_JSON,
+    SEARCH_TOOL_ADAPTER_CONTRACT_MD,
+    SEARCH_TOOL_TRACE,
+    SEARCH_RETENTION_POLICY_JSON,
+    SEARCH_RETENTION_POLICY_MD,
 )
 from simple_ar.core.stages import Stage
 
@@ -96,6 +115,8 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
     paper_cards_path = ctx.artifact_path(SEARCH_PAPER_CARDS)
     claim_cards_path = ctx.artifact_path(SEARCH_CLAIM_CARDS)
     index_meta_path = ctx.artifact_path(SEARCH_INDEX_META)
+    evidence_pack_path = ctx.artifact_path(SEARCH_EVIDENCE_PACK_JSON)
+    experiment_contract_path = ctx.artifact_path(SEARCH_EXPERIMENT_CONTRACT_JSON)
 
     research_plan = read_json(research_plan_path)
     search_meta = read_json(search_meta_path)
@@ -105,6 +126,7 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
     index_meta = read_json(index_meta_path)
     paper_cards = read_jsonl(paper_cards_path)
     claim_cards = read_jsonl(claim_cards_path)
+    evidence_pack = read_json(evidence_pack_path) if evidence_pack_path.exists() else {}
 
     selected_paper_ids = [str(row.get("id", "")) for row in papers if row.get("id")]
     selected_document_ids = [str(row.get("document_id", "")) for row in documents if row.get("document_id")]
@@ -150,6 +172,25 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
             SEARCH_INDEX_META: _rel(ctx, index_meta_path),
             SEARCH_PAPER_CARDS: _rel(ctx, paper_cards_path),
             SEARCH_CLAIM_CARDS: _rel(ctx, claim_cards_path),
+            SEARCH_EVIDENCE_PACK_JSON: _rel(ctx, evidence_pack_path),
+            SEARCH_EVIDENCE_PACK_MD: _rel(ctx, ctx.artifact_path(SEARCH_EVIDENCE_PACK_MD)),
+            SEARCH_GAP_SUMMARY: _rel(ctx, ctx.artifact_path(SEARCH_GAP_SUMMARY)),
+            SEARCH_IDEA_CANDIDATES: _rel(ctx, ctx.artifact_path(SEARCH_IDEA_CANDIDATES)),
+            SEARCH_NOVELTY_CHECKS: _rel(ctx, ctx.artifact_path(SEARCH_NOVELTY_CHECKS)),
+            SEARCH_EXPERIMENT_CONTRACT_JSON: _rel(ctx, experiment_contract_path),
+            SEARCH_EXPERIMENT_CONTRACT_MD: _rel(ctx, ctx.artifact_path(SEARCH_EXPERIMENT_CONTRACT_MD)),
+            SEARCH_TOOL_CONTEXT_JSON: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_CONTEXT_JSON)),
+            SEARCH_TOOL_CONTEXT_MD: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_CONTEXT_MD)),
+            SEARCH_EVIDENCE_REVIEW_MD: _rel(ctx, ctx.artifact_path(SEARCH_EVIDENCE_REVIEW_MD)),
+            SEARCH_DECISION_LOG: _rel(ctx, ctx.artifact_path(SEARCH_DECISION_LOG)),
+            SEARCH_EVAL_JSON: _rel(ctx, ctx.artifact_path(SEARCH_EVAL_JSON)),
+            SEARCH_EVAL_MD: _rel(ctx, ctx.artifact_path(SEARCH_EVAL_MD)),
+            SEARCH_TOOL_ADAPTER_CONTRACT_JSON: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_ADAPTER_CONTRACT_JSON)),
+            SEARCH_TOOL_ADAPTER_CONTRACT_MD: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_ADAPTER_CONTRACT_MD)),
+            SEARCH_TOOL_TRACE: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_TRACE)),
+            SEARCH_EXTERNAL_AGENT_BACKEND: _rel(ctx, ctx.artifact_path(SEARCH_EXTERNAL_AGENT_BACKEND)),
+            SEARCH_RETENTION_POLICY_JSON: _rel(ctx, ctx.artifact_path(SEARCH_RETENTION_POLICY_JSON)),
+            SEARCH_RETENTION_POLICY_MD: _rel(ctx, ctx.artifact_path(SEARCH_RETENTION_POLICY_MD)),
         },
     )
     contract = {
@@ -166,9 +207,15 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
             "chunks": int(index_meta.get("chunk_count", 0) or 0),
             "paper_cards": len(paper_cards),
             "claim_cards": len(claim_cards),
+            "ideas": int(search_meta.get("idea_candidate_count", 0) or 0),
         },
         "store": state.store_paths,
         "coverage": coverage_report,
+        "evidence_pack": {
+            "schema_version": evidence_pack.get("schema_version", ""),
+            "path": _rel(ctx, evidence_pack_path),
+            "limitations": evidence_pack.get("limitations", []),
+        },
     }
     return CollectedStageResult(state=state, contract=contract, report_markdown=coverage_markdown)
 

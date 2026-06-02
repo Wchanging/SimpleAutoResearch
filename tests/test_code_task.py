@@ -128,6 +128,68 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("# Repo Map Summary", repo_summary)
             self.assertIn("## Prompt Budget", repo_summary)
 
+    def test_configured_edit_scope_limits_editable_repo_map_and_apply(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            config = root / "code_task.toml"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove the model implementation only.\n")
+            config.write_text(
+                f"""
+[code_task]
+code_root = "{code_root.as_posix()}"
+task_file = "{task_file.as_posix()}"
+
+[edit_scope]
+allowed_patterns = ["spam_model.py"]
+protected_patterns = ["pyproject.toml"]
+""".strip(),
+                encoding="utf-8",
+            )
+            options = load_code_task_init_options(config_path=str(config))
+
+            run_dir = root / "runs" / "scoped-code-task"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=Path(options.code_root),
+                task_file=Path(options.task_file or ""),
+                benchmark_command="python -m unittest discover -s tests",
+                edit_scope_allowed_patterns=options.edit_scope_allowed_patterns,
+                edit_scope_protected_patterns=options.edit_scope_protected_patterns,
+            )
+
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["edit_scope"]["allowed_patterns"], ["spam_model.py"])
+            self.assertIn("pyproject.toml", manifest["edit_scope"]["protected_patterns"])
+            repo_map = read_json(run_dir / "code_task" / "meta" / "repo_map.json")
+            files = {row["path"]: row for row in repo_map["files"]}
+            self.assertEqual(files["spam_model.py"]["access_role"], "editable")
+            self.assertEqual(files["pyproject.toml"]["access_role"], "read_only_evidence")
+
+            write_text(run_dir / "code_task" / "patch_plan.md", "# Patch Plan\n\n- Keep edits in scope.\n")
+            record_plan_decision(run_dir, decision="approve", note="scope test")
+            edits_path = root / "bad_scope_patch.json"
+            write_json(
+                edits_path,
+                {
+                    "schema_version": 1,
+                    "edits": [
+                        {
+                            "path": "pyproject.toml",
+                            "old": "[project]\nname = \"toy-project\"\nversion = \"0.1.0\"\n",
+                            "new": "[project]\nname = \"toy-project\"\nversion = \"0.2.0\"\n",
+                            "reason": "This file is intentionally outside the edit scope.",
+                        }
+                    ],
+                },
+            )
+            with self.assertRaises(PatchValidationError) as caught:
+                apply_patch_edits(run_dir, edits_file=edits_path)
+            self.assertIn("path is not editable by the edit scope", str(caught.exception))
+
     def test_init_can_create_git_worktree_workspace(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git executable is not available")

@@ -17,7 +17,7 @@
 - 显式 CLI 参数覆盖 TOML 值。
 - 顶层 pipeline TOML 和 code-task TOML 会先经过 Pydantic 校验，再 flatten 成运行时设置；section 类型写错时会更早失败，而不是被静默忽略。
 - 顶层 run config 中，相对路径会在解析器支持的字段上相对配置文件解析，例如 `[experiment].code_task_config` 和 `[research].local_documents`。
-- 当 run config 包含 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[workspace]` 或 `[safety]` 时，同一文件可被复用为 embedded code-task config。
+- 当 run config 包含 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[workspace]`、`[safety]` 或 `[edit_scope]` 时，同一文件可被复用为 embedded code-task config。
 
 ## 完整 Pipeline Config
 
@@ -69,7 +69,7 @@ allow_fixture_fallback = false
 strict = false
 
 [research]
-# 写入 planning/research_plan.json 的检索策略档位；全文解析能力仍是后续规划。
+# research planner 使用的检索策略档位；完整 planning artifact 只在 debug_artifacts = true 时保留。
 mode = "lite"                 # lite | standard | strong
 
 # research-question/query planner。auto 会在 [llm].enabled = true 时调用 LLM；
@@ -130,6 +130,10 @@ max_llm_calls = 4
 
 # 第二轮 coverage-driven follow-up retrieval 最多尝试几个 query。
 max_follow_up_queries = 3
+
+# evidence/novelty_checks.jsonl 的 backend。local 只在当前 evidence pack 内做词面重合风险提示，
+# 不是正式 novelty check。
+novelty_backend = "local"      # local
 
 [retrieval]
 # read/synthesize/report helper 是否启用本地 artifact retrieval。
@@ -194,6 +198,14 @@ reuse_source_venv = false
 
 # 为未来 managed environment 记录；init 不会执行这个命令。
 setup_hook = ""
+
+[edit_scope]
+# automated edits 可触碰的 workspace-relative glob allowlist。
+# 空列表表示所有非 protected workspace 文件都可作为候选。
+allowed_patterns = ["digits_mlp/**"]
+
+# 在默认 protected patterns 之外，额外作为只读证据的路径。
+protected_patterns = ["configs/locked/**"]
 
 [safety]
 # copy/sparse 模式最多复制多大的源文件；0 表示禁用限制。
@@ -283,7 +295,7 @@ max_proposal_chars = 42000
 | `[llm]` | pipeline 和 code task | LLM 是否启用、默认模型和 worker 数。 |
 | `[search]` | `02-search` | provider 行为、fallback 策略、结果数量和手动 query。 |
 | `[research]` | `02-search` | research-question 规划、query expansion、provider 顺序、本地文档、cache/index hints。 |
-| `[research.budget]` | `02-search` 和后续 evidence stages | 写入 `planning/research_plan.json` 的轻量预算上限。 |
+| `[research.budget]` | `02-search` 和后续 evidence stages | research planning 使用的轻量预算上限；只有启用 debug artifacts 时才会保留到 `planning/research_plan.json`。 |
 | `[retrieval]` | read/synthesize/report helpers | 本地 artifact retrieval 上下文。 |
 | `[experiment]` | `05-design` 到 `07-run` | 实验模板、timeout 和可选嵌套 code-task config 路径。 |
 | `[report]` | `08-report` | 报告结构模式。 |
@@ -293,6 +305,7 @@ max_proposal_chars = 42000
 | `[metrics]` | code task comparison | `primary`、`primary_metric`、`directions` 或 `metric_directions` 的替代位置。 |
 | `[environment]` | code task execution | Python 执行策略。 |
 | `[workspace]` | code-task init | workspace 模式和 setup metadata。 |
+| `[edit_scope]` | code-task init 和全部 patch gates | 可选 editable allowlist 和额外 read-only patterns。 |
 | `[safety]` | code-task init/validation | 复制大小和 validation 扫描限制。 |
 | `[execute]` | code-task execute | 状态机限制、运行设置、repair 轮数和输出流模式。 |
 | `[models]` | code-task execute | 默认模型路由。 |
@@ -308,7 +321,7 @@ max_proposal_chars = 42000
 | --- | --- |
 | `[run].topic` | 用户的主要研究/实验目标，会影响 planning、默认搜索 query 和报告表述。 |
 | `[run].from_stage` / `[run].to_stage` | 部分运行的阶段范围。可用于停在 `synthesize`、只重跑 `report`，或 resume 某一段。 |
-| `[run].debug_artifacts` | 是否保留 search 阶段的诊断目录，例如 planning、trace、screening 和 coverage review。默认 false 只压缩诊断文件；documents、全文 manifest、chunks 和 cards 仍会作为 evidence 产物保留。 |
+| `[run].debug_artifacts` | 是否保留 search 阶段的详细诊断和草案交接文件，例如 planning、trace、screening、coverage review、section tables、tool contracts、evidence review、eval report 和 retention policy。默认 false 会保持精简输出；documents、全文 manifest、chunks、cards、evidence pack、ideas、novelty hints 和 experiment contract 仍会作为核心 evidence 产物保留。 |
 | `[llm].enabled` | 是否启用 LLM 支持的 planning、notes、synthesis、report 和 code-task 步骤。真实 code-task 通常需要 LLM 才有实际意义。 |
 | `[llm].workers` | 支持并发的 LLM 阶段使用的 worker 数；并不代表所有 pipeline 阶段都会并发。 |
 | `[search].offline` | 跳过 live literature provider，适合本地 demo 和 deterministic test。 |
@@ -326,10 +339,10 @@ max_proposal_chars = 42000
 | `[research].mode` | 记录计划中的 evidence 深度：`lite` 表示 metadata/本地笔记，`standard` 表示 cache/index-ready，`strong` 预留给全文/向量工作流。 |
 | `[research].planner` | research-question 和 query-expansion 后端。`auto` 会在 `[llm].enabled = true` 时调用 LLM，并在 provider 不可用时回退；`llm` 显式要求走该路径；`deterministic` 禁用额外 LLM planner 调用。 |
 | `[research].sources` | search 阶段 provider 顺序。当前 connector 支持 `openalex`、`semantic_scholar`、`arxiv` 和 `local_files`；`fixture` 用于记录离线 fixture。 |
-| `[research].queries` | 作为 seed queries 写入 `02-search/planning/research_plan.json`。Search 会按 ordered-fallback rounds 执行 planned queries，并可把后续轮次预算用于未覆盖 facets。LLM planner 还会记录带 title/abstract keyword hints 的 `query_specs`。 |
+| `[research].queries` | 作为 research planner 的 seed queries。Search 会按 ordered-fallback rounds 执行 planned queries，并可把后续轮次预算用于未覆盖 facets。LLM planner 还会记录带 title/abstract keyword hints 的 `query_specs`；完整 plan 只在启用 debug artifacts 时保留。 |
 | `[research].auto_query_expansion` | 是否启用 facet-driven follow-up queries。deterministic 模式下为规则扩展；LLM planner 模式下模型可以在相同 query 预算内补充更强术语。想完全使用手写 query 时可以设为 false。 |
 | `[research].max_retrieval_rounds` | DeepResearch loop 计划运行的 retrieval/screening 轮数。大于 `1` 时允许在最终写出 `papers.jsonl` 前执行 coverage-driven follow-up retrieval。 |
-| `[research].max_queries` | `planning/research_plan.json` 的 `query_plan` section 中最多保留多少个 seed + expanded queries。 |
+| `[research].max_queries` | 内部 `query_plan` 中最多保留多少个 seed + expanded queries。 |
 | `[research].required_facets` | 希望覆盖的 evidence facets，例如 `method`、`benchmark`、`dataset`、`code_link` 或 `limitation`。这些会驱动 research questions 和 query expansion。 |
 | `[research].local_documents` | 作为本地研究记录读取的 Markdown/text 文件，路径相对配置文件解析，并会写入 `02-search/documents/documents.jsonl`，记录 parser/hash 状态。 |
 | `[research].use_fulltext` | 全文 evidence 工作流的意图开关。开启后，`documents/fulltext_manifest.json` 会在预算内选择可用的本地/远程全文 hint，`documents/fulltext_extraction.json` 会记录已缓存/本地输入的 parser 结果。 |
@@ -346,6 +359,7 @@ max_proposal_chars = 42000
 | `[research.budget].max_context_tokens` | evidence retrieval 放入 prompt 的计划 token 预算。 |
 | `[research.budget].max_llm_calls` | research 侧 query expansion、screening 等 LLM 操作的计划调用上限。 |
 | `[research.budget].max_follow_up_queries` | 第二轮 coverage-driven follow-up retrieval 最多尝试几个 query。 |
+| `[research.budget].novelty_backend` | `02-search/evidence/novelty_checks.jsonl` 的 backend。当前稳定值是 `local`，只基于当前 evidence pack 做词面重合风险提示。 |
 
 ### Code-Task 字段
 
@@ -363,6 +377,9 @@ max_proposal_chars = 42000
 | `[workspace].mode` | workspace 策略：`copy`、`git_worktree` 或 `sparse_copy`。 |
 | `[workspace].reuse_source_venv` | 检测到 source `.venv` 或 `venv` 时，是否记录并使用其中 Python。 |
 | `[workspace].setup_hook` | 为未来 managed environment 支持预留记录；init 阶段不执行。 |
+| `[edit_scope].allowed_patterns` | automated edits 可以修改的 workspace-relative glob allowlist。空列表表示所有 normalized、非 protected workspace 路径都可编辑。 |
+| `[edit_scope].protected_patterns` | 额外只读路径。tests、benchmark、`.env`、secret/credential-like 路径等默认 protected patterns 始终保留。 |
+| `[edit_scope].mode` | 可选标签，写入 `manifest.json` 供审计使用；它本身不改变行为。 |
 | `[safety].max_file_bytes` | copy/sparse 模式最大复制文件大小，避免误复制大模型、数据或 checkpoint。 |
 | `[safety].validation_max_file_bytes` | 静态 validation 扫描文件大小上限。 |
 
@@ -620,13 +637,25 @@ max_proposal_chars = 24000
 | `auto` / `true` | 同时处理普通日志和 `tqdm` 这类 carriage-return 进度输出。 |
 | `summary` | benchmark 结束后只打印尾部摘要。 |
 
-## Current Edit Scope Behavior
+## Edit Scope Behavior
 
-当前公开 TOML 还没有自定义 `[edit_scope]` allow/deny 配置。现有 code-task 仍会执行默认 edit-scope 基线：
+`[edit_scope]` 已经是 code-task 的真实安全契约，而不是只写给模型看的提示词。它会在多个位置重复生效：
 
-- 源项目只会在 `code_task/workspace` 中被修改；
-- tests、benchmark 文件、`.env` 和 secret/credential-like 路径会作为只读证据；
-- work-plan target files 会限制后续 edit proposal；
-- `apply-edits` 写文件前会再次检查 workspace-relative path、protected patterns、allowed target files 和 old-text 精确匹配。
+- `init` 会把 `allowed_patterns`、`protected_patterns` 和可选 `mode` 写入 `code_task/manifest.json`；
+- repo map、locate、context、work-plan、patch-plan、edit proposal 和 repair 会把 allowlist 之外的路径标为只读证据；
+- `apply-edits` 写文件前还会再次校验 workspace-relative path、allowed patterns、protected patterns、当前 batch target files 和 old-text 精确匹配；
+- 默认 protected patterns 始终保留，因此 tests、benchmark 文件、`.env`、secret/credential-like 路径等不会因为用户配置了 allowlist 而变成可写；
+- `protected_patterns` 是在默认规则之外额外添加只读路径，不是替换默认规则。
 
-可配置 allow/deny edit-scope 规则已纳入 V2.3 计划；在它进入本文档前，不应把它当成已实现能力。
+常见配置如下：
+
+```toml
+[edit_scope]
+# 只允许模型改应用代码；测试、benchmark 和配置仍可作为 evidence 读取。
+allowed_patterns = ["review_pipeline/**", "main.py"]
+
+# 额外锁定实验配置，避免模型为了刷指标而改 benchmark input。
+protected_patterns = ["configs/experiment.json"]
+```
+
+如果 `allowed_patterns` 为空，含义是“允许所有非 protected 的 workspace 文件作为候选”。如果需要最严格的生产级流程，建议显式声明 allowlist，并把数据、配置、测试和 benchmark 放进 protected 范围。

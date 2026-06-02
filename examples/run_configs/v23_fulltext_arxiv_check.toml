@@ -1,10 +1,13 @@
 [run]
-# V2.3 Day11 realistic online search/full-text check.
+# V2.3 realistic online search/full-text check.
 # This run stops at search so you can inspect all V2.3 evidence artifacts
 # without running read/synthesize/report.
 topic = "multi-agent collaboration for coding agents"
 output_root = "runs/v23-fulltext-arxiv-check"
 to_stage = "search"
+# Keep default runs lean. Set this to true only when you need planning traces,
+# screening rows, coverage diagnostics, tool contracts, and retention-policy
+# artifacts for debugging.
 debug_artifacts = false
 
 [llm]
@@ -24,7 +27,7 @@ allow_fixture_fallback = false
 # Keep this extremely small because arXiv can rate-limit repeated development
 # runs. This config is a Day11 full-text smoke, not a broad survey.
 max_papers = 3
-query = "LLM agents software engineering"
+query = "multi-agent collaboration for coding agents"
 
 [research]
 # strong marks this as a parser/full-text-oriented check. The implementation is
@@ -42,7 +45,7 @@ sources = ["arxiv", "openalex", "semantic_scholar"]
 # research-question decomposition, but query expansion is disabled below so the
 # run sends only one live arXiv request.
 queries = [
-  "LLM agents software engineering",
+  "multi-agent collaboration for coding agents",
 ]
 
 auto_query_expansion = false
@@ -80,6 +83,7 @@ max_chunks = 120
 max_context_tokens = 10000
 max_llm_calls = 3
 max_follow_up_queries = 0
+novelty_backend = "local"
 
 [retrieval]
 enabled = true

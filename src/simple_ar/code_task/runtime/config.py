@@ -78,6 +78,12 @@ class SafetySection(_ConfigModel):
     validation_max_file_bytes: int | None = None
 
 
+class EditScopeSection(_ConfigModel):
+    mode: str | None = None
+    allowed_patterns: list[str] | None = None
+    protected_patterns: list[str] | None = None
+
+
 class ExecuteSection(_ConfigModel):
     to_step: str | None = None
     model: str | None = None
@@ -137,6 +143,7 @@ class CodeTaskConfig(_ConfigModel):
     environment: EnvironmentSection = Field(default_factory=EnvironmentSection)
     workspace: WorkspaceSection = Field(default_factory=WorkspaceSection)
     safety: SafetySection = Field(default_factory=SafetySection)
+    edit_scope: EditScopeSection = Field(default_factory=EditScopeSection)
     execute: ExecuteSection = Field(default_factory=ExecuteSection)
     llm: LLMSection = Field(default_factory=LLMSection)
     models: ModelsSection = Field(default_factory=ModelsSection)
@@ -162,6 +169,9 @@ class CodeTaskInitOptions:
     python_executable: str | None
     primary_metric: str | None
     metric_directions: dict[str, str]
+    edit_scope_mode: str | None
+    edit_scope_allowed_patterns: tuple[str, ...]
+    edit_scope_protected_patterns: tuple[str, ...]
     config_path: str | None
 
 
@@ -362,6 +372,7 @@ def load_code_task_init_options(
     environment = config.environment
     workspace = config.workspace
     safety = config.safety
+    edit_scope = config.edit_scope
 
     resolved_code_root = _config_string(code_root) or _config_string(
         code_task.code_root
@@ -448,6 +459,9 @@ def load_code_task_init_options(
             config=config,
             cli_values=metric_directions,
         ),
+        edit_scope_mode=_config_string(edit_scope.mode),
+        edit_scope_allowed_patterns=_config_string_list(edit_scope.allowed_patterns),
+        edit_scope_protected_patterns=_config_string_list(edit_scope.protected_patterns),
         config_path=config_path,
     )
 

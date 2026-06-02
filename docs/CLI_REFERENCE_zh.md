@@ -17,6 +17,7 @@
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
 | `simple-ar inspect` | 为某次 run 构建本地 artifact index。 |
 | `simple-ar search-artifacts` | 搜索已经索引的 run artifacts。 |
+| `simple-ar clean` | 预览并清理某次 run 的可重建缓存。 |
 | `simple-ar code-task ...` | 在隔离可编辑 workspace 中处理已有代码项目。 |
 
 ## Research Pipeline
@@ -187,6 +188,30 @@ uv run simple-ar search-artifacts runs/<run-id> "accuracy" --top-k 5
 **注意**：
 
 如果 index 不存在或过期，先运行 `inspect`。
+
+### `simple-ar clean`
+
+**一句话说明**：预览并清理某个 run 的可重建缓存，同时保留报告、manifest、paper metadata、evidence cards、coverage report 和 `research_index/chunks.jsonl` 等审计产物。
+
+**语法用法**：
+```bash
+uv run simple-ar clean runs/<run-id>
+uv run simple-ar clean runs/<run-id> --yes
+```
+
+**参数表**：
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `RUN_DIR` | path | 要清理的 run 目录。 |
+| `--yes` | flag | 跳过交互式 `yes` 确认，直接删除预览中列出的目标。 |
+
+**生成产物**：
+- 先打印 Rich tree 预览：红色为将删除的缓存，绿色为会保留的审计产物。
+- 删除 `02-search/documents/fulltext_cache/`、`02-search/documents/extracted_text/`、`artifact_search_results.json` 等可重建缓存。
+- 如果 `index_meta.json` 指向当前 workspace 下的共享 SQLite research index，会删除该 run 对应的 SQLite rows。
+
+**注意**：
+`clean` 不会删除 run 目录本身，也不会删除报告、cards、papers、已保留的 debug coverage 和 portable chunks。
 
 ## Code Task Commands
 

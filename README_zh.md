@@ -18,7 +18,7 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
 ## 当前可用能力
 
 - **研究报告**：从主题出发，运行可见的阶段式流程，生成文献笔记、综合分析和报告产物。
-- **研究源规划**：每次 `02-search` 会写入紧凑的 `planning/research_plan.json`，记录研究问题、query plan、OpenAlex/Semantic Scholar/arXiv/本地文件源、可选 LLM-backed query planning、facet-driven query expansion、retrieval-round traces、screening decisions、coverage reports、follow-up retrieval rounds、document records、cache 策略和轻量预算。
+- **研究源规划**：支持 OpenAlex/Semantic Scholar/arXiv/本地文件源、可选 LLM-backed query planning、facet-driven query expansion、筛选、覆盖度检查、follow-up retrieval rounds、document records、cache 策略和轻量预算。普通运行默认保留精简 evidence 产物；需要 planning/traces/coverage 文件时再设置 `debug_artifacts = true`。
 - **Code Task**：在隔离可编辑 workspace 中改进已有代码库，支持 LLM 规划、人工审核点、受控补丁 proposal、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：可以把 code task 嵌入 8 阶段流程，生成 repo map、context pack、work plan、patch 证据、benchmark 指标和报告证据。
@@ -74,7 +74,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
 ```
 
-如果希望把搜索源、query 和本地资料写成可复用配置，可以使用 run config。下面这个本地示例会把 Markdown 笔记作为研究源，并在 `02-search/planning/research_plan.json` 中记录本次检索策略：
+如果希望把搜索源、query 和本地资料写成可复用配置，可以使用 run config。下面这个本地示例会把 Markdown 笔记作为研究源，并默认保留精简 search evidence 产物：
 
 ```bash
 uv run simple-ar run --config examples/run_configs/local_research_report.toml

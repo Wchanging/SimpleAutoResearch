@@ -209,6 +209,43 @@ class SearchStageTests(unittest.TestCase):
             self.assertTrue((ctx.run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl").exists())
             self.assertTrue((ctx.run_dir / "02-search" / "traces" / "screening_decisions.jsonl").exists())
 
+    def test_llm_research_planner_still_runs_when_query_expansion_is_disabled(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            local_note = root / "agent_notes.md"
+            write_text(local_note, "# Notes\n\nMulti-agent coding benchmarks use repository tasks.")
+            ctx = _search_context(root, allow_fixture_fallback=False)
+            ctx.config.update(
+                {
+                    "use_arxiv": False,
+                    "use_llm": True,
+                    "research_planner": "llm",
+                    "research_sources": ["local_files"],
+                    "research_queries": ["multi-agent coding"],
+                    "research_local_documents": [str(local_note)],
+                    "research_auto_query_expansion": False,
+                    "research_max_queries": 1,
+                    "research_required_facets": ["overview", "benchmark"],
+                }
+            )
+
+            fake = _FakeResearchPlanner()
+            with patch("simple_ar._legacy.stage_handlers._llm_client", return_value=fake):
+                execute_search(ctx)
+
+            research_plan = read_json(ctx.run_dir / "02-search" / "planning" / "research_plan.json")
+            query_plan = research_plan["query_plan"]
+            source_plan = research_plan["source_plan"]
+            meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
+
+            self.assertEqual(fake.label, "research-planner")
+            self.assertEqual(query_plan["planner"], "llm")
+            self.assertEqual(query_plan["auto_expansion"], False)
+            self.assertEqual(len(query_plan["queries"]), 1)
+            self.assertEqual(len(source_plan["queries"]), 1)
+            self.assertEqual(meta["research_planner"], "llm")
+
     def test_coverage_gap_can_trigger_follow_up_retrieval_round(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

@@ -24,7 +24,10 @@ from simple_ar.code_task.editing.attempts import (
 )
 from simple_ar.code_task.editing.budget import EditBudget, budget_profiles_json, edit_budget_for_profile
 from simple_ar.code_task.editing.scope import (
+    allowed_patterns_from_manifest,
     editable_paths,
+    edit_scope_rejection_reason,
+    is_edit_allowed_path,
     is_protected_edit_path,
     protected_patterns_from_manifest,
 )
@@ -127,6 +130,7 @@ def propose_patch_edits(
     root = Path(run_dir)
     context = _editor_context_from_run(root)
     safety = EditorSafetyPolicy(
+        allowed_patterns=allowed_patterns_from_manifest(context.manifest),
         protected_patterns=protected_patterns_from_manifest(context.manifest),
         allow_large_edits=allow_large_edits,
     )
@@ -164,6 +168,7 @@ def apply_patch_edits(
     root = Path(run_dir)
     context = _editor_context_from_run(root)
     safety = EditorSafetyPolicy(
+        allowed_patterns=allowed_patterns_from_manifest(context.manifest),
         protected_patterns=protected_patterns_from_manifest(context.manifest),
         allow_large_edits=allow_large_edits,
         allow_unapproved_plan=allow_unapproved_plan,
@@ -279,6 +284,7 @@ def _propose_controlled_patch_edits(
     task_text = _read_required_text(task_dir / "task.md")
     patch_plan = _read_required_text(task_dir / "patch_plan.md")
     index = _read_required_json(meta_dir / "codebase_index.json")
+    allowed_patterns = allowed_patterns_from_manifest(manifest)
     protected_patterns = protected_patterns_from_manifest(manifest)
     batch = load_latest_code_task_batch(root)
     batch_constraints = _batch_constraints(batch)
@@ -295,11 +301,13 @@ def _propose_controlled_patch_edits(
         selected = _context_pack_editable_files(
             loaded_context,
             protected_patterns=protected_patterns,
+            allowed_patterns=allowed_patterns,
             max_files=max_files,
         )
         read_only_context = _context_pack_read_only_files(
             loaded_context,
             protected_patterns=protected_patterns,
+            allowed_patterns=allowed_patterns,
             max_files=max_files,
         )
         snippets = _context_pack_editable_snippets(
@@ -331,12 +339,17 @@ def _propose_controlled_patch_edits(
             index,
             selected_context,
             protected_patterns=protected_patterns,
+            allowed_patterns=allowed_patterns,
             max_files=max_files,
         )
         read_only_context = [
             path
             for path in selected_context
-            if is_protected_edit_path(path, protected_patterns=protected_patterns)
+            if not is_edit_allowed_path(
+                path,
+                allowed_patterns=allowed_patterns,
+                protected_patterns=protected_patterns,
+            )
         ]
         snippets = _source_snippets(
             workspace_dir,
@@ -388,6 +401,7 @@ def _propose_controlled_patch_edits(
                 index=index,
                 snippets=snippets,
                 read_only_context=read_only_context,
+                allowed_patterns=allowed_patterns,
                 protected_patterns=protected_patterns,
                 budget=budget,
                 allowed_edit_files=proposal_allowed_files,
@@ -405,6 +419,7 @@ def _propose_controlled_patch_edits(
         index=index,
         mode=mode,
         protected_patterns=protected_patterns,
+        allowed_patterns=allowed_patterns,
         workspace_dir=workspace_dir,
         budget=budget,
         allow_large_edits=allow_large_edits,
@@ -502,9 +517,11 @@ def _apply_controlled_patch_edits(
 
     applied_budget = _applied_budget_record(proposal, allow_large_edits=allow_large_edits)
     protected_patterns = protected_patterns_from_manifest(manifest)
+    allowed_patterns = allowed_patterns_from_manifest(manifest)
     prepared = _prepare_edits(
         workspace_dir,
         edits,
+        allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
     )
     pre_hash_rows = _hash_rows_for_prepared(workspace_dir, prepared)
@@ -543,6 +560,7 @@ def _apply_controlled_patch_edits(
         codebase_index,
         output_path=meta_dir / "repo_map.json",
         summary_path=meta_dir / "repo_map_summary.md",
+        allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
     )
     _update_manifest_after_apply(
@@ -571,6 +589,7 @@ def _ask_llm_for_edits(
     index: dict[str, Any],
     snippets: list[dict[str, str]],
     read_only_context: list[str],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
     budget: EditBudget,
     allowed_edit_files: list[str],
@@ -584,6 +603,7 @@ def _ask_llm_for_edits(
             index=index,
             snippets=snippets,
             read_only_context=read_only_context,
+            allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
             budget=budget,
             allowed_edit_files=allowed_edit_files,
@@ -601,6 +621,7 @@ def _edit_user_prompt(
     index: dict[str, Any],
     snippets: list[dict[str, str]],
     read_only_context: list[str],
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
     budget: EditBudget,
     allowed_edit_files: list[str],
@@ -617,7 +638,15 @@ def _edit_user_prompt(
                     str(item.get("path", "")),
                     protected_patterns=protected_patterns,
                 )
-                else "editable"
+                else (
+                    "editable"
+                    if is_edit_allowed_path(
+                        str(item.get("path", "")),
+                        allowed_patterns=allowed_patterns,
+                        protected_patterns=protected_patterns,
+                    )
+                    else "read_only"
+                )
             ),
             "summary": item.get("summary", ""),
         }
@@ -693,6 +722,7 @@ def _normalize_edit_proposal(
     index: dict[str, Any],
     mode: str,
     protected_patterns: tuple[str, ...],
+    allowed_patterns: tuple[str, ...],
     workspace_dir: Path,
     budget: EditBudget,
     allow_large_edits: bool,
@@ -717,8 +747,17 @@ def _normalize_edit_proposal(
         if path not in known_paths:
             warnings.append(f"Dropped edit for unknown path: {path or '<empty>'}")
             continue
-        if is_protected_edit_path(path, protected_patterns=protected_patterns):
-            warnings.append(f"Dropped edit for protected read-only path: {path}")
+        rejection = edit_scope_rejection_reason(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        )
+        if rejection:
+            if rejection == "protected_path":
+                warnings.append(f"Dropped edit for protected read-only path: {path}")
+            else:
+                warnings.append(f"Dropped edit for disallowed path `{path}`: {rejection}")
+            rejected_edits.append({"path": path, "reason": rejection})
             continue
         if allowed_paths and path not in allowed_paths:
             warnings.append(f"Dropped edit outside current batch target files: {path}")
@@ -776,6 +815,7 @@ def _prepare_edits(
     workspace_dir: Path,
     edits: list[dict[str, Any]],
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> list[_PreparedEdit]:
     workspace = workspace_dir.resolve()
@@ -800,9 +840,19 @@ def _prepare_edits(
         if file_path is None:
             errors.append(f"edit {index} `{path}`: path escapes the workspace")
             continue
-        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+        rejection = edit_scope_rejection_reason(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        )
+        if rejection:
+            message = (
+                "path is protected by the edit scope"
+                if rejection == "protected_path"
+                else f"path is not editable by the edit scope ({rejection})"
+            )
             errors.append(
-                f"edit {index} `{path}`: path is protected by the edit scope"
+                f"edit {index} `{path}`: {message}"
             )
             continue
         if not file_path.exists() or not file_path.is_file():
@@ -1143,6 +1193,7 @@ def _context_pack_files(
 def _context_pack_editable_files(
     loaded: LoadedCodeTaskContextPack,
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
     max_files: int,
 ) -> list[str]:
@@ -1152,7 +1203,11 @@ def _context_pack_editable_files(
         if not path or path in selected:
             continue
         role = str(row.get("access_role", "editable"))
-        if role != "editable" or is_protected_edit_path(path, protected_patterns=protected_patterns):
+        if role != "editable" or not is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        ):
             continue
         selected.append(path)
         if len(selected) >= max(1, max_files):
@@ -1163,6 +1218,7 @@ def _context_pack_editable_files(
 def _context_pack_read_only_files(
     loaded: LoadedCodeTaskContextPack,
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
     max_files: int,
 ) -> list[str]:
@@ -1172,7 +1228,11 @@ def _context_pack_read_only_files(
         if not path or path in selected:
             continue
         role = str(row.get("access_role", "editable"))
-        if role == "editable" and not is_protected_edit_path(path, protected_patterns=protected_patterns):
+        if role == "editable" and is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        ):
             continue
         selected.append(path)
         if len(selected) >= max(1, max_files):
@@ -1385,9 +1445,14 @@ def _editable_context_files(
     selected_files: list[str],
     *,
     protected_patterns: tuple[str, ...],
+    allowed_patterns: tuple[str, ...],
     max_files: int,
 ) -> list[str]:
-    selected = editable_paths(selected_files, protected_patterns=protected_patterns)
+    selected = editable_paths(
+        selected_files,
+        allowed_patterns=allowed_patterns,
+        protected_patterns=protected_patterns,
+    )
     if selected:
         return selected[: max(1, max_files)]
     fallback: list[str] = []
@@ -1395,7 +1460,11 @@ def _editable_context_files(
         path = _string(item.get("path"))
         if not path:
             continue
-        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+        if not is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        ):
             continue
         kind = _string(item.get("kind"))
         role_tags = [str(tag) for tag in item.get("role_tags", []) if isinstance(tag, str)]

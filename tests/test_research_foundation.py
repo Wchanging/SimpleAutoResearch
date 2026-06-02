@@ -19,12 +19,20 @@ from simple_ar.research.contracts import (
     SourcePlan,
     TextChunk,
 )
-from simple_ar.research.evidence.cards import build_evidence_cards
+from simple_ar.research.evidence.cards import build_dataset_cards, build_evidence_cards, build_method_cards
 from simple_ar.research.evidence.coverage import build_coverage_report
+from simple_ar.research.evidence.derivation import (
+    build_experiment_contract,
+    build_idea_candidates,
+    build_novelty_checks,
+    build_tool_context,
+)
+from simple_ar.research.evidence.pack import build_evidence_pack
 from simple_ar.research.store.chunking import build_text_chunks
 from simple_ar.research.documents.records import build_cache_manifest, build_document_records
 from simple_ar.research.documents.extractors import apply_fulltext_extraction
 from simple_ar.research.documents.fulltext import build_fulltext_manifest, fulltext_hints_for_paper
+from simple_ar.research.documents.sections import build_document_sections
 from simple_ar.research.store.index import write_research_index
 from simple_ar.research.planning.planner import build_query_plan, build_research_questions
 from simple_ar.research.evidence.retrieval import RetrievalCandidate, relevance_score, screen_retrieval_candidates
@@ -71,6 +79,7 @@ class ResearchFoundationTests(unittest.TestCase):
                 "research_index_root": ".simple_ar_cache/research_index",
                 "research_max_documents": 7,
                 "research_max_chunks": 50,
+                "research_novelty_backend": "local",
             },
             default_query="agent simulation",
             default_max_results=4,
@@ -83,6 +92,7 @@ class ResearchFoundationTests(unittest.TestCase):
         self.assertEqual(plan.index_root, ".simple_ar_cache/research_index")
         self.assertEqual(plan.budget["max_documents"], 7)
         self.assertEqual(plan.budget["max_chunks"], 50)
+        self.assertEqual(plan.budget["novelty_backend"], "local")
 
     def test_research_questions_and_query_plan_expand_topic(self) -> None:
         questions = build_research_questions(
@@ -559,6 +569,80 @@ class ResearchFoundationTests(unittest.TestCase):
             self.assertGreaterEqual(len(rows), 1)
             self.assertTrue(all(row[0] == "test-run" for row in all_rows))
 
+    def test_section_aware_chunks_preserve_document_sections(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            note = root / "paper.md"
+            note.write_text(
+                "# Paper\n\n"
+                "## Abstract\n"
+                "The paper studies multi-agent coding systems.\n\n"
+                "## Method\n"
+                "The method coordinates planner, editor, and reviewer agents.\n\n"
+                "## Experiments\n"
+                "The benchmark reports success rate and runtime metrics.\n\n"
+                "## Limitations\n"
+                "A limitation is instability across random seeds.\n",
+                encoding="utf-8",
+            )
+            record = DocumentRecord(
+                document_id="doc-paper",
+                title="Paper",
+                source="local_files",
+                local_path=str(note),
+                extraction_status="parsed",
+                parser="plain_text",
+                metadata={"paper_id": "paper-1"},
+            )
+
+            sections = build_document_sections([record])
+            chunks = build_text_chunks([record], sections=sections, max_chunks=10, chunk_chars=120)
+
+            self.assertEqual([section.section for section in sections], ["abstract", "method", "experiments", "limitations"])
+            self.assertTrue(any(chunk.metadata.get("section") == "method" for chunk in chunks))
+            self.assertTrue(any("#section-" in chunk.chunk_id for chunk in chunks))
+
+    def test_section_aware_cards_prefer_method_and_evaluation_sections(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            note = root / "paper.md"
+            note.write_text(
+                "## Abstract\n"
+                "The paper introduces a coding-agent benchmark.\n\n"
+                "## Method\n"
+                "The method proposes a planner-editor-reviewer framework for repository repair.\n\n"
+                "## Experiments\n"
+                "The benchmark dataset reports success rate, F1, and runtime metrics.\n\n"
+                "## Limitations\n"
+                "A limitation is failure on long-horizon repository tasks.\n",
+                encoding="utf-8",
+            )
+            document = DocumentRecord(
+                document_id="doc-paper",
+                title="Agent Coding Benchmark",
+                source="local_files",
+                local_path=str(note),
+                extraction_status="parsed",
+                parser="plain_text",
+                metadata={"paper_id": "paper-agent"},
+            )
+            sections = build_document_sections([document])
+            chunks = build_text_chunks([document], sections=sections, max_chunks=10, chunk_chars=160)
+
+            paper_cards, claim_cards = build_evidence_cards(documents=[document], chunks=chunks)
+            method_cards = build_method_cards(documents=[document], chunks=chunks)
+            dataset_cards = build_dataset_cards(documents=[document], chunks=chunks)
+
+            self.assertIn("planner-editor-reviewer", paper_cards[0].method_summary)
+            self.assertTrue(paper_cards[0].metrics)
+            self.assertTrue(any("long-horizon" in item for item in paper_cards[0].limitations))
+            self.assertTrue(all("#section-" in ref for ref in paper_cards[0].evidence_refs))
+            self.assertTrue(claim_cards)
+            self.assertTrue(method_cards)
+            self.assertTrue(dataset_cards)
+
     def test_lancedb_index_backend_is_optional(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -610,6 +694,59 @@ class ResearchFoundationTests(unittest.TestCase):
         self.assertEqual(len(claim_cards), 2)
         self.assertTrue(all(card.evidence_refs for card in claim_cards))
 
+    def test_evidence_pack_and_derivations_are_compact_and_grounded(self) -> None:
+        paper = Paper(
+            id="paper-agent",
+            title="Agent Coding Benchmark",
+            authors=[],
+            abstract="The method proposes a planner-editor-reviewer framework and reports success rate.",
+            url="https://example.test/paper",
+            source="openalex",
+            source_id="W1",
+        )
+        document = DocumentRecord(
+            document_id="doc-agent",
+            title=paper.title,
+            source="openalex",
+            abstract=paper.abstract,
+            extraction_status="parsed",
+            metadata={"paper_id": paper.id},
+        )
+        chunks = build_text_chunks([document], max_chunks=2)
+        paper_cards, claim_cards = build_evidence_cards(documents=[document], chunks=chunks)
+        method_cards = build_method_cards(documents=[document], chunks=chunks)
+        dataset_cards = build_dataset_cards(documents=[document], chunks=chunks)
+        pack = build_evidence_pack(
+            topic="multi-agent coding",
+            source_plan=SourcePlan(queries=["multi-agent coding"], require_fulltext=True),
+            papers=[paper],
+            documents=[document],
+            sections=[],
+            chunks=chunks,
+            index_meta={"backend": "keyword", "chunk_count": len(chunks)},
+            paper_cards=paper_cards,
+            claim_cards=claim_cards,
+            method_cards=method_cards,
+            dataset_cards=dataset_cards,
+            code_links=[],
+            coverage_report={"status": "covered", "covered_facets": ["method"], "missing_facets": []},
+            fulltext_manifest={"enabled": True, "selected_count": 1},
+            fulltext_extraction={"parsed_count": 1, "status_counts": {"parsed": 1}},
+        )
+        ideas = build_idea_candidates(pack)
+        novelty_checks = build_novelty_checks(ideas, pack)
+        contract = build_experiment_contract(ideas, pack)
+        tool_context, _ = build_tool_context(pack=pack, contract=contract, novelty_checks=novelty_checks)
+
+        self.assertEqual(pack["schema_version"], "evidence_pack.v1")
+        self.assertNotIn("The method proposes a planner-editor-reviewer", str(pack["papers"]))
+        self.assertTrue(ideas)
+        self.assertTrue(ideas[0].motivation_refs)
+        self.assertTrue(contract.motivation_refs)
+        self.assertTrue(novelty_checks)
+        self.assertTrue(tool_context["human_review_required"])
+        self.assertIn("modify repository files without an approved code-task workspace", tool_context["forbidden_actions"])
+
     def test_evidence_card_claim_scope_prefers_limitations(self) -> None:
         document = DocumentRecord(
             document_id="doc-risk",
@@ -658,6 +795,67 @@ class ResearchFoundationTests(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertTrue(any(row["decision"] == "keep" for row in decisions))
         self.assertTrue(any(row["reason"] == "duplicate_lower_score" for row in decisions))
+
+    def test_screening_preserves_required_facet_diversity(self) -> None:
+        method_a = Paper(
+            id="method-a",
+            title="LLM Agents Software Engineering Benchmark Method",
+            authors=[],
+            abstract="LLM agents solve software engineering tasks with unit tests and benchmarks.",
+            url="https://example.test/method-a",
+            source="openalex",
+        )
+        method_b = Paper(
+            id="method-b",
+            title="Software Engineering Agents Method",
+            authors=[],
+            abstract="Agents improve coding workflows with testing and benchmark feedback.",
+            url="https://example.test/method-b",
+            source="openalex",
+        )
+        overview = Paper(
+            id="overview",
+            title="Survey of LLM Coding Agents",
+            authors=[],
+            abstract="A survey summarizes multi-agent collaboration for software development.",
+            url="https://example.test/overview",
+            source="openalex",
+        )
+
+        kept, decisions = screen_retrieval_candidates(
+            [
+                RetrievalCandidate(
+                    paper=method_a,
+                    source="openalex",
+                    query="llm agents software engineering benchmark",
+                    query_index=1,
+                    round_index=1,
+                    facet="method",
+                ),
+                RetrievalCandidate(
+                    paper=method_b,
+                    source="openalex",
+                    query="software engineering agents method",
+                    query_index=2,
+                    round_index=1,
+                    facet="method",
+                ),
+                RetrievalCandidate(
+                    paper=overview,
+                    source="openalex",
+                    query="multi-agent collaboration coding agents",
+                    query_index=3,
+                    round_index=1,
+                    facet="overview",
+                ),
+            ],
+            max_documents=2,
+            priority_facets=["overview", "method"],
+        )
+
+        kept_ids = {paper.id for paper in kept}
+        self.assertIn("overview", kept_ids)
+        self.assertTrue(any(row["paper_id"] == "overview" and row["reason"] == "facet_coverage" for row in decisions))
 
     def test_negative_scope_acronyms_penalize_out_of_scope_metadata(self) -> None:
         paper = Paper(

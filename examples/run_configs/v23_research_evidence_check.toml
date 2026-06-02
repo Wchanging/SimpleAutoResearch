@@ -1,10 +1,12 @@
 [run]
 # V2.3 research/evidence check config.
-# Default scope is Day3-Day5 friendly: stop at search so you can inspect the
-# research-question, query-plan, source-plan, retrieval, screening, and coverage artifacts quickly.
+# Default scope is Day26-friendly: stop at search so you can inspect the
+# research-question, query-plan, source-plan, retrieval, screening, coverage,
+# evidence, tool-contract, and local-index artifacts.
 topic = "multi-agent collaboration for coding agents"
-output_root = ".tmp_tests/v23-research-evidence-check"
+output_root = "runs/v23-research-evidence-check"
 to_stage = "search"
+debug_artifacts = false
 
 [llm]
 # Required when you want to validate the LLM-backed research planner.
@@ -44,7 +46,8 @@ planner = "llm"
 # and set [search].offline = true.
 sources = ["openalex", "semantic_scholar", "arxiv"]
 
-# Seed queries are preserved in planning/research_plan.json before LLM/planner expansion.
+# Seed queries are used by the planner before LLM/planner expansion; the full
+# planning artifact is retained only when debug_artifacts = true.
 queries = [
   "multi-agent collaboration for coding agents",
   "LLM agents software engineering benchmark",
@@ -55,9 +58,9 @@ max_retrieval_rounds = 2
 max_queries = 8
 required_facets = ["overview", "method", "benchmark", "dataset", "code_link", "limitation"]
 
-# Resolved relative to this config file. Only used when `sources` includes
-# `local_files`; kept here so the config can be switched back to local mode.
-local_documents = ["../research/local_multi_agent_coding_notes.md"]
+# Keep empty for this online test. Add Markdown/text paths only when you want
+# local notes to be included as additional evidence records.
+local_documents = []
 
 # These flags are recorded in documents/cache_manifest.json and
 # documents/fulltext_manifest.json. Remote PDF download is guarded by

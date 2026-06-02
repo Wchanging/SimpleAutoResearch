@@ -1,8 +1,8 @@
-# 工作流与产物
+﻿# 工作流与产物
 
 [English version](WORKFLOWS.md)
 
-本文说明 SimpleAutoResearch 内部在做什么：工作流预设、pipeline 阶段、阶段输出和 run artifact 布局。具体命令见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML 字段见 [配置参考](CONFIG_REFERENCE_zh.md)，安装和 walkthrough 见 [使用与配置](USAGE_zh.md)。
+本文说明 SimpleAutoResearch 内部在做什么：工作流预设、pipeline 阶段、artifact 归属和模块边界。它不重复完整文件手册；具体命令和文件树见 [使用与配置](USAGE_zh.md)，命令参数见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML 字段见 [配置参考](CONFIG_REFERENCE_zh.md)。
 
 ## 工作流预设
 
@@ -101,308 +101,51 @@ plan -> search -> read -> synthesize -> design experiment
 
 ## Search 与 LLM 边界
 
-默认情况下，普通 pipeline run 会在 search 阶段 contract 写出后保留紧凑输出。紧凑模式会保留后续阶段需要的 evidence 产物，只删除 planning、trace 和 review 这类诊断目录：
+Search 是证据引擎，不只是 metadata lookup。它会收束研究问题、选择 source 顺序、检索和筛选候选文献、检查 coverage、记录 document/full-text 状态、构建本地 chunks/cards，并向后续 report 或 code-task 交付保守的 evidence bridge。
+
+普通运行默认只保留紧凑产物：
 
 ```text
 02-search/
-  contract.json
-  report.md
-  papers.jsonl
-  search_meta.json
-  documents/
-    documents.jsonl
-    cache_manifest.json
-    fulltext_manifest.json
-    fulltext_extraction.json
-    fulltext_cache/     # 只有远程全文被获取并保留时出现
-    extracted_text/     # 只有 parser 输出被物化为文本时出现
-  research_index/
-    chunks.jsonl
-    index_meta.json
-  cards/
-    paper_cards.jsonl
-    claim_cards.jsonl
+  papers.jsonl / search_meta.json
+  documents/       # 标准化 document records，以及 full-text/cache manifests
+  research_index/  # 可迁移 chunks 与本地索引 metadata
+  cards/           # paper、claim、method、dataset、code-link cards
+  evidence/        # evidence pack、gap、idea、novelty hint、experiment contract
 ```
 
-如果还需要检查 planning、retrieval trace、screening 和 coverage-review 诊断信息，可以设置 `[run].debug_artifacts = true`：
+当 `[run].debug_artifacts = true` 时，search 还会保留 planning 文件、retrieval traces、screening decisions、coverage-review reports、section tables、只读 tool-context 草案、adapter/governance notes，以及其他诊断产物。
 
-```text
-02-search/
-  contract.json
-  report.md
-  papers.jsonl
-  search_meta.json
-  planning/
-    research_plan.json
-  traces/
-    retrieval_rounds.jsonl
-    screening_decisions.jsonl
-  review/
-    coverage_report.json
-    coverage_report.md
-```
+共享加速索引默认放在 run 目录之外的 `.simple_ar_cache/research_index`，按 run/source metadata 组织。run-local 的 PDF 下载缓存和 extracted text 属于可重建内容，可以用 `simple-ar clean` 预览和清理。
 
-共享加速索引默认写在 run 目录外：
+LLM 参与是有边界的。research planner 可以使用 deterministic、`auto` 或 LLM 模式；coverage check 和本地 novelty check 只是风险信号，不是原创性证明。`--no-llm` 会让 plan/read/synthesize/report 使用 deterministic fallback 文本。
 
-```text
-.simple_ar_cache/
-  research_index/
-    sqlite_fts.db
-    lancedb/
-```
+完整 search-stage 文件树和逐文件说明见 [使用与配置](USAGE_zh.md)。search、cache、parser 和 debug artifact 配置见 [配置参考](CONFIG_REFERENCE_zh.md)。
 
-- `02-search/planning/research_plan.json` 会在一个紧凑 artifact 中记录子问题、需要覆盖的 evidence facets、seed/expanded queries、结构化 title/abstract keyword hints、source 顺序、本地文档、检索模式、cache/index hints 和预算。LLM 关闭时使用 deterministic planner；`[research].planner = "auto"` 或 `"llm"` 时可由模型参与生成。
-- `02-search/traces/retrieval_rounds.jsonl` 会记录实际执行的 source/query 尝试。第一轮会把 normalized query、facet、title/abstract keyword 意图写入 trace；coverage-driven follow-up rounds 复用同一 trace 格式。
-- `02-search/traces/screening_decisions.jsonl` 会记录写入 `papers.jsonl` 前的去重和轻量相关性筛选决策。
-- `02-search/review/coverage_report.json` 和 `02-search/review/coverage_report.md` 会记录 required facets 覆盖情况和缺失问题；如果还有轮次预算，search 阶段会先为未覆盖 facets 跑一个有界 follow-up round，再写出最终论文列表。
-- `02-search/documents/documents.jsonl` 会把已选 metadata 和配置的本地文件统一记录为 document records，并保存 extraction status。在线 metadata 通常是 `metadata_only`；本地 Markdown/text 可以是 `parsed`；不支持或不可用文件会记录为 `skipped` 或 `failed`。
-- `02-search/documents/cache_manifest.json` 会汇总 cache/index 意图、extraction status 和 source counts。
-- `02-search/documents/fulltext_manifest.json` 会记录 arXiv/OpenAlex/local-file 全文 hints、fetch 预算决策、本地可用全文和远程获取失败。
-- `02-search/documents/fulltext_extraction.json` 会记录已缓存/本地全文的 best-effort parser 结果。Markdown/text 和基础 HTML 使用标准库解析；PDF 默认使用轻量 `pypdf`；安装可选依赖后可以选择 `unstructured`，不可用或失败时只写入 manifest，不让 search 阶段失败。
-- `02-search/research_index/chunks.jsonl` 会保存从摘要、已解析本地文件和已抽取全文生成的可移植 chunks，是后续 evidence-card 抽取的 source of truth。
-- `02-search/research_index/index_meta.json` 会记录本地 index backend、run id、可移植 chunk 路径，以及共享 SQLite FTS / LanceDB store 路径。默认共享目录是 `.simple_ar_cache/research_index`，避免每个 run 重复创建数据库。
-- Live search 使用配置中的 source 顺序。默认先用 OpenAlex，再用 Semantic Scholar，最后用 arXiv。未设置 `--strict-search` 且 source plan 允许 cache 时，live 失败后会使用缓存 metadata。
-- 当前 source strategy 是 ordered fallback，不是 full source union：同一个 query 只要某个 provider 返回候选，后续 provider 就不会继续调用。
-- `local_files` 可以把用户提供的 Markdown/text 笔记作为保守的 metadata-like records。本地 PDF 只有在启用 full-text 意图且可选 parser 可用时，才会作为 best-effort 解析输入。
-- `--offline-search` 会跳过 live provider，直接使用 fixture metadata。
-- `--allow-fixture-fallback` 只在 live 和 cache 都失败后允许 fixture metadata。
-- `--no-llm` 会让 plan/read/synthesize/report 使用 deterministic fallback。
-- Report drafting 默认 `auto`：有 `results.json` 时使用 experiment sections，否则使用 literature-only structure。
+## Artifact 归属概览
 
-## Research Run Artifacts
+WORKFLOWS 只保留产物归属层面的说明；完整文件树放在 [使用与配置](USAGE_zh.md)。概括来说：
 
-一次完整 research run 可能包含这些文件，取决于启用的选项：
+- run 根目录文件（`state.json`、`manifest.json`、`config_snapshot.json`、usage logs，以及可选 artifact indexes）负责 resume state、配置快照和可观测性。
+- 阶段目录（`01-plan` 到 `08-report`）各自拥有自己的 contract、report 和稳定 handoff artifact。
+- `02-search` 负责 retrieval、document/full-text 状态、本地 chunks、evidence cards 和紧凑 evidence bridge。
+- 当 research pipeline 衔接代码执行时，`06-code/code_task_run` 会嵌入与 standalone code task 相同形态的 artifact。
+- `08-report` 负责最终报告包：报告正文、references、manifest 和质量检查。
 
-```text
-runs/<run-id>/
-  state.json
-  manifest.json
-  pipeline_state.json
-  config_snapshot.json
-  topic.txt
-  llm_usage.jsonl
-  llm_usage_summary.json
-  artifact_index.json
-  artifact_chunks.jsonl
-  artifact_search_results.json  # 只有显式 search-artifacts 后才生成
-  source_plan.json
-  activity_log.jsonl
-  evidence_ledger.jsonl
-  01-plan/
-  02-search/
-    contract.json
-    report.md
-    papers.jsonl
-    search_meta.json
-    planning/       # 仅在 [run].debug_artifacts = true 时保留
-      research_plan.json
-    documents/
-      documents.jsonl
-      cache_manifest.json
-      fulltext_manifest.json
-      fulltext_extraction.json
-      fulltext_cache/  # 只有远程全文被获取并保留时出现
-      extracted_text/  # 只有 HTML/PDF-like 资源被抽取成文本时出现
-    research_index/
-      chunks.jsonl
-      index_meta.json
-    cards/
-      paper_cards.jsonl
-      claim_cards.jsonl
-    traces/         # 仅在 [run].debug_artifacts = true 时保留
-      retrieval_rounds.jsonl
-      screening_decisions.jsonl
-    review/         # 仅在 [run].debug_artifacts = true 时保留
-      coverage_report.json
-      coverage_report.md
-  03-read/
-  04-synthesize/
-  05-design/
-  06-code/
-    code_task_experiment.json
-    code_task_run/
-  07-run/
-  08-report/
-```
+这样可以让详细运行文件保持可追踪，同时不要求读者在理解 workflow 前先读完每个 JSON/JSONL。主要用于诊断或可重建的文件，应该通过 `debug_artifacts` 管控，或明确标注为 cleanup-safe。
 
-根目录文件：
+## Code Task Artifact 边界
 
-- `state.json`：typed workflow checkpoint，用于 resume 和阶段间显式交接。
-- `manifest.json`：stage status 和声明输出。
-- `pipeline_state.json`：已完成阶段和 resume 的下一阶段。
-- `config_snapshot.json`：本次运行配置快照。
-- `llm_usage.jsonl`：每次成功 LLM request 一行。
-- `llm_usage_summary.json`：token 聚合和可选费用估算。
-- `artifact_index.json`：由 `inspect` 或 `search-artifacts` 生成的本地 artifact index。
-- `artifact_chunks.jsonl`：用于本地 retrieval 的 line-addressable chunks。
-- `artifact_search_results.json`：最近一次 artifact search 结果，只由 artifact search 命令生成。
-- `source_plan.json`：artifact-retrieval source plan，描述每个阶段应该参考哪些 run artifacts；它和 `02-search/planning/research_plan.json` 内部的文献 `source_plan` section 不是同一个东西。
-- `activity_log.jsonl`：source planning 和 retrieval actions 的结构化日志。
-- `evidence_ledger.jsonl`：阶段使用的 snippets，包含 path 和 line range。
-- `02-search/contract.json`：search 阶段的紧凑机器可读摘要，用于阶段交接。
-- `02-search/report.md`：search 阶段的紧凑人工可读摘要。
-- `02-search/planning/research_plan.json`：紧凑的 search planning artifact，内部包含研究问题拆解、可执行 query plan 和文献 source plan sections；仅在 `[run].debug_artifacts = true` 时保留在 run 目录。
-- `02-search/traces/retrieval_rounds.jsonl`：实际执行的 source/query 尝试，包含返回数量、错误和简洁 query 意图 trace；debug artifact。
-- `02-search/traces/screening_decisions.jsonl`：retrieved metadata candidates 的 keep/discard 决策；debug artifact。
-- `02-search/review/coverage_report.json` / `coverage_report.md`：required facets 覆盖情况、缺失问题状态和 follow-up query 决策；debug artifact。
-- `02-search/documents/documents.jsonl`：metadata 和本地文件的标准化 document records；可用时包含 hash 和 parser status。
-- `02-search/documents/cache_manifest.json`：cache、index、full-text 和 extraction-status 汇总。
-- `02-search/documents/fulltext_manifest.json`：全文 hints、候选选择、blocked/skipped 原因，以及 parser/fetch 预算设置。
-- `02-search/documents/fulltext_extraction.json`：已缓存本地/远程全文资源的 parser 结果；PDF 或不支持后缀解析失败会记录在这里，不会让 search 阶段失败。
-- `02-search/research_index/chunks.jsonl`：后续 retrieval、evidence-card extraction 和 report grounding 使用的可移植本地 chunk store；共享加速索引在 `.simple_ar_cache/`。
-- `02-search/research_index/index_meta.json`：本地 index manifest，包含 backend、run id、可移植 chunk 路径和共享 SQLite / LanceDB 加速索引路径。
-- `02-search/cards/paper_cards.jsonl`：deterministic paper cards，带 evidence refs，供后续 gap、idea 和 report stages 使用。
-- `02-search/cards/claim_cards.jsonl`：绑定 chunk id 的保守 claim cards；最终报告使用前仍应经过 report audit。
-- `02-search/search_meta.json`：最终选用 source、状态、数量，以及已保留 evidence artifact 路径；planning/trace/review 诊断路径只会在 `[run].debug_artifacts = true` 时保留。
-- `02-search/papers.jsonl`：传给 `03-read` 的标准化 metadata rows。
-- `05-design/generated_code_task.md`：仅当内嵌 `code_task_project` 没有 task file 时生成。
-- `05-design/generated_code_task_meta.json`：生成 task file 的 provenance。
-- `06-code/code_task_experiment.json`：内嵌 code-task templates 的阶段产物。
+Standalone code task 和嵌入 8 阶段 pipeline 的 code task 使用相同的概念布局。重点不是记住每个文件名，而是理解每组 artifact 的职责：
 
-嵌套 code-task 文件和 standalone code-task 形态一致，但会放在
-`06-code/code_task_run/` 下面：
+- `workspace/`：隔离后的可编辑项目副本、worktree 或 sparse subset。
+- `meta/`：环境报告、repo map、locate results、edit proposals、validation reports、applied-edit summaries 和 LLM usage。
+- `context_packs/`：从候选可编辑文件和受保护只读证据中组装出来的有界 prompt context。
+- `attempts/`：多步骤实现和 repair loop 的 work-plan / batch state。
+- `run/`：baseline/patched benchmark 日志、metrics、execution reports、failure analysis 和 before/after comparison。
+- `repairs/`：按 repair attempt 分组的有界修复 proposal。
 
-```text
-06-code/
-  code_task_run/
-    manifest.json
-    code_task/
-      summary.md
-      work_plan.md
-      patch_plan.md
-      patch.diff
-      workspace/
-      meta/
-        repo_map.json
-        proposed_edits.json
-        validation_report.json
-      context_packs/
-        context-001/
-      attempts/
-        attempt-001/
-          batches/
-            batch-001/
-              batch_state.json
-      run/
-        baseline/
-        patched/
-        comparison.json
-```
-
-重要嵌套文件：
-
-- `06-code/code_task_run/code_task/summary.md`：嵌套 code-task outcome 汇总。
-- `06-code/code_task_run/code_task/meta/repo_map.json`：准备后 workspace 的分层 repo map。
-- `06-code/code_task_run/code_task/context_packs/context-001/`：planning/editing 使用的 prompt-ready context pack。
-- `06-code/code_task_run/code_task/work_plan.md`：批次式 implementation plan。
-- `06-code/code_task_run/code_task/attempts/attempt-001/batches/batch-001/batch_state.json`：当前内嵌 batch 状态。
-- `06-code/code_task_run/code_task/patch_plan.md`：由 pipeline 自动批准的 LLM patch plan。
-- `06-code/code_task_run/code_task/meta/proposed_edits.json`：受控 old/new edit proposal。
-- `06-code/code_task_run/code_task/patch.diff`：在准备好的 workspace 中应用的补丁。
-- `06-code/code_task_run/code_task/run/baseline/`：pre-patch benchmark artifacts。
-- `06-code/code_task_run/code_task/run/patched/`：patched benchmark artifacts。
-- `06-code/code_task_run/code_task/run/comparison.json`：baseline 和 patched 都存在时的 before/after comparison。
-
-Report-stage 文件：
-
-- `08-report/report.md`：最终 Markdown 报告。
-- `08-report/references.bib`：报告正文引用论文的 BibTeX。
-- `08-report/manifest.json`：报告包和可复现 metadata。
-- `08-report/report_quality.json`：citation、metric 和 runtime limits 的规则检查。
-
-## Code Task Artifacts
-
-Code-task artifacts 都放在 `code_task/` 下：
-
-```text
-runs/<run-id>/
-  manifest.json
-  code_task/
-    task.md
-    summary.md
-    work_plan.md
-    patch_plan.md
-    patch.diff
-    workspace/
-    meta/
-      environment_report.json
-      codebase_index.json
-      repo_map.json
-      repo_map_summary.md
-      locate_results.json
-      locate_results.md
-      hitl_decisions.jsonl
-      proposed_edits.json
-      applied_edits.json
-      validation_report.json
-      failure_analysis.md
-      llm_usage.jsonl
-      llm_usage_summary.json
-    context_packs/
-      context-001/
-        context_pack.json
-        prompt_context.md
-        selected_snippets.jsonl
-    attempts/
-      attempt-001/
-        attempt_state.json
-        batches/
-          batch-001/
-            batch_state.json
-            batch_context.json
-            proposed_edits.json
-            proposal_warnings.json
-    run/
-      comparison.json
-      baseline/
-        execution_report.json
-        stdout.txt
-        stderr.txt
-        metrics.json
-      patched/
-        execution_report.json
-        stdout.txt
-        stderr.txt
-        metrics.json
-        failure_analysis.md
-    repairs/
-      repair-001/
-        proposed_edits.json
-```
-
-重要目录：
-
-- `workspace/`：源项目的可编辑副本、worktree 或 sparse subset。
-- `meta/`：环境报告、索引、locate results、决策、proposal、applied edit summary、validation report、failure analysis 和 LLM usage。
-- `context_packs/`：从 locate results 和 workspace snippets 派生的受限 prompt context pack。
-- `attempts/`：用于 bounded implementation / repair loop 的 work-plan attempt 和 batch state。
-- `run/`：带 label 的 benchmark stdout/stderr、execution report、parsed metrics、before/after comparison 和 benchmark failure analysis。
-- `repairs/`：按 attempt 分组的 bounded repair proposal。
-
-重要用户可见文件：
-
-- `summary.md`：紧凑 outcome、下一步建议、task、patch、validation、benchmark、comparison 和 failure-analysis summary。
-- tests 和 benchmark 文件默认受 edit scope 保护。它们可以作为只读证据被索引，但 `propose-edits`、`repair` 和 `apply-edits` 不应修改它们。
-- `meta/environment_report.json`：OS/Python/tool/GPU/project probe。
-- `meta/repo_map.json`：从 `codebase_index.json` 派生的 project/directory/file/symbol/entrypoint/test/benchmark/config 分层 map。
-- `meta/repo_map_summary.md`：人类可读的紧凑 repo-map summary 和 prompt-budget 说明。
-- `meta/locate_results.json`：确定性排序后的 editable targets 和 protected read-only evidence。
-- `meta/locate_results.md`：便于人工检查的 locate summary。
-- `context_packs/context-NNN/context_pack.json`：选择文件、预算、来源 artifact 和省略文件记录。
-- `context_packs/context-NNN/prompt_context.md`：按 editable targets / read-only evidence 分组的 prompt-ready Markdown。
-- `context_packs/context-NNN/selected_snippets.jsonl`：实际截断后的源码片段，每个文件一行。
-- `work_plan.md`：位于 patch plan 之上的批次式 implementation plan。
-- `attempts/attempt-NNN/attempt_state.json`：由 work-plan 和 batch outcome 推导的 attempt 生命周期状态。
-- `attempts/attempt-NNN/batches/batch-NNN/batch_state.json`：active work item、允许修改的 target files、batch artifacts 和最终 batch state。
-- `run/baseline/execution_report.json`：pre-patch benchmark result。
-- `run/patched/execution_report.json`：post-patch benchmark result。
-- `run/comparison.json`：baseline/patched metric deltas 和保守 verdict。
-- `manifest.json.objective`：当 patched benchmark artifact 存在时，从 comparison 派生出的当前任务目标 verdict。它用于区分“代码跑通了”和“指标目标真的提升了”。
-- `patch_plan.md`：编辑前供人审核的计划，包含已记录环境、validation 和 baseline context。
-- 如果存在 latest context pack，`patch_plan.md` 会记录其路径，并优先使用其中的 selected snippets，而不是旧的 index-only 文件选择。
-- `patch.diff`：应用后的补丁，便于 review。
-- `meta/proposed_edits.json`：可审核 edit proposal，并记录 editor backend metadata。
-- `meta/applied_edits.json`：被修改文件及 before/after hash，并记录实际应用的 proposal path 和 editor backend。对于 repair proposal，这里会指向 `code_task/repairs/repair-NNN/proposed_edits.json`。
+tests、benchmarks、环境文件、secrets 和用户配置的 protected paths 默认作为只读证据被索引，不应被 proposal、repair 或 apply 步骤修改。Edit scope 行为和完整 artifact 路径见 [使用与配置](USAGE_zh.md) 与 [配置参考](CONFIG_REFERENCE_zh.md)。
 
 ## Code-Task 环境策略
 

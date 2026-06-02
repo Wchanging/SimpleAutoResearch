@@ -18,6 +18,7 @@ on command syntax, options, outputs, and short operational notes.
 | `simple-ar status` | Print status for a research run or code-task run. |
 | `simple-ar inspect` | Build a local artifact index for a run. |
 | `simple-ar search-artifacts` | Search indexed run artifacts. |
+| `simple-ar clean` | Preview and remove rebuildable run caches. |
 | `simple-ar code-task ...` | Work with an existing codebase in an isolated editable workspace. |
 
 ## Research Pipeline
@@ -191,6 +192,37 @@ uv run simple-ar search-artifacts runs/<run-id> "accuracy" --top-k 5
 **Notes**:
 
 Run `inspect` first when the artifact index is missing or stale.
+
+### `simple-ar clean`
+
+**Purpose**: review and delete rebuildable caches for one run while preserving
+audit artifacts.
+
+**Usage**:
+
+```bash
+uv run simple-ar clean runs/<run-id>
+uv run simple-ar clean runs/<run-id> --yes
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Run directory to clean. |
+| `--yes` | flag | Delete the displayed targets without the interactive `yes` prompt. |
+
+**Outputs**:
+
+- prints a Rich tree preview before deletion
+- deletes run-local rebuildable caches such as `02-search/documents/fulltext_cache/`, `02-search/documents/extracted_text/`, and `artifact_search_results.json`
+- removes this run's rows from the shared SQLite research index when `index_meta.json` points to a workspace-local shared store
+
+**Notes**:
+
+`clean` keeps reports, manifests, papers, evidence cards, retained debug
+coverage reports when present, and portable `research_index/chunks.jsonl`. It
+does not delete the run directory itself.
 
 ## Code Task Commands
 

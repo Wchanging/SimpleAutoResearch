@@ -34,6 +34,13 @@ from simple_ar.code_task.runtime.config import (
     load_code_task_execute_options,
     parse_metric_direction_arg,
 )
+from simple_ar.app.cleanup import (
+    CleanError,
+    apply_clean_plan,
+    build_clean_plan,
+    confirm_clean_plan,
+    render_clean_plan,
+)
 from simple_ar.core.console import print_line
 from simple_ar.core.pipeline import Context, PipelineRunner
 from simple_ar.core.reporting import ConsoleReporter
@@ -452,6 +459,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also search runner metadata such as manifests and stage_meta.json.",
     )
 
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Review and clean rebuildable caches for one run.",
+    )
+    clean_parser.add_argument("run_dir")
+    clean_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Delete the displayed cleanup targets without an interactive confirmation.",
+    )
+
     return parser
 
 
@@ -735,7 +753,31 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         return
 
+    if args.command == "clean":
+        _print_clean(args)
+        return
+
     parser.error(f"Unknown command: {args.command}")
+
+
+def _print_clean(args: argparse.Namespace) -> None:
+    """Preview and clean rebuildable run caches after confirmation."""
+    try:
+        plan = build_clean_plan(Path(args.run_dir))
+    except CleanError as exc:
+        raise SystemExit(str(exc)) from exc
+    render_clean_plan(plan)
+    if not plan.targets:
+        print_line("Nothing to clean.")
+        return
+    if not confirm_clean_plan(plan, assume_yes=args.yes):
+        print_line("Clean cancelled.")
+        return
+    result = apply_clean_plan(plan)
+    print_line(f"Cleaned targets: {result.deleted_targets}")
+    print_line(f"Deleted bytes: {_format_bytes(result.deleted_bytes)}")
+    if result.deleted_sqlite_rows:
+        print_line(f"Deleted shared index rows: {result.deleted_sqlite_rows}")
 
 
 def _stage_handlers():
@@ -1281,6 +1323,9 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
             python_executable=options.python_executable,
             primary_metric=options.primary_metric,
             metric_directions=options.metric_directions,
+            edit_scope_mode=options.edit_scope_mode,
+            edit_scope_allowed_patterns=options.edit_scope_allowed_patterns,
+            edit_scope_protected_patterns=options.edit_scope_protected_patterns,
         )
     except (
         FileExistsError,

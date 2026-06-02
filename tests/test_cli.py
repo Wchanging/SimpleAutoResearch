@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,6 +106,58 @@ class CliTests(unittest.TestCase):
             self.assertIn("Operational metadata included: False", search_stdout.getvalue())
             self.assertTrue((run_dir / "artifact_chunks.jsonl").is_file())
             self.assertTrue((run_dir / "artifact_search_results.json").is_file())
+
+    def test_clean_removes_rebuildable_run_caches_and_shared_index_rows(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "clean-me"
+            documents_dir = run_dir / "02-search" / "documents"
+            cache_dir = documents_dir / "fulltext_cache"
+            text_dir = documents_dir / "extracted_text"
+            index_dir = run_dir / "02-search" / "research_index"
+            cache_dir.mkdir(parents=True)
+            text_dir.mkdir(parents=True)
+            index_dir.mkdir(parents=True)
+            (cache_dir / "paper.pdf").write_bytes(b"%PDF fake")
+            (text_dir / "paper.txt").write_text("parsed paper text", encoding="utf-8")
+            (documents_dir / "fulltext_extraction.json").write_text("{}\n", encoding="utf-8")
+            (run_dir / "02-search" / "papers.jsonl").write_text("{}\n", encoding="utf-8")
+            (index_dir / "chunks.jsonl").write_text("{}\n", encoding="utf-8")
+
+            sqlite_path = root / ".simple_ar_cache" / "research_index" / "sqlite_fts.db"
+            sqlite_path.parent.mkdir(parents=True)
+            conn = sqlite3.connect(sqlite_path)
+            conn.execute("CREATE TABLE chunks(run_id TEXT, text TEXT)")
+            conn.execute("INSERT INTO chunks VALUES ('clean-me', 'delete')")
+            conn.execute("INSERT INTO chunks VALUES ('other-run', 'keep')")
+            conn.commit()
+            conn.close()
+            write_json(
+                index_dir / "index_meta.json",
+                {
+                    "store": {"run_id": "clean-me"},
+                    "sqlite_fts": {"status": "ready", "path": str(sqlite_path)},
+                },
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["clean", str(run_dir), "--yes"])
+
+            self.assertFalse(cache_dir.exists())
+            self.assertFalse(text_dir.exists())
+            self.assertFalse((documents_dir / "fulltext_extraction.json").exists())
+            self.assertTrue((run_dir / "02-search" / "papers.jsonl").exists())
+            self.assertTrue((index_dir / "chunks.jsonl").exists())
+            index_meta = read_json(index_dir / "index_meta.json")
+            self.assertEqual(index_meta["sqlite_fts"]["status"], "cleaned")
+            conn = sqlite3.connect(sqlite_path)
+            rows = conn.execute("SELECT run_id FROM chunks ORDER BY run_id").fetchall()
+            conn.close()
+            self.assertEqual(rows, [("other-run",)])
+            self.assertIn("Will delete", stdout.getvalue())
+            self.assertIn("Will keep", stdout.getvalue())
 
     def test_resume_config_preserves_saved_values_without_cli_overrides(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

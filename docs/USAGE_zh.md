@@ -113,7 +113,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experime
 
 默认搜索行为：
 
-- `search` 会先生成 `02-search/planning/research_plan.json`，记录本次计划使用的研究问题、query、source、模式和预算。
+- `search` 会先构建内部 research plan，记录本次计划使用的研究问题、query、source、模式和预算；`02-search/planning/research_plan.json` 只会在 `[run].debug_artifacts = true` 时保留。
 - 如果没有额外配置，`search` 先查 OpenAlex，再查 Semantic Scholar，最后查 arXiv。
 - 当前默认是按顺序补偿：同一个计划 query 一旦某个 live source 返回候选文献，
   后续 source 会跳过，以减少限流压力和重复噪声。
@@ -165,22 +165,15 @@ max_documents = 20
 max_chunks = 200
 max_context_tokens = 12000
 max_llm_calls = 8
+novelty_backend = "local"
 ```
 
-搜索阶段主要会生成下面这棵 `02-search/` 结构：
+搜索阶段默认会生成下面这棵精简 `02-search/` 结构：
 
 ```text
 02-search/
   papers.jsonl
   search_meta.json
-  planning/
-    research_plan.json
-  traces/
-    retrieval_rounds.jsonl
-    screening_decisions.jsonl
-  review/
-    coverage_report.json
-    coverage_report.md
   documents/
     documents.jsonl
     cache_manifest.json
@@ -193,6 +186,48 @@ max_llm_calls = 8
   cards/
     paper_cards.jsonl
     claim_cards.jsonl
+    method_cards.jsonl
+    dataset_cards.jsonl
+    code_links.jsonl
+  evidence/
+    evidence_pack.json
+    evidence_pack.md
+    gap_summary.md
+    idea_candidates.jsonl
+    novelty_checks.jsonl
+    experiment_contract.json
+    experiment_contract.md
+```
+
+如果需要查看详细诊断、section tables 和未来 Tool/MCP 接入草案，可以设置 `[run].debug_artifacts = true`：
+
+```text
+02-search/
+  planning/
+    research_plan.json
+  traces/
+    retrieval_rounds.jsonl
+    screening_decisions.jsonl
+  review/
+    coverage_report.json
+    coverage_report.md
+  documents/
+    sections.jsonl
+  evidence/
+    tool_context.json
+    tool_context.md
+    evidence_review.md
+    decision_log.jsonl
+    eval_report.json
+    eval_report.md
+  tools/
+    tool_adapter_contract.json
+    tool_adapter_contract.md
+    tool_trace.jsonl
+    external_agent_backend.md
+  governance/
+    artifact_retention_policy.json
+    artifact_retention_policy.md
 ```
 
 共享加速索引默认写在 run 目录外：
@@ -204,22 +239,59 @@ max_llm_calls = 8
     lancedb/       # 启用并安装 LanceDB 后使用的共享 LanceDB store
 ```
 
-其中最重要的文件是：
+如需清理某次 run 的可重建缓存，使用顶层 clean 命令：
 
-- `02-search/planning/research_plan.json`：一个紧凑的计划产物，内部包含 `research_questions`、`query_plan` 和 `source_plan` 三个 section，记录子问题、seed/expanded queries、带 title/abstract keyword hints 的 `query_specs`、计划 sources、检索模式、本地文档、cache/index 偏好和预算。
-- `02-search/traces/retrieval_rounds.jsonl`：每次实际执行的 source/query 尝试，包括状态、返回数量、错误/cache 命中，以及 facet、title/abstract keywords 等简洁 query 意图 trace。
-- `02-search/traces/screening_decisions.jsonl`：对返回 metadata 的去重和轻量 relevance screening 决策。
-- `02-search/review/coverage_report.json` 和 `02-search/review/coverage_report.md`：required facets 覆盖情况、缺失研究问题和 follow-up query 决策。
-- `02-search/documents/documents.jsonl`：标准化 document records，覆盖已选 metadata 和配置的本地文件，并记录 `metadata_only`、`parsed`、`skipped`、`failed` 等 extraction status。
-- `02-search/documents/cache_manifest.json`：cache/extraction 汇总，包含 source counts、status counts 和 full-text/PDF 意图开关。
-- `02-search/documents/fulltext_manifest.json`：全文 hint 和 fetch 预算决策。远程获取失败会记录在该 manifest 中，不会让 search 阶段失败。
-- `02-search/documents/fulltext_extraction.json`：对已缓存/本地全文的 best-effort parser 结果。Markdown/text 和基础 HTML 不需要额外依赖；PDF 解析默认使用轻量 `pypdf`；如果安装了可选依赖，也可以用 `parser_backend = "unstructured"`。
-- `02-search/research_index/chunks.jsonl`：从摘要、已解析本地文件和已抽取全文生成的可移植本地 chunks。
-- `02-search/research_index/index_meta.json`：本地 index manifest，记录 backend、run id、可移植 chunk 路径，以及共享 SQLite FTS / LanceDB store 路径。SQLite 和 LanceDB 默认共享在 `.simple_ar_cache/research_index`，不会在每个 run 目录里复制一份数据库。
-- `02-search/cards/paper_cards.jsonl`：deterministic paper-level evidence cards，包含 problem/method/metric/limitation hints 和 source chunk refs。
-- `02-search/cards/claim_cards.jsonl`：保守的 claim cards，每条都绑定 chunk id。这些还不是最终报告 claim，后续 report 阶段仍需要 audit 后再使用。
-- `02-search/search_meta.json`：最终选用 source、状态、返回数量，以及 planning/trace/review artifact 路径。
-- `02-search/papers.jsonl`：传给 `read` 阶段的标准化论文 metadata。
+```bash
+uv run simple-ar clean runs/<run-id>
+```
+
+它会先打印 Rich tree 预览：红色表示将删除的缓存，绿色表示会保留的审计产物。
+输入 `yes` 后才会执行删除。默认会清理 `02-search/documents/fulltext_cache/`、
+`02-search/documents/extracted_text/` 等较大的 run-local 缓存，以及共享 SQLite
+research index 中属于该 run 的 rows；不会删除 report、manifest、papers、
+evidence cards、已保留的 debug coverage reports 和可移植的 `research_index/chunks.jsonl`。
+
+关键文件按目录看：
+
+- `02-search/` 根目录
+  - `papers.jsonl`：传给 `read` 阶段的标准化论文 metadata。
+  - `search_meta.json`：最终选用 source、状态、返回数量，以及已保留的 evidence artifact 路径。
+- `planning/`（debug-only）
+  - `research_plan.json`：紧凑计划产物，包含 `research_questions`、`query_plan` 和 `source_plan`，记录子问题、seed/expanded queries、source 顺序、检索模式、本地文档、cache/index 偏好和预算。
+- `traces/`（debug-only）
+  - `retrieval_rounds.jsonl`：每次 source/query 尝试，包括状态、返回数量、错误/cache 命中和简洁 query 意图。
+  - `screening_decisions.jsonl`：对返回 metadata 的去重和轻量 relevance screening 决策。
+- `review/`（debug-only）
+  - `coverage_report.json` / `.md`：required facets 覆盖情况、缺失研究问题和 follow-up query 决策。
+- `documents/`
+  - `documents.jsonl`：标准化 document records，覆盖已选 metadata 和配置的本地文件，并记录 `metadata_only`、`parsed`、`skipped`、`failed` 等状态。
+  - `cache_manifest.json`：source counts、status counts 和 full-text/PDF 意图开关。
+  - `fulltext_manifest.json`：全文 hint 和 fetch 预算决策。远程获取失败只会记录在这里，不会让 search 阶段失败。
+  - `fulltext_extraction.json`：已缓存/本地全文的 best-effort parser 结果。Markdown/text 和基础 HTML 不需要额外依赖；PDF 默认使用轻量 `pypdf`；可选 `unstructured` 可通过 `parser_backend = "unstructured"` 启用。
+  - `sections.jsonl`（debug-only）：保守识别出的 section-aware 文本片段，例如 `abstract`、`method`、`experiments`、`results`、`limitations`。
+- `research_index/`
+  - `chunks.jsonl`：从摘要、已解析本地文件和已抽取全文生成的可移植 chunks；存在 section records 时会带上 section metadata。
+  - `index_meta.json`：记录 backend、run id、可移植 chunk 路径，以及共享 SQLite FTS / LanceDB store 路径。共享索引默认在 `.simple_ar_cache/research_index`，不会复制到每个 run。
+- `cards/`
+  - `paper_cards.jsonl`：paper-level evidence cards，包含 problem/method/metric/limitation hints 和 source chunk refs。
+  - `claim_cards.jsonl`：绑定 chunk id 的保守 claim cards；这些还不是最终报告 claim，后续仍需要 audit。
+  - `method_cards.jsonl`、`dataset_cards.jsonl`、`code_links.jsonl`：method、dataset/metric 和 repository-link hints，供后续 experiment contract、code-task 和 report 使用。
+- `evidence/`
+  - `evidence_pack.json` / `.md`：紧凑证据包，汇总 counts、artifact refs、coverage、parser/index provenance 和 limitations；它指向 `cards/*.jsonl`，不会再复制一份 cards 表。
+  - `gap_summary.md`：根据 coverage 和 cards 可见性生成的保守研究简报，不代表 novelty claim。
+  - `idea_candidates.jsonl`：带 evidence refs 的有限 idea candidates，包含 expected outcome、所需 baseline/dataset、metrics、feasibility 和 risks。
+  - `novelty_checks.jsonl`：当前 evidence pack 内部的本地词面 novelty-risk hints，不能替代 live novelty search 或人工审核。
+  - `experiment_contract.json` / `.md`：从文献证据到 code-task / 外部 coding agent 的桥接契约，记录 hypothesis、实现范围、验证提示、预算、风险和 report claim rules。
+  - `tool_context.json` / `.md`（debug-only）：给未来 MCP/tool/agent 的只读 handoff，在打开代码 workspace 前只允许读取和规划。
+  - `evidence_review.md`、`decision_log.jsonl`、`eval_report.json` / `.md`（debug-only）：人工审核清单和简单 research artifact quality checks。
+- `tools/`（debug-only）
+  - `tool_adapter_contract.json` / `.md`：只读 Tool/MCP adapter 契约，定义输入、输出、权限边界、错误/fallback 和 trace 规则。
+  - `tool_trace.jsonl`：工具审计 trace。
+  - `external_agent_backend.md`：Codex、Claude Code、OpenCode 等外部 agent backend 的接入边界说明。
+- `governance/`（debug-only）
+  - `artifact_retention_policy.json` / `.md`：把 search artifacts 分为稳定产物、evidence table、cache、trace、debug 和可重建文件，避免无边界新增 JSON/JSONL。
+- 后续报告阶段
+  - `08-report/report.md`：当 search evidence cards 存在时，LLM 和 fallback report 都会收到紧凑 evidence summary，让 Related Work、Search Scope 和 Limitations 更明确地绑定证据。
 
 `[research].planner = "auto"` 会在 `[llm].enabled = true` 时调用 LLM planner，
 用于生成更强的 research questions 和 query expansion；provider 不可用时会回退到
@@ -283,7 +355,21 @@ uv run simple-ar code-task init --config examples/code_tasks/configs/medium_revi
 
 这个示例会运行 `python main.py --config configs/experiment.json --show-progress`，baseline / patched run 中会打印逐轮进度行，并通过 `[execute].stream_benchmark_output = "auto"` 让 `code-task execute` 在保存 stdout/stderr 产物的同时，把 benchmark 进度转发到命令行。`auto` 模式同时兼容普通 `print` 日志和 `tqdm` 这类 carriage-return 进度输出。
 
-`init` 会创建新的 `runs/<run-id>/`，把源项目准备到 `code_task/workspace/`，把任务写入 `code_task/task.md`，生成 `code_task/meta/codebase_index.json` 以及分层 `code_task/meta/repo_map.json` / `repo_map_summary.md`，并把 benchmark / environment / workspace 策略记录到 `manifest.json`。它不会运行代码、不会调用 LLM，也不会修改原始项目。
+`init` 会创建一个新的 run 目录，核心结构如下：
+
+```text
+runs/<run-id>/
+  manifest.json                 # benchmark、workspace、environment、safety policy
+  code_task/
+    task.md                     # 任务说明
+    workspace/                  # 隔离可编辑副本或 worktree
+    meta/
+      codebase_index.json       # 文件级代码索引
+      repo_map.json             # 分层 repo/symbol map
+      repo_map_summary.md       # 给人看的 repo-map 摘要
+```
+
+它不会运行代码、不会调用 LLM，也不会修改原始项目。
 
 如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。当前要求 `code_root` 是目标项目的 git 仓库根目录；如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入 repo root，或者改用 `copy` 模式。
 
@@ -435,7 +521,19 @@ uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/co
 uv run simple-ar code-task map runs/<run-id>
 ```
 
-`map` 会扫描当前 `code_task/workspace/`，刷新 `code_task/meta/codebase_index.json`，写入 `code_task/meta/repo_map.json` 和 `code_task/meta/repo_map_summary.md`，并更新 `manifest.json`。它不会调用 LLM、不会安装依赖、不会运行 benchmark，也不会修改原始项目。
+`map` 会扫描当前 workspace，并刷新静态代码地图产物：
+
+```text
+code_task/
+  workspace/                  # 被扫描的源码树
+  meta/
+    codebase_index.json       # 文件级代码索引
+    repo_map.json             # 分层 repo/symbol map
+    repo_map_summary.md       # 给人看的摘要
+manifest.json                 # 更新 map/workspace metadata
+```
+
+它不会调用 LLM、不会安装依赖、不会运行 benchmark，也不会修改原始项目。
 
 定位最可能相关的可编辑文件和只读证据：
 

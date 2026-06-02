@@ -20,7 +20,7 @@ outer research pipeline config and standalone/embedded code-task config.
   they are flattened into runtime settings. Wrong section types now fail early
   instead of being silently ignored.
 - Relative paths in top-level run config are resolved relative to the config file when the parser explicitly supports path resolution, such as `[experiment].code_task_config` and `[research].local_documents`.
-- When a run config contains `[code_task]`, `[benchmark]`, `[metrics]`, `[environment]`, `[workspace]`, or `[safety]`, the same file can be reused as the embedded code-task config.
+- When a run config contains `[code_task]`, `[benchmark]`, `[metrics]`, `[environment]`, `[workspace]`, `[safety]`, or `[edit_scope]`, the same file can be reused as the embedded code-task config.
 
 ## Complete Pipeline Config
 
@@ -75,7 +75,8 @@ allow_fixture_fallback = false
 strict = false
 
 [research]
-# Search strategy profile recorded in planning/research_plan.json.
+# Search strategy profile used by the research planner. The full planning
+# artifact is retained only when debug_artifacts = true.
 mode = "lite"                 # lite | standard | strong
 
 # Research-question/query planner. auto uses LLM when [llm].enabled is true,
@@ -137,6 +138,10 @@ max_llm_calls = 4
 
 # Maximum coverage-driven follow-up queries attempted in a second retrieval round.
 max_follow_up_queries = 3
+
+# Backend for evidence/novelty_checks.jsonl. local only records lexical risk
+# hints over the current evidence pack; it is not a definitive novelty check.
+novelty_backend = "local"      # local
 
 [retrieval]
 # Enables local artifact retrieval for read/synthesize/report helpers.
@@ -201,6 +206,15 @@ reuse_source_venv = false
 
 # Recorded for future managed environments; init does not execute this command.
 setup_hook = ""
+
+[edit_scope]
+# Optional allowlist for editable files. Empty means every non-protected
+# workspace-relative path may be edited.
+allowed_patterns = ["digits_mlp/**"]
+
+# Additional protected patterns are appended to the default read-only baseline
+# for tests, benchmarks, .env, secrets, and credential-like paths.
+protected_patterns = ["configs/locked/**"]
 
 [safety]
 # Maximum source file size copied in copy/sparse modes. Use 0 to disable.
@@ -290,7 +304,7 @@ max_proposal_chars = 42000
 | `[llm]` | pipeline and code task | LLM enablement, default model, and worker count. |
 | `[search]` | `02-search` | Provider behavior, fallback policy, result limit, and manual query. |
 | `[research]` | `02-search` | Research-question planning, query expansion, provider order, local documents, cache/index hints. |
-| `[research.budget]` | `02-search` and future evidence stages | Lightweight caps written to `planning/research_plan.json`. |
+| `[research.budget]` | `02-search` and future evidence stages | Lightweight caps used by research planning; retained in `planning/research_plan.json` only when debug artifacts are enabled. |
 | `[retrieval]` | read/synthesize/report helpers | Local artifact retrieval context. |
 | `[experiment]` | `05-design` to `07-run` | Experiment template, timeout, and optional nested code-task config path. |
 | `[report]` | `08-report` | Report structure mode. |
@@ -300,6 +314,7 @@ max_proposal_chars = 42000
 | `[metrics]` | code task comparison | Alternative place for `primary`, `primary_metric`, `directions`, or `metric_directions`. |
 | `[environment]` | code task execution | Python execution policy. |
 | `[workspace]` | code-task init | Workspace mode and setup metadata. |
+| `[edit_scope]` | code-task init and all patch gates | Optional editable allowlist and extra read-only patterns. |
 | `[safety]` | code-task init/validation | Copy size and validation scan limits. |
 | `[execute]` | code-task execute | State-machine limits, runtime settings, repair rounds, output streaming. |
 | `[models]` | code-task execute | Default model routing. |
@@ -315,7 +330,7 @@ max_proposal_chars = 42000
 | --- | --- |
 | `[run].topic` | Main user goal. It is used by planning, default search query generation, and report framing. |
 | `[run].from_stage` / `[run].to_stage` | Stage range for partial runs. Use these to stop at `synthesize`, rerun `report`, or resume a subset. |
-| `[run].debug_artifacts` | When `true`, keeps verbose search diagnostics such as planning, trace, screening, and coverage-review folders in the run directory. Keep it `false` for compact default runs; operational evidence artifacts such as documents, full-text manifests, chunks, and cards are still retained. |
+| `[run].debug_artifacts` | When `true`, keeps verbose search diagnostics and draft handoff files such as planning, trace, screening, coverage review, section tables, tool contracts, evidence review, eval report, and retention policy. Keep it `false` for compact default runs; operational evidence artifacts such as documents, full-text manifests, chunks, cards, evidence pack, ideas, novelty hints, and experiment contract are still retained. |
 | `[llm].enabled` | Turns LLM-backed planning/notes/synthesis/report/code-task steps on or off. Some real code-task steps need LLM mode to be useful. |
 | `[llm].workers` | Parallelism for supported LLM stages. It does not make every pipeline stage concurrent. |
 | `[search].offline` | Skips live literature providers. Useful for local demos and deterministic tests. |
@@ -333,10 +348,10 @@ max_proposal_chars = 42000
 | `[research].mode` | Records intended evidence depth: `lite` for metadata/local notes, `standard` for cache/index-ready use, `strong` for future full-text/vector workflows. |
 | `[research].planner` | Research-question and query-expansion backend. `auto` calls the LLM when `[llm].enabled = true` and falls back to deterministic planning; `llm` explicitly requests that path; `deterministic` disables the extra LLM planner call. |
 | `[research].sources` | Provider order for the search stage. Supported connector names today are `openalex`, `semantic_scholar`, `arxiv`, and `local_files`; `fixture` records offline fixture use. |
-| `[research].queries` | Seed query list written into `02-search/planning/research_plan.json`. Search executes planned queries in ordered-fallback rounds and can spend later round budget on uncovered facets. LLM planner output also records `query_specs` with title/abstract keyword hints. |
-| `[research].auto_query_expansion` | Enables facet-driven follow-up queries from the `research_questions` section of `planning/research_plan.json`. In deterministic mode these are rule-based; in LLM planner mode the model can add stronger terminology within the same query budget. Disable it when you want only hand-written queries. |
+| `[research].queries` | Seed query list used by the research planner. Search executes planned queries in ordered-fallback rounds and can spend later round budget on uncovered facets. LLM planner output also records `query_specs` with title/abstract keyword hints; the full plan is retained only when debug artifacts are enabled. |
+| `[research].auto_query_expansion` | Enables facet-driven follow-up queries from the planned research questions. In deterministic mode these are rule-based; in LLM planner mode the model can add stronger terminology within the same query budget. Disable it when you want only hand-written queries. |
 | `[research].max_retrieval_rounds` | Planned number of retrieval/screening rounds for the DeepResearch loop. Values above `1` allow coverage-driven follow-up retrieval before `papers.jsonl` is finalized. |
-| `[research].max_queries` | Maximum seed + expanded queries kept in the `query_plan` section of `planning/research_plan.json`. |
+| `[research].max_queries` | Maximum seed + expanded queries kept by the internal query plan. |
 | `[research].required_facets` | Evidence facets to cover, such as `method`, `benchmark`, `dataset`, `code_link`, or `limitation`. These drive research questions and query expansion. |
 | `[research].local_documents` | Markdown/text files treated as local research records. These paths are resolved relative to the config file and are also written to `02-search/documents/documents.jsonl` with parser/hash status. |
 | `[research].use_fulltext` | Intent flag for full-text evidence workflows. When true, `documents/fulltext_manifest.json` can select eligible local/remote full-text hints within budget, and `documents/fulltext_extraction.json` records parser outcomes for cached/local inputs. |
@@ -353,6 +368,7 @@ max_proposal_chars = 42000
 | `[research.budget].max_context_tokens` | Planned prompt budget for evidence retrieval context. |
 | `[research.budget].max_llm_calls` | Planned cap for research-side LLM actions such as query expansion and screening. |
 | `[research.budget].max_follow_up_queries` | Maximum coverage-driven follow-up queries attempted in a second retrieval round. |
+| `[research.budget].novelty_backend` | Backend for `02-search/evidence/novelty_checks.jsonl`. Current stable value is `local`, which records lexical risk hints from the current evidence pack only. |
 
 ### Code-Task Fields
 
@@ -370,6 +386,9 @@ max_proposal_chars = 42000
 | `[workspace].mode` | Workspace strategy: `copy`, `git_worktree`, or `sparse_copy`. |
 | `[workspace].reuse_source_venv` | If a source `.venv` or `venv` is detected, record and use that Python as the execution interpreter. |
 | `[workspace].setup_hook` | Stored for future managed environment support. It is not executed during init. |
+| `[edit_scope].allowed_patterns` | Optional workspace-relative glob allowlist for files automated edits may touch. Empty means all normalized non-protected workspace paths are editable. |
+| `[edit_scope].protected_patterns` | Additional workspace-relative glob patterns treated as read-only evidence. Defaults for tests, benchmarks, `.env`, secrets, and credentials are always retained. |
+| `[edit_scope].mode` | Optional label stored in `manifest.json`; it does not change behavior by itself. |
 | `[safety].max_file_bytes` | Max copied file size for copy/sparse modes. This avoids accidentally copying huge model/data artifacts. |
 | `[safety].validation_max_file_bytes` | Max file size scanned by static validation. |
 
@@ -638,15 +657,21 @@ max_proposal_chars = 24000
 | `auto` / `true` | Handle regular line logs and carriage-return progress such as `tqdm`. |
 | `summary` | Print only a tail summary after the benchmark finishes. |
 
-## Current Edit Scope Behavior
+## Edit Scope Behavior
 
-Current public TOML does not yet expose a custom `[edit_scope]` allow/deny
-section. Code-task runs still enforce a default edit-scope baseline:
+`[edit_scope]` is enforced in multiple places: repo-map role tagging, context
+selection, work-plan normalization, edit proposal normalization, repair
+proposal normalization, and final `apply-edits` validation.
 
-- source project is edited only inside `code_task/workspace`
-- tests, benchmark files, `.env`, and secret/credential-looking paths are treated as read-only evidence
-- work-plan target files constrain later edit proposals
-- `apply-edits` rechecks workspace-relative paths, protected patterns, allowed target files, and exact old-text matches before writing
-
-Configurable allow/deny edit-scope rules are planned for V2.3, but should not
-be treated as implemented until they appear in this reference.
+- The source project is edited only inside `code_task/workspace`.
+- If `allowed_patterns` is empty, any normalized workspace-relative path may be
+  edited unless protected.
+- If `allowed_patterns` is set, an edit path must match at least one allowed
+  pattern and must not match any protected pattern.
+- Default protected patterns for tests, benchmarks, `.env`, secrets, and
+  credential-like paths are always retained. User `protected_patterns` add to
+  that baseline rather than replacing it.
+- Work-plan target files still constrain the current batch, so a file can be
+  allowed by `[edit_scope]` but rejected for being outside the active batch.
+- `apply-edits` rechecks workspace-relative paths, edit scope, active batch
+  target files, and exact old-text matches before writing.

@@ -7,8 +7,10 @@ from typing import Any, Callable
 
 from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
 from simple_ar.code_task.editing.scope import (
+    allowed_patterns_from_manifest,
     editable_paths,
-    is_protected_edit_path,
+    edit_scope_rejection_reason,
+    is_edit_allowed_path,
     protected_patterns_from_manifest,
 )
 from simple_ar.code_task.execution.failure import analyze_code_task_failure
@@ -104,6 +106,7 @@ def propose_repair_edits(
     patch_plan = _read_optional_text(paths.task_dir / "patch_plan.md")
     patch_diff = _read_optional_text(paths.task_dir / "patch.diff")
     index = _read_required_json(paths.meta_dir / "codebase_index.json")
+    allowed_patterns = allowed_patterns_from_manifest(manifest)
     protected_patterns = protected_patterns_from_manifest(manifest)
     selected_context = _repair_context_files(
         manifest,
@@ -115,13 +118,18 @@ def propose_repair_edits(
     selected = _editable_repair_context_files(
         index,
         selected_context,
+        allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
         max_files=max_files,
     )
     read_only_context = [
         path
         for path in selected_context
-        if is_protected_edit_path(path, protected_patterns=protected_patterns)
+        if not is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        )
     ]
     snippets = _source_snippets(
         paths.workspace_dir,
@@ -174,6 +182,7 @@ def propose_repair_edits(
         selected_files=selected,
         read_only_context=read_only_context,
         source_analysis=analysis_path.relative_to(paths.run_dir).as_posix(),
+        allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
     )
     write_json(proposal_path, normalized)
@@ -266,10 +275,15 @@ def _editable_repair_context_files(
     index: dict[str, Any],
     selected_files: list[str],
     *,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
     max_files: int,
 ) -> list[str]:
-    selected = editable_paths(selected_files, protected_patterns=protected_patterns)
+    selected = editable_paths(
+        selected_files,
+        allowed_patterns=allowed_patterns,
+        protected_patterns=protected_patterns,
+    )
     if selected:
         return selected[: max(1, max_files)]
     fallback: list[str] = []
@@ -277,7 +291,11 @@ def _editable_repair_context_files(
         path = _string(item.get("path"))
         if not path:
             continue
-        if is_protected_edit_path(path, protected_patterns=protected_patterns):
+        if not is_edit_allowed_path(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        ):
             continue
         kind = _string(item.get("kind"))
         role_tags = [str(tag) for tag in item.get("role_tags", []) if isinstance(tag, str)]
@@ -331,6 +349,7 @@ def _normalize_repair_proposal(
     selected_files: list[str],
     read_only_context: list[str],
     source_analysis: str,
+    allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
     known_paths = {str(item.get("path", "")) for item in _index_files(index)}
@@ -347,8 +366,13 @@ def _normalize_repair_proposal(
         if path not in known_paths:
             warnings.append(f"Dropped edit for unknown path: {path or '<empty>'}")
             continue
-        if is_protected_edit_path(path, protected_patterns=protected_patterns):
-            warnings.append(f"Dropped edit for protected read-only path: {path}")
+        rejection = edit_scope_rejection_reason(
+            path,
+            allowed_patterns=allowed_patterns,
+            protected_patterns=protected_patterns,
+        )
+        if rejection:
+            warnings.append(f"Dropped edit for disallowed path `{path}`: {rejection}")
             continue
         if path not in permitted_paths:
             warnings.append(f"Dropped edit outside repair context: {path}")

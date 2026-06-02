@@ -15,6 +15,8 @@ class EditorSafetyPolicy:
     """Safety policy that every editor backend must respect.
 
     Args:
+        allowed_patterns: Workspace-relative glob patterns that may be edited.
+            Empty means every non-protected workspace path may be edited.
         protected_patterns: Workspace-relative glob patterns that may be read as
             evidence but must not be modified by automated edits.
         blocked_read_patterns: Workspace-relative or shell-style patterns that
@@ -31,7 +33,8 @@ class EditorSafetyPolicy:
             experiments.
     """
 
-    protected_patterns: tuple[str, ...]
+    allowed_patterns: tuple[str, ...] = ()
+    protected_patterns: tuple[str, ...] = ()
     blocked_read_patterns: tuple[str, ...] = ()
     allow_command_execution: bool = False
     allow_network: bool = False

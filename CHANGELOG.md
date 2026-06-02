@@ -4,6 +4,73 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-02
+
+### Added
+
+- Added V2.3 Week 3 research-bridge artifacts under `02-search/evidence/`.
+  Default compact runs keep `evidence_pack.json/md`, `gap_summary.md`,
+  `idea_candidates.jsonl`, `novelty_checks.jsonl`, and
+  `experiment_contract.json/md`; debug runs can also retain
+  `tool_context.json/md`, `evidence_review.md`, `decision_log.jsonl`, and
+  `eval_report.json/md`.
+- Added `[research.budget].novelty_backend`, currently supporting `local`
+  lexical novelty-risk hints over the current evidence pack.
+- Added V2.3 Day 12 section-aware document extraction. Compact runs use section
+  spans for chunk/card construction and debug runs can retain
+  `02-search/documents/sections.jsonl` for inspection.
+- Added section metadata to research chunks when section records are available,
+  so `02-search/research_index/chunks.jsonl` can preserve `section`, `heading`,
+  and `section_id` provenance.
+- Added V2.3 Day 13 extended evidence cards:
+  `method_cards.jsonl`, `dataset_cards.jsonl`, and `code_links.jsonl` under
+  `02-search/cards/`.
+- Added a compact structured evidence summary for report drafting. Both LLM
+  and fallback reports can now use search-stage paper cards, claim cards,
+  section records, and extended cards as bounded evidence.
+- Added configurable code-task `[edit_scope]` allowlists and additional
+  protected patterns. The scope is stored in `code_task/manifest.json` and is
+  enforced by repo mapping, context selection, work-plan creation, edit
+  proposal, repair, and apply-time patch validation.
+- Added debug-only read-only Tool/MCP handoff artifacts under `02-search/tools/`:
+  `tool_adapter_contract.json/md`, `tool_trace.jsonl`, and
+  `external_agent_backend.md`.
+- Added debug-only `02-search/governance/artifact_retention_policy.json/md` to
+  classify search artifacts as stable run outputs, evidence tables, cache
+  artifacts, traces, debug diagnostics, or rebuildable files.
+- Added `simple-ar clean RUN_DIR`, a Rich preview-and-confirm cleanup command
+  for rebuildable run caches and this run's shared SQLite research-index rows.
+
+### Changed
+
+- Paper and claim cards now prefer section-aware method, experiment, result,
+  and limitation chunks when available instead of treating all text as one flat
+  abstract-like source.
+- Usage docs now show the updated compact `02-search/` artifact tree and
+  separate default evidence artifacts from debug-only diagnostics and tool
+  handoff drafts.
+- Code-task examples now declare explicit edit scopes so implementation files
+  are editable while tests, benchmarks, and locked config stay read-only
+  evidence.
+- LLM research planning now still runs when query expansion is disabled. The
+  query count remains bounded by `[research].max_queries`, but
+  `[research].planner = "llm"` no longer silently falls back to deterministic
+  planning.
+- Retrieval screening now preserves required-facet diversity before filling the
+  remaining document budget by rank, reducing cases where one query family
+  crowds out overview/benchmark/dataset evidence.
+- V2.3 online check configs now default to compact artifacts and avoid mixing
+  local demo notes into the online evidence check. Set `[run].debug_artifacts =
+  true` when planning/traces/coverage/tool drafts are needed.
+- Evidence packs now store artifact references and card ids instead of
+  duplicating `cards/*.jsonl`, reducing search-stage artifact sprawl.
+- V2.3 release hardening covered layered checks, bundled code-task examples,
+  a compact search CLI run, a medium code-task baseline CLI run, and full
+  unittest discovery.
+- Pipeline progress output now uses restrained Rich panels, stage rules, and
+  colored status/message categories so users can see the active stage and key
+  events more clearly without changing pipeline behavior.
+
 ## 2026-05-31
 
 ### Added
