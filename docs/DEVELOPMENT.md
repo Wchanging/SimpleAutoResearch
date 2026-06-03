@@ -35,7 +35,7 @@ src/simple_ar/research/
   connectors/  OpenAlex, Semantic Scholar, arXiv, and local-file adapters
   documents/   document records, full-text hints, parser/extractor helpers
   store/       chunks and local index backends
-  evidence/    retrieval screening, coverage, paper cards, claim cards
+  evidence/    retrieval screening, coverage, optional debug evidence cards
   outputs/     search-stage artifact writers
 ```
 

@@ -20,26 +20,27 @@ class RetrievalCandidate:
     returned_source: str = ""
 
 
-def screen_retrieval_candidates(
+def select_retrieval_candidates(
     candidates: list[RetrievalCandidate],
     *,
     max_documents: int,
     negative_terms: list[str] | None = None,
     priority_facets: list[str] | None = None,
 ) -> tuple[list[Paper], list[dict[str, Any]]]:
-    """Deduplicate, score, and keep the strongest retrieval candidates.
+    """Deduplicate, score, and keep retrieval candidates within budget.
 
     Args:
         candidates: Raw paper candidates from source/query attempts.
-        max_documents: Maximum number of papers to keep after screening.
+        max_documents: Maximum number of papers to retain after retrieval
+            selection.
         negative_terms: Optional out-of-scope hints from query planning.
-        priority_facets: Optional required facets. When set, screening first
+        priority_facets: Optional required facets. When set, selection first
             reserves one relevant candidate per facet when possible, then fills
             the remaining budget by rank. This keeps coverage from collapsing
             to a single high-scoring query family.
 
     Returns:
-        A pair of ``(kept_papers, screening_decision_rows)``.
+        A pair of ``(kept_papers, retrieval_selection_rows)``.
     """
 
     limit = max(1, max_documents)
@@ -102,6 +103,23 @@ def screen_retrieval_candidates(
 
     decisions.sort(key=lambda row: (row.get("decision") != "keep", row.get("rank") or 9999, row["paper_id"]))
     return kept, decisions
+
+
+def screen_retrieval_candidates(
+    candidates: list[RetrievalCandidate],
+    *,
+    max_documents: int,
+    negative_terms: list[str] | None = None,
+    priority_facets: list[str] | None = None,
+) -> tuple[list[Paper], list[dict[str, Any]]]:
+    """Backward-compatible wrapper for retrieval candidate selection."""
+
+    return select_retrieval_candidates(
+        candidates,
+        max_documents=max_documents,
+        negative_terms=negative_terms,
+        priority_facets=priority_facets,
+    )
 
 
 def paper_identity_key(paper: Paper) -> str:

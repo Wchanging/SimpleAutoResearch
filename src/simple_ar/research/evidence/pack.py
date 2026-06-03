@@ -167,11 +167,11 @@ def compact_evidence_pack_for_storage(pack: dict[str, Any]) -> dict[str, Any]:
         compact.pop(key, None)
     compact["storage_profile"] = "compact"
     compact["artifact_refs"] = {
-        "paper_cards": "02-search/cards/paper_cards.jsonl",
-        "claim_cards": "02-search/cards/claim_cards.jsonl",
-        "method_cards": "02-search/cards/method_cards.jsonl",
-        "dataset_cards": "02-search/cards/dataset_cards.jsonl",
-        "code_links": "02-search/cards/code_links.jsonl",
+        "paper_cards": "03-read/cards/paper_cards.jsonl",
+        "claim_cards": "03-read/cards/claim_cards.jsonl",
+        "method_cards": "03-read/cards/method_cards.jsonl",
+        "dataset_cards": "03-read/cards/dataset_cards.jsonl",
+        "code_links": "03-read/cards/code_links.jsonl",
         "documents": "02-search/documents/documents.jsonl",
         "chunks": "02-search/research_index/chunks.jsonl",
     }

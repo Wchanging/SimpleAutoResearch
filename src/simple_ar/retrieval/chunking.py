@@ -34,6 +34,7 @@ OPERATIONAL_FILENAMES = {
     "pipeline_state.json",
     "paper_cards.jsonl",
     "research_plan.json",
+    "retrieval_selection.jsonl",
     "state.json",
     "index_meta.json",
     "retrieval_rounds.jsonl",

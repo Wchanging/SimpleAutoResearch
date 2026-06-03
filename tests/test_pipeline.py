@@ -5,14 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from simple_ar.core.artifacts import read_json, read_text
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text
 from simple_ar.experiment.code_task_experiment import (
     CODE_TASK_PROJECT_TEMPLATE,
     CODE_TASK_TOY_SPAM_TEMPLATE,
     CodeTaskExperimentResult,
 )
 from simple_ar.core.pipeline import Context, MissingInputError, PipelineEvent, PipelineRunner
-from simple_ar._legacy.stage_handlers import HANDLERS, execute_code, execute_design
+from simple_ar._legacy.stage_handlers import HANDLERS, execute_code, execute_design, execute_read
 from simple_ar.core.stages import Stage
 
 
@@ -64,28 +64,35 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue((ctx.run_dir / "02-search" / "documents" / "documents.jsonl").is_file())
             self.assertFalse((ctx.run_dir / "02-search" / "documents" / "sections.jsonl").exists())
             self.assertTrue((ctx.run_dir / "02-search" / "research_index" / "chunks.jsonl").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "cards" / "paper_cards.jsonl").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "cards" / "claim_cards.jsonl").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "cards" / "method_cards.jsonl").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "cards" / "dataset_cards.jsonl").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "cards" / "code_links.jsonl").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "evidence" / "evidence_pack.json").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "evidence" / "gap_summary.md").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "evidence" / "idea_candidates.jsonl").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "evidence" / "novelty_checks.jsonl").is_file())
-            self.assertTrue((ctx.run_dir / "02-search" / "evidence" / "experiment_contract.json").is_file())
-            self.assertFalse((ctx.run_dir / "02-search" / "evidence" / "tool_context.json").exists())
-            self.assertFalse((ctx.run_dir / "02-search" / "evidence" / "eval_report.json").exists())
+            self.assertFalse((ctx.run_dir / "02-search" / "cards").exists())
+            self.assertTrue((ctx.run_dir / "03-read" / "review" / "screening_decisions.jsonl").is_file())
+            self.assertTrue((ctx.run_dir / "03-read" / "review" / "shortlist.jsonl").is_file())
+            self.assertTrue((ctx.run_dir / "03-read" / "review" / "reading_table.md").is_file())
+            self.assertFalse((ctx.run_dir / "03-read" / "cards").exists())
+            self.assertTrue((ctx.run_dir / "04-synthesize" / "synthesis_brief.json").is_file())
+            self.assertFalse((ctx.run_dir / "04-synthesize" / "evidence" / "evidence_pack.json").exists())
+            self.assertFalse((ctx.run_dir / "04-synthesize" / "evidence" / "gap_summary.md").exists())
+            self.assertFalse((ctx.run_dir / "04-synthesize" / "evidence" / "idea_candidates.jsonl").exists())
+            self.assertFalse((ctx.run_dir / "04-synthesize" / "evidence" / "novelty_checks.jsonl").exists())
+            self.assertTrue((ctx.run_dir / "05-design" / "evidence" / "experiment_contract.json").is_file())
+            self.assertFalse((ctx.run_dir / "05-design" / "evidence" / "tool_context.json").exists())
+            self.assertFalse((ctx.run_dir / "05-design" / "evidence" / "eval_report.json").exists())
             self.assertFalse((ctx.run_dir / "02-search" / "tools").exists())
             self.assertFalse((ctx.run_dir / "02-search" / "governance").exists())
             search_meta = read_json(ctx.run_dir / "02-search" / "search_meta.json")
             self.assertTrue(search_meta["compact_artifacts"])
+            self.assertIn("source_plan", search_meta)
             self.assertNotIn("sections", search_meta)
-            self.assertIn("method_cards", search_meta)
-            self.assertIn("evidence_pack", search_meta)
-            self.assertIn("experiment_contract", search_meta)
+            self.assertNotIn("method_cards", search_meta)
+            self.assertNotIn("evidence_pack", search_meta)
+            self.assertNotIn("experiment_contract", search_meta)
             self.assertNotIn("research_plan", search_meta)
             self.assertNotIn("retrieval_rounds", search_meta)
+            synthesis_brief = read_json(ctx.run_dir / "04-synthesize" / "synthesis_brief.json")
+            self.assertEqual(
+                synthesis_brief["source_plan"]["queries"],
+                search_meta["source_plan"]["queries"],
+            )
             self.assertTrue((ctx.run_dir / "08-report" / "report.md").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "contract.json").is_file())
             self.assertTrue((ctx.run_dir / "08-report" / "references.bib").is_file())
@@ -336,6 +343,193 @@ class PipelineTests(unittest.TestCase):
                 "05-design/generated_code_task.md",
             )
             self.assertEqual(plan["code_task"]["task_generation"]["mode"], "fallback")
+
+    def test_read_stage_accepts_llm_screening_decisions(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            (run_dir / "01-plan").mkdir(parents=True)
+            (run_dir / "01-plan" / "problem.md").write_text("# Problem\nStudy coding agents.\n", encoding="utf-8")
+            search_dir = run_dir / "02-search"
+            (search_dir / "planning").mkdir(parents=True)
+            (search_dir / "documents").mkdir(parents=True)
+            (search_dir / "research_index").mkdir(parents=True)
+            (search_dir / "papers.jsonl").write_text(
+                '{"id":"paper-1","title":"Relevant Coding Agent","source":"fixture","abstract":"coding agent benchmark"}\n'
+                '{"id":"paper-2","title":"Unrelated Topic","source":"fixture","abstract":"unrelated"}\n',
+                encoding="utf-8",
+            )
+            (search_dir / "planning" / "research_plan.json").write_text('{"query_plan": {}}', encoding="utf-8")
+            (search_dir / "documents" / "documents.jsonl").write_text(
+                '{"document_id":"paper-1","title":"Relevant Coding Agent","source":"fixture","abstract":"coding agent benchmark"}\n'
+                '{"document_id":"paper-2","title":"Unrelated Topic","source":"fixture","abstract":"unrelated"}\n',
+                encoding="utf-8",
+            )
+            (search_dir / "research_index" / "chunks.jsonl").write_text("", encoding="utf-8")
+            ctx = Context(
+                run_dir,
+                "coding agents",
+                config={"use_llm": True, "research_read_batch_size": 1, "research_read_workers": 2},
+                current_stage=Stage.READ,
+            )
+            ctx.stage_dir().mkdir(parents=True)
+
+            with patch("simple_ar._legacy.stage_handlers._llm_client", return_value=_FakeReadClient()):
+                execute_read(ctx)
+
+            shortlist = read_jsonl(run_dir / "03-read" / "review" / "shortlist.jsonl")
+            decisions = (run_dir / "03-read" / "review" / "screening_decisions.jsonl").read_text(encoding="utf-8")
+            notes = read_json(run_dir / "03-read" / "paper_notes.json")
+            self.assertIn("paper-1", decisions)
+            self.assertIn("paper-2", decisions)
+            self.assertIn("coarse_relevance_score", decisions)
+            self.assertIn("synthesis_hint", decisions)
+            self.assertIn("paper-1", str(shortlist))
+            self.assertNotIn("paper-2", str(shortlist))
+            self.assertEqual([row["paper_id"] for row in notes], ["paper-1"])
+            self.assertFalse((run_dir / "03-read" / "cards" / "paper_cards.jsonl").exists())
+
+    def test_read_stage_respects_empty_llm_shortlist(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            (run_dir / "01-plan").mkdir(parents=True)
+            (run_dir / "01-plan" / "problem.md").write_text("# Problem\nStudy coding agents.\n", encoding="utf-8")
+            search_dir = run_dir / "02-search"
+            (search_dir / "planning").mkdir(parents=True)
+            (search_dir / "documents").mkdir(parents=True)
+            (search_dir / "research_index").mkdir(parents=True)
+            (search_dir / "papers.jsonl").write_text(
+                '{"id":"paper-1","title":"Unrelated A","source":"fixture","abstract":"biology"}\n'
+                '{"id":"paper-2","title":"Unrelated B","source":"fixture","abstract":"chemistry"}\n',
+                encoding="utf-8",
+            )
+            (search_dir / "planning" / "research_plan.json").write_text('{"query_plan": {}}', encoding="utf-8")
+            (search_dir / "documents" / "documents.jsonl").write_text(
+                '{"document_id":"paper-1","title":"Unrelated A","source":"fixture","abstract":"biology"}\n'
+                '{"document_id":"paper-2","title":"Unrelated B","source":"fixture","abstract":"chemistry"}\n',
+                encoding="utf-8",
+            )
+            (search_dir / "research_index" / "chunks.jsonl").write_text("", encoding="utf-8")
+            ctx = Context(
+                run_dir,
+                "coding agents",
+                config={"use_llm": True, "research_read_batch_size": 1},
+                current_stage=Stage.READ,
+            )
+            ctx.stage_dir().mkdir(parents=True)
+
+            with patch("simple_ar._legacy.stage_handlers._llm_client", return_value=_FakeReadDropAllClient()):
+                execute_read(ctx)
+
+            shortlist = read_jsonl(run_dir / "03-read" / "review" / "shortlist.jsonl")
+            notes = read_json(run_dir / "03-read" / "paper_notes.json")
+            self.assertEqual(shortlist, [])
+            self.assertEqual(notes, [])
+            self.assertFalse((run_dir / "03-read" / "cards" / "paper_cards.jsonl").exists())
+
+
+class _FakeReadClient:
+    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+        if label == "read-rerank":
+            return {
+                "ranked_papers": [
+                    {
+                        "paper_id": "paper-1",
+                        "decision": "keep",
+                        "reading_priority": 1,
+                        "relevance_score": 5,
+                        "quality_score": 3,
+                        "evidence_role": "benchmark",
+                        "reason": "Directly matches coding-agent evaluation.",
+                        "synthesis_hint": "Use as the benchmark-oriented evidence anchor.",
+                        "confidence": "medium",
+                    },
+                ]
+            }
+        return {}
+
+    def ask_json_many(self, requests: list[object], *, max_workers: int) -> list[dict[str, object]]:
+        labels = [getattr(request, "label", "") for request in requests]
+        if labels and all(str(label).startswith("read-coarse-") for label in labels):
+            results: list[dict[str, object]] = []
+            for request in requests:
+                user = getattr(request, "user", "")
+                if "paper-1" in user:
+                    results.append(
+                        {
+                            "decisions": [
+                                {
+                                    "paper_id": "paper-1",
+                                    "decision": "keep",
+                                    "coarse_relevance_score": 5,
+                                    "likely_facet": "benchmark",
+                                    "reason": "Abstract mentions coding-agent benchmark.",
+                                    "confidence": "medium",
+                                }
+                            ]
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "decisions": [
+                                {
+                                    "paper_id": "paper-2",
+                                    "decision": "drop",
+                                    "coarse_relevance_score": 0,
+                                    "likely_facet": "other",
+                                    "reason": "Out of scope.",
+                                    "confidence": "medium",
+                                }
+                            ]
+                        }
+                    )
+            return results
+        return [
+            {
+                "paper_id": "paper-1",
+                "problem": "Study coding agents.",
+                "method": "Benchmark metadata.",
+                "limitation": "Thin metadata.",
+                "relevance": "Relevant.",
+            },
+            {
+                "paper_id": "paper-2",
+                "problem": "Out of scope.",
+                "method": "Unknown.",
+                "limitation": "Not relevant.",
+                "relevance": "Low.",
+            },
+        ][: len(requests)]
+
+
+class _FakeReadDropAllClient:
+    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+        if label == "read-rerank":
+            return {"ranked_papers": []}
+        return {}
+
+    def ask_json_many(self, requests: list[object], *, max_workers: int) -> list[dict[str, object]]:
+        results: list[dict[str, object]] = []
+        for request in requests:
+            user = getattr(request, "user", "")
+            paper_id = "paper-1" if "paper-1" in user else "paper-2"
+            results.append(
+                {
+                    "decisions": [
+                        {
+                            "paper_id": paper_id,
+                            "decision": "drop",
+                            "coarse_relevance_score": 0,
+                            "likely_facet": "other",
+                            "reason": "Clearly out of scope.",
+                            "confidence": "medium",
+                        }
+                    ]
+                }
+            )
+        return results
 
 
 if __name__ == "__main__":

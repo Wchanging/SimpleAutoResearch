@@ -220,9 +220,10 @@ uv run simple-ar clean runs/<run-id> --yes
 
 **Notes**:
 
-`clean` keeps reports, manifests, papers, evidence cards, retained debug
-coverage reports when present, and portable `research_index/chunks.jsonl`. It
-does not delete the run directory itself.
+`clean` keeps reports, manifests, papers, parser audit files such as
+`fulltext_extraction.json`, read-stage Paper Briefs, synthesis briefs, retained
+debug coverage reports when present, and portable `research_index/chunks.jsonl`.
+It does not delete the run directory itself.
 
 ## Code Task Commands
 

@@ -33,7 +33,7 @@ src/simple_ar/research/
   connectors/  OpenAlex、Semantic Scholar、arXiv、本地文件 adapters
   documents/   document records、full-text hints、parser/extractor helpers
   store/       chunks 与本地 index backends
-  evidence/    retrieval screening、coverage、paper cards、claim cards
+  evidence/    retrieval screening、coverage、可选 debug evidence cards
   outputs/     search-stage artifact writers
 ```
 

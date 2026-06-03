@@ -6,12 +6,14 @@ PLAN_SYSTEM = (
 )
 
 READ_SYSTEM = (
-    "You create careful literature notes from real paper metadata. "
-    "Separate facts from interpretation and avoid inventing details."
+    "You are a careful reading-stage reviewer. Structure retrieved paper "
+    "metadata and extracted snippets into bounded notes, separating facts, "
+    "uncertainty, and interpretation without inventing details."
 )
 
 SYNTHESIZE_SYSTEM = (
-    "You synthesize literature notes into modest research themes and testable hypotheses."
+    "You synthesize shortlisted reading artifacts into research themes, gaps, "
+    "and modest testable hypotheses grounded in cited paper/card evidence."
 )
 
 REPORT_SYSTEM = (
@@ -152,14 +154,152 @@ def paper_note_user_prompt(paper_json: str, evidence_snippets: str = "") -> str:
     """
     evidence_block = _evidence_block(evidence_snippets)
     return (
-        "Given one paper metadata record as JSON, write one JSON object with "
-        "string fields: `paper_id`, `problem`, `method`, `limitation`, and "
-        "`relevance`. Use only the supplied metadata. If the metadata is too "
-        "thin, say what is unknown instead of inventing details. If source "
-        "snippets are provided, use them only as provenance context and do not "
-        "invent facts that are absent from the paper metadata or snippets.\n\n"
+        "Given one paper metadata record as JSON, write one synthesis-ready "
+        "Paper Brief as a JSON object. Use only the supplied metadata and "
+        "source snippets. If evidence is thin, write `unknown` or an empty "
+        "list instead of inventing details.\n\n"
+        "Required fields:\n"
+        "- `paper_id`: stable id from the input.\n"
+        "- `title`: paper title.\n"
+        "- `evidence_role`: one of overview, method, benchmark, dataset, code, "
+        "limitation, comparison, or other.\n"
+        "- `one_sentence_summary`: concise factual summary.\n"
+        "- `problem`: problem or research setting studied by the paper.\n"
+        "- `method`: method, system, or approach summary.\n"
+        "- `datasets`: list of dataset or benchmark names, if visible.\n"
+        "- `metrics`: list of metrics or evaluation criteria, if visible.\n"
+        "- `key_claims`: list of conservative claims explicitly supported by "
+        "the input.\n"
+        "- `limitations`: list of limitations, risks, or missing evidence.\n"
+        "- `relation_to_topic`: why this paper matters for the current topic.\n"
+        "- `synthesis_hint`: one short sentence saying how synthesize should "
+        "use this paper.\n"
+        "- `possible_experiment_hooks`: list of small experiment/code-task "
+        "ideas suggested by the evidence.\n"
+        "- `open_questions`: list of questions that remain unresolved.\n"
+        "- `evidence_refs`: list of paper ids, snippet labels, or empty list.\n"
+        "- `confidence`: low, medium, or high.\n\n"
+        "Rules:\n"
+        "- Do not produce long prose. This is a machine-readable brief for "
+        "later synthesis and experiment design.\n"
+        "- Do not claim novelty or performance unless it is explicit in the "
+        "input.\n"
+        "- Prefer useful uncertainty over confident hallucination.\n\n"
         f"Paper JSON:\n{paper_json}"
         f"{evidence_block}"
+    )
+
+
+def read_coarse_screening_user_prompt(
+    *,
+    topic: str,
+    problem_markdown: str,
+    papers_json: str,
+    research_plan_json: str,
+) -> str:
+    """Build the prompt for abstract-level read-stage coarse screening.
+
+    The coarse pass is designed for larger retrieval sets. It only sees compact
+    metadata and abstracts, so it should decide whether a paper deserves deeper
+    reading without trying to synthesize the field.
+    """
+    return (
+        "Coarsely screen this small batch of retrieved paper metadata for the "
+        "current research problem. Return JSON with one field `decisions`, a "
+        "list of objects. Each object must contain `paper_id`, `decision` "
+        "(`keep` or `drop`), `coarse_relevance_score` (0-5), `reason`, "
+        "`likely_facet`, and `confidence`.\n\n"
+        "Rules:\n"
+        "- Use only title, abstract, source metadata, and the research plan. Do "
+        "not infer details that are not present.\n"
+        "- This is a fast abstract-level pass. Do not write long summaries.\n"
+        "- Keep papers that could help answer a research question, explain a "
+        "method family, provide benchmark/dataset/code signals, or expose a "
+        "limitation relevant to a later experiment.\n"
+        "- Drop papers that are clearly outside the topic, purely adjacent, or "
+        "lack useful evidence for the configured research questions.\n"
+        "- If a paper is thin but plausibly relevant, keep it with lower "
+        "confidence instead of pretending certainty.\n"
+        "- `likely_facet` should be compact, such as overview, method, "
+        "benchmark, dataset, code, limitation, or other.\n"
+        "- Keep reasons concise and auditable.\n\n"
+        f"Topic:\n{topic}\n\n"
+        f"Problem artifact:\n{problem_markdown}\n\n"
+        f"Research Plan JSON:\n{research_plan_json}\n\n"
+        f"Paper Batch JSON:\n{papers_json}\n"
+    )
+
+
+def read_rerank_user_prompt(
+    *,
+    topic: str,
+    problem_markdown: str,
+    papers_json: str,
+    research_plan_json: str,
+    coarse_decisions_json: str,
+    max_shortlist: int,
+) -> str:
+    """Build the prompt for read-stage reranking of coarsely kept papers."""
+    return (
+        "Rerank the coarsely kept papers for structured reading. Return JSON "
+        "with one field `ranked_papers`, a list of objects. Each object must "
+        "contain `paper_id`, `decision` (`keep` or `drop`), "
+        "`reading_priority` (1 is highest priority), `relevance_score` (0-5), "
+        "`quality_score` (0-5), `evidence_role`, `reason`, "
+        "`synthesis_hint`, and `confidence`.\n\n"
+        "Rules:\n"
+        "- Prefer a diverse shortlist that covers the research questions rather "
+        "than many near-duplicate papers.\n"
+        "- `evidence_role` should describe how the paper helps later synthesis: "
+        "overview, method, benchmark, dataset, code, limitation, comparison, or "
+        "other.\n"
+        "- `synthesis_hint` should be one compact sentence explaining what the "
+        "synthesize stage should look for in this paper.\n"
+        "- Do not invent methods, datasets, metrics, repositories, or results.\n"
+        "- Keep at most `max_shortlist` papers unless the input contains fewer "
+        "papers.\n"
+        "- This is prioritization for reading and synthesis, not final novelty "
+        "judgment.\n\n"
+        f"Topic:\n{topic}\n\n"
+        f"Problem artifact:\n{problem_markdown}\n\n"
+        f"Research Plan JSON:\n{research_plan_json}\n\n"
+        f"Coarse Decisions JSON:\n{coarse_decisions_json}\n\n"
+        f"Kept Papers JSON:\n{papers_json}\n\n"
+        f"max_shortlist: {max_shortlist}\n"
+    )
+
+
+def read_screening_user_prompt(
+    *,
+    topic: str,
+    problem_markdown: str,
+    papers_json: str,
+    research_plan_json: str,
+    max_shortlist: int,
+) -> str:
+    """Build the prompt for read-stage paper screening and prioritization."""
+    return (
+        "Review the retrieved paper metadata for the current research problem. "
+        "Return JSON with one field `decisions`, a list of objects. Each object "
+        "must contain `paper_id`, `decision` (`keep` or `drop`), "
+        "`reading_priority` (1 is highest priority), `relevance_score` (0-5), "
+        "`quality_score` (0-5), `reason`, and `confidence`.\n\n"
+        "Rules:\n"
+        "- Keep only papers that are useful for answering the research questions "
+        "or designing a bounded follow-up experiment.\n"
+        "- Prefer papers with methods, benchmarks, datasets, limitations, or code "
+        "signals relevant to the topic.\n"
+        "- Do not invent facts that are not in metadata or the research plan.\n"
+        "- If metadata is thin but potentially relevant, keep it with lower "
+        "confidence rather than pretending certainty.\n"
+        "- Keep at most `max_shortlist` papers unless all retrieved papers are "
+        "clearly necessary.\n"
+        "- This is read-stage screening, not novelty review.\n\n"
+        f"Topic:\n{topic}\n\n"
+        f"Problem artifact:\n{problem_markdown}\n\n"
+        f"Research Plan JSON:\n{research_plan_json}\n\n"
+        f"Retrieved Papers JSON:\n{papers_json}\n\n"
+        f"max_shortlist: {max_shortlist}\n"
     )
 
 
@@ -167,6 +307,7 @@ def synthesize_user_prompt(
     notes_markdown: str,
     paper_notes_json: str,
     evidence_snippets: str = "",
+    structured_context_json: str = "",
 ) -> str:
     """Build the synthesis prompt from free-form and structured notes.
 
@@ -175,19 +316,37 @@ def synthesize_user_prompt(
         paper_notes_json: Structured notes serialized as JSON text.
         evidence_snippets: Optional source-labelled retrieval snippets from the
             current run.
+        structured_context_json: Optional compact JSON assembled from Paper
+            Briefs, the synthesis brief, retrieval coverage, and bounded idea
+            hints.
 
     Returns:
         Prompt requesting synthesis and hypothesis Markdown as JSON fields.
     """
     evidence_block = _evidence_block(evidence_snippets)
+    structured_block = (
+        "\n\nStructured Read/Synthesis Context JSON:\n"
+        f"{structured_context_json}"
+        if structured_context_json.strip()
+        else ""
+    )
     return (
         "Given literature notes, write JSON with two string fields: "
         "`synthesis_markdown` and `hypothesis_markdown`. The hypothesis must be "
-        "small enough for a local toy experiment. Prefer source-labelled "
-        "snippets when they are provided, and do not make claims that cannot be "
-        "traced to notes or snippets.\n\n"
+        "small enough for a local experiment or code-task follow-up. Prefer "
+        "structured Paper Briefs, the synthesis brief, and source-labelled "
+        "snippets when they are provided, and do not make claims that cannot "
+        "be traced to notes, briefs, or snippets.\n\n"
+        "Synthesis requirements:\n"
+        "- Group papers into 2-4 themes or approach patterns.\n"
+        "- Separate consensus, disagreement, and missing evidence.\n"
+        "- Identify concrete gaps that could become bounded experiments.\n"
+        "- The hypothesis should name a measurable change, likely metric, and "
+        "failure condition when supported by the context.\n"
+        "- Use paper ids as provenance anchors where possible.\n\n"
         f"Notes Markdown:\n{notes_markdown}\n\n"
         f"Structured Notes JSON:\n{paper_notes_json}"
+        f"{structured_block}"
         f"{evidence_block}"
     )
 

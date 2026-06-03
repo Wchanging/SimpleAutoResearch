@@ -172,6 +172,10 @@ max_fulltext_documents = 6
 max_pdf_mb = 20
 keep_raw_pdf = false
 parser_backend = "basic"      # basic | pypdf | unstructured
+read_screening = "auto"       # auto | llm | deterministic
+read_batch_size = 4           # papers per abstract-level LLM screening batch
+read_workers = 3              # concurrent screening batches
+read_max_shortlist = 12       # papers sent to deeper Paper Briefs/synthesis
 cache = true
 index_backend = "sqlite_fts"  # keyword | sqlite_fts | hybrid | lancedb | hybrid_lancedb
 # Shared accelerator-store root for SQLite FTS / LanceDB. Use "run" or "local"
@@ -186,7 +190,8 @@ max_llm_calls = 8
 novelty_backend = "local"
 ```
 
-The search stage writes this default compact `02-search/` layout:
+The early research stages now keep stage ownership separated. A compact run
+writes this layout:
 
 ```text
 02-search/
@@ -201,21 +206,31 @@ The search stage writes this default compact `02-search/` layout:
   research_index/
     chunks.jsonl
     index_meta.json
-  cards/
-    paper_cards.jsonl
-    claim_cards.jsonl
-    method_cards.jsonl
-    dataset_cards.jsonl
-    code_links.jsonl
+03-read/
+  review/
+    screening_decisions.jsonl
+    shortlist.jsonl
+    reading_table.md
+  paper_notes.json
+  notes.md
+04-synthesize/
+  synthesis_brief.json
+  synthesis.md
+  hypothesis.md
+05-design/
   evidence/
-    evidence_pack.json
-    evidence_pack.md
-    gap_summary.md
-    idea_candidates.jsonl
-    novelty_checks.jsonl
     experiment_contract.json
     experiment_contract.md
 ```
+
+When LLM mode is enabled, `03-read` uses a two-step review path for larger
+retrieval sets: a concurrent coarse pass screens compact title/abstract batches,
+then a smaller rerank pass assigns reading priority, evidence role, and a short
+synthesis hint. The final decisions are still written to
+`03-read/review/screening_decisions.jsonl`, and only kept papers flow into
+`shortlist.jsonl`, Paper Briefs, notes, and synthesis. Set
+`[research].read_screening = "deterministic"` when you want to skip this extra
+LLM review and keep the retrieval order.
 
 Set `[run].debug_artifacts = true` when you also want verbose diagnostics and
 future-tool handoff drafts:
@@ -226,12 +241,27 @@ future-tool handoff drafts:
     research_plan.json
   traces/
     retrieval_rounds.jsonl
-    screening_decisions.jsonl
+    retrieval_selection.jsonl
   review/
     coverage_report.json
     coverage_report.md
   documents/
     sections.jsonl
+03-read/
+  cards/
+    paper_cards.jsonl
+    claim_cards.jsonl
+    method_cards.jsonl
+    dataset_cards.jsonl
+    code_links.jsonl
+04-synthesize/
+  evidence/
+    evidence_pack.json
+    evidence_pack.md
+    gap_summary.md
+    idea_candidates.jsonl
+    novelty_checks.jsonl
+05-design/
   evidence/
     tool_context.json
     tool_context.md
@@ -269,7 +299,8 @@ will be kept. Type `yes` to proceed. By default, `clean` removes bulky
 run-local cache folders such as `02-search/documents/fulltext_cache/` and
 `02-search/documents/extracted_text/`, plus this run's rows in the shared
 SQLite research index. It keeps reports, manifests, normalized paper metadata,
-evidence cards, retained debug coverage reports when present, and portable
+parser audit files such as `fulltext_extraction.json`, read-stage Paper Briefs,
+synthesis briefs, retained debug coverage reports when present, and portable
 `research_index/chunks.jsonl`.
 
 Key files, grouped by directory:
@@ -277,7 +308,10 @@ Key files, grouped by directory:
 - Root of `02-search/`
   - `papers.jsonl`: normalized paper metadata passed to `read`.
   - `search_meta.json`: selected source, status, returned-paper count, and
-    pointers to retained evidence artifacts.
+    pointers to retained retrieval artifacts. Compact runs also keep a small
+    `source_plan` copy here so downstream stages still know the active sources,
+    full-text intent, index backend, and budgets after verbose planning traces
+    are removed.
 - `planning/` (debug-only)
   - `research_plan.json`: compact plan with `research_questions`, `query_plan`,
     and `source_plan`, including scoped sub-questions, seed/expanded queries,
@@ -286,8 +320,9 @@ Key files, grouped by directory:
 - `traces/` (debug-only)
   - `retrieval_rounds.jsonl`: one row per source/query attempt, including
     status, returned count, errors/cache hits, and compact query intent.
-  - `screening_decisions.jsonl`: deduplication and lightweight
-    relevance-screening decisions for returned metadata.
+  - `retrieval_selection.jsonl`: deduplication, lexical ranking, and
+    budget-capping decisions for returned metadata. This is retrieval selection,
+    not semantic paper review.
 - `review/` (debug-only)
   - `coverage_report.json` / `.md`: required-facet coverage, missing research
     questions, and follow-up query decisions.
@@ -311,25 +346,32 @@ Key files, grouped by directory:
   - `index_meta.json`: backend/run manifest and shared SQLite FTS / LanceDB
     store paths. Shared accelerators live under `.simple_ar_cache/research_index`
     by default instead of being copied into every run.
-- `cards/`
-  - `paper_cards.jsonl`: deterministic paper-level evidence cards with
-    problem/method/metric/limitation hints and source chunk refs.
-  - `claim_cards.jsonl`: conservative claim cards grounded in chunk ids. They
-    are not final report claims until later audit.
-  - `method_cards.jsonl`, `dataset_cards.jsonl`, `code_links.jsonl`:
-    section-aware method, dataset/metric, and repository-link hints for later
-    experiment-contract, code-task, and report stages.
-- `evidence/`
-  - `evidence_pack.json` / `.md`: compact evidence handoff with counts,
-    artifact refs, coverage, parser/index provenance, and limitations. It
-    points to `cards/*.jsonl` instead of copying those tables again.
-  - `gap_summary.md`: conservative research brief derived from coverage and
-    card availability; it is not a novelty claim.
-  - `idea_candidates.jsonl`: bounded idea candidates grounded in evidence refs,
-    with expected outcome, required baselines/datasets, metrics, feasibility,
-    and risks.
-  - `novelty_checks.jsonl`: local lexical novelty-risk hints over the current
-    evidence pack; not a replacement for live novelty search or human review.
+- `03-read/review/`
+  - `screening_decisions.jsonl`: read-stage keep/drop/priority decisions for
+    retrieved papers. LLM mode can drop or reprioritize papers; deterministic
+    fallback keeps retrieved papers but records why each paper is eligible for
+    structured reading.
+  - `shortlist.jsonl`: compact reading shortlist used by Paper Briefs, notes,
+    and synthesis.
+  - `reading_table.md`: human-readable review table with coverage caveats.
+- `03-read/`
+  - `paper_notes.json`: canonical structured Paper Briefs. Each row records the
+    evidence role, concise summary, method/dataset/metric hints, conservative
+    claims, limitations, synthesis hint, possible experiment hooks, and open
+    questions for one shortlisted paper.
+  - `notes.md`: human-readable rendering of the same Paper Briefs.
+  - `cards/*.jsonl` (debug-only): deterministic paper/claim/method/dataset/code
+    hints retained only when `[run].debug_artifacts = true`.
+- `04-synthesize/`
+  - `synthesis_brief.json`: compact bridge from read-stage Paper Briefs to
+    synthesis and design. It contains role counts, coverage/provenance,
+    grouped themes, gaps, bounded idea candidates, local novelty-risk hints,
+    and limitations without duplicating cards.
+  - `synthesis.md` / `hypothesis.md`: human-readable synthesis and the
+    experimentable hypothesis produced from the Paper Briefs.
+  - `evidence/*.jsonl` / `.md` (debug-only): legacy evidence-pack diagnostics
+    retained only when `[run].debug_artifacts = true`.
+- `05-design/evidence/`
   - `experiment_contract.json` / `.md`: bridge from literature evidence to a
     future code-task or external coding agent, including hypothesis,
     implementation scope, validation hints, budgets, risks, and report claim
@@ -339,21 +381,21 @@ Key files, grouped by directory:
   - `evidence_review.md`, `decision_log.jsonl`, `eval_report.json` / `.md`
     (debug-only): human-review checklist and simple research artifact quality
     checks.
-- `tools/` (debug-only)
+- `05-design/tools/` (debug-only)
   - `tool_adapter_contract.json` / `.md`: read-only Tool/MCP adapter contract
     with allowed artifact reads, trace writes, forbidden actions, request/response
     shape, and fallback rules.
   - `tool_trace.jsonl`: append-only tool audit trace.
   - `external_agent_backend.md`: boundary for Codex, Claude Code, OpenCode, and
     similar external agent backends.
-- `governance/` (debug-only)
+- `05-design/governance/` (debug-only)
   - `artifact_retention_policy.json` / `.md`: classifies stable outputs,
     evidence tables, cache artifacts, traces, debug diagnostics, and rebuildable
     files so cleanup stays explicit.
 - Later report stage
-  - `08-report/report.md`: when search evidence cards are available, both LLM
-    and fallback reports receive a compact evidence summary so Related Work,
-    Search Scope, and Limitations stay grounded.
+  - `08-report/report.md`: report generation primarily consumes Paper Briefs
+    and the synthesis brief so Related Work, Search Scope, and Limitations stay
+    grounded.
 
 `[research].planner = "auto"` uses an LLM planner when `[llm].enabled = true`
 and falls back to deterministic planning when the provider is unavailable.
@@ -379,7 +421,7 @@ The local-file connector is intentionally conservative: it reads `.md` and
 matching rather than exact query-string matching. When
 `[research].use_fulltext = true`, the search stage also records local/cached
 parser outcomes in `documents/fulltext_extraction.json` and feeds extracted
-text into `research_index/chunks.jsonl` before building evidence cards. PDF
+text into `research_index/chunks.jsonl` before the read stage builds Paper Briefs. PDF
 inputs remain best-effort: they are parsed only when an optional parser is
 available and full-text intent is enabled.
 

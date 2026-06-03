@@ -112,9 +112,9 @@ Current status:
 
 ```text
 01 plan        Scope the topic and research question
-02 search      Collect paper metadata
-03 read        Create literature notes
-04 synthesize  Summarize themes and propose a hypothesis
+02 search      Retrieve paper metadata, full text, and local chunks
+03 read        Screen, shortlist, and structure retrieved papers
+04 synthesize  Analyze themes, gaps, and experimentable hypotheses
 05 design      Create an experiment plan
 06 code        Generate experiment code or prepare an embedded code task
 07 run         Execute the experiment and parse metrics
@@ -124,9 +124,9 @@ Current status:
 | Stage | Main outputs | Purpose |
 | --- | --- | --- |
 | `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question (LLM-backed when enabled). |
-| `search` | `planning/`, `traces/`, `review/`, `papers.jsonl`, `search_meta.json` | Decompose the topic, retrieve candidates, deduplicate/screen metadata, check coverage, then collect literature records. |
-| `read` | `paper_notes.json`, `notes.md` | Convert paper metadata into structured notes (LLM-backed when enabled). |
-| `synthesize` | `synthesis.md`, `hypothesis.md` | Produce a bounded synthesis and testable hypothesis (LLM-backed when enabled). |
+| `search` | `papers.jsonl`, `search_meta.json`, `documents/`, `research_index/` | Retrieve and ingest metadata/full text, record provider provenance, and build local chunks. It may select candidates within budget but does not perform semantic review. |
+| `read` | `review/`, `paper_notes.json`, `notes.md` | Screen and prioritize retrieved papers, then convert the shortlist into canonical Paper Briefs (LLM-backed when enabled). Larger LLM runs use coarse title/abstract batches before reranking the kept set. |
+| `synthesize` | `synthesis_brief.json`, `synthesis.md`, `hypothesis.md` | Analyze read-stage Paper Briefs into themes, gaps, bounded ideas, and testable hypotheses (LLM-backed when enabled). |
 | `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
 | `code` | `experiment.py` | Generate code from the selected template or prepare an embedded code-task harness. |
 | `run` | `results.json`, `stdout.txt`, `stderr.txt` | Execute the experiment and parse numeric metrics. |
@@ -134,10 +134,11 @@ Current status:
 
 ## Search And LLM Boundaries
 
-Search is the evidence engine, not just a metadata lookup. It scopes research
-questions, chooses source order, retrieves and screens candidates, checks
-coverage, records document/full-text status, builds local chunks/cards, and emits
-a conservative evidence bridge for later report or code-task work.
+Search is the retrieval gate, not the whole evidence engine. It scopes research
+questions, chooses source order, retrieves candidates, records provider
+provenance, and builds document/full-text/index artifacts. It may rank and cap
+retrieved candidates to stay within budget, but semantic screening, structured
+reading, synthesis, and experiment-contract work are owned by later stages.
 
 Normal runs keep compact artifacts by default:
 
@@ -146,13 +147,20 @@ Normal runs keep compact artifacts by default:
   papers.jsonl / search_meta.json
   documents/       # normalized document records and full-text/cache manifests
   research_index/  # portable chunks and local-index metadata
-  cards/           # paper, claim, method, dataset, and code-link cards
-  evidence/        # evidence pack, gaps, ideas, novelty hints, experiment contract
 ```
 
+`03-read` owns screening, reranking, and canonical Paper Briefs. In LLM mode it
+first coarse-screens compact title/abstract batches, then reranks the kept set
+with reading priorities, evidence roles, and synthesis hints. `04-synthesize`
+owns `synthesis_brief.json`, `synthesis.md`, and `hypothesis.md`; legacy
+cards/evidence-pack diagnostics are retained only when
+`[run].debug_artifacts = true`. `05-design` owns the experiment contract and
+optional tool handoff drafts.
+
 When `[run].debug_artifacts = true`, search also keeps planning files, retrieval
-traces, screening decisions, coverage-review reports, section tables, read-only
-tool-context drafts, adapter/governance notes, and other diagnostic artifacts.
+traces, retrieval-selection rows, coverage-review reports, and section tables. Design
+debug mode may keep read-only tool-context drafts, adapter notes, and governance
+artifacts.
 
 Shared accelerator stores live outside the run by default under
 `.simple_ar_cache/research_index`, keyed by run/source metadata. Run-local cache
@@ -178,8 +186,12 @@ in [Usage And Configuration](USAGE.md). At a high level:
   observability.
 - Stage directories (`01-plan` through `08-report`) own their own contracts,
   reports, and stable handoff artifacts.
-- `02-search` owns retrieval, document/full-text status, local chunks, evidence
-  cards, and the compact evidence bridge.
+- `02-search` owns retrieval, document/full-text status, and local chunks.
+- `03-read` owns reading review, shortlists, literature cards, and structured
+  reading notes.
+- `04-synthesize` owns the compact evidence bridge, gaps, ideas, novelty hints,
+  synthesis, and hypothesis derived from read-stage artifacts.
+- `05-design` owns experiment contracts and experiment plans.
 - `06-code/code_task_run` embeds the same artifact shape as a standalone code
   task when the research pipeline hands off to code execution.
 - `08-report` owns the final report package: report text, references, manifest,

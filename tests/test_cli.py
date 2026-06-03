@@ -147,7 +147,7 @@ class CliTests(unittest.TestCase):
 
             self.assertFalse(cache_dir.exists())
             self.assertFalse(text_dir.exists())
-            self.assertFalse((documents_dir / "fulltext_extraction.json").exists())
+            self.assertTrue((documents_dir / "fulltext_extraction.json").exists())
             self.assertTrue((run_dir / "02-search" / "papers.jsonl").exists())
             self.assertTrue((index_dir / "chunks.jsonl").exists())
             index_meta = read_json(index_dir / "index_meta.json")

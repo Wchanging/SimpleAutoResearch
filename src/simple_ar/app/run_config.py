@@ -69,6 +69,10 @@ class ResearchSection(_ConfigModel):
     max_pdf_mb: int | None = None
     keep_raw_pdf: bool | None = None
     parser_backend: str | None = None
+    read_screening: str | None = None
+    read_batch_size: int | None = None
+    read_workers: int | None = None
+    read_max_shortlist: int | None = None
     cache: bool | None = None
     index_backend: str | None = None
     index_root: str | None = None
@@ -138,6 +142,10 @@ class PipelineRunConfig(_ConfigModel):
         _set_int(result, "research_max_pdf_mb", self.research.max_pdf_mb)
         _set_bool(result, "research_keep_raw_pdf", self.research.keep_raw_pdf)
         _set_string(result, "research_parser_backend", self.research.parser_backend)
+        _set_string(result, "research_read_screening", self.research.read_screening)
+        _set_int(result, "research_read_batch_size", self.research.read_batch_size)
+        _set_int(result, "research_read_workers", self.research.read_workers)
+        _set_int(result, "research_read_max_shortlist", self.research.read_max_shortlist)
         _set_bool(result, "research_cache", self.research.cache)
         _set_string(result, "research_index_backend", self.research.index_backend)
         _set_string(result, "research_index_root", self.research.index_root)

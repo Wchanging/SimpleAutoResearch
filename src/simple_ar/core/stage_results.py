@@ -18,34 +18,42 @@ from simple_ar.app.state import (
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text, relative_to_run
 from simple_ar.literature.models import Paper
 from simple_ar.research.outputs.artifacts import (
-    SEARCH_CLAIM_CARDS,
+    DESIGN_DECISION_LOG,
+    DESIGN_EVAL_JSON,
+    DESIGN_EVAL_MD,
+    DESIGN_EVIDENCE_REVIEW_MD,
+    DESIGN_EXPERIMENT_CONTRACT_JSON,
+    DESIGN_EXPERIMENT_CONTRACT_MD,
+    DESIGN_EXTERNAL_AGENT_BACKEND,
+    DESIGN_RETENTION_POLICY_JSON,
+    DESIGN_RETENTION_POLICY_MD,
+    DESIGN_TOOL_ADAPTER_CONTRACT_JSON,
+    DESIGN_TOOL_ADAPTER_CONTRACT_MD,
+    DESIGN_TOOL_CONTEXT_JSON,
+    DESIGN_TOOL_CONTEXT_MD,
+    DESIGN_TOOL_TRACE,
+    READ_CLAIM_CARDS,
+    READ_CODE_LINKS,
+    READ_DATASET_CARDS,
+    READ_METHOD_CARDS,
+    READ_PAPER_CARDS,
+    READ_READING_TABLE,
+    READ_SCREENING_DECISIONS,
+    READ_SHORTLIST,
     SEARCH_COVERAGE_JSON,
     SEARCH_COVERAGE_MD,
-    SEARCH_DECISION_LOG,
     SEARCH_DOCUMENTS,
-    SEARCH_EVAL_JSON,
-    SEARCH_EVAL_MD,
-    SEARCH_EVIDENCE_PACK_JSON,
-    SEARCH_EVIDENCE_PACK_MD,
-    SEARCH_EVIDENCE_REVIEW_MD,
-    SEARCH_EXTERNAL_AGENT_BACKEND,
-    SEARCH_EXPERIMENT_CONTRACT_JSON,
-    SEARCH_EXPERIMENT_CONTRACT_MD,
     SEARCH_INDEX_META,
-    SEARCH_GAP_SUMMARY,
-    SEARCH_IDEA_CANDIDATES,
     SEARCH_META,
-    SEARCH_NOVELTY_CHECKS,
-    SEARCH_PAPER_CARDS,
     SEARCH_PAPERS,
     SEARCH_RESEARCH_PLAN,
-    SEARCH_TOOL_CONTEXT_JSON,
-    SEARCH_TOOL_CONTEXT_MD,
-    SEARCH_TOOL_ADAPTER_CONTRACT_JSON,
-    SEARCH_TOOL_ADAPTER_CONTRACT_MD,
-    SEARCH_TOOL_TRACE,
-    SEARCH_RETENTION_POLICY_JSON,
-    SEARCH_RETENTION_POLICY_MD,
+    SEARCH_RETRIEVAL_SELECTION,
+    SYNTHESIS_EVIDENCE_PACK_JSON,
+    SYNTHESIS_EVIDENCE_PACK_MD,
+    SYNTHESIS_GAP_SUMMARY,
+    SYNTHESIS_IDEA_CANDIDATES,
+    SYNTHESIS_NOVELTY_CHECKS,
+    SYNTHESIS_BRIEF_JSON,
 )
 from simple_ar.core.stages import Stage
 
@@ -112,11 +120,8 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
     documents_path = ctx.artifact_path(SEARCH_DOCUMENTS)
     coverage_md_path = ctx.artifact_path(SEARCH_COVERAGE_MD)
     coverage_json_path = ctx.artifact_path(SEARCH_COVERAGE_JSON)
-    paper_cards_path = ctx.artifact_path(SEARCH_PAPER_CARDS)
-    claim_cards_path = ctx.artifact_path(SEARCH_CLAIM_CARDS)
     index_meta_path = ctx.artifact_path(SEARCH_INDEX_META)
-    evidence_pack_path = ctx.artifact_path(SEARCH_EVIDENCE_PACK_JSON)
-    experiment_contract_path = ctx.artifact_path(SEARCH_EXPERIMENT_CONTRACT_JSON)
+    retrieval_selection_path = ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION)
 
     research_plan = read_json(research_plan_path)
     search_meta = read_json(search_meta_path)
@@ -124,9 +129,6 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
     documents = read_jsonl(documents_path)
     coverage_report = read_json(coverage_json_path)
     index_meta = read_json(index_meta_path)
-    paper_cards = read_jsonl(paper_cards_path)
-    claim_cards = read_jsonl(claim_cards_path)
-    evidence_pack = read_json(evidence_pack_path) if evidence_pack_path.exists() else {}
 
     selected_paper_ids = [str(row.get("id", "")) for row in papers if row.get("id")]
     selected_document_ids = [str(row.get("document_id", "")) for row in documents if row.get("document_id")]
@@ -155,8 +157,6 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
         selected_document_ids=selected_document_ids,
         document_count=len(documents),
         chunk_count=int(index_meta.get("chunk_count", 0) or 0),
-        paper_card_count=len(paper_cards),
-        claim_card_count=len(claim_cards),
         store_paths={
             "index_meta": _rel(ctx, index_meta_path),
             "index_backend": str(index_meta.get("backend", "")),
@@ -167,30 +167,14 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
             "search_meta.json": _rel(ctx, search_meta_path),
             "papers.jsonl": _rel(ctx, papers_path),
             SEARCH_DOCUMENTS: _rel(ctx, documents_path),
+            **(
+                {SEARCH_RETRIEVAL_SELECTION: _rel(ctx, retrieval_selection_path)}
+                if retrieval_selection_path.exists()
+                else {}
+            ),
             SEARCH_COVERAGE_MD: _rel(ctx, coverage_md_path),
             SEARCH_COVERAGE_JSON: _rel(ctx, coverage_json_path),
             SEARCH_INDEX_META: _rel(ctx, index_meta_path),
-            SEARCH_PAPER_CARDS: _rel(ctx, paper_cards_path),
-            SEARCH_CLAIM_CARDS: _rel(ctx, claim_cards_path),
-            SEARCH_EVIDENCE_PACK_JSON: _rel(ctx, evidence_pack_path),
-            SEARCH_EVIDENCE_PACK_MD: _rel(ctx, ctx.artifact_path(SEARCH_EVIDENCE_PACK_MD)),
-            SEARCH_GAP_SUMMARY: _rel(ctx, ctx.artifact_path(SEARCH_GAP_SUMMARY)),
-            SEARCH_IDEA_CANDIDATES: _rel(ctx, ctx.artifact_path(SEARCH_IDEA_CANDIDATES)),
-            SEARCH_NOVELTY_CHECKS: _rel(ctx, ctx.artifact_path(SEARCH_NOVELTY_CHECKS)),
-            SEARCH_EXPERIMENT_CONTRACT_JSON: _rel(ctx, experiment_contract_path),
-            SEARCH_EXPERIMENT_CONTRACT_MD: _rel(ctx, ctx.artifact_path(SEARCH_EXPERIMENT_CONTRACT_MD)),
-            SEARCH_TOOL_CONTEXT_JSON: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_CONTEXT_JSON)),
-            SEARCH_TOOL_CONTEXT_MD: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_CONTEXT_MD)),
-            SEARCH_EVIDENCE_REVIEW_MD: _rel(ctx, ctx.artifact_path(SEARCH_EVIDENCE_REVIEW_MD)),
-            SEARCH_DECISION_LOG: _rel(ctx, ctx.artifact_path(SEARCH_DECISION_LOG)),
-            SEARCH_EVAL_JSON: _rel(ctx, ctx.artifact_path(SEARCH_EVAL_JSON)),
-            SEARCH_EVAL_MD: _rel(ctx, ctx.artifact_path(SEARCH_EVAL_MD)),
-            SEARCH_TOOL_ADAPTER_CONTRACT_JSON: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_ADAPTER_CONTRACT_JSON)),
-            SEARCH_TOOL_ADAPTER_CONTRACT_MD: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_ADAPTER_CONTRACT_MD)),
-            SEARCH_TOOL_TRACE: _rel(ctx, ctx.artifact_path(SEARCH_TOOL_TRACE)),
-            SEARCH_EXTERNAL_AGENT_BACKEND: _rel(ctx, ctx.artifact_path(SEARCH_EXTERNAL_AGENT_BACKEND)),
-            SEARCH_RETENTION_POLICY_JSON: _rel(ctx, ctx.artifact_path(SEARCH_RETENTION_POLICY_JSON)),
-            SEARCH_RETENTION_POLICY_MD: _rel(ctx, ctx.artifact_path(SEARCH_RETENTION_POLICY_MD)),
         },
     )
     contract = {
@@ -205,17 +189,9 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
             "papers": len(papers),
             "documents": len(documents),
             "chunks": int(index_meta.get("chunk_count", 0) or 0),
-            "paper_cards": len(paper_cards),
-            "claim_cards": len(claim_cards),
-            "ideas": int(search_meta.get("idea_candidate_count", 0) or 0),
         },
         "store": state.store_paths,
         "coverage": coverage_report,
-        "evidence_pack": {
-            "schema_version": evidence_pack.get("schema_version", ""),
-            "path": _rel(ctx, evidence_pack_path),
-            "limitations": evidence_pack.get("limitations", []),
-        },
     }
     return CollectedStageResult(state=state, contract=contract, report_markdown=coverage_markdown)
 
@@ -223,19 +199,46 @@ def _collect_search(ctx: "Context") -> CollectedStageResult:
 def _collect_read(ctx: "Context") -> CollectedStageResult:
     notes_path = ctx.artifact_path("notes.md")
     paper_notes_path = ctx.artifact_path("paper_notes.json")
+    screening_path = ctx.artifact_path(READ_SCREENING_DECISIONS)
+    shortlist_path = ctx.artifact_path(READ_SHORTLIST)
+    reading_table_path = ctx.artifact_path(READ_READING_TABLE)
     notes_markdown = read_text(notes_path)
     paper_notes = read_json(paper_notes_path)
+    shortlist = read_jsonl(shortlist_path) if shortlist_path.exists() else []
+    legacy_outputs = {
+        "notes.md": _rel(ctx, notes_path),
+        "paper_notes.json": _rel(ctx, paper_notes_path),
+    }
+    debug_card_paths: dict[str, str] = {}
+    for artifact in (
+        READ_SCREENING_DECISIONS,
+        READ_SHORTLIST,
+        READ_READING_TABLE,
+        READ_PAPER_CARDS,
+        READ_CLAIM_CARDS,
+        READ_METHOD_CARDS,
+        READ_DATASET_CARDS,
+        READ_CODE_LINKS,
+    ):
+        path = ctx.artifact_path(artifact)
+        if path.exists():
+            legacy_outputs[artifact] = _rel(ctx, path)
+            if artifact.startswith("cards/"):
+                debug_card_paths[artifact] = _rel(ctx, path)
     state = ReadState(
         notes_path=_rel(ctx, notes_path),
         paper_notes_path=_rel(ctx, paper_notes_path),
+        screening_decisions_path=_rel(ctx, screening_path) if screening_path.exists() else None,
+        shortlist_path=_rel(ctx, shortlist_path) if shortlist_path.exists() else None,
+        reading_table_path=_rel(ctx, reading_table_path) if reading_table_path.exists() else None,
+        shortlist_count=len(shortlist),
         paper_note_count=len(paper_notes) if isinstance(paper_notes, list) else 0,
-        legacy_outputs={
-            "notes.md": _rel(ctx, notes_path),
-            "paper_notes.json": _rel(ctx, paper_notes_path),
-        },
+        debug_card_paths=debug_card_paths,
+        legacy_outputs=legacy_outputs,
     )
     contract = {
         "schema_version": "read_contract.v1",
+        "shortlist_count": state.shortlist_count,
         "paper_note_count": state.paper_note_count,
         "paper_ids": [
             item.get("paper_id")
@@ -249,22 +252,65 @@ def _collect_read(ctx: "Context") -> CollectedStageResult:
 def _collect_synthesize(ctx: "Context") -> CollectedStageResult:
     synthesis_path = ctx.artifact_path("synthesis.md")
     hypothesis_path = ctx.artifact_path("hypothesis.md")
+    synthesis_brief_path = ctx.artifact_path(SYNTHESIS_BRIEF_JSON)
+    evidence_pack_path = ctx.artifact_path(SYNTHESIS_EVIDENCE_PACK_JSON)
+    idea_candidates_path = ctx.artifact_path(SYNTHESIS_IDEA_CANDIDATES)
     synthesis_markdown = read_text(synthesis_path)
     hypothesis_markdown = read_text(hypothesis_path)
+    synthesis_brief = read_json(synthesis_brief_path) if synthesis_brief_path.exists() else {}
+    evidence_pack = read_json(evidence_pack_path) if evidence_pack_path.exists() else {}
+    idea_candidates = (
+        synthesis_brief.get("idea_candidates", [])
+        if isinstance(synthesis_brief.get("idea_candidates"), list)
+        else read_jsonl(idea_candidates_path) if idea_candidates_path.exists() else []
+    )
+    legacy_outputs = {
+        "synthesis.md": _rel(ctx, synthesis_path),
+        "hypothesis.md": _rel(ctx, hypothesis_path),
+    }
+    if synthesis_brief_path.exists():
+        legacy_outputs[SYNTHESIS_BRIEF_JSON] = _rel(ctx, synthesis_brief_path)
+    for artifact in (
+        SYNTHESIS_EVIDENCE_PACK_JSON,
+        SYNTHESIS_EVIDENCE_PACK_MD,
+        SYNTHESIS_GAP_SUMMARY,
+        SYNTHESIS_IDEA_CANDIDATES,
+        SYNTHESIS_NOVELTY_CHECKS,
+    ):
+        path = ctx.artifact_path(artifact)
+        if path.exists():
+            legacy_outputs[artifact] = _rel(ctx, path)
     state = SynthesisState(
         synthesis_markdown=synthesis_markdown,
         hypothesis_markdown=hypothesis_markdown,
         synthesis_path=_rel(ctx, synthesis_path),
         hypothesis_path=_rel(ctx, hypothesis_path),
-        legacy_outputs={
-            "synthesis.md": _rel(ctx, synthesis_path),
-            "hypothesis.md": _rel(ctx, hypothesis_path),
-        },
+        synthesis_brief_path=_rel(ctx, synthesis_brief_path) if synthesis_brief_path.exists() else None,
+        evidence_pack_path=_rel(ctx, evidence_pack_path) if evidence_pack_path.exists() else None,
+        gap_summary_path=_rel(ctx, ctx.artifact_path(SYNTHESIS_GAP_SUMMARY))
+        if ctx.artifact_path(SYNTHESIS_GAP_SUMMARY).exists()
+        else None,
+        idea_candidates_path=_rel(ctx, idea_candidates_path) if idea_candidates_path.exists() else None,
+        novelty_checks_path=_rel(ctx, ctx.artifact_path(SYNTHESIS_NOVELTY_CHECKS))
+        if ctx.artifact_path(SYNTHESIS_NOVELTY_CHECKS).exists()
+        else None,
+        idea_candidate_count=len(idea_candidates),
+        legacy_outputs=legacy_outputs,
     )
     contract = {
         "schema_version": "synthesis_contract.v1",
         "synthesis_markdown": synthesis_markdown,
         "hypothesis_markdown": hypothesis_markdown,
+        "synthesis_brief": {
+            "schema_version": synthesis_brief.get("schema_version", ""),
+            "path": _rel(ctx, synthesis_brief_path) if synthesis_brief_path.exists() else "",
+            "limitations": synthesis_brief.get("limitations", []),
+        },
+        "debug_evidence_pack": {
+            "schema_version": evidence_pack.get("schema_version", ""),
+            "path": _rel(ctx, evidence_pack_path) if evidence_pack_path.exists() else "",
+        },
+        "idea_candidate_count": len(idea_candidates),
     }
     report_markdown = synthesis_markdown.strip() + "\n\n" + hypothesis_markdown.strip() + "\n"
     return CollectedStageResult(state=state, contract=contract, report_markdown=report_markdown)
@@ -272,17 +318,39 @@ def _collect_synthesize(ctx: "Context") -> CollectedStageResult:
 
 def _collect_design(ctx: "Context") -> CollectedStageResult:
     plan_path = ctx.artifact_path("experiment_plan.json")
+    experiment_contract_path = ctx.artifact_path(DESIGN_EXPERIMENT_CONTRACT_JSON)
     plan = read_json(plan_path)
     experiment_name = str(plan.get("name", ""))
     experiment_template = str(plan.get("template", ""))
     experiment_mode = str(plan.get("mode", "standard"))
     state = DesignState(
         experiment_plan_path=_rel(ctx, plan_path),
+        experiment_contract_path=_rel(ctx, experiment_contract_path) if experiment_contract_path.exists() else None,
         experiment_name=experiment_name,
         experiment_template=experiment_template,
         experiment_mode=experiment_mode,
         legacy_outputs={
             "experiment_plan.json": _rel(ctx, plan_path),
+            **(
+                {
+                    DESIGN_EXPERIMENT_CONTRACT_JSON: _rel(ctx, experiment_contract_path),
+                    DESIGN_EXPERIMENT_CONTRACT_MD: _rel(ctx, ctx.artifact_path(DESIGN_EXPERIMENT_CONTRACT_MD)),
+                    DESIGN_TOOL_CONTEXT_JSON: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_CONTEXT_JSON)),
+                    DESIGN_TOOL_CONTEXT_MD: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_CONTEXT_MD)),
+                    DESIGN_EVIDENCE_REVIEW_MD: _rel(ctx, ctx.artifact_path(DESIGN_EVIDENCE_REVIEW_MD)),
+                    DESIGN_DECISION_LOG: _rel(ctx, ctx.artifact_path(DESIGN_DECISION_LOG)),
+                    DESIGN_EVAL_JSON: _rel(ctx, ctx.artifact_path(DESIGN_EVAL_JSON)),
+                    DESIGN_EVAL_MD: _rel(ctx, ctx.artifact_path(DESIGN_EVAL_MD)),
+                    DESIGN_TOOL_ADAPTER_CONTRACT_JSON: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_ADAPTER_CONTRACT_JSON)),
+                    DESIGN_TOOL_ADAPTER_CONTRACT_MD: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_ADAPTER_CONTRACT_MD)),
+                    DESIGN_TOOL_TRACE: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_TRACE)),
+                    DESIGN_EXTERNAL_AGENT_BACKEND: _rel(ctx, ctx.artifact_path(DESIGN_EXTERNAL_AGENT_BACKEND)),
+                    DESIGN_RETENTION_POLICY_JSON: _rel(ctx, ctx.artifact_path(DESIGN_RETENTION_POLICY_JSON)),
+                    DESIGN_RETENTION_POLICY_MD: _rel(ctx, ctx.artifact_path(DESIGN_RETENTION_POLICY_MD)),
+                }
+                if experiment_contract_path.exists()
+                else {}
+            ),
         },
     )
     contract = {

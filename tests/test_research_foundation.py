@@ -502,6 +502,24 @@ class ResearchFoundationTests(unittest.TestCase):
         self.assertEqual(hints[0].source, "openalex")
         self.assertEqual(hints[0].access, "open")
 
+    def test_scholarly_download_url_without_pdf_suffix_is_treated_as_pdf_hint(self) -> None:
+        paper = Paper(
+            id="openalex-W2",
+            title="An OpenAlex Download Paper",
+            authors=[],
+            abstract="abstract",
+            url="https://openalex.org/W2",
+            source="openalex",
+            source_id="W2",
+            fulltext_url="https://ojs.aaai.org/index.php/AAAI/article/download/34497/36652",
+        )
+
+        hints = fulltext_hints_for_paper(paper, document_id="doc-openalex-download")
+
+        self.assertEqual(len(hints), 1)
+        self.assertEqual(hints[0].kind, "pdf")
+        self.assertEqual(hints[0].access, "open")
+
     def test_openalex_fulltext_prefers_pdf_url_for_parsing(self) -> None:
         url = _fulltext_url_from_openalex(
             {
@@ -892,7 +910,7 @@ class ResearchFoundationTests(unittest.TestCase):
                 required_facets=["benchmark"],
                 max_rounds=2,
             ),
-            screening_rows=[
+            selection_rows=[
                 {
                     "paper_id": "paper-1",
                     "facet": "overview",

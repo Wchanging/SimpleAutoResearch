@@ -38,8 +38,9 @@ to_stage = "report"
 # 是否减少命令行进度日志；最终路径和状态仍会输出。
 quiet = false
 
-# true 会在 run 目录中保留 planning、retrieval trace、screening 和 coverage review 等诊断目录；
-# 默认 false 只压缩诊断文件。documents、全文 manifest、chunks 和 cards 这类后续阶段需要的 evidence 产物仍会保留。
+# true 会在 run 目录中保留 search planning/traces/coverage 文件和 design tool-handoff 草案；
+# 默认 false 只压缩诊断文件。search documents/chunks、read Paper Brief、synthesis brief
+# 和 design contracts 这类后续阶段需要的核心产物仍会保留。
 debug_artifacts = false
 
 [llm]
@@ -106,6 +107,12 @@ max_pdf_mb = 20
 keep_raw_pdf = false
 parser_backend = "basic"      # basic | pypdf | unstructured
 
+# 03-read LLM review：先并发粗筛 title/abstract 小批次，再对保留集合重排。
+read_screening = "auto"       # auto | llm | deterministic
+read_batch_size = 4
+read_workers = 3
+read_max_shortlist = 12
+
 # live provider 失败后是否允许使用 cached metadata。
 cache = true
 
@@ -131,7 +138,7 @@ max_llm_calls = 4
 # 第二轮 coverage-driven follow-up retrieval 最多尝试几个 query。
 max_follow_up_queries = 3
 
-# evidence/novelty_checks.jsonl 的 backend。local 只在当前 evidence pack 内做词面重合风险提示，
+# 04-synthesize/synthesis_brief.json 内 novelty hints 的 backend。local 只在当前 Paper Brief 内做词面重合风险提示，
 # 不是正式 novelty check。
 novelty_backend = "local"      # local
 
@@ -321,7 +328,7 @@ max_proposal_chars = 42000
 | --- | --- |
 | `[run].topic` | 用户的主要研究/实验目标，会影响 planning、默认搜索 query 和报告表述。 |
 | `[run].from_stage` / `[run].to_stage` | 部分运行的阶段范围。可用于停在 `synthesize`、只重跑 `report`，或 resume 某一段。 |
-| `[run].debug_artifacts` | 是否保留 search 阶段的详细诊断和草案交接文件，例如 planning、trace、screening、coverage review、section tables、tool contracts、evidence review、eval report 和 retention policy。默认 false 会保持精简输出；documents、全文 manifest、chunks、cards、evidence pack、ideas、novelty hints 和 experiment contract 仍会作为核心 evidence 产物保留。 |
+| `[run].debug_artifacts` | 是否保留详细诊断和草案交接文件，例如 search planning、provider traces、retrieval-selection rows、coverage review、section tables、debug cards、旧 evidence-pack 诊断产物，以及 design 阶段的 tool contracts、evidence review、eval report 和 retention policy。默认 false 会保持精简输出；核心产物仍按阶段保留：`02-search` documents/chunks、`03-read` review/Paper Brief、`04-synthesize` synthesis brief/Markdown、`05-design` experiment contracts。 |
 | `[llm].enabled` | 是否启用 LLM 支持的 planning、notes、synthesis、report 和 code-task 步骤。真实 code-task 通常需要 LLM 才有实际意义。 |
 | `[llm].workers` | 支持并发的 LLM 阶段使用的 worker 数；并不代表所有 pipeline 阶段都会并发。 |
 | `[search].offline` | 跳过 live literature provider，适合本地 demo 和 deterministic test。 |
@@ -351,6 +358,10 @@ max_proposal_chars = 42000
 | `[research].max_pdf_mb` | 单个 PDF 的大小上限。超过该限制的本地 PDF 会被跳过，后续远程下载器也应遵守这个限制。 |
 | `[research].keep_raw_pdf` | fetch/parser 是否保留原始 PDF。只需要 parsed text 和 section chunks 时建议保持 false。 |
 | `[research].parser_backend` | parser 后端。`basic` 直接解析 Markdown/text 和基础 HTML；`pypdf` 使用轻量 PDF parser；`unstructured` 是可选的更强文档解析后端，未安装时只会在 manifest 中记录失败状态。 |
+| `[research].read_screening` | Read 阶段 review 后端。`auto` 会在 `[llm].enabled = true` 时使用 LLM 两步式粗筛/重排；`llm` 显式要求该路径；`deterministic` 跳过额外 LLM review，按检索顺序保留。 |
+| `[research].read_batch_size` | 每个粗筛 prompt 放入几篇论文的 title/abstract。值越小越精细但 LLM 调用更多；默认 `4`，限制在 `1..8`。 |
+| `[research].read_workers` | 粗筛批次的并发 LLM worker 数。默认取 `3` 和 `[llm].workers` 的较小值，用来避免 50+ 篇论文时塞进一个巨大 prompt。 |
+| `[research].read_max_shortlist` | 粗筛和重排后进入深入 Paper Brief 与 synthesis 的论文上限。省略时，小检索集默认全保留，大检索集默认使用有界 shortlist。 |
 | `[research].cache` | live provider 失败后是否允许使用 cached metadata。 |
 | `[research].index_backend` | 本地索引后端。`keyword` 只写可移植 chunks；`sqlite_fts` / `hybrid` 会更新共享 SQLite FTS store；`lancedb` / `hybrid_lancedb` 会更新共享可选 LanceDB store，未安装 LanceDB 时只记录状态，不影响 `chunks.jsonl`。 |
 | `[research].index_root` | SQLite FTS / LanceDB 的共享加速索引目录。默认 `.simple_ar_cache/research_index`，也可通过 `SIMPLE_AR_RESEARCH_INDEX_ROOT` 覆盖。只有明确需要每个 run 自己保存数据库时，才设为 `run` 或 `local`。 |
@@ -359,7 +370,7 @@ max_proposal_chars = 42000
 | `[research.budget].max_context_tokens` | evidence retrieval 放入 prompt 的计划 token 预算。 |
 | `[research.budget].max_llm_calls` | research 侧 query expansion、screening 等 LLM 操作的计划调用上限。 |
 | `[research.budget].max_follow_up_queries` | 第二轮 coverage-driven follow-up retrieval 最多尝试几个 query。 |
-| `[research.budget].novelty_backend` | `02-search/evidence/novelty_checks.jsonl` 的 backend。当前稳定值是 `local`，只基于当前 evidence pack 做词面重合风险提示。 |
+| `[research.budget].novelty_backend` | `04-synthesize/synthesis_brief.json` 内 novelty hints 的 backend。当前稳定值是 `local`，只基于当前 Paper Brief 做词面重合风险提示。 |
 
 ### Code-Task 字段
 

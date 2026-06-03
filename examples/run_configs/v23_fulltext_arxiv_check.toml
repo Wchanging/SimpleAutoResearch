@@ -1,12 +1,13 @@
 [run]
-# V2.3 realistic online search/full-text check.
-# This run stops at search so you can inspect all V2.3 evidence artifacts
-# without running read/synthesize/report.
+# V2.3 realistic online research-chain check.
+# This run stops at synthesize so you can inspect live retrieval, full-text
+# ingestion, read-stage Paper Briefs, and the compact synthesis brief without
+# running design/code/run/report.
 topic = "multi-agent collaboration for coding agents"
 output_root = "runs/v23-fulltext-arxiv-check"
-to_stage = "search"
+to_stage = "synthesize"
 # Keep default runs lean. Set this to true only when you need planning traces,
-# screening rows, coverage diagnostics, tool contracts, and retention-policy
+# retrieval-selection rows, coverage diagnostics, tool contracts, and retention-policy
 # artifacts for debugging.
 debug_artifacts = false
 
@@ -69,6 +70,15 @@ max_pdf_mb = 15
 keep_raw_pdf = true
 parser_backend = "pypdf"
 
+# 03-read uses a two-step LLM review: first screen compact abstract batches,
+# then rerank the kept set for Paper Brief generation and synthesis. These
+# values are intentionally modest for local use; increase read_max_shortlist
+# for broader surveys.
+read_screening = "llm"       # auto | llm | deterministic
+read_batch_size = 4
+read_workers = 3
+read_max_shortlist = 3
+
 # Disable metadata cache fallback so this check uses a real live query. The
 # downloaded PDF itself is still stored in the run-local fulltext_cache.
 cache = false
@@ -91,5 +101,5 @@ top_k = 6
 
 [report]
 # Useful if you later change to_stage to report, but this check normally stops
-# at search.
+# at synthesize.
 mode = "research_only"

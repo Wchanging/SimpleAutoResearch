@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.tree import Tree
 
 from simple_ar.core.artifacts import read_json, write_json
+from simple_ar.core.console import make_console
 
 
 CleanTargetKind = Literal["file", "directory", "sqlite_rows"]
@@ -55,8 +56,8 @@ def build_clean_plan(run_dir: Path) -> CleanPlan:
     """Build a conservative cleanup plan for one run directory.
 
     The default policy removes rebuildable or bulky cache files while keeping
-    audit artifacts such as papers, cards, coverage reports, reports, manifests,
-    and portable text chunks.
+    audit artifacts such as papers, parser manifests, Paper Briefs, synthesis
+    briefs, reports, manifests, and portable text chunks.
     """
 
     root = run_dir.resolve()
@@ -73,12 +74,23 @@ def build_clean_plan(run_dir: Path) -> CleanPlan:
             "manifest.json",
             "state.json",
             "02-search/papers.jsonl",
+            "02-search/search_meta.json",
             "02-search/documents/documents.jsonl",
+            "02-search/documents/cache_manifest.json",
             "02-search/documents/fulltext_manifest.json",
-            "02-search/cards",
-            "02-search/evidence",
+            "02-search/documents/fulltext_extraction.json",
             "02-search/review",
             "02-search/research_index/chunks.jsonl",
+            "02-search/research_index/index_meta.json",
+            "03-read/review",
+            "03-read/paper_notes.json",
+            "03-read/notes.md",
+            "03-read/cards",
+            "04-synthesize/synthesis_brief.json",
+            "04-synthesize/synthesis.md",
+            "04-synthesize/hypothesis.md",
+            "04-synthesize/evidence",
+            "05-design/evidence",
             "08-report",
             "code_task/summary.md",
         ],
@@ -111,7 +123,7 @@ def build_clean_plan(run_dir: Path) -> CleanPlan:
 def render_clean_plan(plan: CleanPlan, *, console: Console | None = None) -> None:
     """Print a Rich tree preview of the cleanup plan."""
 
-    console = console or Console(highlight=False)
+    console = console or make_console()
     tree = Tree(f"[green]{plan.run_dir}[/green]")
 
     delete_branch = tree.add("[bold red]Will delete[/bold red]")
@@ -143,7 +155,7 @@ def confirm_clean_plan(plan: CleanPlan, *, console: Console | None = None, assum
         return False
     if assume_yes:
         return True
-    console = console or Console(highlight=False)
+    console = console or make_console()
     answer = console.input("[bold]Type yes to delete these items, or no to cancel: [/bold]").strip().lower()
     return answer in {"yes", "y"}
 
@@ -182,7 +194,6 @@ def apply_clean_plan(plan: CleanPlan) -> CleanResult:
 _RUN_LOCAL_CLEAN_TARGETS: tuple[tuple[str, str], ...] = (
     ("02-search/documents/fulltext_cache", "downloaded full-text cache"),
     ("02-search/documents/extracted_text", "parsed full-text cache"),
-    ("02-search/documents/fulltext_extraction.json", "full-text parser debug report"),
     ("artifact_search_results.json", "last artifact search output"),
 )
 

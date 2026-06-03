@@ -363,7 +363,7 @@ def _kind_from_url(url: str) -> str:
     lower = url.lower()
     parsed = urlparse(lower)
     path = parsed.path or lower
-    if path.endswith(PDF_SUFFIX) or "/pdf/" in path:
+    if path.endswith(PDF_SUFFIX) or "/pdf/" in path or _looks_like_pdf_download_path(path):
         return "pdf"
     if any(path.endswith(suffix) for suffix in TEXT_SUFFIXES):
         return "text"
@@ -372,6 +372,17 @@ def _kind_from_url(url: str) -> str:
     if parsed.scheme in {"http", "https"}:
         return "landing"
     return "unknown"
+
+
+def _looks_like_pdf_download_path(path: str) -> bool:
+    """Return true for common scholarly PDF download paths without .pdf suffix."""
+
+    normalized = path.rstrip("/")
+    if "/article/download/" in normalized:
+        return True
+    if "/download/" in normalized and re.search(r"/\d+(?:/\d+)?$", normalized):
+        return True
+    return False
 
 
 def _arxiv_id(value: str) -> str:

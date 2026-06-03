@@ -155,6 +155,10 @@ max_fulltext_documents = 6
 max_pdf_mb = 20
 keep_raw_pdf = false
 parser_backend = "basic"      # basic | pypdf | unstructured
+read_screening = "auto"       # auto | llm | deterministic
+read_batch_size = 4           # 每个摘要级 LLM 粗筛批次包含几篇论文
+read_workers = 3              # 粗筛批次并发数
+read_max_shortlist = 12       # 进入深入 Paper Brief/synthesis 的论文上限
 cache = true
 index_backend = "sqlite_fts"  # keyword | sqlite_fts | hybrid | lancedb | hybrid_lancedb
 # SQLite FTS / LanceDB 的共享加速索引目录；如需每个 run 自己保存数据库，可设为 "run" 或 "local"。
@@ -168,7 +172,7 @@ max_llm_calls = 8
 novelty_backend = "local"
 ```
 
-搜索阶段默认会生成下面这棵精简 `02-search/` 结构：
+前几个 research 阶段现在按职责拆分产物。一次 compact run 会生成：
 
 ```text
 02-search/
@@ -183,21 +187,24 @@ novelty_backend = "local"
   research_index/
     chunks.jsonl
     index_meta.json
-  cards/
-    paper_cards.jsonl
-    claim_cards.jsonl
-    method_cards.jsonl
-    dataset_cards.jsonl
-    code_links.jsonl
+03-read/
+  review/
+    screening_decisions.jsonl
+    shortlist.jsonl
+    reading_table.md
+  paper_notes.json
+  notes.md
+04-synthesize/
+  synthesis_brief.json
+  synthesis.md
+  hypothesis.md
+05-design/
   evidence/
-    evidence_pack.json
-    evidence_pack.md
-    gap_summary.md
-    idea_candidates.jsonl
-    novelty_checks.jsonl
     experiment_contract.json
     experiment_contract.md
 ```
+
+启用 LLM 时，`03-read` 会走两步式 review：先把 title/abstract 组织成小批次并发粗筛，再对保留下来的集合做重排，输出阅读优先级、证据角色和给 `04-synthesize` 使用的简短提示。最终仍然只写入 `03-read/review/screening_decisions.jsonl`，并由 `shortlist.jsonl` 决定哪些论文进入 notes、cards 和 synthesis。如果希望完全跳过这层 LLM review，可以设置 `[research].read_screening = "deterministic"`。
 
 如果需要查看详细诊断、section tables 和未来 Tool/MCP 接入草案，可以设置 `[run].debug_artifacts = true`：
 
@@ -207,12 +214,27 @@ novelty_backend = "local"
     research_plan.json
   traces/
     retrieval_rounds.jsonl
-    screening_decisions.jsonl
+    retrieval_selection.jsonl
   review/
     coverage_report.json
     coverage_report.md
   documents/
     sections.jsonl
+03-read/
+  cards/
+    paper_cards.jsonl
+    claim_cards.jsonl
+    method_cards.jsonl
+    dataset_cards.jsonl
+    code_links.jsonl
+04-synthesize/
+  evidence/
+    evidence_pack.json
+    evidence_pack.md
+    gap_summary.md
+    idea_candidates.jsonl
+    novelty_checks.jsonl
+05-design/
   evidence/
     tool_context.json
     tool_context.md
@@ -249,18 +271,19 @@ uv run simple-ar clean runs/<run-id>
 输入 `yes` 后才会执行删除。默认会清理 `02-search/documents/fulltext_cache/`、
 `02-search/documents/extracted_text/` 等较大的 run-local 缓存，以及共享 SQLite
 research index 中属于该 run 的 rows；不会删除 report、manifest、papers、
-evidence cards、已保留的 debug coverage reports 和可移植的 `research_index/chunks.jsonl`。
+`fulltext_extraction.json` 等解析审计文件、read 阶段 Paper Brief、synthesis brief、
+已保留的 debug coverage reports 和可移植的 `research_index/chunks.jsonl`。
 
 关键文件按目录看：
 
 - `02-search/` 根目录
   - `papers.jsonl`：传给 `read` 阶段的标准化论文 metadata。
-  - `search_meta.json`：最终选用 source、状态、返回数量，以及已保留的 evidence artifact 路径。
+  - `search_meta.json`：最终选用 source、状态、返回数量，以及已保留的 evidence artifact 路径。compact run 还会在这里保留一份小型 `source_plan`，让后续阶段在 verbose planning traces 被清理后仍能知道实际 source、全文意图、index backend 和预算。
 - `planning/`（debug-only）
   - `research_plan.json`：紧凑计划产物，包含 `research_questions`、`query_plan` 和 `source_plan`，记录子问题、seed/expanded queries、source 顺序、检索模式、本地文档、cache/index 偏好和预算。
 - `traces/`（debug-only）
   - `retrieval_rounds.jsonl`：每次 source/query 尝试，包括状态、返回数量、错误/cache 命中和简洁 query 意图。
-  - `screening_decisions.jsonl`：对返回 metadata 的去重和轻量 relevance screening 决策。
+  - `retrieval_selection.jsonl`：对返回 metadata 的去重、词面排序和预算截断决策。它只是检索选择，不是语义阅读筛选。
 - `review/`（debug-only）
   - `coverage_report.json` / `.md`：required facets 覆盖情况、缺失研究问题和 follow-up query 决策。
 - `documents/`
@@ -272,26 +295,30 @@ evidence cards、已保留的 debug coverage reports 和可移植的 `research_i
 - `research_index/`
   - `chunks.jsonl`：从摘要、已解析本地文件和已抽取全文生成的可移植 chunks；存在 section records 时会带上 section metadata。
   - `index_meta.json`：记录 backend、run id、可移植 chunk 路径，以及共享 SQLite FTS / LanceDB store 路径。共享索引默认在 `.simple_ar_cache/research_index`，不会复制到每个 run。
-- `cards/`
-  - `paper_cards.jsonl`：paper-level evidence cards，包含 problem/method/metric/limitation hints 和 source chunk refs。
-  - `claim_cards.jsonl`：绑定 chunk id 的保守 claim cards；这些还不是最终报告 claim，后续仍需要 audit。
-  - `method_cards.jsonl`、`dataset_cards.jsonl`、`code_links.jsonl`：method、dataset/metric 和 repository-link hints，供后续 experiment contract、code-task 和 report 使用。
-- `evidence/`
-  - `evidence_pack.json` / `.md`：紧凑证据包，汇总 counts、artifact refs、coverage、parser/index provenance 和 limitations；它指向 `cards/*.jsonl`，不会再复制一份 cards 表。
-  - `gap_summary.md`：根据 coverage 和 cards 可见性生成的保守研究简报，不代表 novelty claim。
-  - `idea_candidates.jsonl`：带 evidence refs 的有限 idea candidates，包含 expected outcome、所需 baseline/dataset、metrics、feasibility 和 risks。
-  - `novelty_checks.jsonl`：当前 evidence pack 内部的本地词面 novelty-risk hints，不能替代 live novelty search 或人工审核。
+- `03-read/review/`
+  - `screening_decisions.jsonl`：read 阶段对检索结果的 keep/drop/priority 决策。LLM 模式可以丢弃或重排论文；deterministic fallback 会保留已检索入库的论文，并记录其进入结构化阅读的理由。
+  - `shortlist.jsonl`：供 notes、cards 和 synthesis 使用的紧凑阅读 shortlist。
+  - `reading_table.md`：面向人工检查的阅读表格，并记录 coverage caveats。
+- `03-read/`
+  - `paper_notes.json`：默认主产物，也就是结构化 Paper Brief；每条记录包含 evidence role、摘要、方法/数据集/指标提示、保守 claims、limitations、synthesis hint、实验 hook 和 open questions。
+  - `notes.md`：同一组 Paper Brief 的人类可读版本。
+  - `cards/*.jsonl`（debug-only）：只有设置 `[run].debug_artifacts = true` 时才保留的旧式 paper/claim/method/dataset/code hints。
+- `04-synthesize/`
+  - `synthesis_brief.json`：从 Paper Brief 汇总出的紧凑桥接产物，包含 role counts、coverage/provenance、themes、gaps、idea candidates、local novelty-risk hints 和 limitations，不再重复保存 cards 表。
+  - `synthesis.md` / `hypothesis.md`：面向人类阅读的综合分析和可实验假设。
+  - `evidence/*.jsonl` / `.md`（debug-only）：只有设置 `[run].debug_artifacts = true` 时才保留的旧 evidence-pack 诊断产物。
+- `05-design/evidence/`
   - `experiment_contract.json` / `.md`：从文献证据到 code-task / 外部 coding agent 的桥接契约，记录 hypothesis、实现范围、验证提示、预算、风险和 report claim rules。
   - `tool_context.json` / `.md`（debug-only）：给未来 MCP/tool/agent 的只读 handoff，在打开代码 workspace 前只允许读取和规划。
   - `evidence_review.md`、`decision_log.jsonl`、`eval_report.json` / `.md`（debug-only）：人工审核清单和简单 research artifact quality checks。
-- `tools/`（debug-only）
+- `05-design/tools/`（debug-only）
   - `tool_adapter_contract.json` / `.md`：只读 Tool/MCP adapter 契约，定义输入、输出、权限边界、错误/fallback 和 trace 规则。
   - `tool_trace.jsonl`：工具审计 trace。
   - `external_agent_backend.md`：Codex、Claude Code、OpenCode 等外部 agent backend 的接入边界说明。
-- `governance/`（debug-only）
+- `05-design/governance/`（debug-only）
   - `artifact_retention_policy.json` / `.md`：把 search artifacts 分为稳定产物、evidence table、cache、trace、debug 和可重建文件，避免无边界新增 JSON/JSONL。
 - 后续报告阶段
-  - `08-report/report.md`：当 search evidence cards 存在时，LLM 和 fallback report 都会收到紧凑 evidence summary，让 Related Work、Search Scope 和 Limitations 更明确地绑定证据。
+  - `08-report/report.md`：报告生成主要消费 Paper Brief 和 synthesis brief，让 Related Work、Search Scope 和 Limitations 更明确地绑定证据。
 
 `[research].planner = "auto"` 会在 `[llm].enabled = true` 时调用 LLM planner，
 用于生成更强的 research questions 和 query expansion；provider 不可用时会回退到
@@ -307,7 +334,7 @@ required facets，在写出最终 `papers.jsonl` 前执行一个有预算限制�
 uv run simple-ar run --config examples/run_configs/local_research_report.toml
 ```
 
-这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。当前 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取，并使用轻量 keyword-overlap 匹配，而不是要求完整 query 字符串逐字出现。启用 `[research].use_fulltext = true` 后，search 阶段会把本地/缓存全文的 parser 结果写入 `documents/fulltext_extraction.json`，并在生成 evidence cards 前把抽取文本送入 `research_index/chunks.jsonl`。PDF 输入仍是 best-effort：只有在可选 parser 可用且明确启用 full-text 意图时才解析，失败不会中断 search。
+这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。当前 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取，并使用轻量 keyword-overlap 匹配，而不是要求完整 query 字符串逐字出现。启用 `[research].use_fulltext = true` 后，search 阶段会把本地/缓存全文的 parser 结果写入 `documents/fulltext_extraction.json`，并在 read 阶段生成 Paper Brief 前把抽取文本送入 `research_index/chunks.jsonl`。PDF 输入仍是 best-effort：只有在可选 parser 可用且明确启用 full-text 意图时才解析，失败不会中断 search。
 
 ### 恢复和查看状态
 

@@ -42,10 +42,10 @@ to_stage = "report"
 # Suppress progress logs while keeping final paths/status output.
 quiet = false
 
-# Keep verbose search diagnostics such as planning, retrieval traces, screening,
-# and coverage-review folders inside each run directory. The default false keeps
-# diagnostics compact; evidence artifacts such as documents, full-text manifests,
-# chunks, and cards are still retained for downstream stages.
+# Keep verbose diagnostics such as search planning/traces/coverage files and
+# design tool-handoff drafts inside each run directory. The default false keeps
+# diagnostics compact while retaining stage-owned operational artifacts:
+# search documents/chunks, read Paper Briefs, synthesis briefs, and design contracts.
 debug_artifacts = false
 
 [llm]
@@ -113,6 +113,13 @@ max_pdf_mb = 20
 keep_raw_pdf = false
 parser_backend = "basic"      # basic | pypdf | unstructured
 
+# 03-read LLM review settings. The read stage first screens compact abstract
+# batches, then reranks the kept set for deeper Paper Briefs and synthesis.
+read_screening = "auto"       # auto | llm | deterministic
+read_batch_size = 4
+read_workers = 3
+read_max_shortlist = 12
+
 # Whether live-provider failures may use cached metadata.
 cache = true
 
@@ -139,8 +146,9 @@ max_llm_calls = 4
 # Maximum coverage-driven follow-up queries attempted in a second retrieval round.
 max_follow_up_queries = 3
 
-# Backend for evidence/novelty_checks.jsonl. local only records lexical risk
-# hints over the current evidence pack; it is not a definitive novelty check.
+# Backend for novelty hints inside 04-synthesize/synthesis_brief.json. local
+# only records lexical risk hints over current Paper Briefs; it is not a
+# definitive novelty check.
 novelty_backend = "local"      # local
 
 [retrieval]
@@ -330,7 +338,7 @@ max_proposal_chars = 42000
 | --- | --- |
 | `[run].topic` | Main user goal. It is used by planning, default search query generation, and report framing. |
 | `[run].from_stage` / `[run].to_stage` | Stage range for partial runs. Use these to stop at `synthesize`, rerun `report`, or resume a subset. |
-| `[run].debug_artifacts` | When `true`, keeps verbose search diagnostics and draft handoff files such as planning, trace, screening, coverage review, section tables, tool contracts, evidence review, eval report, and retention policy. Keep it `false` for compact default runs; operational evidence artifacts such as documents, full-text manifests, chunks, cards, evidence pack, ideas, novelty hints, and experiment contract are still retained. |
+| `[run].debug_artifacts` | When `true`, keeps verbose diagnostics and draft handoff files such as search planning, provider traces, retrieval-selection rows, coverage review, section tables, debug cards, legacy evidence-pack diagnostics, design tool contracts, evidence review, eval report, and retention policy. Keep it `false` for compact default runs; operational artifacts are still retained under their owning stages: `02-search` documents/chunks, `03-read` review/Paper Briefs, `04-synthesize` synthesis brief/Markdown, and `05-design` experiment contracts. |
 | `[llm].enabled` | Turns LLM-backed planning/notes/synthesis/report/code-task steps on or off. Some real code-task steps need LLM mode to be useful. |
 | `[llm].workers` | Parallelism for supported LLM stages. It does not make every pipeline stage concurrent. |
 | `[search].offline` | Skips live literature providers. Useful for local demos and deterministic tests. |
@@ -360,6 +368,10 @@ max_proposal_chars = 42000
 | `[research].max_pdf_mb` | Per-PDF size ceiling used by full-text planning. Local PDFs above this limit are skipped; future remote fetchers should enforce the same cap. |
 | `[research].keep_raw_pdf` | Whether fetch/parsing steps should retain raw PDF files in cache. Keep false when you only need parsed text and section chunks. |
 | `[research].parser_backend` | Parser backend. `basic` parses Markdown/text and simple HTML directly; `pypdf` uses the lightweight PDF parser when available; `unstructured` is an optional heavier parser backend and records a manifest failure if the package is not installed. |
+| `[research].read_screening` | Read-stage review backend. `auto` uses the LLM two-step screen/rerank path when `[llm].enabled = true`; `llm` explicitly requests it; `deterministic` skips the extra review and keeps retrieval order. |
+| `[research].read_batch_size` | Number of papers placed in each coarse title/abstract screening prompt. Smaller values are more precise but spend more LLM calls; defaults to `4` and is clamped to `1..8`. |
+| `[research].read_workers` | Concurrent LLM workers for coarse screening batches. Defaults to the lower of `3` and `[llm].workers`, so large retrieval sets can be screened without one giant prompt. |
+| `[research].read_max_shortlist` | Maximum number of papers kept for deeper Paper Briefs and synthesis after coarse screening and reranking. When omitted, small retrieval sets keep all papers and larger sets default to a bounded shortlist. |
 | `[research].cache` | Allows live-provider failures to fall back to cached metadata when available. |
 | `[research].index_backend` | Local index backend. `keyword` writes portable chunks only; `sqlite_fts` and `hybrid` update the shared SQLite FTS store; `lancedb` / `hybrid_lancedb` update the shared optional LanceDB store and degrade to a recorded status when LanceDB is not installed. |
 | `[research].index_root` | Shared accelerator-store root for SQLite FTS / LanceDB. Defaults to `.simple_ar_cache/research_index`, or `SIMPLE_AR_RESEARCH_INDEX_ROOT` when set. Use `run` or `local` only when you intentionally want per-run index databases under `02-search/research_index/`. |
@@ -368,7 +380,7 @@ max_proposal_chars = 42000
 | `[research.budget].max_context_tokens` | Planned prompt budget for evidence retrieval context. |
 | `[research.budget].max_llm_calls` | Planned cap for research-side LLM actions such as query expansion and screening. |
 | `[research.budget].max_follow_up_queries` | Maximum coverage-driven follow-up queries attempted in a second retrieval round. |
-| `[research.budget].novelty_backend` | Backend for `02-search/evidence/novelty_checks.jsonl`. Current stable value is `local`, which records lexical risk hints from the current evidence pack only. |
+| `[research.budget].novelty_backend` | Backend for novelty hints inside `04-synthesize/synthesis_brief.json`. Current stable value is `local`, which records lexical risk hints from the current Paper Briefs only. |
 
 ### Code-Task Fields
 

@@ -4,15 +4,41 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-03
+
+### Changed
+
+- 真实 online full-text check 现在能把 `.../article/download/...` 这类常见学术下载链接识别为 PDF candidate，即使 URL 本身不以 `.pdf` 结尾。
+- Compact `search_meta.json` 现在会保留一份小型 `source_plan`，让后续 read/synthesize/design 阶段在 verbose planning traces 被清理后，仍能知道实际 sources、全文意图、index backend 和预算。
+- Retrieval 现在会先收集一个有边界的 overfetch 候选集合，再做最终筛选。这样当某个 provider 返回的候选后续被丢弃时，系统仍有机会用其他 provider 补足文献预算。
+- Synthesis limitations 现在会区分全局全文解析成功和 shortlisted paper 的证据缺口，避免“被丢弃论文解析成功”让保留论文的 brief 看起来比实际更强。
+- 精简 research run 的默认主链：`papers.jsonl` -> `paper_notes.json`
+  Paper Brief -> `synthesis_brief.json` -> `experiment_contract.json`。
+  旧的 `03-read/cards/*` 和 `04-synthesize/evidence/*` 诊断产物现在只在
+  `[run].debug_artifacts = true` 时保留。
+- 解耦 research 阶段产物归属。`02-search` 现在只负责 retrieval/document/full-text/index
+  产物；`03-read` 负责 reading review/shortlist 以及 paper/claim/method/dataset/code-link cards；
+  `04-synthesize` 负责 evidence pack、gap、ideas 和 novelty hints；
+  `05-design` 负责 experiment contract 和可选 tool handoff 草案。
+- 将 search 阶段 metadata screening trace 改为
+  `02-search/traces/retrieval_selection.jsonl`；语义 keep/drop/priority
+  决策现在归属 `03-read/review/`。
+- Read 阶段的 LLM screening 现在可以丢弃或重排检索到的论文；`paper_notes.json`
+  和 read cards 会基于 shortlist 生成，而不是无条件读取所有 retrieved rows。
+- Read 阶段的 LLM review 现在改为可扩展的两步式路径：先并发粗筛 title/abstract 小批次，再对保留集合做重排，并记录阅读优先级、证据角色和 synthesis hint。
+- Pipeline Rich 进度输出现在会展示每个阶段的职责说明，用户运行时可以直接看出当前阶段在做什么。
+- Artifact retrieval 现在会忽略 cards、evidence packs、idea candidates、
+  experiment contracts 和 tool handoff drafts 等结构化中间产物，避免系统生成的证据表被当成新的来源材料再次检索。
+
 ## 2026-06-02
 
 ### Added
 
-- 新增 V2.3 Week 3 research-bridge 产物，统一放在 `02-search/evidence/`。
-  默认精简运行保留 `evidence_pack.json/md`、`gap_summary.md`、
-  `idea_candidates.jsonl`、`novelty_checks.jsonl` 和
-  `experiment_contract.json/md`；debug 运行还可以保留 `tool_context.json/md`、
-  `evidence_review.md`、`decision_log.jsonl` 和 `eval_report.json/md`。
+- 新增 V2.3 Week 3 research-bridge 产物。精简运行会在 `03-read/cards/`
+  保留 reading cards，在 `04-synthesize/evidence/` 保留 synthesis evidence，
+  在 `05-design/evidence/` 保留 experiment contract；debug 运行还可以保留
+  `tool_context.json/md`、`evidence_review.md`、`decision_log.jsonl` 和
+  `eval_report.json/md` 等 design handoff 草案。
 - 新增 `[research.budget].novelty_backend`，当前稳定支持 `local`，
   用于基于当前 evidence pack 生成词面重合 novelty-risk hints。
 
@@ -22,17 +48,17 @@
 - 当 section records 存在时，research chunks 会带上 `section`、`heading` 和
   `section_id` provenance，让 `02-search/research_index/chunks.jsonl` 不再只是扁平文本切块。
 - 新增 V2.3 Day 13 扩展 evidence cards：
-  `02-search/cards/method_cards.jsonl`、`dataset_cards.jsonl` 和
+  `03-read/cards/method_cards.jsonl`、`dataset_cards.jsonl` 和
   `code_links.jsonl`。
 - 报告阶段新增紧凑 structured evidence summary。LLM report 和 fallback report
-  都可以使用 search 阶段的 paper cards、claim cards、section records 和扩展 cards 作为有边界的证据。
+  都可以使用 read 阶段的 paper cards、claim cards、section records 和扩展 cards 作为有边界的证据。
 - 新增可配置的 code-task `[edit_scope]` allowlist 和额外 protected patterns。
   该 scope 会写入 `code_task/manifest.json`，并在 repo map、context、work-plan、
   edit proposal、repair 和 apply-time patch validation 中重复生效。
-- 新增 debug-only 只读 Tool/MCP handoff 产物，位于 `02-search/tools/`：
+- 新增 debug-only 只读 Tool/MCP handoff 产物，位于 `05-design/tools/`：
   `tool_adapter_contract.json/md`、`tool_trace.jsonl` 和
   `external_agent_backend.md`。
-- 新增 debug-only `02-search/governance/artifact_retention_policy.json/md`，
+- 新增 debug-only `05-design/governance/artifact_retention_policy.json/md`，
   用于把 search artifacts 区分为稳定 run outputs、evidence tables、cache、
   trace、debug 诊断和可重建文件。
 - 新增 `simple-ar clean RUN_DIR`：先用 Rich tree 预览、再确认删除的缓存清理命令，
@@ -47,12 +73,12 @@
 - Code-task 示例现在显式声明 edit scope：实现文件可编辑，tests、benchmark 和锁定配置仍作为只读证据。
 - LLM research planning 现在会在 query expansion 关闭时继续生效。`[research].max_queries`
   仍然控制最终 query 数量，但 `[research].planner = "llm"` 不会再静默退回 deterministic planning。
-- Retrieval screening 现在会先尽量保留 required facets 的多样性，再用普通 rank 填满剩余文档预算，减少某一类高分 query 把 overview/benchmark/dataset 证据挤掉的情况。
+- Retrieval selection 现在会先尽量保留 required facets 的多样性，再用普通 rank 填满剩余文档预算，减少某一类高分 query 把 overview/benchmark/dataset 证据挤掉的情况。
 - V2.3 online check 配置现在默认使用 compact artifacts，并避免把本地 demo notes
   混入在线 evidence check。需要 planning/traces/coverage/tool 草案时再设置
   `[run].debug_artifacts = true`。
 - Evidence pack 现在保存 artifact refs 和 card ids，不再重复复制 `cards/*.jsonl`，
-  减少 search 阶段产物膨胀。
+  减少 synthesis 阶段产物膨胀。
 - V2.3 release hardening 覆盖了分层检查、内置 code-task 示例、compact search
   CLI run、medium code-task baseline CLI run，以及全量 unittest discovery。
 
@@ -81,9 +107,9 @@
 - Pipeline 阶段依赖现在优先使用显式 `WorkspaceState` 指针，而不是通过
   `find_artifact` 反向扫描 run 目录；旧 helper 仅作为 legacy compatibility 保留。
 - 默认 pipeline run 会在 search 阶段 contract 写出后只压缩 `02-search` 的诊断目录。
-  `documents/`、`research_index/` 和 `cards/` 等后续 grounding 需要的 evidence 产物会保留在 run 目录；
-  需要额外保留 planning、trace、screening 和 coverage-review 诊断产物时，可设置
-  `[run].debug_artifacts = true`。
+  search-owned `documents/` 和 `research_index/` 会保留在 run 目录；后续阶段会各自保留
+  cards/evidence/contracts。需要额外保留 planning、trace、screening 和 coverage-review
+  诊断产物时，可设置 `[run].debug_artifacts = true`。
 - 紧凑 search run 现在会同步清理 `search_meta.json` 中指向已删除诊断产物的路径，
   避免 metadata 指向不存在的 planning/trace/review 文件。
 - 原本巨大的 `stage_handlers.py` 和 `cli.py` 已移动到私有 `src/simple_ar/_legacy/`，
@@ -109,7 +135,7 @@
   受控远程获取失败会记录到 `fulltext_manifest.json`，search 阶段继续使用 metadata/abstract evidence。
 - 新增 V2.3 Day 11 full-text extraction：
   `02-search/documents/fulltext_extraction.json` 现在会记录已缓存/本地全文资源的 parser 结果，
-  并在生成 evidence cards 前把解析文本送入 `research_index/chunks.jsonl`。
+  并在 read 阶段生成 evidence cards 前把解析文本送入 `research_index/chunks.jsonl`。
 
 ### Changed
 
@@ -132,8 +158,8 @@
   title/abstract keyword 意图，而不是只输出偏浏览器搜索风格的 query 字符串。
 - 新增 V2.3 Day 4 检索 trace 产物：
   `02-search/traces/retrieval_rounds.jsonl` 和
-  `02-search/traces/screening_decisions.jsonl`，记录实际执行的 source/query 尝试、
-  简洁 query 意图 trace、去重和轻量相关性筛选决策，再写入 `papers.jsonl`。
+  `02-search/traces/retrieval_selection.jsonl`，记录实际执行的 source/query 尝试、
+  简洁 query 意图 trace、去重和轻量 retrieval-selection 决策，再写入 `papers.jsonl`。
 - 新增 V2.3 Day 5 coverage 产物：
   `02-search/review/coverage_report.json` 和 `02-search/review/coverage_report.md`，
   记录 required facets 覆盖情况、缺失 facets、问题覆盖度和预算内 follow-up query 建议。
@@ -145,8 +171,8 @@
   `02-search/research_index/chunks.jsonl` 和
   `02-search/research_index/index_meta.json`；在 `sqlite_fts` / `hybrid` 模式下可选生成 SQLite FTS。
 - 新增 V2.3 Day 8 deterministic evidence-card 产物：
-  `02-search/cards/paper_cards.jsonl` 和
-  `02-search/cards/claim_cards.jsonl`，基于 document chunks 生成，并带 evidence refs 供后续 audit 使用。
+  `03-read/cards/paper_cards.jsonl` 和
+  `03-read/cards/claim_cards.jsonl`，基于 document chunks 生成，并带 evidence refs 供后续 audit 使用。
 - 新增 V2.3 Day 9 full-text planning 产物：
   `02-search/documents/fulltext_manifest.json`，记录 arXiv/OpenAlex/local-file 全文 hints、
   fetch 预算决策，以及 blocked/skipped 原因；默认不会下载远程 PDF。
@@ -177,7 +203,7 @@
   和 RAG-style retrieval 提供稳定输入，不需要现在就引入 embedding。
 - OpenAlex metadata 现在会尽量保留 open-access URL hints；arXiv records 也能推导 provider
   PDF hints，供后续受控全文获取/解析阶段使用。
-- search 阶段现在会在 `search_meta.json` 中记录 paper/claim card 数量，方便检查 evidence layer 是否生成完整。
+- read 阶段现在会在 `03-read` stage contract 中记录 paper/claim card 数量，方便检查 evidence layer 是否生成完整，同时不再让 `search_meta.json` 承担下游阶段职责。
 - 拆分公开命令和配置文档：`CLI_REFERENCE_zh.md` 现在只聚焦命令语法、参数表和产物；
   新增 `CONFIG_REFERENCE_zh.md` 集中说明 TOML schema、完整配置和 workspace 模式变体。
 - 配置文档补充了更完整的 inline comments 和关键字段说明，便于理解 `max_papers`、

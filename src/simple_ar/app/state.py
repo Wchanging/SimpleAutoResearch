@@ -62,7 +62,12 @@ class SearchState(StageRuntime):
 class ReadState(StageRuntime):
     notes_path: str | None = None
     paper_notes_path: str | None = None
+    screening_decisions_path: str | None = None
+    shortlist_path: str | None = None
+    reading_table_path: str | None = None
+    shortlist_count: int = 0
     paper_note_count: int = 0
+    debug_card_paths: dict[str, str] = Field(default_factory=dict)
 
 
 class SynthesisState(StageRuntime):
@@ -70,10 +75,17 @@ class SynthesisState(StageRuntime):
     hypothesis_markdown: str = ""
     synthesis_path: str | None = None
     hypothesis_path: str | None = None
+    synthesis_brief_path: str | None = None
+    evidence_pack_path: str | None = None
+    gap_summary_path: str | None = None
+    idea_candidates_path: str | None = None
+    novelty_checks_path: str | None = None
+    idea_candidate_count: int = 0
 
 
 class DesignState(StageRuntime):
     experiment_plan_path: str | None = None
+    experiment_contract_path: str | None = None
     experiment_name: str = ""
     experiment_template: str = ""
     experiment_mode: str = ""

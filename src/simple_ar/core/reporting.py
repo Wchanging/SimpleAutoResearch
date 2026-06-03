@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import sys
 
-from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from simple_ar.core.console import make_console
 from simple_ar.core.pipeline import PipelineEvent
 
 
@@ -20,7 +20,7 @@ class ConsoleReporter:
 
     def __init__(self, *, enabled: bool = True) -> None:
         self.enabled = enabled
-        self.console = Console(file=sys.stdout, highlight=False, soft_wrap=True)
+        self.console = make_console(file=sys.stdout)
 
     def __call__(self, event: PipelineEvent) -> None:
         """Print one pipeline event with restrained Rich formatting."""
@@ -76,6 +76,10 @@ class ConsoleReporter:
 
     def _print_stage_start(self, event: PipelineEvent) -> None:
         self.console.rule(self._stage_title(event), style="cyan")
+        description = str(event.data.get("description", "")).strip()
+        if description:
+            self.console.print(f"[bold cyan]RUNNING[/bold cyan] [dim]{escape(description)}[/dim]")
+            return
         self.console.print("[bold cyan]RUNNING[/bold cyan]")
 
     def _print_stage_done(self, event: PipelineEvent) -> None:
@@ -104,16 +108,18 @@ class ConsoleReporter:
     @staticmethod
     def _message_style(message: str) -> str:
         lower = message.lower()
-        if "llm usage" in lower or "calling llm" in lower:
-            return "magenta"
+        if "llm usage" in lower:
+            return "gold1"
+        if "calling llm" in lower:
+            return "orchid1"
         if "search" in lower or "retriev" in lower or "arxiv" in lower or "openalex" in lower:
-            return "cyan"
+            return "deep_sky_blue1"
         if "failed" in lower or "error" in lower:
-            return "red"
+            return "bright_red"
         if "rate limit" in lower or "fallback" in lower or "warning" in lower or "skipped" in lower:
-            return "yellow"
+            return "bright_yellow"
         if "running" in lower or "generating" in lower or "building" in lower:
-            return "blue"
+            return "dodger_blue1"
         return "white"
 
     @staticmethod

@@ -176,6 +176,7 @@ class PipelineRunner:
                 total_stages=len(stages),
                 inputs=[item.name.lower() for item in contract.requires],
                 outputs=list(contract.outputs),
+                description=contract.description,
             )
 
             try:
@@ -370,7 +371,7 @@ class PipelineRunner:
             for key in (
                 "research_plan",
                 "retrieval_rounds",
-                "screening_decisions",
+                "retrieval_selection",
                 "coverage_report",
                 "sections",
                 "tool_context",

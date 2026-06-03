@@ -4,16 +4,60 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-03
+
+### Changed
+
+- Real online full-text checks now recognize common scholarly download URLs
+  such as `.../article/download/...` as PDF candidates even when the URL does
+  not end with `.pdf`.
+- Compact `search_meta.json` now retains a small `source_plan` copy so
+  downstream read/synthesize/design stages still know the active sources,
+  full-text intent, index backend, and budgets after verbose planning traces are
+  removed.
+- Retrieval now collects a bounded overfetch set before final selection. This
+  helps fill the document budget when one provider returns weak candidates that
+  are later dropped by retrieval/read screening.
+- Synthesis limitations now distinguish global full-text success from
+  shortlisted-paper evidence gaps, so a parsed PDF for a dropped paper does not
+  make the retained brief look stronger than it is.
+- Compact research runs now use a slimmer canonical handoff chain:
+  `papers.jsonl` -> `paper_notes.json` Paper Briefs ->
+  `synthesis_brief.json` -> `experiment_contract.json`. The older
+  `03-read/cards/*` and `04-synthesize/evidence/*` diagnostics are retained
+  only when `[run].debug_artifacts = true`.
+- Decoupled research-stage artifact ownership. `02-search` now stops at
+  retrieval/document/full-text/index artifacts, `03-read` owns paper/claim/
+  method/dataset/code-link cards plus reading review/shortlist artifacts,
+  `04-synthesize` owns evidence packs, gaps, ideas, and novelty hints, and
+  `05-design` owns experiment contracts and
+  optional tool handoff drafts.
+- Renamed search-stage metadata screening traces to
+  `02-search/traces/retrieval_selection.jsonl`; semantic keep/drop/priority
+  decisions now live under `03-read/review/`.
+- Read-stage LLM screening can now drop or reprioritize retrieved papers, and
+  `paper_notes.json` plus read cards are generated from the resulting shortlist
+  instead of blindly reading every retrieved row.
+- Read-stage LLM review now uses a scalable two-step path: concurrent coarse
+  title/abstract screening batches followed by a focused rerank pass that
+  records reading priority, evidence role, and synthesis hints for shortlisted
+  papers.
+- Pipeline stage descriptions are now shown in Rich progress output so users can
+  see the active stage purpose while a run is executing.
+- Artifact retrieval now ignores structured intermediate research artifacts such
+  as cards, evidence packs, idea candidates, experiment contracts, and tool
+  handoff drafts, preventing generated evidence tables from being treated as new
+  source material.
+
 ## 2026-06-02
 
 ### Added
 
-- Added V2.3 Week 3 research-bridge artifacts under `02-search/evidence/`.
-  Default compact runs keep `evidence_pack.json/md`, `gap_summary.md`,
-  `idea_candidates.jsonl`, `novelty_checks.jsonl`, and
-  `experiment_contract.json/md`; debug runs can also retain
-  `tool_context.json/md`, `evidence_review.md`, `decision_log.jsonl`, and
-  `eval_report.json/md`.
+- Added V2.3 Week 3 research-bridge artifacts. Compact runs retain read cards
+  under `03-read/cards/`, synthesis evidence under `04-synthesize/evidence/`,
+  and design experiment contracts under `05-design/evidence/`; debug runs can
+  also retain design handoff drafts such as `tool_context.json/md`,
+  `evidence_review.md`, `decision_log.jsonl`, and `eval_report.json/md`.
 - Added `[research.budget].novelty_backend`, currently supporting `local`
   lexical novelty-risk hints over the current evidence pack.
 - Added V2.3 Day 12 section-aware document extraction. Compact runs use section
@@ -24,18 +68,18 @@ This file records user-visible project changes in reverse chronological order. P
   and `section_id` provenance.
 - Added V2.3 Day 13 extended evidence cards:
   `method_cards.jsonl`, `dataset_cards.jsonl`, and `code_links.jsonl` under
-  `02-search/cards/`.
+  `03-read/cards/`.
 - Added a compact structured evidence summary for report drafting. Both LLM
-  and fallback reports can now use search-stage paper cards, claim cards,
+  and fallback reports can now use read-stage paper cards, claim cards,
   section records, and extended cards as bounded evidence.
 - Added configurable code-task `[edit_scope]` allowlists and additional
   protected patterns. The scope is stored in `code_task/manifest.json` and is
   enforced by repo mapping, context selection, work-plan creation, edit
   proposal, repair, and apply-time patch validation.
-- Added debug-only read-only Tool/MCP handoff artifacts under `02-search/tools/`:
+- Added debug-only read-only Tool/MCP handoff artifacts under `05-design/tools/`:
   `tool_adapter_contract.json/md`, `tool_trace.jsonl`, and
   `external_agent_backend.md`.
-- Added debug-only `02-search/governance/artifact_retention_policy.json/md` to
+- Added debug-only `05-design/governance/artifact_retention_policy.json/md` to
   classify search artifacts as stable run outputs, evidence tables, cache
   artifacts, traces, debug diagnostics, or rebuildable files.
 - Added `simple-ar clean RUN_DIR`, a Rich preview-and-confirm cleanup command
@@ -56,14 +100,14 @@ This file records user-visible project changes in reverse chronological order. P
   query count remains bounded by `[research].max_queries`, but
   `[research].planner = "llm"` no longer silently falls back to deterministic
   planning.
-- Retrieval screening now preserves required-facet diversity before filling the
+- Retrieval selection now preserves required-facet diversity before filling the
   remaining document budget by rank, reducing cases where one query family
   crowds out overview/benchmark/dataset evidence.
 - V2.3 online check configs now default to compact artifacts and avoid mixing
   local demo notes into the online evidence check. Set `[run].debug_artifacts =
   true` when planning/traces/coverage/tool drafts are needed.
 - Evidence packs now store artifact references and card ids instead of
-  duplicating `cards/*.jsonl`, reducing search-stage artifact sprawl.
+  duplicating `cards/*.jsonl`, reducing synthesis artifact sprawl.
 - V2.3 release hardening covered layered checks, bundled code-task examples,
   a compact search CLI run, a medium code-task baseline CLI run, and full
   unittest discovery.
@@ -111,10 +155,11 @@ This file records user-visible project changes in reverse chronological order. P
   over reverse-scanning run folders with `find_artifact`. The old lookup helper
   remains only for legacy compatibility.
 - Default pipeline runs now compact only diagnostic `02-search` folders after
-  the stage contract is written. Operational evidence artifacts such as
-  `documents/`, `research_index/`, and `cards/` stay in the run directory for
-  downstream grounding; set `[run].debug_artifacts = true` to also keep
-  planning, trace, screening, and coverage-review diagnostics.
+  the stage contract is written. Search-owned `documents/` and
+  `research_index/` stay in the run directory for downstream grounding; later
+  stages retain their own cards/evidence/contracts. Set
+  `[run].debug_artifacts = true` to also keep planning, trace, screening, and
+  coverage-review diagnostics.
 - Compact search runs now rewrite `search_meta.json` so it no longer points to
   diagnostic artifacts removed from the run directory.
 - The previous monolithic `stage_handlers.py` and `cli.py` entrypoints were
@@ -150,7 +195,7 @@ This file records user-visible project changes in reverse chronological order. P
 - Added V2.3 Day 11 full-text extraction:
   `02-search/documents/fulltext_extraction.json` now records parser outcomes
   for cached/local full-text resources, and parsed text is fed into
-  `research_index/chunks.jsonl` before evidence cards are built.
+  `research_index/chunks.jsonl` before the read stage builds evidence cards.
 
 ### Changed
 
@@ -177,9 +222,9 @@ This file records user-visible project changes in reverse chronological order. P
   style query strings.
 - Added V2.3 Day 4 retrieval trace artifacts:
   `02-search/traces/retrieval_rounds.jsonl` and
-  `02-search/traces/screening_decisions.jsonl`, including executed source/query
+  `02-search/traces/retrieval_selection.jsonl`, including executed source/query
   attempts, compact query-intent traces, deduplication, and lightweight
-  relevance decisions before `papers.jsonl` is written.
+  retrieval-selection decisions before `papers.jsonl` is written.
 - Added V2.3 Day 5 coverage artifacts:
   `02-search/review/coverage_report.json` and `02-search/review/coverage_report.md`,
   including required-facet coverage, missing facets, question coverage, and
@@ -194,8 +239,8 @@ This file records user-visible project changes in reverse chronological order. P
   `02-search/research_index/index_meta.json`, with optional SQLite FTS creation
   for `sqlite_fts`/`hybrid` modes.
 - Added V2.3 Day 8 deterministic evidence-card artifacts:
-  `02-search/cards/paper_cards.jsonl` and
-  `02-search/cards/claim_cards.jsonl`, grounded in document chunks and marked
+  `03-read/cards/paper_cards.jsonl` and
+  `03-read/cards/claim_cards.jsonl`, grounded in document chunks and marked
   with evidence refs for later audit.
 - Added V2.3 Day 9 full-text planning artifacts:
   `02-search/documents/fulltext_manifest.json`, recording arXiv/OpenAlex/local
@@ -218,7 +263,8 @@ This file records user-visible project changes in reverse chronological order. P
   mode is enabled, `planner = "auto"` can use the model for stronger question
   decomposition and query terminology.
 - When coverage gaps remain and retrieval-round budget is available, search can
-  run a second ordered-fallback retrieval round and then re-screen candidates.
+  run a second ordered-fallback retrieval round and then reselect retrieval
+  candidates within the document budget.
 - Search-stage planning, trace, and review artifacts are now grouped under
   `02-search/planning/`, `02-search/traces/`, and `02-search/review/` so larger
   research runs do not leave every intermediate file at the stage root.
@@ -237,8 +283,9 @@ This file records user-visible project changes in reverse chronological order. P
 - OpenAlex metadata now preserves open-access URL hints when available, and
   arXiv records can derive provider PDF hints for later controlled full-text
   fetch/parse stages.
-- Search-stage evidence artifacts now provide paper/claim card counts in
-  `search_meta.json`, making the research evidence layer easier to inspect.
+- Read-stage evidence artifacts now provide paper/claim card counts in the
+  `03-read` stage contract, making the research evidence layer easier to
+  inspect without overloading `search_meta.json`.
 - Split public command and configuration documentation: `CLI_REFERENCE.md` now
   focuses on command syntax/options/artifacts, while the new
   `CONFIG_REFERENCE.md` centralizes TOML schema, complete configs, and

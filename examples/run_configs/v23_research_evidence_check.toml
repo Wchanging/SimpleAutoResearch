@@ -1,11 +1,11 @@
 [run]
 # V2.3 research/evidence check config.
-# Default scope is Day26-friendly: stop at search so you can inspect the
-# research-question, query-plan, source-plan, retrieval, screening, coverage,
-# evidence, tool-contract, and local-index artifacts.
+# Default scope is a lighter online metadata/read check: stop at read so you
+# can inspect live retrieval, read-stage screening, shortlist, and Paper Briefs
+# without full-text PDF download or later experiment/report stages.
 topic = "multi-agent collaboration for coding agents"
 output_root = "runs/v23-research-evidence-check"
-to_stage = "search"
+to_stage = "read"
 debug_artifacts = false
 
 [llm]

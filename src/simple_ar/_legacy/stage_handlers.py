@@ -36,40 +36,49 @@ from simple_ar.research.connectors import (
 from simple_ar.research.contracts import QueryPlan, ResearchQuestion, SourcePlan
 from simple_ar.research.evidence.coverage import build_coverage_report, coverage_report_markdown
 from simple_ar.research.outputs.artifacts import (
+    DESIGN_DECISION_LOG,
+    DESIGN_EVAL_JSON,
+    DESIGN_EVAL_MD,
+    DESIGN_EVIDENCE_REVIEW_MD,
+    DESIGN_EXPERIMENT_CONTRACT_JSON,
+    DESIGN_EXPERIMENT_CONTRACT_MD,
+    DESIGN_TOOL_CONTEXT_JSON,
+    DESIGN_TOOL_CONTEXT_MD,
+    READ_CLAIM_CARDS,
+    READ_CODE_LINKS,
+    READ_DATASET_CARDS,
+    READ_METHOD_CARDS,
+    READ_PAPER_CARDS,
+    READ_SCREENING_DECISIONS,
+    READ_SHORTLIST,
+    READ_READING_TABLE,
     SEARCH_CACHE_MANIFEST,
     SEARCH_CHUNKS,
-    SEARCH_CLAIM_CARDS,
     SEARCH_COVERAGE_JSON,
     SEARCH_COVERAGE_MD,
-    SEARCH_DECISION_LOG,
     SEARCH_DOCUMENTS,
-    SEARCH_EVAL_JSON,
-    SEARCH_EVAL_MD,
-    SEARCH_EVIDENCE_PACK_JSON,
-    SEARCH_EVIDENCE_PACK_MD,
-    SEARCH_EVIDENCE_REVIEW_MD,
-    SEARCH_EXPERIMENT_CONTRACT_JSON,
-    SEARCH_EXPERIMENT_CONTRACT_MD,
     SEARCH_FULLTEXT_EXTRACTION,
     SEARCH_FULLTEXT_MANIFEST,
-    SEARCH_GAP_SUMMARY,
-    SEARCH_IDEA_CANDIDATES,
     SEARCH_SECTIONS,
     SEARCH_INDEX_META,
     SEARCH_META,
-    SEARCH_NOVELTY_CHECKS,
     SEARCH_PAPERS,
-    SEARCH_PAPER_CARDS,
-    SEARCH_METHOD_CARDS,
-    SEARCH_DATASET_CARDS,
-    SEARCH_CODE_LINKS,
     SEARCH_RESEARCH_PLAN,
     SEARCH_RETRIEVAL_ROUNDS,
-    SEARCH_SCREENING_DECISIONS,
-    SEARCH_TOOL_CONTEXT_JSON,
-    SEARCH_TOOL_CONTEXT_MD,
+    SEARCH_RETRIEVAL_SELECTION,
+    SYNTHESIS_EVIDENCE_PACK_JSON,
+    SYNTHESIS_EVIDENCE_PACK_MD,
+    SYNTHESIS_GAP_SUMMARY,
+    SYNTHESIS_IDEA_CANDIDATES,
+    SYNTHESIS_NOVELTY_CHECKS,
+    SYNTHESIS_BRIEF_JSON,
     build_research_plan_artifact,
+    write_design_handoff_artifacts,
+    write_read_card_artifacts,
+    write_read_review_artifacts,
     write_search_document_artifacts,
+    write_synthesis_brief_artifact,
+    write_synthesis_evidence_artifacts,
 )
 from simple_ar.research.prompts import (
     CODE_TASK_DESIGN_SYSTEM,
@@ -81,12 +90,14 @@ from simple_ar.research.prompts import (
     code_task_design_user_prompt,
     paper_note_user_prompt,
     plan_user_prompt,
+    read_coarse_screening_user_prompt,
+    read_rerank_user_prompt,
     research_planner_user_prompt,
     report_user_prompt,
     synthesize_user_prompt,
 )
 from simple_ar.research.planning.planner import build_llm_research_plan, build_query_plan, build_research_questions
-from simple_ar.research.evidence.retrieval import RetrievalCandidate, screen_retrieval_candidates
+from simple_ar.research.evidence.retrieval import RetrievalCandidate, select_retrieval_candidates
 from simple_ar.research.service import (
     load_hypothesis_markdown,
     load_notes_markdown,
@@ -174,6 +185,7 @@ def execute_search(ctx: Context) -> None:
         "max_papers": max_papers,
         "sources": list(source_plan.sources),
         "source": "arxiv" if ctx.config.get("use_arxiv") is True else "fixture",
+        "source_plan": source_plan.to_row(),
         "research_plan": SEARCH_RESEARCH_PLAN,
         "research_planner": query_plan.planner,
         "query_plan_max_rounds": query_plan.max_rounds,
@@ -208,7 +220,7 @@ def execute_search(ctx: Context) -> None:
             )
             for paper in papers
         ]
-        papers, screening_rows = screen_retrieval_candidates(
+        papers, selection_rows = select_retrieval_candidates(
             candidates,
             max_documents=max_papers,
             negative_terms=query_plan.negative_terms,
@@ -218,13 +230,13 @@ def execute_search(ctx: Context) -> None:
             topic=ctx.topic,
             questions=research_questions,
             query_plan=query_plan,
-            screening_rows=screening_rows,
+            selection_rows=selection_rows,
             retrieval_rows=retrieval_rows,
             max_documents=max_papers,
             next_query_limit=0,
         )
         write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
-        write_jsonl(ctx.artifact_path(SEARCH_SCREENING_DECISIONS), screening_rows)
+        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), selection_rows)
         _write_coverage_artifacts(ctx, coverage_report)
         meta.update(
             {
@@ -232,11 +244,11 @@ def execute_search(ctx: Context) -> None:
                 "status": "offline_fixture",
                 "returned": len(papers),
                 "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
-                "screening_decisions": SEARCH_SCREENING_DECISIONS,
+                "retrieval_selection": SEARCH_RETRIEVAL_SELECTION,
                 "coverage_report": SEARCH_COVERAGE_JSON,
                 "attempt_count": len(retrieval_rows),
-                "screened_candidates": len(screening_rows),
-                "kept_after_screening": len(papers),
+                "candidate_selection_count": len(selection_rows),
+                "kept_after_retrieval_selection": len(papers),
             }
         )
 
@@ -342,6 +354,7 @@ def _live_literature_search(
     """
     max_papers = source_plan.max_results_per_query
     max_documents = _research_document_cap(source_plan, max_papers)
+    candidate_cap = _candidate_collection_cap(max_documents)
     retrieval_rows: list[dict[str, object]] = []
     candidates: list[RetrievalCandidate] = []
     query_specs = _query_specs_by_query(query_plan)
@@ -355,11 +368,11 @@ def _live_literature_search(
         retrieval_rows=retrieval_rows,
         candidates=candidates,
         round_index=1,
-        max_documents=max_documents,
+        max_documents=candidate_cap,
     )
 
     if candidates:
-        papers, screening_rows = screen_retrieval_candidates(
+        papers, selection_rows = select_retrieval_candidates(
             candidates,
             max_documents=max_documents,
             negative_terms=query_plan.negative_terms,
@@ -369,13 +382,13 @@ def _live_literature_search(
             topic=ctx.topic,
             questions=research_questions,
             query_plan=query_plan,
-            screening_rows=screening_rows,
+            selection_rows=selection_rows,
             retrieval_rows=retrieval_rows,
             max_documents=max_documents,
             next_query_limit=_follow_up_query_limit(source_plan),
         )
         follow_up_queries = _coverage_follow_up_queries(coverage_report)
-        if query_plan.max_rounds > 1 and follow_up_queries:
+        if len(papers) < max_documents and query_plan.max_rounds > 1 and follow_up_queries:
             ctx.emit(
                 "stage_message",
                 f"Coverage gaps remain; running {len(follow_up_queries)} follow-up query attempt(s).",
@@ -389,10 +402,10 @@ def _live_literature_search(
                 retrieval_rows=retrieval_rows,
                 candidates=candidates,
                 round_index=2,
-                max_documents=max_documents * 2,
+                max_documents=candidate_cap,
                 start_query_index=len(query_attempts) + 1,
             )
-            papers, screening_rows = screen_retrieval_candidates(
+            papers, selection_rows = select_retrieval_candidates(
                 candidates,
                 max_documents=max_documents,
                 negative_terms=query_plan.negative_terms,
@@ -402,13 +415,13 @@ def _live_literature_search(
                 topic=ctx.topic,
                 questions=research_questions,
                 query_plan=query_plan,
-                screening_rows=screening_rows,
+                selection_rows=selection_rows,
                 retrieval_rows=retrieval_rows,
                 max_documents=max_documents,
                 next_query_limit=0,
             )
         write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
-        write_jsonl(ctx.artifact_path(SEARCH_SCREENING_DECISIONS), screening_rows)
+        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), selection_rows)
         _write_coverage_artifacts(ctx, coverage_report)
         selected_sources = sorted({paper.source for paper in papers}) or ["unknown"]
         return papers, {
@@ -417,13 +430,13 @@ def _live_literature_search(
             "status": "ok",
             "returned": len(papers),
             "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
-            "screening_decisions": SEARCH_SCREENING_DECISIONS,
+            "retrieval_selection": SEARCH_RETRIEVAL_SELECTION,
             "coverage_report": SEARCH_COVERAGE_JSON,
             "coverage_status": coverage_report.get("status"),
             "missing_facets": coverage_report.get("missing_facets", []),
             "attempt_count": len(retrieval_rows),
-            "screened_candidates": len(screening_rows),
-            "kept_after_screening": len(papers),
+            "candidate_selection_count": len(selection_rows),
+            "kept_after_retrieval_selection": len(papers),
             "executed_retrieval_rounds": coverage_report.get("retrieval", {}).get("executed_rounds", 1)
             if isinstance(coverage_report.get("retrieval"), dict)
             else 1,
@@ -449,7 +462,7 @@ def _live_literature_search(
             )
             for paper in fixture_papers
         ]
-        papers, screening_rows = screen_retrieval_candidates(
+        papers, selection_rows = select_retrieval_candidates(
             fixture_candidates,
             max_documents=max_documents,
             negative_terms=query_plan.negative_terms,
@@ -469,13 +482,13 @@ def _live_literature_search(
             topic=ctx.topic,
             questions=research_questions,
             query_plan=query_plan,
-            screening_rows=screening_rows,
+            selection_rows=selection_rows,
             retrieval_rows=retrieval_rows,
             max_documents=max_documents,
             next_query_limit=0,
         )
         write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
-        write_jsonl(ctx.artifact_path(SEARCH_SCREENING_DECISIONS), screening_rows)
+        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), selection_rows)
         _write_coverage_artifacts(ctx, coverage_report)
         return papers, {
             "source": "fixture",
@@ -483,17 +496,17 @@ def _live_literature_search(
             "allow_fixture_fallback": True,
             "returned": len(papers),
             "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
-            "screening_decisions": SEARCH_SCREENING_DECISIONS,
+            "retrieval_selection": SEARCH_RETRIEVAL_SELECTION,
             "coverage_report": SEARCH_COVERAGE_JSON,
             "coverage_status": coverage_report.get("status"),
             "missing_facets": coverage_report.get("missing_facets", []),
             "attempt_count": len(retrieval_rows),
-            "screened_candidates": len(screening_rows),
-            "kept_after_screening": len(papers),
+            "candidate_selection_count": len(selection_rows),
+            "kept_after_retrieval_selection": len(papers),
         }
 
     write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
-    write_jsonl(ctx.artifact_path(SEARCH_SCREENING_DECISIONS), [])
+    write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), [])
     raise LiteratureSearchError(_live_search_failure_message(retrieval_rows))
 
 
@@ -526,7 +539,10 @@ def _collect_retrieval_round(
             )
             _attach_query_trace(attempt, query_spec)
             retrieval_rows.append(attempt)
+            added_count = 0
             for paper in papers:
+                if paper.id in unique_seen:
+                    continue
                 candidates.append(
                     RetrievalCandidate(
                         paper=paper,
@@ -539,7 +555,8 @@ def _collect_retrieval_round(
                     )
                 )
                 unique_seen.add(paper.id)
-            if papers:
+                added_count += 1
+            if added_count and len(unique_seen) >= max_documents:
                 break
         if len(unique_seen) >= max_documents:
             break
@@ -867,6 +884,14 @@ def _research_document_cap(source_plan: SourcePlan, default: int) -> int:
     return max(1, default)
 
 
+def _candidate_collection_cap(max_documents: int) -> int:
+    """Return a bounded raw-candidate cap before final retrieval selection."""
+
+    if max_documents <= 1:
+        return 1
+    return min(max_documents * 2, max_documents + 10)
+
+
 def _planned_query_attempts(source_plan: SourcePlan) -> list[str]:
     queries = [query.strip() for query in source_plan.queries if query.strip()]
     return queries or [primary_query(source_plan)]
@@ -1057,14 +1082,18 @@ def _live_search_failure_message(attempts: list[dict[str, object]]) -> str:
 
 def execute_read(ctx: Context) -> None:
     papers = load_search_paper_rows(ctx)
+    client = _llm_client(ctx)
+    _write_read_review(ctx, papers, client)
+    reading_papers = _shortlisted_papers(ctx, papers)
     evidence = _stage_evidence(ctx, "read")
     evidence_snippets = format_evidence_snippets(evidence)
-    client = _llm_client(ctx)
-    if client is not None and papers:
+    if client is not None and reading_papers:
         try:
-            notes = _read_paper_notes_with_llm(ctx, client, papers, evidence_snippets)
+            notes = _read_paper_notes_with_llm(ctx, client, reading_papers, evidence_snippets)
             write_json(ctx.artifact_path("paper_notes.json"), notes)
             write_text(ctx.artifact_path("notes.md"), _notes_markdown(notes))
+            if _debug_artifacts_enabled(ctx):
+                _write_read_cards(ctx)
             return
         except LLMError as exc:
             ctx.emit("stage_message", f"LLM reading failed; using offline fallback. {exc}")
@@ -1074,20 +1103,527 @@ def execute_read(ctx: Context) -> None:
         {
             "paper_id": paper["id"],
             "title": paper.get("title", ""),
-            "problem": "Pipeline validation",
-            "method": "Placeholder metadata",
-            "limitation": "No real literature search has been implemented yet.",
-            "relevance": "Confirms artifact passing between stages.",
+            "evidence_role": _shortlist_value(ctx, str(paper.get("id") or ""), "evidence_role") or "other",
+            "one_sentence_summary": "Metadata-only fallback note; no deeper interpretation was generated.",
+            "problem": "unknown from available metadata",
+            "method": "unknown from available metadata",
+            "datasets": [],
+            "metrics": [],
+            "key_claims": [],
+            "limitations": ["Offline reading fallback only saw metadata and generated no LLM interpretation."],
+            "relation_to_topic": "Kept for structured reading because it was retrieved within the search budget.",
+            "synthesis_hint": _shortlist_value(ctx, str(paper.get("id") or ""), "synthesis_hint"),
+            "possible_experiment_hooks": [],
+            "open_questions": ["Use LLM reading or full-text parsing before making strong claims."],
+            "confidence": "low",
         }
-        for paper in papers
+        for paper in reading_papers
     ]
     write_json(ctx.artifact_path("paper_notes.json"), notes)
     write_text(ctx.artifact_path("notes.md"), _notes_markdown(notes))
+    if _debug_artifacts_enabled(ctx):
+        _write_read_cards(ctx)
+
+
+def _write_read_review(ctx: Context, papers: list[dict[str, Any]], client: LLMClient | None) -> None:
+    """Write read-stage paper review, shortlist, and reading table artifacts."""
+    llm_decisions: list[dict[str, Any]] | None = None
+    if client is not None and papers and _read_screening_mode(ctx) != "deterministic":
+        try:
+            llm_decisions = _read_screening_with_llm(ctx, client, papers)
+        except LLMError as exc:
+            ctx.emit("stage_message", f"LLM read screening failed; using deterministic shortlist. {exc}")
+    meta = write_read_review_artifacts(
+        stage_dir=ctx.stage_dir(),
+        papers=papers,
+        retrieval_selection=_read_jsonl_artifact(ctx, SEARCH_RETRIEVAL_SELECTION),
+        coverage_report=_safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
+        llm_decisions=llm_decisions,
+    )
+    ctx.emit(
+        "stage_message",
+        "Built read-stage shortlist and reading table.",
+        shortlist_count=meta.get("shortlist_count", 0),
+    )
+
+
+def _read_screening_mode(ctx: Context) -> str:
+    value = str(ctx.config.get("read_screening") or ctx.config.get("research_read_screening") or "auto")
+    return value if value in {"auto", "llm", "deterministic"} else "auto"
+
+
+def _read_screening_with_llm(
+    ctx: Context,
+    client: LLMClient,
+    papers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Ask the LLM to coarse-screen, then rerank papers for structured reading."""
+    problem = load_problem_markdown(ctx)
+    research_plan_json = json.dumps(
+        _safe_read_json_artifact(ctx, SEARCH_RESEARCH_PLAN),
+        ensure_ascii=False,
+        indent=2,
+    )
+    max_shortlist = _read_screening_max_shortlist(ctx, len(papers))
+    coarse_decisions = _read_coarse_screening_with_llm(
+        ctx,
+        client,
+        papers,
+        problem_markdown=problem,
+        research_plan_json=research_plan_json,
+    )
+    if not coarse_decisions:
+        return []
+
+    known_ids = {str(paper.get("id") or "") for paper in papers}
+    valid_coarse = [row for row in coarse_decisions if str(row.get("paper_id") or "") in known_ids]
+    kept_ids = {
+        str(row.get("paper_id") or "")
+        for row in valid_coarse
+        if _decision_value(row.get("decision")) == "keep"
+    }
+    if not kept_ids:
+        return valid_coarse
+
+    paper_by_id = {str(paper.get("id") or ""): paper for paper in papers}
+    kept_papers = [paper_by_id[paper_id] for paper_id in kept_ids if paper_id in paper_by_id]
+    rerank_input = _rerank_input_papers(kept_papers, valid_coarse, max_shortlist=max_shortlist)
+    reranked = _read_rerank_with_llm(
+        ctx,
+        client,
+        rerank_input,
+        coarse_decisions=valid_coarse,
+        problem_markdown=problem,
+        research_plan_json=research_plan_json,
+        max_shortlist=max_shortlist,
+    )
+    if not reranked:
+        return _coarse_decisions_with_priorities(valid_coarse, max_shortlist=max_shortlist)
+    return _merge_read_screening_decisions(
+        coarse_decisions=valid_coarse,
+        rerank_decisions=reranked,
+        reranked_ids={str(paper.get("id") or "") for paper in rerank_input},
+        max_shortlist=max_shortlist,
+    )
+
+
+def _read_coarse_screening_with_llm(
+    ctx: Context,
+    client: LLMClient,
+    papers: list[dict[str, Any]],
+    *,
+    problem_markdown: str,
+    research_plan_json: str,
+) -> list[dict[str, Any]]:
+    """Run abstract-level LLM screening in small concurrent batches."""
+    batches = list(_batched(papers, _read_screening_batch_size(ctx)))
+    if not batches:
+        return []
+    workers = min(_read_screening_workers(ctx), len(batches))
+    ctx.emit(
+        "stage_message",
+        f"Calling LLM for read-stage coarse screening ({len(batches)} batch(es), {workers} worker(s)).",
+    )
+    requests = [
+        LLMRequest(
+            READ_SYSTEM,
+            read_coarse_screening_user_prompt(
+                topic=ctx.topic,
+                problem_markdown=problem_markdown,
+                papers_json=json.dumps(
+                    [_paper_screening_record(paper, index) for index, paper in enumerate(batch, start=1)],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                research_plan_json=research_plan_json,
+            ),
+            label=f"read-coarse-{batch_index:03d}",
+        )
+        for batch_index, batch in enumerate(batches, start=1)
+    ]
+    responses = client.ask_json_many(requests, max_workers=workers)
+    decisions: list[dict[str, Any]] = []
+    for response in responses:
+        raw = response.get("decisions")
+        if not isinstance(raw, list):
+            continue
+        for row in raw:
+            if isinstance(row, dict):
+                decisions.append(_normalize_coarse_decision(row))
+    return decisions
+
+
+def _read_rerank_with_llm(
+    ctx: Context,
+    client: LLMClient,
+    papers: list[dict[str, Any]],
+    *,
+    coarse_decisions: list[dict[str, Any]],
+    problem_markdown: str,
+    research_plan_json: str,
+    max_shortlist: int,
+) -> list[dict[str, Any]]:
+    """Run the focused reranking pass over coarsely kept papers."""
+    if not papers:
+        return []
+    ctx.emit(
+        "stage_message",
+        f"Calling LLM for read-stage reranking ({len(papers)} candidate paper(s)).",
+    )
+    response = client.ask_json(
+        READ_SYSTEM,
+        read_rerank_user_prompt(
+            topic=ctx.topic,
+            problem_markdown=problem_markdown,
+            papers_json=json.dumps(
+                [_paper_screening_record(paper, index) for index, paper in enumerate(papers, start=1)],
+                ensure_ascii=False,
+                indent=2,
+            ),
+            research_plan_json=research_plan_json,
+            coarse_decisions_json=json.dumps(coarse_decisions, ensure_ascii=False, indent=2),
+            max_shortlist=max_shortlist,
+        ),
+        label="read-rerank",
+    )
+    raw = response.get("ranked_papers")
+    if not isinstance(raw, list):
+        raw = response.get("decisions")
+    if not isinstance(raw, list):
+        return []
+    known_ids = {str(paper.get("id") or "") for paper in papers}
+    decisions: list[dict[str, Any]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        paper_id = str(row.get("paper_id") or "").strip()
+        if paper_id not in known_ids:
+            continue
+        decisions.append(_normalize_rerank_decision(row))
+    return decisions
+
+
+def _read_screening_batch_size(ctx: Context) -> int:
+    return _bounded_config_int(
+        ctx,
+        ("read_screening_batch_size", "research_read_batch_size"),
+        default=4,
+        minimum=1,
+        maximum=8,
+    )
+
+
+def _read_screening_workers(ctx: Context) -> int:
+    return _bounded_config_int(
+        ctx,
+        ("read_screening_workers", "research_read_workers"),
+        default=min(3, _llm_max_workers(ctx)),
+        minimum=1,
+        maximum=max(1, _llm_max_workers(ctx)),
+    )
+
+
+def _read_screening_max_shortlist(ctx: Context, paper_count: int) -> int:
+    default = paper_count if paper_count <= 24 else 24
+    return _bounded_config_int(
+        ctx,
+        ("read_screening_max_shortlist", "research_read_max_shortlist"),
+        default=default,
+        minimum=1,
+        maximum=max(1, paper_count),
+    )
+
+
+def _bounded_config_int(
+    ctx: Context,
+    keys: tuple[str, ...],
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    for key in keys:
+        value = ctx.config.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return max(minimum, min(maximum, value))
+    return max(minimum, min(maximum, default))
+
+
+def _batched(items: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:
+    return [items[index : index + batch_size] for index in range(0, len(items), batch_size)]
+
+
+def _paper_screening_record(paper: dict[str, Any], index: int) -> dict[str, Any]:
+    """Return compact paper metadata suitable for read-stage screening prompts."""
+    return {
+        "paper_id": str(paper.get("id") or _paper_id(paper, index)),
+        "title": _truncate_text(str(paper.get("title") or ""), 240),
+        "abstract": _truncate_text(str(paper.get("abstract") or ""), 1400),
+        "source": str(paper.get("source") or ""),
+        "published": paper.get("published"),
+        "authors": _string_items(paper.get("authors"), limit=5),
+        "categories": _string_items(paper.get("categories"), limit=6),
+        "url": paper.get("url"),
+        "doi": paper.get("doi"),
+    }
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    stripped = " ".join(text.split())
+    if len(stripped) <= max_chars:
+        return stripped
+    return stripped[: max_chars - 3].rstrip() + "..."
+
+
+def _normalize_coarse_decision(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "paper_id": str(row.get("paper_id") or "").strip(),
+        "decision": _decision_value(row.get("decision")),
+        "coarse_relevance_score": _optional_int(row.get("coarse_relevance_score")),
+        "reason": str(row.get("reason") or "").strip(),
+        "likely_facet": str(row.get("likely_facet") or row.get("facet") or "").strip(),
+        "confidence": str(row.get("confidence") or "").strip(),
+    }
+
+
+def _normalize_rerank_decision(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "paper_id": str(row.get("paper_id") or "").strip(),
+        "decision": _decision_value(row.get("decision")),
+        "reading_priority": _optional_int(row.get("reading_priority")),
+        "relevance_score": _optional_int(row.get("relevance_score")),
+        "quality_score": _optional_int(row.get("quality_score")),
+        "evidence_role": str(row.get("evidence_role") or "").strip(),
+        "reason": str(row.get("reason") or "").strip(),
+        "synthesis_hint": str(row.get("synthesis_hint") or "").strip(),
+        "confidence": str(row.get("confidence") or "").strip(),
+    }
+
+
+def _decision_value(value: object) -> str:
+    text = str(value or "keep").strip().lower()
+    return text if text in {"keep", "drop"} else "keep"
+
+
+def _optional_int(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _rerank_input_papers(
+    papers: list[dict[str, Any]],
+    coarse_decisions: list[dict[str, Any]],
+    *,
+    max_shortlist: int,
+) -> list[dict[str, Any]]:
+    score_by_id = {
+        str(row.get("paper_id") or ""): int(row.get("coarse_relevance_score") or 0)
+        for row in coarse_decisions
+    }
+    limit = max(max_shortlist, min(max_shortlist * 2, 48))
+    return sorted(
+        papers,
+        key=lambda paper: (-score_by_id.get(str(paper.get("id") or ""), 0), str(paper.get("id") or "")),
+    )[:limit]
+
+
+def _coarse_decisions_with_priorities(
+    coarse_decisions: list[dict[str, Any]],
+    *,
+    max_shortlist: int,
+) -> list[dict[str, Any]]:
+    kept = [
+        row
+        for row in coarse_decisions
+        if _decision_value(row.get("decision")) == "keep"
+    ]
+    kept.sort(
+        key=lambda row: (
+            -int(row.get("coarse_relevance_score") or 0),
+            str(row.get("paper_id") or ""),
+        )
+    )
+    keep_ids = {str(row.get("paper_id") or "") for row in kept[:max_shortlist]}
+    output: list[dict[str, Any]] = []
+    priority = 1
+    for row in coarse_decisions:
+        paper_id = str(row.get("paper_id") or "")
+        item = dict(row)
+        if paper_id in keep_ids:
+            item["decision"] = "keep"
+            item["reading_priority"] = priority
+            item["relevance_score"] = item.get("coarse_relevance_score")
+            item.setdefault("quality_score", None)
+            priority += 1
+        elif _decision_value(row.get("decision")) == "keep":
+            item["decision"] = "drop"
+            item["reason"] = str(item.get("reason") or "") + " Outside read-stage shortlist budget."
+        output.append(item)
+    return output
+
+
+def _merge_read_screening_decisions(
+    *,
+    coarse_decisions: list[dict[str, Any]],
+    rerank_decisions: list[dict[str, Any]],
+    reranked_ids: set[str],
+    max_shortlist: int,
+) -> list[dict[str, Any]]:
+    coarse_by_id = {str(row.get("paper_id") or ""): row for row in coarse_decisions}
+    rerank_by_id = {str(row.get("paper_id") or ""): row for row in rerank_decisions}
+    output: list[dict[str, Any]] = []
+    kept_priorities = 0
+    for paper_id, coarse in coarse_by_id.items():
+        row = dict(coarse)
+        rerank = rerank_by_id.get(paper_id)
+        if rerank is not None:
+            row.update({key: value for key, value in rerank.items() if value not in (None, "")})
+            if _decision_value(row.get("decision")) == "keep":
+                kept_priorities += 1
+                if _optional_int(row.get("reading_priority")) is None:
+                    row["reading_priority"] = kept_priorities
+        elif _decision_value(row.get("decision")) == "keep" and paper_id not in reranked_ids:
+            row["decision"] = "drop"
+            row["reason"] = str(row.get("reason") or "") + " Outside read-stage rerank budget."
+        output.append(row)
+
+    kept_rows = [
+        row for row in output if _decision_value(row.get("decision")) == "keep"
+    ]
+    kept_rows.sort(
+        key=lambda row: (
+            int(row.get("reading_priority") or 9999),
+            -int(row.get("relevance_score") or row.get("coarse_relevance_score") or 0),
+            str(row.get("paper_id") or ""),
+        )
+    )
+    allowed_keep_ids = {str(row.get("paper_id") or "") for row in kept_rows[:max_shortlist]}
+    for row in output:
+        paper_id = str(row.get("paper_id") or "")
+        if _decision_value(row.get("decision")) == "keep" and paper_id not in allowed_keep_ids:
+            row["decision"] = "drop"
+            row["reason"] = str(row.get("reason") or "") + " Outside read-stage shortlist budget."
+    return output
+
+
+def _shortlisted_papers(ctx: Context, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return papers selected by read-stage shortlist, preserving shortlist order."""
+    if not ctx.artifact_path(READ_SHORTLIST).exists():
+        return papers
+    shortlist = _read_jsonl_artifact(ctx, READ_SHORTLIST)
+    paper_by_id = {str(paper.get("id") or ""): paper for paper in papers}
+    selected: list[dict[str, Any]] = []
+    for row in shortlist:
+        paper = paper_by_id.get(str(row.get("paper_id") or ""))
+        if paper is not None:
+            selected.append(paper)
+    return selected
+
+
+def _shortlisted_document_ids(ctx: Context) -> set[str]:
+    return {str(row.get("paper_id") or "") for row in _read_jsonl_artifact(ctx, READ_SHORTLIST) if row.get("paper_id")}
+
+
+def _shortlist_value(ctx: Context, paper_id: str, key: str) -> str:
+    for row in _read_jsonl_artifact(ctx, READ_SHORTLIST):
+        if str(row.get("paper_id") or "") == paper_id:
+            return str(row.get(key) or "")
+    return ""
+
+
+def _debug_artifacts_enabled(ctx: Context) -> bool:
+    value = ctx.config.get("debug_artifacts", False)
+    return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _downstream_source_plan(ctx: Context) -> dict[str, Any]:
+    """Return source-plan metadata for downstream stages after compaction.
+
+    Verbose runs keep ``planning/research_plan.json``. Compact runs remove that
+    debug artifact, so search also stores a compact source-plan copy in
+    ``search_meta.json``. Older compact runs may lack that copy; for those we
+    reconstruct the minimum reliable fields from retained search manifests.
+    """
+
+    research_plan = _safe_read_json_artifact(ctx, SEARCH_RESEARCH_PLAN)
+    if isinstance(research_plan, dict):
+        source_plan = research_plan.get("source_plan")
+        if _usable_source_plan(source_plan):
+            return dict(source_plan)
+
+    search_meta = _safe_read_json_artifact(ctx, SEARCH_META)
+    source_plan = search_meta.get("source_plan") if isinstance(search_meta, dict) else None
+    if _usable_source_plan(source_plan):
+        return dict(source_plan)
+
+    return _source_plan_from_search_manifests(ctx, search_meta if isinstance(search_meta, dict) else {})
+
+
+def _usable_source_plan(value: object) -> bool:
+    return isinstance(value, dict) and bool(value.get("queries") or value.get("sources"))
+
+
+def _source_plan_from_search_manifests(ctx: Context, search_meta: dict[str, Any]) -> dict[str, Any]:
+    cache_manifest = _safe_read_json_artifact(ctx, SEARCH_CACHE_MANIFEST)
+    fulltext_manifest = _safe_read_json_artifact(ctx, SEARCH_FULLTEXT_MANIFEST)
+    fulltext_budget = fulltext_manifest.get("budget") if isinstance(fulltext_manifest, dict) else {}
+    budget = dict(fulltext_budget) if isinstance(fulltext_budget, dict) else {}
+    return {
+        "schema_version": "source_plan.reconstructed.v1",
+        "queries": _string_sequence(search_meta.get("queries")) or _string_sequence([search_meta.get("query")])
+        or [ctx.topic],
+        "sources": _string_sequence(search_meta.get("sources")) or _string_sequence(search_meta.get("sources_used")),
+        "mode": str(ctx.config.get("research_mode") or "standard"),
+        "require_fulltext": bool(cache_manifest.get("require_fulltext") or fulltext_manifest.get("enabled")),
+        "allow_pdf_download": bool(cache_manifest.get("allow_pdf_download") or fulltext_manifest.get("allow_pdf_download")),
+        "index_backend": str(search_meta.get("index_backend") or "keyword"),
+        "budget": budget,
+    }
+
+
+def _string_sequence(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _write_read_cards(ctx: Context) -> None:
+    """Write semantic reading cards from retrieved documents and chunks."""
+    documents = _read_jsonl_artifact(ctx, SEARCH_DOCUMENTS)
+    chunks = _read_jsonl_artifact(ctx, SEARCH_CHUNKS)
+    if not documents:
+        return
+    if ctx.artifact_path(READ_SHORTLIST).exists():
+        shortlisted_ids = _shortlisted_document_ids(ctx)
+        documents = [
+            row
+            for row in documents
+            if str(row.get("document_id") or row.get("source_id") or "") in shortlisted_ids
+        ]
+        chunks = [row for row in chunks if str(row.get("document_id") or "") in shortlisted_ids]
+    meta = write_read_card_artifacts(
+        stage_dir=ctx.stage_dir(),
+        documents=documents,
+        chunks=chunks,
+    )
+    ctx.emit(
+        "stage_message",
+        "Built reading cards from retrieved documents.",
+        paper_card_count=meta.get("paper_card_count", 0),
+        claim_card_count=meta.get("claim_card_count", 0),
+    )
 
 
 def execute_synthesize(ctx: Context) -> None:
     notes = load_notes_markdown(ctx)
     paper_notes = json.dumps(load_paper_notes_json(ctx), indent=2, ensure_ascii=False)
+    _write_synthesis_evidence(ctx)
     evidence = _stage_evidence(ctx, "synthesize")
     evidence_snippets = format_evidence_snippets(evidence)
     client = _llm_client(ctx)
@@ -1096,7 +1632,12 @@ def execute_synthesize(ctx: Context) -> None:
             ctx.emit("stage_message", "Calling LLM for synthesis.")
             response = client.ask_json(
                 SYNTHESIZE_SYSTEM,
-                synthesize_user_prompt(notes, paper_notes, evidence_snippets=evidence_snippets),
+                synthesize_user_prompt(
+                    notes,
+                    paper_notes,
+                    evidence_snippets=evidence_snippets,
+                    structured_context_json=_synthesis_structured_context(ctx),
+                ),
                 label="synthesize",
             )
             synthesis = _text_field(response, "synthesis_markdown")
@@ -1123,8 +1664,86 @@ def execute_synthesize(ctx: Context) -> None:
     )
 
 
+def _synthesis_structured_context(ctx: Context) -> str:
+    """Return compact JSON context for LLM synthesis."""
+    context = {
+        "schema_version": "synthesis_prompt_context.v1",
+        "reading": {
+            "shortlist": _read_jsonl_artifact(ctx, READ_SHORTLIST)[:12],
+            "screening_decisions": _read_jsonl_artifact(ctx, READ_SCREENING_DECISIONS)[:24],
+            "paper_briefs": load_paper_notes_json(ctx)[:12],
+        },
+        "retrieval_coverage": _safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
+        "synthesis_brief": _safe_read_json_artifact(ctx, SYNTHESIS_BRIEF_JSON),
+    }
+    if _debug_artifacts_enabled(ctx):
+        context["debug_cards"] = {
+            "paper_cards": _read_jsonl_artifact(ctx, READ_PAPER_CARDS)[:12],
+            "claim_cards": _read_jsonl_artifact(ctx, READ_CLAIM_CARDS)[:24],
+            "method_cards": _read_jsonl_artifact(ctx, READ_METHOD_CARDS)[:12],
+            "dataset_cards": _read_jsonl_artifact(ctx, READ_DATASET_CARDS)[:12],
+            "code_links": _read_jsonl_artifact(ctx, READ_CODE_LINKS)[:12],
+        }
+        context["debug_synthesis_evidence_pack"] = _safe_read_json_artifact(ctx, SYNTHESIS_EVIDENCE_PACK_JSON)
+    return json.dumps(context, ensure_ascii=False, indent=2)
+
+
+def _write_synthesis_evidence(ctx: Context) -> None:
+    """Write synthesis-owned compact brief and optional debug evidence tables."""
+    documents = _read_jsonl_artifact(ctx, SEARCH_DOCUMENTS)
+    chunks = _read_jsonl_artifact(ctx, SEARCH_CHUNKS)
+    if not documents:
+        return
+    source_plan = _downstream_source_plan(ctx)
+    paper_notes = load_paper_notes_json(ctx)
+    meta = write_synthesis_brief_artifact(
+        stage_dir=ctx.stage_dir(),
+        topic=ctx.topic,
+        source_plan=source_plan,
+        papers=load_search_paper_rows(ctx),
+        paper_notes=paper_notes,
+        coverage_report=_safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
+        index_meta=_safe_read_json_artifact(ctx, SEARCH_INDEX_META),
+        fulltext_manifest=_safe_read_json_artifact(ctx, SEARCH_FULLTEXT_MANIFEST),
+        fulltext_extraction=_safe_read_json_artifact(ctx, SEARCH_FULLTEXT_EXTRACTION),
+    )
+    ctx.emit(
+        "stage_message",
+        "Built compact synthesis brief from paper notes.",
+        idea_candidate_count=meta.get("idea_candidate_count", 0),
+    )
+    if not _debug_artifacts_enabled(ctx):
+        return
+    paper_cards = _read_jsonl_artifact(ctx, READ_PAPER_CARDS)
+    claim_cards = _read_jsonl_artifact(ctx, READ_CLAIM_CARDS)
+    debug_meta = write_synthesis_evidence_artifacts(
+        stage_dir=ctx.stage_dir(),
+        topic=ctx.topic,
+        source_plan=source_plan,
+        papers=load_search_paper_rows(ctx),
+        documents=documents,
+        sections=_read_jsonl_artifact(ctx, SEARCH_SECTIONS),
+        chunks=chunks,
+        index_meta=_safe_read_json_artifact(ctx, SEARCH_INDEX_META),
+        paper_cards=paper_cards,
+        claim_cards=claim_cards,
+        method_cards=_read_jsonl_artifact(ctx, READ_METHOD_CARDS),
+        dataset_cards=_read_jsonl_artifact(ctx, READ_DATASET_CARDS),
+        code_links=_read_jsonl_artifact(ctx, READ_CODE_LINKS),
+        coverage_report=_safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
+        fulltext_manifest=_safe_read_json_artifact(ctx, SEARCH_FULLTEXT_MANIFEST),
+        fulltext_extraction=_safe_read_json_artifact(ctx, SEARCH_FULLTEXT_EXTRACTION),
+    )
+    ctx.emit(
+        "stage_message",
+        "Built debug synthesis evidence pack and bounded idea candidates.",
+        idea_candidate_count=debug_meta.get("idea_candidate_count", 0),
+    )
+
+
 def execute_design(ctx: Context) -> None:
     hypothesis = load_hypothesis_markdown(ctx)
+    _write_design_handoff(ctx)
     template = _experiment_template(ctx)
     if is_code_task_experiment_template(template):
         spec = code_task_experiment_spec(_repo_root(), ctx.config)
@@ -1191,6 +1810,76 @@ def execute_design(ctx: Context) -> None:
             "timeout_sec": _experiment_timeout(ctx),
         },
     )
+
+
+def _write_design_handoff(ctx: Context) -> None:
+    """Write design-owned experiment contract and optional tool handoff artifacts."""
+    evidence_pack = _safe_read_json_artifact(ctx, SYNTHESIS_EVIDENCE_PACK_JSON)
+    synthesis_brief = _safe_read_json_artifact(ctx, SYNTHESIS_BRIEF_JSON)
+    if not evidence_pack and synthesis_brief:
+        evidence_pack = _evidence_pack_from_synthesis_brief(synthesis_brief)
+    if not evidence_pack:
+        return
+    source_plan = _downstream_source_plan(ctx)
+    budget = source_plan.get("budget") if isinstance(source_plan, dict) else {}
+    compact_artifacts = ctx.config.get("debug_artifacts") is not True
+    if isinstance(budget, dict) and "compact_artifacts" in budget:
+        compact_artifacts = bool(budget.get("compact_artifacts"))
+    meta = write_design_handoff_artifacts(
+        stage_dir=ctx.stage_dir(),
+        evidence_pack=evidence_pack,
+        idea_candidates=_idea_candidates_for_design(ctx, synthesis_brief),
+        novelty_checks=_novelty_checks_for_design(ctx, synthesis_brief),
+        compact_artifacts=compact_artifacts,
+    )
+    ctx.emit(
+        "stage_message",
+        "Built design experiment contract from synthesized evidence.",
+        experiment_contract=meta.get("experiment_contract", ""),
+    )
+
+
+def _evidence_pack_from_synthesis_brief(brief: dict[str, Any]) -> dict[str, Any]:
+    """Return an evidence-pack-like view for design from the compact brief."""
+    return {
+        "schema_version": "synthesis_brief_handoff.v1",
+        "topic": brief.get("topic"),
+        "source_plan": brief.get("source_plan", {}),
+        "counts": brief.get("counts", {}),
+        "coverage": brief.get("coverage", {}),
+        "provenance": brief.get("provenance", {}),
+        "papers": [
+            {
+                "id": row.get("paper_id"),
+                "title": row.get("title"),
+                "source": row.get("source"),
+            }
+            for row in _list_value(brief.get("paper_briefs"))
+            if isinstance(row, dict)
+        ],
+        "paper_cards": [],
+        "claim_cards": [],
+        "method_cards": [],
+        "dataset_cards": [],
+        "code_links": [],
+        "limitations": _list_value(brief.get("limitations")),
+    }
+
+
+def _idea_candidates_for_design(ctx: Context, synthesis_brief: dict[str, Any]) -> list[dict[str, Any]]:
+    if synthesis_brief:
+        ideas = _list_value(synthesis_brief.get("idea_candidates"))
+        if ideas:
+            return [row for row in ideas if isinstance(row, dict)]
+    return _read_jsonl_artifact(ctx, SYNTHESIS_IDEA_CANDIDATES)
+
+
+def _novelty_checks_for_design(ctx: Context, synthesis_brief: dict[str, Any]) -> list[dict[str, Any]]:
+    if synthesis_brief:
+        checks = _list_value(synthesis_brief.get("novelty_checks"))
+        if checks:
+            return [row for row in checks if isinstance(row, dict)]
+    return _read_jsonl_artifact(ctx, SYNTHESIS_NOVELTY_CHECKS)
 
 
 def _resolve_code_task_design_task(
@@ -1606,13 +2295,17 @@ def _related_work_markdown(papers: list[Paper]) -> str:
 
 def _research_evidence_summary(ctx: Context, papers: list[Paper]) -> str:
     """Build a compact, report-ready summary from structured search evidence."""
-    paper_cards = _read_jsonl_artifact(ctx, SEARCH_PAPER_CARDS)
-    claim_cards = _read_jsonl_artifact(ctx, SEARCH_CLAIM_CARDS)
-    method_cards = _read_jsonl_artifact(ctx, SEARCH_METHOD_CARDS)
-    dataset_cards = _read_jsonl_artifact(ctx, SEARCH_DATASET_CARDS)
-    code_links = _read_jsonl_artifact(ctx, SEARCH_CODE_LINKS)
+    synthesis_brief = _safe_read_json_artifact(ctx, SYNTHESIS_BRIEF_JSON)
+    paper_cards = _read_jsonl_artifact(ctx, READ_PAPER_CARDS)
+    claim_cards = _read_jsonl_artifact(ctx, READ_CLAIM_CARDS)
+    method_cards = _read_jsonl_artifact(ctx, READ_METHOD_CARDS)
+    dataset_cards = _read_jsonl_artifact(ctx, READ_DATASET_CARDS)
+    code_links = _read_jsonl_artifact(ctx, READ_CODE_LINKS)
     sections = _read_jsonl_artifact(ctx, SEARCH_SECTIONS)
-    if not any((paper_cards, claim_cards, method_cards, dataset_cards, code_links, sections)):
+    paper_briefs = _list_value(synthesis_brief.get("paper_briefs")) if synthesis_brief else []
+    themes = _list_value(synthesis_brief.get("themes")) if synthesis_brief else []
+    gaps = _list_value(synthesis_brief.get("gaps")) if synthesis_brief else []
+    if not any((paper_briefs, themes, gaps, paper_cards, claim_cards, method_cards, dataset_cards, code_links, sections)):
         return ""
 
     section_counts: dict[str, int] = {}
@@ -1621,15 +2314,36 @@ def _research_evidence_summary(ctx: Context, papers: list[Paper]) -> str:
         section_counts[section] = section_counts.get(section, 0) + 1
 
     lines = [
-        f"- Paper cards: {len(paper_cards)}; claim cards: {len(claim_cards)}; "
-        f"method cards: {len(method_cards)}; dataset cards: {len(dataset_cards)}; "
-        f"code links: {len(code_links)}.",
+        f"- Paper Briefs: {len(paper_briefs)}; themes: {len(themes)}; gaps: {len(gaps)}.",
     ]
+    if paper_cards or claim_cards or method_cards or dataset_cards or code_links:
+        lines.append(
+            f"- Debug cards: paper={len(paper_cards)}, claim={len(claim_cards)}, "
+            f"method={len(method_cards)}, dataset={len(dataset_cards)}, code_links={len(code_links)}."
+        )
     if section_counts:
         coverage = ", ".join(f"{name}={count}" for name, count in sorted(section_counts.items()))
         lines.append(f"- Section coverage: {coverage}.")
 
     paper_ids = {paper.id for paper in papers}
+    for row in paper_briefs[:5]:
+        if not isinstance(row, dict):
+            continue
+        paper_id = str(row.get("paper_id") or "")
+        citation = f" [@{paper_id}]" if paper_id in paper_ids else ""
+        role = str(row.get("evidence_role") or "other")
+        summary = _compact_field(row.get("one_sentence_summary"), default="No summary captured")
+        hint = _compact_field(row.get("synthesis_hint"), default="")
+        hint_text = f" Hint: {hint}" if hint else ""
+        lines.append(f"- Paper Brief `{paper_id or 'unknown'}`{citation} ({role}): {summary}.{hint_text}")
+    for row in themes[:4]:
+        if isinstance(row, dict):
+            lines.append(
+                f"- Theme `{row.get('role') or 'other'}`: "
+                f"{_compact_field(row.get('summary'), default='No theme summary captured')}."
+            )
+    if gaps:
+        lines.append("- Open gaps: " + "; ".join(_compact_field(gap, default="unknown gap") for gap in gaps[:4]) + ".")
     for row in paper_cards[:4]:
         paper_id = str(row.get("paper_id") or "")
         citation = f" [@{paper_id}]" if paper_id in paper_ids else ""
@@ -1676,13 +2390,13 @@ def _report_evidence_summary_markdown(summary: str) -> str:
     """Render structured evidence summary for fallback reports."""
     if summary.strip():
         return (
-            "The following structured evidence summary was generated from search-stage "
-            "paper cards, claim cards, section-aware chunks, and related artifacts. "
+            "The following structured evidence summary was generated from read-stage "
+            "Paper Briefs, the synthesis brief, section-aware chunks, and optional debug cards. "
             "It should be read as bounded evidence rather than a complete literature review.\n\n"
             f"{summary.strip()}"
         )
     return (
-        "No structured evidence cards were available. The report therefore relies on "
+        "No structured Paper Brief evidence was available. The report therefore relies on "
         "paper metadata, synthesis artifacts, and explicit limitations."
     )
 
@@ -2651,7 +3365,7 @@ def _source_artifacts(ctx: Context) -> dict[str, str]:
         "search_meta.json",
         SEARCH_RESEARCH_PLAN,
         SEARCH_RETRIEVAL_ROUNDS,
-        SEARCH_SCREENING_DECISIONS,
+        SEARCH_RETRIEVAL_SELECTION,
         SEARCH_COVERAGE_JSON,
         SEARCH_COVERAGE_MD,
         SEARCH_DOCUMENTS,
@@ -2661,24 +3375,28 @@ def _source_artifacts(ctx: Context) -> dict[str, str]:
         SEARCH_SECTIONS,
         SEARCH_CHUNKS,
         SEARCH_INDEX_META,
-        SEARCH_PAPER_CARDS,
-        SEARCH_CLAIM_CARDS,
-        SEARCH_METHOD_CARDS,
-        SEARCH_DATASET_CARDS,
-        SEARCH_CODE_LINKS,
-        SEARCH_EVIDENCE_PACK_JSON,
-        SEARCH_EVIDENCE_PACK_MD,
-        SEARCH_GAP_SUMMARY,
-        SEARCH_IDEA_CANDIDATES,
-        SEARCH_NOVELTY_CHECKS,
-        SEARCH_EXPERIMENT_CONTRACT_JSON,
-        SEARCH_EXPERIMENT_CONTRACT_MD,
-        SEARCH_TOOL_CONTEXT_JSON,
-        SEARCH_TOOL_CONTEXT_MD,
-        SEARCH_EVIDENCE_REVIEW_MD,
-        SEARCH_DECISION_LOG,
-        SEARCH_EVAL_JSON,
-        SEARCH_EVAL_MD,
+        READ_SCREENING_DECISIONS,
+        READ_SHORTLIST,
+        READ_READING_TABLE,
+        READ_PAPER_CARDS,
+        READ_CLAIM_CARDS,
+        READ_METHOD_CARDS,
+        READ_DATASET_CARDS,
+        READ_CODE_LINKS,
+        SYNTHESIS_EVIDENCE_PACK_JSON,
+        SYNTHESIS_EVIDENCE_PACK_MD,
+        SYNTHESIS_GAP_SUMMARY,
+        SYNTHESIS_IDEA_CANDIDATES,
+        SYNTHESIS_NOVELTY_CHECKS,
+        SYNTHESIS_BRIEF_JSON,
+        DESIGN_EXPERIMENT_CONTRACT_JSON,
+        DESIGN_EXPERIMENT_CONTRACT_MD,
+        DESIGN_TOOL_CONTEXT_JSON,
+        DESIGN_TOOL_CONTEXT_MD,
+        DESIGN_EVIDENCE_REVIEW_MD,
+        DESIGN_DECISION_LOG,
+        DESIGN_EVAL_JSON,
+        DESIGN_EVAL_MD,
         "activity_log.jsonl",
         "evidence_ledger.jsonl",
         "artifact_index.json",
@@ -2721,6 +3439,10 @@ def _read_jsonl_artifact(ctx: Context, filename: str) -> list[dict[str, Any]]:
         return read_jsonl(path)
     except (OSError, json.JSONDecodeError):
         return []
+
+
+def _list_value(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def _compact_field(value: object, *, default: str, limit: int = 220) -> str:
@@ -2876,7 +3598,7 @@ def _read_paper_notes_with_llm(
     client: LLMClient,
     papers: list[dict[str, Any]],
     evidence_snippets: str = "",
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Create one structured note per paper using concurrent LLM requests.
 
     Args:
@@ -2916,35 +3638,75 @@ def _normalize_paper_note(
     paper: dict[str, Any],
     response: dict[str, Any],
     index: int,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Merge model output with source metadata into a stable note schema."""
+    limitation_text = _text_field(response, "limitation")
+    limitations = _string_list_field(response, "limitations")
+    if limitation_text and limitation_text not in limitations:
+        limitations.append(limitation_text)
     return {
         "paper_id": _text_field(response, "paper_id") or _paper_id(paper, index),
-        "title": str(paper.get("title", "")),
+        "title": _text_field(response, "title") or str(paper.get("title", "")),
+        "evidence_role": _text_field(response, "evidence_role") or "other",
+        "one_sentence_summary": _text_field(response, "one_sentence_summary") or _text_field(response, "summary"),
         "problem": _text_field(response, "problem") or "Not specified.",
         "method": _text_field(response, "method") or "Not specified.",
-        "limitation": _text_field(response, "limitation") or "Not specified.",
-        "relevance": _text_field(response, "relevance") or "Not specified.",
+        "datasets": _string_list_field(response, "datasets"),
+        "metrics": _string_list_field(response, "metrics"),
+        "key_claims": _string_list_field(response, "key_claims") or _string_list_field(response, "main_claims"),
+        "limitations": limitations or ["Not specified."],
+        "relation_to_topic": _text_field(response, "relation_to_topic")
+        or _text_field(response, "relevance")
+        or "Not specified.",
+        "synthesis_hint": _text_field(response, "synthesis_hint"),
+        "possible_experiment_hooks": _string_list_field(response, "possible_experiment_hooks"),
+        "open_questions": _string_list_field(response, "open_questions"),
+        "evidence_refs": _string_list_field(response, "evidence_refs"),
+        "confidence": _text_field(response, "confidence") or "unknown",
+        "limitation": limitation_text or (limitations[0] if limitations else "Not specified."),
+        "relevance": _text_field(response, "relevance") or _text_field(response, "relation_to_topic") or "Not specified.",
     }
 
 
-def _notes_markdown(notes: list[dict[str, str]]) -> str:
+def _notes_markdown(notes: list[dict[str, Any]]) -> str:
     """Render structured paper notes as inspectable Markdown."""
     lines = ["# Literature Notes", ""]
     for note in notes:
         lines.append(f"## {note['paper_id']}")
         if note.get("title"):
             lines.append(f"Title: {note['title']}")
+        if note.get("evidence_role"):
+            lines.append(f"Role: {note['evidence_role']}")
         lines.extend(
             [
+                f"- Summary: {note.get('one_sentence_summary') or 'Not specified.'}",
                 f"- Problem: {note['problem']}",
                 f"- Method: {note['method']}",
-                f"- Limitation: {note['limitation']}",
-                f"- Relevance: {note['relevance']}",
+                f"- Datasets: {_join_inline(note.get('datasets'))}",
+                f"- Metrics: {_join_inline(note.get('metrics'))}",
+                f"- Key claims: {_join_inline(note.get('key_claims'))}",
+                f"- Limitations: {_join_inline(note.get('limitations'))}",
+                f"- Relation to topic: {note.get('relation_to_topic') or note.get('relevance') or 'Not specified.'}",
+                f"- Synthesis hint: {note.get('synthesis_hint') or 'Not specified.'}",
+                f"- Experiment hooks: {_join_inline(note.get('possible_experiment_hooks'))}",
                 "",
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _string_list_field(row: dict[str, Any], key: str) -> list[str]:
+    value = row.get(key)
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _join_inline(value: object) -> str:
+    rows = value if isinstance(value, list) else []
+    return ", ".join(str(item) for item in rows if str(item).strip()) or "Not specified."
 
 
 def _paper_id(paper: dict[str, Any], index: int) -> str:

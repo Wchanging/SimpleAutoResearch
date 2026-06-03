@@ -11,26 +11,27 @@ def build_coverage_report(
     topic: str,
     questions: list[ResearchQuestion],
     query_plan: QueryPlan,
-    screening_rows: list[dict[str, Any]],
+    selection_rows: list[dict[str, Any]],
     retrieval_rows: list[dict[str, Any]],
     max_documents: int,
     next_query_limit: int = 3,
 ) -> dict[str, Any]:
-    """Build a coverage report from retrieval traces and screening decisions.
+    """Build a retrieval coverage report from provider traces and selections.
 
     The report is intentionally lexical and auditable. It does not claim that a
-    topic is fully solved; it only records which configured facets have at
-    least one kept candidate and which follow-up queries should be tried next.
+    topic is fully solved, nor does it perform reading-stage paper screening.
+    It records which configured facets have at least one selected retrieval
+    candidate and which follow-up queries should be tried next.
     """
 
     kept_paper_ids = {
         str(row.get("paper_id") or "")
-        for row in screening_rows
+        for row in selection_rows
         if row.get("decision") == "keep" and row.get("paper_id")
     }
     evidence_rows = [
         row
-        for row in screening_rows
+        for row in selection_rows
         if _is_evidence_row(row, kept_paper_ids)
     ]
     required_facets = _required_facets(questions, query_plan)
@@ -76,10 +77,10 @@ def build_coverage_report(
             "attempt_count": len(retrieval_rows),
             "sources": sorted({str(row.get("source") or "") for row in retrieval_rows if row.get("source")}),
         },
-        "screening": {
-            "kept_documents": len([row for row in screening_rows if row.get("decision") == "keep"]),
+        "retrieval_selection": {
+            "kept_documents": len([row for row in selection_rows if row.get("decision") == "keep"]),
             "evidence_rows": len(evidence_rows),
-            "screened_candidates": len(screening_rows),
+            "candidate_rows": len(selection_rows),
             "max_documents": max_documents,
         },
     }
@@ -119,13 +120,13 @@ def coverage_report_markdown(report: dict[str, Any]) -> str:
         lines.append("- No follow-up query recommended within the current budget.")
     lines.extend(["", "## Retrieval Summary", ""])
     retrieval = report.get("retrieval") if isinstance(report.get("retrieval"), dict) else {}
-    screening = report.get("screening") if isinstance(report.get("screening"), dict) else {}
+    selection = report.get("retrieval_selection") if isinstance(report.get("retrieval_selection"), dict) else {}
     lines.extend(
         [
             f"- Executed rounds: {retrieval.get('executed_rounds', 0)} / {retrieval.get('planned_rounds', 0)}",
             f"- Source attempts: {retrieval.get('attempt_count', 0)}",
-            f"- Kept documents: {screening.get('kept_documents', 0)} / {screening.get('max_documents', 0)}",
-            f"- Screened candidates: {screening.get('screened_candidates', 0)}",
+            f"- Selected retrieval candidates: {selection.get('kept_documents', 0)} / {selection.get('max_documents', 0)}",
+            f"- Candidate rows: {selection.get('candidate_rows', 0)}",
         ]
     )
     return "\n".join(lines).rstrip() + "\n"

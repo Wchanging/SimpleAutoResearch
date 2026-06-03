@@ -79,9 +79,9 @@ plan -> search -> read -> synthesize -> design experiment
 
 ```text
 01 plan        限定主题和研究问题
-02 search      收集论文元数据
-03 read        生成文献笔记
-04 synthesize  总结主题并提出假设
+02 search      检索论文 metadata、全文和本地 chunks
+03 read        筛选、排序并结构化阅读检索结果
+04 synthesize  分析主题、gap 和可实验假设
 05 design      创建实验计划
 06 code        生成实验代码或准备内嵌 code task
 07 run         执行实验并解析指标
@@ -91,9 +91,9 @@ plan -> search -> read -> synthesize -> design experiment
 | 阶段 | 主要输出 | 目的 |
 | --- | --- | --- |
 | `plan` | `goal.md`, `problem.md` | 把主题收束成具体研究问题；启用 LLM 时由 LLM 支持。 |
-| `search` | `planning/`、`traces/`、`review/`、`papers.jsonl`、`search_meta.json` | 拆解主题、执行检索、去重/筛选 metadata、检查覆盖度，并从配置源收集文献记录。 |
-| `read` | `paper_notes.json`, `notes.md` | 把论文 metadata 转成结构化 notes；启用 LLM 时由 LLM 支持。 |
-| `synthesize` | `synthesis.md`, `hypothesis.md` | 产出有边界的 synthesis 和可测试假设。 |
+| `search` | `papers.jsonl`、`search_meta.json`、`documents/`、`research_index/` | 检索和摄取 metadata/全文，记录 provider provenance，并构建本地 chunks。它可以为了预算做候选选择，但不做语义阅读审查。 |
+| `read` | `review/`、`paper_notes.json`、`notes.md` | 对检索结果做筛选和阅读优先级排序，再把 shortlist 转成规范化 Paper Brief；启用 LLM 且检索量较大时，先按 title/abstract 小批次粗筛，再重排保留集合。 |
+| `synthesize` | `synthesis_brief.json`、`synthesis.md`、`hypothesis.md` | 基于 read 阶段 Paper Brief 分析主题、gap、有限 ideas 和可测试假设；启用 LLM 时由 LLM 支持。 |
 | `design` | `experiment_plan.json` | 选择安全实验模板和参数。 |
 | `code` | `experiment.py` | 根据模板生成代码，或准备内嵌 code-task harness。 |
 | `run` | `results.json`, `stdout.txt`, `stderr.txt` | 执行实验并解析数值指标。 |
@@ -101,7 +101,7 @@ plan -> search -> read -> synthesize -> design experiment
 
 ## Search 与 LLM 边界
 
-Search 是证据引擎，不只是 metadata lookup。它会收束研究问题、选择 source 顺序、检索和筛选候选文献、检查 coverage、记录 document/full-text 状态、构建本地 chunks/cards，并向后续 report 或 code-task 交付保守的 evidence bridge。
+Search 是检索入口，不是完整证据引擎。它会收束研究问题、选择 source 顺序、检索候选文献、记录 provider provenance，并构建 document/full-text/index 产物。它可以为了预算做候选排序和截断，但语义筛选、结构化阅读、综合和实验契约分别由后续阶段负责。
 
 普通运行默认只保留紧凑产物：
 
@@ -110,11 +110,11 @@ Search 是证据引擎，不只是 metadata lookup。它会收束研究问题、
   papers.jsonl / search_meta.json
   documents/       # 标准化 document records，以及 full-text/cache manifests
   research_index/  # 可迁移 chunks 与本地索引 metadata
-  cards/           # paper、claim、method、dataset、code-link cards
-  evidence/        # evidence pack、gap、idea、novelty hint、experiment contract
 ```
 
-当 `[run].debug_artifacts = true` 时，search 还会保留 planning 文件、retrieval traces、screening decisions、coverage-review reports、section tables、只读 tool-context 草案、adapter/governance notes，以及其他诊断产物。
+`03-read` 负责筛选、重排和 Paper Brief。LLM 模式下，它会先并发粗筛紧凑 title/abstract 批次，再给保留集合分配阅读优先级、证据角色和 synthesis hint。`04-synthesize` 默认生成 `synthesis_brief.json`、`synthesis.md` 和 `hypothesis.md`；旧的 cards/evidence pack 诊断产物只在 `[run].debug_artifacts = true` 时保留。`05-design` 负责 experiment contract 和可选 tool handoff 草案。
+
+当 `[run].debug_artifacts = true` 时，search 还会保留 planning 文件、retrieval traces、retrieval-selection rows、coverage-review reports 和 section tables。Design 的 debug 模式可以保留只读 tool-context 草案、adapter notes 和 governance artifacts。
 
 共享加速索引默认放在 run 目录之外的 `.simple_ar_cache/research_index`，按 run/source metadata 组织。run-local 的 PDF 下载缓存和 extracted text 属于可重建内容，可以用 `simple-ar clean` 预览和清理。
 
@@ -128,7 +128,10 @@ WORKFLOWS 只保留产物归属层面的说明；完整文件树放在 [使用�
 
 - run 根目录文件（`state.json`、`manifest.json`、`config_snapshot.json`、usage logs，以及可选 artifact indexes）负责 resume state、配置快照和可观测性。
 - 阶段目录（`01-plan` 到 `08-report`）各自拥有自己的 contract、report 和稳定 handoff artifact。
-- `02-search` 负责 retrieval、document/full-text 状态、本地 chunks、evidence cards 和紧凑 evidence bridge。
+- `02-search` 负责 retrieval、document/full-text 状态和本地 chunks。
+- `03-read` 负责 reading review、shortlist、literature cards 和结构化阅读笔记。
+- `04-synthesize` 负责从 read 阶段产物推导出的紧凑 evidence bridge、gaps、ideas、novelty hints、synthesis 和 hypothesis。
+- `05-design` 负责 experiment contracts 和 experiment plans。
 - 当 research pipeline 衔接代码执行时，`06-code/code_task_run` 会嵌入与 standalone code task 相同形态的 artifact。
 - `08-report` 负责最终报告包：报告正文、references、manifest 和质量检查。
 

@@ -46,8 +46,6 @@ class SearchStageTests(unittest.TestCase):
             fulltext_manifest = read_json(ctx.run_dir / "02-search" / "documents" / "fulltext_manifest.json")
             chunks = read_jsonl(ctx.run_dir / "02-search" / "research_index" / "chunks.jsonl")
             index_meta = read_json(ctx.run_dir / "02-search" / "research_index" / "index_meta.json")
-            paper_cards = read_jsonl(ctx.run_dir / "02-search" / "cards" / "paper_cards.jsonl")
-            claim_cards = read_jsonl(ctx.run_dir / "02-search" / "cards" / "claim_cards.jsonl")
 
             self.assertEqual(papers[0]["source"], "fixture")
             self.assertEqual(meta["status"], "fixture_fallback")
@@ -62,9 +60,8 @@ class SearchStageTests(unittest.TestCase):
             self.assertEqual(fulltext_manifest["document_count"], len(documents))
             self.assertEqual(meta["chunks"], "research_index/chunks.jsonl")
             self.assertEqual(index_meta["chunk_count"], len(chunks))
-            self.assertEqual(meta["paper_cards"], "cards/paper_cards.jsonl")
-            self.assertEqual(meta["paper_card_count"], len(paper_cards))
-            self.assertEqual(meta["claim_card_count"], len(claim_cards))
+            self.assertNotIn("paper_cards", meta)
+            self.assertFalse((ctx.run_dir / "02-search" / "cards" / "paper_cards.jsonl").exists())
 
     def test_openalex_success_is_used_before_arxiv(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -139,33 +136,28 @@ class SearchStageTests(unittest.TestCase):
             research_plan = read_json(ctx.run_dir / "02-search" / "planning" / "research_plan.json")
             source_plan = research_plan["source_plan"]
             retrieval_rounds = read_jsonl(ctx.run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl")
-            screening = read_jsonl(ctx.run_dir / "02-search" / "traces" / "screening_decisions.jsonl")
+            selection = read_jsonl(ctx.run_dir / "02-search" / "traces" / "retrieval_selection.jsonl")
             documents = read_jsonl(ctx.run_dir / "02-search" / "documents" / "documents.jsonl")
             chunks = read_jsonl(ctx.run_dir / "02-search" / "research_index" / "chunks.jsonl")
             index_meta = read_json(ctx.run_dir / "02-search" / "research_index" / "index_meta.json")
-            paper_cards = read_jsonl(ctx.run_dir / "02-search" / "cards" / "paper_cards.jsonl")
-            claim_cards = read_jsonl(ctx.run_dir / "02-search" / "cards" / "claim_cards.jsonl")
             fulltext_manifest = read_json(ctx.run_dir / "02-search" / "documents" / "fulltext_manifest.json")
 
             self.assertEqual(papers[0]["source"], "local_files")
             self.assertEqual(meta["source"], "local_files")
             self.assertEqual(meta["status"], "ok")
             self.assertEqual(meta["retrieval_rounds"], "traces/retrieval_rounds.jsonl")
-            self.assertEqual(meta["screening_decisions"], "traces/screening_decisions.jsonl")
+            self.assertEqual(meta["retrieval_selection"], "traces/retrieval_selection.jsonl")
             self.assertEqual(source_plan["sources"], ["local_files"])
             self.assertEqual(source_plan["local_documents"], [str(local_note)])
             self.assertIn("research_plan", meta)
             self.assertGreaterEqual(len(retrieval_rounds), 1)
             self.assertIn("title_keywords", retrieval_rounds[0])
-            self.assertTrue(any(row["decision"] == "keep" for row in screening))
+            self.assertTrue(any(row["decision"] == "keep" for row in selection))
             self.assertEqual(documents[0]["extraction_status"], "parsed")
             self.assertEqual(documents[0]["parser"], "plain_text")
             self.assertGreaterEqual(len(chunks), 1)
             self.assertEqual(index_meta["backend"], "sqlite_fts")
-            self.assertEqual(paper_cards[0]["schema_version"], "paper_card.v1")
-            self.assertTrue(paper_cards[0]["evidence_refs"])
-            self.assertTrue(claim_cards)
-            self.assertTrue(claim_cards[0]["evidence_refs"])
+            self.assertFalse((ctx.run_dir / "02-search" / "cards" / "paper_cards.jsonl").exists())
             self.assertEqual(fulltext_manifest["documents"][0]["hints"][0]["status"], "hint_only")
 
     def test_llm_research_planner_can_expand_queries_before_source_plan(self) -> None:
@@ -207,7 +199,7 @@ class SearchStageTests(unittest.TestCase):
             self.assertIn("title_keywords", query_plan["query_specs"][0])
             self.assertEqual(meta["research_planner"], "llm")
             self.assertTrue((ctx.run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl").exists())
-            self.assertTrue((ctx.run_dir / "02-search" / "traces" / "screening_decisions.jsonl").exists())
+            self.assertTrue((ctx.run_dir / "02-search" / "traces" / "retrieval_selection.jsonl").exists())
 
     def test_llm_research_planner_still_runs_when_query_expansion_is_disabled(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -255,9 +247,10 @@ class SearchStageTests(unittest.TestCase):
                     "research_sources": ["openalex"],
                     "research_queries": ["agent overview"],
                     "research_required_facets": ["overview", "method"],
+                    "research_auto_query_expansion": False,
                     "research_max_retrieval_rounds": 2,
-                    "research_max_documents": 1,
-                    "research_max_queries": 3,
+                    "research_max_documents": 2,
+                    "research_max_queries": 1,
                 }
             )
 

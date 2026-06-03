@@ -245,11 +245,11 @@ def build_tool_context(
             "download additional content unless the run config allows it",
         ],
         "primary_artifacts": {
-            "evidence_pack": "02-search/evidence/evidence_pack.json",
-            "gap_summary": "02-search/evidence/gap_summary.md",
-            "idea_candidates": "02-search/evidence/idea_candidates.jsonl",
-            "novelty_checks": "02-search/evidence/novelty_checks.jsonl",
-            "experiment_contract": "02-search/evidence/experiment_contract.json",
+            "evidence_pack": "04-synthesize/evidence/evidence_pack.json",
+            "gap_summary": "04-synthesize/evidence/gap_summary.md",
+            "idea_candidates": "04-synthesize/evidence/idea_candidates.jsonl",
+            "novelty_checks": "04-synthesize/evidence/novelty_checks.jsonl",
+            "experiment_contract": "05-design/evidence/experiment_contract.json",
         },
         "human_review_required": True,
     }

@@ -191,7 +191,7 @@ uv run simple-ar search-artifacts runs/<run-id> "accuracy" --top-k 5
 
 ### `simple-ar clean`
 
-**一句话说明**：预览并清理某个 run 的可重建缓存，同时保留报告、manifest、paper metadata、evidence cards、coverage report 和 `research_index/chunks.jsonl` 等审计产物。
+**一句话说明**：预览并清理某个 run 的可重建缓存，同时保留报告、manifest、paper metadata、read 阶段 Paper Brief、coverage report 和 `research_index/chunks.jsonl` 等审计产物。
 
 **语法用法**：
 ```bash
@@ -211,7 +211,7 @@ uv run simple-ar clean runs/<run-id> --yes
 - 如果 `index_meta.json` 指向当前 workspace 下的共享 SQLite research index，会删除该 run 对应的 SQLite rows。
 
 **注意**：
-`clean` 不会删除 run 目录本身，也不会删除报告、cards、papers、已保留的 debug coverage 和 portable chunks。
+`clean` 不会删除 run 目录本身，也不会删除报告、manifest、papers、`fulltext_extraction.json` 等解析审计文件、read 阶段 Paper Brief、synthesis brief、已保留的 debug coverage 和 portable chunks。
 
 ## Code Task Commands
 
