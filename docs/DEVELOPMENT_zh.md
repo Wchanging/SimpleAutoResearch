@@ -15,10 +15,30 @@ SimpleAutoResearch 现在采用 file-first + state-backed 的形态：
 
 这样项目更容易学习、调试和重构。
 
-旧的巨型 CLI 和 stage handler 模块在 reboot 期间移动到私有
-`src/simple_ar/_legacy/`。公开 import path 仍通过小型 compatibility wrapper
-工作，但新的行为应优先实现到 `core/`、`research/`、`experiment/` 和
-`code_task/` 这些领域模块中。
+旧的巨型 CLI 和 stage handler 模块已经从 `src/simple_ar/_legacy/` 迁出。
+该包现在只保留兼容旧 import path 的别名。新的行为应优先实现到
+`core/`、`research/`、`experiment/`、`report/` 和 `code_task/`
+这些领域模块中。
+
+CLI 代码按职责拆分：
+
+```text
+src/simple_ar/cli/
+  parser.py  argparse 命令与参数声明
+  main.py    命令分发与用户可见输出
+```
+
+Pipeline stage 编排按工作流区域拆分：
+
+```text
+src/simple_ar/pipeline_stages/
+  research.py    01-04 阶段：plan、search、read、synthesize
+  experiment.py  05-07 阶段：design、code、run
+  report.py      08 阶段：report packaging 与安全审查
+  common.py      LLM access、artifact reads 等共享 stage helpers
+  registry.py    PipelineRunner 使用的 HANDLERS registry
+  handlers.py    仅兼容聚合；不要在这里继续添加新逻辑
+```
 
 顶层实现模块已经收束到领域包中。新代码应直接从 `core/*`、`app/*`、
 `integrations/*`、`research/*`、`experiment/*`、`report/*` 或 `code_task/*`
@@ -47,8 +67,8 @@ src/simple_ar/research/
    中添加或扩展 typed state/contract models。
 3. 在对应领域 service 中实现阶段行为，例如
    `src/simple_ar/research/service.py` 或 `src/simple_ar/experiment/service.py`。
-4. 只有 pipeline registry 需要 handler 时，才添加薄 adapter。reboot 期间这仍然是
-   `src/simple_ar/_legacy/stage_handlers.py`；等它被拆完后，再切到新的领域 registry。
+4. 在 `src/simple_ar/pipeline_stages/` 的对应模块中添加 stage controller。
+   这里应负责阶段编排和产物衔接，不要重新变成新的大杂烩实现层。
 5. 在 `HANDLERS` 中注册 handler。
 6. 添加聚焦测试，检查 state update 和 declared outputs。
 

@@ -4,6 +4,34 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-05
+
+### Changed
+
+- `code-task execute` now runs continuously to real review gates by default,
+  with Rich step/status output. The `--interactive` flag is reserved for
+  primitive-step debugging, and `--yes` only auto-continues those primitive
+  prompts.
+- LLM work-plan and patch-plan failures now stop as `llm_planning_failed`
+  after configured retries instead of silently writing offline fallback plans.
+  Use `--allow-planning-fallback` only when a deterministic fallback is
+  acceptable.
+- `code-task init` now uses the same Rich-facing output style as execute.
+- `simple-ar clean --shared-cache` now clears both the shared research index
+  and the shared literature provider cache, with an explicit strong-cleanup
+  warning.
+- The medium review pipeline example now allows `configs/experiment.json` in
+  edit scope so phrase-feature implementations can enable the new feature
+  family and be measured by the benchmark.
+- Embedded code-task experiments now label forwarded logs as patched benchmark
+  stdout/stderr to avoid confusion with standalone baseline/patched artifacts.
+
+### Internal
+
+- The public CLI and pipeline stage entry points were split into smaller
+  modules under `src/simple_ar/cli/` and `src/simple_ar/pipeline_stages/`.
+  The old large modules remain only as private compatibility shims.
+
 ## 2026-06-03
 
 ### Changed

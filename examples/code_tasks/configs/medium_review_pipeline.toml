@@ -30,6 +30,8 @@ max_source_chars_per_file = 7000
 stream_benchmark_output = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
+allow_planning_fallback = false
+llm_retry_attempts = 2
 
 [models.code_task]
 # Leave empty to use SIMPLE_AR_MODEL or --model.
@@ -52,10 +54,12 @@ reuse_source_venv = false
 setup_hook = ""
 
 [edit_scope]
-# Keep benchmark config and tests as evidence while allowing the application
-# modules and entrypoint to change.
-allowed_patterns = ["review_pipeline/**", "main.py"]
-protected_patterns = ["configs/experiment.json"]
+# Allow the application modules, entrypoint, and experiment config to change.
+# This task may need to enable a newly implemented feature family in the config;
+# tests, evaluation data, secrets, and benchmark-like files remain protected by
+# the built-in safety rules.
+allowed_patterns = ["review_pipeline/**", "main.py", "configs/experiment.json"]
+protected_patterns = []
 
 [safety]
 max_file_bytes = 2000000

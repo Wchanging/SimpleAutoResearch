@@ -283,6 +283,7 @@ Shared accelerator stores are written outside the run by default:
 
 ```text
 .simple_ar_cache/
+  literature/      # shared provider metadata cache
   research_index/
     sqlite_fts.db  # shared SQLite FTS rows, keyed by run_id
     lancedb/       # shared LanceDB store when enabled and installed
@@ -302,6 +303,42 @@ SQLite research index. It keeps reports, manifests, normalized paper metadata,
 parser audit files such as `fulltext_extraction.json`, read-stage Paper Briefs,
 synthesis briefs, retained debug coverage reports when present, and portable
 `research_index/chunks.jsonl`.
+
+For a stronger cleanup that removes every known rebuildable cache and index for
+that run, use:
+
+```bash
+uv run simple-ar clean runs/<run-id> --all-caches
+```
+
+This mode shows an additional red warning panel before confirmation. It also
+removes artifact retrieval caches, run-local research indexes, code-task repo
+maps, locate results, and context packs while keeping final reports, metadata,
+manifests, and benchmark outputs.
+
+To clear only the shared research index store across runs:
+
+```bash
+uv run simple-ar clean --shared-index
+```
+
+This previews and then clears the shared SQLite FTS / LanceDB accelerator store,
+usually `.simple_ar_cache/research_index`. It does not delete any run directory
+or run-local audit files, but cross-run index acceleration and cache hits are
+lost until future runs rebuild the store. Use `--index-root PATH` when the
+shared index lives elsewhere. Paths outside the current workspace require
+`--allow-external-index-root`, because that can affect other projects.
+
+For the strongest shared cleanup, clear both the shared research index and the
+shared literature-provider cache:
+
+```bash
+uv run simple-ar clean --shared-cache
+```
+
+This usually removes `.simple_ar_cache/research_index/` and
+`.simple_ar_cache/literature/`. It does not delete run directories, but future
+runs may need to re-query providers and rebuild local search acceleration.
 
 Key files, grouped by directory:
 
@@ -582,17 +619,22 @@ benchmark, workspace, environment, and safety policy.
 > `code_task/run/<label>/stdout.txt`.
 
 > Note: The medium task often touches feature extraction, model scoring, and
-> config together, so it may create a reviewed `large` batch. Add
+> config together. Its sample edit scope allows `configs/experiment.json`
+> because a newly implemented feature family must be enabled before the
+> benchmark can measure it. It may create a reviewed `large` batch; add
 > `--allow-large-edits` to the final apply command only after inspecting
 > `code_task/meta/proposed_edits.json`.
 
-2. Continue to the first human review gate:
+2. Run the state-aware executor:
 
 ```bash
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-This usually writes the first execution artifacts:
+On an interactive terminal, this one command can walk through the plan review,
+proposal review, apply, validation, and patched benchmark gates. On a
+non-interactive shell, or when you answer `no`, it stops at the current review
+gate and can be rerun after review. The first review gate usually writes:
 
 ```text
 code_task/
@@ -613,14 +655,35 @@ code_task/
 At this point the original project is still untouched and the workspace has not
 received model edits.
 
-3. Read `code_task/work_plan.md` and `code_task/patch_plan.md`. If the plan is
-reasonable, approve it:
+`execute` renders the step state with Rich and runs continuously until a real
+review gate is reached. In an interactive terminal, those gates are handled
+inline: a yellow review panel points to `patch_plan.md`, `proposed_edits.json`,
+or large-edit approval and asks whether to continue. In non-interactive shells,
+it stops at the gate instead of waiting for input. If a run is interrupted,
+rerun the same `code-task execute` command: completed steps are detected and
+shown as skipped before the workflow advances. Use `--interactive` only for
+debug mode when you want to confirm each primitive step; `--yes` only
+auto-continues those interactive primitive prompts and never approves review
+gates by itself. Use `--no-review-inline` if you prefer the older
+stop-and-rerun flow.
+
+If LLM work planning or patch planning returns malformed JSON, `execute` stops
+with `llm_planning_failed` and leaves the fallback artifacts unwritten. Rerun
+the same command to retry the LLM step. Use `--no-llm` for a deterministic
+offline plan, or `--allow-planning-fallback` only when that weaker fallback is
+acceptable for the task.
+
+3. At the patch-plan review panel, read `code_task/work_plan.md` and
+`code_task/patch_plan.md`. If the plan is reasonable, answer `yes` to continue.
+If you are running non-interactively, answered `no`, or used
+`--no-review-inline`, approve it explicitly:
 
 ```bash
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
 ```
 
-4. Generate an edit proposal, but do not apply it yet:
+4. If the first executor command did not already continue, generate an edit
+proposal next. Do not apply it until the inline proposal review panel appears:
 
 ```bash
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
@@ -637,7 +700,9 @@ The default editor backend is `controlled_patch`. Its metadata is recorded in
 `manifest.json.patch`. The backend does not run benchmarks, approve plans, or
 write reports; those gates remain owned by the code-task workflow.
 
-5. Apply the reviewed proposal and evaluate the patched workspace:
+5. At the proposal review panel, inspect the generated edits. Answer `yes` to
+apply and evaluate the patched workspace. If you are running non-interactively,
+answered `no`, or used `--no-review-inline`, apply explicitly:
 
 ```bash
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --apply-proposed-edits --timeout 60
@@ -946,6 +1011,16 @@ uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/co
 
 - Check `manifest.json`: `plan.status` should be `approved`. The decision log
   is `code_task/meta/hitl_decisions.jsonl`.
+
+`execute` stopped with `llm_planning_failed`:
+
+- This means the model call returned invalid/missing structured JSON for the
+  work plan or patch plan. No deterministic fallback plan is written by default.
+- Rerun the same `code-task execute ... --config ...` command to retry from the
+  same point; completed earlier steps will be detected as skipped.
+- If you want to proceed without LLM planning, rerun with `--no-llm`. If you
+  still want the LLM first but accept deterministic fallback after retries, use
+  `--allow-planning-fallback` or set `[execute].allow_planning_fallback = true`.
 
 Validation passed but patched benchmark failed:
 

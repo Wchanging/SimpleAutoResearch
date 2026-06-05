@@ -112,6 +112,8 @@ mode = "copy"  # copy | git_worktree | sparse_copy
 
 接着运行完整的人工审核流程。`init` 会打印一个新的 run 目录，例如
 `runs/20260523-xxxx-my-code-task`；后续命令把 `runs/<run-id>` 替换成这个实际路径即可。
+在真实交互终端里，`code-task execute` 会在审核门询问是否继续，输入 `yes` 后可以继续推进；
+下面的显式命令链是同一流程的 review-first 版本，也适合非交互 shell。
 
 ```bash
 uv run simple-ar code-task init --config path/to/your_code_task.toml

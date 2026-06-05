@@ -256,6 +256,7 @@ novelty_backend = "local"
 
 ```text
 .simple_ar_cache/
+  literature/      # 共享 literature provider metadata cache
   research_index/
     sqlite_fts.db  # 按 run_id 区分 rows 的共享 SQLite FTS store
     lancedb/       # 启用并安装 LanceDB 后使用的共享 LanceDB store
@@ -273,6 +274,38 @@ uv run simple-ar clean runs/<run-id>
 research index 中属于该 run 的 rows；不会删除 report、manifest、papers、
 `fulltext_extraction.json` 等解析审计文件、read 阶段 Paper Brief、synthesis brief、
 已保留的 debug coverage reports 和可移植的 `research_index/chunks.jsonl`。
+
+如果希望把该 run 下所有已知可重建缓存和索引都清掉，可以使用：
+
+```bash
+uv run simple-ar clean runs/<run-id> --all-caches
+```
+
+这个模式会在确认前额外显示红色警告面板，并删除 artifact retrieval caches、
+run-local research indexes、code-task repo map、locate results 和 context packs；
+但仍会保留最终 report、metadata、manifest 和 benchmark outputs。
+
+如果只想清空跨 run 共享的 research index store：
+
+```bash
+uv run simple-ar clean --shared-index
+```
+
+这个命令会先预览，然后清空共享 SQLite FTS / LanceDB 加速索引，通常位于
+`.simple_ar_cache/research_index`。它不会删除任何 run 目录或 run-local 审计文件，
+但跨 run 的索引加速和 cache 命中会丢失，后续运行需要重新构建。共享索引在别处时
+使用 `--index-root PATH`；如果路径在当前 workspace 外，还必须显式加
+`--allow-external-index-root`，因为这可能影响其他项目。
+
+如果要进行最强共享清理，同时清空 research index 和 literature provider cache：
+
+```bash
+uv run simple-ar clean --shared-cache
+```
+
+这通常会删除 `.simple_ar_cache/research_index/` 和
+`.simple_ar_cache/literature/`。它不会删除任何 run 目录，但后续运行可能需要重新请求
+literature provider，并重新构建本地检索加速索引。
 
 关键文件按目录看：
 
@@ -436,15 +469,18 @@ runs/<run-id>/
 
 > Tip：medium review pipeline 会运行 `python main.py --config configs/experiment.json --show-progress`。执行时可以看到类似 `benchmark stdout: round 1/4 ...` 的转发行，同时完整 stdout 仍会保存到 `code_task/run/<label>/stdout.txt`。
 
-> Note：medium 任务通常会联动 feature extraction、model scoring 和 config，因此可能生成一个已审核的 `large` batch。只有在检查 `code_task/meta/proposed_edits.json` 后，最后应用 proposal 时才应加入 `--allow-large-edits`。
+> Note：medium 任务通常会联动 feature extraction、model scoring 和 config。示例 edit scope 允许修改 `configs/experiment.json`，因为新实现的 feature family 需要在配置中启用，benchmark 才能测到它。因此它可能生成一个已审核的 `large` batch。只有在检查 `code_task/meta/proposed_edits.json` 后，最后应用 proposal 时才应加入 `--allow-large-edits`。
 
-2. 推进到第一个人工审核点：
+2. 运行状态感知 executor：
 
 ```bash
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
 ```
 
-这一步通常会生成第一批执行产物：
+在真实终端里，这一条命令可以一路经过 plan 审核、proposal 审核、应用补丁、验证和
+patched benchmark；每个真实审核门都会用黄色 Rich 面板提示你看什么、下一步会做什么。
+如果在非交互 shell 中运行，或者你回答 `no`，它会停在当前审核门，方便你之后重跑。
+第一个审核门通常会生成：
 
 ```text
 code_task/
@@ -464,13 +500,29 @@ code_task/
 
 这时原始项目仍未被修改，workspace 也还没有应用模型 edits。
 
-3. 阅读 `code_task/work_plan.md` 和 `code_task/patch_plan.md`。如果计划合理，批准它：
+`execute` 会用 Rich 显示步骤状态，并默认连续运行到真正需要人工判断的审核门。
+真实终端里的审核门会 inline 询问是否继续；非交互 shell 中则直接停住，避免卡住。
+中途中断后，重新运行同一条 `code-task execute` 命令即可：已完成步骤会被检测并显示为
+skipped，然后 workflow 从下一个需要处理的位置继续。只有在调试 primitive 步骤时才建议加
+`--interactive` 逐步确认；`--yes` 只会自动继续这些 interactive primitive prompts，
+不会替你批准审核门。使用 `--no-review-inline` 可以恢复“停住、下次再跑”的行为。
+
+如果 LLM work-plan 或 patch-plan 返回了无法解析的 JSON，`execute` 会停在
+`llm_planning_failed`，并且默认不会写入 offline fallback plan。此时直接重跑同一条
+命令即可重新尝试模型调用；如果你明确想完全离线规划，使用 `--no-llm`；如果你希望
+先尝试 LLM、失败后接受较弱的 deterministic fallback，再使用
+`--allow-planning-fallback`。
+
+3. 在 patch-plan 审核面板出现时，阅读 `code_task/work_plan.md` 和
+`code_task/patch_plan.md`。如果计划合理，输入 `yes` 继续。如果你在非交互环境运行、
+回答了 `no`，或使用了 `--no-review-inline`，则可以显式批准：
 
 ```bash
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
 ```
 
-4. 生成 edit proposal，但先不要应用：
+4. 如果第一条 executor 命令没有已经继续到 proposal，则继续生成 edit proposal。
+在 proposal 审核面板出现前，不会应用补丁：
 
 ```bash
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
@@ -486,7 +538,9 @@ uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/co
 `proposed_edits.json`、active batch state、`applied_edits.json` 和
 `manifest.json.patch` 中。backend 不负责运行 benchmark、批准计划或写报告；这些 gate 仍由 code-task workflow 管理。
 
-5. 确认 proposal 后，应用补丁并运行验证和 patched benchmark：
+5. 在 proposal 审核面板中检查 edits。确认无误后输入 `yes`，即可应用补丁并运行验证和
+patched benchmark。如果你在非交互环境运行、回答了 `no`，或使用了 `--no-review-inline`，
+则显式应用：
 
 ```bash
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --apply-proposed-edits --timeout 60
@@ -707,6 +761,12 @@ uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/co
 ```
 
 - 可检查 `manifest.json` 中的 `plan.status` 是否为 `approved`；人工决策记录在 `code_task/meta/hitl_decisions.jsonl`。
+
+`execute` 停在 `llm_planning_failed`：
+
+- 这表示模型在 work-plan 或 patch-plan 阶段返回了格式错误/缺失的结构化 JSON。默认情况下不会写入 deterministic fallback plan，避免把弱计划伪装成 LLM 计划继续执行。
+- 直接重跑同一条 `code-task execute ... --config ...` 命令即可从同一位置重试；已完成的前置步骤会显示为 skipped。
+- 如果你想完全跳过 LLM planning，重跑时加 `--no-llm`。如果你仍想先试 LLM，但失败后接受 deterministic fallback，可以加 `--allow-planning-fallback`，或在 TOML 里设置 `[execute].allow_planning_fallback = true`。
 
 validation 通过，但 patched benchmark 失败：
 

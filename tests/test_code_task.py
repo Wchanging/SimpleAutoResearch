@@ -38,6 +38,7 @@ from simple_ar.experiment.code_task_experiment import (
     prepare_code_task_experiment,
     write_code_task_experiment_meta,
 )
+from simple_ar.integrations.llm import LLMError
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
@@ -1916,7 +1917,8 @@ protected_patterns = ["pyproject.toml"]
                 "resource",
             )
             output = stdout.getvalue()
-            self.assertIn("Primary metric: macro_f1", output)
+            self.assertIn("Primary metric:", output)
+            self.assertIn("macro_f1", output)
             self.assertIn("Metric directions:", output)
 
     def test_code_task_init_cli_reads_toml_config(self) -> None:
@@ -2155,6 +2157,109 @@ protected_patterns = ["pyproject.toml"]
                 ],
             )
 
+    def test_execute_blocks_on_llm_work_plan_failure_without_fallback(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove the spam classifier with LLM planning.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            fake_client = _FailingCodeTaskClient()
+
+            with patch("simple_ar.code_task.editing.work_plan.LLMClient.from_env", return_value=fake_client):
+                result = execute_code_task(
+                    run_dir,
+                    use_llm=True,
+                    to_step="work-plan",
+                    timeout_sec=10,
+                    llm_retry_attempts=2,
+                )
+
+            self.assertEqual(result.stop_reason, "llm_planning_failed")
+            self.assertEqual(result.steps[-1].step, "work-plan")
+            self.assertEqual(result.steps[-1].status, "blocked")
+            self.assertIn("LLM work planning failed", result.steps[-1].detail)
+            self.assertEqual(fake_client.calls, 2)
+            self.assertFalse((run_dir / "code_task" / "work_plan.json").exists())
+            self.assertFalse((run_dir / "code_task" / "work_plan.md").exists())
+
+    def test_execute_uses_planning_fallback_only_when_explicitly_allowed(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove the spam classifier with fallback allowed.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            fake_client = _FailingCodeTaskClient()
+
+            with patch("simple_ar.code_task.editing.work_plan.LLMClient.from_env", return_value=fake_client):
+                result = execute_code_task(
+                    run_dir,
+                    use_llm=True,
+                    to_step="work-plan",
+                    timeout_sec=10,
+                    allow_planning_fallback=True,
+                    llm_retry_attempts=2,
+                )
+
+            self.assertEqual(result.stop_reason, "stop_point")
+            self.assertEqual(result.steps[-1].step, "work-plan")
+            self.assertEqual(result.steps[-1].status, "done")
+            self.assertEqual(fake_client.calls, 2)
+            work_plan = read_json(run_dir / "code_task" / "work_plan.json")
+            self.assertEqual(work_plan["mode"], "offline")
+
+    def test_execute_blocks_on_llm_patch_plan_failure_without_fallback(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove the spam classifier patch plan.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            first = execute_code_task(run_dir, use_llm=False, to_step="batch", timeout_sec=10)
+            self.assertEqual(first.stop_reason, "stop_point")
+            fake_client = _FailingCodeTaskClient()
+
+            with patch("simple_ar.code_task.editing.planning.LLMClient.from_env", return_value=fake_client):
+                result = execute_code_task(
+                    run_dir,
+                    use_llm=True,
+                    to_step="plan",
+                    timeout_sec=10,
+                    llm_retry_attempts=2,
+                )
+
+            self.assertEqual(result.stop_reason, "llm_planning_failed")
+            self.assertEqual(result.steps[-1].step, "plan")
+            self.assertEqual(result.steps[-1].status, "blocked")
+            self.assertIn("LLM patch planning failed", result.steps[-1].detail)
+            self.assertEqual(fake_client.calls, 2)
+            self.assertFalse((run_dir / "code_task" / "patch_plan.md").exists())
+
     def test_execute_dry_run_has_no_side_effects(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -2181,8 +2286,11 @@ protected_patterns = ["pyproject.toml"]
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 main(["code-task", "execute", str(run_dir), "--dry-run", "--no-llm"])
-            self.assertIn("Stop reason: dry_run", stdout.getvalue())
-            self.assertIn("probe: would_run", stdout.getvalue())
+            output = stdout.getvalue()
+            self.assertIn("Stop reason", output)
+            self.assertIn("dry_run", output)
+            self.assertIn("probe", output)
+            self.assertIn("would_run", output)
 
     def test_execute_cli_reads_runtime_config(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -2233,9 +2341,80 @@ protected_patterns = ["pyproject.toml"]
                 main(["code-task", "execute", str(run_dir), "--config", str(config_file)])
 
             output = stdout.getvalue()
-            self.assertIn("Stop reason: stop_point", output)
-            self.assertIn("baseline: done", output)
+            self.assertIn("Stop reason", output)
+            self.assertIn("stop_point", output)
+            self.assertIn("baseline", output)
+            self.assertIn("done", output)
             self.assertFalse((run_dir / "code_task" / "work_plan.json").exists())
+
+    def test_execute_interactive_skips_completed_steps_without_prompting(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nResume already completed execute steps.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            result = execute_code_task(run_dir, to_step="baseline", use_llm=False, timeout_sec=10)
+            self.assertEqual(result.stop_reason, "stop_point")
+
+            stdout = io.StringIO()
+            with patch("simple_ar.cli.main.confirm_next_step") as confirm:
+                with contextlib.redirect_stdout(stdout):
+                    main(["code-task", "execute", str(run_dir), "--to-step", "baseline", "--interactive", "--no-llm"])
+
+            confirm.assert_not_called()
+            output = stdout.getvalue()
+            self.assertIn("probe", output)
+            self.assertIn("baseline", output)
+            self.assertIn("skipped", output)
+
+    def test_execute_inline_review_can_approve_plan_and_continue(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nApprove plan inline and continue.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            stdout = io.StringIO()
+            with (
+                patch("sys.stdin.isatty", return_value=True),
+                patch("simple_ar.cli.main.confirm_review_gate", return_value=True) as confirm,
+                contextlib.redirect_stdout(stdout),
+            ):
+                main(
+                    [
+                        "code-task",
+                        "execute",
+                        str(run_dir),
+                        "--to-step",
+                        "propose-edits",
+                        "--no-llm",
+                    ]
+                )
+
+            confirm.assert_called_once()
+            output = stdout.getvalue()
+            self.assertIn("Patch Plan Review", output)
+            self.assertTrue((run_dir / "code_task" / "meta" / "proposed_edits.json").is_file())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["plan"]["status"], "approved")
 
     def test_execute_applies_reviewed_proposal_after_approval(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -2915,6 +3094,15 @@ class _FakeCodeTaskClient:
                 "risks": [],
             }
         raise AssertionError(f"Unexpected LLM label: {label}")
+
+
+class _FailingCodeTaskClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+        self.calls += 1
+        raise LLMError("LLM response did not contain a JSON object")
 
 
 def _indexed_file(index: dict[str, object], path: str) -> dict[str, object]:

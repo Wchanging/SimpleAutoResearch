@@ -515,10 +515,10 @@ def main() -> int:
     stdout = result.stdout_path.read_text(encoding="utf-8", errors="replace")
     stderr = result.stderr_path.read_text(encoding="utf-8", errors="replace")
     if stdout.strip():
-        print("=== benchmark stdout ===")
+        print("=== patched benchmark stdout ===")
         print(stdout.rstrip())
     if stderr.strip():
-        print("=== benchmark stderr ===", file=sys.stderr)
+        print("=== patched benchmark stderr ===", file=sys.stderr)
         print(stderr.rstrip(), file=sys.stderr)
     print(f"benchmark_passed: {{1.0 if result.status == 'passed' else 0.0}}")
     print(f"benchmark_returncode: {{float(result.returncode) if result.returncode is not None else -1.0}}")

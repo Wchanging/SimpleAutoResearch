@@ -143,6 +143,9 @@ mode = "copy"  # copy | git_worktree | sparse_copy
 
 Then run the reviewed flow. `init` prints a run directory such as
 `runs/20260523-xxxx-my-code-task`; use that path in place of `runs/<run-id>`.
+On an interactive terminal, `code-task execute` can continue through review
+gates after you answer `yes`. The explicit commands below are the same flow in
+a review-first form that also works in non-interactive shells.
 
 ```bash
 uv run simple-ar code-task init --config path/to/your_code_task.toml

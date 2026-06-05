@@ -28,6 +28,8 @@ max_files = 8
 max_source_chars_per_file = 6000
 apply_proposed_edits = false
 allow_large_edits = false
+allow_planning_fallback = false
+llm_retry_attempts = 2
 
 [models.code_task]
 # Leave these empty to use SIMPLE_AR_MODEL or --model for all steps.

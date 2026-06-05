@@ -197,21 +197,35 @@ uv run simple-ar search-artifacts runs/<run-id> "accuracy" --top-k 5
 ```bash
 uv run simple-ar clean runs/<run-id>
 uv run simple-ar clean runs/<run-id> --yes
+uv run simple-ar clean runs/<run-id> --all-caches
+uv run simple-ar clean --shared-index
+uv run simple-ar clean --shared-cache
 ```
 
 **参数表**：
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
-| `RUN_DIR` | path | 要清理的 run 目录。 |
+| `RUN_DIR` | path | 要清理的 run 目录。使用 `--shared-index` 或 `--shared-cache` 时可省略。 |
 | `--yes` | flag | 跳过交互式 `yes` 确认，直接删除预览中列出的目标。 |
+| `--all-caches` | flag | 在更强警告后，删除该 run 下所有已知可重建缓存、索引和 context artifacts。 |
+| `--shared-index` | flag | 强清理：清空跨 run/test 共享的 research index store。 |
+| `--shared-cache` | flag | 最强共享清理：同时清空共享 research index 和 literature provider cache。 |
+| `--index-root PATH` | path | `--shared-index` / `--shared-cache` 使用的共享索引根目录；默认 `SIMPLE_AR_RESEARCH_INDEX_ROOT` 或 `.simple_ar_cache/research_index`。 |
+| `--literature-cache-root PATH` | path | `--shared-cache` 使用的 literature cache 根目录；默认 `.simple_ar_cache/literature`。 |
+| `--allow-external-index-root` | flag | 允许 shared cleanup 清理当前 workspace 外的路径。 |
 
 **生成产物**：
 - 先打印 Rich tree 预览：红色为将删除的缓存，绿色为会保留的审计产物。
 - 删除 `02-search/documents/fulltext_cache/`、`02-search/documents/extracted_text/`、`artifact_search_results.json` 等可重建缓存。
 - 如果 `index_meta.json` 指向当前 workspace 下的共享 SQLite research index，会删除该 run 对应的 SQLite rows。
+- 使用 `--all-caches` 时，还会删除可重建的 research index、artifact search index/chunks、code-task repo map、locate outputs 和 context packs。
 
 **注意**：
-`clean` 不会删除 run 目录本身，也不会删除报告、manifest、papers、`fulltext_extraction.json` 等解析审计文件、read 阶段 Paper Brief、synthesis brief、已保留的 debug coverage 和 portable chunks。
+`clean` 不会删除 run 目录本身，也不会删除报告、manifest、papers、`fulltext_extraction.json` 等解析审计文件、read 阶段 Paper Brief、synthesis brief、已保留的 debug coverage 和 portable chunks。`--all-caches` 会把 portable chunks 也视为可重建索引缓存删除，但仍会保留最终报告、metadata、manifest 和 benchmark outputs。
+
+`--shared-index` 比 `--all-caches` 更强：它会清空跨 run 共享的 SQLite/LanceDB 加速索引，后续运行需要重新构建索引状态。它不触碰 run 目录，因此 run-local 审计产物仍会保留。
+
+`--shared-cache` 更强：它会同时清空共享 research index 和 `.simple_ar_cache/literature`，后续运行可能需要重新请求 literature provider，并重新构建本地索引。
 
 ## Code Task Commands
 
@@ -289,11 +303,16 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--model NAME` | string | LLM 步骤模型覆盖。 |
 | `--no-llm` | flag | 尽可能使用 deterministic fallback。 |
 | `--timeout N` | int | benchmark timeout。 |
+| `--yes` | flag | 与 `--interactive` 一起使用时，自动继续 primitive prompts。正常 execute 默认已连续运行到审核门。 |
+| `--interactive` | flag | 调试模式：逐个 primitive step 确认，而不是连续运行到下一个审核门。 |
+| `--no-review-inline` | flag | 禁用 inline 审核提示，在审核门直接停止。 |
 | `--skip-validation` | flag | 静态验证未通过时仍运行 benchmark。 |
 | `--strict-validation` | flag | 将较高风险 validation warning 视为 error。 |
 | `--validation-max-file-bytes N` | int | 静态验证扫描文件大小上限。 |
 | `--apply-proposed-edits` | flag | plan 批准后应用已审核的 `proposed_edits.json`。 |
 | `--allow-large-edits` | flag | 允许已审核、超过 normal 预算的较大 proposal。 |
+| `--allow-planning-fallback` | flag | LLM 规划重试失败后，允许写入 deterministic fallback work/patch plan。 |
+| `--llm-retry-attempts N` | int | work-plan / patch-plan 的 LLM 尝试次数。 |
 | `--repair-rounds N` | int | 失败后的 bounded repair proposal 轮数。 |
 | `--max-files N` | int | LLM 步骤上下文文件预算。 |
 | `--max-source-chars-per-file N` | int | 单文件 source 上下文预算。 |
@@ -313,9 +332,18 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 
 **注意**：
 
-`execute` 会保留审核点：通常先停在 `patch_plan.md` 后，再停在
-`proposed_edits.json` 后。完整运行流程见
+`execute` 会保留审核点，但不强制每个审核门都另开一条命令。真实终端里，它会对
+`patch_plan.md`、`proposed_edits.json` 或 large-edit approval 打印黄色 Rich 审核面板，
+并询问是否继续；非交互 shell 中则会直接停在审核门，避免等待输入。中断后重跑时，
+已完成步骤会显示为 skipped。只有调试 primitive step 时才建议使用 `--interactive`，
+并可搭配 `--yes` 自动继续这些 primitive prompts。使用 `--no-review-inline` 可恢复
+“停住、下次再跑”的旧行为。完整运行流程见
 [使用与配置](USAGE_zh.md#推荐路径toml--execute)。
+
+如果 LLM work-plan 或 patch-plan 返回了无法解析的 JSON，`execute` 会停在
+`llm_planning_failed`，并且不会写入 offline fallback plan。此时直接重跑同一条
+`execute` 命令即可重新尝试模型调用；如果你明确接受 deterministic plan，再使用
+`--no-llm` 或 `--allow-planning-fallback`。
 
 #### `simple-ar code-task decide-plan`
 
@@ -515,6 +543,8 @@ uv run simple-ar code-task work-plan runs/<run-id>
 | `--model NAME` | string | 模型覆盖。 |
 | `--no-llm` | flag | 使用 fallback planning。 |
 | `--force` | flag | 重新生成已有 work plan。 |
+| `--allow-planning-fallback` | flag | LLM work planning 失败时允许 deterministic fallback。 |
+| `--llm-retry-attempts N` | int | work planning 的 LLM 尝试次数。 |
 | `--max-files N` | int | planning 上下文文件预算。 |
 | `--max-source-chars-per-file N` | int | 单文件 source 上下文预算。 |
 
@@ -573,6 +603,8 @@ uv run simple-ar code-task plan runs/<run-id>
 | `--model NAME` | string | 模型覆盖。 |
 | `--no-llm` | flag | 使用 fallback plan。 |
 | `--force` | flag | 重新生成已有 plan。 |
+| `--allow-planning-fallback` | flag | LLM patch planning 失败时允许 deterministic fallback。 |
+| `--llm-retry-attempts N` | int | patch planning 的 LLM 尝试次数。 |
 | `--max-files N` | int | 上下文文件预算。 |
 | `--max-source-chars-per-file N` | int | 单文件 source 上下文预算。 |
 

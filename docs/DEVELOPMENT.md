@@ -16,10 +16,30 @@ SimpleAutoResearch is now file-first plus state-backed:
 
 This keeps the project easier to learn, debug, and refactor.
 
-The old monolithic CLI and stage handler modules live under private
-`src/simple_ar/_legacy/` during the reboot. Public imports still work through
-small compatibility wrappers, but new behavior should be implemented in the
-domain modules under `core/`, `research/`, `experiment/`, and `code_task/`.
+The old monolithic CLI and stage handler modules have been moved out of
+`src/simple_ar/_legacy/`. That package now only contains compatibility aliases
+for older imports. New behavior should be implemented in the domain modules
+under `core/`, `research/`, `experiment/`, `report/`, and `code_task/`.
+
+CLI code is split by responsibility:
+
+```text
+src/simple_ar/cli/
+  parser.py  argparse command and option declarations
+  main.py    command dispatch and user-facing output
+```
+
+Pipeline-stage orchestration is split by workflow area:
+
+```text
+src/simple_ar/pipeline_stages/
+  research.py    stages 01-04: plan, search, read, synthesize
+  experiment.py  stages 05-07: design, code, run
+  report.py      stage 08 report packaging and safety checks
+  common.py      shared stage helpers such as LLM access and artifact reads
+  registry.py    HANDLERS registry used by PipelineRunner
+  handlers.py    compatibility aggregation only; do not add new logic here
+```
 
 Top-level implementation modules have been collapsed into domain packages.
 Prefer direct imports from `core/*`, `app/*`, `integrations/*`, `research/*`,
@@ -51,9 +71,9 @@ To add a stage to the default research pipeline, update these places together:
    and `src/simple_ar/core/contracts.py`.
 3. Implement stage behavior in the responsible domain service, for example
    `src/simple_ar/research/service.py` or `src/simple_ar/experiment/service.py`.
-4. Add a thin adapter in the pipeline registry. During the reboot this still
-   means `src/simple_ar/_legacy/stage_handlers.py`; once that file is retired,
-   use the new domain registry instead.
+4. Add the stage controller to the appropriate module under
+   `src/simple_ar/pipeline_stages/`. Keep it as orchestration over domain
+   services, not a new all-purpose implementation dump.
 5. Register the handler in `HANDLERS`.
 6. Add a focused test that checks state updates and declared outputs.
 

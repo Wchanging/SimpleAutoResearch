@@ -9,13 +9,14 @@ Improve the review-classification baseline in `medium_review_pipeline_project` b
 - Keep the command-line entrypoint as `python main.py --config configs/experiment.json --show-progress`.
 - Preserve the existing `review_pipeline` module layout.
 - Prefer a small, reviewable patch across the relevant source/config files rather than a whole-file rewrite.
+- You may update `configs/experiment.json` when the change only enables the new feature family required by the implementation.
 - Do not change evaluation examples, labels, tests, or metric computation to inflate the score.
 
 ## Expected Implementation Direction
 
 - Add phrase or bigram feature extraction in `review_pipeline/features.py`.
 - Wire phrase features into `review_pipeline/model.py` with explicit, readable weights or scoring logic.
-- Update `configs/experiment.json` only if needed to enable the new feature family.
+- Enable the new feature family in `configs/experiment.json` when phrase features are implemented.
 - Keep progress output visible during runs.
 - Keep metric lines in `name: value` format so SimpleAutoResearch can parse them.
 

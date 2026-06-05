@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any
 
-from simple_ar._legacy import cli as _legacy
+_main = import_module("simple_ar.cli.main")
 
 
-main = _legacy.main
+main = _main.main
 
 
 def __getattr__(name: str) -> Any:
-    return getattr(_legacy, name)
+    return getattr(_main, name)

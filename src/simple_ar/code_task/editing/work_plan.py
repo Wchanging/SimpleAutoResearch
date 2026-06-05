@@ -77,6 +77,8 @@ def generate_code_task_work_plan(
     *,
     model: str | None = None,
     use_llm: bool = True,
+    allow_llm_fallback: bool = False,
+    llm_retry_attempts: int = 1,
     force: bool = False,
     max_files: int = 8,
     max_source_chars_per_file: int = 2500,
@@ -92,8 +94,12 @@ def generate_code_task_work_plan(
     Args:
         run_dir: Code-task run directory created by ``code-task init``.
         model: Optional OpenAI-compatible model override.
-        use_llm: Whether to call the configured LLM provider. Falls back to a
-            deterministic work plan when the provider is unavailable.
+        use_llm: Whether to call the configured LLM provider.
+        allow_llm_fallback: When true, use the deterministic work plan after
+            all LLM attempts fail. When false, raise ``LLMError`` so callers can
+            stop and retry later without writing an offline plan.
+        llm_retry_attempts: Number of LLM planning attempts before failing or
+            falling back.
         force: Overwrite existing ``work_plan.json`` and ``work_plan.md``.
         max_files: Maximum number of source/evidence files included in the
             planning prompt.
@@ -114,6 +120,8 @@ def generate_code_task_work_plan(
         raise ValueError("max_files must be at least 1")
     if max_source_chars_per_file < 200:
         raise ValueError("max_source_chars_per_file must be at least 200")
+    if llm_retry_attempts < 1:
+        raise ValueError("llm_retry_attempts must be at least 1")
 
     root = Path(run_dir)
     paths = code_task_paths(root)
@@ -160,29 +168,39 @@ def generate_code_task_work_plan(
     mode = "offline"
     plan_data: dict[str, Any] | None = None
     if use_llm:
-        try:
-            _emit(message_callback, "Calling LLM for code-task work planning.")
-            client = LLMClient.from_env(
-                model=model,
-                usage_callback=lambda usage: _record_code_task_usage(
-                    paths.meta_dir,
-                    usage,
-                    message_callback=message_callback,
-                ),
-            )
-            plan_data = _ask_llm_for_work_plan(
-                client,
-                task_text=task_text,
-                index=index,
-                snippets=snippets,
-                benchmark_command=_benchmark_command(manifest),
-                run_context=run_context,
-                allowed_patterns=allowed_patterns,
-                protected_patterns=protected_patterns,
-            )
-            mode = "llm"
-        except LLMError as exc:
-            _emit(message_callback, f"LLM work planning failed; using offline fallback. {exc}")
+        last_error: LLMError | None = None
+        for attempt in range(1, llm_retry_attempts + 1):
+            try:
+                suffix = f" (attempt {attempt}/{llm_retry_attempts})" if llm_retry_attempts > 1 else ""
+                _emit(message_callback, f"Calling LLM for code-task work planning{suffix}.")
+                client = LLMClient.from_env(
+                    model=model,
+                    usage_callback=lambda usage: _record_code_task_usage(
+                        paths.meta_dir,
+                        usage,
+                        message_callback=message_callback,
+                    ),
+                )
+                plan_data = _ask_llm_for_work_plan(
+                    client,
+                    task_text=task_text,
+                    index=index,
+                    snippets=snippets,
+                    benchmark_command=_benchmark_command(manifest),
+                    run_context=run_context,
+                    allowed_patterns=allowed_patterns,
+                    protected_patterns=protected_patterns,
+                )
+                mode = "llm"
+                break
+            except LLMError as exc:
+                last_error = exc
+                _emit(message_callback, f"LLM work planning attempt {attempt} failed: {exc}")
+        if plan_data is None and last_error is not None:
+            if allow_llm_fallback:
+                _emit(message_callback, f"Using offline fallback after LLM work planning failed. {last_error}")
+            else:
+                raise LLMError(f"LLM work planning failed after {llm_retry_attempts} attempt(s): {last_error}") from last_error
 
     if plan_data is None:
         plan_data = _offline_work_plan(

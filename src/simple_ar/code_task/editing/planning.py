@@ -64,6 +64,8 @@ def generate_patch_plan(
     *,
     model: str | None = None,
     use_llm: bool = True,
+    allow_llm_fallback: bool = False,
+    llm_retry_attempts: int = 1,
     force: bool = False,
     max_files: int = 8,
     max_source_chars_per_file: int = 2500,
@@ -74,8 +76,12 @@ def generate_patch_plan(
     Args:
         run_dir: Code-task run directory created by ``code-task init``.
         model: Optional OpenAI-compatible model override.
-        use_llm: Whether to call the configured LLM provider. If the provider
-            is unavailable, the function falls back to a deterministic plan.
+        use_llm: Whether to call the configured LLM provider.
+        allow_llm_fallback: When true, use the deterministic patch plan after
+            all LLM attempts fail. When false, raise ``LLMError`` so callers can
+            stop and retry later without writing an offline plan.
+        llm_retry_attempts: Number of LLM planning attempts before failing or
+            falling back.
         force: Overwrite an existing ``patch_plan.md`` when true.
         max_files: Maximum number of relevant source files to include in the
             planning context.
@@ -91,6 +97,8 @@ def generate_patch_plan(
         FileExistsError: If ``patch_plan.md`` already exists and ``force`` is
             false.
     """
+    if llm_retry_attempts < 1:
+        raise ValueError("llm_retry_attempts must be at least 1")
     root = Path(run_dir)
     task_dir = root / "code_task"
     meta_dir = task_dir / "meta"
@@ -137,29 +145,39 @@ def generate_patch_plan(
     mode = "offline"
     plan_data: dict[str, Any] | None = None
     if use_llm:
-        try:
-            _emit(message_callback, "Calling LLM for code-task patch planning.")
-            client = LLMClient.from_env(
-                model=model,
-                usage_callback=lambda usage: _record_code_task_usage(
-                    meta_dir,
-                    usage,
-                    message_callback=message_callback,
-                ),
-            )
-            plan_data = _ask_llm_for_plan(
-                client,
-                task_text=task_text,
-                index=index,
-                snippets=snippets,
-                benchmark_command=_benchmark_command(manifest),
-                run_context=run_context,
-                allowed_patterns=allowed_patterns,
-                protected_patterns=protected_patterns,
-            )
-            mode = "llm"
-        except LLMError as exc:
-            _emit(message_callback, f"LLM planning failed; using offline fallback. {exc}")
+        last_error: LLMError | None = None
+        for attempt in range(1, llm_retry_attempts + 1):
+            try:
+                suffix = f" (attempt {attempt}/{llm_retry_attempts})" if llm_retry_attempts > 1 else ""
+                _emit(message_callback, f"Calling LLM for code-task patch planning{suffix}.")
+                client = LLMClient.from_env(
+                    model=model,
+                    usage_callback=lambda usage: _record_code_task_usage(
+                        meta_dir,
+                        usage,
+                        message_callback=message_callback,
+                    ),
+                )
+                plan_data = _ask_llm_for_plan(
+                    client,
+                    task_text=task_text,
+                    index=index,
+                    snippets=snippets,
+                    benchmark_command=_benchmark_command(manifest),
+                    run_context=run_context,
+                    allowed_patterns=allowed_patterns,
+                    protected_patterns=protected_patterns,
+                )
+                mode = "llm"
+                break
+            except LLMError as exc:
+                last_error = exc
+                _emit(message_callback, f"LLM patch planning attempt {attempt} failed: {exc}")
+        if plan_data is None and last_error is not None:
+            if allow_llm_fallback:
+                _emit(message_callback, f"Using offline fallback after LLM patch planning failed. {last_error}")
+            else:
+                raise LLMError(f"LLM patch planning failed after {llm_retry_attempts} attempt(s): {last_error}") from last_error
 
     if plan_data is None:
         plan_data = _offline_plan(

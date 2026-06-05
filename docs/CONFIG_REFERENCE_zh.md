@@ -225,7 +225,7 @@ validation_max_file_bytes = 500000
 # 状态感知 executor 最多推进到哪一步。
 to_step = "run"
 
-# false 时 code-task LLM 步骤尽量使用 deterministic fallback。
+# false 会关闭 LLM，使用 deterministic fallback；true 会调用模型。
 use_llm = true
 
 # executor 管理的 baseline/patched benchmark timeout 秒数。
@@ -246,6 +246,13 @@ apply_proposed_edits = false
 
 # 允许超过 normal 预算但落在 large 预算内的 proposal。
 allow_large_edits = false
+
+# 真实 LLM run 建议保持 false：如果 work-plan / patch-plan 的模型输出格式坏了，
+# execute 会停止并允许你重跑同一条命令，而不是静默写入 deterministic fallback plan。
+allow_planning_fallback = false
+
+# work-plan / patch-plan 的 LLM 重试次数；全部失败后才停止或显式 fallback。
+llm_retry_attempts = 2
 
 # 失败后最多生成多少轮 bounded repair proposal。
 repair_rounds = 1
@@ -404,6 +411,8 @@ max_proposal_chars = 42000
 | `[execute].stream_benchmark_output` | 实时 benchmark log 模式：`off`、`line`、`auto` 或 `summary`。有 tqdm 这类进度条时建议 `auto`。 |
 | `[execute].apply_proposed_edits` | 允许 execute 应用已经审核过的 proposal。review-first 流程建议保持 false。 |
 | `[execute].allow_large_edits` | 允许应用超过 normal 预算但落在 large 预算内的已审核 proposal。 |
+| `[execute].allow_planning_fallback` | LLM work-plan / patch-plan 重试后仍失败时，是否允许写入 deterministic fallback plan。真实 LLM run 建议保持 false，这样坏输出会安全停止并可重跑。 |
+| `[execute].llm_retry_attempts` | work-plan / patch-plan 的 LLM 尝试次数。 |
 | `[execute].repair_rounds` | validation/benchmark 失败后最多生成几轮 bounded repair proposal；repair 仍需审核。 |
 | `[execute].max_files` | plan/proposal/repair 步骤纳入 LLM 上下文的最大文件数。 |
 | `[execute].max_source_chars_per_file` | LLM 上下文中单个文件的 source snippet 字符预算。 |
@@ -577,6 +586,8 @@ repair_rounds = 1
 stream_benchmark_output = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
+allow_planning_fallback = false
+llm_retry_attempts = 2
 
 [budget]
 profile = "normal"
@@ -619,6 +630,8 @@ max_source_chars_per_file = 4000
 stream_benchmark_output = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
+allow_planning_fallback = false
+llm_retry_attempts = 2
 
 [models.code_task]
 planner = "gpt-4o-mini"
@@ -662,11 +675,11 @@ max_proposal_chars = 24000
 
 ```toml
 [edit_scope]
-# 只允许模型改应用代码；测试、benchmark 和配置仍可作为 evidence 读取。
-allowed_patterns = ["review_pipeline/**", "main.py"]
+# 允许模型改应用代码和必要的实验配置；测试、benchmark 与数据仍可作为 evidence 读取。
+allowed_patterns = ["review_pipeline/**", "main.py", "configs/experiment.json"]
 
-# 额外锁定实验配置，避免模型为了刷指标而改 benchmark input。
-protected_patterns = ["configs/experiment.json"]
+# 此示例不额外锁定配置；内置规则仍会保护 tests、数据、secret 和 credential-like 路径。
+protected_patterns = []
 ```
 
 如果 `allowed_patterns` 为空，含义是“允许所有非 protected 的 workspace 文件作为候选”。如果需要最严格的生产级流程，建议显式声明 allowlist，并把数据、配置、测试和 benchmark 放进 protected 范围。

@@ -21,6 +21,7 @@ from simple_ar.code_task.execution.runner import run_code_task_baseline, run_cod
 from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest
 from simple_ar.code_task.execution.validation import validate_code_task
 from simple_ar.code_task.editing.work_plan import generate_code_task_work_plan
+from simple_ar.integrations.llm import LLMError
 
 
 MessageCallback = Callable[[str], None]
@@ -93,6 +94,8 @@ def execute_code_task(
     stream_benchmark_output: bool | str = False,
     apply_proposed_edits: bool = False,
     allow_large_edits: bool = False,
+    allow_planning_fallback: bool = False,
+    llm_retry_attempts: int = 1,
     repair_rounds: int = 0,
     budget_profile: str | None = None,
     edit_budget_overrides: dict[str, Any] | None = None,
@@ -132,6 +135,12 @@ def execute_code_task(
             proposal after the patch plan has been approved.
         allow_large_edits: Allow proposals that exceed the normal edit budget
             but fit the large profile.
+        allow_planning_fallback: Allow deterministic offline work/patch plans
+            after LLM planning attempts fail. By default, LLM planning failures
+            stop the run without writing fallback plans so the same execute
+            command can retry cleanly.
+        llm_retry_attempts: Number of attempts for LLM-backed work and patch
+            planning before stopping or explicitly falling back.
         repair_rounds: Maximum repair proposals execute may create after a
             validation or benchmark failure. Proposals are never auto-applied.
         budget_profile: Optional edit budget profile passed to edit proposal
@@ -157,6 +166,8 @@ def execute_code_task(
         raise ValueError("max_batches must be at least 1 when provided")
     if cost_cap_usd is not None and cost_cap_usd < 0:
         raise ValueError("cost_cap_usd must be non-negative when provided")
+    if llm_retry_attempts < 1:
+        raise ValueError("llm_retry_attempts must be at least 1")
 
     root = Path(run_dir)
     paths = code_task_paths(root)
@@ -226,14 +237,30 @@ def execute_code_task(
             return _result(paths, steps, "cost_cap_exceeded", "LLM cost cap reached before work planning.")
         else:
             _emit(message_callback, "Generating batch-oriented work plan.")
-            result = generate_code_task_work_plan(
-                root,
-                model=planner_model or model,
-                use_llm=use_llm,
-                max_files=max_files,
-                max_source_chars_per_file=max_source_chars_per_file,
-                message_callback=message_callback,
-            )
+            try:
+                result = generate_code_task_work_plan(
+                    root,
+                    model=planner_model or model,
+                    use_llm=use_llm,
+                    allow_llm_fallback=allow_planning_fallback,
+                    llm_retry_attempts=llm_retry_attempts,
+                    max_files=max_files,
+                    max_source_chars_per_file=max_source_chars_per_file,
+                    message_callback=message_callback,
+                )
+            except LLMError as exc:
+                _record(steps, "work-plan", "blocked", _first_error_line(str(exc)))
+                return _result(
+                    paths,
+                    steps,
+                    "llm_planning_failed",
+                    (
+                        "LLM work planning failed and no offline fallback was written. "
+                        "Rerun the same execute command to retry, use --no-llm for a "
+                        "deterministic plan, or pass --allow-planning-fallback if an "
+                        "offline fallback is acceptable."
+                    ),
+                )
             _record(steps, "work-plan", "done", f"mode {result.mode}; items {result.item_count}")
     if _stop_after("work-plan", to_step):
         return _result(paths, steps, "stop_point", "Stopped after work-plan as requested.")
@@ -266,14 +293,30 @@ def execute_code_task(
             return _result(paths, steps, "cost_cap_exceeded", "LLM cost cap reached before patch planning.")
         else:
             _emit(message_callback, "Generating patch plan.")
-            result = generate_patch_plan(
-                root,
-                model=planner_model or model,
-                use_llm=use_llm,
-                max_files=max_files,
-                max_source_chars_per_file=max_source_chars_per_file,
-                message_callback=message_callback,
-            )
+            try:
+                result = generate_patch_plan(
+                    root,
+                    model=planner_model or model,
+                    use_llm=use_llm,
+                    allow_llm_fallback=allow_planning_fallback,
+                    llm_retry_attempts=llm_retry_attempts,
+                    max_files=max_files,
+                    max_source_chars_per_file=max_source_chars_per_file,
+                    message_callback=message_callback,
+                )
+            except LLMError as exc:
+                _record(steps, "plan", "blocked", _first_error_line(str(exc)))
+                return _result(
+                    paths,
+                    steps,
+                    "llm_planning_failed",
+                    (
+                        "LLM patch planning failed and no offline fallback was written. "
+                        "Rerun the same execute command to retry, use --no-llm for a "
+                        "deterministic plan, or pass --allow-planning-fallback if an "
+                        "offline fallback is acceptable."
+                    ),
+                )
             _record(steps, "plan", "done", f"mode {result.mode}; pending approval")
             plan_status = "pending_approval"
         if plan_status == "pending_approval":

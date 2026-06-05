@@ -203,27 +203,49 @@ audit artifacts.
 ```bash
 uv run simple-ar clean runs/<run-id>
 uv run simple-ar clean runs/<run-id> --yes
+uv run simple-ar clean runs/<run-id> --all-caches
+uv run simple-ar clean --shared-index
+uv run simple-ar clean --shared-cache
 ```
 
 **Options**:
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `RUN_DIR` | path | Run directory to clean. |
+| `RUN_DIR` | path | Run directory to clean. Optional when `--shared-index` or `--shared-cache` is used. |
 | `--yes` | flag | Delete the displayed targets without the interactive `yes` prompt. |
+| `--all-caches` | flag | Delete every known rebuildable cache/index/context artifact for this run after a stronger warning. |
+| `--shared-index` | flag | Strong cleanup: clear the shared research index store across runs/tests. |
+| `--shared-cache` | flag | Strongest shared cleanup: clear shared research indexes and literature provider cache. |
+| `--index-root PATH` | path | Shared index root for `--shared-index`/`--shared-cache`; defaults to `SIMPLE_AR_RESEARCH_INDEX_ROOT` or `.simple_ar_cache/research_index`. |
+| `--literature-cache-root PATH` | path | Literature provider cache root for `--shared-cache`; defaults to `.simple_ar_cache/literature`. |
+| `--allow-external-index-root` | flag | Allow shared cleanup to touch a path outside the current workspace. |
 
 **Outputs**:
 
 - prints a Rich tree preview before deletion
 - deletes run-local rebuildable caches such as `02-search/documents/fulltext_cache/`, `02-search/documents/extracted_text/`, and `artifact_search_results.json`
 - removes this run's rows from the shared SQLite research index when `index_meta.json` points to a workspace-local shared store
+- with `--all-caches`, also deletes rebuildable research indexes, artifact search indexes/chunks, code-task repo maps, locate outputs, and context packs
 
 **Notes**:
 
 `clean` keeps reports, manifests, papers, parser audit files such as
 `fulltext_extraction.json`, read-stage Paper Briefs, synthesis briefs, retained
 debug coverage reports when present, and portable `research_index/chunks.jsonl`.
-It does not delete the run directory itself.
+It does not delete the run directory itself. `--all-caches` removes
+`research_index/chunks.jsonl` because it treats all indexes and retrieval
+accelerators as rebuildable cache data, but it still keeps final reports,
+metadata, manifests, and benchmark outputs.
+
+`--shared-index` is stronger than `--all-caches`: it clears the shared
+SQLite/LanceDB accelerator store across runs, so future runs must rebuild index
+state. It keeps run-local audit artifacts because it does not touch run
+directories.
+
+`--shared-cache` is stronger again: it clears both the shared research index
+and `.simple_ar_cache/literature`, so future runs may need to re-query
+literature providers as well as rebuild local indexes.
 
 ## Code Task Commands
 
@@ -308,11 +330,16 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--model NAME` | string | Model override for LLM-backed steps. |
 | `--no-llm` | flag | Use deterministic fallbacks where possible. |
 | `--timeout N` | int | Benchmark timeout. |
+| `--yes` | flag | With `--interactive`, auto-continue primitive prompts. Normal execute already runs to review gates. |
+| `--interactive` | flag | Debug mode: confirm each primitive step instead of running continuously to the next review gate. |
+| `--no-review-inline` | flag | Disable inline review prompts and stop at review gates instead. |
 | `--skip-validation` | flag | Run benchmark even when static validation has not passed. |
 | `--strict-validation` | flag | Treat higher-risk validation warnings as errors. |
 | `--validation-max-file-bytes N` | int | Max file size scanned by static validation. |
 | `--apply-proposed-edits` | flag | Apply reviewed `proposed_edits.json` after plan approval. |
 | `--allow-large-edits` | flag | Allow a reviewed proposal that exceeds the normal edit budget. |
+| `--allow-planning-fallback` | flag | Allow deterministic offline work/patch plans after LLM planning retries fail. |
+| `--llm-retry-attempts N` | int | LLM work-plan and patch-plan attempts before stopping or explicitly falling back. |
 | `--repair-rounds N` | int | Number of bounded repair proposals after failure. |
 | `--max-files N` | int | Context file budget for LLM steps. |
 | `--max-source-chars-per-file N` | int | Per-file source context budget. |
@@ -332,9 +359,21 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 
 **Notes**:
 
-`execute` preserves review gates. It normally stops after `patch_plan.md`, then
-again after `proposed_edits.json`. Full workflow walkthroughs live in
+`execute` preserves review gates without forcing a separate command for every
+gate. In an interactive terminal, it renders a yellow Rich review panel for
+`patch_plan.md`, `proposed_edits.json`, or large-edit approval and asks whether
+to continue. In non-interactive shells it stops at the gate instead of waiting
+for input. Completed steps are shown as skipped on resume. Use `--interactive`
+only when debugging primitive steps; combine it with `--yes` to auto-continue
+those primitive prompts. Use `--no-review-inline` when you want the older
+stop-and-rerun behavior. Full workflow walkthroughs live in
 [Usage And Configuration](USAGE.md#recommended-path-toml--execute).
+
+When LLM work planning or patch planning returns malformed JSON, execute stops
+with `llm_planning_failed` and does not write an offline fallback plan. Rerun
+the same `execute` command to retry the LLM step. Use `--no-llm` for a fully
+deterministic plan, or `--allow-planning-fallback` only when a fallback plan is
+acceptable for the current task.
 
 #### `simple-ar code-task decide-plan`
 
@@ -537,6 +576,8 @@ uv run simple-ar code-task work-plan runs/<run-id>
 | `--model NAME` | string | Model override. |
 | `--no-llm` | flag | Use fallback planning. |
 | `--force` | flag | Regenerate existing work-plan artifacts. |
+| `--allow-planning-fallback` | flag | Allow deterministic fallback if LLM work planning fails. |
+| `--llm-retry-attempts N` | int | LLM work planning attempts before failing or falling back. |
 | `--max-files N` | int | Planning context file budget. |
 | `--max-source-chars-per-file N` | int | Per-file source context budget. |
 
@@ -595,6 +636,8 @@ uv run simple-ar code-task plan runs/<run-id>
 | `--model NAME` | string | Model override. |
 | `--no-llm` | flag | Use fallback plan. |
 | `--force` | flag | Regenerate existing plan. |
+| `--allow-planning-fallback` | flag | Allow deterministic fallback if LLM patch planning fails. |
+| `--llm-retry-attempts N` | int | LLM patch planning attempts before failing or falling back. |
 | `--max-files N` | int | Context file budget. |
 | `--max-source-chars-per-file N` | int | Per-file source context budget. |
 

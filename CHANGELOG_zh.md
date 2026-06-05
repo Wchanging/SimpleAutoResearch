@@ -4,6 +4,25 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-05
+
+### Changed
+
+- `code-task execute` 现在默认连续运行到真正的审核门，并使用 Rich 展示步骤状态。
+  `--interactive` 只用于 primitive step 调试，`--yes` 也只会自动继续这些 primitive prompts。
+- LLM work-plan / patch-plan 在配置次数内重试后仍失败时，现在会停在
+  `llm_planning_failed`，不会静默写入 offline fallback plan。只有明确接受较弱的
+  deterministic fallback 时，才使用 `--allow-planning-fallback`。
+- `code-task init` 现在也使用 Rich 风格输出，和 execute 的展示方式保持一致。
+- `simple-ar clean --shared-cache` 现在会同时清空共享 research index 和共享 literature provider cache，并显示更强的清理警告。
+- medium review pipeline 示例现在允许 edit scope 修改 `configs/experiment.json`，这样模型实现 phrase feature 后可以启用新 feature family，benchmark 才能测到实际提升。
+- 内嵌 code-task experiment 转发日志时，现在使用 patched benchmark stdout/stderr 标签，避免和 standalone baseline/patched artifacts 混淆。
+
+### Internal
+
+- 公共 CLI 和 pipeline stage 入口拆分到 `src/simple_ar/cli/` 和
+  `src/simple_ar/pipeline_stages/` 下的小模块；旧的大文件仅作为私有兼容 shim 保留。
+
 ## 2026-06-03
 
 ### Changed

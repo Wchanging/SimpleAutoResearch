@@ -96,6 +96,8 @@ class ExecuteSection(_ConfigModel):
     stream_benchmark_output: str | bool | None = None
     apply_proposed_edits: bool | None = None
     allow_large_edits: bool | None = None
+    allow_planning_fallback: bool | None = None
+    llm_retry_attempts: int | None = None
     repair_rounds: int | None = None
     budget_profile: str | None = None
     max_batches: int | None = None
@@ -198,6 +200,8 @@ class CodeTaskExecuteOptions:
     stream_benchmark_output: str
     apply_proposed_edits: bool
     allow_large_edits: bool
+    allow_planning_fallback: bool
+    llm_retry_attempts: int
     repair_rounds: int
     budget_profile: str | None
     edit_budget_overrides: dict[str, Any]
@@ -319,6 +323,12 @@ def load_code_task_execute_options(
             value=execute.allow_large_edits,
             default=False,
         ),
+        allow_planning_fallback=_resolve_bool(
+            override=None,
+            value=execute.allow_planning_fallback,
+            default=False,
+        ),
+        llm_retry_attempts=_positive_int(_config_int(execute.llm_retry_attempts), 1),
         repair_rounds=_non_negative_int(_config_int(execute.repair_rounds), 0),
         budget_profile=budget_profile,
         edit_budget_overrides=_edit_budget_overrides(budget, budget_profile),

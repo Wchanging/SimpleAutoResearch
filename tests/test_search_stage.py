@@ -12,7 +12,7 @@ from simple_ar.literature.models import Paper
 from simple_ar.literature.openalex_client import OpenAlexSearchError
 from simple_ar.literature.semantic_scholar_client import SemanticScholarSearchError
 from simple_ar.core.pipeline import Context
-from simple_ar._legacy.stage_handlers import execute_search
+from simple_ar.pipeline_stages.research import execute_search
 from simple_ar.core.stages import Stage
 
 
@@ -67,10 +67,10 @@ class SearchStageTests(unittest.TestCase):
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             ctx = _search_context(Path(tmp), allow_fixture_fallback=False)
-            with patch("simple_ar._legacy.stage_handlers.OpenAlexSearchClient", _OpenAlexSuccessClient), patch(
-                "simple_ar._legacy.stage_handlers.ArxivSearchClient", _ArxivShouldNotRunClient
+            with patch("simple_ar.pipeline_stages.research.OpenAlexSearchClient", _OpenAlexSuccessClient), patch(
+                "simple_ar.pipeline_stages.research.ArxivSearchClient", _ArxivShouldNotRunClient
             ), patch(
-                "simple_ar._legacy.stage_handlers.put_cache", return_value=None
+                "simple_ar.pipeline_stages.research.put_cache", return_value=None
             ):
                 execute_search(ctx)
 
@@ -90,14 +90,14 @@ class SearchStageTests(unittest.TestCase):
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             ctx = _search_context(Path(tmp), allow_fixture_fallback=False)
-            with patch("simple_ar._legacy.stage_handlers.OpenAlexSearchClient", _OpenAlexFailingClient), patch(
-                "simple_ar._legacy.stage_handlers.SemanticScholarSearchClient", _SemanticScholarSuccessClient
+            with patch("simple_ar.pipeline_stages.research.OpenAlexSearchClient", _OpenAlexFailingClient), patch(
+                "simple_ar.pipeline_stages.research.SemanticScholarSearchClient", _SemanticScholarSuccessClient
             ), patch(
-                "simple_ar._legacy.stage_handlers.ArxivSearchClient", _ArxivShouldNotRunClient
+                "simple_ar.pipeline_stages.research.ArxivSearchClient", _ArxivShouldNotRunClient
             ), patch(
-                "simple_ar._legacy.stage_handlers.get_cached", return_value=None
+                "simple_ar.pipeline_stages.research.get_cached", return_value=None
             ), patch(
-                "simple_ar._legacy.stage_handlers.put_cache", return_value=None
+                "simple_ar.pipeline_stages.research.put_cache", return_value=None
             ):
                 execute_search(ctx)
 
@@ -180,7 +180,7 @@ class SearchStageTests(unittest.TestCase):
                 }
             )
 
-            with patch("simple_ar._legacy.stage_handlers._llm_client", return_value=_FakeResearchPlanner()):
+            with patch("simple_ar.pipeline_stages.research._llm_client", return_value=_FakeResearchPlanner()):
                 execute_search(ctx)
 
             research_plan = read_json(ctx.run_dir / "02-search" / "planning" / "research_plan.json")
@@ -223,7 +223,7 @@ class SearchStageTests(unittest.TestCase):
             )
 
             fake = _FakeResearchPlanner()
-            with patch("simple_ar._legacy.stage_handlers._llm_client", return_value=fake):
+            with patch("simple_ar.pipeline_stages.research._llm_client", return_value=fake):
                 execute_search(ctx)
 
             research_plan = read_json(ctx.run_dir / "02-search" / "planning" / "research_plan.json")
@@ -254,8 +254,8 @@ class SearchStageTests(unittest.TestCase):
                 }
             )
 
-            with patch("simple_ar._legacy.stage_handlers.OpenAlexSearchClient", _CoverageOpenAlexClient), patch(
-                "simple_ar._legacy.stage_handlers.put_cache", return_value=None
+            with patch("simple_ar.pipeline_stages.research.OpenAlexSearchClient", _CoverageOpenAlexClient), patch(
+                "simple_ar.pipeline_stages.research.put_cache", return_value=None
             ):
                 execute_search(ctx)
 
@@ -397,11 +397,11 @@ class _FakeResearchPlanner:
 
 @contextlib.contextmanager
 def _failed_live_search_patches():
-    with patch("simple_ar._legacy.stage_handlers.OpenAlexSearchClient", _OpenAlexFailingClient), patch(
-        "simple_ar._legacy.stage_handlers.SemanticScholarSearchClient", _SemanticScholarFailingClient
+    with patch("simple_ar.pipeline_stages.research.OpenAlexSearchClient", _OpenAlexFailingClient), patch(
+        "simple_ar.pipeline_stages.research.SemanticScholarSearchClient", _SemanticScholarFailingClient
     ), patch(
-        "simple_ar._legacy.stage_handlers.ArxivSearchClient", _RateLimitedClient
-    ), patch("simple_ar._legacy.stage_handlers.get_cached", return_value=None):
+        "simple_ar.pipeline_stages.research.ArxivSearchClient", _RateLimitedClient
+    ), patch("simple_ar.pipeline_stages.research.get_cached", return_value=None):
         yield
 
 

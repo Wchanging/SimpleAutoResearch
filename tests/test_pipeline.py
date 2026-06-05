@@ -12,7 +12,9 @@ from simple_ar.experiment.code_task_experiment import (
     CodeTaskExperimentResult,
 )
 from simple_ar.core.pipeline import Context, MissingInputError, PipelineEvent, PipelineRunner
-from simple_ar._legacy.stage_handlers import HANDLERS, execute_code, execute_design, execute_read
+from simple_ar.pipeline_stages.registry import HANDLERS
+from simple_ar.pipeline_stages.experiment import execute_code, execute_design
+from simple_ar.pipeline_stages.research import execute_read
 from simple_ar.core.stages import Stage
 
 
@@ -218,7 +220,7 @@ class PipelineTests(unittest.TestCase):
             ctx.current_stage = Stage.CODE
             ctx.stage_dir().mkdir(parents=True)
             with patch(
-                "simple_ar._legacy.stage_handlers.prepare_code_task_experiment",
+                "simple_ar.pipeline_stages.experiment.prepare_code_task_experiment",
                 return_value=fake_result,
             ):
                 execute_code(ctx)
@@ -287,7 +289,7 @@ class PipelineTests(unittest.TestCase):
             ctx.current_stage = Stage.CODE
             ctx.stage_dir().mkdir(parents=True)
             with patch(
-                "simple_ar._legacy.stage_handlers.prepare_code_task_experiment",
+                "simple_ar.pipeline_stages.experiment.prepare_code_task_experiment",
                 return_value=fake_result,
             ):
                 execute_code(ctx)
@@ -374,7 +376,7 @@ class PipelineTests(unittest.TestCase):
             )
             ctx.stage_dir().mkdir(parents=True)
 
-            with patch("simple_ar._legacy.stage_handlers._llm_client", return_value=_FakeReadClient()):
+            with patch("simple_ar.pipeline_stages.research._llm_client", return_value=_FakeReadClient()):
                 execute_read(ctx)
 
             shortlist = read_jsonl(run_dir / "03-read" / "review" / "shortlist.jsonl")
@@ -419,7 +421,7 @@ class PipelineTests(unittest.TestCase):
             )
             ctx.stage_dir().mkdir(parents=True)
 
-            with patch("simple_ar._legacy.stage_handlers._llm_client", return_value=_FakeReadDropAllClient()):
+            with patch("simple_ar.pipeline_stages.research._llm_client", return_value=_FakeReadDropAllClient()):
                 execute_read(ctx)
 
             shortlist = read_jsonl(run_dir / "03-read" / "review" / "shortlist.jsonl")

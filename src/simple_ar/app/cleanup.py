@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import sqlite3
 import shutil
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.tree import Tree
 
 from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.core.console import make_console
+from simple_ar.literature.cache import DEFAULT_CACHE_DIR as DEFAULT_LITERATURE_CACHE_DIR
+from simple_ar.research.store.index import DEFAULT_SHARED_INDEX_ROOT
 
 
-CleanTargetKind = Literal["file", "directory", "sqlite_rows"]
+CleanTargetKind = Literal["file", "directory", "sqlite_rows", "lancedb_rows"]
 
 
 class CleanError(RuntimeError):
@@ -38,6 +42,9 @@ class CleanPlan:
     """Preview of what the clean command will delete and preserve."""
 
     run_dir: Path
+    all_caches: bool = False
+    shared_index: bool = False
+    shared_cache: bool = False
     targets: list[CleanTarget] = field(default_factory=list)
     kept: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
@@ -50,14 +57,17 @@ class CleanResult:
     deleted_targets: int
     deleted_bytes: int
     deleted_sqlite_rows: int
+    deleted_lancedb_rows: int
 
 
-def build_clean_plan(run_dir: Path) -> CleanPlan:
+def build_clean_plan(run_dir: Path, *, all_caches: bool = False) -> CleanPlan:
     """Build a conservative cleanup plan for one run directory.
 
     The default policy removes rebuildable or bulky cache files while keeping
     audit artifacts such as papers, parser manifests, Paper Briefs, synthesis
-    briefs, reports, manifests, and portable text chunks.
+    briefs, reports, manifests, and portable text chunks. ``all_caches``
+    removes every known run-local cache and accelerator artifact while still
+    preserving user-facing reports, manifests, and source evidence records.
     """
 
     root = run_dir.resolve()
@@ -96,34 +106,170 @@ def build_clean_plan(run_dir: Path) -> CleanPlan:
         ],
     )
 
-    for relative, reason in _RUN_LOCAL_CLEAN_TARGETS:
-        path = root / relative
-        if not path.exists():
-            continue
-        _assert_inside(root, path)
-        kind: CleanTargetKind = "directory" if path.is_dir() else "file"
-        targets.append(
-            CleanTarget(
-                kind=kind,
-                label=relative,
-                reason=reason,
-                path=path,
-                bytes_count=_path_size(path),
-            )
-        )
+    selected_targets = _ALL_CACHE_TARGETS if all_caches else _RUN_LOCAL_CLEAN_TARGETS
+    seen: set[Path] = set()
+    for relative, reason in selected_targets:
+        _append_path_target(root, targets, seen, relative, reason)
 
     sqlite_target, sqlite_skipped = _sqlite_clean_target(root)
     if sqlite_target is not None:
         targets.append(sqlite_target)
     skipped.extend(sqlite_skipped)
+    if all_caches:
+        lancedb_target, lancedb_skipped = _lancedb_clean_target(root)
+        if lancedb_target is not None:
+            targets.append(lancedb_target)
+        skipped.extend(lancedb_skipped)
 
-    return CleanPlan(run_dir=root, targets=targets, kept=kept, skipped=skipped)
+    return CleanPlan(run_dir=root, all_caches=all_caches, targets=targets, kept=kept, skipped=skipped)
+
+
+def build_shared_index_clean_plan(
+    *,
+    index_root: str | Path | None = None,
+    allow_external_index_root: bool = False,
+) -> CleanPlan:
+    """Build a destructive cleanup plan for the shared research index store.
+
+    This clears accelerator state across runs, including SQLite FTS databases
+    and optional LanceDB tables/directories. It never removes run-local audit
+    files such as ``papers.jsonl`` or ``research_index/chunks.jsonl``.
+    """
+
+    root = _resolve_shared_index_root(index_root)
+    if not _is_inside_workspace(root) and not allow_external_index_root:
+        raise CleanError(
+            "Shared index root is outside the current workspace. "
+            "Pass --allow-external-index-root only if you intentionally want to clean it: "
+            f"{root}"
+        )
+    targets: list[CleanTarget] = []
+    skipped: list[str] = []
+    kept: list[str] = []
+    if not root.exists():
+        skipped.append(f"shared index root does not exist: {root}")
+        return CleanPlan(run_dir=root, shared_index=True, targets=targets, kept=kept, skipped=skipped)
+    if not root.is_dir():
+        raise CleanError(f"Shared index root is not a directory: {root}")
+    kept.append(f"{root} (directory itself is kept)")
+    for child in sorted(root.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+        targets.append(
+            CleanTarget(
+                kind="directory" if child.is_dir() else "file",
+                label=child.name + ("/" if child.is_dir() else ""),
+                reason="shared research index store used across runs",
+                path=child,
+                bytes_count=_path_size(child),
+            )
+        )
+    return CleanPlan(run_dir=root, shared_index=True, targets=targets, kept=kept, skipped=skipped)
+
+
+def build_shared_cache_clean_plan(
+    *,
+    index_root: str | Path | None = None,
+    literature_cache_root: str | Path | None = None,
+    allow_external_index_root: bool = False,
+) -> CleanPlan:
+    """Build a destructive cleanup plan for all shared cache stores.
+
+    This is stronger than ``build_shared_index_clean_plan``. It clears the
+    shared research index store and the shared literature-provider cache under
+    ``.simple_ar_cache`` by default. Run-local audit artifacts remain untouched.
+    """
+
+    roots = [
+        (
+            _resolve_shared_index_root(index_root),
+            "shared research index store used across runs",
+        ),
+        (
+            _resolve_literature_cache_root(literature_cache_root),
+            "shared literature provider cache used across runs",
+        ),
+    ]
+    for root, _reason in roots:
+        if not _is_inside_workspace(root) and not allow_external_index_root:
+            raise CleanError(
+                "Shared cache root is outside the current workspace. "
+                "Pass --allow-external-index-root only if you intentionally want to clean it: "
+                f"{root}"
+            )
+    plan_root = _common_root([root for root, _reason in roots])
+    targets: list[CleanTarget] = []
+    kept: list[str] = []
+    skipped: list[str] = []
+    seen: set[Path] = set()
+    for root, reason in roots:
+        if not root.exists():
+            skipped.append(f"shared cache root does not exist: {root}")
+            continue
+        if not root.is_dir():
+            raise CleanError(f"Shared cache root is not a directory: {root}")
+        resolved = root.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        targets.append(
+            CleanTarget(
+                kind="directory",
+                label=_relative_label(plan_root, root) + "/",
+                reason=reason,
+                path=root,
+                bytes_count=_path_size(root),
+            )
+        )
+    kept.append(f"{plan_root} (parent directory is kept)")
+    return CleanPlan(run_dir=plan_root, shared_cache=True, targets=targets, kept=kept, skipped=skipped)
 
 
 def render_clean_plan(plan: CleanPlan, *, console: Console | None = None) -> None:
     """Print a Rich tree preview of the cleanup plan."""
 
     console = console or make_console()
+    if plan.shared_index:
+        console.print(
+            Panel(
+                (
+                    "[bold red]Shared-index cleanup is enabled.[/bold red]\n"
+                    "This clears accelerator indexes across different runs/tests, "
+                    "including SQLite FTS and optional LanceDB data under the shared "
+                    "research index root. Future runs can rebuild these indexes from "
+                    "their retained run-local artifacts, but cross-run search cache hits "
+                    "and index acceleration will be lost."
+                ),
+                title="[bold red]Strong Cleanup Warning[/bold red]",
+                border_style="red",
+            )
+        )
+    if plan.shared_cache:
+        console.print(
+            Panel(
+                (
+                    "[bold red]Shared-cache cleanup is enabled.[/bold red]\n"
+                    "This clears cross-run cache stores, including the shared "
+                    "research index and the literature provider cache. Future "
+                    "runs can rebuild these artifacts, but they may need to "
+                    "re-query providers, re-download metadata, and rebuild local "
+                    "search acceleration."
+                ),
+                title="[bold red]Strong Cleanup Warning[/bold red]",
+                border_style="red",
+            )
+        )
+    if plan.all_caches:
+        console.print(
+            Panel(
+                (
+                    "[bold red]All-cache cleanup is enabled.[/bold red]\n"
+                    "This removes rebuildable indexes, downloaded/parsed full-text caches, "
+                    "artifact search caches, and code-task context caches for this run. "
+                    "Reports, manifests, papers, and benchmark results are kept."
+                ),
+                title="[bold red]Warning[/bold red]",
+                border_style="red",
+            )
+        )
     tree = Tree(f"[green]{plan.run_dir}[/green]")
 
     delete_branch = tree.add("[bold red]Will delete[/bold red]")
@@ -131,7 +277,7 @@ def render_clean_plan(plan: CleanPlan, *, console: Console | None = None) -> Non
         for target in plan.targets:
             _add_target_node(delete_branch, plan.run_dir, target)
     else:
-        delete_branch.add("[dim]No rebuildable caches found.[/dim]")
+        delete_branch.add("[dim]No matching cache targets found.[/dim]")
 
     keep_branch = tree.add("[bold green]Will keep[/bold green]")
     if plan.kept:
@@ -156,7 +302,15 @@ def confirm_clean_plan(plan: CleanPlan, *, console: Console | None = None, assum
     if assume_yes:
         return True
     console = console or make_console()
-    answer = console.input("[bold]Type yes to delete these items, or no to cancel: [/bold]").strip().lower()
+    if plan.shared_cache:
+        prompt = "Type yes to clear ALL shared caches across runs, or no to cancel: "
+    elif plan.shared_index:
+        prompt = "Type yes to clear this SHARED index store across runs, or no to cancel: "
+    elif plan.all_caches:
+        prompt = "Type yes to delete ALL listed caches, or no to cancel: "
+    else:
+        prompt = "Type yes to delete these items, or no to cancel: "
+    answer = console.input(f"[bold]{prompt}[/bold]").strip().lower()
     return answer in {"yes", "y"}
 
 
@@ -166,6 +320,7 @@ def apply_clean_plan(plan: CleanPlan) -> CleanResult:
     deleted_targets = 0
     deleted_bytes = 0
     deleted_sqlite_rows = 0
+    deleted_lancedb_rows = 0
     for target in plan.targets:
         if target.kind in {"file", "directory"}:
             if target.path is None:
@@ -184,10 +339,15 @@ def apply_clean_plan(plan: CleanPlan) -> CleanResult:
             deleted_sqlite_rows += _delete_sqlite_rows(target)
             _mark_index_meta_cleaned(plan.run_dir, target)
             deleted_targets += 1
+            continue
+        if target.kind == "lancedb_rows":
+            deleted_lancedb_rows += _delete_lancedb_rows(target)
+            deleted_targets += 1
     return CleanResult(
         deleted_targets=deleted_targets,
         deleted_bytes=deleted_bytes,
         deleted_sqlite_rows=deleted_sqlite_rows,
+        deleted_lancedb_rows=deleted_lancedb_rows,
     )
 
 
@@ -196,6 +356,48 @@ _RUN_LOCAL_CLEAN_TARGETS: tuple[tuple[str, str], ...] = (
     ("02-search/documents/extracted_text", "parsed full-text cache"),
     ("artifact_search_results.json", "last artifact search output"),
 )
+
+_ALL_CACHE_TARGETS: tuple[tuple[str, str], ...] = (
+    ("02-search/documents/fulltext_cache", "downloaded full-text cache"),
+    ("02-search/documents/extracted_text", "parsed full-text cache"),
+    ("02-search/research_index", "run-local portable and accelerator research index"),
+    ("artifact_index.json", "rebuildable run artifact index"),
+    ("artifact_chunks.jsonl", "rebuildable artifact retrieval chunks"),
+    ("artifact_search_results.json", "last artifact search output"),
+    ("code_task/meta/codebase_index.json", "rebuildable codebase file index"),
+    ("code_task/meta/repo_map.json", "rebuildable code-task repo map"),
+    ("code_task/meta/repo_map_summary.md", "rebuildable repo-map summary"),
+    ("code_task/meta/locate_results.json", "rebuildable code-task locate results"),
+    ("code_task/meta/locate_results.md", "rebuildable code-task locate summary"),
+    ("code_task/context_packs", "rebuildable code-task prompt context packs"),
+)
+
+
+def _append_path_target(
+    root: Path,
+    targets: list[CleanTarget],
+    seen: set[Path],
+    relative: str,
+    reason: str,
+) -> None:
+    path = root / relative
+    if not path.exists():
+        return
+    _assert_inside(root, path)
+    resolved = path.resolve()
+    if resolved in seen:
+        return
+    seen.add(resolved)
+    kind: CleanTargetKind = "directory" if path.is_dir() else "file"
+    targets.append(
+        CleanTarget(
+            kind=kind,
+            label=relative,
+            reason=reason,
+            path=path,
+            bytes_count=_path_size(path),
+        )
+    )
 
 
 def _existing_relative_paths(root: Path, candidates: list[str]) -> list[str]:
@@ -246,6 +448,48 @@ def _sqlite_clean_target(run_dir: Path) -> tuple[CleanTarget | None, list[str]]:
     )
 
 
+def _lancedb_clean_target(run_dir: Path) -> tuple[CleanTarget | None, list[str]]:
+    meta_path = run_dir / "02-search" / "research_index" / "index_meta.json"
+    if not meta_path.exists():
+        return None, []
+    try:
+        meta = read_json(meta_path)
+    except Exception as exc:
+        return None, [f"02-search/research_index/index_meta.json could not be read for LanceDB cleanup: {exc}"]
+    if not isinstance(meta, dict):
+        return None, []
+    store = meta.get("store") if isinstance(meta.get("store"), dict) else {}
+    lancedb_meta = meta.get("lancedb") if isinstance(meta.get("lancedb"), dict) else {}
+    run_id = str(store.get("run_id") or run_dir.name)
+    path_value = lancedb_meta.get("path")
+    if not path_value:
+        return None, []
+    lancedb_path = Path(str(path_value)).resolve()
+    if not lancedb_path.exists():
+        return None, [f"shared LanceDB index missing: {lancedb_path}"]
+    cwd = Path.cwd().resolve()
+    try:
+        lancedb_path.relative_to(cwd)
+    except ValueError:
+        return None, [f"shared LanceDB index is outside this workspace and was not touched: {lancedb_path}"]
+    rows = _count_lancedb_rows(lancedb_path, run_id)
+    if rows is None:
+        return None, [f"LanceDB rows for run_id={run_id} could not be counted; install lancedb to clean shared LanceDB rows."]
+    if rows <= 0:
+        return None, []
+    return (
+        CleanTarget(
+            kind="lancedb_rows",
+            label=f"{lancedb_path} LanceDB rows for run_id={run_id}",
+            reason="shared LanceDB accelerator rows",
+            path=lancedb_path,
+            sqlite_run_id=run_id,
+            sqlite_rows=rows,
+        ),
+        [],
+    )
+
+
 def _count_sqlite_rows(path: Path, run_id: str) -> int:
     conn: sqlite3.Connection | None = None
     try:
@@ -277,6 +521,38 @@ def _delete_sqlite_rows(target: CleanTarget) -> int:
             conn.close()
 
 
+def _count_lancedb_rows(path: Path, run_id: str) -> int | None:
+    try:
+        import lancedb  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return None
+    try:
+        table = lancedb.connect(str(path)).open_table("chunks")
+        return int(table.count_rows(f"run_id = '{_lancedb_literal(run_id)}'"))
+    except Exception:
+        return None
+
+
+def _delete_lancedb_rows(target: CleanTarget) -> int:
+    if target.path is None or target.sqlite_run_id is None:
+        return 0
+    try:
+        import lancedb  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return 0
+    try:
+        table = lancedb.connect(str(target.path)).open_table("chunks")
+        before = int(table.count_rows(f"run_id = '{_lancedb_literal(target.sqlite_run_id)}'"))
+        table.delete(f"run_id = '{_lancedb_literal(target.sqlite_run_id)}'")
+        return before
+    except Exception:
+        return 0
+
+
+def _lancedb_literal(value: str) -> str:
+    return value.replace("'", "''")
+
+
 def _mark_index_meta_cleaned(run_dir: Path, target: CleanTarget) -> None:
     meta_path = run_dir / "02-search" / "research_index" / "index_meta.json"
     if not meta_path.exists():
@@ -297,7 +573,7 @@ def _mark_index_meta_cleaned(run_dir: Path, target: CleanTarget) -> None:
 
 
 def _add_target_node(branch: Tree, run_dir: Path, target: CleanTarget) -> None:
-    if target.kind == "sqlite_rows":
+    if target.kind in {"sqlite_rows", "lancedb_rows"}:
         branch.add(
             f"[red]{target.label}[/red] "
             f"[dim]({target.sqlite_rows} row(s), {target.reason})[/dim]"
@@ -353,3 +629,33 @@ def _format_bytes(value: int) -> str:
     if value < 1024 * 1024:
         return f"{value / 1024:.1f} KiB"
     return f"{value / (1024 * 1024):.1f} MiB"
+
+
+def _resolve_shared_index_root(value: str | Path | None) -> Path:
+    if value is not None and str(value).strip():
+        return Path(str(value)).resolve()
+    env_value = os.environ.get("SIMPLE_AR_RESEARCH_INDEX_ROOT", "").strip()
+    return Path(env_value or DEFAULT_SHARED_INDEX_ROOT).resolve()
+
+
+def _resolve_literature_cache_root(value: str | Path | None) -> Path:
+    if value is not None and str(value).strip():
+        return Path(str(value)).resolve()
+    return DEFAULT_LITERATURE_CACHE_DIR.resolve()
+
+
+def _common_root(paths: list[Path]) -> Path:
+    if not paths:
+        return Path.cwd().resolve()
+    try:
+        return Path(os.path.commonpath([str(path.resolve()) for path in paths])).resolve()
+    except ValueError as exc:
+        raise CleanError("Shared cache roots must be on the same drive to clean together.") from exc
+
+
+def _is_inside_workspace(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(Path.cwd().resolve())
+        return True
+    except ValueError:
+        return False

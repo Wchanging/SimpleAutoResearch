@@ -159,6 +159,135 @@ class CliTests(unittest.TestCase):
             self.assertIn("Will delete", stdout.getvalue())
             self.assertIn("Will keep", stdout.getvalue())
 
+    def test_clean_all_caches_removes_every_rebuildable_cache(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            run_dir = root / "runs" / "clean-all"
+            documents_dir = run_dir / "02-search" / "documents"
+            cache_dir = documents_dir / "fulltext_cache"
+            text_dir = documents_dir / "extracted_text"
+            index_dir = run_dir / "02-search" / "research_index"
+            code_meta = run_dir / "code_task" / "meta"
+            context_dir = run_dir / "code_task" / "context_packs" / "context-001"
+            report_dir = run_dir / "08-report"
+            for path in (cache_dir, text_dir, index_dir, code_meta, context_dir, report_dir):
+                path.mkdir(parents=True)
+            (cache_dir / "paper.pdf").write_bytes(b"%PDF fake")
+            (text_dir / "paper.txt").write_text("parsed paper text", encoding="utf-8")
+            (documents_dir / "fulltext_extraction.json").write_text("{}\n", encoding="utf-8")
+            (run_dir / "02-search" / "papers.jsonl").write_text("{}\n", encoding="utf-8")
+            (index_dir / "chunks.jsonl").write_text("{}\n", encoding="utf-8")
+            (run_dir / "artifact_index.json").write_text("{}\n", encoding="utf-8")
+            (run_dir / "artifact_chunks.jsonl").write_text("{}\n", encoding="utf-8")
+            (run_dir / "artifact_search_results.json").write_text("{}\n", encoding="utf-8")
+            (code_meta / "codebase_index.json").write_text("{}\n", encoding="utf-8")
+            (code_meta / "repo_map.json").write_text("{}\n", encoding="utf-8")
+            (code_meta / "repo_map_summary.md").write_text("# Repo Map\n", encoding="utf-8")
+            (code_meta / "locate_results.json").write_text("{}\n", encoding="utf-8")
+            (code_meta / "locate_results.md").write_text("# Locate\n", encoding="utf-8")
+            (context_dir / "context_pack.json").write_text("{}\n", encoding="utf-8")
+            (report_dir / "report.md").write_text("# Report\n", encoding="utf-8")
+
+            sqlite_path = root / ".simple_ar_cache" / "research_index" / "sqlite_fts.db"
+            sqlite_path.parent.mkdir(parents=True)
+            conn = sqlite3.connect(sqlite_path)
+            conn.execute("CREATE TABLE chunks(run_id TEXT, text TEXT)")
+            conn.execute("INSERT INTO chunks VALUES ('clean-all', 'delete')")
+            conn.execute("INSERT INTO chunks VALUES ('other-run', 'keep')")
+            conn.commit()
+            conn.close()
+            write_json(
+                index_dir / "index_meta.json",
+                {
+                    "store": {"run_id": "clean-all"},
+                    "sqlite_fts": {"status": "ready", "path": str(sqlite_path)},
+                },
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["clean", str(run_dir), "--all-caches", "--yes"])
+
+            self.assertFalse(cache_dir.exists())
+            self.assertFalse(text_dir.exists())
+            self.assertFalse(index_dir.exists())
+            self.assertFalse((run_dir / "artifact_index.json").exists())
+            self.assertFalse((run_dir / "artifact_chunks.jsonl").exists())
+            self.assertFalse((run_dir / "artifact_search_results.json").exists())
+            self.assertFalse((code_meta / "codebase_index.json").exists())
+            self.assertFalse((code_meta / "repo_map.json").exists())
+            self.assertFalse((code_meta / "repo_map_summary.md").exists())
+            self.assertFalse((code_meta / "locate_results.json").exists())
+            self.assertFalse((code_meta / "locate_results.md").exists())
+            self.assertFalse((run_dir / "code_task" / "context_packs").exists())
+            self.assertTrue((documents_dir / "fulltext_extraction.json").exists())
+            self.assertTrue((run_dir / "02-search" / "papers.jsonl").exists())
+            self.assertTrue((report_dir / "report.md").exists())
+            conn = sqlite3.connect(sqlite_path)
+            rows = conn.execute("SELECT run_id FROM chunks ORDER BY run_id").fetchall()
+            conn.close()
+            self.assertEqual(rows, [("other-run",)])
+            self.assertIn("All-cache cleanup is enabled", stdout.getvalue())
+            self.assertIn("Deleted shared SQLite index rows: 1", stdout.getvalue())
+
+    def test_clean_shared_index_clears_cross_run_index_store(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            index_root = root / ".simple_ar_cache" / "research_index"
+            lancedb_dir = index_root / "lancedb"
+            index_root.mkdir(parents=True)
+            lancedb_dir.mkdir()
+            sqlite_path = index_root / "sqlite_fts.db"
+            conn = sqlite3.connect(sqlite_path)
+            conn.execute("CREATE TABLE chunks(run_id TEXT, text TEXT)")
+            conn.execute("INSERT INTO chunks VALUES ('run-a', 'delete')")
+            conn.commit()
+            conn.close()
+            (lancedb_dir / "table.lance").write_text("fake lancedb data", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["clean", "--shared-index", "--index-root", str(index_root), "--yes"])
+
+            self.assertTrue(index_root.exists())
+            self.assertEqual(list(index_root.iterdir()), [])
+            self.assertIn("Shared-index cleanup is enabled", stdout.getvalue())
+            self.assertIn("Cleaned targets: 2", stdout.getvalue())
+
+    def test_clean_shared_cache_clears_index_and_literature_cache(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            cache_root = root / ".simple_ar_cache"
+            index_root = cache_root / "research_index"
+            literature_root = cache_root / "literature"
+            index_root.mkdir(parents=True)
+            literature_root.mkdir(parents=True)
+            (index_root / "chunks.sqlite").write_text("index", encoding="utf-8")
+            (literature_root / "cached-provider-response.json").write_text("{}", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(
+                    [
+                        "clean",
+                        "--shared-cache",
+                        "--index-root",
+                        str(index_root),
+                        "--literature-cache-root",
+                        str(literature_root),
+                        "--yes",
+                    ]
+                )
+
+            self.assertFalse(index_root.exists())
+            self.assertFalse(literature_root.exists())
+            output = stdout.getvalue()
+            self.assertIn("Shared-cache cleanup is enabled", output)
+            self.assertIn("literature", output)
+
     def test_resume_config_preserves_saved_values_without_cli_overrides(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

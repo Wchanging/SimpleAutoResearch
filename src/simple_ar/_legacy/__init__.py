@@ -1,7 +1,6 @@
-"""Private transitional modules kept during the reboot refactor.
+"""Private compatibility aliases for pre-refactor import paths.
 
-These files still contain the old CLI and stage-handler orchestration. New code
-should live in domain packages such as ``core``, ``research``, ``experiment``,
-and ``code_task``. Public compatibility shims remain at ``simple_ar.cli`` and
-``simple_ar._legacy.stage_handlers`` while the large modules are retired incrementally.
+The large CLI and stage-handler implementations were moved into
+``simple_ar.cli`` and ``simple_ar.pipeline_stages``. This package remains only
+to keep older imports working while downstream users migrate.
 """
