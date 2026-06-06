@@ -115,6 +115,12 @@ uv run simple-ar run --topic "agent simulation" --to-stage synthesize
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
 ```
 
+The V2.4 report path uses Markdown report templates plus an LLM
+Writer/Reviewer loop. It supports short citation keys, audit artifacts, report
+variants, and either full-source drafting or batch-refine drafting for larger
+paper sets. See `examples/run_configs/v24_realistic_research_report.toml` and
+[Usage And Configuration](docs/USAGE.md) for practical commands.
+
 ### 2. Existing-Code Code Task
 
 Use this when you already have a project and want the model to propose a

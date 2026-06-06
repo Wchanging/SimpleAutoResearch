@@ -6,6 +6,15 @@
 
 ## 2026-06-05
 
+### Added
+
+- 新增 V2.4 report foundation：`src/simple_ar/report/` 现在包含 Markdown 报告模板、reviewer criteria、紧凑 report memory、只读 source-backtracking tools 和本地 report audit 产物。
+- `08-report` 现在除了 `report.md`、`references.bib`、`manifest.json` 和 `report_quality.json`，还会写出 `report_memory.json` 和 `report_audit.json`。
+- Pipeline config 现在支持 report template / reviewer 设置、source backtracking 预算，以及 `[report.audit]` 开关。
+- 新增受控 report Writer/Reviewer loop。LLM 模式下，`08-report` 会按模板分节起草、按 criteria 审查每节、执行有限修订，并把 reviewer findings 写入 `report_audit.json`。
+- 新增报告重跑写入策略：`overwrite`、`archive` 和 `variant`。其中
+  `variant` 会把额外报告包写入 `08-report/variants/<label>/`，不替换当前主 `report.md`。
+
 ### Changed
 
 - `code-task execute` 现在默认连续运行到真正的审核门，并使用 Rich 展示步骤状态。
@@ -17,6 +26,14 @@
 - `simple-ar clean --shared-cache` 现在会同时清空共享 research index 和共享 literature provider cache，并显示更强的清理警告。
 - medium review pipeline 示例现在允许 edit scope 修改 `configs/experiment.json`，这样模型实现 phrase feature 后可以启用新 feature family，benchmark 才能测到实际提升。
 - 内嵌 code-task experiment 转发日志时，现在使用 patched benchmark stdout/stderr 标签，避免和 standalone baseline/patched artifacts 混淆。
+- 报告生成现在使用 `P1` 这类模型侧短 citation key，并在 citation audit
+  前映射回真实 provider id，减少长 OpenAlex / Semantic Scholar id 拷贝错误。
+- Report section planning 现在使用可配置的 `max_section_sources` 预算，不再硬编码每节只给 4 个 source handles。
+
+- `max_section_sources = 0` 现在表示每个报告 section 都可以看到全部已选论文级 handles，全文 chunks 仍通过有界 backtracking 按需回查，适合大上下文模型下的 survey 生成。
+- Survey 报告现在区分“起草顺序”和“最终展示顺序”：起草顺序由模板里的 `Draft order:` 指令控制，最终 Markdown 仍按模板顺序展示。
+- 报告起草新增可选 `batch_refine` source strategy，用于把更大的论文集合分批增量整合到同一 section 中。
+- `batch_refine` 可通过 `review_source_batches = true` 在每个 source batch 后增加 reviewer 检查。
 
 ### Internal
 

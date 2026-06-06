@@ -130,7 +130,7 @@ Current status:
 | `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
 | `code` | `experiment.py` | Generate code from the selected template or prepare an embedded code-task harness. |
 | `run` | `results.json`, `stdout.txt`, `stderr.txt` | Execute the experiment and parse numeric metrics. |
-| `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json` | Write a paper-like report with citations (LLM-backed when enabled). |
+| `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | Write a template-guided report with citations, bounded source backtracking, and audit artifacts (LLM-backed when enabled). |
 
 ## Search And LLM Boundaries
 
@@ -195,7 +195,7 @@ in [Usage And Configuration](USAGE.md). At a high level:
 - `06-code/code_task_run` embeds the same artifact shape as a standalone code
   task when the research pipeline hands off to code execution.
 - `08-report` owns the final report package: report text, references, manifest,
-  and quality checks.
+  compact report memory, source/citation/metric audit, and quality checks.
 
 This split keeps detailed operational files available without forcing readers to
 learn every JSON/JSONL artifact before they understand the workflow. When a file

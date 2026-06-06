@@ -93,6 +93,28 @@ class ExperimentSection(_ConfigModel):
 
 class ReportSection(_ConfigModel):
     mode: str | None = None
+    template: str | None = None
+    criteria: str | None = None
+    style: str | None = None
+    draft_sections: bool | None = None
+    debug_artifacts: bool | None = None
+    agent: str | None = None
+    reviewer: str | None = None
+    max_review_iterations: int | None = None
+    max_section_tokens: int | None = None
+    max_report_tokens: int | None = None
+    max_section_sources: int | None = None
+    source_strategy: str | None = None
+    source_batch_size: int | None = None
+    max_source_batches: int | None = None
+    review_source_batches: bool | None = None
+    review_trace: str | None = None
+    output_mode: str | None = None
+    output_label: str | None = None
+    allow_source_backtracking: bool | None = None
+    max_backtracking_calls: int | None = None
+    max_backtracking_tokens: int | None = None
+    audit: dict[str, Any] = Field(default_factory=dict)
 
 
 class PipelineRunConfig(_ConfigModel):
@@ -173,6 +195,28 @@ class PipelineRunConfig(_ConfigModel):
             result["code_task_config"] = str(_resolve_relative(config_path, code_task_config))
 
         _set_string(result, "report_mode", self.report.mode)
+        _set_string(result, "report_template", self.report.template)
+        _set_string(result, "report_criteria", self.report.criteria)
+        _set_string(result, "report_style", self.report.style)
+        _set_bool(result, "report_draft_sections", self.report.draft_sections)
+        _set_bool(result, "report_debug_artifacts", self.report.debug_artifacts)
+        _set_string(result, "report_agent", self.report.agent)
+        _set_string(result, "report_reviewer", self.report.reviewer)
+        _set_int(result, "report_max_review_iterations", self.report.max_review_iterations)
+        _set_int(result, "report_max_section_tokens", self.report.max_section_tokens)
+        _set_int(result, "report_max_report_tokens", self.report.max_report_tokens)
+        _set_int(result, "report_max_section_sources", self.report.max_section_sources)
+        _set_string(result, "report_source_strategy", self.report.source_strategy)
+        _set_int(result, "report_source_batch_size", self.report.source_batch_size)
+        _set_int(result, "report_max_source_batches", self.report.max_source_batches)
+        _set_bool(result, "report_review_source_batches", self.report.review_source_batches)
+        _set_string(result, "report_review_trace", self.report.review_trace)
+        _set_string(result, "report_output_mode", self.report.output_mode)
+        _set_string(result, "report_output_label", self.report.output_label)
+        _set_bool(result, "report_allow_source_backtracking", self.report.allow_source_backtracking)
+        _set_int(result, "report_max_backtracking_calls", self.report.max_backtracking_calls)
+        _set_int(result, "report_max_backtracking_tokens", self.report.max_backtracking_tokens)
+        _set_report_audit(result, self.report.audit)
 
         if "code_task_config" not in result and _contains_code_task_config(raw_data):
             result["code_task_config"] = str(config_path.resolve())
@@ -259,6 +303,14 @@ def _set_resolved_string_list(
     ]
     if paths:
         result[key] = paths
+
+
+def _set_report_audit(result: dict[str, object], value: object) -> None:
+    if not isinstance(value, dict):
+        return
+    for key, enabled in value.items():
+        if isinstance(enabled, bool):
+            result[f"report_audit_{key}"] = enabled
 
 
 def _contains_code_task_config(data: dict[str, Any]) -> bool:

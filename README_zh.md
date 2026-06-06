@@ -87,6 +87,8 @@ uv run simple-ar run --topic "agent simulation" --to-stage synthesize
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
 ```
 
+V2.4 的报告路径使用 Markdown 报告模板和 LLM Writer/Reviewer loop，支持短 citation key、报告审计产物、独立 variant 重跑，以及面向较大论文集合的 full-source / batch-refine 起草策略。实际命令可以参考 `examples/run_configs/v24_realistic_research_report.toml` 和 [使用与配置](docs/USAGE_zh.md)。
+
 ### 2. Code Task：已有代码库修改
 
 当你已经有一个项目，希望模型提出可审核的改进时，先写一个简短任务文件，例如 `tasks/improve_model.md`，说明希望修改什么、用什么 benchmark 判断效果。然后为自己的项目创建一个 TOML 配置：

@@ -1,0 +1,148 @@
+[run]
+# V2.4 realistic research-only report check.
+#
+# This config is intentionally larger than the smoke configs but still bounded
+# for local development:
+# 1. Run it end to end as a research-only survey:
+#      uv run simple-ar run --config examples\run_configs\v24_realistic_research_report.toml
+# 2. If you want to regenerate only the final report after prompt/template
+#    changes, copy the printed run directory and resume only 08-report:
+#      uv run simple-ar resume runs\v24-realistic-research-report\<run-id> --from-stage report --to-stage report --config examples\run_configs\v24_realistic_research_report.toml
+#    To keep the current report and write an extra version:
+#      uv run simple-ar resume runs\v24-realistic-research-report\<run-id> --from-stage report --to-stage report --config examples\run_configs\v24_realistic_research_report.toml --report-output-mode variant --report-output-label survey-v2
+#
+# The CLI detects report.mode = "research_only" and skips design/code/run.
+topic = "LLM multi-agent collaboration for repository-level coding agents"
+output_root = "runs/v24-realistic-research-report"
+to_stage = "report"
+
+# Keep normal runs compact. Set true only when debugging retrieval traces,
+# source-planning rows, coverage diagnostics, or report tool traces.
+debug_artifacts = false
+
+[llm]
+# Exercises research planning, read screening/reranking, synthesis, and the
+# report writer/reviewer when resumed to report.
+enabled = true
+# model = "gpt-4o-mini"
+workers = 4
+
+[search]
+# Real online search. Fixture fallback is disabled so the report cannot look
+# literature-backed unless live or cached academic metadata was actually found.
+offline = false
+strict = true
+allow_fixture_fallback = false
+
+# Total selected paper records after multi-source retrieval and deduplication.
+# Increase to 20+ for a broader survey; keep 12 for a practical local run.
+max_papers = 16
+query = "LLM multi-agent collaboration repository coding agents software engineering"
+
+[research]
+mode = "strong"
+planner = "llm"
+
+# Prefer broad academic graph sources first, then arXiv for directly available
+# PDF/full-text resources. If one source fails or rate-limits, the next source
+# can still provide metadata.
+sources = ["openalex", "semantic_scholar", "arxiv"]
+
+# Seed queries are short academic-search keywords, not browser-style questions.
+# The LLM planner may generate focused variants, bounded below.
+queries = [
+  "LLM multi-agent coding agents",
+  "repository-level code generation agents",
+  "multi-agent software engineering benchmarks",
+  "program repair agents validation feedback",
+]
+auto_query_expansion = true
+max_retrieval_rounds = 2
+max_queries = 6
+required_facets = [
+  "multi_agent_architecture",
+  "coding_agent_workflow",
+  "repository_level_benchmark",
+  "validation_or_repair",
+  "safety_or_human_review",
+]
+
+# No local demo files: this is meant to test live search, full-text selection,
+# extraction, indexing, read, synthesize, and report generation.
+local_documents = []
+
+# Full-text path. Download only a bounded subset of eligible PDFs and keep raw
+# PDFs so extraction failures can be inspected. pypdf is the lightweight default.
+use_fulltext = true
+allow_pdf_download = true
+max_fulltext_documents = 10
+max_pdf_mb = 30
+keep_raw_pdf = true
+parser_backend = "pypdf"
+
+# 03-read: coarse LLM screening over compact abstract batches, then rerank the
+# kept set and write Paper Briefs. This is the main realism upgrade over the
+# earlier one-paper demos.
+read_screening = "llm"
+read_batch_size = 4
+read_workers = 3
+read_max_shortlist = 10
+
+# Cache and index settings. Metadata/cache entries are still live-source-backed,
+# not fixtures. Shared index keeps repeated local development cheaper.
+cache = true
+index_backend = "sqlite_fts"
+index_root = ".simple_ar_cache/research_index"
+
+[research.budget]
+# Hard local-development guardrails. These limits control selected records,
+# indexed chunks, prompt context, and follow-up query expansion.
+max_documents = 12
+max_chunks = 360
+max_context_tokens = 18000
+max_llm_calls = 18
+max_follow_up_queries = 2
+novelty_backend = "local"
+
+[retrieval]
+enabled = true
+top_k = 10
+
+[report]
+mode = "research_only"
+template = "survey"
+criteria = "auto"
+style = "technical_survey"
+
+# Keep section drafts for report inspection, but avoid full debug traces unless
+# explicitly needed. The reviewer can request bounded source backtracking.
+draft_sections = true
+debug_artifacts = false
+agent = "llm"
+reviewer = "llm"
+max_review_iterations = 1
+max_section_tokens = 5000
+max_report_tokens = 15000
+# 0 exposes all selected paper-level handles to each section. Full-text chunks
+# remain available through bounded backtracking tools. Use a positive number
+# for tighter prompt budgets, e.g. 8 for conservative local runs.
+max_section_sources = 0
+# full sends the configured section source set in one call. batch_refine splits
+# larger source sets into batches and asks the writer to revise the same
+# section incrementally. This is useful when candidate papers grow beyond what
+# one prompt should handle comfortably.
+source_strategy = "full"       # full | batch_refine
+source_batch_size = 12
+max_source_batches = 0         # 0 means all batches
+review_source_batches = false  # true adds reviewer checks after each source batch
+review_trace = "meta"
+output_mode = "overwrite"
+output_label = ""
+allow_source_backtracking = true
+max_backtracking_calls = 8
+max_backtracking_tokens = 8000
+
+[report.audit]
+citations = true
+metrics = true
+claims = true

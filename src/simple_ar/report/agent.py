@@ -1,0 +1,802 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from typing import Any
+
+from pydantic import ValidationError
+
+from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.report.assembler import assemble_report_sections
+from simple_ar.report.schema import (
+    AgentReportResult,
+    ClaimEvidenceRecord,
+    ReportContext,
+    ReportIterationRecord,
+    ReportMemory,
+    ReportRuntimeConfig,
+    ReportSectionDraft,
+    ReportSectionPlan,
+    ReportSectionReview,
+    ReportTemplateBundle,
+    ReportToolCall,
+    ReportToolResult,
+    ReviewerFinding,
+)
+from simple_ar.report.tool_gateway import ReportToolGateway
+
+
+WRITER_SYSTEM = """You are the SimpleAutoResearch report Writer.
+Write only evidence-bounded Markdown sections for the current run.
+Do not invent citations, metrics, datasets, methods, or external references.
+Use short citation keys exactly as provided, in Pandoc-style form like [@P1].
+Write survey prose, not a pipeline run log: do not mention artifact paths,
+stage names, JSON files, tool traces, or search/debug internals unless the
+section is explicitly about limitations.
+Keep paragraphs short. Prefer 2-4 compact paragraphs or a short comparison
+list instead of one dense block.
+For survey reports, synthesize across papers: build taxonomies, contrast
+assumptions, compare evaluation settings, and state boundary conditions.
+When many sources are available, use them to improve coverage and confidence;
+do not make the report grow linearly by writing one paragraph per paper.
+Never write prompt-planning language such as "Hint:", "Use this paper as", or
+"Additional synthesis detail is available".
+Return one JSON object matching the requested schema."""
+
+
+REVIEWER_SYSTEM = """You are the SimpleAutoResearch report Reviewer.
+Review independently against the provided criteria, source handles, metrics, and current-run boundaries.
+Do not rewrite prose unless asked. Return structured findings and optional bounded context requests.
+Flag operational/provenance sections in research-only reports when they make
+the report read like a pipeline log instead of an academic survey.
+Flag any section that is one huge paragraph or mixes many unrelated claims
+without paragraph breaks or comparison bullets.
+Flag paper-by-paper note dumps, prompt/planning residue, missing taxonomy,
+missing cross-paper comparison, and performance claims without boundary
+conditions.
+Prefer revision instructions that improve synthesis density, evidence coverage,
+and section structure over requests to add more paper-by-paper detail.
+Return one JSON object matching the requested schema."""
+
+
+def run_report_agent(
+    *,
+    client: LLMClient | None,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    config: ReportRuntimeConfig,
+    gateway: ReportToolGateway,
+    emit: Callable[[str], None] | None = None,
+) -> AgentReportResult | None:
+    """Run the bounded Writer/Reviewer loop for the report stage.
+
+    Args:
+        client: Configured LLM client. ``None`` disables agent mode.
+        context: Compact report input from earlier stages.
+        template: Loaded writing template and reviewer criteria.
+        memory: Recoverable report memory.
+        config: Runtime report config.
+        gateway: Read-only report tool gateway.
+        emit: Optional progress callback.
+
+    Returns:
+        Agent-generated report body and updated memory, or ``None`` when agent
+        mode is disabled or a validated agent pass cannot be produced.
+    """
+    if client is None or config.agent == "disabled":
+        return None
+    if not memory.section_plan:
+        return None
+
+    current = memory.model_copy(deep=True)
+    sections: list[ReportSectionDraft] = []
+    iterations: list[ReportIterationRecord] = []
+    all_findings: list[ReviewerFinding] = []
+    all_tool_results: list[ReportToolResult] = []
+
+    try:
+        for section_index, section in enumerate(_draft_sequence(current.section_plan), start=1):
+            source_batches = _source_batches(section.evidence_handles, config)
+            first_batch = source_batches[0] if source_batches else section.evidence_handles
+            draft_section = _section_with_evidence(section, first_batch)
+            _emit(emit, f"Writer drafting `{section.heading}`.")
+            draft = _draft_section(
+                client=client,
+                context=context,
+                template=template,
+                memory=current,
+                section=draft_section,
+                config=config,
+                extra_context=[],
+                label=f"report-writer-{section.section_id}",
+                source_batch_index=1,
+                source_batch_count=len(source_batches),
+            )
+            iterations.append(_iteration(section_index, section, "draft", draft.status, draft.used_sources))
+
+            if config.source_strategy == "batch_refine" and len(source_batches) > 1:
+                for batch_index, batch in enumerate(source_batches[1:], start=2):
+                    _emit(
+                        emit,
+                        (
+                            f"Writer integrating source batch {batch_index}/"
+                            f"{len(source_batches)} for `{section.heading}`."
+                        ),
+                    )
+                    batch_section = _section_with_evidence(section, batch)
+                    revised = _draft_section(
+                        client=client,
+                        context=context,
+                        template=template,
+                        memory=current,
+                        section=batch_section,
+                        config=config,
+                        extra_context=[],
+                        previous_draft=draft,
+                        label=f"report-integrator-{section.section_id}-{batch_index}",
+                        source_batch_index=batch_index,
+                        source_batch_count=len(source_batches),
+                    )
+                    draft = _merge_incremental_draft(draft, revised)
+                    iterations.append(
+                        _iteration(section_index, section, "integrate_sources", draft.status, draft.used_sources)
+                    )
+                    if config.review_source_batches and config.reviewer != "disabled":
+                        _emit(
+                            emit,
+                            (
+                                f"Reviewer checking source batch {batch_index}/"
+                                f"{len(source_batches)} for `{section.heading}`."
+                            ),
+                        )
+                        batch_review = _review_section(
+                            client=client,
+                            context=context,
+                            template=template,
+                            memory=current,
+                            section=batch_section,
+                            draft=draft,
+                            label=f"report-batch-reviewer-{section.section_id}-{batch_index}",
+                        )
+                        batch_tool_results = _run_context_requests(gateway, batch_review, config)
+                        all_tool_results.extend(batch_tool_results)
+                        all_findings.extend(batch_review.findings)
+                        iterations.append(
+                            _iteration(
+                                section_index,
+                                section,
+                                "review_source_batch",
+                                batch_review.verdict,
+                                draft.used_sources,
+                                findings=batch_review.findings,
+                                tool_results=batch_tool_results,
+                            )
+                        )
+                        if _needs_revision(batch_review) and config.max_review_iterations > 0:
+                            _emit(emit, f"Writer revising `{section.heading}` from batch reviewer findings.")
+                            batch_revised = _draft_section(
+                                client=client,
+                                context=context,
+                                template=template,
+                                memory=current,
+                                section=batch_section,
+                                config=config,
+                                extra_context=batch_tool_results,
+                                previous_draft=draft,
+                                review=batch_review,
+                                label=f"report-batch-reviser-{section.section_id}-{batch_index}",
+                                source_batch_index=batch_index,
+                                source_batch_count=len(source_batches),
+                            )
+                            draft = _merge_incremental_draft(draft, batch_revised)
+                            iterations.append(
+                                _iteration(
+                                    section_index,
+                                    section,
+                                    "revise_source_batch",
+                                    draft.status,
+                                    draft.used_sources,
+                                )
+                            )
+
+            if config.reviewer == "disabled":
+                sections.append(draft)
+                _merge_draft_into_memory(current, draft, [])
+                continue
+
+            _emit(emit, f"Reviewer checking `{section.heading}`.")
+            review = _review_section(
+                client=client,
+                context=context,
+                template=template,
+                memory=current,
+                section=section,
+                draft=draft,
+                label=f"report-reviewer-{section.section_id}",
+            )
+            tool_results = _run_context_requests(gateway, review, config)
+            all_tool_results.extend(tool_results)
+            all_findings.extend(review.findings)
+            iterations.append(
+                _iteration(
+                    section_index,
+                    section,
+                    "review",
+                    review.verdict,
+                    draft.used_sources,
+                    findings=review.findings,
+                    tool_results=tool_results,
+                )
+            )
+
+            if _needs_revision(review) and config.max_review_iterations > 0:
+                _emit(emit, f"Writer revising `{section.heading}` from reviewer findings.")
+                revised = _draft_section(
+                    client=client,
+                    context=context,
+                    template=template,
+                    memory=current,
+                    section=section,
+                    config=config,
+                    previous_draft=draft,
+                    review=review,
+                    extra_context=tool_results,
+                    label=f"report-reviser-{section.section_id}",
+                )
+                draft = revised
+                iterations.append(_iteration(section_index, section, "revise", draft.status, draft.used_sources))
+
+                if config.max_review_iterations > 1:
+                    second_review = _review_section(
+                        client=client,
+                        context=context,
+                        template=template,
+                        memory=current,
+                        section=section,
+                        draft=draft,
+                        label=f"report-reviewer-{section.section_id}-revise",
+                    )
+                    all_findings.extend(second_review.findings)
+                    iterations.append(
+                        _iteration(
+                            section_index,
+                            section,
+                            "review_revision",
+                            second_review.verdict,
+                            draft.used_sources,
+                            findings=second_review.findings,
+                        )
+                    )
+
+            sections.append(draft)
+            _merge_draft_into_memory(current, draft, review.findings)
+
+        body = assemble_report_sections(title=context.topic, sections=_final_sequence(current.section_plan, sections))
+        current.reviewer_findings = _dedupe_findings(current.reviewer_findings + all_findings)
+        return AgentReportResult(
+            report_body=body,
+            memory=current,
+            sections=sections,
+            iterations=iterations,
+            reviewer_findings=all_findings,
+            tool_results=all_tool_results,
+            used_agent=True,
+        )
+    except (LLMError, ValidationError, ValueError) as exc:
+        _emit(emit, f"Report agent failed validation; using deterministic fallback. {exc}")
+        return None
+
+
+def build_writer_brief(
+    *,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+) -> str:
+    """Build a compact prompt-side brief for writer/reviewer calls."""
+    sections = ", ".join(section.heading for section in memory.section_plan[:8])
+    return (
+        f"Report mode: {context.report_mode}\n"
+        f"Template: {template.name}\n"
+        f"Sections: {sections}\n"
+        f"Source handles: {len(context.source_handles)}\n"
+        f"Metric sources: {len(context.metric_sources)}\n"
+    )
+
+
+def _draft_section(
+    *,
+    client: LLMClient,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    section: ReportSectionPlan,
+    config: ReportRuntimeConfig,
+    extra_context: list[ReportToolResult],
+    label: str,
+    previous_draft: ReportSectionDraft | None = None,
+    review: ReportSectionReview | None = None,
+    source_batch_index: int = 1,
+    source_batch_count: int = 1,
+) -> ReportSectionDraft:
+    response = client.ask_json(
+        WRITER_SYSTEM,
+        _writer_prompt(
+            context=context,
+            template=template,
+            memory=memory,
+            section=section,
+            config=config,
+            extra_context=extra_context,
+            previous_draft=previous_draft,
+            review=review,
+            source_batch_index=source_batch_index,
+            source_batch_count=source_batch_count,
+        ),
+        label=label,
+    )
+    draft = ReportSectionDraft.model_validate(_normalize_draft_response(response, section))
+    if not draft.draft_markdown.strip() and draft.status != "skipped":
+        raise LLMError(f"Writer returned empty draft for {section.section_id}")
+    return draft
+
+
+def _review_section(
+    *,
+    client: LLMClient,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    section: ReportSectionPlan,
+    draft: ReportSectionDraft,
+    label: str,
+) -> ReportSectionReview:
+    response = client.ask_json(
+        REVIEWER_SYSTEM,
+        _reviewer_prompt(
+            context=context,
+            template=template,
+            memory=memory,
+            section=section,
+            draft=draft,
+        ),
+        label=label,
+    )
+    return ReportSectionReview.model_validate(_normalize_review_response(response, section))
+
+
+def _writer_prompt(
+    *,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    section: ReportSectionPlan,
+    config: ReportRuntimeConfig,
+    extra_context: list[ReportToolResult],
+    previous_draft: ReportSectionDraft | None,
+    review: ReportSectionReview | None,
+    source_batch_index: int,
+    source_batch_count: int,
+) -> str:
+    payload = {
+        "task": "draft_or_revise_one_report_section",
+        "report_mode": context.report_mode,
+        "style": config.style,
+        "max_section_tokens": config.max_section_tokens,
+        "section": section.model_dump(mode="json"),
+        "source_strategy": {
+            "mode": config.source_strategy,
+            "batch_index": source_batch_index,
+            "batch_count": source_batch_count,
+            "instruction": _source_strategy_instruction(
+                config=config,
+                batch_index=source_batch_index,
+                batch_count=source_batch_count,
+            ),
+        },
+        "template_markdown": template.template_markdown,
+        "writer_brief": build_writer_brief(context=context, template=template, memory=memory),
+        "objective": memory.objective,
+        "global_research_context": {
+            "evidence_summary": context.evidence_summary[:3000],
+            "synthesis": context.synthesis_markdown[:3000],
+            "hypothesis": context.hypothesis_markdown[:1500],
+        },
+        "limitations": memory.limitations[:8],
+        "source_handles": _handles_for_section(memory, section),
+        "metric_sources": [metric.model_dump(mode="json") for metric in memory.metric_sources[:12]],
+        "claims_evidence_matrix": [
+            claim.model_dump(mode="json") for claim in memory.claims_evidence_matrix[:20]
+        ],
+        "previous_draft": previous_draft.model_dump(mode="json") if previous_draft else {},
+        "review_findings": [finding.model_dump(mode="json") for finding in (review.findings if review else [])],
+        "extra_tool_context": [result.model_dump(mode="json") for result in extra_context[:6]],
+        "style_rules": [
+            "Write as an academic survey for the user topic, not as documentation of the SimpleAutoResearch pipeline.",
+            "Do not include artifact names, file paths, JSON filenames, stage numbers, or command provenance in the body.",
+            "Do not create sections named Search Scope, Evidence Summary, Pipeline, Artifacts, or Stage Outputs.",
+            "Do not use prompt-planning phrases such as Hint:, Use this paper as, Paper Brief, or Additional synthesis detail.",
+            "Do not write a paper-by-paper literature note dump; group papers by taxonomy and comparison dimensions.",
+            "Use the available source set broadly, but compress by grouping similar papers and citing representative evidence.",
+            "When source_strategy.mode is batch_refine and previous_draft is present, update the existing section instead of appending a separate mini-section.",
+            "For incremental source batches, revise taxonomy tables, evidence maps, and contrasts to absorb new papers compactly.",
+            "For Method Families, include a compact taxonomy table or grouped comparison before prose.",
+            "For Evaluation, include an evidence-quality map when enough source metadata is available.",
+            "For Evaluation, distinguish benchmark/task scale and state whether evidence transfers to repository-level tasks.",
+            "Draft front-matter as if it is written after the body: Abstract and Introduction should summarize the actual synthesis, not generic background.",
+            "For each strong conclusion, add a boundary condition or uncertainty statement.",
+            "Keep paragraphs under roughly 120 words; split dense synthesis into short paragraphs or concise bullets.",
+            "Use only `cite_as` values such as [@P1] for body citations; never cite long source handles or raw paper ids.",
+            "The final renderer will map short citation keys back to verified source ids and numeric citations.",
+        ],
+        "output_schema": {
+            "section_id": section.section_id,
+            "heading": section.heading,
+            "status": "drafted|revised|skipped",
+            "draft_markdown": "Markdown body for this section only; do not include References",
+            "used_sources": ["source handle ids used"],
+            "metric_ids": ["metric ids used"],
+            "citations": ["short citation keys cited, such as P1"],
+            "claims": [
+                {
+                    "claim_id": "stable id",
+                    "claim": "claim text",
+                    "status": "supported|partially_supported|unsupported|speculative",
+                    "evidence_handles": [],
+                    "metric_ids": [],
+                    "citation_ids": ["short citation keys, such as P1"],
+                    "notes": "",
+                }
+            ],
+            "open_questions": [],
+            "limitations": [],
+        },
+    }
+    return _json_prompt(payload)
+
+
+def _reviewer_prompt(
+    *,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    section: ReportSectionPlan,
+    draft: ReportSectionDraft,
+) -> str:
+    payload = {
+        "task": "review_one_report_section",
+        "report_mode": context.report_mode,
+        "section": section.model_dump(mode="json"),
+        "criteria_markdown": template.criteria_markdown,
+        "objective": memory.objective,
+        "known_limitations": memory.limitations[:8],
+        "allowed_sources": _handles_for_section(memory, section),
+        "metric_sources": [metric.model_dump(mode="json") for metric in memory.metric_sources[:12]],
+        "draft": draft.model_dump(mode="json"),
+        "tool_policy": {
+            "allowed_tools": [
+                "get_paper_brief",
+                "get_neighbor_chunks",
+                "get_metric_source",
+                "get_synthesis_brief",
+                "get_code_task_result",
+            ],
+            "only_request_tools_when_evidence_is_insufficient": True,
+            "prefer_get_paper_brief_arguments": {"citation_key": "P1"},
+        },
+        "review_focus": [
+            "Does this section read like a survey section rather than a pipeline log?",
+            "Are citations adjacent to paper-specific claims?",
+            "Are long paragraphs split into readable units?",
+            "Are operational details moved out of the body unless they are reader-facing limitations?",
+            "Does the section synthesize across papers instead of listing paper briefs?",
+            "Does it contain taxonomy/comparison dimensions when discussing methods?",
+            "Does it use the selected source set broadly without becoming a paper-by-paper dump?",
+            "Does Evaluation include an evidence-quality map or equivalent compact comparison when useful?",
+            "Are benchmark limitations and transfer boundaries stated near empirical claims?",
+            "Is it free of prompt residue such as Hint, Use this paper as, Paper Brief, or Additional synthesis detail?",
+        ],
+        "output_schema": {
+            "section_id": section.section_id,
+            "verdict": "pass|warning|revise_required|fail",
+            "findings": [
+                {
+                    "finding_id": "stable id",
+                    "type": "unsupported_claim|citation_misuse|missing_limitation|metric_mismatch|style",
+                    "severity": "info|minor|major|critical",
+                    "message": "specific issue",
+                    "section_id": section.section_id,
+                    "claim_id": "",
+                    "evidence_handles": [],
+                    "suggested_action": "",
+                }
+            ],
+            "context_requests": [
+                {
+                    "tool_name": "get_paper_brief",
+                    "arguments": {"handle": "paper:..."},
+                    "caller": "reviewer",
+                    "trace_id": "optional",
+                }
+            ],
+            "revision_instructions": [],
+            "notes": "",
+        },
+    }
+    return _json_prompt(payload)
+
+
+def _json_prompt(payload: dict[str, Any]) -> str:
+    return (
+        "Return exactly one JSON object. Do not wrap it in Markdown fences.\n\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+
+
+def _normalize_draft_response(response: dict[str, Any], section: ReportSectionPlan) -> dict[str, Any]:
+    normalized = dict(response)
+    normalized.setdefault("section_id", section.section_id)
+    normalized.setdefault("heading", section.heading)
+    normalized.setdefault("status", "drafted")
+    normalized.setdefault("draft_markdown", "")
+    normalized.setdefault("used_sources", [])
+    normalized.setdefault("metric_ids", [])
+    normalized.setdefault("citations", [])
+    normalized.setdefault("claims", [])
+    normalized.setdefault("open_questions", [])
+    normalized.setdefault("limitations", [])
+    return normalized
+
+
+def _normalize_review_response(response: dict[str, Any], section: ReportSectionPlan) -> dict[str, Any]:
+    normalized = dict(response)
+    normalized.setdefault("section_id", section.section_id)
+    normalized.setdefault("verdict", "warning")
+    normalized.setdefault("findings", [])
+    normalized.setdefault("context_requests", [])
+    normalized.setdefault("revision_instructions", [])
+    normalized.setdefault("notes", "")
+    normalized["findings"] = [
+        _normalize_finding(finding, section, index)
+        for index, finding in enumerate(normalized.get("findings") or [], start=1)
+        if isinstance(finding, dict)
+    ]
+    normalized["context_requests"] = [
+        _normalize_tool_call(call, index)
+        for index, call in enumerate(normalized.get("context_requests") or [], start=1)
+        if isinstance(call, dict)
+    ]
+    return normalized
+
+
+def _normalize_finding(
+    finding: dict[str, Any],
+    section: ReportSectionPlan,
+    index: int,
+) -> dict[str, Any]:
+    item = dict(finding)
+    item.setdefault("finding_id", f"{section.section_id}-finding-{index:03d}")
+    item.setdefault("type", "review")
+    item.setdefault("severity", "minor")
+    item.setdefault("message", item.get("suggested_action") or "Reviewer finding.")
+    item.setdefault("section_id", section.section_id)
+    item.setdefault("claim_id", "")
+    item.setdefault("evidence_handles", [])
+    item.setdefault("suggested_action", "")
+    return item
+
+
+def _normalize_tool_call(call: dict[str, Any], index: int) -> dict[str, Any]:
+    item = dict(call)
+    item.setdefault("tool_name", "")
+    item.setdefault("arguments", {})
+    item.setdefault("caller", "reviewer")
+    item.setdefault("trace_id", f"review-tool-{index:03d}")
+    return item
+
+
+def _run_context_requests(
+    gateway: ReportToolGateway,
+    review: ReportSectionReview,
+    config: ReportRuntimeConfig,
+) -> list[ReportToolResult]:
+    if not config.allow_source_backtracking:
+        return []
+    results: list[ReportToolResult] = []
+    for call in review.context_requests[: config.max_backtracking_calls]:
+        if not call.tool_name:
+            continue
+        results.append(gateway.call(call))
+    return results
+
+
+def _handles_for_section(memory: ReportMemory, section: ReportSectionPlan) -> list[dict[str, Any]]:
+    handles = {handle.handle: handle for handle in memory.source_handles}
+    selected: list[str] = []
+    for handle in section.evidence_handles:
+        if handle in handles:
+            selected.append(handle)
+    if not selected:
+        selected = list(handles)[:8]
+    return [_prompt_handle_view(handles[handle]) for handle in selected]
+
+
+def _source_batches(evidence_handles: list[str], config: ReportRuntimeConfig) -> list[list[str]]:
+    handles = [handle for handle in evidence_handles if handle]
+    if not handles:
+        return [[]]
+    if config.source_strategy != "batch_refine":
+        return [handles]
+    batch_size = max(1, config.source_batch_size)
+    batches = [handles[index : index + batch_size] for index in range(0, len(handles), batch_size)]
+    if config.max_source_batches > 0:
+        return batches[: config.max_source_batches]
+    return batches
+
+
+def _section_with_evidence(section: ReportSectionPlan, evidence_handles: list[str]) -> ReportSectionPlan:
+    return section.model_copy(update={"evidence_handles": list(evidence_handles)})
+
+
+def _merge_incremental_draft(
+    previous: ReportSectionDraft,
+    revised: ReportSectionDraft,
+) -> ReportSectionDraft:
+    """Keep the latest prose while preserving accumulated provenance lists."""
+    used_sources = _stable_union(previous.used_sources, revised.used_sources)
+    metric_ids = _stable_union(previous.metric_ids, revised.metric_ids)
+    citations = _stable_union(previous.citations, revised.citations)
+    open_questions = _stable_union(previous.open_questions, revised.open_questions)
+    limitations = _stable_union(previous.limitations, revised.limitations)
+    claims = previous.claims[:]
+    claim_ids = {claim.claim_id for claim in claims}
+    for claim in revised.claims:
+        if claim.claim_id in claim_ids:
+            continue
+        claims.append(claim)
+        claim_ids.add(claim.claim_id)
+    return revised.model_copy(
+        update={
+            "used_sources": used_sources,
+            "metric_ids": metric_ids,
+            "citations": citations,
+            "claims": claims,
+            "open_questions": open_questions,
+            "limitations": limitations,
+        }
+    )
+
+
+def _stable_union(first: list[str], second: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in first + second:
+        if not item or item in seen:
+            continue
+        merged.append(item)
+        seen.add(item)
+    return merged
+
+
+def _source_strategy_instruction(
+    *,
+    config: ReportRuntimeConfig,
+    batch_index: int,
+    batch_count: int,
+) -> str:
+    if config.source_strategy != "batch_refine":
+        return "Draft using the provided source handles as the section evidence set."
+    if batch_index <= 1:
+        return (
+            "Draft an initial section from the first source batch. Leave the "
+            "structure easy to revise when later source batches arrive."
+        )
+    return (
+        "Revise the previous draft to integrate this new source batch. Update "
+        "tables, comparisons, and evidence-quality judgments compactly; do not "
+        "append a separate list of new papers."
+    )
+
+
+def _draft_sequence(sections: list[ReportSectionPlan]) -> list[ReportSectionPlan]:
+    return sorted(
+        sections,
+        key=lambda section: (
+            section.draft_order if section.draft_order else section.final_order,
+            section.final_order,
+            section.section_id,
+        ),
+    )
+
+
+def _final_sequence(
+    plans: list[ReportSectionPlan],
+    drafts: list[ReportSectionDraft],
+) -> list[ReportSectionDraft]:
+    order = {plan.section_id: plan.final_order or index for index, plan in enumerate(plans, start=1)}
+    return sorted(drafts, key=lambda draft: (order.get(draft.section_id, 9999), draft.section_id))
+
+
+def _prompt_handle_view(handle: Any) -> dict[str, Any]:
+    """Return a compact model-facing handle with short citation guidance.
+
+    The raw handle is retained for source provenance and chunk backtracking, but
+    prose citations should use ``cite_as``. This keeps long provider ids out of
+    normal body citation generation.
+    """
+    data = handle.model_dump(mode="json")
+    citation_key = data.get("citation_key") or ""
+    if citation_key:
+        data["cite_as"] = f"[@{citation_key}]"
+        data["paper_id_for_display"] = citation_key
+        data.pop("paper_id", None)
+        data["tool_args"] = {"citation_key": citation_key}
+    return data
+
+
+def _needs_revision(review: ReportSectionReview) -> bool:
+    if review.verdict in {"revise_required", "fail"}:
+        return True
+    return any(finding.severity in {"major", "critical"} for finding in review.findings)
+
+
+def _merge_draft_into_memory(
+    memory: ReportMemory,
+    draft: ReportSectionDraft,
+    findings: list[ReviewerFinding],
+) -> None:
+    existing_claim_ids = {claim.claim_id for claim in memory.claims_evidence_matrix}
+    for claim in draft.claims:
+        if claim.claim_id not in existing_claim_ids:
+            memory.claims_evidence_matrix.append(claim)
+            existing_claim_ids.add(claim.claim_id)
+    memory.reviewer_findings = _dedupe_findings(memory.reviewer_findings + findings)
+    for item in draft.open_questions:
+        if item and item not in memory.open_questions:
+            memory.open_questions.append(item)
+    for item in draft.limitations:
+        if item and item not in memory.limitations:
+            memory.limitations.append(item)
+    decision = f"Section `{draft.section_id}` drafted with {len(draft.used_sources)} source handle(s)."
+    if decision not in memory.key_decisions:
+        memory.key_decisions.append(decision)
+
+
+def _dedupe_findings(findings: list[ReviewerFinding]) -> list[ReviewerFinding]:
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[ReviewerFinding] = []
+    for finding in findings:
+        key = (finding.type, finding.section_id, finding.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(finding)
+    return deduped
+
+
+def _iteration(
+    iteration: int,
+    section: ReportSectionPlan,
+    action: str,
+    status: str,
+    used_sources: list[str],
+    *,
+    findings: list[ReviewerFinding] | None = None,
+    tool_results: list[ReportToolResult] | None = None,
+) -> ReportIterationRecord:
+    return ReportIterationRecord(
+        iteration=iteration,
+        section_id=section.section_id,
+        action=action,
+        status=status,
+        summary=f"{action} `{section.heading}` -> {status}",
+        used_sources=used_sources[:8],
+        findings=findings or [],
+        tool_results=tool_results or [],
+    )
+
+
+def _emit(callback: Callable[[str], None] | None, message: str) -> None:
+    if callback is not None:
+        callback(message)

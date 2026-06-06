@@ -95,12 +95,20 @@ uv run simple-ar run --config examples/run_configs/local_research_report.toml
 ```bash
 uv run simple-ar resume runs/<run-id>
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
+uv run simple-ar resume runs/<run-id> --from-stage report --to-stage report --report-output-mode variant --report-output-label survey-v2
 ```
 
 **参数表**：
 
 `resume` 接收 `RUN_DIR`，并支持大多数 `run` 参数作为覆盖，包括
-`--config`、阶段范围、LLM/search/report 参数和内嵌 code-task 参数。
+`--config`、阶段范围、LLM/search/report 参数、报告写入策略和内嵌 code-task 参数。
+
+常用报告写入参数：
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `--report-output-mode` | choice | `overwrite`、`archive` 或 `variant`。`variant` 会写入 `08-report/variants/<label>/`，不替换当前主报告。 |
+| `--report-output-label` | string | report archive/variant 的可选目录标签。 |
 
 **生成产物**：
 

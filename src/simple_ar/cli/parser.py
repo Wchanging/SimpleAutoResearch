@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Report drafting mode: auto (based on results.json), research_only, or experiment.",
     )
+    _add_report_output_args(run_parser)
     run_parser.add_argument("--quiet", action="store_true", default=None)
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
@@ -60,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override report drafting mode for a resumed run.",
     )
+    _add_report_output_args(resume_parser)
     resume_parser.add_argument("--quiet", action="store_true", default=None)
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
@@ -673,6 +675,27 @@ def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
         metavar="METRIC=DIRECTION",
         help="Metric direction for embedded code-task comparison. May be repeated.",
     )
+
+
+def _add_report_output_args(parser: argparse.ArgumentParser) -> None:
+    """Add shared report output policy arguments for run/resume."""
+    parser.add_argument(
+        "--report-output-mode",
+        choices=("overwrite", "archive", "variant"),
+        default=None,
+        help=(
+            "Report write policy. overwrite replaces 08-report outputs; "
+            "archive backs up existing outputs before replacing them; "
+            "variant writes a separate 08-report/variants/<label> package "
+            "without replacing the current report.md when it already exists."
+        ),
+    )
+    parser.add_argument(
+        "--report-output-label",
+        default=None,
+        help="Optional folder label for --report-output-mode variant/archive.",
+    )
+
 
 def _metric_direction_arg(value: str) -> tuple[str, str]:
     """Parse ``--metric-direction metric=direction`` arguments."""

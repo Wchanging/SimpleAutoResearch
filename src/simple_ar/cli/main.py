@@ -61,8 +61,8 @@ from simple_ar.integrations.llm import LLMError
 from simple_ar.retrieval.index import build_artifact_index
 from simple_ar.retrieval.search import search_artifacts
 from simple_ar.app.run_config import RunConfigError, load_pipeline_run_config
-from simple_ar.pipeline_stages import HANDLERS
-from simple_ar.core.stages import Stage
+from simple_ar.pipeline_stages.registry import HANDLERS
+from simple_ar.core.stages import Stage, parse_stage
 from simple_ar.cli.parser import build_parser
 
 
@@ -82,11 +82,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             topic=topic,
             config=dict(settings["config"]),
         )
-        executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
-            ctx,
-            from_stage=from_stage,
-            to_stage=to_stage,
-        )
+        executions = _run_pipeline_for_cli(ctx, reporter, from_stage=from_stage, to_stage=to_stage)
         if settings["quiet"]:
             print_line(f"Run directory: {run_dir}")
         print_line(f"Stages completed: {len(executions)}")
@@ -105,11 +101,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             topic=topic,
             config=config,
         )
-        executions = PipelineRunner(_stage_handlers(), reporter=reporter).run(
-            ctx,
-            from_stage=from_stage,
-            to_stage=to_stage,
-        )
+        executions = _run_pipeline_for_cli(ctx, reporter, from_stage=from_stage, to_stage=to_stage)
         if quiet:
             print_line(f"Run directory: {run_dir}")
         print_line(f"Resumed from: {from_stage}")
@@ -235,6 +227,57 @@ def _stage_handlers():
     return {Stage(number): handler for number, handler in HANDLERS.items()}
 
 
+def _run_pipeline_for_cli(
+    ctx: Context,
+    reporter: ConsoleReporter,
+    *,
+    from_stage: str,
+    to_stage: str,
+) -> list[object]:
+    """Run the pipeline, with research-only report shortcut support."""
+    if not _should_jump_research_only_report(ctx.config, from_stage=from_stage, to_stage=to_stage):
+        return PipelineRunner(_stage_handlers(), reporter=reporter).run(
+            ctx,
+            from_stage=from_stage,
+            to_stage=to_stage,
+        )
+
+    start = parse_stage(from_stage)
+    executions: list[object] = []
+    if int(start) <= int(Stage.SYNTHESIZE):
+        executions.extend(
+            PipelineRunner(_stage_handlers(), reporter=reporter).run(
+                ctx,
+                from_stage=start,
+                to_stage=Stage.SYNTHESIZE,
+            )
+        )
+    executions.extend(
+        PipelineRunner(_stage_handlers(), reporter=reporter).run(
+            ctx,
+            from_stage=Stage.REPORT,
+            to_stage=Stage.REPORT,
+        )
+    )
+    return executions
+
+
+def _should_jump_research_only_report(
+    config: dict[str, object],
+    *,
+    from_stage: str,
+    to_stage: str,
+) -> bool:
+    """Return true when report-only survey should skip design/code/run stages."""
+    try:
+        target = parse_stage(to_stage)
+        start = parse_stage(from_stage)
+    except ValueError:
+        return False
+    mode = str(config.get("report_mode") or "auto").strip().lower()
+    return mode == "research_only" and target == Stage.REPORT and start != Stage.REPORT
+
+
 def _resolve_run_settings(args: argparse.Namespace) -> dict[str, object]:
     """Merge run defaults, TOML config, and explicit CLI overrides."""
     file_config = _load_run_config_or_exit(getattr(args, "config", None))
@@ -291,6 +334,8 @@ def _apply_run_cli_overrides(config: dict[str, object], args: argparse.Namespace
     _set_if_not_none(config, "experiment_timeout_sec", args.experiment_timeout)
     _set_if_not_none(config, "retrieval_top_k", args.retrieval_top_k)
     _set_if_not_none(config, "report_mode", args.report_mode)
+    _set_if_not_none(config, "report_output_mode", getattr(args, "report_output_mode", None))
+    _set_if_not_none(config, "report_output_label", getattr(args, "report_output_label", None))
     config.update(_pipeline_code_task_config(args))
 
     if args.no_llm is True:

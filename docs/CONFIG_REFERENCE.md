@@ -172,6 +172,56 @@ timeout = 60
 # auto chooses experiment or research-only report based on available results.
 mode = "auto"                 # auto | research_only | experiment
 
+# Built-in template name or custom Markdown path. auto maps research_only to
+# survey and experiment to experiment.
+template = "auto"             # auto | survey | experiment | reproduction | path/to/template.md
+
+# Built-in reviewer criteria or custom Markdown path. auto follows template.
+criteria = "auto"
+
+# Report tone hint consumed by the report agent.
+style = "paper"               # paper | technical | concise
+
+# Keep section drafts and full report traces only when needed.
+draft_sections = false
+debug_artifacts = false
+
+# V2.4 local path uses LLM writer/reviewer as the main quality mechanism.
+agent = "llm"                 # llm | disabled
+reviewer = "llm"              # llm | disabled
+max_review_iterations = 2
+max_section_tokens = 1200
+max_report_tokens = 5000
+# 0 means all selected paper-level handles; positive values bound prompt size.
+max_section_sources = 8
+# full drafts from the section source set in one call. batch_refine splits
+# larger sets into batches and incrementally revises the same section.
+source_strategy = "full"       # full | batch_refine
+source_batch_size = 10
+max_source_batches = 0         # 0 means all batches
+review_source_batches = false  # true reviews after each batch-refine batch
+review_trace = "meta"         # off | meta | full
+
+# Report write policy:
+# - overwrite: replace 08-report/report.md and companion artifacts.
+# - archive: copy the existing report package to 08-report/archives/<label>
+#   before overwriting it.
+# - variant: write a new package to 08-report/variants/<label> without
+#   replacing the current report.md when it already exists.
+output_mode = "overwrite"     # overwrite | archive | variant
+output_label = ""             # optional folder label for archive/variant
+
+# Allow the writer/reviewer to request bounded read-only source context.
+allow_source_backtracking = true
+max_backtracking_calls = 8
+max_backtracking_tokens = 6000
+
+[report.audit]
+citations = true
+metrics = true
+claims = true
+strict = false
+
 [code_task]
 # Source project copied/worktree-prepared into code_task/workspace.
 code_root = "examples/code_tasks/tiny_digits_mlp_project"
@@ -356,6 +406,25 @@ max_proposal_chars = 42000
 | `[search].strict` | Fails immediately when search cannot produce real/cache results. Use this when fixture fallback would hide a bad run. |
 | `[retrieval].top_k` | Number of local artifact chunks retrieved into later prompts when artifact retrieval is enabled. |
 | `[report].mode` | `auto` chooses based on available experiment results; `research_only` avoids experiment claims; `experiment` expects results. |
+| `[report].template` | Built-in report template name (`survey`, `experiment`, `reproduction`) or a custom Markdown path. `auto` follows `mode`. |
+| `[report].criteria` | Built-in reviewer criteria or a custom Markdown path. `auto` follows `template`. |
+| `[report].style` | Tone hint for report writing: `paper`, `technical`, or `concise`. |
+| `[report].draft_sections` | When true, keeps Writer Agent section drafts under `08-report/sections/`. Default false keeps compact reports. |
+| `[report].debug_artifacts` | When true, keeps reviewer findings, tool results, and iteration traces under `08-report/audit/` and `08-report/iterations/`. Default false. |
+| `[report].agent` / `[report].reviewer` | Report writer/reviewer backend. V2.4 local path expects LLM for quality; disabled mode is a fallback. |
+| `[report].max_review_iterations` | Maximum writer/reviewer revision rounds. |
+| `[report].max_section_tokens` / `[report].max_report_tokens` | Token budgets for section drafting and final report assembly. |
+| `[report].max_section_sources` | Maximum model-facing source handles assigned to each section plan. `0` exposes all selected paper-level handles; full-text chunks stay available through bounded backtracking tools. |
+| `[report].source_strategy` | `full` drafts each section from the configured source set in one pass. `batch_refine` splits larger source sets and revises each section incrementally. |
+| `[report].source_batch_size` | Number of source handles per batch when `source_strategy = "batch_refine"`. |
+| `[report].max_source_batches` | Maximum batches per section in `batch_refine`; `0` means all batches. |
+| `[report].review_source_batches` | When true, reviewer checks run after each `batch_refine` integration batch. This improves control but increases LLM cost. |
+| `[report].output_mode` / `.output_label` | Controls reruns of 08-report: overwrite in place, archive the old report before overwriting, or write a separate variant package. |
+| `[report].review_trace` | Reviewer trace retention: `off`, `meta`, or `full`. |
+| `[report].allow_source_backtracking` | Allows report tools to retrieve bounded extra evidence from current-run source handles. |
+| `[report].max_backtracking_calls` / `[report].max_backtracking_tokens` | Source-backtracking call and token budgets. |
+| `[report.audit].citations` / `.metrics` / `.claims` | Enables citation, metric, and claim audit components. |
+| `[report.audit].strict` | Reserved strict mode for blocking final reports on warnings; default false. |
 
 ### Evidence Source Fields
 

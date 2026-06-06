@@ -97,7 +97,7 @@ plan -> search -> read -> synthesize -> design experiment
 | `design` | `experiment_plan.json` | 选择安全实验模板和参数。 |
 | `code` | `experiment.py` | 根据模板生成代码，或准备内嵌 code-task harness。 |
 | `run` | `results.json`, `stdout.txt`, `stderr.txt` | 执行实验并解析数值指标。 |
-| `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json` | 写带 citation 的论文式报告；启用 LLM 时由 LLM 支持。 |
+| `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | 基于模板写带 citation 的报告，并保留有界 source backtracking、报告记忆和审计产物；启用 LLM 时由 LLM 支持。 |
 
 ## Search 与 LLM 边界
 
@@ -133,7 +133,7 @@ WORKFLOWS 只保留产物归属层面的说明；完整文件树放在 [使用�
 - `04-synthesize` 负责从 read 阶段产物推导出的紧凑 evidence bridge、gaps、ideas、novelty hints、synthesis 和 hypothesis。
 - `05-design` 负责 experiment contracts 和 experiment plans。
 - 当 research pipeline 衔接代码执行时，`06-code/code_task_run` 会嵌入与 standalone code task 相同形态的 artifact。
-- `08-report` 负责最终报告包：报告正文、references、manifest 和质量检查。
+- `08-report` 负责最终报告包：报告正文、references、manifest、紧凑报告记忆、source/citation/metric audit 和质量检查。
 
 这样可以让详细运行文件保持可追踪，同时不要求读者在理解 workflow 前先读完每个 JSON/JSONL。主要用于诊断或可重建的文件，应该通过 `debug_artifacts` 管控，或明确标注为 cleanup-safe。
 

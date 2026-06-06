@@ -442,12 +442,17 @@ def _collect_run(ctx: "Context") -> CollectedStageResult:
 
 
 def _collect_report(ctx: "Context") -> CollectedStageResult:
-    report_path = ctx.artifact_path("report.md")
-    references_path = ctx.artifact_path("references.bib")
-    quality_path = ctx.artifact_path("report_quality.json")
-    manifest_path = ctx.artifact_path("manifest.json")
+    report_dir = _report_artifact_dir(ctx)
+    report_path = report_dir / "report.md"
+    references_path = report_dir / "references.bib"
+    citation_map_path = report_dir / "citation_map.json"
+    quality_path = report_dir / "report_quality.json"
+    memory_path = report_dir / "report_memory.json"
+    audit_path = report_dir / "report_audit.json"
+    manifest_path = report_dir / "manifest.json"
     report_text = read_text(report_path)
     quality = read_json(quality_path)
+    audit = read_json(audit_path) if audit_path.exists() else {}
     manifest = read_json(manifest_path)
     papers = manifest.get("cited_papers", []) if isinstance(manifest, dict) else []
     cited_paper_ids = [
@@ -459,23 +464,50 @@ def _collect_report(ctx: "Context") -> CollectedStageResult:
         report_path=_rel(ctx, report_path),
         references_path=_rel(ctx, references_path),
         quality_path=_rel(ctx, quality_path),
+        memory_path=_rel(ctx, memory_path) if memory_path.exists() else None,
+        audit_path=_rel(ctx, audit_path) if audit_path.exists() else None,
         manifest_path=_rel(ctx, manifest_path),
         report_mode=str(manifest.get("report_mode", "")) if isinstance(manifest, dict) else "",
+        template_name=str(
+            (manifest.get("report_template", {}) or {}).get("name", "")
+        )
+        if isinstance(manifest, dict)
+        else "",
+        audit_status=str(audit.get("status", "")) if isinstance(audit, dict) else "",
         cited_paper_ids=cited_paper_ids,
         legacy_outputs={
             "report.md": _rel(ctx, report_path),
             "references.bib": _rel(ctx, references_path),
+            **({"citation_map.json": _rel(ctx, citation_map_path)} if citation_map_path.exists() else {}),
             "report_quality.json": _rel(ctx, quality_path),
+            **({"report_memory.json": _rel(ctx, memory_path)} if memory_path.exists() else {}),
+            **({"report_audit.json": _rel(ctx, audit_path)} if audit_path.exists() else {}),
             "manifest.json": _rel(ctx, manifest_path),
         },
     )
     contract = {
         "schema_version": "report_contract.v1",
         "report_mode": state.report_mode,
+        "template_name": state.template_name,
         "quality_status": quality.get("status") if isinstance(quality, dict) else None,
+        "audit_status": state.audit_status,
         "cited_paper_ids": cited_paper_ids,
     }
     return CollectedStageResult(state=state, contract=contract, report_markdown=report_text)
+
+
+def _report_artifact_dir(ctx: "Context") -> Path:
+    """Return the report package directory for normal or variant output."""
+    stage_dir = ctx.stage_dir()
+    if str(ctx.config.get("report_output_mode") or "").strip().lower() == "variant":
+        marker_path = stage_dir / "latest_variant.json"
+        if marker_path.exists():
+            marker = read_json(marker_path)
+            if isinstance(marker, dict):
+                variant_dir = ctx.resolve_artifact(str(marker.get("output_dir") or ""))
+                if variant_dir is not None and (variant_dir / "report.md").exists():
+                    return variant_dir
+    return stage_dir
 
 
 def _rel(ctx: "Context", path: Path) -> str:

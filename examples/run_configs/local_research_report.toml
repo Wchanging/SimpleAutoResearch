@@ -43,3 +43,10 @@ top_k = 4
 
 [report]
 mode = "research_only"
+template = "survey"
+criteria = "auto"
+
+[report.audit]
+citations = true
+metrics = false
+claims = true

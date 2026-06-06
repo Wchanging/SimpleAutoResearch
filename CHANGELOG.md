@@ -6,6 +6,23 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-06-05
 
+### Added
+
+- Added the V2.4 report foundation under `src/simple_ar/report/`: Markdown
+  report templates, reviewer criteria files, compact report memory, read-only
+  source-backtracking tools, and local report audit artifacts.
+- `08-report` now writes `report_memory.json` and `report_audit.json` in
+  addition to `report.md`, `references.bib`, `manifest.json`, and
+  `report_quality.json`.
+- Pipeline config now supports report template/reviewer settings, source
+  backtracking budgets, and `[report.audit]` switches.
+- Added a bounded report Writer/Reviewer loop. In LLM mode, `08-report` now
+  drafts template sections, reviews each section against criteria, performs
+  limited revisions, and writes reviewer findings into `report_audit.json`.
+- Added report rerun output policies: `overwrite`, `archive`, and `variant`.
+  `variant` writes an extra report package under `08-report/variants/<label>/`
+  without replacing the current main `report.md`.
+
 ### Changed
 
 - `code-task execute` now runs continuously to real review gates by default,
@@ -25,6 +42,21 @@ This file records user-visible project changes in reverse chronological order. P
   family and be measured by the benchmark.
 - Embedded code-task experiments now label forwarded logs as patched benchmark
   stdout/stderr to avoid confusion with standalone baseline/patched artifacts.
+- Report generation now uses short model-facing citation keys such as `P1` and
+  maps them back to verified provider ids before citation audit, reducing
+  failures from long OpenAlex/Semantic Scholar id copying.
+- Report section planning now uses a configurable `max_section_sources` budget
+  instead of hard-coding four source handles per section.
+- `max_section_sources = 0` now exposes all selected paper-level handles to
+  each report section while leaving full-text chunks for bounded backtracking,
+  which is useful for large-context survey runs.
+- Survey report drafting now separates drafting order from final section order:
+  evidence-heavy body sections are drafted before Introduction/Abstract, while
+  the final Markdown still follows the template layout.
+- Report drafting now supports an optional `batch_refine` source strategy for
+  incrementally integrating larger paper sets into each section.
+- `batch_refine` can optionally run reviewer checks after each source batch via
+  `review_source_batches = true`.
 
 ### Internal
 

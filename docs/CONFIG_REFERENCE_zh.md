@@ -163,6 +163,53 @@ timeout = 60
 # auto 会根据是否有实验结果选择 experiment 或 research_only 报告结构。
 mode = "auto"                 # auto | research_only | experiment
 
+# 内置模板名或自定义 Markdown 路径。auto 会把 research_only 映射到 survey，
+# 把 experiment 映射到 experiment。
+template = "auto"             # auto | survey | experiment | reproduction | path/to/template.md
+
+# 内置 reviewer criteria 或自定义 Markdown 路径。auto 跟随 template。
+criteria = "auto"
+
+# 报告语气提示。
+style = "paper"               # paper | technical | concise
+
+# 默认保持紧凑；需要逐节草稿和完整 trace 时再打开。
+draft_sections = false
+debug_artifacts = false
+
+# V2.4 本地路径以 LLM writer/reviewer 为报告质量主体。
+agent = "llm"                 # llm | disabled
+reviewer = "llm"              # llm | disabled
+max_review_iterations = 2
+max_section_tokens = 1200
+max_report_tokens = 5000
+# 0 表示每节都暴露全部已选论文级 handles；正数用于控制 prompt 长度。
+max_section_sources = 8
+source_strategy = "full"       # full | batch_refine
+source_batch_size = 10
+max_source_batches = 0         # 0 表示使用全部批次
+review_source_batches = false  # true 表示每个 batch_refine 批次后都审查
+review_trace = "meta"         # off | meta | full
+
+# 报告写入策略：
+# - overwrite：覆盖 08-report/report.md 及配套产物。
+# - archive：覆盖前把旧报告包复制到 08-report/archives/<label>。
+# - variant：在已有 report.md 时写入 08-report/variants/<label>，
+#   不替换当前主报告。
+output_mode = "overwrite"     # overwrite | archive | variant
+output_label = ""             # archive/variant 的可选目录标签
+
+# 允许 writer/reviewer 在预算内只读回查当前 run 的 source handles。
+allow_source_backtracking = true
+max_backtracking_calls = 8
+max_backtracking_tokens = 6000
+
+[report.audit]
+citations = true
+metrics = true
+claims = true
+strict = false
+
 [code_task]
 # 源项目会被复制或 worktree 准备到 code_task/workspace。
 code_root = "examples/code_tasks/tiny_digits_mlp_project"
@@ -345,6 +392,25 @@ max_proposal_chars = 42000
 | `[search].strict` | 搜索无法产出真实或 cached 结果时直接失败。用于避免 fixture fallback 掩盖坏 run。 |
 | `[retrieval].top_k` | 启用 artifact retrieval 时，后续 prompt 检索多少个本地 artifact chunk。 |
 | `[report].mode` | `auto` 根据是否存在实验结果选择报告结构；`research_only` 避免实验结论；`experiment` 要求有结果证据。 |
+| `[report].template` | 内置报告模板名（`survey`、`experiment`、`reproduction`）或自定义 Markdown 路径。`auto` 跟随 `mode`。 |
+| `[report].criteria` | 内置 reviewer criteria 或自定义 Markdown 路径。`auto` 跟随 `template`。 |
+| `[report].style` | 报告语气提示：`paper`、`technical` 或 `concise`。 |
+| `[report].draft_sections` | 是否把 Writer Agent 的分节草稿保留到 `08-report/sections/`；默认 false 保持紧凑输出。 |
+| `[report].debug_artifacts` | 是否把 reviewer findings、tool results 和 iteration traces 保留到 `08-report/audit/` 与 `08-report/iterations/`；默认 false。 |
+| `[report].agent` / `[report].reviewer` | 报告 writer/reviewer 后端。V2.4 本地路径建议用 LLM；disabled 只是 fallback。 |
+| `[report].max_review_iterations` | writer/reviewer 最多修订轮数。 |
+| `[report].max_section_tokens` / `[report].max_report_tokens` | section 起草和最终报告组装的 token 预算。 |
+| `[report].max_section_sources` | 每个 section plan 分配给模型的最多 source handles。`0` 表示暴露全部已选论文级 handles；全文 chunks 仍通过有界 backtracking tools 按需回查。 |
+| `[report].source_strategy` | `full` 表示每节一次性使用配置的 source set；`batch_refine` 表示把较大的 source set 分批，并在同一 section 草稿上逐批增量修订。 |
+| `[report].source_batch_size` | `source_strategy = "batch_refine"` 时每批 source handles 数量。 |
+| `[report].max_source_batches` | `batch_refine` 下每节最多处理多少批；`0` 表示处理全部批次。 |
+| `[report].review_source_batches` | 为 true 时，每个 `batch_refine` 批次整合后都会调用 reviewer。质量控制更强，但 LLM 成本更高。 |
+| `[report].output_mode` / `.output_label` | 控制重跑 08-report 时的写入方式：直接覆盖、覆盖前归档旧报告，或写一份不覆盖主报告的 variant。 |
+| `[report].review_trace` | reviewer trace 保留策略：`off`、`meta` 或 `full`。 |
+| `[report].allow_source_backtracking` | 是否允许 report tools 在当前 run 的 source handles 中有界回查更多证据。 |
+| `[report].max_backtracking_calls` / `[report].max_backtracking_tokens` | source backtracking 调用次数和返回 token 预算。 |
+| `[report.audit].citations` / `.metrics` / `.claims` | 启用 citation、metric 和 claim audit 组件。 |
+| `[report.audit].strict` | 后续 strict mode 可把 warning 作为阻断条件；默认 false。 |
 
 ### Evidence Source 字段
 

@@ -96,13 +96,21 @@ Use a TOML config for real runs with many options. See the
 ```bash
 uv run simple-ar resume runs/<run-id>
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
+uv run simple-ar resume runs/<run-id> --from-stage report --to-stage report --report-output-mode variant --report-output-label survey-v2
 ```
 
 **Options**:
 
 `resume` accepts `RUN_DIR` plus most `run` options as overrides, including
-`--config`, stage range, LLM/search/report options, and embedded code-task
-options.
+`--config`, stage range, LLM/search/report options, report output policy, and
+embedded code-task options.
+
+Common report output options:
+
+| Option | Type | Description |
+|---|---|---|
+| `--report-output-mode` | choice | `overwrite`, `archive`, or `variant`. `variant` writes `08-report/variants/<label>/` without replacing the current main report. |
+| `--report-output-label` | string | Optional folder label for report archive/variant outputs. |
 
 **Outputs**:
 

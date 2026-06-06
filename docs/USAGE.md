@@ -105,6 +105,20 @@ Then generate a literature-only report from the existing artifacts:
 uv run simple-ar resume runs/<run-id> --from-stage report
 ```
 
+If the current report is worth keeping, generate a separate report package
+instead of replacing `08-report/report.md`:
+
+```bash
+uv run simple-ar resume runs/<run-id> --from-stage report --to-stage report \
+  --report-output-mode variant --report-output-label survey-v2
+```
+
+This writes the new package under
+`08-report/variants/survey-v2/` and keeps the current `report.md` unchanged.
+Use `--report-output-mode archive` when you prefer to overwrite the main report
+but automatically copy the previous package to `08-report/archives/<label>/`
+first.
+
 By default, report drafting is automatic: if `results.json` is missing, the
 report switches to a literature-only structure. You can force a mode:
 
@@ -112,6 +126,37 @@ report switches to a literature-only structure. You can force a mode:
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experiment
 ```
+
+#### Report Source Strategy
+
+For small or medium literature sets, the practical default is to let the report
+agent see all selected paper-level handles:
+
+```toml
+[report]
+max_section_sources = 0
+source_strategy = "full"
+```
+
+This does not place every full-text chunk into every prompt. Paper-level
+handles carry titles, abstracts, short citation keys, and compact metadata;
+the writer/reviewer can still request bounded full-text context through the
+report tools when backtracking is enabled.
+
+For larger candidate sets, use incremental drafting:
+
+```toml
+[report]
+max_section_sources = 0
+source_strategy = "batch_refine"
+source_batch_size = 10
+max_source_batches = 0
+review_source_batches = false
+```
+
+`batch_refine` drafts each section from the first source batch, then revises
+the same section as later batches arrive. Enable `review_source_batches = true`
+only when you want stronger per-batch control and accept the extra LLM cost.
 
 ### What Is LLM-Backed vs Deterministic
 
@@ -429,10 +474,21 @@ Key files, grouped by directory:
   - `artifact_retention_policy.json` / `.md`: classifies stable outputs,
     evidence tables, cache artifacts, traces, debug diagnostics, and rebuildable
     files so cleanup stays explicit.
-- Later report stage
-  - `08-report/report.md`: report generation primarily consumes Paper Briefs
-    and the synthesis brief so Related Work, Search Scope, and Limitations stay
-    grounded.
+- `08-report/`
+  - `report.md`: final Markdown report assembled from the active report
+    template, known evidence, and experiment/code-task results when present.
+  - `references.bib`: bounded bibliography generated from actually cited
+    papers, not arbitrary model-suggested references.
+  - `manifest.json`: report mode, template/criteria paths, cited paper IDs,
+    quality status, and audit status for reproducibility.
+  - `report_memory.json`: compact section plan, source handles, metric claims,
+    and limitations used to keep later writer/reviewer passes coherent.
+  - `report_quality.json`: deterministic safety checks for citation
+    provenance, cited-paper coverage, metric visibility, and runtime/fallback
+    disclosure.
+  - `report_audit.json`: compact audit package for citations, metrics,
+    claim-support warnings, and Writer/Reviewer findings when agent mode is
+    enabled.
 
 `[research].planner = "auto"` uses an LLM planner when `[llm].enabled = true`
 and falls back to deterministic planning when the provider is unavailable.
@@ -1214,6 +1270,8 @@ The embedded artifact layout is:
   references.bib
   manifest.json
   report_quality.json
+  report_memory.json
+  report_audit.json
 ```
 
 This path is convenient for end-to-end experiments, but it deliberately trades

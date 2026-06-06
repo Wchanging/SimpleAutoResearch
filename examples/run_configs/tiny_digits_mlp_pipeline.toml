@@ -45,6 +45,14 @@ timeout = 60
 
 [report]
 mode = "auto"
+template = "experiment"
+criteria = "auto"
+allow_source_backtracking = true
+
+[report.audit]
+citations = true
+metrics = true
+claims = true
 
 [code_task]
 # Project prepared under 06-code/code_task_run/code_task/workspace.

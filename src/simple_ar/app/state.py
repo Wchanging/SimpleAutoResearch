@@ -108,8 +108,12 @@ class ReportState(StageRuntime):
     report_path: str | None = None
     references_path: str | None = None
     quality_path: str | None = None
+    memory_path: str | None = None
+    audit_path: str | None = None
     manifest_path: str | None = None
     report_mode: str = ""
+    template_name: str = ""
+    audit_status: str = ""
     cited_paper_ids: list[str] = Field(default_factory=list)
 
 

@@ -59,12 +59,18 @@ class PromptTests(unittest.TestCase):
             report_mode="research_only",
         )
 
-        self.assertIn("## Search Scope", prompt)
-        self.assertIn("## Thematic Synthesis", prompt)
-        self.assertIn("## Approach Patterns", prompt)
-        self.assertIn("## Open Questions", prompt)
+        self.assertIn("## Introduction And Scope", prompt)
+        self.assertIn("## Method Families", prompt)
+        self.assertIn("## Evaluation And Benchmarks", prompt)
+        self.assertIn("## Design Patterns And Failure Modes", prompt)
+        self.assertIn("## Research Gaps And Opportunities", prompt)
         self.assertIn("literature-only survey-style report", prompt)
         self.assertIn("Do not include Method, Experiments, or Results sections", prompt)
+        self.assertIn("Do not include operational sections", prompt)
+        self.assertIn("taxonomy", prompt)
+        self.assertIn("comparison table", prompt)
+        self.assertIn("boundary condition", prompt)
+        self.assertIn("do not list papers as a retrieval log", prompt)
         self.assertIn("fixture placeholders", prompt)
 
     def test_read_and_synthesis_prompts_accept_source_labelled_evidence(self) -> None:

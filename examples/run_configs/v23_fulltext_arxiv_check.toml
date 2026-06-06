@@ -103,3 +103,11 @@ top_k = 6
 # Useful if you later change to_stage to report, but this check normally stops
 # at synthesize.
 mode = "research_only"
+template = "survey"
+criteria = "auto"
+allow_source_backtracking = true
+
+[report.audit]
+citations = true
+metrics = true
+claims = true

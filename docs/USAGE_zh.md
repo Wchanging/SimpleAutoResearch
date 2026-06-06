@@ -94,12 +94,48 @@ uv run simple-ar run --topic "toy topic" --to-stage synthesize
 uv run simple-ar resume runs/<run-id> --from-stage report
 ```
 
+如果当前报告已经比较满意，不想被下一次重写覆盖，可以写一份独立报告包：
+
+```bash
+uv run simple-ar resume runs/<run-id> --from-stage report --to-stage report \
+  --report-output-mode variant --report-output-label survey-v2
+```
+
+新报告会写入 `08-report/variants/survey-v2/`，当前主报告
+`08-report/report.md` 不会被替换。如果你希望主报告被更新，但覆盖前自动保留旧版本，可以使用
+`--report-output-mode archive`，旧报告包会复制到 `08-report/archives/<label>/`。
+
 默认 `report-mode` 是自动判断：如果没有 `results.json`，就写 research-only 结构；如果有实验结果，就写 experiment 结构。也可以强制指定：
 
 ```bash
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode experiment
 ```
+
+#### 报告 source strategy
+
+对于小到中等规模的文献集合，比较实用的默认方式是让 report agent 看到全部已选论文级 handles：
+
+```toml
+[report]
+max_section_sources = 0
+source_strategy = "full"
+```
+
+这不会把每篇论文的全部全文 chunk 都塞进每个 prompt。论文级 handles 只包含标题、摘要、短 citation key 和紧凑 metadata；如果启用了 source backtracking，writer/reviewer 仍然可以通过只读 report tools 有界回查更多全文片段。
+
+对于更大的候选集合，可以使用增量起草：
+
+```toml
+[report]
+max_section_sources = 0
+source_strategy = "batch_refine"
+source_batch_size = 10
+max_source_batches = 0
+review_source_batches = false
+```
+
+`batch_refine` 会先用第一批 source 起草每个 section，再随着后续批次进入不断修订同一个 section。只有在需要更强的逐批质量控制、且可以接受更高 LLM 成本时，才建议打开 `review_source_batches = true`。
 
 ### 哪些部分依赖 LLM，哪些部分是确定性的
 
@@ -350,8 +386,13 @@ literature provider，并重新构建本地检索加速索引。
   - `external_agent_backend.md`：Codex、Claude Code、OpenCode 等外部 agent backend 的接入边界说明。
 - `05-design/governance/`（debug-only）
   - `artifact_retention_policy.json` / `.md`：把 search artifacts 分为稳定产物、evidence table、cache、trace、debug 和可重建文件，避免无边界新增 JSON/JSONL。
-- 后续报告阶段
-  - `08-report/report.md`：报告生成主要消费 Paper Brief 和 synthesis brief，让 Related Work、Search Scope 和 Limitations 更明确地绑定证据。
+- `08-report/`
+  - `report.md`：基于当前报告模板、已知证据以及可用的实验/code-task 结果组装最终 Markdown 报告。
+  - `references.bib`：只为正文实际引用的论文生成有界 bibliography，不保留模型随口给出的外部引用。
+  - `manifest.json`：记录 report mode、模板/审查标准路径、正文引用论文、质量状态和审计状态，便于复现。
+  - `report_memory.json`：紧凑保存 section plan、source handles、metric claims 和 limitations，用于后续 writer/reviewer 多轮调用时维持任务记忆。
+  - `report_quality.json`：确定性安全检查，覆盖 citation provenance、正文引用覆盖、metric visibility 和 runtime/fallback disclosure。
+  - `report_audit.json`：紧凑审计包，记录 citation、metric、claim-support warning，以及启用 agent mode 时的 Writer/Reviewer findings。
 
 `[research].planner = "auto"` 会在 `[llm].enabled = true` 时调用 LLM planner，
 用于生成更强的 research questions 和 query expansion；provider 不可用时会回退到
@@ -910,6 +951,8 @@ uv run simple-ar run \
   references.bib
   manifest.json
   report_quality.json
+  report_memory.json
+  report_audit.json
 ```
 
 这个路径方便端到端实验，但会牺牲 standalone workflow 的人工暂停点。对安全敏感或难调试项目，建议先用 standalone `code-task execute` 或手动 primitive 路径。

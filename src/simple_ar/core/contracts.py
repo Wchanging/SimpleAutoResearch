@@ -61,7 +61,15 @@ CONTRACTS: dict[Stage, StageContract] = {
     Stage.REPORT: StageContract(
         stage=Stage.REPORT,
         requires=(Stage.SYNTHESIZE,),
-        outputs=("contract.json", "report.md", "references.bib", "report_quality.json"),
+        outputs=(
+            "contract.json",
+            "report.md",
+            "references.bib",
+            "citation_map.json",
+            "report_memory.json",
+            "report_quality.json",
+            "report_audit.json",
+        ),
         description="Assemble the final report and citation audit artifacts.",
     ),
 }

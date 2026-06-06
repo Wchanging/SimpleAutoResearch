@@ -1,24 +1,481 @@
 from __future__ import annotations
 
 import unittest
+import re
 from pathlib import Path
 
 from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
 from simple_ar.core.pipeline import Context
+from simple_ar.report.agent import run_report_agent
+from simple_ar.report.audit import build_report_audit
+from simple_ar.report.context import build_report_context
+from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.quality import build_report_quality
-from simple_ar.pipeline_stages.report import (
+from simple_ar.report.schema import ReportRuntimeConfig, ReportToolCall
+from simple_ar.report.schema import ReportSectionReview
+from simple_ar.report.service import (
     _append_references_section,
     _build_research_report,
     _build_report,
     _body_citation_ids,
+    _expand_short_citation_keys,
+    _citation_display_map,
+    _citation_map_artifact,
     _cited_papers,
+    _display_citation_numbers,
     _report_bound_errors,
+    _sanitize_report_citations,
     _strip_references_section,
+    _validated_agent_report,
 )
+from simple_ar.report.templates import load_report_template_bundle
+from simple_ar.report.tool_gateway import ReportToolGateway
+
+
+class _FakeReportLLM:
+    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+        section_id = _extract_prompt_value(user, "section_id") or "section"
+        heading = _extract_prompt_value(user, "heading") or "Section"
+        if "reviewer" in label:
+            return {
+                "section_id": section_id,
+                "verdict": "pass",
+                "findings": [],
+                "context_requests": [],
+                "revision_instructions": [],
+                "notes": "Looks evidence-bound.",
+            }
+        return {
+            "section_id": section_id,
+            "heading": heading,
+            "status": "drafted",
+            "draft_markdown": f"This section summarizes current evidence [@P1] for {heading}.",
+            "used_sources": ["paper:paper-1"],
+            "metric_ids": [],
+            "citations": ["P1"],
+            "claims": [
+                {
+                    "claim_id": f"claim:{section_id}",
+                    "claim": f"{heading} is grounded in current-run evidence.",
+                    "status": "partially_supported",
+                    "evidence_handles": ["paper:paper-1"],
+                    "metric_ids": [],
+                    "citation_ids": ["P1"],
+                    "notes": "Fake LLM test claim.",
+                }
+            ],
+            "open_questions": [],
+            "limitations": [],
+        }
+
+
+def _extract_prompt_value(prompt: str, key: str) -> str:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', prompt)
+    return match.group(1) if match else ""
 
 
 class ReportSafetyTests(unittest.TestCase):
+    def test_report_review_accepts_object_revision_instructions(self) -> None:
+        review = ReportSectionReview.model_validate(
+            {
+                "section_id": "related_work",
+                "verdict": "revise_required",
+                "findings": [],
+                "context_requests": [],
+                "revision_instructions": [
+                    {
+                        "finding_id": "rw-001",
+                        "suggested_action": "Replace broad benchmark claims with source-bound wording.",
+                    }
+                ],
+                "notes": "",
+            }
+        )
+
+        self.assertEqual(
+            review.revision_instructions,
+            ["rw-001: Replace broad benchmark claims with source-bound wording."],
+        )
+
+    def test_sanitize_report_citations_removes_unknown_placeholders(self) -> None:
+        body = (
+            "# Draft\n\n"
+            "Known evidence [@paper-1; @1] and an unsupported placeholder [@missing].\n"
+        )
+
+        sanitized, removed = _sanitize_report_citations(body, {"paper-1"})
+
+        self.assertEqual(removed, ["1", "missing"])
+        self.assertIn("[@paper-1]", sanitized)
+        self.assertNotIn("@1", sanitized)
+        self.assertNotIn("@missing", sanitized)
+        validate_citations(sanitized, {"paper-1"})
+
+    def test_validated_agent_report_repairs_unknown_citations(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="",
+            url="https://example.com/paper-1",
+        )
+        draft = (
+            "# Draft\n\n"
+            "Known evidence is still cited [@paper-1], while a malformed "
+            "placeholder should be removed [@paper-typo].\n"
+        )
+
+        result = _validated_agent_report(
+            Context(Path("run"), "Agent Simulation", config={}),
+            draft,
+            search_meta={"source": "openalex", "status": "ok"},
+            plan={},
+            papers=[paper],
+            citation_key_map={},
+            report_mode="research_only",
+            results_present=False,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        report_body, removed = result
+        self.assertEqual(removed, ["paper-typo"])
+        self.assertIn("[@paper-1]", report_body)
+        self.assertNotIn("paper-typo", report_body)
+
+    def test_short_citation_keys_expand_before_validation(self) -> None:
+        body = "# Draft\n\nKnown evidence [@P1; @p2]. Bare fallback [P1, P2].\n"
+
+        expanded = _expand_short_citation_keys(body, {"P1": "paper-1", "P2": "paper-2"})
+
+        self.assertIn("[@paper-1; @paper-2]", expanded)
+        self.assertIn("Bare fallback [@paper-1; @paper-2]", expanded)
+        validate_citations(expanded, {"paper-1", "paper-2"})
+
+    def test_validated_agent_report_accepts_short_citation_keys(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="",
+            url="https://example.com/paper-1",
+        )
+
+        result = _validated_agent_report(
+            Context(Path("run"), "Agent Simulation", config={}),
+            "# Draft\n\nKnown evidence is cited with a short model key [@P1].\n",
+            search_meta={"source": "openalex", "status": "ok"},
+            plan={},
+            papers=[paper],
+            citation_key_map={"P1": "paper-1"},
+            report_mode="research_only",
+            results_present=False,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        report_body, removed = result
+        self.assertEqual(removed, [])
+        self.assertIn("[@paper-1]", report_body)
+        self.assertNotIn("[@P1]", report_body)
+
+    def test_numeric_citation_display_uses_map_without_losing_source_ids(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="",
+            url="https://example.com/paper-1",
+        )
+        citation_map = _citation_display_map([paper])
+
+        display = _display_citation_numbers("Known evidence [@paper-1]. Extra note [paper-1].", citation_map)
+        report = _append_references_section(display, [paper], citation_map)
+
+        self.assertIn("Known evidence [1].", report)
+        self.assertIn("Extra note [1].", report)
+        self.assertIn("- [1] Known Paper.", report)
+        self.assertNotIn("[@paper-1]", report)
+
+    def test_citation_map_records_model_keys(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="",
+            url="https://example.com/paper-1",
+        )
+
+        artifact = _citation_map_artifact({"paper-1": 1}, [paper], {"P1": "paper-1"})
+
+        self.assertEqual(artifact["model_key_style"], "short_keys")
+        self.assertEqual(artifact["entries"][0]["model_key"], "P1")
+        self.assertEqual(artifact["entries"][0]["paper_id"], "paper-1")
+
+    def test_report_template_bundle_and_memory_are_structured(self) -> None:
+        ctx = Context(Path("run"), "Agent Simulation", config={})
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=["Ada"],
+            abstract="A paper about agent systems.",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            ctx,
+            report_mode="research_only",
+            goal="# Goal\nStudy agents.",
+            problem="# Problem\nWhat evidence exists?",
+            search_meta={"source": "openalex", "status": "ok"},
+            synthesis="# Synthesis\nAgent workflows have roles.",
+            hypothesis="# Hypothesis\nRole separation may help.",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="- Known evidence [@paper-1].",
+        )
+        template = load_report_template_bundle(
+            report_mode="research_only",
+            config=ReportRuntimeConfig(template="survey"),
+            project_root=Path.cwd(),
+        )
+        memory = initialize_report_memory(context=context, template=template)
+
+        self.assertEqual(template.name, "survey")
+        self.assertTrue(memory.section_plan)
+        self.assertNotIn("Intended Use", {section.heading for section in memory.section_plan})
+        self.assertNotIn("References", {section.heading for section in memory.section_plan})
+        self.assertIn("paper:paper-1", {handle.handle for handle in memory.source_handles})
+        self.assertIn("P1", {handle.citation_key for handle in memory.source_handles})
+
+    def test_report_memory_can_expose_all_selected_papers(self) -> None:
+        papers = [
+            Paper(
+                id=f"paper-{index}",
+                title=f"Known Paper {index}",
+                authors=[],
+                abstract="Known metadata.",
+                url=f"https://example.com/paper-{index}",
+            )
+            for index in range(1, 13)
+        ]
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="research_only",
+            goal="# Goal\nStudy agents.",
+            problem="# Problem\nWhat evidence exists?",
+            search_meta={"source": "openalex", "status": "ok"},
+            synthesis="# Synthesis\nAgent workflows have roles.",
+            hypothesis="# Hypothesis\nRole separation may help.",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row() for paper in papers],
+            papers=papers,
+            research_evidence_summary="- Known evidence.",
+            max_section_sources=0,
+        )
+        template = load_report_template_bundle(
+            report_mode="research_only",
+            config=ReportRuntimeConfig(template="survey"),
+            project_root=Path.cwd(),
+        )
+        memory = initialize_report_memory(context=context, template=template)
+
+        first_section = memory.section_plan[0]
+        paper_handles = [handle for handle in first_section.evidence_handles if handle.startswith("paper:")]
+
+        self.assertEqual(len(paper_handles), 12)
+
+    def test_report_agent_drafts_and_reviews_template_sections(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=["Ada"],
+            abstract="A paper about agent systems.",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="research_only",
+            goal="# Goal\nStudy agents.",
+            problem="# Problem\nWhat evidence exists?",
+            search_meta={"source": "openalex", "status": "ok"},
+            synthesis="# Synthesis\nAgent workflows have roles.",
+            hypothesis="# Hypothesis\nRole separation may help.",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="- Known evidence [@paper-1].",
+        )
+        template = load_report_template_bundle(
+            report_mode="research_only",
+            config=ReportRuntimeConfig(template="survey"),
+            project_root=Path.cwd(),
+        )
+        memory = initialize_report_memory(context=context, template=template)
+        gateway = ReportToolGateway(context)
+
+        result = run_report_agent(
+            client=_FakeReportLLM(),
+            context=context,
+            template=template,
+            memory=memory,
+            config=ReportRuntimeConfig(template="survey", max_review_iterations=0),
+            gateway=gateway,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.used_agent)
+        self.assertGreaterEqual(len(result.sections), 3)
+        self.assertIn("[@P1]", result.report_body)
+        self.assertNotIn("## Intended Use", result.report_body)
+        self.assertNotIn("## References", result.report_body)
+        self.assertTrue(result.iterations[0].section_id.startswith("method"))
+        self.assertLess(
+            result.report_body.index("## Abstract / Executive Summary"),
+            result.report_body.index("## Method Families"),
+        )
+
+    def test_report_agent_can_refine_sections_over_source_batches(self) -> None:
+        papers = [
+            Paper(
+                id=f"paper-{index}",
+                title=f"Known Paper {index}",
+                authors=[],
+                abstract="Known metadata.",
+                url=f"https://example.com/paper-{index}",
+            )
+            for index in range(1, 13)
+        ]
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="research_only",
+            goal="# Goal\nStudy agents.",
+            problem="# Problem\nWhat evidence exists?",
+            search_meta={"source": "openalex", "status": "ok"},
+            synthesis="# Synthesis\nAgent workflows have roles.",
+            hypothesis="# Hypothesis\nRole separation may help.",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row() for paper in papers],
+            papers=papers,
+            research_evidence_summary="- Known evidence.",
+            max_section_sources=0,
+        )
+        template = load_report_template_bundle(
+            report_mode="research_only",
+            config=ReportRuntimeConfig(template="survey"),
+            project_root=Path.cwd(),
+        )
+        memory = initialize_report_memory(context=context, template=template)
+
+        result = run_report_agent(
+            client=_FakeReportLLM(),
+            context=context,
+            template=template,
+            memory=memory,
+            config=ReportRuntimeConfig(
+                template="survey",
+                max_review_iterations=0,
+                source_strategy="batch_refine",
+                source_batch_size=5,
+                review_source_batches=True,
+            ),
+            gateway=ReportToolGateway(context),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(any(item.action == "integrate_sources" for item in result.iterations))
+        self.assertTrue(any(item.action == "review_source_batch" for item in result.iterations))
+
+    def test_report_tool_gateway_exports_and_resolves_sources(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="Known metadata.",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="experiment",
+            goal="",
+            problem="",
+            search_meta={},
+            synthesis="",
+            hypothesis="",
+            plan={},
+            results={"metrics": {"accuracy": 0.75}},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="",
+        )
+        gateway = ReportToolGateway(context)
+
+        tool_names = {tool["function"]["name"] for tool in gateway.openai_tools()}
+        self.assertIn("get_paper_brief", tool_names)
+        result = gateway.call(
+            ReportToolCall(
+                tool_name="get_metric_source",
+                arguments={"metric_id": "metric:accuracy"},
+            )
+        )
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.content["name"], "accuracy")
+        paper_result = gateway.call(
+            ReportToolCall(
+                tool_name="get_paper_brief",
+                arguments={"citation_key": "P1"},
+            )
+        )
+        self.assertEqual(paper_result.status, "ok")
+        self.assertEqual(paper_result.content["handles"][0]["cite_as"], "[@P1]")
+        self.assertNotIn("paper_id", paper_result.content["handles"][0])
+
+    def test_report_audit_records_unknown_citation_and_metric_sources(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="experiment",
+            goal="",
+            problem="",
+            search_meta={},
+            synthesis="",
+            hypothesis="",
+            plan={},
+            results={"metrics": {"accuracy": 0.75}},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="",
+        )
+        template = load_report_template_bundle(
+            report_mode="experiment",
+            config=ReportRuntimeConfig(template="experiment"),
+            project_root=Path.cwd(),
+        )
+        memory = initialize_report_memory(context=context, template=template)
+        audit = build_report_audit(
+            report="# Draft\n\nKnown claim [@missing]. accuracy is 0.75.\n",
+            report_body="# Draft\n\nKnown claim [@missing]. accuracy is 0.75.\n",
+            context=context,
+            memory=memory,
+        )
+
+        self.assertEqual(audit.status, "failed")
+        self.assertIn("missing", audit.citation_audit.unknown_citations)
+        self.assertIn("metric:accuracy", audit.metric_audit.matched_metrics)
+
     def test_model_written_references_are_replaced_with_known_papers(self) -> None:
         draft = (
             "# A Draft\n\n"
@@ -280,16 +737,43 @@ class ReportSafetyTests(unittest.TestCase):
             papers=[paper],
         )
 
-        self.assertIn("## Search Scope", report)
-        self.assertIn("## Thematic Synthesis", report)
-        self.assertIn("## Approach Patterns", report)
-        self.assertIn("## Open Questions", report)
-        self.assertNotIn("## Method", report)
-        self.assertNotIn("## Experiments", report)
-        self.assertNotIn("## Results", report)
+        self.assertIn("## Draft Status", report)
+        self.assertIn("## Research Question", report)
+        self.assertIn("## Available Sources", report)
+        self.assertIn("## Evidence Handoff", report)
+        self.assertIn("## Boundaries And Next Steps", report)
+        self.assertIn("conservative fallback", report)
+        self.assertNotRegex(report, r"(?m)^## Method\s*$")
+        self.assertNotRegex(report, r"(?m)^## Experiments\s*$")
+        self.assertNotRegex(report, r"(?m)^## Results\s*$")
         self.assertNotIn("experiment design, code generation, execution", report)
         self.assertIn("No experiment was executed", report)
-        self.assertIn("not a claim that the report covers the full literature", report)
+        self.assertIn("should not be treated as a complete literature-backed review", report)
+        self.assertNotIn("Hint:", report)
+        self.assertNotIn("Use this paper as", report)
+        self.assertNotIn("Paper Brief", report)
+        self.assertNotIn("Additional synthesis detail", report)
+        self.assertNotIn("## Search Scope", report)
+        self.assertNotIn("## Evidence Summary", report)
+
+    def test_research_only_bounds_reject_prompt_residue(self) -> None:
+        report = (
+            "# Draft\n\n"
+            "## Method Families\n\n"
+            "Paper Brief [@paper-1]: Hint: Use this paper as an example.\n\n"
+            "## Evidence Summary\n\n"
+            "Additional synthesis detail is available in the stage artifacts."
+        )
+
+        errors = _report_bound_errors(
+            report,
+            search_meta={"source": "openalex", "status": "ok"},
+            plan={},
+            report_mode="research_only",
+            results_present=False,
+        )
+
+        self.assertTrue(any("pipeline residue" in error for error in errors))
 
 
 if __name__ == "__main__":

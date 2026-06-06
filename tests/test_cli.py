@@ -68,6 +68,37 @@ class CliTests(unittest.TestCase):
             self.assertIn("02 search: done", status_text)
             self.assertIn("03 read: pending", status_text)
 
+    def test_research_only_report_run_skips_experiment_stages(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            output_root = Path(tmp) / "runs"
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "run",
+                        "--topic",
+                        "toy topic",
+                        "--to-stage",
+                        "report",
+                        "--output-root",
+                        str(output_root),
+                        "--report-mode",
+                        "research_only",
+                        "--no-llm",
+                        "--offline-search",
+                        "--quiet",
+                    ]
+                )
+
+            run_dir = next(output_root.iterdir())
+            self.assertTrue((run_dir / "04-synthesize" / "stage_meta.json").is_file())
+            self.assertTrue((run_dir / "08-report" / "report.md").is_file())
+            self.assertTrue((run_dir / "08-report" / "citation_map.json").is_file())
+            self.assertFalse((run_dir / "05-design" / "stage_meta.json").exists())
+            self.assertFalse((run_dir / "06-code" / "stage_meta.json").exists())
+            self.assertFalse((run_dir / "07-run" / "stage_meta.json").exists())
+
     def test_inspect_and_search_artifacts_commands_write_retrieval_files(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

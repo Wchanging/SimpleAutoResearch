@@ -1,25 +1,6 @@
-"""Pipeline stage adapters and default registry."""
+"""Pipeline stage adapters.
 
-from simple_ar.pipeline_stages.registry import (
-    HANDLERS,
-    execute_code,
-    execute_design,
-    execute_plan,
-    execute_read,
-    execute_report,
-    execute_run,
-    execute_search,
-    execute_synthesize,
-)
-
-__all__ = [
-    "HANDLERS",
-    "execute_code",
-    "execute_design",
-    "execute_plan",
-    "execute_read",
-    "execute_report",
-    "execute_run",
-    "execute_search",
-    "execute_synthesize",
-]
+Import ``simple_ar.pipeline_stages.registry`` when the full default handler
+registry is needed. Keeping package import side-effect free prevents domain
+services from pulling every stage into memory and avoids circular imports.
+"""
