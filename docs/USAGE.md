@@ -1,6 +1,6 @@
-# Usage And Configuration
+﻿# Usage And Configuration
 
-[中文版本](USAGE_zh.md)
+[涓枃鐗堟湰](USAGE_zh.md)
 
 This document explains how to install, configure, and run SimpleAutoResearch.
 It is the practical user guide; workflow concepts and artifact details live in
@@ -83,7 +83,7 @@ uv run simple-ar run --topic "toy topic" --to-stage report
 For repeatable multi-option runs, use a top-level TOML config:
 
 ```bash
-uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+uv run simple-ar run --config examples/full_pipeline_tiny_mlp/configs/pipeline.toml
 ```
 
 The config can provide `[run]`, `[llm]`, `[search]`, `[research]`,
@@ -500,23 +500,18 @@ When `[research].max_retrieval_rounds` is greater than `1`, the search stage can
 use uncovered required facets to run a bounded second follow-up round before it
 writes the final `papers.jsonl`.
 
-Local Markdown/text notes can be used as a conservative source without live
-literature-provider calls:
+The public research-only example uses live academic sources and bounded
+full-text extraction:
 
 ```bash
-uv run simple-ar run --config examples/run_configs/local_research_report.toml
+uv run simple-ar run --config examples/research_report/configs/research_report.toml
 ```
 
-That example config sets `[research].sources = ["local_files"]` and points
-`[research].local_documents` at `examples/research/local_agent_simulation_notes.md`.
-The local-file connector is intentionally conservative: it reads `.md` and
-`.txt` files as metadata-like records and uses lightweight keyword-overlap
-matching rather than exact query-string matching. When
-`[research].use_fulltext = true`, the search stage also records local/cached
-parser outcomes in `documents/fulltext_extraction.json` and feeds extracted
-text into `research_index/chunks.jsonl` before the read stage builds Paper Briefs. PDF
-inputs remain best-effort: they are parsed only when an optional parser is
-available and full-text intent is enabled.
+That config sets `[report].mode = "research_only"`, so the pipeline skips
+design/code/run and goes directly from search/read/synthesize to report.
+Local Markdown/text notes are still supported with
+`[research].sources = ["local_files"]`; see the local-notes snippet in
+`CONFIG_REFERENCE.md` when you want an offline private-corpus run.
 
 ### Resume And Status
 
@@ -556,16 +551,11 @@ small allowlisted subsets. The workflow is intentionally step-by-step so each
 stage can be reviewed.
 
 Initialize from a TOML config so project paths, benchmark metrics, workspace
-mode, model routing, and edit budgets stay in one reviewable file:
+mode, model routing, and edit budgets stay in one reviewable file. The bundled
+standalone example uses the medium review pipeline:
 
 ```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
-```
-
-For a slightly more realistic local example, use the medium review pipeline:
-
-```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/medium_review_pipeline.toml
+uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
 ```
 
 That example runs `python main.py --config configs/experiment.json
@@ -637,18 +627,18 @@ for the config schema.
 
 For normal use, prefer a TOML config plus the state-aware executor. This keeps
 commands short while preserving review gates for the patch plan and edit
-proposal. The examples below use the tiny digits MLP config; replace the config
-path with `examples/code_tasks/configs/medium_review_pipeline.toml` when you
-want the larger multi-file example with visible benchmark progress.
+proposal. The examples below use the medium review pipeline config because it
+exercises multi-file edits, project config changes, metrics, and visible
+benchmark progress.
 
 1. Initialize a run:
 
 ```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
 ```
 
 The command prints a run directory such as
-`runs/20260523-xxxx-tiny-digits-mlp`. Replace `runs/<run-id>` in the following
+`runs/20260523-xxxx-medium-review-pipeline`. Replace `runs/<run-id>` in the following
 commands with that printed path.
 
 `init` writes the isolated workspace and static project map:
@@ -684,7 +674,7 @@ benchmark, workspace, environment, and safety policy.
 2. Run the state-aware executor:
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml
 ```
 
 On an interactive terminal, this one command can walk through the plan review,
@@ -742,7 +732,7 @@ uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "
 proposal next. Do not apply it until the inline proposal review panel appears:
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --to-step propose-edits
 ```
 
 Review:
@@ -761,7 +751,7 @@ apply and evaluate the patched workspace. If you are running non-interactively,
 answered `no`, or used `--no-review-inline`, apply explicitly:
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --apply-proposed-edits --timeout 60
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --apply-proposed-edits --timeout 60
 ```
 
 6. Inspect the result:
@@ -797,7 +787,7 @@ was not really met.
 7. If the proposal needs repair, ask for one bounded repair proposal:
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step repair --repair-rounds 1 --timeout 60
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --to-step repair --repair-rounds 1 --timeout 60
 ```
 
 Review the newest `code_task/repairs/repair-NNN/proposed_edits.json`, then
@@ -813,7 +803,7 @@ uv run simple-ar status runs/<run-id>
 Preview the next executor action without writing artifacts:
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --dry-run
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --dry-run
 ```
 
 ### Optional Mapping And Context Tools
@@ -1062,7 +1052,7 @@ than an older failed attempt.
 
 ```bash
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --to-step propose-edits
 ```
 
 - Check `manifest.json`: `plan.status` should be `approved`. The decision log
@@ -1094,7 +1084,7 @@ code_task/summary.md
 - Ask for a bounded repair proposal:
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step repair --repair-rounds 1 --timeout 60
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --to-step repair --repair-rounds 1 --timeout 60
 ```
 
 - Review the newest `code_task/repairs/repair-NNN/proposed_edits.json`, then
@@ -1167,7 +1157,7 @@ existing-code task during `06-code` and include the result in `08-report`.
 Config-driven user project:
 
 ```bash
-uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+uv run simple-ar run --config examples/full_pipeline_tiny_mlp/configs/pipeline.toml
 ```
 
 The example config is intentionally complete: it includes the outer pipeline
@@ -1183,7 +1173,7 @@ uv run simple-ar run \
   --topic "improve tiny digits MLP" \
   --to-stage report \
   --experiment-template code_task_project \
-  --code-task-config examples/code_tasks/configs/tiny_digits_mlp.toml \
+  --code-task-config examples/full_pipeline_tiny_mlp/configs/pipeline.toml \
   --offline-search \
   --experiment-timeout 60
 ```
@@ -1195,8 +1185,8 @@ uv run simple-ar run \
   --topic "improve tiny digits MLP" \
   --to-stage report \
   --experiment-template code_task_project \
-  --code-root examples/code_tasks/tiny_digits_mlp_project \
-  --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
+  --code-root examples/full_pipeline_tiny_mlp/project \
+  --task-file examples/full_pipeline_tiny_mlp/task.md \
   --benchmark-command "python benchmark.py" \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
@@ -1213,7 +1203,7 @@ uv run simple-ar run \
   --topic "research and improve the tiny digits MLP baseline" \
   --to-stage report \
   --experiment-template code_task_project \
-  --code-root examples/code_tasks/tiny_digits_mlp_project \
+  --code-root examples/full_pipeline_tiny_mlp/project \
   --benchmark-command "python benchmark.py" \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
@@ -1232,12 +1222,16 @@ user project, probes the environment, runs a baseline benchmark, builds a repo
 map/context pack, generates a batch-oriented work plan, creates an
 attempt/batch record, generates a patch plan, records an automatic pipeline
 approval, asks for controlled edits, applies them inside the prepared
-workspace, and validates the result. During `07-run`, the harness runs the
+workspace, and validates the result. To keep unattended pipeline runs small and
+reviewable, the embedded path executes the first concrete work item as a single
+batch instead of automatically merging a serial dependency chain into a large
+patch. During `07-run`, the harness runs the
 patched benchmark, writes `comparison.json` when baseline and patched metrics
 are both available, and exposes code-task metrics through `07-run/results.json`.
 During `08-report`, the report includes a deterministic Code Task Evidence
 section pointing back to the nested work plan, batch state, summary, diff, and
-comparison artifacts. The embedded path uses the same edit-scope guard as the
+comparison artifacts; report memory also exposes baseline, patched, and delta
+metrics from the nested `comparison.json`. The embedded path uses the same edit-scope guard as the
 standalone workflow, so the patch cannot rewrite protected tests or benchmark
 files just to improve reported metrics.
 

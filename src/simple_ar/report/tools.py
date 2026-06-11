@@ -6,6 +6,7 @@ from simple_ar.report.schema import ReportToolSpec
 
 
 class GetPaperBriefArgs(BaseModel):
+    handle: str = Field(default="", description="Optional source handle such as paper:<id> from the current run.")
     paper_id: str = Field(default="", description="Paper id from the current run.")
     citation_key: str = Field(default="", description="Short citation key such as P1 from the current report prompt.")
 

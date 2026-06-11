@@ -77,7 +77,7 @@ uv run simple-ar run --topic "toy topic" --to-stage report
 如果参数较多，推荐使用顶层 TOML 配置：
 
 ```bash
-uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+uv run simple-ar run --config examples/full_pipeline_tiny_mlp/configs/pipeline.toml
 ```
 
 配置文件可以包含 `[run]`、`[llm]`、`[search]`、`[research]`、`[retrieval]`、`[experiment]`、`[report]`，也可以包含和 `code-task init --config` 相同的 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[workspace]`、`[safety]`。显式 CLI 参数会覆盖配置文件。完整示例和字段解释见 [配置参考](CONFIG_REFERENCE_zh.md#完整-pipeline-config)。
@@ -402,13 +402,13 @@ deterministic planning。想要完全可复现、无额外 LLM 调用时设为 `
 当 `[research].max_retrieval_rounds` 大于 `1` 时，search 阶段会根据仍未覆盖的
 required facets，在写出最终 `papers.jsonl` 前执行一个有预算限制的第二轮 follow-up 检索。
 
-本地 Markdown/text 笔记也可以作为保守的研究源使用，不需要调用 live literature provider：
+公开的 research-only 示例使用 live academic sources 和有边界的 full-text extraction：
 
 ```bash
-uv run simple-ar run --config examples/run_configs/local_research_report.toml
+uv run simple-ar run --config examples/research_report/configs/research_report.toml
 ```
 
-这个示例设置了 `[research].sources = ["local_files"]`，并把 `[research].local_documents` 指向 `examples/research/local_agent_simulation_notes.md`。当前 local-file connector 仍然很克制：只把 `.md` / `.txt` 当作 metadata-like records 读取，并使用轻量 keyword-overlap 匹配，而不是要求完整 query 字符串逐字出现。启用 `[research].use_fulltext = true` 后，search 阶段会把本地/缓存全文的 parser 结果写入 `documents/fulltext_extraction.json`，并在 read 阶段生成 Paper Brief 前把抽取文本送入 `research_index/chunks.jsonl`。PDF 输入仍是 best-effort：只有在可选 parser 可用且明确启用 full-text 意图时才解析，失败不会中断 search。
+这个配置设置了 `[report].mode = "research_only"`，因此 pipeline 会跳过 design/code/run，直接从 search/read/synthesize 进入 report。本地 Markdown/text 笔记仍然可以通过 `[research].sources = ["local_files"]` 使用；如果要做离线私有语料运行，请参考 `CONFIG_REFERENCE_zh.md` 里的 local-notes 配置片段。
 
 ### 恢复和查看状态
 
@@ -442,16 +442,10 @@ uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 
 Code Task 会把源项目准备到一个隔离的可编辑 workspace 中，后续所有补丁都只改这个 workspace，不修改原始项目。默认 `copy` 模式最稳妥；V2.2 还支持面向较大 git 项目的 `git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。
 
-推荐先从 TOML 配置初始化，把项目路径、benchmark 指标、workspace 模式、模型路由和编辑预算都放在一个可审核文件里：
+推荐先从 TOML 配置初始化，把项目路径、benchmark 指标、workspace 模式、模型路由和编辑预算都放在一个可审核文件里。内置 standalone 示例使用 medium review pipeline：
 
 ```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
-```
-
-如果想试一个更接近真实项目的本地示例，可以使用 medium review pipeline：
-
-```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/medium_review_pipeline.toml
+uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
 ```
 
 这个示例会运行 `python main.py --config configs/experiment.json --show-progress`，baseline / patched run 中会打印逐轮进度行，并通过 `[execute].stream_benchmark_output = "auto"` 让 `code-task execute` 在保存 stdout/stderr 产物的同时，把 benchmark 进度转发到命令行。`auto` 模式同时兼容普通 `print` 日志和 `tqdm` 这类 carriage-return 进度输出。
@@ -480,15 +474,15 @@ benchmark 最好输出 `name: value` 数值行。自定义指标推荐在 TOML �
 
 ### 推荐路径：TOML + Execute
 
-正常使用时，推荐把项目路径、benchmark、指标方向、模型路由和预算放进 TOML，然后用 `code-task execute` 推进。这样命令更短，但仍然保留 patch plan 和 edit proposal 两个审核点。下面示例默认使用 tiny digits MLP 配置；如果要运行带进度输出的多文件 medium 示例，把 config 路径替换为 `examples/code_tasks/configs/medium_review_pipeline.toml`。
+正常使用时，推荐把项目路径、benchmark、指标方向、模型路由和预算放进 TOML，然后用 `code-task execute` 推进。这样命令更短，但仍然保留 patch plan 和 edit proposal 两个审核点。下面示例使用 medium review pipeline 配置，覆盖多文件修改、项目配置变更、指标解析和可见 benchmark 进度。
 
 1. 初始化 run：
 
 ```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
 ```
 
-这个命令会打印一个 run 目录，例如 `runs/20260523-xxxx-tiny-digits-mlp`。下面命令中的 `runs/<run-id>` 都替换成这个实际路径即可。
+这个命令会打印一个 run 目录，例如 `runs/20260523-xxxx-medium-review-pipeline`。下面命令中的 `runs/<run-id>` 都替换成这个实际路径即可。
 
 `init` 会写入隔离 workspace 和静态项目地图：
 
@@ -515,7 +509,7 @@ runs/<run-id>/
 2. 运行状态感知 executor：
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml
 ```
 
 在真实终端里，这一条命令可以一路经过 plan 审核、proposal 审核、应用补丁、验证和
@@ -566,7 +560,7 @@ uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "
 在 proposal 审核面板出现前，不会应用补丁：
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --to-step propose-edits
 ```
 
 重点审核：
@@ -584,7 +578,7 @@ patched benchmark。如果你在非交互环境运行、回答了 `no`，或使�
 则显式应用：
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --apply-proposed-edits --timeout 60
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --apply-proposed-edits --timeout 60
 ```
 
 6. 查看整体状态：
@@ -617,7 +611,7 @@ code_task/
 7. 如果需要修复，先请求一个有限范围的 repair proposal：
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step repair --repair-rounds 1 --timeout 60
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --to-step repair --repair-rounds 1 --timeout 60
 ```
 
 审核最新的 `code_task/repairs/repair-NNN/proposed_edits.json`，再显式应用：
@@ -632,7 +626,7 @@ uv run simple-ar status runs/<run-id>
 如果只想预览下一步，不写任何产物：
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --dry-run
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --dry-run
 ```
 
 ### 可选的代码地图和上下文工具
@@ -798,7 +792,7 @@ uv run simple-ar code-task apply-edits runs/<run-id> \
 
 ```bash
 uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step propose-edits
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --to-step propose-edits
 ```
 
 - 可检查 `manifest.json` 中的 `plan.status` 是否为 `approved`；人工决策记录在 `code_task/meta/hitl_decisions.jsonl`。
@@ -824,7 +818,7 @@ code_task/summary.md
 - 请求一个有限范围的修复 proposal：
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml --to-step repair --repair-rounds 1 --timeout 60
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml --to-step repair --repair-rounds 1 --timeout 60
 ```
 
 - 审核最新的 `code_task/repairs/repair-NNN/proposed_edits.json`，再显式应用、验证和重跑：
@@ -871,7 +865,7 @@ Proposal 只覆盖了联动计划的第一部分：
 推荐配置驱动：
 
 ```bash
-uv run simple-ar run --config examples/run_configs/tiny_digits_mlp_pipeline.toml
+uv run simple-ar run --config examples/full_pipeline_tiny_mlp/configs/pipeline.toml
 ```
 
 等价的 split config 形式：
@@ -881,7 +875,7 @@ uv run simple-ar run \
   --topic "improve tiny digits MLP" \
   --to-stage report \
   --experiment-template code_task_project \
-  --code-task-config examples/code_tasks/configs/tiny_digits_mlp.toml \
+  --code-task-config examples/full_pipeline_tiny_mlp/configs/pipeline.toml \
   --offline-search \
   --experiment-timeout 60
 ```
@@ -893,8 +887,8 @@ uv run simple-ar run \
   --topic "improve tiny digits MLP" \
   --to-stage report \
   --experiment-template code_task_project \
-  --code-root examples/code_tasks/tiny_digits_mlp_project \
-  --task-file examples/code_tasks/tasks/improve_tiny_digits_mlp.md \
+  --code-root examples/full_pipeline_tiny_mlp/project \
+  --task-file examples/full_pipeline_tiny_mlp/task.md \
   --benchmark-command "python benchmark.py" \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
@@ -910,7 +904,7 @@ uv run simple-ar run \
   --topic "research and improve the tiny digits MLP baseline" \
   --to-stage report \
   --experiment-template code_task_project \
-  --code-root examples/code_tasks/tiny_digits_mlp_project \
+  --code-root examples/full_pipeline_tiny_mlp/project \
   --benchmark-command "python benchmark.py" \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \

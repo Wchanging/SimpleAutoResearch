@@ -157,7 +157,7 @@ template = "code_task_project"
 timeout = 60
 
 # 可选外部 code-task config；省略时复用本文件中的 code-task sections。
-# code_task_config = "examples/code_tasks/configs/tiny_digits_mlp.toml"
+# code_task_config = "examples/full_pipeline_tiny_mlp/configs/pipeline.toml"
 
 [report]
 # auto 会根据是否有实验结果选择 experiment 或 research_only 报告结构。
@@ -212,10 +212,10 @@ strict = false
 
 [code_task]
 # 源项目会被复制或 worktree 准备到 code_task/workspace。
-code_root = "examples/code_tasks/tiny_digits_mlp_project"
+code_root = "examples/full_pipeline_tiny_mlp/project"
 
 # code-task 的任务说明文件。
-task_file = "examples/code_tasks/tasks/improve_tiny_digits_mlp.md"
+task_file = "examples/full_pipeline_tiny_mlp/task.md"
 
 # standalone code-task run 的父目录。
 output_root = "runs"
@@ -545,7 +545,7 @@ max_retrieval_rounds = 1
 max_queries = 4
 required_facets = ["overview", "method", "benchmark"]
 local_documents = [
-  "../research/local_agent_simulation_notes.md",
+  "../private_corpus/agent_simulation_notes.md",
 ]
 cache = true
 index_backend = "keyword"

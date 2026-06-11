@@ -74,10 +74,10 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
 ```
 
-如果希望把搜索源、query 和本地资料写成可复用配置，可以使用 run config。下面这个本地示例会把 Markdown 笔记作为研究源，并默认保留精简 search evidence 产物：
+如果希望把搜索源、query 和报告设置写成可复用配置，可以使用 run config。内置 research-report 示例使用 live academic sources、有边界的 full-text extraction，以及 research-only 报告生成：
 
 ```bash
-uv run simple-ar run --config examples/run_configs/local_research_report.toml
+uv run simple-ar run --config examples/research_report/configs/research_report.toml
 ```
 
 如果只想做文献综述，可以先停在 `synthesize`，再从打印出的 run 目录生成研究报告：
@@ -87,7 +87,7 @@ uv run simple-ar run --topic "agent simulation" --to-stage synthesize
 uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
 ```
 
-V2.4 的报告路径使用 Markdown 报告模板和 LLM Writer/Reviewer loop，支持短 citation key、报告审计产物、独立 variant 重跑，以及面向较大论文集合的 full-source / batch-refine 起草策略。实际命令可以参考 `examples/run_configs/v24_realistic_research_report.toml` 和 [使用与配置](docs/USAGE_zh.md)。
+V2.4 的报告路径使用 Markdown 报告模板和 LLM Writer/Reviewer loop，支持短 citation key、报告审计产物、独立 variant 重跑，以及面向较大论文集合的 full-source / batch-refine 起草策略。实际命令可以参考 `examples/research_report/configs/research_report.toml` 和 [使用与配置](docs/USAGE_zh.md)。
 
 ### 2. Code Task：已有代码库修改
 
@@ -128,7 +128,7 @@ uv run simple-ar status runs/<run-id>
 
 这套命令会准备隔离 workspace、运行 baseline benchmark、生成 work plan、停在 patch plan 审核点、生成 `code_task/meta/proposed_edits.json`、应用已审核 proposal、验证 patched workspace、运行 patched benchmark，并写入最终状态。如果结果还需要有限范围的后续修复，可以继续使用 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中的 repair 流程。
 
-内置 demo 配置，例如 `tiny_digits_mlp.toml` 和 `medium_review_pipeline.toml`，放在 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中作为辅助示例。
+内置 standalone code-task 示例是 `examples/code_task_medium_review/configs/code_task.toml`，放在 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中作为辅助示例。
 
 ### 3. Research With Experiment：研究流程衔接代码实验
 
@@ -187,7 +187,7 @@ uv run simple-ar run --config path/to/your_pipeline.toml
 
 这会创建一次正常的 8 阶段 run。在 `06-code` 中，系统会把配置中的项目准备到 `06-code/code_task_run/code_task/workspace`，构建 repo map 和 context pack，调用 LLM 生成 work plan 与 patch proposal，在隔离 workspace 内应用补丁并验证。`07-run` 会运行 patched benchmark 并比较指标；`08-report` 会生成最终报告，并把嵌套的 work plan、patch、benchmark 和 comparison 产物作为确定性 code-task 证据写进去。
 
-内嵌路径的目标是端到端跑完，因此会在隔离 workspace 中自动批准 patch plan。如果你希望每一步都先人工审核，应使用 standalone `code-task` 命令。内置 demo 配置在 `examples/run_configs/tiny_digits_mlp_pipeline.toml`；完整说明见 [使用与配置](docs/USAGE_zh.md#8-阶段流程中的内嵌-code-task)。
+内嵌路径的目标是端到端跑完，因此会在隔离 workspace 中自动批准 patch plan。如果你希望每一步都先人工审核，应使用 standalone `code-task` 命令。内置 demo 配置在 `examples/full_pipeline_tiny_mlp/configs/pipeline.toml`；完整说明见 [使用与配置](docs/USAGE_zh.md#8-阶段流程中的内嵌-code-task)。
 
 ## 当前能力边界
 

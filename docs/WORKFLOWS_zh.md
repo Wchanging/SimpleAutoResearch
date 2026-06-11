@@ -51,9 +51,9 @@ init workspace -> index code -> map repo -> probe environment
 
 内置示例：
 
-- `toy_spam_project`：极小规则分类器，适合 patch 和 failure-analysis smoke test。
-- `tiny_digits_mlp_project`：基于 NumPy 和 scikit-learn bundled digits dataset 的轻量 MLP，适合无需 GPU/下载的本地 ML benchmark。
-- `medium_review_pipeline_project`：多模块 review classifier，入口是 `main.py`，使用 JSON config，运行时有进度输出，任务自然涉及 feature extraction、model scoring 和配置文件之间的联动。
+- `examples/research_report/`：纯 research-only 流程，覆盖 search/read/synthesize/report，并支持 live academic sources 和 report variant。
+- `examples/code_task_medium_review/`：standalone code-task 流程，目标是一个多模块 review classifier，入口是 `main.py`，使用 JSON config，运行时有进度输出，任务自然涉及 feature extraction、model scoring 和配置文件之间的联动。
+- `examples/full_pipeline_tiny_mlp/`：完整 8 阶段流程，目标是轻量 NumPy MLP benchmark，适合不依赖 GPU 的端到端本地检查。
 
 ### 3. Research With Experiment：研究衔接实验
 

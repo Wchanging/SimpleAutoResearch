@@ -125,6 +125,45 @@ src/simple_ar/code_task/
 - 优先使用小而可组合的函数，不要过早塞进单个 agent loop。
 
 Metric comparison 应保持保守。未知数值指标可以记录 delta，但除非 manifest 显式配置方向或命中简单本地 heuristic，否则不应用于 improved/regressed verdict。只有当指标命名约定足够常见、不令人意外时，才添加新的默认 heuristic。
+
+## 扩展 Report 与 Audit
+
+Report system 是 V2.4 用来承接 research-only survey、experiment report 和
+embedded code-task result 的出口。它应该保持 template-driven 和 evidence-aware，
+不要退回到单个大 prompt 或单个大 service 文件。
+
+```text
+src/simple_ar/report/
+  schema.py        context、memory、tools、draft、review 的 Pydantic models
+  context.py       收集 papers、synthesis、metrics 和 code-task comparison
+  templates.py     加载 Markdown 模板和 reviewer criteria
+  memory.py        紧凑 section plan、evidence handles、claims、limitations
+  tools.py         report tool schema definitions
+  tool_gateway.py  有边界的只读 tool execution
+  retrieval.py     source-handle backtracking
+  agent.py         Writer/Reviewer orchestration
+  citations.py     citation key 映射、显示标签和 citation cleanup
+  audit.py         citation、metric、claim 和 reviewer audit 汇总
+  assembler.py     section drafts 组装为最终 Markdown
+  quality.py       deterministic report quality checks
+  service.py       stage entrypoint 和 artifact packaging
+```
+
+新增 report 行为时：
+
+- schema 放在 `schema.py`，不要在 `service.py` 里继续堆自由 dict；
+- source lookup / backtracking 放到 `context.py`、`retrieval.py` 或
+  `tool_gateway.py`；
+- Writer/Reviewer loop 行为放到 `agent.py`；
+- citation 映射、显示转换和 cleanup 放到 `citations.py`；
+- 机械一致性检查放到 `audit.py` 或 `quality.py`；
+- 模板和审查标准放在 `templates/report/`，不要硬编码成长 prompt；
+- `service.py` 只保留 stage-level coordinator 和 artifact writer 的职责。
+
+`report/service.py`、`pipeline_stages/research.py` 和 `cli/main.py` 仍然偏大，
+需要视为黄灯。不要继续往这些文件里添加无关行为；新的工作应该迁移到对应领域模块，
+或者顺手减少这些文件的职责。这是维护规则，不是要求把每个小 helper 都拆成独立文件。
+
 ### Code-Task Environment Policy
 
 当前 V2.2 code-task runner 通过 `copy`、`git_worktree` 或实验性 `sparse_copy` 提供 workspace isolation，并支持 command timeout、可选 benchmark output streaming、stdout/stderr 捕获、受限 environment map 和显式 execution interpreter policy。它支持 `current` 和 `external`，但还不会创建或安装到单独 Python environment。除非未来功能明确改变这一点，否则不要默认把用户项目依赖安装到 SimpleAutoResearch 自己的 `.venv`。

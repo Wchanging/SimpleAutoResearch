@@ -701,6 +701,38 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(work_item["budget_profile"], "large")
             self.assertTrue(work_item["requires_budget_override"])
 
+    def test_create_code_task_batch_can_disable_serial_merge(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(code_root / "extra.py", "VALUE = 1\n")
+            write_text(task_file, "# Task\n\nImplement a coupled feature safely.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            _write_dependent_work_plan(run_dir)
+
+            result = create_code_task_batch(
+                run_dir,
+                work_item_id="W1",
+                merge_dependent_chain=False,
+            )
+
+            batch_state = read_json(result.batch_state_path)
+            work_item = batch_state["work_item"]
+            self.assertEqual(work_item["source_work_item_ids"], ["W1"])
+            self.assertEqual(work_item["execution_scope"], "single_work_item")
+            self.assertEqual(work_item["target_files"], ["spam_model.py"])
+            self.assertEqual(work_item["budget_profile"], "normal")
+            self.assertFalse(work_item["requires_budget_override"])
+
     def test_record_plan_decision_updates_work_plan_approval(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

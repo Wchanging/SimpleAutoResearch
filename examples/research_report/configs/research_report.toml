@@ -1,19 +1,20 @@
 [run]
-# V2.4 realistic research-only report check.
+# Research-only survey/report example.
 #
-# This config is intentionally larger than the smoke configs but still bounded
-# for local development:
+# This is the canonical example for literature search -> read -> synthesize ->
+# report. It does not run code experiments. It is intentionally larger than a
+# smoke test but still bounded for local development:
 # 1. Run it end to end as a research-only survey:
-#      uv run simple-ar run --config examples\run_configs\v24_realistic_research_report.toml
+#      uv run simple-ar run --config examples/research_report/configs/research_report.toml
 # 2. If you want to regenerate only the final report after prompt/template
 #    changes, copy the printed run directory and resume only 08-report:
-#      uv run simple-ar resume runs\v24-realistic-research-report\<run-id> --from-stage report --to-stage report --config examples\run_configs\v24_realistic_research_report.toml
+#      uv run simple-ar resume runs/research-report/<run-id> --from-stage report --to-stage report --config examples/research_report/configs/research_report.toml
 #    To keep the current report and write an extra version:
-#      uv run simple-ar resume runs\v24-realistic-research-report\<run-id> --from-stage report --to-stage report --config examples\run_configs\v24_realistic_research_report.toml --report-output-mode variant --report-output-label survey-v2
+#      uv run simple-ar resume runs/research-report/<run-id> --from-stage report --to-stage report --config examples/research_report/configs/research_report.toml --report-output-mode variant --report-output-label survey-v2
 #
 # The CLI detects report.mode = "research_only" and skips design/code/run.
 topic = "LLM multi-agent collaboration for repository-level coding agents"
-output_root = "runs/v24-realistic-research-report"
+output_root = "runs/research-report"
 to_stage = "report"
 
 # Keep normal runs compact. Set true only when debugging retrieval traces,

@@ -92,14 +92,23 @@ def _section_evidence_handles(context: ReportContext) -> list[str]:
     metadata. Extra non-paper handles fill remaining slots only when the paper
     set is smaller than the configured section-source budget.
     """
+    experiment_handles = [
+        handle.handle for handle in context.source_handles if handle.kind == "experiment"
+    ]
     paper_handles = [handle.handle for handle in context.source_handles if handle.kind == "paper"]
     if context.max_section_sources <= 0:
+        if context.report_mode == "experiment":
+            return [*experiment_handles, *paper_handles] or [
+                handle.handle for handle in context.source_handles if handle.kind != "chunk"
+            ]
         if paper_handles:
             return paper_handles
         return [handle.handle for handle in context.source_handles if handle.kind != "chunk"]
 
     budget = max(1, context.max_section_sources)
-    selected = paper_handles[:budget]
+    selected = experiment_handles[:budget] if context.report_mode == "experiment" else []
+    selected.extend(path for path in paper_handles if path not in selected)
+    selected = selected[:budget]
     if len(selected) >= budget:
         return selected
     selected_set = set(selected)
@@ -118,7 +127,7 @@ def _initial_claims(context: ReportContext) -> list[ClaimEvidenceRecord]:
     for metric in context.metric_sources[:8]:
         claims.append(
             ClaimEvidenceRecord(
-                claim_id=f"claim:{metric.name}",
+                claim_id=f"claim:{_slug(metric.metric_id)}",
                 claim=f"Report may discuss metric `{metric.name}` only with value from `{metric.artifact}`.",
                 status="supported",
                 metric_ids=[metric.metric_id],

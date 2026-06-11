@@ -399,7 +399,7 @@ class CliTests(unittest.TestCase):
                         "timeout = 11",
                         "",
                         "[code_task]",
-                        f'code_root = "{(repo_root / "examples" / "code_tasks" / "tiny_digits_mlp_project").as_posix()}"',
+                        f'code_root = "{(repo_root / "examples" / "full_pipeline_tiny_mlp" / "project").as_posix()}"',
                         f'task_file = "{(repo_root / "examples" / "code_tasks" / "tasks" / "improve_tiny_digits_mlp.md").as_posix()}"',
                         'name = "configured-pipeline-task"',
                         "",

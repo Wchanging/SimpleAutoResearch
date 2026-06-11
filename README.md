@@ -1,6 +1,6 @@
-# SimpleAutoResearch
+﻿# SimpleAutoResearch
 
-[中文版本](README_zh.md)
+[涓枃鐗堟湰](README_zh.md)
 
 SimpleAutoResearch is a teaching-first, lightweight auto-research project
 inspired by [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw).
@@ -99,12 +99,12 @@ SimpleAutoResearch records token counts but leaves estimated cost as `null`.
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
 ```
 
-For repeatable source settings, use a run config. This local example uses a
-Markdown note as a research source and keeps the search output compact by
-default:
+For repeatable source settings, use a run config. The bundled research-report
+example uses live academic sources, bounded full-text extraction, and
+research-only report generation:
 
 ```bash
-uv run simple-ar run --config examples/run_configs/local_research_report.toml
+uv run simple-ar run --config examples/research_report/configs/research_report.toml
 ```
 
 For a literature-only pass, stop at `synthesize`, then resume report generation
@@ -118,7 +118,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research
 The V2.4 report path uses Markdown report templates plus an LLM
 Writer/Reviewer loop. It supports short citation keys, audit artifacts, report
 variants, and either full-source drafting or batch-refine drafting for larger
-paper sets. See `examples/run_configs/v24_realistic_research_report.toml` and
+paper sets. See `examples/research_report/configs/research_report.toml` and
 [Usage And Configuration](docs/USAGE.md) for practical commands.
 
 ### 2. Existing-Code Code Task
@@ -169,8 +169,8 @@ the patched workspace, runs the patched benchmark, and writes the final status.
 If the result needs a bounded follow-up, use the repair path documented in
 [Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
 
-Bundled demo configs such as `tiny_digits_mlp.toml` and
-`medium_review_pipeline.toml` are documented in
+The bundled standalone code-task example is
+`examples/code_task_medium_review/configs/code_task.toml`; it is documented in
 [Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
 
 ### 3. Research With Experiment
@@ -242,7 +242,7 @@ plan, patch, benchmark, and comparison artifacts.
 The embedded path is designed to finish end to end, so it auto-approves the
 patch plan inside the isolated workspace. Use standalone `code-task` commands
 when you want explicit human approval before each step. A bundled demo config is
-available at `examples/run_configs/tiny_digits_mlp_pipeline.toml`; full embedded
+available at `examples/full_pipeline_tiny_mlp/configs/pipeline.toml`; full embedded
 workflow details are in [Usage And Configuration](docs/USAGE.md#embedded-code-task-in-the-8-stage-pipeline).
 
 ## Capability Boundaries

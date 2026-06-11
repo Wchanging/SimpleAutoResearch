@@ -20,7 +20,6 @@ from simple_ar.literature.bibtex import papers_to_bibtex
 from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import (
     CitationError,
-    find_citation_ids,
     validate_citations,
 )
 from simple_ar.integrations.llm import LLMError
@@ -30,6 +29,22 @@ from simple_ar.core.pipeline import (
 )
 from simple_ar.report.agent import run_report_agent
 from simple_ar.report.audit import build_report_audit
+from simple_ar.report.citations import (
+    append_references_section as _append_references_section,
+    body_citation_ids as _body_citation_ids,
+    citation_display_map as _citation_display_map,
+    citation_instruction as _citation_instruction,
+    citation_map_artifact as _citation_map_artifact,
+    cited_papers as _cited_papers,
+    display_citation_numbers as _display_citation_numbers,
+    expand_short_citation_keys as _expand_short_citation_keys,
+    literature_citation_sentence as _literature_citation_sentence,
+    model_citation_key as _model_citation_key,
+    normalize_bare_source_id_citations as _normalize_bare_source_id_citations,
+    record_removed_citations as _record_removed_citations,
+    sanitize_report_citations as _sanitize_report_citations,
+    strip_references_section as _strip_references_section,
+)
 from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory, write_report_memory
 from simple_ar.report.schema import AgentReportResult, ReportAuditConfig, ReportRuntimeConfig
@@ -71,13 +86,8 @@ from simple_ar.research.outputs.artifacts import (
     SYNTHESIS_NOVELTY_CHECKS,
     SYNTHESIS_BRIEF_JSON,
 )
-from simple_ar.research.prompts import (
-    REPORT_SYSTEM,
-    report_user_prompt,
-)
 from simple_ar.research.service import load_search_paper_rows
 from simple_ar.report.quality import build_report_quality
-from simple_ar.retrieval.evidence import format_evidence_snippets
 from simple_ar.experiment.service import load_experiment_plan
 from simple_ar.pipeline_stages.common import (
     _list_value,
@@ -87,9 +97,7 @@ from simple_ar.pipeline_stages.common import (
     _relative_artifact,
     _safe_read_artifact,
     _safe_read_json_artifact,
-    _stage_evidence,
     _string_items,
-    _text_field,
 )
 
 def execute_report(ctx: Context) -> None:
@@ -114,8 +122,6 @@ def execute_report(ctx: Context) -> None:
             "set --report-mode research_only."
         )
     report_config = _report_runtime_config(ctx)
-    evidence = _stage_evidence(ctx, "report")
-    evidence_snippets = format_evidence_snippets(evidence)
     research_evidence_summary = _research_evidence_summary(ctx, papers)
     template = load_report_template_bundle(
         report_mode=report_mode,
@@ -167,24 +173,6 @@ def execute_report(ctx: Context) -> None:
             report = None
     else:
         report = None
-    if report is None and report_config.agent == "legacy":
-        report = _report_with_llm(
-            ctx,
-            goal=goal,
-            problem=problem,
-            search_meta=search_meta,
-            synthesis=synthesis,
-            hypothesis=hypothesis,
-            plan=plan,
-            results=results,
-            paper_rows=paper_rows,
-            papers=papers,
-            evidence_snippets=evidence_snippets,
-            research_evidence_summary=research_evidence_summary,
-            report_mode=report_mode,
-            results_present=results_present,
-            citation_key_map=report_context.citation_key_map,
-        )
     if report is None:
         if report_mode == "research_only":
             report = _build_research_report(
@@ -582,92 +570,6 @@ def _report_evidence_summary_markdown(summary: str) -> str:
         "No structured evidence handoff was available. Inspect the search, read, "
         "and synthesize artifacts before treating this fallback as useful."
     )
-
-def _report_with_llm(
-    ctx: Context,
-    *,
-    goal: str,
-    problem: str,
-    search_meta: dict[str, Any],
-    synthesis: str,
-    hypothesis: str,
-    plan: dict[str, Any],
-    results: dict[str, Any],
-    paper_rows: list[dict[str, Any]],
-    papers: list[Paper],
-    evidence_snippets: str,
-    research_evidence_summary: str,
-    report_mode: str,
-    results_present: bool,
-    citation_key_map: dict[str, str],
-) -> str | None:
-    """Generate the final report with an evidence-bounded LLM prompt.
-
-    Args:
-        ctx: Current pipeline context.
-        goal: Goal Markdown produced by the plan stage.
-        problem: Problem Markdown produced by the plan stage.
-        search_meta: Search metadata produced by the search stage.
-        synthesis: Synthesis Markdown produced by the synthesize stage.
-        hypothesis: Hypothesis Markdown produced by the synthesize stage.
-        plan: Experiment plan JSON from the design stage.
-        results: Experiment run result JSON from the run stage.
-        paper_rows: Raw paper rows loaded from ``papers.jsonl``.
-        papers: Normalized paper metadata.
-        evidence_snippets: Source-labelled retrieval snippets selected for the
-            report stage.
-
-    Returns:
-        Model-written report Markdown, or ``None`` if LLM mode is disabled or
-        the output fails validation.
-    """
-    client = _llm_client(ctx)
-    if client is None:
-        return None
-
-    try:
-        ctx.emit("stage_message", "Calling LLM for polished report drafting.")
-        response = client.ask_json(
-            REPORT_SYSTEM,
-            report_user_prompt(
-                topic=ctx.topic,
-                goal_markdown=goal,
-                problem_markdown=problem,
-                search_meta_json=json.dumps(search_meta, indent=2, ensure_ascii=False),
-                papers_json=json.dumps(paper_rows, indent=2, ensure_ascii=False),
-                synthesis_markdown=synthesis,
-                hypothesis_markdown=hypothesis,
-                experiment_plan_json=json.dumps(plan, indent=2, ensure_ascii=False),
-                results_json=json.dumps(results, indent=2, ensure_ascii=False),
-                evidence_snippets=evidence_snippets,
-                research_evidence_summary=research_evidence_summary,
-                citation_instruction=_citation_instruction(papers, citation_key_map),
-                report_mode=report_mode,
-            ),
-            label="report",
-        )
-        report = _text_field(response, "report_markdown")
-        if not report:
-            raise LLMError("report_markdown was empty")
-        report = _strip_references_section(report)
-        report = _expand_short_citation_keys(report, citation_key_map)
-        report = _normalize_bare_source_id_citations(report, {paper.id for paper in papers})
-        validate_citations(report, {paper.id for paper in papers})
-        if papers and not _body_citation_ids(report, {paper.id for paper in papers}):
-            raise LLMError("report_markdown did not cite any known paper in the body")
-        bound_errors = _report_bound_errors(
-            report,
-            search_meta,
-            plan,
-            report_mode=report_mode,
-            results_present=results_present,
-        )
-        if bound_errors:
-            raise LLMError("report_markdown exceeded artifact bounds: " + "; ".join(bound_errors))
-        return report.strip() + "\n"
-    except (LLMError, CitationError) as exc:
-        ctx.emit("stage_message", f"LLM report drafting failed; using structured fallback. {exc}")
-        return None
 
 def _build_report(
     ctx: Context,
@@ -1089,9 +991,37 @@ def _code_task_evidence_markdown(ctx: Context, plan: dict[str, Any]) -> str:
             f"The before/after comparison verdict is `{verdict}`"
             + (f" ({reason_text})." if reason_text else ".")
         )
+        table = _code_task_comparison_table(comparison)
+        if table:
+            lines.append(table)
     if summary_path.exists():
         lines.append("The consolidated code-task summary is stored at `06-code/code_task_run/code_task/summary.md`.")
-    return " ".join(lines)
+    return "\n\n".join(lines)
+
+
+def _code_task_comparison_table(comparison: dict[str, Any]) -> str:
+    rows = comparison.get("metrics")
+    if not isinstance(rows, list) or not rows:
+        return ""
+    table = [
+        "| Metric | Baseline | Patched | Delta | Interpretation |",
+        "|---|---:|---:|---:|---|",
+    ]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        table.append(
+            "| "
+            + f"`{name}` | "
+            + f"{_format_metric(row.get('baseline'))} | "
+            + f"{_format_metric(row.get('patched'))} | "
+            + f"{_format_metric(row.get('delta'))} | "
+            + f"{str(row.get('interpretation') or '').strip() or 'recorded'} |"
+        )
+    return "\n".join(table) if len(table) > 2 else ""
 
 def _review_sensitive_changed_files(changed_files: object) -> list[str]:
     """Return changed code-task files that should be highlighted in reports."""
@@ -1281,294 +1211,6 @@ def _conclusion_markdown(results: dict[str, Any]) -> str:
         "available staged artifacts. The result is best read as a reproducibility "
         "demo for SimpleAutoResearch rather than a standalone scientific claim."
     )
-
-def _references_markdown(
-    papers: list[Paper],
-    citation_map: dict[str, int] | None = None,
-) -> str:
-    """Render a reader-friendly reference list with known citation keys."""
-    if not papers:
-        return "No references were available."
-    lines = []
-    for paper in papers:
-        label = f"[{citation_map[paper.id]}]" if citation_map and paper.id in citation_map else f"[@{paper.id}]"
-        url = f" {paper.url}" if paper.url else ""
-        lines.append(f"- {label} {paper.title}.{url}")
-    return "\n".join(lines)
-
-def _strip_references_section(markdown: str) -> str:
-    """Remove a model-written References section before appending verified refs."""
-    lines = markdown.strip().splitlines()
-    kept: list[str] = []
-    for line in lines:
-        if line.strip().lower().lstrip("#").strip() == "references":
-            break
-        kept.append(line)
-    return "\n".join(kept).strip() + "\n"
-
-def _append_references_section(
-    markdown: str,
-    papers: list[Paper],
-    citation_map: dict[str, int] | None = None,
-) -> str:
-    """Append deterministic references generated from known paper metadata."""
-    body = markdown.strip()
-    return f"{body}\n\n## References\n\n{_references_markdown(papers, citation_map)}\n"
-
-def _sanitize_report_citations(markdown_body: str, allowed_ids: set[str]) -> tuple[str, list[str]]:
-    """Remove citation ids that are not part of the current run source map.
-
-    Report generation can be strict without being brittle: the writer/reviewer
-    may occasionally produce numeric placeholders such as ``[@1]``. Those are
-    not valid source ids, so they are removed before deterministic references
-    are appended and recorded in the audit as a warning.
-    """
-    invalid = sorted(find_citation_ids(markdown_body) - allowed_ids)
-    if not invalid:
-        return markdown_body, []
-    sanitized = markdown_body
-    for citation_id in invalid:
-        sanitized = re.sub(
-            rf"@{re.escape(citation_id)}(?![A-Za-z0-9_.:-])",
-            "",
-            sanitized,
-        )
-    sanitized = re.sub(r"\[\s*(?:;\s*)*\]", "", sanitized)
-    sanitized = re.sub(r"\[\s*;\s*", "[", sanitized)
-    sanitized = re.sub(r";\s*\]", "]", sanitized)
-    sanitized = re.sub(r";\s*;", ";", sanitized)
-    sanitized = re.sub(r"[ \t]{2,}", " ", sanitized)
-    return sanitized.strip() + "\n", invalid
-
-def _expand_short_citation_keys(markdown_body: str, citation_key_map: dict[str, str]) -> str:
-    """Map model-facing short citation keys back to real source ids.
-
-    Writer prompts use short keys such as ``P1`` to avoid making the model copy
-    long OpenAlex/Semantic Scholar ids. Validation and references still operate
-    on the real paper ids, so expansion happens before citation audit.
-    """
-    if not citation_key_map:
-        return markdown_body
-    normalized = {key.upper(): paper_id for key, paper_id in citation_key_map.items()}
-
-    def paper_id_for(key: str) -> str:
-        return normalized.get(key.strip().upper(), "")
-
-    def replace_pandoc_key(match: re.Match[str]) -> str:
-        paper_id = paper_id_for(match.group(1))
-        return f"@{paper_id}" if paper_id else match.group(0)
-
-    expanded = re.sub(r"@([Pp]\d+)(?![A-Za-z0-9_.:-])", replace_pandoc_key, markdown_body)
-
-    def replace_bare_group(match: re.Match[str]) -> str:
-        content = match.group(1).strip()
-        if "@" in content:
-            return match.group(0)
-        parts = [part.strip() for part in re.split(r"[;,]", content) if part.strip()]
-        paper_ids = [paper_id_for(part) for part in parts]
-        if not paper_ids or any(not paper_id for paper_id in paper_ids):
-            return match.group(0)
-        return "[" + "; ".join(f"@{paper_id}" for paper_id in paper_ids) + "]"
-
-    return re.sub(r"\[([Pp]\d+(?:\s*[;,]\s*[Pp]\d+)*)\]", replace_bare_group, expanded)
-
-def _record_removed_citations(report_audit: object, citation_ids: list[str]) -> None:
-    """Annotate report audit when invalid citation placeholders were removed."""
-    if not citation_ids:
-        return
-    joined = ", ".join(citation_ids)
-    warning = (
-        "Removed citation id(s) not present in the current run source map before "
-        f"writing references: {joined}."
-    )
-    if hasattr(report_audit, "citation_audit"):
-        report_audit.citation_audit.warnings.append(warning)
-        if report_audit.citation_audit.status == "passed":
-            report_audit.citation_audit.status = "warning"
-    if hasattr(report_audit, "notes"):
-        report_audit.notes.append(warning)
-    if getattr(report_audit, "status", "passed") == "passed":
-        report_audit.status = "warning"
-
-def _citation_display_map(papers: list[Paper]) -> dict[str, int]:
-    """Return stable numeric citation labels for body-cited papers."""
-    return {paper.id: index for index, paper in enumerate(papers, start=1)}
-
-def _citation_map_artifact(
-    citation_map: dict[str, int],
-    papers: list[Paper],
-    citation_key_map: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    """Return the written citation map artifact for display/reference lookup."""
-    by_id = {paper.id: paper for paper in papers}
-    key_by_id = {paper_id: key for key, paper_id in (citation_key_map or {}).items()}
-    entries: list[dict[str, Any]] = []
-    for paper_id, number in sorted(citation_map.items(), key=lambda item: item[1]):
-        paper = by_id.get(paper_id)
-        entries.append(
-            {
-                "number": number,
-                "model_key": key_by_id.get(paper_id, ""),
-                "paper_id": paper_id,
-                "title": paper.title if paper else "",
-                "url": paper.url if paper else "",
-                "source": paper.source if paper else "",
-            }
-        )
-    return {
-        "schema_version": "citation_map.v1",
-        "display_style": "numeric_brackets",
-        "model_key_style": "short_keys",
-        "entries": entries,
-    }
-
-def _display_citation_numbers(markdown_body: str, citation_map: dict[str, int]) -> str:
-    """Convert internal ``[@paper-id]`` citations to readable ``[1]`` labels."""
-    if not citation_map:
-        return markdown_body
-
-    def replace_group(match: re.Match[str]) -> str:
-        ids = re.findall(r"@([A-Za-z0-9_.:-]+)", match.group(1))
-        numbers = [citation_map[citation_id] for citation_id in ids if citation_id in citation_map]
-        if not numbers:
-            return match.group(0)
-        deduped = list(dict.fromkeys(numbers))
-        return "[" + ", ".join(str(number) for number in deduped) + "]"
-
-    converted = re.sub(
-        r"\[([^\]]*@([A-Za-z0-9_.:-]+)[^\]]*)\]",
-        replace_group,
-        markdown_body,
-    )
-
-    def replace_standalone(match: re.Match[str]) -> str:
-        citation_id = match.group(1)
-        number = citation_map.get(citation_id)
-        return f"[{number}]" if number is not None else match.group(0)
-
-    converted = re.sub(r"@([A-Za-z0-9_.:-]+)", replace_standalone, converted)
-    return _display_bare_source_id_numbers(converted, citation_map)
-
-
-def _normalize_bare_source_id_citations(markdown_body: str, allowed_ids: set[str]) -> str:
-    """Convert upstream ``[paper-id]`` notes into the internal citation form."""
-    if not allowed_ids:
-        return markdown_body
-
-    def replace_bracket(match: re.Match[str]) -> str:
-        content = match.group(1).strip()
-        if "@" in content:
-            return match.group(0)
-        parts = [part.strip() for part in re.split(r"[;,]", content) if part.strip()]
-        if not parts or any(part not in allowed_ids for part in parts):
-            return match.group(0)
-        return "[" + "; ".join(f"@{part}" for part in parts) + "]"
-
-    return re.sub(r"\[([A-Za-z0-9_.:;\-\s]+)\]", replace_bracket, markdown_body)
-
-
-def _display_bare_source_id_numbers(markdown_body: str, citation_map: dict[str, int]) -> str:
-    """Convert source-id brackets copied from upstream notes into display labels."""
-    if not citation_map:
-        return markdown_body
-
-    id_pattern = "|".join(re.escape(paper_id) for paper_id in sorted(citation_map, key=len, reverse=True))
-    if not id_pattern:
-        return markdown_body
-
-    def replace_bracket(match: re.Match[str]) -> str:
-        content = match.group(1).strip()
-        parts = [part.strip() for part in re.split(r"[;,]", content) if part.strip()]
-        if not parts or any(part not in citation_map for part in parts):
-            return match.group(0)
-        numbers = sorted({citation_map[part] for part in parts})
-        return "[" + ", ".join(str(number) for number in numbers) + "]"
-
-    converted = re.sub(r"\[([A-Za-z0-9_.:;\-\s]+)\]", replace_bracket, markdown_body)
-
-    def replace_parenthesized(match: re.Match[str]) -> str:
-        citation_id = match.group(1)
-        number = citation_map.get(citation_id)
-        return f"[{number}]" if number is not None else match.group(0)
-
-    converted = re.sub(rf"\(({id_pattern})\)", replace_parenthesized, converted)
-    return re.sub(rf"`(?:{id_pattern})`", "", converted)
-
-def _cited_papers(markdown_body: str, papers: list[Paper]) -> list[Paper]:
-    """Return papers cited in the report body, preserving metadata order.
-
-    Args:
-        markdown_body: Report Markdown before the generated References section.
-        papers: Papers loaded from ``papers.jsonl``.
-
-    Returns:
-        Subset of ``papers`` whose ids appear in body citations.
-    """
-    paper_by_id = {paper.id: paper for paper in papers}
-    ordered_ids = _ordered_body_citation_ids(markdown_body, set(paper_by_id))
-    return [paper_by_id[paper_id] for paper_id in ordered_ids if paper_id in paper_by_id]
-
-def _ordered_body_citation_ids(markdown: str, allowed_ids: set[str]) -> list[str]:
-    """Return allowed citation ids in first-mention order before references."""
-    body = _strip_references_section(markdown)
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for paper_id in re.findall(r"@([A-Za-z0-9_.:-]+)", body):
-        if paper_id in allowed_ids and paper_id not in seen:
-            ordered.append(paper_id)
-            seen.add(paper_id)
-    return ordered
-
-def _citation_instruction(papers: list[Paper], citation_key_map: dict[str, str] | None = None) -> str:
-    """Build AutoResearchClaw-style guidance from known paper metadata.
-
-    Args:
-        papers: Papers loaded from ``papers.jsonl``.
-
-    Returns:
-        A compact prompt block that lists allowed citation keys and reminds the
-        model to cite papers only when the local metadata supports the claim.
-    """
-    if not papers:
-        return ""
-    key_by_id = {paper_id: key for key, paper_id in (citation_key_map or {}).items()}
-    lines = [
-        "Use only these short citation keys in body text, in Pandoc form `[@P1]`:",
-    ]
-    for paper in papers:
-        abstract = f" Abstract: {paper.abstract[:220]}" if paper.abstract else ""
-        source = f" Source: {paper.source}" if paper.source else ""
-        key = key_by_id.get(paper.id, paper.id)
-        lines.append(f"- [@{key}] TITLE: \"{paper.title}\".{source}{abstract}")
-    lines.extend(
-        [
-            "Do not cite a paper unless the sentence discusses that paper or its listed metadata.",
-            "If no listed paper supports a claim, write the claim without a citation or weaken it.",
-        ]
-    )
-    return "\n".join(lines)
-
-def _literature_citation_sentence(papers: list[Paper]) -> str:
-    """Create one conservative citation sentence for fallback introductions."""
-    real_papers = [paper for paper in papers if paper.source != "fixture"]
-    selected = real_papers or papers
-    if not selected:
-        return ""
-    keys = " ".join(f"[@{paper.id}]" for paper in selected[:3])
-    return f"The body cites examples from the retrieved set such as {keys}."
-
-def _body_citation_ids(markdown: str, allowed_ids: set[str]) -> set[str]:
-    """Return allowed citation ids that appear before the References section."""
-    body = _strip_references_section(markdown)
-    found = set(re.findall(r"@([A-Za-z0-9_.:-]+)", body))
-    return found & allowed_ids
-
-def _model_citation_key(paper_id: str, citation_key_map: dict[str, str]) -> str:
-    """Return the short model-facing citation key for one paper id."""
-    for key, mapped_paper_id in citation_key_map.items():
-        if mapped_paper_id == paper_id:
-            return key
-    return ""
 
 def _report_manifest(
     ctx: Context,

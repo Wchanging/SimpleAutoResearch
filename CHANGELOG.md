@@ -25,6 +25,28 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Embedded `code_task_project` runs now keep the first execution batch small by
+  default instead of automatically merging serial dependent work-plan items into
+  a large patch. Standalone `code-task execute` keeps the larger merge behavior
+  for interactive code-task workflows.
+- Report context now treats nested code-task `run/comparison.json` as first-class
+  experiment evidence. `08-report` can cite baseline/patched/delta metrics and
+  the fallback report includes a before/after Code Task Evidence table.
+- A strict embedded code-task pipeline check now covers the full path from
+  `06-code` through `08-report`; the bundled tiny-digits MLP run improved
+  accuracy from `0.766667` to `0.913333` and macro F1 from `0.756898` to
+  `0.913388`.
+- Removed the hidden legacy single-prompt report drafting branch from the V2.4
+  report service. LLM-backed reports now go through the Writer/Reviewer agent
+  loop, and failures fall back to the structured deterministic report.
+- Report citation mapping/display/cleanup helpers moved into
+  `src/simple_ar/report/citations.py`, and the report tool gateway now accepts
+  source handles when resolving paper briefs so reviewer tool requests match the
+  advertised schema.
+- Public examples are now organized around three maintained entrypoints:
+  `examples/research_report/`, `examples/code_task_medium_review/`, and
+  `examples/full_pipeline_tiny_mlp/`. Older narrow or transitional configs were
+  removed from `examples/`, and the toy spam project moved to `tests/fixtures`.
 - `code-task execute` now runs continuously to real review gates by default,
   with Rich step/status output. The `--interactive` flag is reserved for
   primitive-step debugging, and `--yes` only auto-continues those primitive

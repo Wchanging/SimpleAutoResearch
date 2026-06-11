@@ -30,7 +30,7 @@
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report
-uv run simple-ar run --config examples/run_configs/local_research_report.toml
+uv run simple-ar run --config examples/research_report/configs/research_report.toml
 ```
 
 **参数表**：
@@ -250,7 +250,7 @@ Code-task 命令会把已有项目准备到 `runs/<run-id>/code_task/workspace`�
 **语法用法**：
 
 ```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
 uv run simple-ar code-task init --code-root path/to/project --task-file task.md --benchmark-command "python main.py"
 ```
 
@@ -295,7 +295,7 @@ uv run simple-ar code-task init --code-root path/to/project --task-file task.md 
 **语法用法**：
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml
 uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
 ```

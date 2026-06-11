@@ -1,6 +1,6 @@
-# CLI Reference
+﻿# CLI Reference
 
-[中文版本](CLI_REFERENCE_zh.md)
+[涓枃鐗堟湰](CLI_REFERENCE_zh.md)
 
 This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
@@ -31,7 +31,7 @@ on command syntax, options, outputs, and short operational notes.
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report
-uv run simple-ar run --config examples/run_configs/local_research_report.toml
+uv run simple-ar run --config examples/research_report/configs/research_report.toml
 ```
 
 **Options**:
@@ -275,7 +275,7 @@ the first code index.
 **Usage**:
 
 ```bash
-uv run simple-ar code-task init --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
 uv run simple-ar code-task init --code-root path/to/project --task-file task.md --benchmark-command "python main.py"
 ```
 
@@ -322,7 +322,7 @@ artifacts.
 **Usage**:
 
 ```bash
-uv run simple-ar code-task execute runs/<run-id> --config examples/code_tasks/configs/tiny_digits_mlp.toml
+uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml
 uv run simple-ar code-task execute runs/<run-id> --to-step propose-edits
 uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeout 60
 ```

@@ -1,6 +1,6 @@
-# Configuration Reference
+﻿# Configuration Reference
 
-[中文版本](CONFIG_REFERENCE_zh.md)
+[涓枃鐗堟湰](CONFIG_REFERENCE_zh.md)
 
 This document is the TOML reference for SimpleAutoResearch. It covers both the
 outer research pipeline config and standalone/embedded code-task config.
@@ -166,7 +166,7 @@ template = "code_task_project"
 timeout = 60
 
 # Optional external code-task config. If omitted, code-task sections in this file are reused.
-# code_task_config = "examples/code_tasks/configs/tiny_digits_mlp.toml"
+# code_task_config = "examples/full_pipeline_tiny_mlp/configs/pipeline.toml"
 
 [report]
 # auto chooses experiment or research-only report based on available results.
@@ -224,10 +224,10 @@ strict = false
 
 [code_task]
 # Source project copied/worktree-prepared into code_task/workspace.
-code_root = "examples/code_tasks/tiny_digits_mlp_project"
+code_root = "examples/full_pipeline_tiny_mlp/project"
 
 # Task description for standalone or embedded code-task work.
-task_file = "examples/code_tasks/tasks/improve_tiny_digits_mlp.md"
+task_file = "examples/full_pipeline_tiny_mlp/task.md"
 
 # Parent directory for standalone code-task runs.
 output_root = "runs"
@@ -559,7 +559,7 @@ max_retrieval_rounds = 1
 max_queries = 4
 required_facets = ["overview", "method", "benchmark"]
 local_documents = [
-  "../research/local_agent_simulation_notes.md",
+  "../private_corpus/agent_simulation_notes.md",
 ]
 cache = true
 index_backend = "keyword"

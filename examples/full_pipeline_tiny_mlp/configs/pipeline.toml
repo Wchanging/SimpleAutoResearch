@@ -56,11 +56,11 @@ claims = true
 
 [code_task]
 # Project prepared under 06-code/code_task_run/code_task/workspace.
-code_root = "examples/code_tasks/tiny_digits_mlp_project"
+code_root = "examples/full_pipeline_tiny_mlp/project"
 
 # Optional for embedded pipeline runs. If omitted, 05-design generates
 # generated_code_task.md from the research artifacts and codebase summary.
-task_file = "examples/code_tasks/tasks/improve_tiny_digits_mlp.md"
+task_file = "examples/full_pipeline_tiny_mlp/task.md"
 name = "tiny-digits-mlp-pipeline"
 
 [workspace]

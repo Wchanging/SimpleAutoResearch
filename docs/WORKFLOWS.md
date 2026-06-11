@@ -1,6 +1,6 @@
-# Workflows And Artifacts
+﻿# Workflows And Artifacts
 
-[中文版本](WORKFLOWS_zh.md)
+[涓枃鐗堟湰](WORKFLOWS_zh.md)
 
 This document explains what SimpleAutoResearch is doing internally: workflow
 presets, pipeline stages, artifact ownership, and module boundaries. It avoids
@@ -79,11 +79,14 @@ Key boundaries:
 
 Bundled examples:
 
-- `toy_spam_project`: tiny rule-based classifier, useful for patch and failure-analysis smoke tests.
-- `tiny_digits_mlp_project`: lightweight NumPy MLP over scikit-learn's bundled digits dataset, useful for realistic local ML benchmark experiments without GPU or downloads.
-- `medium_review_pipeline_project`: multi-module review classifier with a `main.py`
-  entrypoint, JSON config, visible progress output, and a task that naturally
-  touches feature extraction, model scoring, and configuration.
+- `examples/research_report/`: research-only search/read/synthesize/report
+  workflow with live academic sources and report variants.
+- `examples/code_task_medium_review/`: standalone code-task workflow over a
+  multi-module review classifier with a `main.py` entrypoint, JSON config,
+  visible progress output, and a task that naturally touches feature extraction,
+  model scoring, and configuration.
+- `examples/full_pipeline_tiny_mlp/`: full 8-stage pipeline over a lightweight
+  NumPy MLP benchmark, useful for end-to-end local checks without GPU.
 
 ### 3. Research With Experiment
 
@@ -104,8 +107,12 @@ Current status:
 - `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
 - The embedded path is end-to-end: it builds the same repo-map/context-pack,
   work-plan, and attempt/batch evidence as standalone code tasks, then
-  auto-approves the patch plan inside the prepared workspace. The standalone
-  code-task workflow remains the safer human-review path.
+  auto-approves the patch plan inside the prepared workspace. Embedded runs keep
+  the active batch to the first concrete work item by default; standalone
+  code-task remains the better place for large merged batches and human review.
+- The final report receives the nested code-task comparison as experiment
+  evidence, so before/after metrics can appear in the Code Task Evidence section
+  instead of being hidden inside `06-code/`.
 - Report generation is guarded: LLM drafts are accepted only when citations, metric visibility, fixture disclosure, and toy-demo boundaries pass rule-based checks.
 
 ## Default 8-Stage Pipeline

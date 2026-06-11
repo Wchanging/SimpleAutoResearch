@@ -164,8 +164,8 @@ def code_task_toy_spam_spec(repo_root: Path) -> CodeTaskExperimentSpec:
     root = Path(repo_root)
     return CodeTaskExperimentSpec(
         template=CODE_TASK_TOY_SPAM_TEMPLATE,
-        code_root=root / "examples" / "code_tasks" / "toy_spam_project",
-        task_file=root / "examples" / "code_tasks" / "tasks" / "improve_toy_spam_baseline.md",
+        code_root=root / "tests" / "fixtures" / "code_tasks" / "toy_spam_project",
+        task_file=root / "tests" / "fixtures" / "code_tasks" / "improve_toy_spam_baseline.md",
         benchmark_command=CODE_TASK_TOY_SPAM_BENCHMARK,
         allow_test_changes=False,
         approval_note="Auto-approved inside isolated 8-stage demo workspace.",
@@ -347,7 +347,11 @@ def prepare_code_task_experiment(
         )
     work_item_id = _first_executable_work_item_id(work_plan.work_plan_path)
     _emit(message_callback, f"Creating code-task attempt/batch state for {work_item_id}.")
-    batch = create_code_task_batch(run_dir, work_item_id=work_item_id)
+    batch = create_code_task_batch(
+        run_dir,
+        work_item_id=work_item_id,
+        merge_dependent_chain=False,
+    )
 
     _emit(message_callback, "Calling LLM for code-task patch plan.")
     plan = generate_patch_plan(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import json
 import re
+import shutil
 from pathlib import Path
 
 from simple_ar.literature.models import Paper
@@ -9,24 +11,26 @@ from simple_ar.literature.verify import validate_citations
 from simple_ar.core.pipeline import Context
 from simple_ar.report.agent import run_report_agent
 from simple_ar.report.audit import build_report_audit
+from simple_ar.report.citations import (
+    append_references_section as _append_references_section,
+    body_citation_ids as _body_citation_ids,
+    citation_display_map as _citation_display_map,
+    citation_map_artifact as _citation_map_artifact,
+    cited_papers as _cited_papers,
+    display_citation_numbers as _display_citation_numbers,
+    expand_short_citation_keys as _expand_short_citation_keys,
+    sanitize_report_citations as _sanitize_report_citations,
+    strip_references_section as _strip_references_section,
+)
 from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.quality import build_report_quality
 from simple_ar.report.schema import ReportRuntimeConfig, ReportToolCall
 from simple_ar.report.schema import ReportSectionReview
 from simple_ar.report.service import (
-    _append_references_section,
     _build_research_report,
     _build_report,
-    _body_citation_ids,
-    _expand_short_citation_keys,
-    _citation_display_map,
-    _citation_map_artifact,
-    _cited_papers,
-    _display_citation_numbers,
     _report_bound_errors,
-    _sanitize_report_citations,
-    _strip_references_section,
     _validated_agent_report,
 )
 from simple_ar.report.templates import load_report_template_bundle
@@ -76,6 +80,72 @@ def _extract_prompt_value(prompt: str, key: str) -> str:
 
 
 class ReportSafetyTests(unittest.TestCase):
+    def test_report_context_includes_nested_code_task_comparison(self) -> None:
+        run_dir = Path(".tmp_tests") / "report-code-task-context"
+        if run_dir.exists():
+            shutil.rmtree(run_dir)
+        comparison_dir = run_dir / "06-code" / "code_task_run" / "code_task" / "run"
+        comparison_dir.mkdir(parents=True)
+        comparison = {
+            "verdict": "improved",
+            "reasons": ["improved `accuracy` by +0.10"],
+            "baseline": {"metrics": {"accuracy": 0.70, "macro_f1": 0.68}},
+            "patched": {"metrics": {"accuracy": 0.80, "macro_f1": 0.79}},
+            "metrics": [
+                {
+                    "name": "accuracy",
+                    "delta": 0.10,
+                    "direction": "higher_is_better",
+                }
+            ],
+        }
+        (comparison_dir / "comparison.json").write_text(
+            json.dumps(comparison),
+            encoding="utf-8",
+        )
+        meta_dir = run_dir / "06-code"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        (meta_dir / "code_task_experiment.json").write_text(
+            json.dumps({"code_task_run_dir": str(meta_dir / "code_task_run")}),
+            encoding="utf-8",
+        )
+        ctx = Context(run_dir, "code task report")
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="Known abstract.",
+            url="https://example.com/1",
+        )
+
+        context = build_report_context(
+            ctx,
+            report_mode="experiment",
+            goal="",
+            problem="",
+            search_meta={},
+            synthesis="",
+            hypothesis="",
+            plan={"template": "code_task_project"},
+            results={"metrics": {"accuracy": 0.80}},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="",
+        )
+        template = load_report_template_bundle(
+            report_mode="experiment",
+            config=ReportRuntimeConfig(template="experiment"),
+            project_root=Path.cwd(),
+        )
+        memory = initialize_report_memory(context=context, template=template)
+
+        metric_ids = {metric.metric_id for metric in memory.metric_sources}
+        self.assertIn("metric:code_task_baseline_accuracy", metric_ids)
+        self.assertIn("metric:code_task_patched_accuracy", metric_ids)
+        self.assertIn("metric:code_task_delta_accuracy", metric_ids)
+        self.assertIn("artifact:code_task_comparison", memory.section_plan[0].evidence_handles)
+        shutil.rmtree(run_dir)
+
     def test_report_review_accepts_object_revision_instructions(self) -> None:
         review = ReportSectionReview.model_validate(
             {
@@ -436,6 +506,13 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(paper_result.status, "ok")
         self.assertEqual(paper_result.content["handles"][0]["cite_as"], "[@P1]")
         self.assertNotIn("paper_id", paper_result.content["handles"][0])
+        handle_result = gateway.call(
+            ReportToolCall(
+                tool_name="get_paper_brief",
+                arguments={"handle": "paper:paper-1"},
+            )
+        )
+        self.assertEqual(handle_result.status, "ok")
 
     def test_report_audit_records_unknown_citation_and_metric_sources(self) -> None:
         paper = Paper(

@@ -1,6 +1,6 @@
-# Development Guide
+﻿# Development Guide
 
-[中文版本](DEVELOPMENT_zh.md)
+[涓枃鐗堟湰](DEVELOPMENT_zh.md)
 
 This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For TOML schema details, see [Configuration Reference](CONFIG_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
 
@@ -147,6 +147,49 @@ recorded as deltas, but they should not decide an improved/regressed verdict
 unless their direction is known from explicit manifest configuration or a
 simple local heuristic. Add new default heuristics only when the metric naming
 convention is common enough to be unsurprising.
+
+## Extending Report And Audit
+
+The report system is the V2.4 outlet for research-only surveys, experiment
+reports, and embedded code-task results. Keep it template-driven and
+evidence-aware rather than turning it back into a single prompt or a single
+large service file.
+
+```text
+src/simple_ar/report/
+  schema.py        Pydantic models for context, memory, tools, drafts, reviews
+  context.py       collect papers, synthesis, metrics, and code-task comparison
+  templates.py     load Markdown templates and reviewer criteria
+  memory.py        compact section plan, evidence handles, claims, limitations
+  tools.py         report tool schema definitions
+  tool_gateway.py  bounded read-only tool execution
+  retrieval.py     source-handle backtracking
+  agent.py         Writer/Reviewer orchestration
+  citations.py     citation key mapping, display labels, and citation cleanup
+  audit.py         citation, metric, claim, and reviewer audit aggregation
+  assembler.py     section drafts to final Markdown
+  quality.py       deterministic report quality checks
+  service.py       stage entrypoint and artifact packaging
+```
+
+When adding report behavior:
+
+- put schemas in `schema.py`, not ad hoc dictionaries in `service.py`;
+- put new source lookup or backtracking logic in `context.py`,
+  `retrieval.py`, or `tool_gateway.py`;
+- put Writer/Reviewer loop behavior in `agent.py`;
+- put citation mapping, display conversion, and citation cleanup in
+  `citations.py`;
+- put mechanical checks in `audit.py` or `quality.py`;
+- keep templates and criteria in `templates/report/`, not hard-coded prompt
+  strings;
+- keep `service.py` as the stage-level coordinator and artifact writer.
+
+`report/service.py`, `pipeline_stages/research.py`, and `cli/main.py` are still
+large enough to be treated as yellow lights. Do not add unrelated behavior to
+them. New work should either move logic into the owning domain module or reduce
+these files. This is a maintenance rule, not a demand to split every small
+helper into a separate file.
 
 ### Code-Task Environment Policy
 

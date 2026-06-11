@@ -17,6 +17,12 @@
 
 ### Changed
 
+- 内嵌 `code_task_project` 现在默认只执行第一个较小的 work-plan batch，不再自动把串行依赖项合并成大补丁；standalone `code-task execute` 仍保留面向人工审核工作流的合并行为。
+- Report context 现在会把嵌套 code-task 的 `run/comparison.json` 当作一等实验/指标证据。`08-report` 可以看到 baseline、patched 和 delta 指标，fallback report 也会写出 Code Task Evidence 前后对比表。
+- 新增严格的内嵌 code-task pipeline 检查，覆盖 `06-code` 到 `08-report` 的完整路径；bundled tiny-digits MLP 测试中，accuracy 从 `0.766667` 提升到 `0.913333`，macro F1 从 `0.756898` 提升到 `0.913388`。
+- 移除了 V2.4 report service 里隐藏的 legacy 单 prompt 报告生成分支。LLM 报告现在统一走 Writer/Reviewer agent loop；失败时回退到结构化 deterministic report。
+- Report citation 映射、显示和 cleanup helper 已迁移到 `src/simple_ar/report/citations.py`；report tool gateway 现在也能用 source handle 解析 paper brief，让 reviewer tool request 和公开 schema 保持一致。
+- 公开 examples 现在收束为三个维护入口：`examples/research_report/`、`examples/code_task_medium_review/` 和 `examples/full_pipeline_tiny_mlp/`。旧的窄范围/过渡配置已从 `examples/` 移除，toy spam 项目迁移到 `tests/fixtures`。
 - `code-task execute` 现在默认连续运行到真正的审核门，并使用 Rich 展示步骤状态。
   `--interactive` 只用于 primitive step 调试，`--yes` 也只会自动继续这些 primitive prompts。
 - LLM work-plan / patch-plan 在配置次数内重试后仍失败时，现在会停在

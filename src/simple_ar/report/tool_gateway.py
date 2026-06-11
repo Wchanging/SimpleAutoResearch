@@ -62,14 +62,16 @@ class ReportToolGateway:
         name = call.tool_name
         if name == "get_paper_brief":
             args = GetPaperBriefArgs.model_validate(call.arguments)
-            handles = (
-                self.resolver.find_by_citation_key(args.citation_key)
-                if args.citation_key
-                else self.resolver.find_by_paper(args.paper_id)
-            )
+            if args.handle:
+                handle = self.resolver.get(args.handle)
+                handles = self.resolver.find_by_paper(handle.paper_id) if handle and handle.paper_id else ([handle] if handle else [])
+            elif args.citation_key:
+                handles = self.resolver.find_by_citation_key(args.citation_key)
+            else:
+                handles = self.resolver.find_by_paper(args.paper_id)
             if not handles:
                 return ReportToolResult(tool_name=name, status="not_found", summary="No paper handle found.")
-            source_label = args.citation_key or args.paper_id
+            source_label = args.handle or args.citation_key or args.paper_id
             return ReportToolResult(
                 tool_name=name,
                 summary=f"Found {len(handles)} handle(s) for paper {source_label}.",

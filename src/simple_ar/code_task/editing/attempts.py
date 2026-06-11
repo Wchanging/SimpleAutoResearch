@@ -84,6 +84,7 @@ def create_code_task_batch(
     kind: str = "implementation",
     parent_batch_id: str = "",
     force: bool = False,
+    merge_dependent_chain: bool = True,
 ) -> CodeTaskBatchResult:
     """Create a state directory for executing one work-plan item.
 
@@ -96,6 +97,9 @@ def create_code_task_batch(
         attempt_id: Optional existing or new attempt id. When omitted, the
             active attempt from ``manifest.json`` is reused or ``attempt-001``
             is created.
+        merge_dependent_chain: When true, merge a narrow serial dependency
+            chain into one execution batch. Disable this for fully automated
+            embedded pipeline runs that should prefer small reviewable steps.
         force: Recreate a batch for the same work item even when one already
             exists in the active attempt.
 
@@ -116,7 +120,11 @@ def create_code_task_batch(
     if work_item is None:
         available = ", ".join(_work_item_ids(work_plan)) or "none"
         raise ValueError(f"Unknown work item `{work_item_id}`. Available: {available}")
-    execution_item = _execution_work_item(work_plan, work_item)
+    execution_item = (
+        _execution_work_item(work_plan, work_item)
+        if merge_dependent_chain
+        else _single_execution_work_item(work_item)
+    )
 
     attempt = _ensure_attempt(
         root,
@@ -371,10 +379,15 @@ def _find_existing_batch(
 def _execution_work_item(work_plan: dict[str, Any], work_item: dict[str, Any]) -> dict[str, Any]:
     chain = _dependent_work_item_chain(work_plan, work_item)
     if len(chain) <= 1:
-        result = dict(work_item)
-        result.setdefault("source_work_item_ids", [str(work_item.get("id", ""))])
-        return result
+        return _single_execution_work_item(work_item)
     return _merge_work_items(chain)
+
+
+def _single_execution_work_item(work_item: dict[str, Any]) -> dict[str, Any]:
+    result = dict(work_item)
+    result.setdefault("source_work_item_ids", [str(work_item.get("id", ""))])
+    result.setdefault("execution_scope", "single_work_item")
+    return result
 
 
 def _dependent_work_item_chain(work_plan: dict[str, Any], first: dict[str, Any]) -> list[dict[str, Any]]:

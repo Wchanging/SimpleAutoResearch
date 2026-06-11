@@ -2,7 +2,7 @@
 
 ## Objective
 
-Improve the review-classification baseline in `medium_review_pipeline_project` by adding phrase-aware sentiment handling. The current model only uses unigram word features, so it misclassifies common phrases such as `not good`, `not bad`, `not slow`, `hardly useful`, and `good ... broken`.
+Improve the review-classification baseline in `project/` by adding phrase-aware sentiment handling. The current model only uses unigram word features, so it misclassifies common phrases such as `not good`, `not bad`, `not slow`, `hardly useful`, and `good ... broken`.
 
 ## Scope
 

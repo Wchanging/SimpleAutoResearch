@@ -237,7 +237,7 @@ class PipelineTests(unittest.TestCase):
     def test_code_task_project_template_accepts_user_project_config(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         repo_root = Path(__file__).resolve().parents[1]
-        config_path = repo_root / "examples" / "code_tasks" / "configs" / "tiny_digits_mlp.toml"
+        config_path = repo_root / "examples" / "full_pipeline_tiny_mlp" / "configs" / "pipeline.toml"
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             run_dir = Path(tmp) / "run"
             ctx = Context(
@@ -306,7 +306,7 @@ class PipelineTests(unittest.TestCase):
     def test_code_task_project_design_can_generate_missing_task_file(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         repo_root = Path(__file__).resolve().parents[1]
-        code_root = repo_root / "examples" / "code_tasks" / "tiny_digits_mlp_project"
+        code_root = repo_root / "examples" / "full_pipeline_tiny_mlp" / "project"
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             run_dir = Path(tmp) / "run"
             ctx = Context(

@@ -1,6 +1,18 @@
+# Standalone code-task example.
+#
+# Pipeline-only sections such as [run], [search], [research], [experiment],
+# and [report] are intentionally omitted here. Use this file with:
+#
+#   uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
+#   uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml
+#
+# The project layout mirrors a user-owned repository: task.md describes the
+# requested change, project/ contains the editable code, and this config keeps
+# benchmark, workspace, model, and safety settings in one place.
+
 [code_task]
-code_root = "examples/code_tasks/medium_review_pipeline_project"
-task_file = "examples/code_tasks/tasks/improve_medium_review_pipeline.md"
+code_root = "examples/code_task_medium_review/project"
+task_file = "examples/code_task_medium_review/task.md"
 output_root = "runs"
 name = "medium-review-pipeline"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from simple_ar.core.artifacts import read_json
 from simple_ar.core.pipeline import Context
 from simple_ar.literature.models import Paper
 from simple_ar.report.schema import MetricSource, ReportContext, SourceHandle
@@ -30,7 +31,11 @@ def build_report_context(
     source_handles.extend(_paper_brief_handles(ctx, citation_key_map))
     source_handles.extend(_chunk_handles(ctx, limit=80, citation_key_map=citation_key_map))
     source_handles.extend(_synthesis_handles(ctx))
-    metric_sources = _metric_sources(ctx, results)
+    source_handles.extend(_code_task_handles(ctx))
+    metric_sources = [
+        *_code_task_metric_sources(ctx),
+        *_metric_sources(ctx, results),
+    ]
     return ReportContext(
         topic=ctx.topic,
         report_mode=report_mode,
@@ -157,6 +162,71 @@ def _synthesis_handles(ctx: Context) -> list[SourceHandle]:
     return handles
 
 
+def _code_task_handles(ctx: Context) -> list[SourceHandle]:
+    comparison, artifact = _code_task_comparison(ctx)
+    if not comparison:
+        return []
+    baseline = comparison.get("baseline") if isinstance(comparison.get("baseline"), dict) else {}
+    patched = comparison.get("patched") if isinstance(comparison.get("patched"), dict) else {}
+    baseline_metrics = baseline.get("metrics") if isinstance(baseline.get("metrics"), dict) else {}
+    patched_metrics = patched.get("metrics") if isinstance(patched.get("metrics"), dict) else {}
+    reasons = comparison.get("reasons")
+    reason_text = "; ".join(str(item) for item in reasons) if isinstance(reasons, list) else ""
+    summary = (
+        f"Code-task before/after comparison verdict: {comparison.get('verdict', 'unknown')}. "
+        f"Baseline metrics: {_metric_summary(baseline_metrics)}. "
+        f"Patched metrics: {_metric_summary(patched_metrics)}. "
+        f"Reasons: {reason_text or 'not recorded'}."
+    )
+    return [
+        SourceHandle(
+            handle="artifact:code_task_comparison",
+            kind="experiment",
+            title="Code task before/after comparison",
+            artifact=artifact,
+            summary=summary[:1200],
+            metadata=comparison,
+        )
+    ]
+
+
+def _code_task_metric_sources(ctx: Context) -> list[MetricSource]:
+    comparison, artifact = _code_task_comparison(ctx)
+    if not comparison:
+        return []
+    sources: list[MetricSource] = []
+    for label in ("baseline", "patched"):
+        run = comparison.get(label)
+        metrics = run.get("metrics") if isinstance(run, dict) else {}
+        if not isinstance(metrics, dict):
+            continue
+        for name, value in metrics.items():
+            _append_metric_source(
+                sources,
+                metric_id=f"metric:code_task_{label}_{name}",
+                name=str(name),
+                value=value,
+                artifact=artifact,
+                label=f"code_task_{label}",
+            )
+    for row in comparison.get("metrics", []):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        _append_metric_source(
+            sources,
+            metric_id=f"metric:code_task_delta_{name}",
+            name=name,
+            value=row.get("delta"),
+            artifact=artifact,
+            label="code_task_delta",
+            direction=str(row.get("direction") or ""),
+        )
+    return sources
+
+
 def _metric_sources(ctx: Context, results: dict[str, Any]) -> list[MetricSource]:
     metrics = results.get("metrics", {}) if isinstance(results, dict) else {}
     if not isinstance(metrics, dict):
@@ -166,17 +236,99 @@ def _metric_sources(ctx: Context, results: dict[str, Any]) -> list[MetricSource]
     for name, value in metrics.items():
         if isinstance(value, bool):
             continue
-        if isinstance(value, (int, float, str)):
-            sources.append(
-                MetricSource(
-                    metric_id=f"metric:{name}",
-                    name=str(name),
-                    value=value,
-                    artifact=artifact,
-                    label="experiment",
-                )
-            )
+        _append_metric_source(
+            sources,
+            metric_id=f"metric:{name}",
+            name=str(name),
+            value=value,
+            artifact=artifact,
+            label="experiment",
+        )
     return sources
+
+
+def _append_metric_source(
+    sources: list[MetricSource],
+    *,
+    metric_id: str,
+    name: str,
+    value: object,
+    artifact: str,
+    label: str,
+    direction: str = "",
+) -> None:
+    if isinstance(value, bool):
+        return
+    if isinstance(value, (int, float, str)):
+        sources.append(
+            MetricSource(
+                metric_id=metric_id,
+                name=name,
+                value=value,
+                artifact=artifact,
+                label=label,
+                direction=direction,
+            )
+        )
+
+
+def _code_task_comparison(ctx: Context) -> tuple[dict[str, Any], str]:
+    meta_path = ctx.find_artifact("code_task_experiment.json")
+    if meta_path is None or not meta_path.exists():
+        return {}, ""
+    try:
+        meta = read_json(meta_path)
+    except Exception:
+        return {}, ""
+    if not isinstance(meta, dict):
+        return {}, ""
+    comparison_ref = meta.get("comparison")
+    comparison_path: Path | None = None
+    if isinstance(comparison_ref, str) and comparison_ref.strip():
+        comparison_path = _resolve_artifact_ref(ctx, comparison_ref, base=meta_path.parent)
+    if comparison_path is None or not comparison_path.exists():
+        run_dir_value = meta.get("code_task_run_dir")
+        if isinstance(run_dir_value, str) and run_dir_value.strip():
+            run_dir = _resolve_artifact_ref(ctx, run_dir_value, base=meta_path.parent)
+        else:
+            run_dir = meta_path.parent / "code_task_run"
+        comparison_path = run_dir / "code_task" / "run" / "comparison.json"
+    if not comparison_path.exists():
+        return {}, ""
+    try:
+        comparison = read_json(comparison_path)
+    except Exception:
+        return {}, ""
+    if not isinstance(comparison, dict):
+        return {}, ""
+    return comparison, _relative_path(ctx, comparison_path)
+
+
+def _resolve_artifact_ref(ctx: Context, value: str, *, base: Path | None = None) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    candidates = [
+        path,
+        ctx.run_dir / path,
+    ]
+    if base is not None:
+        candidates.insert(1, base / path)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _metric_summary(metrics: object) -> str:
+    if not isinstance(metrics, dict) or not metrics:
+        return "none"
+    parts = [
+        f"{key}={value}"
+        for key, value in sorted(metrics.items())
+        if isinstance(value, (int, float, str)) and not isinstance(value, bool)
+    ]
+    return ", ".join(parts[:8]) if parts else "none"
 
 
 def _read_jsonl(ctx: Context, artifact_name: str) -> list[dict[str, Any]]:
