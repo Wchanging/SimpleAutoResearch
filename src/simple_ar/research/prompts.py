@@ -410,6 +410,59 @@ def code_task_design_user_prompt(
     )
 
 
+def merged_code_task_design_user_prompt(
+    *,
+    topic: str,
+    user_task_markdown: str,
+    goal_markdown: str,
+    problem_markdown: str,
+    synthesis_markdown: str,
+    hypothesis_markdown: str,
+    codebase_summary_json: str,
+    benchmark_command: str,
+    primary_metric: str,
+) -> str:
+    """Build the prompt that merges a user task file with research context."""
+    metric = primary_metric or "the configured benchmark metrics"
+    command = benchmark_command or "the configured benchmark command"
+    return (
+        "Write JSON with one string field: `task_markdown`.\n\n"
+        "The value will be saved as the embedded code-task `task.md`. "
+        "The user's task file is the hard requirement. The research artifacts "
+        "may refine motivation, constraints, target signals, and success "
+        "criteria, but must not broaden the user request or override explicit "
+        "user constraints.\n\n"
+        "Required Markdown structure:\n"
+        "# Code Task\n"
+        "## Objective\n"
+        "## User Requirements\n"
+        "## Research-Derived Context\n"
+        "## Target Codebase Signals\n"
+        "## Constraints\n"
+        "## Success Criteria\n"
+        "## Suggested Investigation Steps\n\n"
+        "Rules:\n"
+        "- Preserve every explicit user requirement and protected boundary.\n"
+        "- Use research context only when it helps turn the request into a "
+        "clearer, testable coding task.\n"
+        "- Do not instruct the agent to edit tests, benchmark files, or "
+        "validation targets.\n"
+        "- Mention the benchmark command and primary metric/metric family.\n"
+        "- Prefer a small, reviewable patch over a broad redesign.\n"
+        "- If research artifacts are thin or unrelated, say so and keep the "
+        "task grounded in the user file.\n\n"
+        f"Topic:\n{topic}\n\n"
+        f"User Task Markdown:\n{user_task_markdown}\n\n"
+        f"Goal Markdown:\n{goal_markdown}\n\n"
+        f"Problem Markdown:\n{problem_markdown}\n\n"
+        f"Synthesis Markdown:\n{synthesis_markdown}\n\n"
+        f"Hypothesis Markdown:\n{hypothesis_markdown}\n\n"
+        f"Codebase Summary JSON:\n{codebase_summary_json}\n\n"
+        f"Benchmark Command:\n{command}\n\n"
+        f"Primary Metric:\n{metric}\n"
+    )
+
+
 def report_user_prompt(
     *,
     topic: str,

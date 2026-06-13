@@ -43,6 +43,52 @@ max_llm_calls = 4
 template = "code_task_project"
 timeout = 60
 
+[task]
+# Unified V2.5 task identity. The legacy [code_task] section below is retained
+# so the same file can still be reused by standalone code-task commands.
+kind = "existing_project"
+name = "tiny-digits-mlp-pipeline"
+objective = "Improve the local tiny digits MLP benchmark without changing tests."
+code_root = "../project"
+task_file = "../task.md"
+
+[implementation]
+mode = "patch_existing"
+domain_profile = "ml_experiment"
+provider = "local"
+# Embedded 8-stage runs can merge the user task file with research-derived
+# context from 01-plan..04-synthesize before entering code-task execution.
+task_handoff = "merge"
+allow_external_agent = false
+max_repair_attempts = 1
+
+[execution]
+backend = "local"
+command = "python benchmark.py"
+timeout_sec = 60
+stream_output = "auto"
+allow_dependency_install = false
+
+[resource]
+max_runtime_sec = 60
+max_files = 6
+max_generated_lines = 700
+max_memory_mb = 2048
+allow_gpu = false
+
+[evaluation]
+primary_metric = "accuracy"
+direction = "maximize"
+required_metrics = ["accuracy", "macro_f1"]
+success_criteria = ["accuracy should improve or avoid regression"]
+metric_directions = { accuracy = "higher", macro_f1 = "higher", train_time_sec = "resource", inference_time_ms = "resource", params = "resource" }
+
+[generation]
+enabled = false
+max_batches = 2
+files_per_batch = 3
+review_required = true
+
 [report]
 mode = "auto"
 template = "experiment"
@@ -60,6 +106,8 @@ code_root = "examples/full_pipeline_tiny_mlp/project"
 
 # Optional for embedded pipeline runs. If omitted, 05-design generates
 # generated_code_task.md from the research artifacts and codebase summary.
+# With [implementation].task_handoff = "merge", this file is treated as hard
+# user requirements and merged with research context into generated_code_task.md.
 task_file = "examples/full_pipeline_tiny_mlp/task.md"
 name = "tiny-digits-mlp-pipeline"
 

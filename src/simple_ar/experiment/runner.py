@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from simple_ar.experiment.metrics import parse_metric_lines
+from simple_ar.experiment.execution.backend import LocalExecutionBackend, RunRequest
 
 
 class ExperimentRunError(RuntimeError):
@@ -32,6 +31,9 @@ class ExperimentRunResult:
     stderr: str
     metrics: dict[str, float] = field(default_factory=dict)
     command: list[str] = field(default_factory=list)
+    duration_sec: float = 0.0
+    backend: str = "local"
+    cwd: str = ""
 
     def to_json(self) -> dict[str, Any]:
         """Convert the result into a JSON-serializable dictionary."""
@@ -40,7 +42,17 @@ class ExperimentRunResult:
             "timed_out": self.timed_out,
             "metrics": dict(self.metrics),
             "command": list(self.command),
+            "duration_sec": self.duration_sec,
+            "backend": self.backend,
+            "cwd": self.cwd,
+            "status": self.status,
         }
+
+    @property
+    def status(self) -> str:
+        if self.timed_out:
+            return "timed_out"
+        return "passed" if self.returncode == 0 else "failed"
 
 
 def run_experiment(script_path: Path, *, timeout_sec: int = 30) -> ExperimentRunResult:
@@ -62,46 +74,25 @@ def run_experiment(script_path: Path, *, timeout_sec: int = 30) -> ExperimentRun
         raise ExperimentRunError(f"Experiment script not found: {script_path}")
 
     command = [sys.executable, script_path.name]
-    try:
-        completed = subprocess.run(
-            command,
+    result = LocalExecutionBackend().run(
+        RunRequest(
+            command=command,
             cwd=script_path.parent,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            check=False,
+            timeout_sec=timeout_sec,
+            label="experiment",
         )
-        return ExperimentRunResult(
-            returncode=completed.returncode,
-            timed_out=False,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            metrics=parse_metric_lines(completed.stdout),
-            command=command,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = _output_text(exc.stdout)
-        stderr = _output_text(exc.stderr)
-        if stderr:
-            stderr += "\n"
-        stderr += f"Timed out after {timeout_sec} seconds."
-        return ExperimentRunResult(
-            returncode=None,
-            timed_out=True,
-            stdout=stdout,
-            stderr=stderr,
-            metrics=parse_metric_lines(stdout),
-            command=command,
-        )
-
-
-def _output_text(value: bytes | str | None) -> str:
-    """Normalize subprocess timeout output into text."""
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
+    )
+    return ExperimentRunResult(
+        returncode=result.returncode,
+        timed_out=result.timed_out,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        metrics=dict(result.metrics),
+        command=list(result.command),
+        duration_sec=result.duration_sec,
+        backend=result.backend,
+        cwd=result.cwd,
+    )
 
 
 __all__ = ["ExperimentRunError", "ExperimentRunResult", "run_experiment"]

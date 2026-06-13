@@ -17,7 +17,7 @@
 - 显式 CLI 参数覆盖 TOML 值。
 - 顶层 pipeline TOML 和 code-task TOML 会先经过 Pydantic 校验，再 flatten 成运行时设置；section 类型写错时会更早失败，而不是被静默忽略。
 - 顶层 run config 中，相对路径会在解析器支持的字段上相对配置文件解析，例如 `[experiment].code_task_config` 和 `[research].local_documents`。
-- 当 run config 包含 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[workspace]`、`[safety]` 或 `[edit_scope]` 时，同一文件可被复用为 embedded code-task config。
+- 当 run config 包含 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[safety]` 或 `[edit_scope]` 这类旧 code-task section 时，同一文件可被复用为 embedded code-task config。`[workspace]` 也会被新的统一任务配置使用，因此不会再单独作为 code-task 信号。
 
 ## 完整 Pipeline Config
 
@@ -42,6 +42,10 @@ quiet = false
 # 默认 false 只压缩诊断文件。search documents/chunks、read Paper Brief、synthesis brief
 # 和 design contracts 这类后续阶段需要的核心产物仍会保留。
 debug_artifacts = false
+
+# false 表示重跑 06-code/07-run 前先归档旧的已审核产物。
+# 只有明确不需要保留旧代码/运行证据时才设为 true。
+overwrite_stage_artifacts = false
 
 [llm]
 # true 使用 OpenAI-compatible 模型；false 尽量使用 deterministic fallback。
@@ -159,6 +163,59 @@ timeout = 60
 # 可选外部 code-task config；省略时复用本文件中的 code-task sections。
 # code_task_config = "examples/full_pipeline_tiny_mlp/configs/pipeline.toml"
 
+# V2.5 开始，新 pipeline config 推荐使用下面这些统一 section。它们把
+# research-first、已有项目 code-task、greenfield experiment 的关键参数
+# 归一到同一个运行时 TaskConfig。下面旧的 [code_task]/[benchmark]/[environment]
+# 仍然兼容，但新配置应优先使用这一组。
+[task]
+kind = "existing_project"      # auto | existing_project | greenfield | benchmark_solution
+name = "tiny-digits-mlp"
+objective = "Improve the local benchmark without editing tests."
+code_root = "examples/full_pipeline_tiny_mlp/project"
+task_file = "examples/full_pipeline_tiny_mlp/task.md"
+
+[implementation]
+mode = "patch_existing"        # auto | patch_existing | generate_project | template
+domain_profile = "ml_experiment" # auto | generic_research_experiment | code_experiment | ml_experiment | code_agent_eval
+provider = "local"
+task_handoff = "user_file"     # user_file | merge；merge 会把 task_file 与研究上下文合并
+allow_external_agent = false
+max_repair_attempts = 1
+
+[workspace]
+mode = "copy"                  # copy | git_worktree | sparse_copy
+reuse_source_venv = false
+setup_hook = ""
+include = []
+exclude = []
+
+[execution]
+backend = "local"              # 当前 V2.5 foundation 路径先支持 local
+command = "python benchmark.py"
+timeout_sec = 60
+stream_output = "auto"
+allow_dependency_install = false
+
+[resource]
+max_runtime_sec = 60
+max_files = 8
+max_generated_lines = 700
+max_memory_mb = 2048
+allow_gpu = false
+
+[evaluation]
+primary_metric = "accuracy"
+direction = "maximize"
+required_metrics = ["accuracy", "macro_f1"]
+success_criteria = ["primary metric should improve or avoid regression"]
+metric_directions = { accuracy = "higher", macro_f1 = "higher", train_time_sec = "resource" }
+
+[generation]
+enabled = false                # greenfield 项目生成时设为 true；已有项目 patch 不需要打开
+max_batches = 2
+files_per_batch = 3
+review_required = true
+
 [report]
 # auto 会根据是否有实验结果选择 experiment 或 research_only 报告结构。
 mode = "auto"                 # auto | research_only | experiment
@@ -243,15 +300,8 @@ params = "resource"
 mode = "current"              # current | external
 # python = "C:/path/to/python.exe"
 
-[workspace]
-# copy 最稳；git_worktree 适合 git repo root；sparse_copy 只复制 allowlist。
-mode = "copy"                 # copy | git_worktree | sparse_copy
-
-# 如果检测到 source .venv/venv，是否复用其 Python；不会自动安装依赖。
-reuse_source_venv = false
-
-# 为未来 managed environment 记录；init 不会执行这个命令。
-setup_hook = ""
+# workspace 设置只在上面的统一 [workspace] section 声明一次，并复用于
+# embedded code-task 兼容层。
 
 [edit_scope]
 # automated edits 可触碰的 workspace-relative glob allowlist。
@@ -348,7 +398,7 @@ max_total_edit_chars = 24000
 max_proposal_chars = 42000
 ```
 
-## Section Reference
+## Section 参考
 
 | Section | 使用方 | 含义 |
 | --- | --- | --- |
@@ -359,13 +409,19 @@ max_proposal_chars = 42000
 | `[research.budget]` | `02-search` 和后续 evidence stages | research planning 使用的轻量预算上限；只有启用 debug artifacts 时才会保留到 `planning/research_plan.json`。 |
 | `[retrieval]` | read/synthesize/report helpers | 本地 artifact retrieval 上下文。 |
 | `[experiment]` | `05-design` 到 `07-run` | 实验模板、timeout 和可选嵌套 code-task config 路径。 |
+| `[task]` | `05-design` 和后续 implementation stages | 统一任务身份、目标、可选任务文件和可选源码根目录。 |
+| `[implementation]` | `05-design` 和 `06-code` | 代码如何产生或修改：已有项目 patch、固定模板，或受控 greenfield 生成。 |
+| `[workspace]` | code-task init 和统一任务配置 | workspace 策略和 setup metadata。 |
+| `[execution]` | design/run/code-task 兼容层 | 执行后端、命令、timeout、输出流和依赖安装策略。 |
+| `[resource]` | design 和后续 implementation gates | 运行时间、文件数、生成行数、内存和 GPU 预算。 |
+| `[evaluation]` | design、comparison、report | 主指标、方向、必需指标和成功条件。 |
+| `[generation]` | greenfield path | 分批/文件生成预算和 review 策略。 |
 | `[report]` | `08-report` | 报告结构模式。 |
 | `[code_task]` | standalone 或 embedded code task | 源项目、任务文件、输出目录和展示名。 |
 | `[benchmark]` | code task | benchmark command 和主指标。 |
 | `[benchmark.metric_directions]` | code task comparison | 指标解释规则。 |
 | `[metrics]` | code task comparison | `primary`、`primary_metric`、`directions` 或 `metric_directions` 的替代位置。 |
 | `[environment]` | code task execution | Python 执行策略。 |
-| `[workspace]` | code-task init | workspace 模式和 setup metadata。 |
 | `[edit_scope]` | code-task init 和全部 patch gates | 可选 editable allowlist 和额外 read-only patterns。 |
 | `[safety]` | code-task init/validation | 复制大小和 validation 扫描限制。 |
 | `[execute]` | code-task execute | 状态机限制、运行设置、repair 轮数和输出流模式。 |
@@ -383,6 +439,7 @@ max_proposal_chars = 42000
 | `[run].topic` | 用户的主要研究/实验目标，会影响 planning、默认搜索 query 和报告表述。 |
 | `[run].from_stage` / `[run].to_stage` | 部分运行的阶段范围。可用于停在 `synthesize`、只重跑 `report`，或 resume 某一段。 |
 | `[run].debug_artifacts` | 是否保留详细诊断和草案交接文件，例如 search planning、provider traces、retrieval-selection rows、coverage review、section tables、debug cards、旧 evidence-pack 诊断产物，以及 design 阶段的 tool contracts、evidence review、eval report 和 retention policy。默认 false 会保持精简输出；核心产物仍按阶段保留：`02-search` documents/chunks、`03-read` review/Paper Brief、`04-synthesize` synthesis brief/Markdown、`05-design` experiment contracts。 |
+| `[run].overwrite_stage_artifacts` | 默认 `false`。从 `06-code` 或 `07-run` 重跑时，会先把旧的关键代码/运行产物复制到 `archives/<timestamp>/`，再写入新产物。只有明确想无归档覆盖旧产物时才设为 `true`。 |
 | `[llm].enabled` | 是否启用 LLM 支持的 planning、notes、synthesis、report 和 code-task 步骤。真实 code-task 通常需要 LLM 才有实际意义。 |
 | `[llm].workers` | 支持并发的 LLM 阶段使用的 worker 数；并不代表所有 pipeline 阶段都会并发。 |
 | `[search].offline` | 跳过 live literature provider，适合本地 demo 和 deterministic test。 |
@@ -411,6 +468,33 @@ max_proposal_chars = 42000
 | `[report].max_backtracking_calls` / `[report].max_backtracking_tokens` | source backtracking 调用次数和返回 token 预算。 |
 | `[report.audit].citations` / `.metrics` / `.claims` | 启用 citation、metric 和 claim audit 组件。 |
 | `[report.audit].strict` | 后续 strict mode 可把 warning 作为阻断条件；默认 false。 |
+
+### 统一实验与代码字段
+
+V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它们会被归一成
+`task_config`，同时在需要时映射到旧 code-task key，因此现有 embedded
+`code_task_project` 仍能继续运行。
+
+| 字段 | 含义 |
+| --- | --- |
+| `[task].kind` | `existing_project` 表示已有源码项目和受控 patch；`greenfield` / `benchmark_solution` 使用受控项目生成路径。 |
+| `[task].code_root` / `.task_file` | 源项目根目录和任务 Markdown；路径相对配置文件解析。 |
+| `[implementation].mode` | `patch_existing` 映射到当前受控 code-task 行为；`generate_project` 会在 `06-code/generated_project` 下规划、生成、审查并运行一个受控项目。 |
+| `[implementation].domain_profile` | 选择规划默认值，例如 `generic_research_experiment`、`code_experiment`、`ml_experiment` 或 `code_agent_eval`。 |
+| `[implementation].task_handoff` | 仅用于 8 阶段内嵌已有项目代码任务。`user_file` 会原样使用 `[task].task_file`；`merge` 会在 `05-design/generated_code_task.md` 中把用户任务作为硬约束，并融合 goal/problem/synthesis/hypothesis 上下文。 |
+| `[execution].command` / `.timeout_sec` | benchmark/execution 规划使用的命令和 timeout；已有项目会映射到旧 benchmark 设置。 |
+| `[resource].max_files` / `.max_generated_lines` | 写入 `05-design/resource_plan.json` 的代码前预算。 |
+| `[resource].max_memory_mb` / `.allow_gpu` | runtime 资源预算，会写入 `resource_plan.json`，并在生成或修改代码前作为 contract constraints 暴露。 |
+| `[evaluation].primary_metric` / `.metric_directions` | 写入 `05-design/result_schema.json` 的结果 schema 和指标方向；现有 code-task comparison 也会消费这些字段。 |
+| `[evaluation].required_metrics` / `.success_criteria` | 必需指标检查和成功条件说明，会被 `07-run/guard_report.json` 和最终报告使用。 |
+| `[generation].enabled` | 启用 greenfield 项目生成路径；已有项目 code-task 运行保持 false。 |
+| `[generation].max_batches` / `.files_per_batch` / `.review_required` | 后续项目生成路径的计划提示；已有项目 patch run 只记录用于审计。 |
+
+`05-design` 会把这些字段落成 `experiment_plan.json`、`experiment_contract.json`、
+`result_schema.json`、`resource_plan.json`、`dependency_plan.json`、
+`domain_profile.json` 和 `contract_validation.json`。如果
+`contract_validation.json` 报告失败，`06-code` 会拒绝继续进入代码阶段。
+`07-run/results.json` 是实验结果的 canonical 入口，会集中记录指标、执行 provenance、comparison/verdict，以及 `resource_plan.json`、`code_review.json` 和 `guard_report.json` 的紧凑证据信号。报告阶段应引用这组 canonical 结果，而不是直接从 stdout 猜测实验结论。
 
 ### Evidence Source 字段
 
@@ -453,7 +537,7 @@ max_proposal_chars = 42000
 | `[experiment].timeout` | stage `07-run` 的 timeout；对 embedded code task，也会约束嵌套 benchmark 调用。 |
 | `[experiment].code_task_config` | 可选 standalone code-task TOML 路径。想把 pipeline 和 code-task 配置拆开时使用。 |
 | `[code_task].code_root` | 源项目路径。原始项目不会被直接修改，系统会在 run 目录下准备 workspace。 |
-| `[code_task].task_file` | 用户任务说明。standalone `code-task init` 必填；内嵌 8 阶段 run 可在省略时自动生成。 |
+| `[code_task].task_file` | 用户任务说明。standalone `code-task init` 必填；内嵌 8 阶段 run 可在省略时自动生成，也可在 `[implementation].task_handoff = "merge"` 时与研究上下文融合。 |
 | `[benchmark].command` | 在 `code_task/workspace` 中 patch 前后运行的命令。建议输出 `accuracy: 0.82` 这类可解析指标。 |
 | `[benchmark].primary_metric` | objective verdict 使用的主指标。未知指标仍会记录，但最好声明方向。 |
 | `[benchmark.metric_directions]` | 指标方向表：`higher`、`lower`、`resource` 或 `ignore`。 |
@@ -467,7 +551,7 @@ max_proposal_chars = 42000
 | `[safety].max_file_bytes` | copy/sparse 模式最大复制文件大小，避免误复制大模型、数据或 checkpoint。 |
 | `[safety].validation_max_file_bytes` | 静态 validation 扫描文件大小上限。 |
 
-### Execute And Budget 字段
+### Execute 与 Budget 字段
 
 | 字段 | 含义 |
 | --- | --- |
@@ -609,7 +693,7 @@ reuse_source_venv = false
 
 只有在你理解项目依赖关系时才建议使用 `sparse_copy`；它可能漏掉运行时 import 需要的文件。
 
-## Standalone Code-Task Config
+## 独立 Code-Task Config
 
 用于 `simple-ar code-task init --config PATH`，后续也可传给
 `simple-ar code-task execute RUN_DIR --config PATH`。
@@ -668,7 +752,7 @@ max_total_edit_chars = 12000
 max_proposal_chars = 24000
 ```
 
-## Embedded Code-Task Config
+## 内嵌 Code-Task Config
 
 对 `simple-ar run --config PATH`，可以把 code-task 设置放在同一个 run config，也可以指向单独的 code-task config：
 
@@ -679,9 +763,9 @@ timeout = 120
 code_task_config = "../code_tasks/configs/my_project.toml"
 ```
 
-如果省略 `[experiment].code_task_config`，但 run config 中包含 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[workspace]` 或 `[safety]`，则 run config 自身会被复用为 embedded code-task config。
+如果省略 `[experiment].code_task_config`，但 run config 中包含 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[safety]` 或 `[edit_scope]`，则 run config 自身会被复用为 embedded code-task config。
 
-## Execute And Budget
+## Execute 与 Budget
 
 `execute` 是状态感知调度器。下面配置控制它最多推进到哪一步、使用哪些模型、纳入多少上下文，以及允许多大的 edit proposal。
 

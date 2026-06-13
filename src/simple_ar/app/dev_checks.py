@@ -44,6 +44,7 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         description="Pipeline, stage contracts, and experiment runner tests.",
         targets=(
             "tests.test_pipeline",
+            "tests.test_experiment_execution",
             "tests.test_experiment_runner",
             "tests.test_search_stage",
         ),

@@ -185,9 +185,15 @@ mode = "current"
 uv run simple-ar run --config path/to/your_pipeline.toml
 ```
 
-这会创建一次正常的 8 阶段 run。在 `06-code` 中，系统会把配置中的项目准备到 `06-code/code_task_run/code_task/workspace`，构建 repo map 和 context pack，调用 LLM 生成 work plan 与 patch proposal，在隔离 workspace 内应用补丁并验证。`07-run` 会运行 patched benchmark 并比较指标；`08-report` 会生成最终报告，并把嵌套的 work plan、patch、benchmark 和 comparison 产物作为确定性 code-task 证据写进去。
+这会创建一次正常的 8 阶段 run。在 `06-code` 中，系统会把配置中的项目准备到 `06-code/code_task_run/code_task/workspace`，构建 repo map 和 context pack，调用 LLM 生成 work plan 与 patch proposal，在隔离 workspace 内应用补丁并验证。`07-run` 会运行 patched benchmark，把指标投影到 canonical `results.json`，写出 `guard_report.json`，并在可用时比较嵌套 code-task 指标；`08-report` 会生成最终报告，并把嵌套的 work plan、patch、benchmark 和 comparison 产物作为确定性 code-task 证据写进去。
 
-内嵌路径的目标是端到端跑完，因此会在隔离 workspace 中自动批准 patch plan。如果你希望每一步都先人工审核，应使用 standalone `code-task` 命令。内置 demo 配置在 `examples/full_pipeline_tiny_mlp/configs/pipeline.toml`；完整说明见 [使用与配置](docs/USAGE_zh.md#8-阶段流程中的内嵌-code-task)。
+内嵌路径的目标是端到端跑完，因此会在隔离 workspace 中自动批准 patch plan。如果你希望每一步都先人工审核，应使用 standalone `code-task` 命令。内置 demo 配置在 `examples/full_pipeline_tiny_mlp/configs/pipeline.toml`；完整说明见 [使用与配置](docs/USAGE_zh.md#8-阶段流程中的内嵌-code-task)。如果想保留用户写好的 `task.md` 作为硬约束，同时让 `05-design` 融合前面研究上下文，可以设置 `[implementation].task_handoff = "merge"`。
+
+### 4. Greenfield Experiment：从零生成受控实验项目
+
+当任务还没有现成源码项目时，可以使用 V2.5 的 greenfield 路径。它会先写出 experiment contract，再在 `06-code/generated_project` 下生成受控小项目，执行 code review，运行 `experiment.py`，最后只把通过 `guard_report.json` 检查的 canonical `07-run/results.json` 作为实验结果。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
+
+greenfield 路径会作为真实能力保留，而不是绑定在一个很小的 toy demo 上。当前公开 examples 重点保留 research-only、standalone code-task 和 existing-project full pipeline 三类工作流；如果要做从零实现任务，建议先明确任务、指标 schema、资源预算和依赖策略，再添加对应配置。
 
 ## 当前能力边界
 
@@ -198,7 +204,7 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 - `git_worktree` 要求目标项目是 git 仓库根目录，并且至少有一个本地 commit；不要求连接 GitHub 远程仓库。
 - `sparse_copy` 仍是实验性功能，如果 include 范围过窄，可能漏掉运行依赖。
 - 目前不会自动安装项目依赖，也不会自动管理 Docker/Conda/GPU/Slurm 环境。
-- 较大的代码修改 proposal 仍可能触发很长的 LLM completion。V2.2 会继续加入 bounded proposal contract、context request、多轮 attempt 和未来 external coding-agent adapter；在这些能力成熟前，不建议把它当作大型无人值守重构工具。
+- 较大的代码修改 proposal 仍可能触发很长的 LLM completion。V2.5 正在把实验/代码执行收束到明确 contract、资源预算、canonical results、guard、受控 greenfield 路径和后续 external-agent adapter；在这些能力稳定前，不建议把它当作大型无人值守重构工具。
 - 文献检索现在会写入可审计的 source plan 和 document-store metadata，并支持 OpenAlex、Semantic Scholar、arXiv 和本地 Markdown/text 笔记。它可以解析本地/缓存的 Markdown、text、基础 HTML，以及轻量 `pypdf` PDF。当前已预留可选 `unstructured` 和 LanceDB hooks，但还不是完整 section-aware PDF parser 或向量 RAG survey 系统。
 - LLM 报告有引用、指标和边界规则保护；如果草稿不合格，会回退到结构化 deterministic report。
 

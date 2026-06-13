@@ -140,8 +140,10 @@ review_source_batches = false
 ### 哪些部分依赖 LLM，哪些部分是确定性的
 
 - LLM 支持阶段：`plan`、`read`、`synthesize` 和 `report`。
-- 默认确定性阶段：`design`、`code` 和 `run` 使用固定实验模板，除非选择了 code-task experiment template。
+- `05-design` 会在任何代码生成或修改之前，先写出稳定的 experiment contract、result schema、resource plan、dependency plan 和 domain profile。
+- `06-code` 现在有三条受控实现路径：固定模板、已有项目的内嵌 code-task patch、以及没有现成源码时的 greenfield 项目生成。
 - 内嵌 code-task experiment：`06-code` 可以调用 LLM 生成 work plan、patch plan 和受控 edit proposal，但补丁只会应用到 run 目录下的隔离 workspace。
+- Greenfield experiment：`06-code` 可以调用 LLM 做 architecture/file planning 和代码实现；进入 `07-run` 前会写出 review、memory、backend 和 artifact manifest。
 - Guarded reports：如果 LLM 报告缺少必要正文引用、虚构 citation key 或夸大 fixture/toy evidence，会回退到结构化 deterministic report。
 - `--no-llm` 会让相关阶段使用离线 fallback 内容。
 
@@ -235,8 +237,16 @@ novelty_backend = "local"
   synthesis.md
   hypothesis.md
 05-design/
+  experiment_plan.json
+  experiment_contract.json
+  experiment_contract.md
+  result_schema.json
+  resource_plan.json
+  dependency_plan.json
+  domain_profile.json
+  contract_validation.json
   evidence/
-    experiment_contract.json
+    experiment_contract.json  # 兼容旧 research handoff
     experiment_contract.md
 ```
 
@@ -376,8 +386,16 @@ literature provider，并重新构建本地检索加速索引。
   - `synthesis_brief.json`：从 Paper Brief 汇总出的紧凑桥接产物，包含 role counts、coverage/provenance、themes、gaps、idea candidates、local novelty-risk hints 和 limitations，不再重复保存 cards 表。
   - `synthesis.md` / `hypothesis.md`：面向人类阅读的综合分析和可实验假设。
   - `evidence/*.jsonl` / `.md`（debug-only）：只有设置 `[run].debug_artifacts = true` 时才保留的旧 evidence-pack 诊断产物。
+- `05-design/`
+  - `experiment_plan.json`：下一步 code 阶段使用的执行/模板计划。
+  - `experiment_contract.json` / `.md`：V2.5 可执行契约，记录 task kind、目标、implementation mode、源码项目、benchmark command、风险、约束，以及结果/资源/依赖引用。
+  - `result_schema.json`：主指标、必需指标、方向和成功条件，供 run guard 和后续 report 使用。
+  - `resource_plan.json`：在生成或修改代码前明确 runtime、文件数、生成行数、内存、GPU 和输出流预算。
+  - `dependency_plan.json`：依赖安装策略、预期入口和 setup-hook notes。它只记录策略，不自动安装依赖。
+  - `domain_profile.json`：generic、已有代码、ML 或 code-agent evaluation 任务的规划默认值。
+  - `contract_validation.json`：进入 code 前的契约检查；如果它报告失败，`06-code` 会停止。
 - `05-design/evidence/`
-  - `experiment_contract.json` / `.md`：从文献证据到 code-task / 外部 coding agent 的桥接契约，记录 hypothesis、实现范围、验证提示、预算、风险和 report claim rules。
+  - `experiment_contract.json` / `.md`：来自 V2.3 synthesis artifacts 的兼容 research handoff。可执行的 V2.5 contract 位于 `05-design/experiment_contract.json`。
   - `tool_context.json` / `.md`（debug-only）：给未来 MCP/tool/agent 的只读 handoff，在打开代码 workspace 前只允许读取和规划。
   - `evidence_review.md`、`decision_log.jsonl`、`eval_report.json` / `.md`（debug-only）：人工审核清单和简单 research artifact quality checks。
 - `05-design/tools/`（debug-only）
@@ -440,7 +458,7 @@ uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 
 ## Code Task 工作流
 
-Code Task 会把源项目准备到一个隔离的可编辑 workspace 中，后续所有补丁都只改这个 workspace，不修改原始项目。默认 `copy` 模式最稳妥；V2.2 还支持面向较大 git 项目的 `git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。
+Code Task 会把源项目准备到一个隔离的可编辑 workspace 中，后续所有补丁都只改这个 workspace，不修改原始项目。默认 `copy` 模式最稳妥；工作流也支持面向较大 git 项目的 `git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。
 
 推荐先从 TOML 配置初始化，把项目路径、benchmark 指标、workspace 模式、模型路由和编辑预算都放在一个可审核文件里。内置 standalone 示例使用 medium review pipeline：
 
@@ -536,11 +554,11 @@ code_task/
 这时原始项目仍未被修改，workspace 也还没有应用模型 edits。
 
 `execute` 会用 Rich 显示步骤状态，并默认连续运行到真正需要人工判断的审核门。
-真实终端里的审核门会 inline 询问是否继续；非交互 shell 中则直接停住，避免卡住。
-中途中断后，重新运行同一条 `code-task execute` 命令即可：已完成步骤会被检测并显示为
+真实终端里的审核门会 inline 询问是否继续；非交互 shell 中会干净停住，除非显式传入
+`--yes`。中途中断后，重新运行同一条 `code-task execute` 命令即可：已完成步骤会被检测并显示为
 skipped，然后 workflow 从下一个需要处理的位置继续。只有在调试 primitive 步骤时才建议加
-`--interactive` 逐步确认；`--yes` 只会自动继续这些 interactive primitive prompts，
-不会替你批准审核门。使用 `--no-review-inline` 可以恢复“停住、下次再跑”的行为。
+`--interactive` 逐步确认；`--yes` 会自动继续这些 interactive primitive prompts，
+并且在普通 execute 模式下也会自动批准 inline 审核门。只有明确想自动审批 plan/proposal 时才使用它。使用 `--no-review-inline` 可以恢复“停住、下次再跑”的行为。
 
 如果 LLM work-plan 或 patch-plan 返回了无法解析的 JSON，`execute` 会停在
 `llm_planning_failed`，并且默认不会写入 offline fallback plan。此时直接重跑同一条
@@ -706,7 +724,7 @@ uv run simple-ar code-task batch runs/<run-id> --work-item W1
 记录 work items、target files、read-only evidence、validation hints、
 context requests 和 budget profiles。它不生成代码，也不修改文件。`batch`
 会在 `code_task/attempts/attempt-NNN/batches/batch-NNN/` 下创建持久状态，
-这是 V2.2 后续做多轮、分批编辑和失败恢复的基础。active batch 存在时，
+这是后续做多轮、分批编辑和失败恢复的基础。active batch 存在时，
 edit proposal 会被限制在该 batch 的 target files 内，并写入额外的批次级
 review 产物。
 
@@ -741,7 +759,7 @@ uv run simple-ar code-task propose-edits runs/<run-id>
 `propose-edits` 写入 `code_task/meta/proposed_edits.json`。proposal 使用 old/new 文本替换，供人工审核；它本身不会编辑 workspace。默认 tests 和 benchmark 文件是只读证据，proposal 不会给这些路径提供可编辑 snippet，后续 apply 也会再次拒绝保护路径。
 proposal 也会记录 `editor.backend = "controlled_patch"`，方便后续接入其他 backend 后仍能按同一产物形态审计。
 预留的 `external_agent` backend 在当前版本不能执行。它只会为未来 Codex / Claude / OpenCode adapter 构建可审查 invocation plan，其中包含 provider、command preview、blocked read patterns、timeout、network/shell permissions、log path 和 diff path。未来外部 agent 的结果也必须先变成 captured diff/proposal，再经过 SimpleAutoResearch 的 validation、benchmark 和 summary。
-V2.2 还会在模型返回 JSON 后执行本地编辑预算检查。超预算 proposal 会写入 warnings 和 rejected edits，而不是直接应用；如果 proposal 仍在 larger review budget 内，审核 JSON 后再显式使用 `--allow-large-edits`。
+执行器还会在模型返回 JSON 后执行本地编辑预算检查。超预算 proposal 会写入 warnings 和 rejected edits，而不是直接应用；如果 proposal 仍在 larger review budget 内，审核 JSON 后再显式使用 `--allow-large-edits`。
 
 应用已审核 edits：
 
@@ -914,7 +932,9 @@ uv run simple-ar run \
 
 这种模式下，`05-design` 会从前面研究阶段的产物和紧凑代码摘要中写出 `generated_code_task.md` 和 `generated_code_task_meta.json`，`06-code` 再把生成任务作为普通 `code_task/task.md` 输入。
 
-`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、运行 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁并验证。`07-run` 运行 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
+如果你已经写好了精确的 `task.md`，但仍希望 8 阶段前面的 goal/problem/synthesis/hypothesis 帮助收束实现优先级，可以在 pipeline config 里设置 `[implementation].task_handoff = "merge"`。这时用户任务会作为硬约束保留，`05-design` 会额外生成融合后的 `generated_code_task.md`，再交给内嵌 code-task 执行。
+
+`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、运行 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁、静态验证，并先运行一次 patched benchmark 做阶段内验证。如果这个验证 benchmark 失败，bridge 会基于 failure evidence 写出诊断并尝试一次受控 repair。`07-run` 会重新运行已验证的 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 canonical `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
 
 内嵌产物结构大致是：
 
@@ -939,7 +959,10 @@ uv run simple-ar run \
         patched/
         comparison.json
 07-run/
-  results.json
+  results.json          # canonical metrics/execution/comparison result
+  guard_report.json     # 缺失指标、timeout、NaN/Inf、空跑检查
+  stdout.txt
+  stderr.txt
 08-report/
   report.md
   references.bib
@@ -950,6 +973,61 @@ uv run simple-ar run \
 ```
 
 这个路径方便端到端实验，但会牺牲 standalone workflow 的人工暂停点。对安全敏感或难调试项目，建议先用 standalone `code-task execute` 或手动 primitive 路径。
+
+## 8 阶段流程中的 Greenfield Experiment
+
+当你只有研究或 benchmark-style 任务、还没有现成源码项目时，可以使用 greenfield 路径。它不是开放式自主 agent：`05-design` 先写出可执行 contract 和预算，`06-code` 只在 run 目录下生成一个受控小项目并审查，`07-run` 只信任 canonical `results.json` 中可解析的指标。
+
+当前公开 examples 暂不内置一个很小的 greenfield toy 项目。对于从零实现任务，建议新建配置并明确设置 `[task].kind = "greenfield"`、`[implementation].mode = "generate_project"`、匹配真实任务规模的 `[resource]` 限制，以及 `[evaluation]` 指标 schema。这样 greenfield 能力仍然可用，但不会被一个低价值 demo 绑定；后续更适合放到服务器或真实 benchmark-style 任务中测试。
+
+从 `code` 或 `run` 重跑时，默认会先把旧的 `06-code` / `07-run` 关键产物复制到
+`archives/<timestamp>/`，再写入新的代码或运行结果：
+
+```bash
+uv run simple-ar resume runs/<run-id> --from-stage code --to-stage report
+uv run simple-ar resume runs/<run-id> --from-stage run --to-stage report
+```
+
+只有明确想无归档覆盖旧产物时才使用 `--overwrite-stage-artifacts`。
+
+紧凑产物结构大致是：
+
+```text
+05-design/
+  experiment_contract.json
+  result_schema.json
+  resource_plan.json
+  dependency_plan.json
+  domain_profile.json
+  contract_validation.json
+06-code/
+  implementation_plan.json
+  architecture_plan.json
+  architecture_plan.md
+  file_plan.json
+  generated_project/
+    main.py
+    generated_experiment/
+      runner.py
+  code_artifacts.json
+  implementation_memory.json
+  code_review.json
+  code_backend.json
+  experiment.py
+07-run/
+  results.json
+  guard_report.json
+  stdout.txt
+  stderr.txt
+  repair_summary.json  # 只有尝试受控修复时才会出现
+  archives/<timestamp>/ # 安全重跑时保存旧运行产物
+08-report/
+  report.md
+  report_memory.json
+  report_audit.json
+```
+
+Greenfield 路径受 `[resource]`、`[evaluation]` 和 `[generation]` 共同约束：生成文件数和行数有上限，依赖安装默认关闭，required metrics 会被 `guard_report.json` 检查，code review warning 会投影到 canonical `results.json`，repair 目前只基于运行证据做窄范围 schema 修复。报告阶段会优先读取 `07-run/results.json`、`guard_report.json`、resource plan 和 code review，而不是直接从 stdout 猜测实验结论。
 
 ## 命令设计原则
 

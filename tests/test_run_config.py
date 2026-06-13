@@ -106,6 +106,86 @@ sources = "openalex"
             self.assertIn("Invalid run config", str(raised.exception))
             self.assertIn("sources", str(raised.exception))
 
+    def test_unified_task_sections_are_flattened_and_mapped_to_legacy_keys(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            config = root / "pipeline.toml"
+            code_root = root / "project"
+            task_file = root / "task.md"
+            code_root.mkdir()
+            task_file.write_text("# Task\n", encoding="utf-8")
+            config.write_text(
+                """
+[run]
+topic = "repository-level coding agent benchmark"
+
+[task]
+kind = "existing_project"
+name = "medium-code-agent"
+objective = "Improve the benchmark score without changing tests."
+code_root = "project"
+task_file = "task.md"
+
+[implementation]
+mode = "patch_existing"
+domain_profile = "code_agent_eval"
+provider = "local"
+task_handoff = "merge"
+max_repair_attempts = 2
+
+[workspace]
+mode = "git_worktree"
+reuse_source_venv = true
+include = ["src/**"]
+exclude = ["secrets/**"]
+
+[execution]
+backend = "local"
+command = "uv run python benchmark.py"
+timeout_sec = 240
+stream_output = "auto"
+
+[resource]
+max_runtime_sec = 240
+max_files = 8
+max_generated_lines = 700
+max_memory_mb = 2048
+
+[evaluation]
+primary_metric = "accuracy"
+direction = "maximize"
+required_metrics = ["accuracy", "macro_f1"]
+metric_directions = { accuracy = "higher", runtime_sec = "lower" }
+
+[generation]
+enabled = true
+max_batches = 2
+files_per_batch = 3
+""".strip(),
+                encoding="utf-8",
+            )
+
+            parsed = load_pipeline_run_config(str(config))
+
+            self.assertEqual(parsed["task_kind"], "existing_project")
+            self.assertEqual(parsed["experiment_template"], "code_task_project")
+            self.assertEqual(parsed["code_task_code_root"], str(code_root.resolve()))
+            self.assertEqual(parsed["code_task_task_file"], str(task_file.resolve()))
+            self.assertEqual(parsed["code_task_benchmark_command"], "uv run python benchmark.py")
+            self.assertEqual(parsed["code_task_workspace_mode"], "git_worktree")
+            self.assertEqual(parsed["code_task_workspace_include"], ["src/**"])
+            self.assertEqual(parsed["code_task_primary_metric"], "accuracy")
+            self.assertEqual(parsed["code_task_metric_directions"]["runtime_sec"], "lower")
+            self.assertEqual(parsed["implementation_task_handoff"], "merge")
+            task_config = parsed["task_config"]
+            self.assertIsInstance(task_config, dict)
+            self.assertEqual(task_config["task"]["kind"], "existing_project")
+            self.assertEqual(task_config["implementation"]["domain_profile"], "code_agent_eval")
+            self.assertEqual(task_config["implementation"]["task_handoff"], "merge")
+            self.assertEqual(task_config["resource"]["max_files"], 8)
+            self.assertEqual(task_config["generation"]["files_per_batch"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

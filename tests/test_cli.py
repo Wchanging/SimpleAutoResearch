@@ -10,12 +10,30 @@ from types import SimpleNamespace
 
 from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.cli import _resume_config, main
+from simple_ar.cli.code_task_view import confirm_review_gate
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_review_gate_without_input_stops_cleanly(self) -> None:
+        class FakeConsole:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            def input(self, _prompt: str) -> str:
+                raise EOFError
+
+            def print(self, message: object) -> None:
+                self.messages.append(str(message))
+
+        console = FakeConsole()
+
+        self.assertFalse(confirm_review_gate("Approve?", console=console))
+        self.assertTrue(confirm_review_gate("Approve?", console=console, assume_yes=True))
+        self.assertTrue(any("No interactive input" in message for message in console.messages))
+
     def test_resume_uses_pipeline_state_and_status_reports_progress(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

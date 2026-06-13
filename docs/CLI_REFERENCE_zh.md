@@ -56,6 +56,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 | `--no-retrieval` | flag | 禁用本地 artifact retrieval 上下文。 |
 | `--retrieval-top-k N` | int | 本地 artifact chunk 检索数量。 |
 | `--quiet` | flag | 减少进度日志输出。 |
+| `--overwrite-stage-artifacts` | flag | 关闭 `06-code` / `07-run` 重跑时的默认归档保护。只有旧代码/运行产物可丢弃时才使用。 |
 
 **内嵌 code-task 参数**：
 
@@ -109,6 +110,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --to-stage report --re
 |---|---|---|
 | `--report-output-mode` | choice | `overwrite`、`archive` 或 `variant`。`variant` 会写入 `08-report/variants/<label>/`，不替换当前主报告。 |
 | `--report-output-label` | string | report archive/variant 的可选目录标签。 |
+| `--overwrite-stage-artifacts` | flag | 关闭 `06-code` / `07-run` 重跑时的默认归档保护。 |
 
 **生成产物**：
 
@@ -311,7 +313,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--model NAME` | string | LLM 步骤模型覆盖。 |
 | `--no-llm` | flag | 尽可能使用 deterministic fallback。 |
 | `--timeout N` | int | benchmark timeout。 |
-| `--yes` | flag | 与 `--interactive` 一起使用时，自动继续 primitive prompts。正常 execute 默认已连续运行到审核门。 |
+| `--yes` | flag | 普通 execute 模式下自动批准 inline 审核门；与 `--interactive` 一起使用时，自动继续 primitive prompts。只有明确接受审核风险、想自动化跑通时才使用。 |
 | `--interactive` | flag | 调试模式：逐个 primitive step 确认，而不是连续运行到下一个审核门。 |
 | `--no-review-inline` | flag | 禁用 inline 审核提示，在审核门直接停止。 |
 | `--skip-validation` | flag | 静态验证未通过时仍运行 benchmark。 |
@@ -342,10 +344,11 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 
 `execute` 会保留审核点，但不强制每个审核门都另开一条命令。真实终端里，它会对
 `patch_plan.md`、`proposed_edits.json` 或 large-edit approval 打印黄色 Rich 审核面板，
-并询问是否继续；非交互 shell 中则会直接停在审核门，避免等待输入。中断后重跑时，
+并询问是否继续；非交互 shell 中会干净停在审核门，除非显式传入 `--yes`。中断后重跑时，
 已完成步骤会显示为 skipped。只有调试 primitive step 时才建议使用 `--interactive`，
-并可搭配 `--yes` 自动继续这些 primitive prompts。使用 `--no-review-inline` 可恢复
-“停住、下次再跑”的旧行为。完整运行流程见
+并可搭配 `--yes` 自动继续这些 primitive prompts。普通 execute 模式下的 `--yes`
+会自动批准审核门，只应在你明确想自动审批 plan/proposal 时使用。使用
+`--no-review-inline` 可恢复“停住、下次再跑”的旧行为。完整运行流程见
 [使用与配置](USAGE_zh.md#推荐路径toml--execute)。
 
 如果 LLM work-plan 或 patch-plan 返回了无法解析的 JSON，`execute` 会停在

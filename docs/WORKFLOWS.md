@@ -101,7 +101,9 @@ plan -> search -> read -> synthesize -> design experiment
 
 Current status:
 
-- `06-code` normally generates a whitelisted template experiment.
+- `06-code` can generate a whitelisted template experiment, prepare an embedded
+  code-task workspace for existing projects, or create a bounded greenfield
+  project under `06-code/generated_project` when no source project exists yet.
 - `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, optional `--task-file`, and `--benchmark-command` flags. If no task file is supplied, `05-design` generates `generated_code_task.md` from the earlier research artifacts and a compact codebase summary.
 - `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
 - `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
@@ -134,9 +136,9 @@ Current status:
 | `search` | `papers.jsonl`, `search_meta.json`, `documents/`, `research_index/` | Retrieve and ingest metadata/full text, record provider provenance, and build local chunks. It may select candidates within budget but does not perform semantic review. |
 | `read` | `review/`, `paper_notes.json`, `notes.md` | Screen and prioritize retrieved papers, then convert the shortlist into canonical Paper Briefs (LLM-backed when enabled). Larger LLM runs use coarse title/abstract batches before reranking the kept set. |
 | `synthesize` | `synthesis_brief.json`, `synthesis.md`, `hypothesis.md` | Analyze read-stage Paper Briefs into themes, gaps, bounded ideas, and testable hypotheses (LLM-backed when enabled). |
-| `design` | `experiment_plan.json` | Select a safe experiment template and parameters. |
-| `code` | `experiment.py` | Generate code from the selected template or prepare an embedded code-task harness. |
-| `run` | `results.json`, `stdout.txt`, `stderr.txt` | Execute the experiment and parse numeric metrics. |
+| `design` | `experiment_plan.json`, `experiment_contract.json`, `result_schema.json`, `resource_plan.json`, `dependency_plan.json`, `domain_profile.json`, `contract_validation.json` | Select a safe experiment template and write the executable contract, metric schema, resource/dependency budget, domain profile, and pre-code validation. |
+| `code` | `code_task_run/`, `experiment.py`, or generated implementation artifacts | Prepare an embedded code-task harness or generate implementation artifacts from the design contract. |
+| `run` | `results.json`, `guard_report.json`, `stdout.txt`, `stderr.txt` | Execute the experiment, normalize canonical results, and guard against missing/invalid metrics before reporting. |
 | `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | Write a template-guided report with citations, bounded source backtracking, and audit artifacts (LLM-backed when enabled). |
 
 ## Search And LLM Boundaries
@@ -198,7 +200,8 @@ in [Usage And Configuration](USAGE.md). At a high level:
   reading notes.
 - `04-synthesize` owns the compact evidence bridge, gaps, ideas, novelty hints,
   synthesis, and hypothesis derived from read-stage artifacts.
-- `05-design` owns experiment contracts and experiment plans.
+- `05-design` owns experiment contracts, result schemas, resource/dependency
+  plans, domain profiles, contract validation, and experiment plans.
 - `06-code/code_task_run` embeds the same artifact shape as a standalone code
   task when the research pipeline hands off to code execution.
 - `08-report` owns the final report package: report text, references, manifest,

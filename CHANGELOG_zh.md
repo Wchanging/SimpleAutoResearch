@@ -4,6 +4,31 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-12
+
+### Added
+
+- 新增 V2.5 experiment/code reliability foundation：顶层 pipeline 配置现在可以使用统一的 `[task]`、`[implementation]`、`[execution]`、`[resource]`、`[evaluation]` 和 `[generation]` sections。
+- `05-design` 现在会写出紧凑 experiment contract 包：`experiment_contract.json/.md`、`result_schema.json`、`resource_plan.json`、`dependency_plan.json`、`domain_profile.json` 和 `contract_validation.json`。
+- 新增 domain profiles：generic experiment、existing-code experiment、ML experiment 和 code-agent evaluation task。
+- 新增 V2.5 execution foundation：`src/simple_ar/experiment/execution/` 现在包含 `RunRequest` / `RunResult`、local execution backend、canonical result normalization 和 result guard checks。
+- 新增受控 greenfield 实现路径：没有现成源码项目的任务可以在 `06-code` 写出 `architecture_plan.json/.md`、`file_plan.json`、`generated_project/`、`code_artifacts.json`、`implementation_memory.json`、`code_review.json`、`code_backend.json` 和可运行的 `experiment.py` harness。
+- 新增 experiment tool contract 层：`src/simple_ar/experiment/tools/` 现在包含只读 local gateway tools，以及面向未来 MCP / external-agent adapter 的 OpenAI tool schema export。
+
+### Changed
+
+- 统一任务设置会被归一到 `task_config`，并在需要时映射回旧 code-task keys；现有 `code_task_project` 仍可运行，新配置则可以使用更一致的参数结构。
+- 当 `05-design/contract_validation.json` 报告 experiment contract 失败时，`06-code` 会在代码生成前停止。
+- `07-run/results.json` 现在使用 canonical schema，同时保留旧顶层 `metrics`、`returncode` 和 `timed_out` 字段作为兼容入口。`07-run/guard_report.json` 会记录 timeout、非零退出、缺失指标和 NaN/Inf 检查。
+- 内嵌 code-task pipeline run 现在会把嵌套 baseline-vs-patched comparison 投影到 canonical `07-run/results.json.comparisons`。
+- `07-run` 现在会在 greenfield 执行证据显示缺少 schema required metrics 时，尝试一次受控修复、重新运行，并记录 `repair_summary.json`。
+- 内嵌 code-task pipeline run 现在会在 `06-code` 内先验证 patched benchmark，再交给 `07-run`；如果 benchmark 失败，会基于 failure evidence 尝试一次受控 repair，而不是把坏补丁继续传给报告阶段。
+- 从 `06-code` 或 `07-run` 重跑时，默认会把已有已审核产物保存在 `archives/<timestamp>/` 下。只有明确不需要旧代码/运行证据时，才使用 `--overwrite-stage-artifacts` 或 `[run].overwrite_stage_artifacts = true`。
+- canonical `07-run/results.json` 现在会携带紧凑的 resource plan、code review 和 guard 信号；`08-report` 会把这些作为实验依据暴露给 writer/reviewer，使 code review 或 guard 有 warning 时报告能自动收紧结论。
+- 内嵌 code-task bridge 已从旧 experiment facade 拆到 `src/simple_ar/experiment/code_task_bridge/`；pipeline experiment stage 逻辑也拆成 design/code/run 模块，让 `pipeline_stages/experiment.py` 保持薄接线层。
+- full-pipeline tiny MLP 示例现在包含新的统一 task/config sections，同时保留旧 code-task sections 作为兼容路径。
+- 配置参考文档现在说明 V2.5 统一 sections，并且不再把单独的 `[workspace]` 当作 embedded code-task config 信号。
+
 ## 2026-06-05
 
 ### Added
@@ -19,12 +44,12 @@
 
 - 内嵌 `code_task_project` 现在默认只执行第一个较小的 work-plan batch，不再自动把串行依赖项合并成大补丁；standalone `code-task execute` 仍保留面向人工审核工作流的合并行为。
 - Report context 现在会把嵌套 code-task 的 `run/comparison.json` 当作一等实验/指标证据。`08-report` 可以看到 baseline、patched 和 delta 指标，fallback report 也会写出 Code Task Evidence 前后对比表。
-- 新增严格的内嵌 code-task pipeline 检查，覆盖 `06-code` 到 `08-report` 的完整路径；bundled tiny-digits MLP 测试中，accuracy 从 `0.766667` 提升到 `0.913333`，macro F1 从 `0.756898` 提升到 `0.913388`。
+- 新增严格的内嵌 code-task pipeline 检查，覆盖 `06-code` 到 `08-report` 的完整路径；bundled tiny-digits MLP 测试中，accuracy 从 `0.766667` 提升到 `0.913333`，macro F1 从 `0.756898` 提升到 `0.913254`。
 - 移除了 V2.4 report service 里隐藏的 legacy 单 prompt 报告生成分支。LLM 报告现在统一走 Writer/Reviewer agent loop；失败时回退到结构化 deterministic report。
 - Report citation 映射、显示和 cleanup helper 已迁移到 `src/simple_ar/report/citations.py`；report tool gateway 现在也能用 source handle 解析 paper brief，让 reviewer tool request 和公开 schema 保持一致。
 - 公开 examples 现在收束为三个维护入口：`examples/research_report/`、`examples/code_task_medium_review/` 和 `examples/full_pipeline_tiny_mlp/`。旧的窄范围/过渡配置已从 `examples/` 移除，toy spam 项目迁移到 `tests/fixtures`。
 - `code-task execute` 现在默认连续运行到真正的审核门，并使用 Rich 展示步骤状态。
-  `--interactive` 只用于 primitive step 调试，`--yes` 也只会自动继续这些 primitive prompts。
+  `--interactive` 只用于 primitive step 调试；`--yes` 现在会在普通 execute 模式下明确自动批准 inline 审核门，并在 interactive 模式下自动继续 primitive prompts。
 - LLM work-plan / patch-plan 在配置次数内重试后仍失败时，现在会停在
   `llm_planning_failed`，不会静默写入 offline fallback plan。只有明确接受较弱的
   deterministic fallback 时，才使用 `--allow-planning-fallback`。

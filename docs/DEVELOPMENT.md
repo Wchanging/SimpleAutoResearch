@@ -193,7 +193,7 @@ helper into a separate file.
 
 ### Code-Task Environment Policy
 
-The current V2.2 code-task runner has workspace isolation through `copy`,
+The current code-task runner has workspace isolation through `copy`,
 `git_worktree`, or experimental `sparse_copy`, command timeouts, optional
 streamed benchmark output, captured stdout/stderr, a restricted environment
 map, and an explicit execution interpreter policy. It supports `current` and

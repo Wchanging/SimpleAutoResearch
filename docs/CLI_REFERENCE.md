@@ -57,6 +57,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 | `--no-retrieval` | flag | Disable local artifact retrieval context. |
 | `--retrieval-top-k N` | int | Number of local artifact chunks to retrieve. |
 | `--quiet` | flag | Suppress progress logs. |
+| `--overwrite-stage-artifacts` | flag | Disable default archive protection for rerunning `06-code` / `07-run` artifacts. Use only when old code/run outputs are disposable. |
 
 **Code-task pipeline options**:
 
@@ -111,6 +112,7 @@ Common report output options:
 |---|---|---|
 | `--report-output-mode` | choice | `overwrite`, `archive`, or `variant`. `variant` writes `08-report/variants/<label>/` without replacing the current main report. |
 | `--report-output-label` | string | Optional folder label for report archive/variant outputs. |
+| `--overwrite-stage-artifacts` | flag | Disable default archive protection for rerunning `06-code` / `07-run` artifacts. |
 
 **Outputs**:
 
@@ -338,7 +340,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--model NAME` | string | Model override for LLM-backed steps. |
 | `--no-llm` | flag | Use deterministic fallbacks where possible. |
 | `--timeout N` | int | Benchmark timeout. |
-| `--yes` | flag | With `--interactive`, auto-continue primitive prompts. Normal execute already runs to review gates. |
+| `--yes` | flag | Auto-approve inline review gates in normal execute mode; with `--interactive`, auto-continue primitive prompts. Use only after you are comfortable approving the reviewed plan/proposal. |
 | `--interactive` | flag | Debug mode: confirm each primitive step instead of running continuously to the next review gate. |
 | `--no-review-inline` | flag | Disable inline review prompts and stop at review gates instead. |
 | `--skip-validation` | flag | Run benchmark even when static validation has not passed. |
@@ -370,11 +372,12 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 `execute` preserves review gates without forcing a separate command for every
 gate. In an interactive terminal, it renders a yellow Rich review panel for
 `patch_plan.md`, `proposed_edits.json`, or large-edit approval and asks whether
-to continue. In non-interactive shells it stops at the gate instead of waiting
-for input. Completed steps are shown as skipped on resume. Use `--interactive`
-only when debugging primitive steps; combine it with `--yes` to auto-continue
-those primitive prompts. Use `--no-review-inline` when you want the older
-stop-and-rerun behavior. Full workflow walkthroughs live in
+to continue. In non-interactive shells it stops cleanly at the gate unless
+`--yes` is supplied. Completed steps are shown as skipped on resume. Use
+`--interactive` only when debugging primitive steps; combine it with `--yes` to
+auto-continue those primitive prompts. Use `--yes` in normal execute mode only
+when automated approval is intentional, and `--no-review-inline` when you want
+the older stop-and-rerun behavior. Full workflow walkthroughs live in
 [Usage And Configuration](USAGE.md#recommended-path-toml--execute).
 
 When LLM work planning or patch planning returns malformed JSON, execute stops

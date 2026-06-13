@@ -68,7 +68,7 @@ plan -> search -> read -> synthesize -> design experiment
 
 当前状态：
 
-- `06-code` 默认生成白名单 template experiment。
+- `06-code` 可以生成白名单 template experiment、为已有项目准备内嵌 code-task workspace，也可以在没有现成源码时创建受控的 `06-code/generated_project` greenfield 项目。
 - `--experiment-template code_task_project` 是通用内嵌 handoff，会接入 code-task workflow。它接受 `--code-task-config`，也接受显式 `--code-root`、可选 `--task-file` 和 `--benchmark-command`。如果没有 task file，`05-design` 会基于前面研究产物和紧凑代码摘要生成 `generated_code_task.md`。
 - `simple-ar run --config ...` 是保持多参数 research/code-task run 可读、可复现的推荐方式。
 - `--experiment-template llm_code_task_toy_spam` 仍保留为 bundled smoke-test template。
@@ -94,9 +94,9 @@ plan -> search -> read -> synthesize -> design experiment
 | `search` | `papers.jsonl`、`search_meta.json`、`documents/`、`research_index/` | 检索和摄取 metadata/全文，记录 provider provenance，并构建本地 chunks。它可以为了预算做候选选择，但不做语义阅读审查。 |
 | `read` | `review/`、`paper_notes.json`、`notes.md` | 对检索结果做筛选和阅读优先级排序，再把 shortlist 转成规范化 Paper Brief；启用 LLM 且检索量较大时，先按 title/abstract 小批次粗筛，再重排保留集合。 |
 | `synthesize` | `synthesis_brief.json`、`synthesis.md`、`hypothesis.md` | 基于 read 阶段 Paper Brief 分析主题、gap、有限 ideas 和可测试假设；启用 LLM 时由 LLM 支持。 |
-| `design` | `experiment_plan.json` | 选择安全实验模板和参数。 |
-| `code` | `experiment.py` | 根据模板生成代码，或准备内嵌 code-task harness。 |
-| `run` | `results.json`, `stdout.txt`, `stderr.txt` | 执行实验并解析数值指标。 |
+| `design` | `experiment_plan.json`、`experiment_contract.json`、`result_schema.json`、`resource_plan.json`、`dependency_plan.json`、`domain_profile.json`、`contract_validation.json` | 选择安全实验模板，并写出可执行契约、指标 schema、资源/依赖预算、domain profile 和代码前检查。 |
+| `code` | `code_task_run/`、`experiment.py` 或生成式实现产物 | 基于 design contract 准备内嵌 code-task harness，或生成实现产物。 |
+| `run` | `results.json`、`guard_report.json`、`stdout.txt`、`stderr.txt` | 执行实验，写出 canonical results，并在报告前检查缺失/异常指标。 |
 | `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | 基于模板写带 citation 的报告，并保留有界 source backtracking、报告记忆和审计产物；启用 LLM 时由 LLM 支持。 |
 
 ## Search 与 LLM 边界
@@ -131,7 +131,8 @@ WORKFLOWS 只保留产物归属层面的说明；完整文件树放在 [使用�
 - `02-search` 负责 retrieval、document/full-text 状态和本地 chunks。
 - `03-read` 负责 reading review、shortlist、literature cards 和结构化阅读笔记。
 - `04-synthesize` 负责从 read 阶段产物推导出的紧凑 evidence bridge、gaps、ideas、novelty hints、synthesis 和 hypothesis。
-- `05-design` 负责 experiment contracts 和 experiment plans。
+- `05-design` 负责 experiment contracts、result schemas、resource/dependency
+  plans、domain profiles、contract validation 和 experiment plans。
 - 当 research pipeline 衔接代码执行时，`06-code/code_task_run` 会嵌入与 standalone code task 相同形态的 artifact。
 - `08-report` 负责最终报告包：报告正文、references、manifest、紧凑报告记忆、source/citation/metric audit 和质量检查。
 
