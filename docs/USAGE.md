@@ -1,6 +1,6 @@
 ﻿# Usage And Configuration
 
-[涓枃鐗堟湰](USAGE_zh.md)
+[中文版本](USAGE_zh.md)
 
 This document explains how to install, configure, and run SimpleAutoResearch.
 It is the practical user guide; workflow concepts and artifact details live in

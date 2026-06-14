@@ -78,8 +78,10 @@ src/simple_ar/research/
 ## 添加 Experiment Template
 
 固定脚本模板主要位于 `src/simple_ar/experiment/templates.py`。内嵌 8 阶段
-code-task templates 位于 `src/simple_ar/experiment/code_task_experiment.py`，
-因为它们会在写 run harness 前准备已有 workspace。
+code-task templates 位于 `src/simple_ar/experiment/code_task_bridge/`，
+因为它们会在写 run harness 前准备已有 workspace。旧的
+`src/simple_ar/experiment/code_task_experiment.py` 只作为兼容 facade 保留；
+新代码应直接从 `code_task_bridge` 导入。
 
 `src/simple_ar/experiment/runner.py` 用于固定模板生成脚本的 subprocess 运行。
 `src/simple_ar/code_task/` 则负责 LLM-guided 项目编辑、workspace 隔离、patch、

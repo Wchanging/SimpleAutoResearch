@@ -1,6 +1,6 @@
 ﻿# Workflows And Artifacts
 
-[涓枃鐗堟湰](WORKFLOWS_zh.md)
+[中文版本](WORKFLOWS_zh.md)
 
 This document explains what SimpleAutoResearch is doing internally: workflow
 presets, pipeline stages, artifact ownership, and module boundaries. It avoids

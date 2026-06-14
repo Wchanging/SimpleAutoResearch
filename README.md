@@ -1,6 +1,6 @@
 ﻿# SimpleAutoResearch
 
-[涓枃鐗堟湰](README_zh.md)
+[中文版本](README_zh.md)
 
 SimpleAutoResearch is a teaching-first, lightweight auto-research project
 inspired by [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw).

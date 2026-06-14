@@ -1,6 +1,6 @@
 ﻿# Development Guide
 
-[涓枃鐗堟湰](DEVELOPMENT_zh.md)
+[中文版本](DEVELOPMENT_zh.md)
 
 This document is for contributors who want to extend SimpleAutoResearch. For command details, see [CLI Reference](CLI_REFERENCE.md). For TOML schema details, see [Configuration Reference](CONFIG_REFERENCE.md). For setup walkthroughs, see [Usage And Configuration](USAGE.md). For workflow concepts and artifacts, see [Workflows And Artifacts](WORKFLOWS.md).
 
@@ -84,9 +84,11 @@ exists for legacy fallback only.
 ## Adding An Experiment Template
 
 Fixed script templates primarily live in `src/simple_ar/experiment/templates.py`.
-Embedded 8-stage code-task templates live in
-`src/simple_ar/experiment/code_task_experiment.py` because they prepare an existing
-workspace before writing the run harness.
+Embedded 8-stage code-task templates live under
+`src/simple_ar/experiment/code_task_bridge/` because they prepare an existing
+workspace before writing the run harness. The older
+`src/simple_ar/experiment/code_task_experiment.py` module is a compatibility
+facade only; new code should import from `code_task_bridge`.
 
 Use `src/simple_ar/experiment/runner.py` for fixed generated-template
 subprocesses. Use `src/simple_ar/code_task/` for LLM-guided project editing,

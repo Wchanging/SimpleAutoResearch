@@ -33,7 +33,7 @@ from simple_ar.code_task import (
     validate_code_task,
 )
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
-from simple_ar.experiment.code_task_experiment import (
+from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
     prepare_code_task_experiment,
     write_code_task_experiment_meta,
@@ -1117,10 +1117,11 @@ protected_patterns = ["pyproject.toml"]
             meta = read_json(meta_path)
             self.assertEqual(meta["work_plan_mode"], "llm")
             self.assertEqual(meta["batch"]["work_item_id"], "W1")
-            self.assertEqual(meta["batch"]["state"], "validating")
+            self.assertEqual(meta["batch"]["state"], "completed")
             self.assertEqual(meta["editor_backend"], "controlled_patch")
             self.assertIn("repo_map", meta)
             self.assertIn("context_pack", meta)
+            self.assertIn("comparison", meta)
 
     def test_patch_plan_includes_baseline_and_environment_context(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

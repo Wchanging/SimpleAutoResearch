@@ -1,6 +1,6 @@
 ﻿# Configuration Reference
 
-[涓枃鐗堟湰](CONFIG_REFERENCE_zh.md)
+[中文版本](CONFIG_REFERENCE_zh.md)
 
 This document is the TOML reference for SimpleAutoResearch. It covers both the
 outer research pipeline config and standalone/embedded code-task config.

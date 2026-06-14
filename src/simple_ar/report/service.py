@@ -12,7 +12,7 @@ from simple_ar.core.artifacts import (
     write_text,
 )
 from simple_ar.code_task.editing.scope import is_protected_edit_path
-from simple_ar.experiment.code_task_experiment import (
+from simple_ar.experiment.code_task_bridge import (
     CODE_TASK_PROJECT_TEMPLATE,
     is_code_task_experiment_template,
 )

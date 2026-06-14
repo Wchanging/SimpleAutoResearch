@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text
-from simple_ar.experiment.code_task_experiment import (
+from simple_ar.experiment.code_task_bridge import (
     CODE_TASK_PROJECT_TEMPLATE,
     CODE_TASK_TOY_SPAM_TEMPLATE,
     CodeTaskExperimentResult,

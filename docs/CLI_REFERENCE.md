@@ -1,6 +1,6 @@
 ﻿# CLI Reference
 
-[涓枃鐗堟湰](CLI_REFERENCE_zh.md)
+[中文版本](CLI_REFERENCE_zh.md)
 
 This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
