@@ -193,7 +193,13 @@ uv run simple-ar run --config path/to/your_pipeline.toml
 
 当任务还没有现成源码项目时，可以使用 V2.5 的 greenfield 路径。它会先写出 experiment contract，再在 `06-code/generated_project` 下生成受控小项目，执行 code review，运行 `experiment.py`，最后只把通过 `guard_report.json` 检查的 canonical `07-run/results.json` 作为实验结果。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
 
-greenfield 路径会作为真实能力保留，而不是绑定在一个很小的 toy demo 上。当前公开 examples 重点保留 research-only、standalone code-task 和 existing-project full pipeline 三类工作流；如果要做从零实现任务，建议先明确任务、指标 schema、资源预算和依赖策略，再添加对应配置。
+轻量公开示例位于 `examples/greenfield_lightweight_training/configs/greenfield_training.toml`。它会让 pipeline 从零生成一个 CPU-only 的中等偏轻量文本分类实验套件，使用本地确定性数据、多个 baseline/model condition 和可解析指标：
+
+```bash
+uv run simple-ar run --config examples/greenfield_lightweight_training/configs/greenfield_training.toml --to-stage run
+```
+
+这个示例适合做本地 greenfield 结构检查：它会测试任务 Markdown handoff、architecture/file planning、多文件生成、code review、run guard 和 diagnosis。更强的 greenfield 任务可以复用同样的配置形态，但需要有意识地提高资源预算，并明确任务自己的指标 schema。
 
 ## 当前能力边界
 

@@ -961,6 +961,8 @@ uv run simple-ar run \
 07-run/
   results.json          # canonical metrics/execution/comparison result
   guard_report.json     # 缺失指标、timeout、NaN/Inf、空跑检查
+  diagnosis.json        # guard/code-review/runtime 信号汇总，供 repair/report 使用
+  diagnosis.md          # 人类可读的运行诊断和建议动作
   stdout.txt
   stderr.txt
 08-report/
@@ -978,7 +980,13 @@ uv run simple-ar run \
 
 当你只有研究或 benchmark-style 任务、还没有现成源码项目时，可以使用 greenfield 路径。它不是开放式自主 agent：`05-design` 先写出可执行 contract 和预算，`06-code` 只在 run 目录下生成一个受控小项目并审查，`07-run` 只信任 canonical `results.json` 中可解析的指标。
 
-当前公开 examples 暂不内置一个很小的 greenfield toy 项目。对于从零实现任务，建议新建配置并明确设置 `[task].kind = "greenfield"`、`[implementation].mode = "generate_project"`、匹配真实任务规模的 `[resource]` 限制，以及 `[evaluation]` 指标 schema。这样 greenfield 能力仍然可用，但不会被一个低价值 demo 绑定；后续更适合放到服务器或真实 benchmark-style 任务中测试。
+运行轻量本地 greenfield 示例：
+
+```bash
+uv run simple-ar run --config examples/greenfield_lightweight_training/configs/greenfield_training.toml --to-stage run
+```
+
+这个示例会让 pipeline 从零生成一个中等偏轻量的 CPU-only 文本分类实验套件。它使用任务 Markdown 作为详细实现说明，通过 `[resource]` 限制本地资源，并在 `[evaluation]` 中要求 condition-level baseline/model metrics、ablation gain、data size、耗时和参数量等指标。它适合做本地 greenfield 结构检查；后续更强的服务器任务可以复用同样的配置形态，再有意识地提高预算。
 
 从 `code` 或 `run` 重跑时，默认会先把旧的 `06-code` / `07-run` 关键产物复制到
 `archives/<timestamp>/`，再写入新的代码或运行结果：
@@ -1017,6 +1025,8 @@ uv run simple-ar resume runs/<run-id> --from-stage run --to-stage report
 07-run/
   results.json
   guard_report.json
+  diagnosis.json
+  diagnosis.md
   stdout.txt
   stderr.txt
   repair_summary.json  # 只有尝试受控修复时才会出现
@@ -1027,7 +1037,7 @@ uv run simple-ar resume runs/<run-id> --from-stage run --to-stage report
   report_audit.json
 ```
 
-Greenfield 路径受 `[resource]`、`[evaluation]` 和 `[generation]` 共同约束：生成文件数和行数有上限，依赖安装默认关闭，required metrics 会被 `guard_report.json` 检查，code review warning 会投影到 canonical `results.json`，repair 目前只基于运行证据做窄范围 schema 修复。报告阶段会优先读取 `07-run/results.json`、`guard_report.json`、resource plan 和 code review，而不是直接从 stdout 猜测实验结论。
+Greenfield 路径受 `[resource]`、`[evaluation]` 和 `[generation]` 共同约束：生成文件数和行数有上限，依赖安装默认关闭，required metrics 会被 `guard_report.json` 检查。`diagnosis.json` 会把 guard、code review、stdout/stderr tail 和缺失指标整理成可修复建议；repair 目前只基于这类运行证据做窄范围 schema 修复。报告阶段会优先读取 `07-run/results.json`、`guard_report.json`、`diagnosis.json`、resource plan 和 code review，而不是直接从 stdout 猜测实验结论。
 
 ## 命令设计原则
 

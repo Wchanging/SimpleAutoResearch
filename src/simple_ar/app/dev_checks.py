@@ -24,9 +24,11 @@ class CheckGroup:
 
 CHECK_GROUPS: dict[str, CheckGroup] = {
     "quick": CheckGroup(
-        description="Fast sanity checks for contracts, metrics, prompts, and CLI parsing.",
+        description="Fast sanity checks for contracts, config loading, metrics, prompts, and CLI parsing.",
         targets=(
             "tests.test_contracts",
+            "tests.test_dev_checks",
+            "tests.test_run_config",
             "tests.test_metrics",
             "tests.test_prompts",
             "tests.test_cli",

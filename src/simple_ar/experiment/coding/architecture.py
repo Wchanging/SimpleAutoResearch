@@ -119,7 +119,7 @@ def fallback_architecture_plan(
             "Fallback generation is a conservative runnable scaffold, not a domain-specific breakthrough.",
             "LLM-generated files still require review and run guard validation.",
         ],
-        "files": _fallback_files(required_metrics),
+        "files": _fallback_files(required_metrics, _positive_int(resource_plan.get("max_files"), 8)),
     }
 
 
@@ -167,12 +167,13 @@ def greenfield_architecture_prompt(
 ) -> str:
     max_files = _positive_int(resource_plan.get("max_files"), 8)
     max_lines = _positive_int(resource_plan.get("max_generated_lines"), 1200)
-    if max_files >= 12 or max_lines >= 2000:
+    if max_files >= 8 or max_lines >= 1400:
         size_guidance = (
-            "- This is a medium local experiment: use 8-15 cohesive files when helpful, "
-            "with clear modules for data/task generation, scoring, orchestration, reporting, "
-            "configuration, and self-checks.\n"
+            "- This is a medium-light local experiment: use 6-10 cohesive files when helpful, "
+            "with clear modules for data/task generation, feature extraction, models, metrics, "
+            "evaluation orchestration, reporting/formatting, configuration, and self-checks.\n"
             "- Keep modules purposeful; do not create filler files just to hit the budget.\n"
+            "- Preserve the task file's requested module boundaries unless they conflict with the resource budget.\n"
         )
     else:
         size_guidance = (
@@ -191,6 +192,10 @@ def greenfield_architecture_prompt(
         "- Keep file count within resource_plan.max_files.\n"
         f"{size_guidance}"
         "- The entrypoint must print all required metrics as `metric_name: number`.\n"
+        "- Define exactly one authoritative experiment orchestrator. Helper modules "
+        "must not each reimplement their own full dataset/model/metric pipeline.\n"
+        "- Make `main.py` a thin CLI wrapper when possible; put reusable logic in "
+        "purpose-specific modules and call them from the orchestrator.\n"
         "- Avoid heavyweight dependencies, network access, and GPU use unless explicitly allowed.\n\n"
         f"Experiment contract JSON:\n{json.dumps(dict(contract), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema JSON:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
@@ -205,8 +210,89 @@ GREENFIELD_ARCHITECT_SYSTEM = (
 )
 
 
-def _fallback_files(required_metrics: list[str]) -> list[dict[str, Any]]:
+def _fallback_files(required_metrics: list[str], max_files: int = 4) -> list[dict[str, Any]]:
     metric_note = ", ".join(required_metrics) if required_metrics else "configured metrics"
+    if max_files >= 8:
+        return [
+            {
+                "path": "main.py",
+                "purpose": "Thin command-line entrypoint that loads config and prints metrics.",
+                "dependencies": ["generated_experiment/runner.py", "config.json"],
+                "acceptance_criteria": [f"Prints {metric_note} as parseable metric lines."],
+                "entrypoint": True,
+            },
+            {
+                "path": "generated_experiment/__init__.py",
+                "purpose": "Package marker for generated experiment code.",
+                "dependencies": [],
+                "acceptance_criteria": ["Importing generated_experiment succeeds."],
+                "entrypoint": False,
+            },
+            {
+                "path": "config.json",
+                "purpose": "Small, auditable experiment configuration.",
+                "dependencies": [],
+                "acceptance_criteria": ["Contains seed, dataset size, noise, and condition metadata."],
+                "entrypoint": False,
+            },
+            {
+                "path": "generated_experiment/data.py",
+                "purpose": "Generate deterministic noisy text-classification data and train/validation/test splits.",
+                "dependencies": ["config.json"],
+                "acceptance_criteria": ["Creates at least four classes and avoids mutating caller-owned data."],
+                "entrypoint": False,
+            },
+            {
+                "path": "generated_experiment/features.py",
+                "purpose": "Build unigram, bigram, and optional character n-gram feature views.",
+                "dependencies": [],
+                "acceptance_criteria": ["Feature extraction is deterministic and shared by all model conditions."],
+                "entrypoint": False,
+            },
+            {
+                "path": "generated_experiment/models.py",
+                "purpose": "Implement majority/keyword baselines and lightweight Naive Bayes-style model conditions.",
+                "dependencies": ["generated_experiment/features.py"],
+                "acceptance_criteria": ["Every model exposes fit/predict or equivalent deterministic behavior."],
+                "entrypoint": False,
+            },
+            {
+                "path": "generated_experiment/metrics.py",
+                "purpose": "Compute accuracy, macro F1, condition-level summary metrics, and resource counts.",
+                "dependencies": [],
+                "acceptance_criteria": ["Returns numeric values for all required metric calculations."],
+                "entrypoint": False,
+            },
+            {
+                "path": "generated_experiment/runner.py",
+                "purpose": "Single authoritative run_experiment orchestrator.",
+                "dependencies": [
+                    "config.json",
+                    "generated_experiment/data.py",
+                    "generated_experiment/models.py",
+                    "generated_experiment/metrics.py",
+                ],
+                "acceptance_criteria": [f"Returns numeric values for {metric_note}."],
+                "entrypoint": False,
+            },
+            {
+                "path": "generated_experiment/evaluation.py",
+                "purpose": "Run each condition under the same split and aggregate condition-level metrics.",
+                "dependencies": [
+                    "generated_experiment/models.py",
+                    "generated_experiment/metrics.py",
+                ],
+                "acceptance_criteria": ["Produces best-condition, margin, and ablation values without duplicated orchestration."],
+                "entrypoint": False,
+            },
+            {
+                "path": "generated_experiment/reporting.py",
+                "purpose": "Format condition-level summaries and final metric dictionaries.",
+                "dependencies": ["generated_experiment/evaluation.py"],
+                "acceptance_criteria": ["Keeps CLI output parseable while preserving an auditable condition table in code."],
+                "entrypoint": False,
+            },
+        ][:max(1, max_files)]
     return [
         {
             "path": "main.py",

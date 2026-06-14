@@ -4,6 +4,23 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-13
+
+### Added
+
+- 新增 `07-run/diagnosis.json` 和 `diagnosis.md`。实验运行诊断会把 result guard issue、code review warning、缺失指标、stdout/stderr tail 和受控修复建议汇总成统一的 repair/report context。
+- 新增只读 experiment tool：`read_experiment_diagnosis`，并让 `inspect_execution_failure` 同时返回 diagnosis。
+
+### Changed
+
+- Greenfield repair 现在除了 guard issue，也会读取 diagnosis context；缺失 required metrics 有了稳定契约，即使后续 guard 内部实现调整也不影响修复入口。
+- Experiment report context 现在会把 `artifact:experiment_diagnosis` 和 canonical results、result guard 一起暴露给报告 writer/reviewer。
+- Pipeline stage 输出摘要现在显示该阶段的真实产物，不再只显示内部 `contract.json` / `report.md` 摘要；例如 `07-run` 会直接显示 `results.json`、`guard_report.json`、`diagnosis.json`、stdout 和 stderr。
+- Greenfield schema repair 现在会改写生成项目实际执行的 `main.py` 入口，并在后续 rerun 中保留 repaired-result provenance，不再把补丁写到未被执行的 fallback 模块里。
+- Greenfield 训练示例现在从 tiny smoke project 升级为中等偏轻量 experiment-suite 任务，包含更多 condition-level metrics 和更大的文件/行数预算。
+- Greenfield architecture planner 现在会把 8+ 文件预算视为中等偏轻量项目，引导模型规划 data、features、models、metrics、evaluation、reporting 和 self-checks 等有意义模块。
+- Developer quick checks 现在也覆盖 run-config 和公开 example config loading tests，避免 example 路径或统一配置字段漂移后才在更重的 pipeline tests 中暴露。
+
 ## 2026-06-12
 
 ### Added
@@ -14,6 +31,7 @@
 - 新增 V2.5 execution foundation：`src/simple_ar/experiment/execution/` 现在包含 `RunRequest` / `RunResult`、local execution backend、canonical result normalization 和 result guard checks。
 - 新增受控 greenfield 实现路径：没有现成源码项目的任务可以在 `06-code` 写出 `architecture_plan.json/.md`、`file_plan.json`、`generated_project/`、`code_artifacts.json`、`implementation_memory.json`、`code_review.json`、`code_backend.json` 和可运行的 `experiment.py` harness。
 - 新增 experiment tool contract 层：`src/simple_ar/experiment/tools/` 现在包含只读 local gateway tools，以及面向未来 MCP / external-agent adapter 的 OpenAI tool schema export。
+- 新增轻量 greenfield 训练示例：`examples/greenfield_lightweight_training/configs/greenfield_training.toml`。
 
 ### Changed
 
@@ -28,6 +46,8 @@
 - 内嵌 code-task bridge 已从旧 experiment facade 拆到 `src/simple_ar/experiment/code_task_bridge/`；pipeline experiment stage 逻辑也拆成 design/code/run 模块，让 `pipeline_stages/experiment.py` 保持薄接线层。
 - full-pipeline tiny MLP 示例现在包含新的统一 task/config sections，同时保留旧 code-task sections 作为兼容路径。
 - 配置参考文档现在说明 V2.5 统一 sections，并且不再把单独的 `[workspace]` 当作 embedded code-task config 信号。
+- greenfield experiment contract 现在会包含 `[task].task_file` 的受限摘录，让从零代码生成能读取详细任务 Markdown，而不是只看到文件路径。
+- greenfield code review 默认不再把 LLM 生成项目静默替换成 deterministic scaffold。确定性审查失败时会保留产物供检查；只有显式设置 `[generation].allow_fallback_scaffold = true` 才会降级，LLM reviewer findings 则作为 warning 保留。
 
 ## 2026-06-05
 
@@ -47,7 +67,7 @@
 - 新增严格的内嵌 code-task pipeline 检查，覆盖 `06-code` 到 `08-report` 的完整路径；bundled tiny-digits MLP 测试中，accuracy 从 `0.766667` 提升到 `0.913333`，macro F1 从 `0.756898` 提升到 `0.913254`。
 - 移除了 V2.4 report service 里隐藏的 legacy 单 prompt 报告生成分支。LLM 报告现在统一走 Writer/Reviewer agent loop；失败时回退到结构化 deterministic report。
 - Report citation 映射、显示和 cleanup helper 已迁移到 `src/simple_ar/report/citations.py`；report tool gateway 现在也能用 source handle 解析 paper brief，让 reviewer tool request 和公开 schema 保持一致。
-- 公开 examples 现在收束为三个维护入口：`examples/research_report/`、`examples/code_task_medium_review/` 和 `examples/full_pipeline_tiny_mlp/`。旧的窄范围/过渡配置已从 `examples/` 移除，toy spam 项目迁移到 `tests/fixtures`。
+- 公开 examples 现在收束为四个维护入口：`examples/research_report/`、`examples/code_task_medium_review/`、`examples/full_pipeline_tiny_mlp/` 和 V2.5 的 `examples/greenfield_lightweight_training/`。旧的窄范围/过渡配置已从 `examples/` 移除，toy spam 项目迁移到 `tests/fixtures`。
 - `code-task execute` 现在默认连续运行到真正的审核门，并使用 Rich 展示步骤状态。
   `--interactive` 只用于 primitive step 调试；`--yes` 现在会在普通 execute 模式下明确自动批准 inline 审核门，并在 interactive 模式下自动继续 primitive prompts。
 - LLM work-plan / patch-plan 在配置次数内重试后仍失败时，现在会停在

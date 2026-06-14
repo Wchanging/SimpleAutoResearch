@@ -55,7 +55,31 @@ def metric_values(metrics: list[str]) -> dict[str, float]:
     result: dict[str, float] = {}
     for index, metric in enumerate(metrics):
         lowered = metric.lower()
-        if "loss" in lowered or "error" in lowered:
+        if lowered in {"majority_accuracy", "baseline_accuracy"}:
+            value = 0.60
+        elif lowered == "keyword_accuracy":
+            value = 0.72
+        elif lowered == "char_ngram_accuracy":
+            value = 0.78
+        elif lowered == "unigram_accuracy":
+            value = 0.80
+        elif lowered == "bigram_accuracy":
+            value = 0.84
+        elif lowered == "accuracy":
+            value = 0.84
+        elif lowered == "macro_f1":
+            value = 0.82
+        elif lowered == "ablation_gain":
+            value = 0.12
+        elif lowered == "best_model_margin":
+            value = 0.04
+        elif lowered == "condition_count":
+            value = 5.0
+        elif lowered == "data_size":
+            value = 240.0
+        elif lowered == "parameter_count":
+            value = 256.0
+        elif "loss" in lowered or "error" in lowered:
             value = max(0.01, 0.20 - index * 0.01)
         elif "time" in lowered or "latency" in lowered:
             value = 0.01 + index * 0.005

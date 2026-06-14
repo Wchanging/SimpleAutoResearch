@@ -5,6 +5,11 @@ from typing import Any
 
 from simple_ar.core.artifacts import write_json, write_text
 from simple_ar.core.pipeline import Context
+from simple_ar.experiment.execution.diagnosis import (
+    compact_diagnosis,
+    diagnose_experiment_run,
+    render_diagnosis_markdown,
+)
 from simple_ar.experiment.execution.guards import evaluate_result_guard
 from simple_ar.experiment.execution.repair import repair_generated_project_from_guard
 from simple_ar.experiment.execution.results import (
@@ -27,6 +32,8 @@ def execute_run(ctx: Context) -> None:
             "execution_report.json",
             "results.json",
             "guard_report.json",
+            "diagnosis.json",
+            "diagnosis.md",
             "repair_summary.json",
         ),
         reason="run stage rerun",
@@ -35,20 +42,25 @@ def execute_run(ctx: Context) -> None:
     timeout_sec = experiment_timeout(ctx)
     ctx.emit("stage_message", f"Running experiment subprocess with {timeout_sec}s timeout.")
     result = run_experiment(experiment_path, timeout_sec=timeout_sec)
-    canonical, guard = _write_run_outputs(ctx, result)
-    if _should_attempt_greenfield_repair(ctx, guard):
+    canonical, guard, diagnosis = _write_run_outputs(ctx, result)
+    if _should_attempt_greenfield_repair(ctx, guard, diagnosis):
         ctx.emit("stage_message", "Guard failed; attempting one bounded greenfield repair.")
         repair_summary = repair_generated_project_from_guard(
             project_dir=ctx.run_dir / "06-code" / "generated_project",
             result_schema=design_json(ctx, "result_schema.json"),
             guard_report=guard,
+            diagnosis_report=diagnosis,
             current_metrics=canonical.get("metrics", {}) if isinstance(canonical.get("metrics"), dict) else {},
             output_path=ctx.artifact_path("repair_summary.json"),
         )
         if repair_summary.get("status") == "patched":
             ctx.emit("stage_message", "Repair patched generated project; rerunning experiment.")
             result = run_experiment(experiment_path, timeout_sec=timeout_sec)
-            _write_run_outputs(ctx, result, repair_summary=repair_summary)
+            _, repaired_guard, _ = _write_run_outputs(ctx, result, repair_summary=repair_summary)
+            ctx.emit(
+                "stage_message",
+                f"Repair rerun guard status: {repaired_guard.get('status', 'unknown')}.",
+            )
 
 
 def _write_run_outputs(
@@ -56,7 +68,7 @@ def _write_run_outputs(
     result: Any,
     *,
     repair_summary: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     write_text(ctx.artifact_path("stdout.txt"), result.stdout or "No stdout output.\n")
     write_text(ctx.artifact_path("stderr.txt"), result.stderr or "No stderr output.\n")
     write_json(ctx.artifact_path("execution_report.json"), result.to_json())
@@ -82,6 +94,7 @@ def _write_run_outputs(
         artifacts["review_failure_recovery"] = "06-code/review_failure_recovery.json"
     if comparisons:
         artifacts["code_task_comparison"] = comparisons[0].get("source", "")
+    repair_summary = repair_summary or _existing_generated_project_repair(ctx)
     canonical = build_canonical_results(
         result,
         result_schema=result_schema,
@@ -103,12 +116,43 @@ def _write_run_outputs(
     if review_recovery:
         canonical["review_failure_recovery"] = review_recovery
     guard = evaluate_result_guard(canonical, result_schema=result_schema)
+    diagnosis = diagnose_experiment_run(
+        results=canonical,
+        guard_report=guard,
+        result_schema=result_schema,
+        code_review=code_review,
+        stdout_tail=result.stdout or "",
+        stderr_tail=result.stderr or "",
+    )
     canonical["guard"] = guard
+    canonical["diagnosis"] = compact_diagnosis(diagnosis)
     if guard.get("status") == "failed":
         canonical["status"] = "failed"
     write_json(ctx.artifact_path("guard_report.json"), guard)
+    write_json(ctx.artifact_path("diagnosis.json"), diagnosis)
+    write_text(ctx.artifact_path("diagnosis.md"), render_diagnosis_markdown(diagnosis))
     write_canonical_results(ctx.artifact_path("results.json"), canonical)
-    return canonical, guard
+    return canonical, guard, diagnosis
+
+
+def _existing_generated_project_repair(ctx: Context) -> dict[str, Any] | None:
+    """Retain repair provenance when rerunning a previously patched greenfield project."""
+
+    summary = load_optional_json(ctx.artifact_path("repair_summary.json"))
+    if str(summary.get("status") or "").strip().lower() != "patched":
+        return None
+    main_path = ctx.run_dir / "06-code" / "generated_project" / "main.py"
+    if not main_path.is_file():
+        return None
+    try:
+        text = main_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if "generated_experiment.runner" not in text:
+        return None
+    summary = dict(summary)
+    summary["reused_from_prior_run"] = True
+    return summary
 
 
 def _compact_code_review(review: dict[str, Any]) -> dict[str, Any]:
@@ -135,7 +179,11 @@ def _compact_code_artifacts(artifacts: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _should_attempt_greenfield_repair(ctx: Context, guard: dict[str, Any]) -> bool:
+def _should_attempt_greenfield_repair(
+    ctx: Context,
+    guard: dict[str, Any],
+    diagnosis: dict[str, Any],
+) -> bool:
     if guard.get("status") != "failed":
         return False
     try:
@@ -143,6 +191,9 @@ def _should_attempt_greenfield_repair(ctx: Context, guard: dict[str, Any]) -> bo
     except (TypeError, ValueError):
         attempts = 1
     if attempts < 1:
+        return False
+    repair = diagnosis.get("repair")
+    if isinstance(repair, dict) and repair.get("local_repair_supported") is False:
         return False
     return (ctx.run_dir / "06-code" / "generated_project").is_dir()
 

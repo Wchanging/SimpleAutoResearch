@@ -83,6 +83,12 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
         client=_llm_client(ctx),
     )
     if result.review_status == "failed" and ctx.config.get("use_llm") is True:
+        if ctx.config.get("generation_allow_fallback_scaffold") is not True:
+            ctx.emit(
+                "stage_message",
+                "Greenfield LLM project failed deterministic review; keeping generated artifacts for inspection.",
+            )
+            raise RuntimeError(f"Greenfield code review failed. See {result.code_review_path}.")
         ctx.emit(
             "stage_message",
             "Greenfield LLM project failed review; archiving it and using bounded fallback scaffold.",

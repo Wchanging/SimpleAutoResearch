@@ -77,7 +77,7 @@ def _agent_review(
     for path in sorted(project_dir.rglob("*.py"))[:6]:
         try:
             rel = path.relative_to(project_dir).as_posix()
-            text = path.read_text(encoding="utf-8", errors="replace")[:4000]
+            text = _review_snippet(path)
         except OSError:
             continue
         snippets.append(f"### {rel}\n```python\n{text}\n```")
@@ -105,6 +105,11 @@ def _agent_review(
         if isinstance(row, Mapping):
             severity = str(row.get("severity", "warning")).lower()
             if severity not in {"error", "warning", "info"}:
+                severity = "warning"
+            if severity == "error":
+                # The LLM reviewer receives snippets, not a full executable view.
+                # Keep its feedback visible but leave hard failures to deterministic
+                # checks such as path safety, file budgets, py_compile, and run guards.
                 severity = "warning"
             findings.append(
                 _finding(
@@ -140,6 +145,21 @@ def _metric_name_visible(project_dir: Path, metric: str) -> bool:
     return False
 
 
+def _review_snippet(path: Path, *, limit: int = 5000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if len(text) <= limit:
+        return text
+    half = max(1000, limit // 2)
+    return (
+        text[:half].rstrip()
+        + "\n\n# ... middle omitted for reviewer prompt ...\n\n"
+        + text[-half:].lstrip()
+    )
+
+
 def _safe_path(value: str) -> str:
     path = PurePosixPath(value.replace("\\", "/").strip().lstrip("/"))
     if not value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
@@ -164,4 +184,3 @@ def _int(value: object, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-

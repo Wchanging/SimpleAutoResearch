@@ -198,6 +198,7 @@ def _experiment_result_handles(ctx: Context, results: dict[str, Any]) -> list[So
     handles: list[SourceHandle] = []
     metrics = results.get("metrics") if isinstance(results.get("metrics"), dict) else {}
     guard = results.get("guard") if isinstance(results.get("guard"), dict) else {}
+    diagnosis = results.get("diagnosis") if isinstance(results.get("diagnosis"), dict) else {}
     code_review = results.get("code_review") if isinstance(results.get("code_review"), dict) else {}
     resource_plan = results.get("resource_plan") if isinstance(results.get("resource_plan"), dict) else {}
     recovery = (
@@ -214,6 +215,8 @@ def _experiment_result_handles(ctx: Context, results: dict[str, Any]) -> list[So
     ]
     if guard:
         summary_parts.append(f"guard={guard.get('status', 'unknown')}")
+    if diagnosis:
+        summary_parts.append(f"diagnosis={diagnosis.get('status', 'unknown')}")
     if code_review:
         summary_parts.append(f"code_review={code_review.get('status', 'unknown')}")
     handles.append(
@@ -228,6 +231,7 @@ def _experiment_result_handles(ctx: Context, results: dict[str, Any]) -> list[So
                 "metrics": metrics,
                 "verdicts": verdicts,
                 "guard": guard,
+                "diagnosis": diagnosis,
             },
         )
     )
@@ -241,6 +245,23 @@ def _experiment_result_handles(ctx: Context, results: dict[str, Any]) -> list[So
                 artifact=_relative_artifact(ctx, "guard_report.json"),
                 summary=_guard_summary(guard),
                 metadata={"status": guard.get("status"), "issues": issues[:20]},
+            )
+        )
+    if diagnosis:
+        deficiencies = diagnosis.get("deficiencies") if isinstance(diagnosis.get("deficiencies"), list) else []
+        handles.append(
+            SourceHandle(
+                handle="artifact:experiment_diagnosis",
+                kind="experiment",
+                title="Experiment run diagnosis",
+                artifact=_relative_artifact(ctx, "diagnosis.json"),
+                summary=str(diagnosis.get("summary") or "")[:1200],
+                metadata={
+                    "status": diagnosis.get("status"),
+                    "completion": diagnosis.get("completion", {}),
+                    "repair": diagnosis.get("repair", {}),
+                    "deficiencies": deficiencies[:20],
+                },
             )
         )
     if code_review:

@@ -224,6 +224,7 @@ enabled = false                # set true for greenfield project generation
 max_batches = 2
 files_per_batch = 3
 review_required = true
+allow_fallback_scaffold = false # if true, failed LLM code can be replaced by a safe scaffold
 
 [report]
 # auto chooses experiment or research-only report based on available results.
@@ -503,6 +504,7 @@ needed, so existing embedded `code_task_project` runs keep working.
 | `[evaluation].required_metrics` / `.success_criteria` | Required metric checks and success notes used by `07-run/guard_report.json` and the final report. |
 | `[generation].enabled` | Enables the greenfield project-generation path. Leave false for existing-project code-task runs. |
 | `[generation].max_batches` / `.files_per_batch` / `.review_required` | Project-generation planning and review budget recorded into `05-design/experiment_contract.json` and consumed by `06-code`. |
+| `[generation].allow_fallback_scaffold` | Defaults to false. When false, failed generated code stays available for inspection instead of being silently replaced by a deterministic scaffold. |
 
 During `05-design`, these fields materialize as `experiment_plan.json`,
 `experiment_contract.json`, `result_schema.json`, `resource_plan.json`,
@@ -512,8 +514,10 @@ pre-code contract.
 During `07-run`, `results.json` is the canonical experiment result and includes
 metric values, execution provenance, comparisons/verdicts when available, and
 compact references to `resource_plan.json`, `code_review.json`, and
-`guard_report.json`. Reports should read experiment numbers from this canonical
-result package rather than parsing stdout directly.
+`guard_report.json` / `diagnosis.json`. `diagnosis.json` turns guard,
+code-review, runtime, and missing-metric signals into readable repair/report
+context. Reports should read experiment numbers from this canonical result
+package rather than parsing stdout directly.
 
 ### Evidence Source Fields
 

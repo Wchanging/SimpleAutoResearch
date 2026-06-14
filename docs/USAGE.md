@@ -1303,6 +1303,8 @@ The embedded artifact layout is:
 07-run/
   results.json          # canonical metrics/execution/comparison result
   guard_report.json     # missing metric, timeout, NaN/Inf, empty-run checks
+  diagnosis.json        # guard/code-review/runtime signals for repair/report context
+  diagnosis.md          # human-readable diagnosis and suggested actions
   stdout.txt
   stderr.txt
 08-report/
@@ -1327,13 +1329,19 @@ the executable contract and budgets, `06-code` writes a small generated project
 under the run directory, reviews it, and wraps it with `experiment.py`, and
 `07-run` only trusts parseable metrics in canonical `results.json`.
 
-The public examples intentionally do not ship a small greenfield toy project at
-the moment. For from-scratch implementation tasks, create a config with
-`[task].kind = "greenfield"`, `[implementation].mode = "generate_project"`,
-clear `[resource]` limits, and an `[evaluation]` metric schema that matches the
-task you actually want to run. This avoids locking the feature to a low-value
-demo while keeping the greenfield execution path available for realistic
-server-side or benchmark-style work.
+Run the lightweight local greenfield example:
+
+```bash
+uv run simple-ar run --config examples/greenfield_lightweight_training/configs/greenfield_training.toml --to-stage run
+```
+
+The example asks the pipeline to generate a medium-light CPU-only
+text-classifier experiment suite from scratch. It uses a task Markdown file as
+the detailed implementation brief, explicit `[resource]` limits, and an
+`[evaluation]` metric schema that requires condition-level baseline/model
+metrics, ablation gain, data size, timing, and parameter-count metrics. Use it
+as a local greenfield structure check; for stronger server-side tasks, keep the
+same config shape and raise budgets deliberately.
 
 Reruns from `code` or `run` are archive-safe by default. Existing
 `06-code`/`07-run` reviewed artifacts are copied to
@@ -1374,6 +1382,8 @@ The compact artifact layout is:
 07-run/
   results.json
   guard_report.json
+  diagnosis.json
+  diagnosis.md
   stdout.txt
   stderr.txt
   repair_summary.json  # only when bounded repair is attempted
@@ -1387,11 +1397,12 @@ The compact artifact layout is:
 Greenfield is not a free-form autonomous agent. It is constrained by
 `[resource]`, `[evaluation]`, and `[generation]`: generated files and lines are
 bounded, dependency installation is disabled unless explicitly allowed, required
-metrics are checked by `guard_report.json`, code-review warnings are projected
-into canonical `results.json`, and repair currently only uses execution evidence
-for narrow, schema-driven fixes. The report stage reads experiment claims from
-`07-run/results.json`, `guard_report.json`, resource plans, and code-review
-artifacts rather than from raw stdout alone.
+metrics are checked by `guard_report.json`, and `diagnosis.json` consolidates
+guard, code-review, stdout/stderr, and missing-metric signals into repair/report
+context. Repair currently uses that execution evidence only for narrow,
+schema-driven fixes. The report stage reads experiment claims from
+`07-run/results.json`, `guard_report.json`, `diagnosis.json`, resource plans,
+and code-review artifacts rather than from raw stdout alone.
 
 Legacy bundled toy smoke test:
 

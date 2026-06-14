@@ -149,6 +149,7 @@ class GenerationSection(_ConfigModel):
     max_batches: int | None = None
     files_per_batch: int | None = None
     review_required: bool | None = None
+    allow_fallback_scaffold: bool | None = None
 
 
 class ModelsSection(_ConfigModel):
@@ -325,6 +326,7 @@ class PipelineRunConfig(_ConfigModel):
         _set_int(result, "generation_max_batches", self.generation.max_batches)
         _set_int(result, "generation_files_per_batch", self.generation.files_per_batch)
         _set_bool(result, "generation_review_required", self.generation.review_required)
+        _set_bool(result, "generation_allow_fallback_scaffold", self.generation.allow_fallback_scaffold)
 
         _set_string(result, "models_planner", self.models.planner)
         _set_string(result, "models_implementer", self.models.implementer)

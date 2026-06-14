@@ -449,6 +449,8 @@ def _collect_code(ctx: "Context") -> CollectedStageResult:
 
 def _collect_run(ctx: "Context") -> CollectedStageResult:
     results_path = ctx.artifact_path("results.json")
+    guard_path = ctx.artifact_path("guard_report.json")
+    diagnosis_path = ctx.artifact_path("diagnosis.json")
     stdout_path = ctx.artifact_path("stdout.txt")
     stderr_path = ctx.artifact_path("stderr.txt")
     results = read_json(results_path)
@@ -460,6 +462,8 @@ def _collect_run(ctx: "Context") -> CollectedStageResult:
         metrics=dict(metrics) if isinstance(metrics, dict) else {},
         legacy_outputs={
             "results.json": _rel(ctx, results_path),
+            **({"guard_report.json": _rel(ctx, guard_path)} if guard_path.exists() else {}),
+            **({"diagnosis.json": _rel(ctx, diagnosis_path)} if diagnosis_path.exists() else {}),
             "stdout.txt": _rel(ctx, stdout_path),
             "stderr.txt": _rel(ctx, stderr_path),
         },

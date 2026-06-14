@@ -215,6 +215,7 @@ enabled = false                # greenfield 项目生成时设为 true；已有�
 max_batches = 2
 files_per_batch = 3
 review_required = true
+allow_fallback_scaffold = false # true 时，失败的 LLM 代码可被安全 scaffold 替换
 
 [report]
 # auto 会根据是否有实验结果选择 experiment 或 research_only 报告结构。
@@ -489,12 +490,13 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[evaluation].required_metrics` / `.success_criteria` | 必需指标检查和成功条件说明，会被 `07-run/guard_report.json` 和最终报告使用。 |
 | `[generation].enabled` | 启用 greenfield 项目生成路径；已有项目 code-task 运行保持 false。 |
 | `[generation].max_batches` / `.files_per_batch` / `.review_required` | 后续项目生成路径的计划提示；已有项目 patch run 只记录用于审计。 |
+| `[generation].allow_fallback_scaffold` | 默认 false。false 时，生成代码失败会保留产物供检查，而不是静默替换成 deterministic scaffold。 |
 
 `05-design` 会把这些字段落成 `experiment_plan.json`、`experiment_contract.json`、
 `result_schema.json`、`resource_plan.json`、`dependency_plan.json`、
 `domain_profile.json` 和 `contract_validation.json`。如果
 `contract_validation.json` 报告失败，`06-code` 会拒绝继续进入代码阶段。
-`07-run/results.json` 是实验结果的 canonical 入口，会集中记录指标、执行 provenance、comparison/verdict，以及 `resource_plan.json`、`code_review.json` 和 `guard_report.json` 的紧凑证据信号。报告阶段应引用这组 canonical 结果，而不是直接从 stdout 猜测实验结论。
+`07-run/results.json` 是实验结果的 canonical 入口，会集中记录指标、执行 provenance、comparison/verdict，以及 `resource_plan.json`、`code_review.json`、`guard_report.json` 和 `diagnosis.json` 的紧凑证据信号。`diagnosis.json` 会把 guard/code-review/runtime 问题整理成可读诊断和修复建议；报告阶段应引用这组 canonical 结果，而不是直接从 stdout 猜测实验结论。
 
 ### Evidence Source 字段
 

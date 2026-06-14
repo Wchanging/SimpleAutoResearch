@@ -14,6 +14,15 @@ class ContractTests(unittest.TestCase):
         for contract in CONTRACTS.values():
             self.assertTrue(contract.outputs, contract.stage.name)
 
+    def test_run_contract_reports_real_run_artifacts(self) -> None:
+        outputs = set(CONTRACTS[Stage.RUN].outputs)
+
+        self.assertIn("results.json", outputs)
+        self.assertIn("guard_report.json", outputs)
+        self.assertIn("diagnosis.json", outputs)
+        self.assertNotIn("contract.json", outputs)
+        self.assertNotIn("report.md", outputs)
+
 
 if __name__ == "__main__":
     unittest.main()

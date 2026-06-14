@@ -107,6 +107,7 @@ def evaluate_result_guard(
             )
         )
     _append_code_review_issues(results, issues)
+    _append_repair_issues(results, issues)
     _append_review_recovery_issues(results, issues)
     _append_comparison_verdict_issues(results, issues)
     _append_success_criteria_issues(contract, schema, results, issues)
@@ -163,6 +164,20 @@ def _append_code_review_issues(results: Mapping[str, Any], issues: list[GuardIss
                 "warning",
                 "code_review_warning",
                 "Generated code review reported warnings; report claims should mention implementation risk.",
+            )
+        )
+
+
+def _append_repair_issues(results: Mapping[str, Any], issues: list[GuardIssue]) -> None:
+    repair = results.get("repair")
+    if not isinstance(repair, Mapping):
+        return
+    if str(repair.get("status") or "").strip().lower() == "patched":
+        issues.append(
+            GuardIssue(
+                "warning",
+                "experiment_repaired",
+                "Experiment metrics were produced after a bounded repair; report claims should disclose this repair context.",
             )
         )
 

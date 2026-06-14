@@ -217,7 +217,7 @@ uv run python scripts/run_checks.py code-task
 | 修改范围 | 建议检查 |
 | --- | --- |
 | 仅文档 | `git diff --check` 加人工检查链接。 |
-| 小型 parser、prompt、metric 或 CLI 改动 | `uv run simple-ar-checks quick`。 |
+| 小型 parser、prompt、config、metric 或 CLI 改动 | `uv run simple-ar-checks quick`。 |
 | Code-task 内部、workspace、repo-map、patching、validation、runner、repair | `uv run simple-ar-checks code-task`。 |
 | 内置 code-task 示例或 benchmark 示例 | `uv run simple-ar-checks code-task-examples`。 |
 | Pipeline、stages、experiment templates、run config | `uv run simple-ar-checks pipeline`。 |
@@ -240,6 +240,12 @@ uv run python -m unittest tests.test_code_task_examples
 
 ```bash
 uv run python -m unittest tests.test_experiment_runner
+```
+
+运行配置解析和公开 example 配置加载测试：
+
+```bash
+uv run python -m unittest tests.test_run_config
 ```
 
 ## Git 卫生

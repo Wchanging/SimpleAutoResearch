@@ -260,11 +260,21 @@ or `run` archives existing reviewed artifacts by default, and reports consume
 canonical results, resource limits, guard status, and code-review signals rather
 than raw stdout alone.
 
-The greenfield path is kept as a real framework capability rather than a tiny
-toy demo. The public examples currently focus on research-only, standalone
-code-task, and full-pipeline existing-project workflows; add a concrete
-greenfield config when you have a task, metric schema, resource budget, and
-allowed dependency policy that match your environment.
+A lightweight public example is available at
+`examples/greenfield_lightweight_training/configs/greenfield_training.toml`.
+It asks the pipeline to generate a medium-light CPU-only text-classification
+experiment suite from scratch, with deterministic local data, multiple
+baseline/model conditions, and parseable metrics:
+
+```bash
+uv run simple-ar run --config examples/greenfield_lightweight_training/configs/greenfield_training.toml --to-stage run
+```
+
+Use this as a local greenfield structure check: it exercises task Markdown
+handoff, architecture/file planning, multi-file generation, code review, run
+guards, and diagnosis. For stronger greenfield tasks, keep the same config shape
+but raise budgets deliberately and make the task-specific metric schema
+explicit.
 
 ## Capability Boundaries
 

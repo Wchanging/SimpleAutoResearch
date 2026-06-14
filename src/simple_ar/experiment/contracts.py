@@ -308,11 +308,13 @@ def _build_dependency_plan(runtime: UnifiedTaskConfig, domain_profile: DomainPro
 
 
 def _resolve_objective(runtime: UnifiedTaskConfig, topic: str, hypothesis: str) -> str:
-    if runtime.task.objective:
-        return runtime.task.objective
-    if topic:
-        return topic
-    return _short_text(hypothesis, 300)
+    base = runtime.task.objective or topic or _short_text(hypothesis, 300)
+    task_spec = _task_file_excerpt(runtime.task.task_file)
+    if not task_spec:
+        return base
+    if base:
+        return _short_text(f"{base}\n\nTask file requirements:\n{task_spec}", 3500)
+    return task_spec
 
 
 def _constraints(runtime: UnifiedTaskConfig, domain_profile: DomainProfile) -> list[str]:
@@ -323,6 +325,9 @@ def _constraints(runtime: UnifiedTaskConfig, domain_profile: DomainProfile) -> l
         f"Maximum runtime: {runtime.resource.max_runtime_sec}s.",
     ]
     constraints.extend(domain_profile.result_requirements[:3])
+    task_spec = _task_file_excerpt(runtime.task.task_file, limit=900)
+    if task_spec:
+        constraints.append("Follow the task file requirements; excerpt: " + task_spec.replace("\n", " ")[:900])
     return constraints
 
 
@@ -373,6 +378,20 @@ def _short_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3].rstrip() + "..."
+
+
+def _task_file_excerpt(path_value: str, *, limit: int = 2400) -> str:
+    path_value = path_value.strip()
+    if not path_value:
+        return ""
+    path = Path(path_value)
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return _short_text(text, limit)
 
 
 def _str(value: Any, default: str = "") -> str:
