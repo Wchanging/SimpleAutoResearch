@@ -336,6 +336,7 @@ def _apply_run_cli_overrides(config: dict[str, object], args: argparse.Namespace
     _set_if_not_none(config, "report_mode", args.report_mode)
     _set_if_not_none(config, "report_output_mode", getattr(args, "report_output_mode", None))
     _set_if_not_none(config, "report_output_label", getattr(args, "report_output_label", None))
+    _set_if_not_none(config, "overwrite_stage_artifacts", getattr(args, "overwrite_stage_artifacts", None))
     config.update(_pipeline_code_task_config(args))
 
     if args.no_llm is True:
@@ -1307,7 +1308,10 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
                         "benchmark, and expected files."
                     ),
                 )
-                if not confirm_review_gate("Approve the patch plan and continue?"):
+                if not confirm_review_gate(
+                    "Approve the patch plan and continue?",
+                    assume_yes=bool(args.yes),
+                ):
                     print_line("Execute stopped at patch-plan review.")
                     return
                 record_plan_decision(
@@ -1328,7 +1332,10 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
                         "target path, and proposal warning."
                     ),
                 )
-                if not confirm_review_gate("Apply the reviewed edit proposal and continue?"):
+                if not confirm_review_gate(
+                    "Apply the reviewed edit proposal and continue?",
+                    assume_yes=bool(args.yes),
+                ):
                     print_line("Execute stopped at edit-proposal review.")
                     return
                 inline_apply_proposed_edits = True
@@ -1344,7 +1351,10 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
                         "the larger patch is intentional and fully reviewed."
                     ),
                 )
-                if not confirm_review_gate("Allow this large edit proposal and continue?"):
+                if not confirm_review_gate(
+                    "Allow this large edit proposal and continue?",
+                    assume_yes=bool(args.yes),
+                ):
                     print_line("Execute stopped at large-edit review.")
                     return
                 inline_apply_proposed_edits = True
@@ -1390,7 +1400,7 @@ def _inline_review_enabled(args: argparse.Namespace) -> bool:
         not bool(args.dry_run)
         and not bool(args.no_review_inline)
         and not bool(args.interactive)
-        and sys.stdin.isatty()
+        and (bool(args.yes) or sys.stdin.isatty())
     )
 
 

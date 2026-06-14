@@ -161,8 +161,17 @@ only when you want stronger per-batch control and accept the extra LLM cost.
 ### What Is LLM-Backed vs Deterministic
 
 - LLM-backed when enabled: `plan`, `read`, `synthesize`, and `report` stages.
-- Deterministic by default: `design`, `code`, and `run` use fixed experiment templates unless a code-task experiment template is selected.
-- Embedded code-task experiment: `06-code` can call the LLM for a work plan, patch plan, and controlled edit proposal, but the patch is applied only inside an isolated workspace under the run directory.
+- `05-design` writes a stable experiment contract, result schema, resource plan,
+  dependency plan, and domain profile before any code is generated or patched.
+- `06-code` has three bounded implementation paths: fixed templates,
+  embedded code-task patches for existing projects, and greenfield project
+  generation for tasks with no source project yet.
+- Embedded code-task experiment: `06-code` can call the LLM for a work plan,
+  patch plan, and controlled edit proposal, but the patch is applied only inside
+  an isolated workspace under the run directory.
+- Greenfield experiment: `06-code` can call the LLM for architecture/file
+  planning and implementation; it always writes review, memory, backend, and
+  artifact manifests before `07-run` validates canonical metrics.
 - Guarded reports: if an LLM-written report omits required body citations, invents citation keys, or overstates fixture/toy evidence, the report stage writes a structured fallback report instead.
 - `--no-llm` forces offline fallbacks with placeholder content in `goal.md`, `notes.md`, `synthesis.md`, and `report.md`.
 
@@ -263,8 +272,16 @@ writes this layout:
   synthesis.md
   hypothesis.md
 05-design/
+  experiment_plan.json
+  experiment_contract.json
+  experiment_contract.md
+  result_schema.json
+  resource_plan.json
+  dependency_plan.json
+  domain_profile.json
+  contract_validation.json
   evidence/
-    experiment_contract.json
+    experiment_contract.json  # compatibility research handoff
     experiment_contract.md
 ```
 
@@ -453,11 +470,26 @@ Key files, grouped by directory:
     experimentable hypothesis produced from the Paper Briefs.
   - `evidence/*.jsonl` / `.md` (debug-only): legacy evidence-pack diagnostics
     retained only when `[run].debug_artifacts = true`.
+- `05-design/`
+  - `experiment_plan.json`: selected execution/template plan for the next code
+    stage.
+  - `experiment_contract.json` / `.md`: V2.5 executable contract, including
+    task kind, objective, implementation mode, source project, benchmark
+    command, risks, constraints, and result/resource/dependency references.
+  - `result_schema.json`: primary metric, required metrics, directions, and
+    success criteria used by run guards and later reports.
+  - `resource_plan.json`: runtime, file-count, generated-line, memory, GPU, and
+    streaming budget before code is generated or patched.
+  - `dependency_plan.json`: dependency-install policy, expected entrypoints,
+    and setup-hook notes. It records policy; it does not install packages.
+  - `domain_profile.json`: planning defaults for generic, existing-code, ML,
+    or code-agent evaluation tasks.
+  - `contract_validation.json`: pre-code validation status; `06-code` stops
+    when this reports a failed contract.
 - `05-design/evidence/`
-  - `experiment_contract.json` / `.md`: bridge from literature evidence to a
-    future code-task or external coding agent, including hypothesis,
-    implementation scope, validation hints, budgets, risks, and report claim
-    rules.
+  - `experiment_contract.json` / `.md`: compatibility research handoff from
+    V2.3 synthesis artifacts. The executable V2.5 contract lives at
+    `05-design/experiment_contract.json`.
   - `tool_context.json` / `.md` (debug-only): read-only handoff for future
     MCP/tool/agent integrations before any code workspace is opened.
   - `evidence_review.md`, `decision_log.jsonl`, `eval_report.json` / `.md`
@@ -545,9 +577,9 @@ See [CLI Reference](CLI_REFERENCE.md#artifact-tools) for option details.
 
 The code-task workflow prepares a source project under an isolated editable
 workspace and never mutates the original codebase. The default `copy` mode is
-the safest choice; V2.2 also supports `git_worktree` for larger repo-root git
-projects where a full copy is wasteful, plus experimental `sparse_copy` for
-small allowlisted subsets. The workflow is intentionally step-by-step so each
+the safest choice. The workflow also supports `git_worktree` for larger
+repo-root git projects where a full copy is wasteful, plus experimental
+`sparse_copy` for small allowlisted subsets. The workflow is intentionally step-by-step so each
 stage can be reviewed.
 
 Initialize from a TOML config so project paths, benchmark metrics, workspace
@@ -705,13 +737,14 @@ received model edits.
 review gate is reached. In an interactive terminal, those gates are handled
 inline: a yellow review panel points to `patch_plan.md`, `proposed_edits.json`,
 or large-edit approval and asks whether to continue. In non-interactive shells,
-it stops at the gate instead of waiting for input. If a run is interrupted,
-rerun the same `code-task execute` command: completed steps are detected and
-shown as skipped before the workflow advances. Use `--interactive` only for
-debug mode when you want to confirm each primitive step; `--yes` only
-auto-continues those interactive primitive prompts and never approves review
-gates by itself. Use `--no-review-inline` if you prefer the older
-stop-and-rerun flow.
+it stops cleanly at the gate unless `--yes` is supplied. If a run is
+interrupted, rerun the same `code-task execute` command: completed steps are
+detected and shown as skipped before the workflow advances. Use `--interactive`
+only for debug mode when you want to confirm each primitive step; `--yes`
+auto-continues those primitive prompts, and in normal execute mode also
+auto-approves inline review gates. Use it only when automated approval is
+intentional. Use `--no-review-inline` if you prefer the older stop-and-rerun
+flow.
 
 If LLM work planning or patch planning returns malformed JSON, `execute` stops
 with `llm_planning_failed` and leaves the fallback artifacts unwritten. Rerun
@@ -892,8 +925,8 @@ uv run simple-ar code-task batch runs/<run-id> --work-item W1
 It records work items, target files, read-only evidence, validation hints,
 context requests, and budget profiles. It does not generate code or edit
 files. `batch` creates durable attempt state under
-`code_task/attempts/attempt-NNN/batches/batch-NNN/`, which is the V2.2
-foundation for later multi-round, per-batch editing and recovery. When a batch
+`code_task/attempts/attempt-NNN/batches/batch-NNN/`, which is the foundation
+for later multi-round, per-batch editing and recovery. When a batch
 is active, edit proposals are constrained to that batch's target files and
 write extra batch-local review artifacts.
 
@@ -962,9 +995,9 @@ SimpleAutoResearch applies validation, benchmark execution, and summary logic.
 By default, tests and benchmark files are treated as read-only evidence:
 `propose-edits` omits them from editable snippets, and any model edit targeting
 paths such as `tests/**`, `test_*.py`, `benchmark.py`, or `*benchmark*.py` is
-dropped from the proposal. V2.2 also applies an edit budget after the model
-returns JSON. Oversized proposals are written with warnings and rejected edits
-instead of being applied; if the proposal fits the larger review budget, rerun
+dropped from the proposal. The executor also applies an edit budget after the
+model returns JSON. Oversized proposals are written with warnings and rejected
+edits instead of being applied; if the proposal fits the larger review budget, rerun
 with `--allow-large-edits` only after reading the JSON.
 
 Apply proposed edits inside the editable workspace:
@@ -1216,18 +1249,28 @@ In that mode, `05-design` writes `generated_code_task.md` and
 codebase summary. `06-code` then uses the generated task as the normal
 `code_task/task.md` input for planning and edit proposal.
 
+When you already have a precise task file but still want the 8-stage research
+context to shape implementation priorities, set
+`[implementation].task_handoff = "merge"` in the pipeline config. The user
+task file remains the hard requirement, while `05-design` writes a merged
+`generated_code_task.md` that adds goal/problem/synthesis/hypothesis context,
+benchmark criteria, and codebase signals for the embedded code-task run.
+
 `code_task_project` writes a normal pipeline run plus nested code-task artifacts
 under `06-code/code_task_run/`. During `06-code`, it copies or worktrees the
 user project, probes the environment, runs a baseline benchmark, builds a repo
 map/context pack, generates a batch-oriented work plan, creates an
 attempt/batch record, generates a patch plan, records an automatic pipeline
 approval, asks for controlled edits, applies them inside the prepared
-workspace, and validates the result. To keep unattended pipeline runs small and
-reviewable, the embedded path executes the first concrete work item as a single
-batch instead of automatically merging a serial dependency chain into a large
-patch. During `07-run`, the harness runs the
-patched benchmark, writes `comparison.json` when baseline and patched metrics
-are both available, and exposes code-task metrics through `07-run/results.json`.
+workspace, validates the result, and runs the patched benchmark once before
+leaving `06-code`. If that verification benchmark fails, the bridge records a
+failure analysis and attempts one bounded repair from the execution evidence.
+To keep unattended pipeline runs small and reviewable, the embedded path
+executes the first concrete work item as a single batch instead of automatically
+merging a serial dependency chain into a large patch. During `07-run`, the
+harness reruns the verified patched benchmark, writes `comparison.json` when
+baseline and patched metrics are both available, and exposes code-task metrics
+through canonical `07-run/results.json`.
 During `08-report`, the report includes a deterministic Code Task Evidence
 section pointing back to the nested work plan, batch state, summary, diff, and
 comparison artifacts; report memory also exposes baseline, patched, and delta
@@ -1258,7 +1301,12 @@ The embedded artifact layout is:
         patched/
         comparison.json
 07-run/
-  results.json
+  results.json          # canonical metrics/execution/comparison result
+  guard_report.json     # missing metric, timeout, NaN/Inf, empty-run checks
+  diagnosis.json        # guard/code-review/runtime signals for repair/report context
+  diagnosis.md          # human-readable diagnosis and suggested actions
+  stdout.txt
+  stderr.txt
 08-report/
   report.md
   references.bib
@@ -1272,6 +1320,89 @@ This path is convenient for end-to-end experiments, but it deliberately trades
 away the standalone workflow's review pauses. For safety-sensitive or
 hard-to-debug projects, use standalone `code-task execute` or the manual path
 first, then move to `code_task_project` after the benchmark and task are stable.
+
+## Greenfield Experiment In The 8-Stage Pipeline
+
+Use this when you have a research or benchmark-style task but no existing source
+project yet. The greenfield path is intentionally bounded: `05-design` creates
+the executable contract and budgets, `06-code` writes a small generated project
+under the run directory, reviews it, and wraps it with `experiment.py`, and
+`07-run` only trusts parseable metrics in canonical `results.json`.
+
+Run the lightweight local greenfield example:
+
+```bash
+uv run simple-ar run --config examples/greenfield_lightweight_training/configs/greenfield_training.toml --to-stage run
+```
+
+The example asks the pipeline to generate a medium-light CPU-only
+text-classifier experiment suite from scratch. It uses a task Markdown file as
+the detailed implementation brief, explicit `[resource]` limits, and an
+`[evaluation]` metric schema that requires condition-level baseline/model
+metrics, ablation gain, data size, timing, and parameter-count metrics. Use it
+as a local greenfield structure check; for stronger server-side tasks, keep the
+same config shape and raise budgets deliberately.
+
+Reruns from `code` or `run` are archive-safe by default. Existing
+`06-code`/`07-run` reviewed artifacts are copied to
+`archives/<timestamp>/` before new outputs are written:
+
+```bash
+uv run simple-ar resume runs/<run-id> --from-stage code --to-stage report
+uv run simple-ar resume runs/<run-id> --from-stage run --to-stage report
+```
+
+Use `--overwrite-stage-artifacts` only when you intentionally want to discard
+the previous code/run artifacts without an archive.
+
+The compact artifact layout is:
+
+```text
+05-design/
+  experiment_contract.json
+  result_schema.json
+  resource_plan.json
+  dependency_plan.json
+  domain_profile.json
+  contract_validation.json
+06-code/
+  implementation_plan.json
+  architecture_plan.json
+  architecture_plan.md
+  file_plan.json
+  generated_project/
+    main.py
+    generated_experiment/
+      runner.py
+  code_artifacts.json
+  implementation_memory.json
+  code_review.json
+  code_backend.json
+  experiment.py
+07-run/
+  results.json
+  guard_report.json
+  diagnosis.json
+  diagnosis.md
+  stdout.txt
+  stderr.txt
+  repair_summary.json  # only when bounded repair is attempted
+  archives/<timestamp>/ # previous run artifacts when rerun safely
+08-report/
+  report.md
+  report_memory.json
+  report_audit.json
+```
+
+Greenfield is not a free-form autonomous agent. It is constrained by
+`[resource]`, `[evaluation]`, and `[generation]`: generated files and lines are
+bounded, dependency installation is disabled unless explicitly allowed, required
+metrics are checked by `guard_report.json`, and `diagnosis.json` consolidates
+guard, code-review, stdout/stderr, and missing-metric signals into repair/report
+context. Repair currently uses that execution evidence only for narrow,
+schema-driven fixes. The report stage reads experiment claims from
+`07-run/results.json`, `guard_report.json`, `diagnosis.json`, resource plans,
+and code-review artifacts rather than from raw stdout alone.
 
 Legacy bundled toy smoke test:
 

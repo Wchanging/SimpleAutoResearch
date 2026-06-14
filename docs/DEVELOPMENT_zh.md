@@ -166,7 +166,7 @@ src/simple_ar/report/
 
 ### Code-Task Environment Policy
 
-当前 V2.2 code-task runner 通过 `copy`、`git_worktree` 或实验性 `sparse_copy` 提供 workspace isolation，并支持 command timeout、可选 benchmark output streaming、stdout/stderr 捕获、受限 environment map 和显式 execution interpreter policy。它支持 `current` 和 `external`，但还不会创建或安装到单独 Python environment。除非未来功能明确改变这一点，否则不要默认把用户项目依赖安装到 SimpleAutoResearch 自己的 `.venv`。
+当前 code-task runner 通过 `copy`、`git_worktree` 或实验性 `sparse_copy` 提供 workspace isolation，并支持 command timeout、可选 benchmark output streaming、stdout/stderr 捕获、受限 environment map 和显式 execution interpreter policy。它支持 `current` 和 `external`，但还不会创建或安装到单独 Python environment。除非未来功能明确改变这一点，否则不要默认把用户项目依赖安装到 SimpleAutoResearch 自己的 `.venv`。
 
 环境支持应分层演进：
 
@@ -217,7 +217,7 @@ uv run python scripts/run_checks.py code-task
 | 修改范围 | 建议检查 |
 | --- | --- |
 | 仅文档 | `git diff --check` 加人工检查链接。 |
-| 小型 parser、prompt、metric 或 CLI 改动 | `uv run simple-ar-checks quick`。 |
+| 小型 parser、prompt、config、metric 或 CLI 改动 | `uv run simple-ar-checks quick`。 |
 | Code-task 内部、workspace、repo-map、patching、validation、runner、repair | `uv run simple-ar-checks code-task`。 |
 | 内置 code-task 示例或 benchmark 示例 | `uv run simple-ar-checks code-task-examples`。 |
 | Pipeline、stages、experiment templates、run config | `uv run simple-ar-checks pipeline`。 |
@@ -240,6 +240,12 @@ uv run python -m unittest tests.test_code_task_examples
 
 ```bash
 uv run python -m unittest tests.test_experiment_runner
+```
+
+运行配置解析和公开 example 配置加载测试：
+
+```bash
+uv run python -m unittest tests.test_run_config
 ```
 
 ## Git 卫生

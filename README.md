@@ -235,15 +235,46 @@ This creates a normal 8-stage run. During `06-code`, it prepares the configured
 project under `06-code/code_task_run/code_task/workspace`, builds repo maps and
 context packs, asks the LLM for a work plan and patch proposal, applies the
 patch inside the isolated workspace, and validates it. During `07-run`, it runs
-the patched benchmark and compares metrics. During `08-report`, it writes a
-report with deterministic code-task evidence pointing back to the nested work
-plan, patch, benchmark, and comparison artifacts.
+the patched benchmark, projects metrics into canonical `results.json`, writes
+`guard_report.json`, and compares nested code-task metrics when available.
+During `08-report`, it writes a report with deterministic code-task evidence
+pointing back to the nested work plan, patch, benchmark, and comparison
+artifacts.
 
 The embedded path is designed to finish end to end, so it auto-approves the
 patch plan inside the isolated workspace. Use standalone `code-task` commands
 when you want explicit human approval before each step. A bundled demo config is
 available at `examples/full_pipeline_tiny_mlp/configs/pipeline.toml`; full embedded
 workflow details are in [Usage And Configuration](docs/USAGE.md#embedded-code-task-in-the-8-stage-pipeline).
+Set `[implementation].task_handoff = "merge"` when you want an existing
+`task.md` to stay authoritative while `05-design` enriches it with the earlier
+research context before entering code-task execution.
+
+### 4. Greenfield Experiment
+
+Use this when the task has no existing source project yet. V2.5 writes an
+experiment contract, generates a bounded project under `06-code/generated_project`,
+reviews the generated files, runs `experiment.py`, and accepts only canonical
+`07-run/results.json` metrics guarded by `guard_report.json`. Rerunning `code`
+or `run` archives existing reviewed artifacts by default, and reports consume
+canonical results, resource limits, guard status, and code-review signals rather
+than raw stdout alone.
+
+A lightweight public example is available at
+`examples/greenfield_lightweight_training/configs/greenfield_training.toml`.
+It asks the pipeline to generate a medium-light CPU-only text-classification
+experiment suite from scratch, with deterministic local data, multiple
+baseline/model conditions, and parseable metrics:
+
+```bash
+uv run simple-ar run --config examples/greenfield_lightweight_training/configs/greenfield_training.toml --to-stage run
+```
+
+Use this as a local greenfield structure check: it exercises task Markdown
+handoff, architecture/file planning, multi-file generation, code review, run
+guards, and diagnosis. For stronger greenfield tasks, keep the same config shape
+but raise budgets deliberately and make the task-specific metric schema
+explicit.
 
 ## Capability Boundaries
 
@@ -260,10 +291,10 @@ still intentionally conservative.
   allowlist is too narrow.
 - The tool does not yet install project dependencies or manage
   Docker/Conda/GPU/Slurm environments.
-- Large code-edit proposals may still produce long LLM completions. V2.2 is
-  adding bounded proposal contracts, context requests, multi-round attempts, and
-  future external coding-agent adapters before recommending unattended large
-  refactors.
+- Large code-edit proposals may still produce long LLM completions. V2.5 is
+  moving experiment/code execution toward explicit contracts, resource budgets,
+  canonical results, guards, a bounded greenfield path, and future
+  external-agent adapters before recommending unattended large refactors.
 - Literature search now has an auditable source plan and document-store
   metadata, and can use OpenAlex, Semantic Scholar, arXiv, or local
   Markdown/text notes. It can parse local/cached Markdown, text, basic HTML, and

@@ -77,6 +77,13 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse((ctx.run_dir / "04-synthesize" / "evidence" / "idea_candidates.jsonl").exists())
             self.assertFalse((ctx.run_dir / "04-synthesize" / "evidence" / "novelty_checks.jsonl").exists())
             self.assertTrue((ctx.run_dir / "05-design" / "evidence" / "experiment_contract.json").is_file())
+            self.assertTrue((ctx.run_dir / "05-design" / "experiment_contract.json").is_file())
+            self.assertTrue((ctx.run_dir / "05-design" / "experiment_contract.md").is_file())
+            self.assertTrue((ctx.run_dir / "05-design" / "result_schema.json").is_file())
+            self.assertTrue((ctx.run_dir / "05-design" / "resource_plan.json").is_file())
+            self.assertTrue((ctx.run_dir / "05-design" / "dependency_plan.json").is_file())
+            self.assertTrue((ctx.run_dir / "05-design" / "domain_profile.json").is_file())
+            self.assertTrue((ctx.run_dir / "05-design" / "contract_validation.json").is_file())
             self.assertFalse((ctx.run_dir / "05-design" / "evidence" / "tool_context.json").exists())
             self.assertFalse((ctx.run_dir / "05-design" / "evidence" / "eval_report.json").exists())
             self.assertFalse((ctx.run_dir / "02-search" / "tools").exists())
@@ -123,6 +130,13 @@ class PipelineTests(unittest.TestCase):
             report_quality = read_json(ctx.run_dir / "08-report" / "report_quality.json")
             self.assertEqual(report_quality["status"], "passed")
             self.assertEqual(report_quality["summary"]["body_cited_paper_count"], 1)
+            results = read_json(ctx.run_dir / "07-run" / "results.json")
+            self.assertEqual(results["schema_version"], "2.5")
+            self.assertEqual(results["status"], "passed")
+            self.assertEqual(results["guard"]["status"], "passed")
+            self.assertIn("accuracy_delta", results["metrics"])
+            self.assertEqual(results["result_schema"]["primary_metric"], "accuracy_delta")
+            self.assertTrue((ctx.run_dir / "07-run" / "guard_report.json").is_file())
 
             report = read_text(ctx.run_dir / "08-report" / "report.md")
             self.assertIn("## Abstract", report)
@@ -199,6 +213,10 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(plan["template"], CODE_TASK_TOY_SPAM_TEMPLATE)
             self.assertEqual(plan["mode"], "embedded_code_task")
             self.assertEqual(plan["method"], "llm_planned_controlled_patch")
+            contract = read_json(run_dir / "05-design" / "experiment_contract.json")
+            self.assertEqual(contract["task_kind"], "existing_project")
+            self.assertEqual(contract["implementation_mode"], "patch_existing")
+            self.assertEqual(contract["result_schema"]["primary_metric"], "benchmark_passed")
 
             code_dir = run_dir / "06-code"
             fake_result = CodeTaskExperimentResult(
@@ -222,7 +240,7 @@ class PipelineTests(unittest.TestCase):
             ctx.current_stage = Stage.CODE
             ctx.stage_dir().mkdir(parents=True)
             with patch(
-                "simple_ar.pipeline_stages.experiment.prepare_code_task_experiment",
+                "simple_ar.experiment.code.prepare_code_task_experiment",
                 return_value=fake_result,
             ):
                 execute_code(ctx)
@@ -266,6 +284,11 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(plan["code_task"]["benchmark_command"], "python benchmark.py")
             self.assertEqual(plan["code_task"]["primary_metric"], "accuracy")
             self.assertEqual(plan["code_task"]["scope"], "user_project")
+            contract = read_json(run_dir / "05-design" / "experiment_contract.json")
+            self.assertEqual(contract["task_kind"], "existing_project")
+            self.assertIn("python benchmark.py", contract["benchmark_command"])
+            self.assertEqual(contract["result_schema"]["primary_metric"], "accuracy")
+            self.assertEqual(read_json(run_dir / "05-design" / "contract_validation.json")["status"], "passed")
 
             code_dir = run_dir / "06-code"
             fake_result = CodeTaskExperimentResult(
@@ -291,7 +314,7 @@ class PipelineTests(unittest.TestCase):
             ctx.current_stage = Stage.CODE
             ctx.stage_dir().mkdir(parents=True)
             with patch(
-                "simple_ar.pipeline_stages.experiment.prepare_code_task_experiment",
+                "simple_ar.experiment.code.prepare_code_task_experiment",
                 return_value=fake_result,
             ):
                 execute_code(ctx)
@@ -347,6 +370,85 @@ class PipelineTests(unittest.TestCase):
                 "05-design/generated_code_task.md",
             )
             self.assertEqual(plan["code_task"]["task_generation"]["mode"], "fallback")
+            contract = read_json(run_dir / "05-design" / "experiment_contract.json")
+            self.assertEqual(contract["task_kind"], "existing_project")
+            self.assertEqual(contract["result_schema"]["primary_metric"], "accuracy")
+
+    def test_code_task_project_design_can_merge_user_task_with_research_context(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        repo_root = Path(__file__).resolve().parents[1]
+        code_root = repo_root / "examples" / "full_pipeline_tiny_mlp" / "project"
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            task_file = Path(tmp) / "task.md"
+            task_file.write_text(
+                "# User Task\n\nImprove validation accuracy without editing benchmark.py.\n",
+                encoding="utf-8",
+            )
+            ctx = Context(
+                run_dir,
+                "Upgrade a tiny MLP after literature review",
+                config={
+                    "experiment_template": CODE_TASK_PROJECT_TEMPLATE,
+                    "code_task_code_root": str(code_root),
+                    "code_task_task_file": str(task_file),
+                    "code_task_benchmark_command": "python benchmark.py",
+                    "code_task_primary_metric": "accuracy",
+                    "implementation_task_handoff": "merge",
+                    "use_llm": False,
+                },
+            )
+            for stage_name, filename, text in (
+                ("01-plan", "goal.md", "# Goal\n\nImprove a lightweight MLP baseline.\n"),
+                ("01-plan", "problem.md", "# Problem\n\nFind a small local improvement.\n"),
+                ("04-synthesize", "synthesis.md", "# Synthesis\n\nPrefer modest architecture tuning.\n"),
+                ("04-synthesize", "hypothesis.md", "# Hypothesis\n\nA small source patch can improve validation accuracy.\n"),
+            ):
+                stage_dir = run_dir / stage_name
+                stage_dir.mkdir(parents=True, exist_ok=True)
+                (stage_dir / filename).write_text(text, encoding="utf-8")
+
+            ctx.current_stage = Stage.DESIGN
+            ctx.stage_dir().mkdir(parents=True)
+            execute_design(ctx)
+
+            generated_task = run_dir / "05-design" / "generated_code_task.md"
+            self.assertTrue(generated_task.is_file())
+            task_text = read_text(generated_task)
+            self.assertIn("## User Requirements", task_text)
+            self.assertIn("without editing benchmark.py", task_text)
+            self.assertIn("## Research-Derived Context", task_text)
+            self.assertIn("small source patch can improve validation accuracy", task_text)
+            plan = read_json(run_dir / "05-design" / "experiment_plan.json")
+            self.assertEqual(plan["code_task"]["task_source"], "merged_user_and_research")
+            self.assertEqual(
+                plan["code_task"]["generated_task_file"],
+                "05-design/generated_code_task.md",
+            )
+            self.assertEqual(plan["code_task"]["task_generation"]["mode"], "fallback_merge")
+
+    def test_code_stage_stops_on_failed_experiment_contract(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            design_dir = run_dir / "05-design"
+            design_dir.mkdir(parents=True)
+            (design_dir / "experiment_plan.json").write_text(
+                '{"template": "toy_text_classification"}',
+                encoding="utf-8",
+            )
+            (design_dir / "contract_validation.json").write_text(
+                '{"status": "failed", "errors": ["missing code_root"]}',
+                encoding="utf-8",
+            )
+            ctx = Context(run_dir, "toy topic", current_stage=Stage.CODE)
+            ctx.stage_dir().mkdir(parents=True)
+
+            with self.assertRaises(RuntimeError) as raised:
+                execute_code(ctx)
+
+            self.assertIn("Experiment contract validation failed", str(raised.exception))
+            self.assertIn("missing code_root", str(raised.exception))
 
     def test_read_stage_accepts_llm_screening_decisions(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

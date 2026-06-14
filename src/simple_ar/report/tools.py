@@ -26,7 +26,7 @@ class GetSynthesisBriefArgs(BaseModel):
 
 
 class GetCodeTaskResultArgs(BaseModel):
-    run_ref: str = Field(default="", description="Optional code-task or run reference.")
+    run_ref: str = Field(default="", description="Optional experiment/code-task or run reference.")
 
 
 class ToolOutput(BaseModel):
@@ -60,7 +60,7 @@ def report_tool_specs() -> list[ReportToolSpec]:
         ),
         _spec(
             "get_code_task_result",
-            "Return code-task or experiment result provenance when available.",
+            "Return canonical experiment/code-task result, guard, review, and metric provenance when available.",
             GetCodeTaskResultArgs,
         ),
     ]

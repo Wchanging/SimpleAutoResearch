@@ -31,6 +31,7 @@ def build_report_context(
     source_handles.extend(_paper_brief_handles(ctx, citation_key_map))
     source_handles.extend(_chunk_handles(ctx, limit=80, citation_key_map=citation_key_map))
     source_handles.extend(_synthesis_handles(ctx))
+    source_handles.extend(_experiment_result_handles(ctx, results))
     source_handles.extend(_code_task_handles(ctx))
     metric_sources = [
         *_code_task_metric_sources(ctx),
@@ -190,6 +191,118 @@ def _code_task_handles(ctx: Context) -> list[SourceHandle]:
     ]
 
 
+def _experiment_result_handles(ctx: Context, results: dict[str, Any]) -> list[SourceHandle]:
+    """Expose canonical experiment evidence to the report writer/reviewer."""
+    if not isinstance(results, dict) or not results:
+        return []
+    handles: list[SourceHandle] = []
+    metrics = results.get("metrics") if isinstance(results.get("metrics"), dict) else {}
+    guard = results.get("guard") if isinstance(results.get("guard"), dict) else {}
+    diagnosis = results.get("diagnosis") if isinstance(results.get("diagnosis"), dict) else {}
+    code_review = results.get("code_review") if isinstance(results.get("code_review"), dict) else {}
+    resource_plan = results.get("resource_plan") if isinstance(results.get("resource_plan"), dict) else {}
+    recovery = (
+        results.get("review_failure_recovery")
+        if isinstance(results.get("review_failure_recovery"), dict)
+        else {}
+    )
+    verdicts = results.get("verdicts") if isinstance(results.get("verdicts"), list) else []
+    summary_parts = [
+        f"status={results.get('status', 'unknown')}",
+        f"returncode={results.get('returncode', 'unknown')}",
+        f"timed_out={results.get('timed_out', 'unknown')}",
+        f"metrics={_metric_summary(metrics)}",
+    ]
+    if guard:
+        summary_parts.append(f"guard={guard.get('status', 'unknown')}")
+    if diagnosis:
+        summary_parts.append(f"diagnosis={diagnosis.get('status', 'unknown')}")
+    if code_review:
+        summary_parts.append(f"code_review={code_review.get('status', 'unknown')}")
+    handles.append(
+        SourceHandle(
+            handle="artifact:canonical_results",
+            kind="experiment",
+            title="Canonical experiment results",
+            artifact=_relative_artifact(ctx, "results.json"),
+            summary="; ".join(summary_parts)[:1400],
+            metadata={
+                "status": results.get("status"),
+                "metrics": metrics,
+                "verdicts": verdicts,
+                "guard": guard,
+                "diagnosis": diagnosis,
+            },
+        )
+    )
+    if guard:
+        issues = guard.get("issues") if isinstance(guard.get("issues"), list) else []
+        handles.append(
+            SourceHandle(
+                handle="artifact:result_guard",
+                kind="experiment",
+                title="Experiment result guard",
+                artifact=_relative_artifact(ctx, "guard_report.json"),
+                summary=_guard_summary(guard),
+                metadata={"status": guard.get("status"), "issues": issues[:20]},
+            )
+        )
+    if diagnosis:
+        deficiencies = diagnosis.get("deficiencies") if isinstance(diagnosis.get("deficiencies"), list) else []
+        handles.append(
+            SourceHandle(
+                handle="artifact:experiment_diagnosis",
+                kind="experiment",
+                title="Experiment run diagnosis",
+                artifact=_relative_artifact(ctx, "diagnosis.json"),
+                summary=str(diagnosis.get("summary") or "")[:1200],
+                metadata={
+                    "status": diagnosis.get("status"),
+                    "completion": diagnosis.get("completion", {}),
+                    "repair": diagnosis.get("repair", {}),
+                    "deficiencies": deficiencies[:20],
+                },
+            )
+        )
+    if code_review:
+        handles.append(
+            SourceHandle(
+                handle="artifact:code_review",
+                kind="experiment",
+                title="Generated code review",
+                artifact=_relative_artifact(ctx, "code_review.json"),
+                summary=_code_review_summary(code_review),
+                metadata=code_review,
+            )
+        )
+    if resource_plan:
+        handles.append(
+            SourceHandle(
+                handle="artifact:resource_plan",
+                kind="experiment",
+                title="Experiment resource plan",
+                artifact=_relative_artifact(ctx, "resource_plan.json"),
+                summary=_resource_plan_summary(resource_plan),
+                metadata=resource_plan,
+            )
+        )
+    if recovery:
+        handles.append(
+            SourceHandle(
+                handle="artifact:review_failure_recovery",
+                kind="experiment",
+                title="Greenfield review failure recovery",
+                artifact=_relative_artifact(ctx, "review_failure_recovery.json"),
+                summary=(
+                    f"Recovery reason: {recovery.get('reason', 'unknown')}. "
+                    f"Recovery mode: {recovery.get('recovery_mode', 'unknown')}."
+                )[:1200],
+                metadata=recovery,
+            )
+        )
+    return handles
+
+
 def _code_task_metric_sources(ctx: Context) -> list[MetricSource]:
     comparison, artifact = _code_task_comparison(ctx)
     if not comparison:
@@ -329,6 +442,42 @@ def _metric_summary(metrics: object) -> str:
         if isinstance(value, (int, float, str)) and not isinstance(value, bool)
     ]
     return ", ".join(parts[:8]) if parts else "none"
+
+
+def _guard_summary(guard: dict[str, Any]) -> str:
+    issues = guard.get("issues") if isinstance(guard.get("issues"), list) else []
+    issue_text = "; ".join(
+        f"{item.get('severity', 'unknown')}:{item.get('code', 'issue')}"
+        for item in issues
+        if isinstance(item, dict)
+    )
+    return (
+        f"Guard status: {guard.get('status', 'unknown')}. "
+        f"Issues: {issue_text or 'none'}."
+    )[:1200]
+
+
+def _code_review_summary(review: dict[str, Any]) -> str:
+    findings = review.get("findings") if isinstance(review.get("findings"), list) else []
+    finding_text = "; ".join(
+        f"{item.get('severity', 'unknown')}:{item.get('code', 'review')}"
+        for item in findings
+        if isinstance(item, dict)
+    )
+    summary = review.get("summary") if isinstance(review.get("summary"), dict) else {}
+    return (
+        f"Code review status: {review.get('status', 'unknown')}. "
+        f"Errors: {summary.get('error_count', 0)}; warnings: {summary.get('warning_count', 0)}. "
+        f"Findings: {finding_text or 'none'}."
+    )[:1400]
+
+
+def _resource_plan_summary(plan: dict[str, Any]) -> str:
+    fields = []
+    for key in ("max_runtime_sec", "max_files", "max_generated_lines", "max_memory_mb", "allow_gpu"):
+        if key in plan:
+            fields.append(f"{key}={plan.get(key)}")
+    return "Resource limits: " + (", ".join(fields) if fields else "not recorded") + "."
 
 
 def _read_jsonl(ctx: Context, artifact_name: str) -> list[dict[str, Any]]:

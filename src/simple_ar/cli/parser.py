@@ -36,6 +36,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_report_output_args(run_parser)
     run_parser.add_argument("--quiet", action="store_true", default=None)
+    run_parser.add_argument(
+        "--overwrite-stage-artifacts",
+        action="store_true",
+        default=None,
+        help="Do not archive existing code/run stage artifacts before rerunning those stages.",
+    )
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
     resume_parser.add_argument("run_dir")
@@ -63,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_report_output_args(resume_parser)
     resume_parser.add_argument("--quiet", action="store_true", default=None)
+    resume_parser.add_argument(
+        "--overwrite-stage-artifacts",
+        action="store_true",
+        default=None,
+        help="Do not archive existing code/run stage artifacts before rerunning those stages.",
+    )
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
@@ -407,8 +419,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help=(
-            "When combined with --interactive, auto-continue eligible primitive "
-            "steps. Normal execute runs already continue to review gates."
+            "Auto-approve inline review gates in normal execute mode; with "
+            "--interactive, auto-continue eligible primitive steps."
         ),
     )
     code_task_execute.add_argument(

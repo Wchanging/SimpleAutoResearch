@@ -1,0 +1,134 @@
+[run]
+topic = "greenfield lightweight text classifier experiment suite with ablation"
+output_root = "runs/greenfield-lightweight-training"
+to_stage = "report"
+
+[llm]
+enabled = true
+workers = 2
+
+[search]
+# This example uses local evidence notes rather than live literature search.
+offline = true
+max_papers = 4
+allow_fixture_fallback = true
+
+[research]
+mode = "lite"
+planner = "auto"
+sources = ["local_files"]
+queries = ["lightweight local text classification ablation"]
+auto_query_expansion = false
+max_retrieval_rounds = 1
+max_queries = 3
+required_facets = ["method", "benchmark", "dataset"]
+cache = true
+index_backend = "keyword"
+local_documents = ["../evidence/lightweight_text_classification_notes.md"]
+
+[research.budget]
+max_documents = 4
+max_chunks = 40
+max_context_tokens = 5000
+max_llm_calls = 4
+
+[experiment]
+template = "greenfield_project"
+timeout = 60
+
+[task]
+kind = "greenfield"
+name = "greenfield-lightweight-training"
+objective = """
+Generate a medium-light CPU-only Python project that trains and evaluates a
+deterministic text classifier experiment suite from scratch. The project should
+compare multiple baselines and model conditions under the same data split,
+include enough module structure to test greenfield planning, and report a
+bounded ablation conclusion through parseable metrics.
+"""
+task_file = "../task.md"
+
+[implementation]
+mode = "generate_project"
+domain_profile = "ml_experiment"
+provider = "local"
+allow_external_agent = false
+max_repair_attempts = 1
+
+[execution]
+backend = "local"
+command = "python experiment.py"
+timeout_sec = 60
+stream_output = "auto"
+allow_dependency_install = false
+
+[resource]
+max_runtime_sec = 60
+max_files = 10
+max_generated_lines = 1800
+max_memory_mb = 2048
+allow_gpu = false
+
+[evaluation]
+primary_metric = "accuracy"
+direction = "maximize"
+required_metrics = [
+  "accuracy",
+  "macro_f1",
+  "majority_accuracy",
+  "keyword_accuracy",
+  "unigram_accuracy",
+  "bigram_accuracy",
+  "char_ngram_accuracy",
+  "ablation_gain",
+  "best_model_margin",
+  "condition_count",
+  "data_size",
+  "train_time_sec",
+  "inference_time_ms",
+  "parameter_count",
+]
+success_criteria = [
+  "trained model should emit all required metrics",
+  "best trained condition should usually outperform the strongest baseline",
+  "condition-level metrics should make the ablation interpretable",
+  "runtime should stay within the configured local budget",
+  "project structure should separate data, features, models, metrics, evaluation, and CLI output",
+]
+
+[evaluation.metric_directions]
+accuracy = "higher"
+macro_f1 = "higher"
+majority_accuracy = "higher"
+keyword_accuracy = "higher"
+unigram_accuracy = "higher"
+bigram_accuracy = "higher"
+char_ngram_accuracy = "higher"
+ablation_gain = "higher"
+best_model_margin = "higher"
+condition_count = "higher"
+data_size = "resource"
+train_time_sec = "resource"
+inference_time_ms = "resource"
+parameter_count = "resource"
+
+[generation]
+enabled = true
+max_batches = 3
+files_per_batch = 4
+review_required = true
+# Keep LLM-generated code for inspection if deterministic review fails.
+# Set true only when you explicitly prefer a weak scaffold over stopping.
+allow_fallback_scaffold = false
+
+[report]
+mode = "experiment"
+template = "experiment"
+criteria = "auto"
+style = "technical"
+agent = "llm"
+reviewer = "llm"
+max_review_iterations = 1
+max_section_tokens = 900
+max_report_tokens = 3500
+source_strategy = "full"

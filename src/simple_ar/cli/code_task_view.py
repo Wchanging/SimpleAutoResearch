@@ -117,11 +117,25 @@ def render_review_gate(
     console.print(Panel(table, title=f"[bold yellow]{escape(title)}[/bold yellow]", border_style="yellow"))
 
 
-def confirm_review_gate(prompt: str, *, console: Console | None = None) -> bool:
+def confirm_review_gate(
+    prompt: str,
+    *,
+    console: Console | None = None,
+    assume_yes: bool = False,
+) -> bool:
     """Ask the user whether to continue at an inline review gate."""
 
     console = console or make_console()
-    answer = console.input(f"[bold yellow]{escape(prompt)} Type yes or no: [/bold yellow]").strip().lower()
+    if assume_yes:
+        console.print("[yellow]Auto-approved review gate because --yes was supplied.[/yellow]")
+        return True
+    try:
+        answer = console.input(
+            f"[bold yellow]{escape(prompt)} Type yes or no: [/bold yellow]"
+        ).strip().lower()
+    except EOFError:
+        console.print("[yellow]No interactive input was available; review gate was not approved.[/yellow]")
+        return False
     return answer in {"yes", "y"}
 
 

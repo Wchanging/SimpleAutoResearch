@@ -373,10 +373,25 @@ def _collect_design(ctx: "Context") -> CollectedStageResult:
 def _collect_code(ctx: "Context") -> CollectedStageResult:
     experiment_path = ctx.artifact_path("experiment.py")
     code_task_meta_path = ctx.artifact_path("code_task_experiment.json")
+    code_artifacts_path = ctx.artifact_path("code_artifacts.json")
+    code_review_path = ctx.artifact_path("code_review.json")
+    code_backend_path = ctx.artifact_path("code_backend.json")
+    architecture_plan_path = ctx.artifact_path("architecture_plan.json")
+    file_plan_path = ctx.artifact_path("file_plan.json")
+    memory_path = ctx.artifact_path("implementation_memory.json")
     changed_files: list[str] = []
     if code_task_meta_path.exists():
         meta = read_json(code_task_meta_path)
         changed_files = [str(item) for item in meta.get("changed_files", []) if str(item).strip()]
+    generated_files: list[str] = []
+    if code_artifacts_path.exists():
+        artifacts = read_json(code_artifacts_path)
+        rows = artifacts.get("generated_files", []) if isinstance(artifacts, dict) else []
+        generated_files = [
+            str(item.get("path", ""))
+            for item in rows
+            if isinstance(item, dict) and str(item.get("path", "")).strip()
+        ]
     state = CodeState(
         experiment_path=_rel(ctx, experiment_path),
         code_task_meta_path=_rel(ctx, code_task_meta_path) if code_task_meta_path.exists() else None,
@@ -388,6 +403,32 @@ def _collect_code(ctx: "Context") -> CollectedStageResult:
                 if code_task_meta_path.exists()
                 else {}
             ),
+            **(
+                {"code_artifacts.json": _rel(ctx, code_artifacts_path)}
+                if code_artifacts_path.exists()
+                else {}
+            ),
+            **(
+                {"code_review.json": _rel(ctx, code_review_path)}
+                if code_review_path.exists()
+                else {}
+            ),
+            **(
+                {"code_backend.json": _rel(ctx, code_backend_path)}
+                if code_backend_path.exists()
+                else {}
+            ),
+            **(
+                {"architecture_plan.json": _rel(ctx, architecture_plan_path)}
+                if architecture_plan_path.exists()
+                else {}
+            ),
+            **({"file_plan.json": _rel(ctx, file_plan_path)} if file_plan_path.exists() else {}),
+            **(
+                {"implementation_memory.json": _rel(ctx, memory_path)}
+                if memory_path.exists()
+                else {}
+            ),
         },
     )
     contract = {
@@ -395,17 +436,21 @@ def _collect_code(ctx: "Context") -> CollectedStageResult:
         "experiment_path": state.experiment_path,
         "code_task_meta_path": state.code_task_meta_path,
         "changed_files": changed_files,
+        "generated_files": generated_files,
     }
     report_markdown = (
         "# Code Stage Summary\n\n"
         f"- Experiment script: `{state.experiment_path}`\n"
         f"- Changed files recorded: {len(changed_files)}\n"
+        f"- Generated files recorded: {len(generated_files)}\n"
     )
     return CollectedStageResult(state=state, contract=contract, report_markdown=report_markdown)
 
 
 def _collect_run(ctx: "Context") -> CollectedStageResult:
     results_path = ctx.artifact_path("results.json")
+    guard_path = ctx.artifact_path("guard_report.json")
+    diagnosis_path = ctx.artifact_path("diagnosis.json")
     stdout_path = ctx.artifact_path("stdout.txt")
     stderr_path = ctx.artifact_path("stderr.txt")
     results = read_json(results_path)
@@ -417,6 +462,8 @@ def _collect_run(ctx: "Context") -> CollectedStageResult:
         metrics=dict(metrics) if isinstance(metrics, dict) else {},
         legacy_outputs={
             "results.json": _rel(ctx, results_path),
+            **({"guard_report.json": _rel(ctx, guard_path)} if guard_path.exists() else {}),
+            **({"diagnosis.json": _rel(ctx, diagnosis_path)} if diagnosis_path.exists() else {}),
             "stdout.txt": _rel(ctx, stdout_path),
             "stderr.txt": _rel(ctx, stderr_path),
         },

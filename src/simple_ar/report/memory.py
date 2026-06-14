@@ -157,6 +157,26 @@ def _initial_limitations(context: ReportContext) -> list[str]:
         limitations.append("No experiment results are available; empirical claims must be avoided.")
     if context.search_meta.get("source") == "fixture" or "fixture" in str(context.search_meta.get("status", "")):
         limitations.append("Literature evidence came from fixture/fallback metadata.")
+    guard = context.results.get("guard") if isinstance(context.results, dict) else {}
+    if isinstance(guard, dict) and guard.get("status") in {"warning", "failed"}:
+        limitations.append(
+            f"Experiment result guard status is `{guard.get('status')}`; claims must be qualified."
+        )
+    code_review = context.results.get("code_review") if isinstance(context.results, dict) else {}
+    if isinstance(code_review, dict) and code_review.get("status") in {"warning", "failed"}:
+        limitations.append(
+            f"Generated code review status is `{code_review.get('status')}`; implementation risk must be disclosed."
+        )
+    recovery = (
+        context.results.get("review_failure_recovery")
+        if isinstance(context.results, dict)
+        else {}
+    )
+    if isinstance(recovery, dict) and recovery:
+        limitations.append(
+            "Initial generated code failed review and was replaced by a bounded fallback; "
+            "treat implementation claims as recovered rather than fully autonomous."
+        )
     return limitations
 
 

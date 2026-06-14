@@ -5,12 +5,73 @@ import unittest
 from pathlib import Path
 
 from simple_ar.app.run_config import RunConfigError, load_pipeline_run_config
+from simple_ar.code_task.runtime.config import (
+    load_code_task_execute_options,
+    load_code_task_init_options,
+)
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class RunConfigTests(unittest.TestCase):
+    def test_public_example_configs_load_with_expected_runtime_shape(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        research_config = repo_root / "examples" / "research_report" / "configs" / "research_report.toml"
+        research = load_pipeline_run_config(
+            str(research_config)
+        )
+        self.assertEqual(research["report_mode"], "research_only")
+        self.assertEqual(research["research_use_fulltext"], True)
+        self.assertIn("openalex", research["research_sources"])
+        self.assertEqual(research["report_source_strategy"], "full")
+
+        full_pipeline_config = (
+            repo_root / "examples" / "full_pipeline_tiny_mlp" / "configs" / "pipeline.toml"
+        )
+        full_pipeline = load_pipeline_run_config(
+            str(full_pipeline_config)
+        )
+        self.assertEqual(full_pipeline["task_kind"], "existing_project")
+        self.assertEqual(full_pipeline["experiment_template"], "code_task_project")
+        self.assertEqual(full_pipeline["implementation_task_handoff"], "merge")
+        self.assertEqual(full_pipeline["code_task_config"], str(full_pipeline_config.resolve()))
+        self.assertTrue(Path(str(full_pipeline["code_task_code_root"])).is_dir())
+        self.assertTrue(Path(str(full_pipeline["code_task_task_file"])).is_file())
+
+        greenfield_config = (
+            repo_root
+            / "examples"
+            / "greenfield_lightweight_training"
+            / "configs"
+            / "greenfield_training.toml"
+        )
+        greenfield = load_pipeline_run_config(
+            str(greenfield_config)
+        )
+        self.assertEqual(greenfield["task_kind"], "greenfield")
+        self.assertEqual(greenfield["implementation_mode"], "generate_project")
+        self.assertEqual(greenfield["generation_enabled"], True)
+        self.assertEqual(greenfield["resource_max_files"], 10)
+        self.assertIn("condition_count", greenfield["evaluation_required_metrics"])
+        self.assertIn("char_ngram_accuracy", greenfield["evaluation_required_metrics"])
+
+        code_task_config = (
+            repo_root / "examples" / "code_task_medium_review" / "configs" / "code_task.toml"
+        )
+        init_options = load_code_task_init_options(config_path=str(code_task_config))
+        execute_options = load_code_task_execute_options(config_path=str(code_task_config))
+
+        self.assertEqual(init_options.name, "medium-review-pipeline")
+        self.assertEqual(init_options.workspace_mode, "copy")
+        self.assertIn("review_pipeline/**", init_options.edit_scope_allowed_patterns)
+        self.assertTrue((repo_root / init_options.code_root).is_dir())
+        self.assertTrue((repo_root / str(init_options.task_file)).is_file())
+        self.assertEqual(execute_options.to_step, "run")
+        self.assertEqual(execute_options.llm_retry_attempts, 2)
+        self.assertFalse(execute_options.allow_planning_fallback)
+
     def test_research_section_is_flattened_for_pipeline_config(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -105,6 +166,88 @@ sources = "openalex"
 
             self.assertIn("Invalid run config", str(raised.exception))
             self.assertIn("sources", str(raised.exception))
+
+    def test_unified_task_sections_are_flattened_and_mapped_to_legacy_keys(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            config = root / "pipeline.toml"
+            code_root = root / "project"
+            task_file = root / "task.md"
+            code_root.mkdir()
+            task_file.write_text("# Task\n", encoding="utf-8")
+            config.write_text(
+                """
+[run]
+topic = "repository-level coding agent benchmark"
+
+[task]
+kind = "existing_project"
+name = "medium-code-agent"
+objective = "Improve the benchmark score without changing tests."
+code_root = "project"
+task_file = "task.md"
+
+[implementation]
+mode = "patch_existing"
+domain_profile = "code_agent_eval"
+provider = "local"
+task_handoff = "merge"
+max_repair_attempts = 2
+
+[workspace]
+mode = "git_worktree"
+reuse_source_venv = true
+include = ["src/**"]
+exclude = ["secrets/**"]
+
+[execution]
+backend = "local"
+command = "uv run python benchmark.py"
+timeout_sec = 240
+stream_output = "auto"
+
+[resource]
+max_runtime_sec = 240
+max_files = 8
+max_generated_lines = 700
+max_memory_mb = 2048
+
+[evaluation]
+primary_metric = "accuracy"
+direction = "maximize"
+required_metrics = ["accuracy", "macro_f1"]
+metric_directions = { accuracy = "higher", runtime_sec = "lower" }
+
+[generation]
+enabled = true
+max_batches = 2
+files_per_batch = 3
+allow_fallback_scaffold = true
+""".strip(),
+                encoding="utf-8",
+            )
+
+            parsed = load_pipeline_run_config(str(config))
+
+            self.assertEqual(parsed["task_kind"], "existing_project")
+            self.assertEqual(parsed["experiment_template"], "code_task_project")
+            self.assertEqual(parsed["code_task_code_root"], str(code_root.resolve()))
+            self.assertEqual(parsed["code_task_task_file"], str(task_file.resolve()))
+            self.assertEqual(parsed["code_task_benchmark_command"], "uv run python benchmark.py")
+            self.assertEqual(parsed["code_task_workspace_mode"], "git_worktree")
+            self.assertEqual(parsed["code_task_workspace_include"], ["src/**"])
+            self.assertEqual(parsed["code_task_primary_metric"], "accuracy")
+            self.assertEqual(parsed["code_task_metric_directions"]["runtime_sec"], "lower")
+            self.assertEqual(parsed["implementation_task_handoff"], "merge")
+            task_config = parsed["task_config"]
+            self.assertIsInstance(task_config, dict)
+            self.assertEqual(task_config["task"]["kind"], "existing_project")
+            self.assertEqual(task_config["implementation"]["domain_profile"], "code_agent_eval")
+            self.assertEqual(task_config["implementation"]["task_handoff"], "merge")
+            self.assertEqual(task_config["resource"]["max_files"], 8)
+            self.assertEqual(task_config["generation"]["files_per_batch"], 3)
+            self.assertEqual(task_config["generation"]["allow_fallback_scaffold"], True)
 
 
 if __name__ == "__main__":

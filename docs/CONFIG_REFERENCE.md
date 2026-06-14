@@ -20,7 +20,7 @@ outer research pipeline config and standalone/embedded code-task config.
   they are flattened into runtime settings. Wrong section types now fail early
   instead of being silently ignored.
 - Relative paths in top-level run config are resolved relative to the config file when the parser explicitly supports path resolution, such as `[experiment].code_task_config` and `[research].local_documents`.
-- When a run config contains `[code_task]`, `[benchmark]`, `[metrics]`, `[environment]`, `[workspace]`, `[safety]`, or `[edit_scope]`, the same file can be reused as the embedded code-task config.
+- When a run config contains legacy code-task sections such as `[code_task]`, `[benchmark]`, `[metrics]`, `[environment]`, `[safety]`, or `[edit_scope]`, the same file can be reused as the embedded code-task config. `[workspace]` is also used by the newer unified task config, so it is not treated as a code-task signal by itself.
 
 ## Complete Pipeline Config
 
@@ -47,6 +47,10 @@ quiet = false
 # diagnostics compact while retaining stage-owned operational artifacts:
 # search documents/chunks, read Paper Briefs, synthesis briefs, and design contracts.
 debug_artifacts = false
+
+# false archives existing 06-code/07-run reviewed artifacts before reruns.
+# Set true only when prior code/run artifacts are intentionally disposable.
+overwrite_stage_artifacts = false
 
 [llm]
 # true uses the configured OpenAI-compatible model; false uses deterministic fallbacks where possible.
@@ -168,6 +172,60 @@ timeout = 60
 # Optional external code-task config. If omitted, code-task sections in this file are reused.
 # code_task_config = "examples/full_pipeline_tiny_mlp/configs/pipeline.toml"
 
+# V2.5 unified experiment/coding sections are the preferred shape for new
+# pipeline configs. They normalize research-first, existing-project code-task,
+# and greenfield experiment settings into one runtime task config. The older
+# [code_task]/[benchmark]/[environment] sections below are still accepted.
+[task]
+kind = "existing_project"      # auto | existing_project | greenfield | benchmark_solution
+name = "tiny-digits-mlp"
+objective = "Improve the local benchmark without editing tests."
+code_root = "examples/full_pipeline_tiny_mlp/project"
+task_file = "examples/full_pipeline_tiny_mlp/task.md"
+
+[implementation]
+mode = "patch_existing"        # auto | patch_existing | generate_project | template
+domain_profile = "ml_experiment" # auto | generic_research_experiment | code_experiment | ml_experiment | code_agent_eval
+provider = "local"
+task_handoff = "user_file"     # user_file | merge; merge combines task_file with research context
+allow_external_agent = false
+max_repair_attempts = 1
+
+[workspace]
+mode = "copy"                  # copy | git_worktree | sparse_copy
+reuse_source_venv = false
+setup_hook = ""
+include = []
+exclude = []
+
+[execution]
+backend = "local"              # local for the current V2.5 foundation path
+command = "python benchmark.py"
+timeout_sec = 60
+stream_output = "auto"
+allow_dependency_install = false
+
+[resource]
+max_runtime_sec = 60
+max_files = 8
+max_generated_lines = 700
+max_memory_mb = 2048
+allow_gpu = false
+
+[evaluation]
+primary_metric = "accuracy"
+direction = "maximize"
+required_metrics = ["accuracy", "macro_f1"]
+success_criteria = ["primary metric should improve or avoid regression"]
+metric_directions = { accuracy = "higher", macro_f1 = "higher", train_time_sec = "resource" }
+
+[generation]
+enabled = false                # set true for greenfield project generation
+max_batches = 2
+files_per_batch = 3
+review_required = true
+allow_fallback_scaffold = false # if true, failed LLM code can be replaced by a safe scaffold
+
 [report]
 # auto chooses experiment or research-only report based on available results.
 mode = "auto"                 # auto | research_only | experiment
@@ -255,15 +313,8 @@ params = "resource"
 mode = "current"              # current | external
 # python = "C:/path/to/python.exe"
 
-[workspace]
-# copy is safest; git_worktree is lighter for git repo roots; sparse_copy is allowlist-based.
-mode = "copy"                 # copy | git_worktree | sparse_copy
-
-# Reuse source .venv/venv Python if detected. No dependency installation is performed.
-reuse_source_venv = false
-
-# Recorded for future managed environments; init does not execute this command.
-setup_hook = ""
+# Workspace settings are declared once in the unified [workspace] section above
+# and reused by embedded code-task compatibility.
 
 [edit_scope]
 # Optional allowlist for editable files. Empty means every non-protected
@@ -366,20 +417,26 @@ max_proposal_chars = 42000
 
 | Section | Used by | Meaning |
 | --- | --- | --- |
-| `[run]` | `run`, `resume` | Topic, output root, stage range, quiet mode, and debug artifact retention. |
+| `[run]` | `run`, `resume` | Topic, output root, stage range, quiet mode, debug artifact retention, and rerun overwrite policy. |
 | `[llm]` | pipeline and code task | LLM enablement, default model, and worker count. |
 | `[search]` | `02-search` | Provider behavior, fallback policy, result limit, and manual query. |
 | `[research]` | `02-search` | Research-question planning, query expansion, provider order, local documents, cache/index hints. |
 | `[research.budget]` | `02-search` and future evidence stages | Lightweight caps used by research planning; retained in `planning/research_plan.json` only when debug artifacts are enabled. |
 | `[retrieval]` | read/synthesize/report helpers | Local artifact retrieval context. |
 | `[experiment]` | `05-design` to `07-run` | Experiment template, timeout, and optional nested code-task config path. |
+| `[task]` | `05-design` and future implementation stages | Unified task identity, objective, optional task file, and optional source code root. |
+| `[implementation]` | `05-design` and `06-code` | How code should be produced or changed: existing-project patch, fixed template path, or bounded greenfield generation. |
+| `[workspace]` | code-task init and unified task config | Workspace strategy and setup metadata. |
+| `[execution]` | design/run/code-task compatibility | Backend, command, timeout, streaming, and dependency-install policy. |
+| `[resource]` | design and future implementation gates | Runtime, file-count, generated-line, memory, and GPU budgets. |
+| `[evaluation]` | design, comparison, report | Primary metric, direction, required metrics, and success criteria. |
+| `[generation]` | greenfield path | Batch/file generation budget and review policy. |
 | `[report]` | `08-report` | Report structure mode. |
 | `[code_task]` | standalone or embedded code task | Source project, task file, output root, display name. |
 | `[benchmark]` | code task | Benchmark command and primary metric. |
 | `[benchmark.metric_directions]` | code task comparison | Metric interpretation rules. |
 | `[metrics]` | code task comparison | Alternative place for `primary`, `primary_metric`, `directions`, or `metric_directions`. |
 | `[environment]` | code task execution | Python execution policy. |
-| `[workspace]` | code-task init | Workspace mode and setup metadata. |
 | `[edit_scope]` | code-task init and all patch gates | Optional editable allowlist and extra read-only patterns. |
 | `[safety]` | code-task init/validation | Copy size and validation scan limits. |
 | `[execute]` | code-task execute | State-machine limits, runtime settings, repair rounds, output streaming. |
@@ -397,6 +454,7 @@ max_proposal_chars = 42000
 | `[run].topic` | Main user goal. It is used by planning, default search query generation, and report framing. |
 | `[run].from_stage` / `[run].to_stage` | Stage range for partial runs. Use these to stop at `synthesize`, rerun `report`, or resume a subset. |
 | `[run].debug_artifacts` | When `true`, keeps verbose diagnostics and draft handoff files such as search planning, provider traces, retrieval-selection rows, coverage review, section tables, debug cards, legacy evidence-pack diagnostics, design tool contracts, evidence review, eval report, and retention policy. Keep it `false` for compact default runs; operational artifacts are still retained under their owning stages: `02-search` documents/chunks, `03-read` review/Paper Briefs, `04-synthesize` synthesis brief/Markdown, and `05-design` experiment contracts. |
+| `[run].overwrite_stage_artifacts` | Defaults to `false`. When rerunning `06-code` or `07-run`, existing reviewed artifacts are copied to `archives/<timestamp>/` before new outputs are written. Set `true` only when you explicitly want reruns to overwrite prior code/run artifacts without archive protection. |
 | `[llm].enabled` | Turns LLM-backed planning/notes/synthesis/report/code-task steps on or off. Some real code-task steps need LLM mode to be useful. |
 | `[llm].workers` | Parallelism for supported LLM stages. It does not make every pipeline stage concurrent. |
 | `[search].offline` | Skips live literature providers. Useful for local demos and deterministic tests. |
@@ -425,6 +483,41 @@ max_proposal_chars = 42000
 | `[report].max_backtracking_calls` / `[report].max_backtracking_tokens` | Source-backtracking call and token budgets. |
 | `[report.audit].citations` / `.metrics` / `.claims` | Enables citation, metric, and claim audit components. |
 | `[report.audit].strict` | Reserved strict mode for blocking final reports on warnings; default false. |
+
+### Unified Experiment And Coding Fields
+
+These V2.5 foundation sections are preferred for new pipeline configs. They are
+normalized into `task_config` and also mapped to legacy code-task keys where
+needed, so existing embedded `code_task_project` runs keep working.
+
+| Field | Meaning |
+| --- | --- |
+| `[task].kind` | `existing_project` uses a source project and controlled patches; `greenfield` / `benchmark_solution` use the bounded project-generation path. |
+| `[task].code_root` / `.task_file` | Source project root and task Markdown. Paths are resolved relative to the config file. |
+| `[implementation].mode` | `patch_existing` maps to controlled code-task behavior. `generate_project` plans, writes, reviews, and runs a bounded generated project under `06-code/generated_project`. |
+| `[implementation].domain_profile` | Chooses planning defaults such as `generic_research_experiment`, `code_experiment`, `ml_experiment`, or `code_agent_eval`. |
+| `[implementation].task_handoff` | Embedded existing-project runs only. `user_file` passes `[task].task_file` through unchanged. `merge` writes `05-design/generated_code_task.md` by combining the user task file as hard requirements with goal/problem/synthesis/hypothesis context. |
+| `[execution].command` / `.timeout_sec` | Command and timeout used for benchmark/execution planning; for existing projects these map to legacy benchmark settings. |
+| `[resource].max_files` / `.max_generated_lines` | Pre-code generation/edit budget written into `05-design/resource_plan.json`. |
+| `[resource].max_memory_mb` / `.allow_gpu` | Runtime resource budget recorded in `resource_plan.json` and surfaced as contract constraints before code is generated or modified. |
+| `[evaluation].primary_metric` / `.metric_directions` | Result schema and metric direction rules written into `05-design/result_schema.json`; existing code-task comparison also consumes them. |
+| `[evaluation].required_metrics` / `.success_criteria` | Required metric checks and success notes used by `07-run/guard_report.json` and the final report. |
+| `[generation].enabled` | Enables the greenfield project-generation path. Leave false for existing-project code-task runs. |
+| `[generation].max_batches` / `.files_per_batch` / `.review_required` | Project-generation planning and review budget recorded into `05-design/experiment_contract.json` and consumed by `06-code`. |
+| `[generation].allow_fallback_scaffold` | Defaults to false. When false, failed generated code stays available for inspection instead of being silently replaced by a deterministic scaffold. |
+
+During `05-design`, these fields materialize as `experiment_plan.json`,
+`experiment_contract.json`, `result_schema.json`, `resource_plan.json`,
+`dependency_plan.json`, `domain_profile.json`, and `contract_validation.json`.
+`06-code` refuses to continue when `contract_validation.json` reports a failed
+pre-code contract.
+During `07-run`, `results.json` is the canonical experiment result and includes
+metric values, execution provenance, comparisons/verdicts when available, and
+compact references to `resource_plan.json`, `code_review.json`, and
+`guard_report.json` / `diagnosis.json`. `diagnosis.json` turns guard,
+code-review, runtime, and missing-metric signals into readable repair/report
+context. Reports should read experiment numbers from this canonical result
+package rather than parsing stdout directly.
 
 ### Evidence Source Fields
 
@@ -467,7 +560,7 @@ max_proposal_chars = 42000
 | `[experiment].timeout` | Timeout for stage `07-run`; for embedded code tasks it also constrains nested benchmark calls. |
 | `[experiment].code_task_config` | Optional path to a standalone code-task TOML. Use this when you want pipeline and code-task settings in separate files. |
 | `[code_task].code_root` | Source project path. The original project is not edited; a workspace is prepared under the run directory. |
-| `[code_task].task_file` | User-facing task description. Required for standalone `code-task init`; embedded 8-stage runs can generate one when omitted. |
+| `[code_task].task_file` | User-facing task description. Required for standalone `code-task init`; embedded 8-stage runs can generate one when omitted, or merge it with research context when `[implementation].task_handoff = "merge"`. |
 | `[benchmark].command` | Command executed inside `code_task/workspace` before and after edits. It should print parseable metrics such as `accuracy: 0.82`. |
 | `[benchmark].primary_metric` | Main metric used for the objective verdict. Unknown metrics are still recorded, but need directions to decide improvement. |
 | `[benchmark.metric_directions]` | Direction map for metrics: `higher`, `lower`, `resource`, or `ignore`. |
@@ -701,8 +794,8 @@ code_task_config = "../code_tasks/configs/my_project.toml"
 ```
 
 If `[experiment].code_task_config` is omitted and the run config contains
-`[code_task]`, `[benchmark]`, `[metrics]`, `[environment]`, `[workspace]`, or
-`[safety]`, the run config itself is reused as the embedded code-task config.
+`[code_task]`, `[benchmark]`, `[metrics]`, `[environment]`, `[safety]`, or
+`[edit_scope]`, the run config itself is reused as the embedded code-task config.
 
 ## Execute And Budget
 

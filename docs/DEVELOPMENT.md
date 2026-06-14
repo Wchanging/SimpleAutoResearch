@@ -193,7 +193,7 @@ helper into a separate file.
 
 ### Code-Task Environment Policy
 
-The current V2.2 code-task runner has workspace isolation through `copy`,
+The current code-task runner has workspace isolation through `copy`,
 `git_worktree`, or experimental `sparse_copy`, command timeouts, optional
 streamed benchmark output, captured stdout/stderr, a restricted environment
 map, and an explicit execution interpreter policy. It supports `current` and
@@ -260,7 +260,7 @@ Recommended validation layers:
 | Change area | Suggested check |
 | --- | --- |
 | Docs only | `git diff --check` plus manual link review. |
-| Small parser, prompt, metric, or CLI changes | `uv run simple-ar-checks quick`. |
+| Small parser, prompt, config, metric, or CLI changes | `uv run simple-ar-checks quick`. |
 | Code-task internals, workspace, repo-map, patching, validation, runner, repair | `uv run simple-ar-checks code-task`. |
 | Bundled code-task examples or benchmark examples | `uv run simple-ar-checks code-task-examples`. |
 | Pipeline, stages, experiment templates, run config | `uv run simple-ar-checks pipeline`. |
@@ -283,6 +283,12 @@ Run the experiment runner tests:
 
 ```bash
 uv run python -m unittest tests.test_experiment_runner
+```
+
+Run config and public example config loading tests:
+
+```bash
+uv run python -m unittest tests.test_run_config
 ```
 
 ## Git Hygiene

@@ -4,6 +4,112 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-13
+
+### Added
+
+- Added `07-run/diagnosis.json` and `diagnosis.md` for experiment runs. The
+  diagnosis consolidates result guard issues, code-review warnings, missing
+  metrics, stdout/stderr tails, and bounded repair suggestions into one
+  repair/report context.
+- Added the read-only `read_experiment_diagnosis` experiment tool and included
+  diagnosis context in `inspect_execution_failure`.
+
+### Changed
+
+- Greenfield repair now consumes diagnosis context in addition to guard issues,
+  so missing required metrics have one stable contract even if guard internals
+  evolve.
+- Experiment report context now exposes `artifact:experiment_diagnosis` beside
+  canonical results and result guards.
+- Pipeline stage output summaries now display the stage's real artifacts instead
+  of the internal `contract.json` / `report.md` summaries, so `07-run` surfaces
+  `results.json`, `guard_report.json`, `diagnosis.json`, stdout, and stderr.
+- Greenfield schema repair now rewrites the generated project's actual
+  `main.py` entrypoint and records repaired-result provenance on later reruns,
+  rather than patching an unused fallback module.
+- The greenfield training example is now a medium-light experiment-suite task
+  instead of a tiny smoke project, with more condition-level metrics and a
+  larger file/line budget.
+- Greenfield architecture planning now treats 8+ file budgets as medium-light
+  projects and asks for purposeful modules for data, features, models, metrics,
+  evaluation, reporting, and self-checks.
+- Developer quick checks now include run-config and public example-config loading
+  tests, so example paths and unified config fields are guarded before broader
+  pipeline tests.
+
+## 2026-06-12
+
+### Added
+
+- Added the V2.5 experiment/code reliability foundation: top-level pipeline
+  configs can now use unified `[task]`, `[implementation]`, `[execution]`,
+  `[resource]`, `[evaluation]`, and `[generation]` sections.
+- `05-design` now writes a compact experiment contract package:
+  `experiment_contract.json/.md`, `result_schema.json`, `resource_plan.json`,
+  `dependency_plan.json`, `domain_profile.json`, and
+  `contract_validation.json`.
+- Added domain profiles for generic experiments, existing-code experiments,
+  ML experiments, and code-agent evaluation tasks.
+- Added the V2.5 execution foundation under `src/simple_ar/experiment/execution/`:
+  `RunRequest` / `RunResult`, a local execution backend, canonical result
+  normalization, and result guard checks.
+- Added a bounded greenfield implementation path for tasks without an existing
+  source project. `06-code` now writes `architecture_plan.json/.md`,
+  `file_plan.json`, `generated_project/`, `code_artifacts.json`,
+  `implementation_memory.json`, `code_review.json`, `code_backend.json`, and a
+  runnable `experiment.py` harness.
+- Added an experiment tool contract layer under
+  `src/simple_ar/experiment/tools/`, including read-only local gateway tools
+  and OpenAI tool-schema export for future MCP/external-agent adapters.
+- Added a lightweight greenfield training example at
+  `examples/greenfield_lightweight_training/configs/greenfield_training.toml`.
+
+### Changed
+
+- Unified task settings are normalized into `task_config` and mapped back to
+  legacy code-task keys where needed, so existing `code_task_project` runs keep
+  working while new configs can use one coherent shape.
+- `06-code` now stops before code generation when
+  `05-design/contract_validation.json` reports a failed experiment contract.
+- `07-run/results.json` now uses a canonical schema while keeping legacy
+  top-level `metrics`, `returncode`, and `timed_out` fields for compatibility.
+  `07-run/guard_report.json` records timeout, non-zero exit, missing metric,
+  and NaN/Inf checks.
+- Embedded code-task pipeline runs now project nested baseline-vs-patched
+  comparison data into canonical `07-run/results.json.comparisons`.
+- Embedded code-task pipeline runs now verify the patched benchmark during
+  `06-code` before handing control to `07-run`; if the benchmark fails, the
+  bridge performs one bounded repair attempt based on failure evidence instead
+  of letting a broken patch become report evidence.
+- `07-run` can now attempt one bounded greenfield repair when execution evidence
+  shows schema-level missing metrics, then rerun the generated experiment and
+  record `repair_summary.json`.
+- Rerunning `06-code` or `07-run` now preserves existing reviewed artifacts under
+  `archives/<timestamp>/` by default. Use `--overwrite-stage-artifacts` or
+  `[run].overwrite_stage_artifacts = true` only when old code/run artifacts are
+  intentionally disposable.
+- Canonical `07-run/results.json` now carries compact resource-plan,
+  code-review, and guard signals. `08-report` exposes those signals as
+  experiment evidence so result claims can be qualified when code review or
+  result guards warn.
+- The embedded code-task bridge was split out of the old experiment facade into
+  `src/simple_ar/experiment/code_task_bridge/`, and pipeline experiment stage
+  logic was split into design/code/run modules so `pipeline_stages/experiment.py`
+  remains a thin wrapper.
+- The full-pipeline tiny MLP example now includes the new unified task/config
+  sections while retaining legacy code-task sections for compatibility.
+- Configuration reference docs now document the unified V2.5 sections and no
+  longer treat `[workspace]` alone as a signal that a run config is an embedded
+  code-task config.
+- Greenfield experiment contracts now include a bounded excerpt of
+  `[task].task_file`, so from-scratch code generation can follow detailed task
+  Markdown instead of only seeing the file path.
+- Greenfield code review no longer silently replaces LLM-generated projects
+  with a deterministic scaffold by default. Deterministic review failures now
+  keep artifacts for inspection unless `[generation].allow_fallback_scaffold`
+  is explicitly enabled; LLM reviewer findings are retained as warnings.
+
 ## 2026-06-05
 
 ### Added
@@ -35,7 +141,7 @@ This file records user-visible project changes in reverse chronological order. P
 - A strict embedded code-task pipeline check now covers the full path from
   `06-code` through `08-report`; the bundled tiny-digits MLP run improved
   accuracy from `0.766667` to `0.913333` and macro F1 from `0.756898` to
-  `0.913388`.
+  `0.913254`.
 - Removed the hidden legacy single-prompt report drafting branch from the V2.4
   report service. LLM-backed reports now go through the Writer/Reviewer agent
   loop, and failures fall back to the structured deterministic report.
@@ -43,14 +149,17 @@ This file records user-visible project changes in reverse chronological order. P
   `src/simple_ar/report/citations.py`, and the report tool gateway now accepts
   source handles when resolving paper briefs so reviewer tool requests match the
   advertised schema.
-- Public examples are now organized around three maintained entrypoints:
+- Public examples are now organized around four maintained entrypoints:
   `examples/research_report/`, `examples/code_task_medium_review/`, and
-  `examples/full_pipeline_tiny_mlp/`. Older narrow or transitional configs were
-  removed from `examples/`, and the toy spam project moved to `tests/fixtures`.
+  `examples/full_pipeline_tiny_mlp/`, plus the V2.5
+  `examples/greenfield_lightweight_training/` entrypoint. Older narrow or
+  transitional configs were removed from `examples/`, and the toy spam project
+  moved to `tests/fixtures`.
 - `code-task execute` now runs continuously to real review gates by default,
   with Rich step/status output. The `--interactive` flag is reserved for
-  primitive-step debugging, and `--yes` only auto-continues those primitive
-  prompts.
+  primitive-step debugging; `--yes` now explicitly auto-approves inline review
+  gates in normal execute mode and auto-continues primitive prompts in
+  interactive mode.
 - LLM work-plan and patch-plan failures now stop as `llm_planning_failed`
   after configured retries instead of silently writing offline fallback plans.
   Use `--allow-planning-fallback` only when a deterministic fallback is
