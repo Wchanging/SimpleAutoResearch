@@ -15,6 +15,7 @@
 | `simple-ar run` | 启动新的 8 阶段 research pipeline。 |
 | `simple-ar resume` | 继续已有 research pipeline run。 |
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
+| `simple-ar tools ...` | 导出 tool schema、调用 run-local tool，或通过 MCP stdio 暴露只读 tools。 |
 | `simple-ar inspect` | 为某次 run 构建本地 artifact index。 |
 | `simple-ar search-artifacts` | 搜索已经索引的 run artifacts。 |
 | `simple-ar clean` | 预览并清理某次 run 的可重建缓存。 |
@@ -145,6 +146,74 @@ uv run simple-ar status runs/<run-id>
 
 对 code-task run，会显示环境、计划、补丁、验证、benchmark、指标对比和 repair 状态。
 
+## Tool 与 MCP
+
+### `simple-ar tools schema`
+
+**一句话说明**：导出真实已注册 tool 的 MCP 或 OpenAI function-tool schema。
+
+**语法用法**：
+
+```bash
+uv run simple-ar tools schema --format mcp
+uv run simple-ar tools schema --format openai --output tool_schema.json
+```
+
+**参数表**：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `--format` | enum | `mcp` 或 `openai`，默认 `mcp`。 |
+| `--output PATH` | path | 可选输出文件；省略时打印到 stdout。 |
+
+### `simple-ar tools call`
+
+**一句话说明**：调用一个 run-local 只读 tool，并写入紧凑 trace。
+
+**语法用法**：
+
+```bash
+uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
+uv run simple-ar tools call runs/<run-id> search_generated_code --args-json '{"query":"run_experiment","max_matches":10}'
+```
+
+**参数表**：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `RUN_DIR` | path | 已有 run 目录。 |
+| `TOOL_NAME` | string | 已注册 tool 名称。 |
+| `--args-json JSON` | object | JSON object 形式的 tool 参数。 |
+| `--debug-payloads` | flag | 保留更大的 trace payload；默认 trace 保持紧凑。 |
+
+**生成产物**：
+
+- stdout 上的 tool result JSON；
+- `RUN_DIR/tools/tool_trace.jsonl`。
+
+### `simple-ar tools serve-mcp`
+
+**一句话说明**：通过 MCP stdio 暴露 run-local 只读 tools。
+
+**语法用法**：
+
+```bash
+uv run simple-ar tools serve-mcp runs/<run-id>
+```
+
+**参数表**：
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `RUN_DIR` | path | tools 可检查的已有 run 目录。 |
+| `--debug-payloads` | flag | 保留更大的 trace payload。 |
+
+**注意**：
+
+- 当前 server methods：`initialize`、`ping`、`tools/list`、`tools/call`；
+- 默认只暴露真实注册的只读 experiment tools；
+- 这个命令不会启用写文件、shell、network 或 dependency-install tool。
+
 ## Artifact Tools
 
 ### `simple-ar inspect`
@@ -219,7 +288,7 @@ uv run simple-ar clean --shared-cache
 | `--yes` | flag | 跳过交互式 `yes` 确认，直接删除预览中列出的目标。 |
 | `--all-caches` | flag | 在更强警告后，删除该 run 下所有已知可重建缓存、索引和 context artifacts。 |
 | `--shared-index` | flag | 强清理：清空跨 run/test 共享的 research index store。 |
-| `--shared-cache` | flag | 最强共享清理：同时清空共享 research index 和 literature provider cache。 |
+| `--shared-cache` | flag | 最强共享清理：同时清空共享 research index、literature provider cache 和外部 agent handoff archives。 |
 | `--index-root PATH` | path | `--shared-index` / `--shared-cache` 使用的共享索引根目录；默认 `SIMPLE_AR_RESEARCH_INDEX_ROOT` 或 `.simple_ar_cache/research_index`。 |
 | `--literature-cache-root PATH` | path | `--shared-cache` 使用的 literature cache 根目录；默认 `.simple_ar_cache/literature`。 |
 | `--allow-external-index-root` | flag | 允许 shared cleanup 清理当前 workspace 外的路径。 |
@@ -235,7 +304,7 @@ uv run simple-ar clean --shared-cache
 
 `--shared-index` 比 `--all-caches` 更强：它会清空跨 run 共享的 SQLite/LanceDB 加速索引，后续运行需要重新构建索引状态。它不触碰 run 目录，因此 run-local 审计产物仍会保留。
 
-`--shared-cache` 更强：它会同时清空共享 research index 和 `.simple_ar_cache/literature`，后续运行可能需要重新请求 literature provider，并重新构建本地索引。
+`--shared-cache` 更强：它会同时清空共享 research index、`.simple_ar_cache/literature` 和 `.simple_ar_cache/agent_handoff_archives`。后续运行可能需要重新请求 literature provider、重新构建本地索引，并且不再保留旧的外部 agent handoff transcripts。
 
 ## Code Task Commands
 

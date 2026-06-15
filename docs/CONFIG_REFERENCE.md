@@ -186,9 +186,14 @@ task_file = "examples/full_pipeline_tiny_mlp/task.md"
 [implementation]
 mode = "patch_existing"        # auto | patch_existing | generate_project | template
 domain_profile = "ml_experiment" # auto | generic_research_experiment | code_experiment | ml_experiment | code_agent_eval
-provider = "local"
+provider = "local"             # local | fake | local_llm | codex | claude_code | opencode | external_cli
+agent_mode = "model"           # model | handoff | delegated_workspace
+agent_model = ""               # optional model override; empty uses the external CLI default
+agent_binary = ""              # optional custom CLI binary/path for external providers
+agent_args = []                # optional extra CLI arguments
+agent_timeout_sec = 600        # timeout for one backend invocation
 task_handoff = "user_file"     # user_file | merge; merge combines task_file with research context
-allow_external_agent = false
+allow_external_agent = false   # required before launching external CLI providers
 max_repair_attempts = 1
 
 [workspace]
@@ -496,7 +501,11 @@ needed, so existing embedded `code_task_project` runs keep working.
 | `[task].code_root` / `.task_file` | Source project root and task Markdown. Paths are resolved relative to the config file. |
 | `[implementation].mode` | `patch_existing` maps to controlled code-task behavior. `generate_project` plans, writes, reviews, and runs a bounded generated project under `06-code/generated_project`. |
 | `[implementation].domain_profile` | Chooses planning defaults such as `generic_research_experiment`, `code_experiment`, `ml_experiment`, or `code_agent_eval`. |
+| `[implementation].provider` | Code implementation backend. `local` is the default in-process path. `fake` is a deterministic test backend. `local_llm` writes bounded review artifacts through the configured LLM. `codex`, `claude_code`, `opencode`, and `external_cli` use the V2.6 external-agent handoff boundary and stay disabled unless `[implementation].allow_external_agent = true`. |
+| `[implementation].agent_mode` | Chooses how much of the implementation loop the selected backend may own. `model` keeps SimpleAutoResearch as the harness and only uses the configured model/backend for bounded text/code generation. `handoff` writes an auditable `agent_handoff/<name>/` package and ingests candidate files from an external agent. `delegated_workspace` is the future strong path where an external harness owns the workspace loop; it is recognized but currently fails explicitly instead of silently degrading. |
+| `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | Optional external backend launch settings. Leave `agent_model` empty to use the Codex/Claude/OpenCode CLI default configured for the account; set it only when you know the CLI supports that model name. Use `agent_binary` for a custom executable path or for generic `external_cli`; `agent_args` appends extra CLI arguments; `agent_timeout_sec` bounds one backend invocation. |
 | `[implementation].task_handoff` | Embedded existing-project runs only. `user_file` passes `[task].task_file` through unchanged. `merge` writes `05-design/generated_code_task.md` by combining the user task file as hard requirements with goal/problem/synthesis/hypothesis context. |
+| `[implementation].allow_external_agent` | Enables optional external CLI launches for agent-backed generation or repair. External outputs are copied into `agent_outputs/<name>/` and still pass SimpleAutoResearch review, result guards, or code-task validation before they matter. Keep this false for ordinary local runs. |
 | `[execution].command` / `.timeout_sec` | Command and timeout used for benchmark/execution planning; for existing projects these map to legacy benchmark settings. |
 | `[resource].max_files` / `.max_generated_lines` | Pre-code generation/edit budget written into `05-design/resource_plan.json`. |
 | `[resource].max_memory_mb` / `.allow_gpu` | Runtime resource budget recorded in `resource_plan.json` and surfaced as contract constraints before code is generated or modified. |

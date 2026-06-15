@@ -107,6 +107,11 @@ class ImplementationSection(_ConfigModel):
     mode: str | None = None
     domain_profile: str | None = None
     provider: str | None = None
+    agent_mode: str | None = None
+    agent_model: str | None = None
+    agent_binary: str | None = None
+    agent_args: list[str] | None = None
+    agent_timeout_sec: int | None = None
     task_handoff: str | None = None
     allow_external_agent: bool | None = None
     max_repair_attempts: int | None = None
@@ -293,6 +298,11 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "implementation_mode", self.implementation.mode)
         _set_string(result, "implementation_domain_profile", self.implementation.domain_profile)
         _set_string(result, "implementation_provider", self.implementation.provider)
+        _set_string(result, "implementation_agent_mode", self.implementation.agent_mode)
+        _set_string(result, "implementation_agent_model", self.implementation.agent_model)
+        _set_string(result, "implementation_agent_binary", self.implementation.agent_binary)
+        _set_string_list(result, "implementation_agent_args", self.implementation.agent_args)
+        _set_int(result, "implementation_agent_timeout_sec", self.implementation.agent_timeout_sec)
         _set_string(result, "implementation_task_handoff", self.implementation.task_handoff)
         _set_bool(result, "implementation_allow_external_agent", self.implementation.allow_external_agent)
         _set_int(result, "implementation_max_repair_attempts", self.implementation.max_repair_attempts)

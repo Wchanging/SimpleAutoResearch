@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from simple_ar.agent_backends import is_external_agent_provider
 from simple_ar.core.artifacts import write_json, write_text
 from simple_ar.core.pipeline import Context
 from simple_ar.experiment.execution.diagnosis import (
@@ -11,7 +12,10 @@ from simple_ar.experiment.execution.diagnosis import (
     render_diagnosis_markdown,
 )
 from simple_ar.experiment.execution.guards import evaluate_result_guard
-from simple_ar.experiment.execution.repair import repair_generated_project_from_guard
+from simple_ar.experiment.execution.repair import (
+    repair_generated_project_from_guard,
+    repair_generated_project_with_agent_backend,
+)
 from simple_ar.experiment.execution.results import (
     build_canonical_results,
     load_optional_json,
@@ -21,6 +25,7 @@ from simple_ar.experiment.rerun import preserve_stage_outputs
 from simple_ar.experiment.runner import run_experiment
 from simple_ar.experiment.service import load_experiment_script_path
 from simple_ar.experiment.stage_common import design_json, experiment_timeout, relative_or_string
+from simple_ar.pipeline_stages.common import _llm_client
 
 
 def execute_run(ctx: Context) -> None:
@@ -45,14 +50,7 @@ def execute_run(ctx: Context) -> None:
     canonical, guard, diagnosis = _write_run_outputs(ctx, result)
     if _should_attempt_greenfield_repair(ctx, guard, diagnosis):
         ctx.emit("stage_message", "Guard failed; attempting one bounded greenfield repair.")
-        repair_summary = repair_generated_project_from_guard(
-            project_dir=ctx.run_dir / "06-code" / "generated_project",
-            result_schema=design_json(ctx, "result_schema.json"),
-            guard_report=guard,
-            diagnosis_report=diagnosis,
-            current_metrics=canonical.get("metrics", {}) if isinstance(canonical.get("metrics"), dict) else {},
-            output_path=ctx.artifact_path("repair_summary.json"),
-        )
+        repair_summary = _repair_generated_project(ctx, guard, diagnosis, canonical)
         if repair_summary.get("status") == "patched":
             ctx.emit("stage_message", "Repair patched generated project; rerunning experiment.")
             result = run_experiment(experiment_path, timeout_sec=timeout_sec)
@@ -61,6 +59,44 @@ def execute_run(ctx: Context) -> None:
                 "stage_message",
                 f"Repair rerun guard status: {repaired_guard.get('status', 'unknown')}.",
             )
+
+
+def _repair_generated_project(
+    ctx: Context,
+    guard: dict[str, Any],
+    diagnosis: dict[str, Any],
+    canonical: dict[str, Any],
+) -> dict[str, Any]:
+    provider = str(ctx.config.get("implementation_provider") or "local").strip().lower().replace("-", "_")
+    current_metrics = canonical.get("metrics", {}) if isinstance(canonical.get("metrics"), dict) else {}
+    project_dir = ctx.run_dir / "06-code" / "generated_project"
+    if provider != "local" and is_external_agent_provider(provider):
+        ctx.emit("stage_message", f"Using `{provider}` repair backend through agent handoff.")
+        return repair_generated_project_with_agent_backend(
+            run_dir=ctx.run_dir,
+            project_dir=project_dir,
+            provider=provider,
+            result_schema=design_json(ctx, "result_schema.json"),
+            guard_report=guard,
+            diagnosis_report=diagnosis,
+            current_metrics=current_metrics,
+            output_path=ctx.artifact_path("repair_summary.json"),
+            client=_llm_client(ctx),
+            timeout_sec=int(ctx.config.get("implementation_agent_timeout_sec") or experiment_timeout(ctx)),
+            external_enabled=ctx.config.get("implementation_allow_external_agent") is True,
+            agent_mode=str(ctx.config.get("implementation_agent_mode") or ""),
+            agent_model=str(ctx.config.get("implementation_agent_model") or ""),
+            agent_binary=str(ctx.config.get("implementation_agent_binary") or ""),
+            agent_args=tuple(str(item) for item in (ctx.config.get("implementation_agent_args") or [])),
+        )
+    return repair_generated_project_from_guard(
+        project_dir=project_dir,
+        result_schema=design_json(ctx, "result_schema.json"),
+        guard_report=guard,
+        diagnosis_report=diagnosis,
+        current_metrics=current_metrics,
+        output_path=ctx.artifact_path("repair_summary.json"),
+    )
 
 
 def _write_run_outputs(

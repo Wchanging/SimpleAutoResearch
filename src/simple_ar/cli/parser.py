@@ -79,6 +79,20 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
 
+    tools_parser = subparsers.add_parser("tools", help="Inspect or serve run-local SimpleAutoResearch tools.")
+    tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
+    tools_schema = tools_subparsers.add_parser("schema", help="Export OpenAI or MCP tool schemas.")
+    tools_schema.add_argument("--format", choices=("mcp", "openai"), default="mcp")
+    tools_schema.add_argument("--output", default=None)
+    tools_call = tools_subparsers.add_parser("call", help="Call one run-local read-only tool.")
+    tools_call.add_argument("run_dir")
+    tools_call.add_argument("tool_name")
+    tools_call.add_argument("--args-json", default="{}")
+    tools_call.add_argument("--debug-payloads", action="store_true")
+    tools_mcp = tools_subparsers.add_parser("serve-mcp", help="Serve read-only run tools over MCP stdio.")
+    tools_mcp.add_argument("run_dir")
+    tools_mcp.add_argument("--debug-payloads", action="store_true")
+
     code_task_parser = subparsers.add_parser(
         "code-task",
         help="Work with an existing codebase in an isolated run workspace.",

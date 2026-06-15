@@ -16,6 +16,7 @@ on command syntax, options, outputs, and short operational notes.
 | `simple-ar run` | Start a new 8-stage research pipeline run. |
 | `simple-ar resume` | Continue an existing research pipeline run. |
 | `simple-ar status` | Print status for a research run or code-task run. |
+| `simple-ar tools ...` | Export tool schemas, call run-local tools, or serve read-only tools over MCP stdio. |
 | `simple-ar inspect` | Build a local artifact index for a run. |
 | `simple-ar search-artifacts` | Search indexed run artifacts. |
 | `simple-ar clean` | Preview and remove rebuildable run caches. |
@@ -149,6 +150,75 @@ uv run simple-ar status runs/<run-id>
 
 This command is read-only.
 
+## Tools And MCP
+
+### `simple-ar tools schema`
+
+**Purpose**: export registered real tool schemas in MCP or OpenAI function-tool
+format.
+
+**Usage**:
+
+```bash
+uv run simple-ar tools schema --format mcp
+uv run simple-ar tools schema --format openai --output tool_schema.json
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `--format` | enum | `mcp` or `openai`. Default: `mcp`. |
+| `--output PATH` | path | Optional file output. Prints to stdout when omitted. |
+
+### `simple-ar tools call`
+
+**Purpose**: call one run-local read-only tool and write a compact trace.
+
+**Usage**:
+
+```bash
+uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
+uv run simple-ar tools call runs/<run-id> search_generated_code --args-json '{"query":"run_experiment","max_matches":10}'
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Existing run directory. |
+| `TOOL_NAME` | string | Registered tool name. |
+| `--args-json JSON` | object | Tool arguments as a JSON object. |
+| `--debug-payloads` | flag | Keep larger trace payloads. Default traces are compact. |
+
+**Outputs**:
+
+- tool result JSON on stdout;
+- `RUN_DIR/tools/tool_trace.jsonl`.
+
+### `simple-ar tools serve-mcp`
+
+**Purpose**: expose run-local read-only tools over MCP stdio.
+
+**Usage**:
+
+```bash
+uv run simple-ar tools serve-mcp runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Existing run directory whose artifacts tools may inspect. |
+| `--debug-payloads` | flag | Keep larger trace payloads. |
+
+**Notes**:
+
+- current server methods: `initialize`, `ping`, `tools/list`, `tools/call`;
+- only real registered read-only experiment tools are exposed by default;
+- no write, shell, network, or dependency-install tool is enabled by this command.
+
 ## Artifact Tools
 
 ### `simple-ar inspect`
@@ -226,7 +296,7 @@ uv run simple-ar clean --shared-cache
 | `--yes` | flag | Delete the displayed targets without the interactive `yes` prompt. |
 | `--all-caches` | flag | Delete every known rebuildable cache/index/context artifact for this run after a stronger warning. |
 | `--shared-index` | flag | Strong cleanup: clear the shared research index store across runs/tests. |
-| `--shared-cache` | flag | Strongest shared cleanup: clear shared research indexes and literature provider cache. |
+| `--shared-cache` | flag | Strongest shared cleanup: clear shared research indexes, literature provider cache, and external-agent handoff archives. |
 | `--index-root PATH` | path | Shared index root for `--shared-index`/`--shared-cache`; defaults to `SIMPLE_AR_RESEARCH_INDEX_ROOT` or `.simple_ar_cache/research_index`. |
 | `--literature-cache-root PATH` | path | Literature provider cache root for `--shared-cache`; defaults to `.simple_ar_cache/literature`. |
 | `--allow-external-index-root` | flag | Allow shared cleanup to touch a path outside the current workspace. |
@@ -253,9 +323,10 @@ SQLite/LanceDB accelerator store across runs, so future runs must rebuild index
 state. It keeps run-local audit artifacts because it does not touch run
 directories.
 
-`--shared-cache` is stronger again: it clears both the shared research index
-and `.simple_ar_cache/literature`, so future runs may need to re-query
-literature providers as well as rebuild local indexes.
+`--shared-cache` is stronger again: it clears the shared research index,
+`.simple_ar_cache/literature`, and `.simple_ar_cache/agent_handoff_archives`,
+so future runs may need to re-query literature providers, rebuild local indexes,
+and will no longer have prior external-agent handoff transcripts.
 
 ## Code Task Commands
 

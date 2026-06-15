@@ -302,6 +302,7 @@ novelty_backend = "local"
 
 ```text
 .simple_ar_cache/
+  agent_handoff_archives/ # 旧外部 agent handoff transcripts
   literature/      # 共享 literature provider metadata cache
   research_index/
     sqlite_fts.db  # 按 run_id 区分 rows 的共享 SQLite FTS store
@@ -343,15 +344,15 @@ uv run simple-ar clean --shared-index
 使用 `--index-root PATH`；如果路径在当前 workspace 外，还必须显式加
 `--allow-external-index-root`，因为这可能影响其他项目。
 
-如果要进行最强共享清理，同时清空 research index 和 literature provider cache：
+如果要进行最强共享清理，同时清空 research index、literature provider cache 和旧外部 agent handoff archives：
 
 ```bash
 uv run simple-ar clean --shared-cache
 ```
 
-这通常会删除 `.simple_ar_cache/research_index/` 和
-`.simple_ar_cache/literature/`。它不会删除任何 run 目录，但后续运行可能需要重新请求
-literature provider，并重新构建本地检索加速索引。
+这通常会删除 `.simple_ar_cache/research_index/`、`.simple_ar_cache/literature/`
+和 `.simple_ar_cache/agent_handoff_archives/`。它不会删除任何 run 目录，但后续运行可能需要重新请求
+literature provider、重新构建本地检索加速索引，并且不再保留旧的外部 agent handoff transcripts。
 
 关键文件按目录看：
 
@@ -455,6 +456,72 @@ uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 ```
 
 参数细节见 [CLI 参考](CLI_REFERENCE_zh.md#artifact-tools)。
+
+## Tool 和外部 Agent Handoff 预览
+
+V2.6 新增内部 common tool 与 agent-handoff 层。它是未来 Codex、Claude Code、
+OpenCode、OpenAI tool calling 或 MCP adapter 的受控扩展点，不是新的默认运行路径。
+
+当前行为：
+
+- 注册的 tool 必须是真实可用的本地 report / experiment tool，不添加空壳 MCP stub；
+- 可以导出 OpenAI-style 和 MCP-style tool schema；
+- 默认权限策略是 read-only / plan-only；
+- 外部 agent handoff package 写到 `runs/<run-id>/agent_handoff/<name>/`；
+- backend 输出如果被收集，会进入 `runs/<run-id>/agent_outputs/<name>/`，
+  仍必须经过 SimpleAutoResearch validation，才能影响 patch、result 或 report。
+
+handoff package 会显式列出上下文、权限和期望输出：
+
+```text
+runs/<run-id>/agent_handoff/<name>/
+  instructions.md           # task、backend profile、permission summary
+  tool_schema.json          # 真实 tool schema
+  permission_policy.json    # write/shell/network/secret policy
+  artifact_handles.json     # 暴露给 backend 的 run artifacts
+  expected_outputs.json     # backend 可产出的 canonical files
+  workspace_manifest.json   # 紧凑 run/workspace 视图
+  context/
+```
+
+外部工具仍然只是可选 strong path adapter。本地 research、report、greenfield
+experiment 和 code-task workflow 不需要 Codex、Claude Code、OpenCode 或 MCP server
+也能继续运行。
+
+V2.6 也在这个边界后面接入了可运行 backend：
+
+- `fake`：deterministic dry-run backend，用于集成测试；
+- `local_llm`：用当前 LLM 生成有边界的 review 产物；
+- `codex`、`claude_code`、`opencode`、`external_cli`：可选 CLI backend。
+
+如果要试 agent-backed greenfield generation 或 repair，可以设置
+`[implementation].provider`。外部 CLI provider 还必须显式设置
+`[implementation].allow_external_agent = true`。如果 executable 不在 `PATH`，或者需要
+provider-specific flags，可以使用 `[implementation].agent_binary`、`.agent_args` 和
+`.agent_timeout_sec`。即使开启，backend 也只能把候选文件
+写到 handoff 目录；SimpleAutoResearch 会再复制到 run workspace，并继续执行原有的
+code review、result guard、benchmark 或 code-task validation gate。
+
+`[implementation].agent_mode` 是这一层唯一新增的模式开关：
+
+- `model`：SimpleAutoResearch 仍然拥有 harness，只把有界生成交给本地/模型 backend。
+- `handoff`：为 Codex、Claude Code、OpenCode 或其他外部 CLI 写出可审计 handoff package，
+  再把 candidate files 收回 SimpleAutoResearch 的 gate。
+- `delegated_workspace`：预留给未来“外部 harness 接管 workspace loop”的强路径。当前版本会识别
+  这个值，但执行时会显式失败，不会静默降级。
+
+run-local 只读 tools 也可以通过 MCP stdio 暴露：
+
+```bash
+uv run simple-ar tools schema --format mcp
+uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
+uv run simple-ar tools serve-mcp runs/<run-id>
+```
+
+标准的 Codex/MCP 集成示例位于 `examples/tool_mcp_codex_agent/`。它使用
+`[implementation].provider = "codex"`，并默认保持 `[implementation].agent_model = ""`，
+让 Codex CLI 使用当前账号配置的默认模型。只有确认 CLI/账号支持某个模型名时，
+再显式填写 `agent_model`。
 
 ## Code Task 工作流
 

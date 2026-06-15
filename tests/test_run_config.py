@@ -192,6 +192,7 @@ task_file = "task.md"
 mode = "patch_existing"
 domain_profile = "code_agent_eval"
 provider = "local"
+agent_mode = "model"
 task_handoff = "merge"
 max_repair_attempts = 2
 
@@ -239,11 +240,13 @@ allow_fallback_scaffold = true
             self.assertEqual(parsed["code_task_workspace_include"], ["src/**"])
             self.assertEqual(parsed["code_task_primary_metric"], "accuracy")
             self.assertEqual(parsed["code_task_metric_directions"]["runtime_sec"], "lower")
+            self.assertEqual(parsed["implementation_agent_mode"], "model")
             self.assertEqual(parsed["implementation_task_handoff"], "merge")
             task_config = parsed["task_config"]
             self.assertIsInstance(task_config, dict)
             self.assertEqual(task_config["task"]["kind"], "existing_project")
             self.assertEqual(task_config["implementation"]["domain_profile"], "code_agent_eval")
+            self.assertEqual(task_config["implementation"]["agent_mode"], "model")
             self.assertEqual(task_config["implementation"]["task_handoff"], "merge")
             self.assertEqual(task_config["resource"]["max_files"], 8)
             self.assertEqual(task_config["generation"]["files_per_batch"], 3)

@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from simple_ar.experiment.tools.gateway import LocalExperimentToolGateway
+from simple_ar.report.schema import ReportContext, ReportToolCall
+from simple_ar.report.tool_gateway import ReportToolGateway
+from simple_ar.tools.permissions import ToolPermissionPolicy
+from simple_ar.tools.registry import ToolRegistry, default_tool_registry
+from simple_ar.tools.specs import CommonToolSpec, ToolCall, ToolResult
+from simple_ar.tools.trace import ToolTraceWriter, tool_timer
+
+
+class CommonToolGateway:
+    """Permissioned gateway that dispatches to existing domain tool gateways."""
+
+    def __init__(
+        self,
+        run_dir: Path,
+        *,
+        registry: ToolRegistry | None = None,
+        policy: ToolPermissionPolicy | None = None,
+        report_context: ReportContext | None = None,
+        trace_path: Path | None = None,
+        debug_payloads: bool = False,
+    ) -> None:
+        self.run_dir = Path(run_dir)
+        self.registry = registry or default_tool_registry(include_report=report_context is not None)
+        self.policy = policy or ToolPermissionPolicy.read_only()
+        self._experiment = LocalExperimentToolGateway(self.run_dir)
+        self._report = ReportToolGateway(report_context) if report_context is not None else None
+        self._trace = ToolTraceWriter(trace_path or self.run_dir / "tools" / "tool_trace.jsonl", debug_payloads=debug_payloads)
+
+    def list_specs(self) -> list[CommonToolSpec]:
+        return self.registry.list_specs()
+
+    def call(self, call: ToolCall | str, arguments: dict[str, Any] | None = None) -> ToolResult:
+        if isinstance(call, str):
+            call = ToolCall(tool_name=call, arguments=arguments or {})
+        spec = self.registry.get(call.tool_name)
+        if spec is None:
+            result = ToolResult(tool_name=call.tool_name, status="blocked", error="Unknown tool.")
+            self._trace.append(call=call, result=result, spec=None, duration_sec=0.0)
+            return result
+        allowed, reason = self.policy.is_allowed(spec)
+        if not allowed:
+            result = ToolResult(
+                tool_name=call.tool_name,
+                status="blocked",
+                error=reason,
+                metadata={"permission_level": spec.permission_level, "risk_level": spec.risk_level},
+            )
+            self._trace.append(call=call, result=result, spec=spec, duration_sec=0.0)
+            return result
+        with tool_timer() as timer:
+            result = self._dispatch(spec, call)
+        self._trace.append(call=call, result=result, spec=spec, duration_sec=timer.duration_sec)
+        return result
+
+    def _dispatch(self, spec: CommonToolSpec, call: ToolCall) -> ToolResult:
+        if spec.domain == "experiment":
+            result = self._experiment.call(call.tool_name, call.arguments)
+            return ToolResult(
+                tool_name=result.name,
+                status=_status(result.status),
+                data=result.data,
+                error=result.error,
+            )
+        if spec.domain == "report":
+            if self._report is None:
+                return ToolResult(tool_name=call.tool_name, status="blocked", error="Report context is not available.")
+            result = self._report.call(
+                ReportToolCall(
+                    tool_name=call.tool_name,
+                    arguments=call.arguments,
+                    caller=call.caller,
+                    trace_id=call.trace_id,
+                )
+            )
+            return ToolResult(
+                tool_name=result.tool_name,
+                status=_status(result.status),
+                data=result.content,
+                summary=result.summary,
+                artifacts=list(result.source_handles),
+                metadata=result.metadata,
+            )
+        return ToolResult(tool_name=call.tool_name, status="blocked", error=f"Unhandled tool domain: {spec.domain}")
+
+
+def _status(status: str) -> str:
+    if status in {"ok", "not_found", "blocked", "error"}:
+        return status
+    return "error"

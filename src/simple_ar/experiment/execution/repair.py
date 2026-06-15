@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Mapping
 
+from simple_ar.agent_backends import (
+    AgentPermissionPolicy,
+    AgentRunRequest,
+    create_agent_backend,
+    create_agent_handoff,
+    ingest_agent_outputs,
+    normalize_agent_mode,
+    validate_agent_mode_for_provider,
+)
 from simple_ar.core.artifacts import write_json
+from simple_ar.integrations.llm import LLMClient
 
 
 def repair_generated_project_from_guard(
@@ -72,6 +84,129 @@ def repair_generated_project_from_guard(
     return summary
 
 
+def repair_generated_project_with_agent_backend(
+    *,
+    run_dir: Path,
+    project_dir: Path,
+    provider: str,
+    result_schema: Mapping[str, Any],
+    guard_report: Mapping[str, Any],
+    diagnosis_report: Mapping[str, Any] | None = None,
+    current_metrics: Mapping[str, Any],
+    output_path: Path,
+    client: LLMClient | None = None,
+    timeout_sec: int = 600,
+    external_enabled: bool = False,
+    agent_mode: str = "",
+    agent_model: str = "",
+    agent_binary: str = "",
+    agent_args: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Ask an agent backend for a bounded repair proposal, then apply candidate files.
+
+    The backend never edits ``project_dir`` directly. It must write changed files under
+    ``generated_files/`` in the handoff directory; this function copies those files into
+    the generated project and records provenance before the run stage reruns guards.
+    """
+
+    resolved_agent_mode = normalize_agent_mode(agent_mode, provider=provider)
+    validate_agent_mode_for_provider(resolved_agent_mode, provider=provider)
+    package = create_agent_handoff(
+        run_dir=run_dir,
+        name=f"repair-{provider}",
+        instructions=_repair_handoff_instructions(
+            result_schema=result_schema,
+            guard_report=guard_report,
+            diagnosis_report=diagnosis_report or {},
+            current_metrics=current_metrics,
+        ),
+        permission_policy=AgentPermissionPolicy(
+            allow_file_write=True,
+            allow_shell_commands=False,
+            allow_network=False,
+            allowed_write_patterns=["generated_files/**", "review.md", "agent_result.json"],
+            notes=[
+                "Write only replacement or new project files under generated_files/.",
+                "Do not mutate 06-code/generated_project directly.",
+                "SimpleAutoResearch will apply files and rerun result guards.",
+            ],
+        ),
+        expected_outputs={
+            "mode": "greenfield_repair",
+            "allowed_outputs": ["generated_files/", "review.md", "agent_result.json"],
+            "canonical_result": "agent_result.json",
+        },
+        artifact_refs=[
+            "05-design/result_schema.json",
+            "07-run/results.json",
+            "07-run/guard_report.json",
+            "07-run/diagnosis.json",
+            "06-code/code_artifacts.json",
+            "06-code/code_review.json",
+        ],
+    )
+    backend = create_agent_backend(
+        provider,
+        enabled=external_enabled,
+        client=client,
+        model=agent_model or None,
+        timeout_sec=timeout_sec,
+        binary=agent_binary or None,
+        extra_args=agent_args,
+    )
+    result = backend.run(
+        AgentRunRequest(
+            provider=provider,
+            run_dir=run_dir,
+            handoff_dir=package.handoff_dir,
+            workspace_dir=project_dir,
+            timeout_sec=timeout_sec,
+            metadata={
+                "mode": "greenfield_repair",
+                "agent_mode": resolved_agent_mode.value,
+                "guard_status": str(guard_report.get("status", "unknown")),
+            },
+        )
+    )
+    ingestion = ingest_agent_outputs(run_dir=run_dir, handoff_dir=package.handoff_dir)
+    summary: dict[str, Any] = {
+        "schema_version": "experiment_repair.v1",
+        "status": "skipped",
+        "strategy": f"agent_backend:{provider}",
+        "provider": provider,
+        "agent_mode": resolved_agent_mode.value,
+        "agent_status": result.status,
+        "handoff_dir": package.handoff_dir.relative_to(run_dir).as_posix(),
+        "ingestion": ingestion,
+        "changed_files": [],
+        "notes": [],
+    }
+    generated_dir = package.handoff_dir / "generated_files"
+    if not result.ok:
+        summary["notes"].append(f"Agent backend did not complete successfully: {result.message or result.status}.")
+        write_json(output_path, summary)
+        return summary
+    if not generated_dir.is_dir():
+        summary["notes"].append("Agent backend produced no generated_files/ repair proposal.")
+        write_json(output_path, summary)
+        return summary
+    backup_dir = output_path.parent / "repair_backups" / "generated_project_before_agent"
+    if project_dir.is_dir():
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        shutil.copytree(project_dir, backup_dir)
+        summary["backup_dir"] = backup_dir.relative_to(run_dir).as_posix()
+    changed = _overlay_generated_files(generated_dir, project_dir)
+    summary["changed_files"] = changed
+    summary["status"] = "patched" if changed else "skipped"
+    if changed:
+        summary["notes"].append("Applied agent-generated repair files; rerun guard will validate the result.")
+    else:
+        summary["notes"].append("No safe repair files were found in generated_files/.")
+    write_json(output_path, summary)
+    return summary
+
+
 def _missing_metrics(schema: Mapping[str, Any], metrics: Mapping[str, Any]) -> list[str]:
     required = schema.get("required_metrics")
     names = [str(item) for item in required if str(item).strip()] if isinstance(required, list) else []
@@ -79,6 +214,52 @@ def _missing_metrics(schema: Mapping[str, Any], metrics: Mapping[str, Any]) -> l
     if primary and primary not in names:
         names.insert(0, primary)
     return [name for name in names if name not in metrics]
+
+
+def _repair_handoff_instructions(
+    *,
+    result_schema: Mapping[str, Any],
+    guard_report: Mapping[str, Any],
+    diagnosis_report: Mapping[str, Any],
+    current_metrics: Mapping[str, Any],
+) -> str:
+    return (
+        "# Greenfield Repair Handoff\n\n"
+        "Patch the generated experiment project by writing changed files under `generated_files/`. "
+        "Focus on the smallest repair that satisfies the result schema and preserves bounded runtime.\n\n"
+        "## Current Metrics\n\n"
+        f"{dict(current_metrics)}\n\n"
+        "## Result Schema\n\n"
+        f"{dict(result_schema)}\n\n"
+        "## Guard Report\n\n"
+        f"{dict(guard_report)}\n\n"
+        "## Diagnosis\n\n"
+        f"{dict(diagnosis_report)}\n"
+    )
+
+
+def _overlay_generated_files(src_dir: Path, project_dir: Path) -> list[str]:
+    project_dir.mkdir(parents=True, exist_ok=True)
+    changed: list[str] = []
+    for src in sorted(src_dir.rglob("*")):
+        if not src.is_file():
+            continue
+        rel = _safe_relative_path(src.relative_to(src_dir).as_posix())
+        if not rel:
+            continue
+        dst = project_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        changed.append(rel)
+    return changed
+
+
+def _safe_relative_path(value: str) -> str:
+    value = value.replace("\\", "/").strip().lstrip("/")
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return ""
+    return path.as_posix()
 
 
 def _missing_metrics_from_diagnosis(diagnosis: Mapping[str, Any]) -> list[str]:

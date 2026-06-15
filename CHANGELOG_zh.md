@@ -4,6 +4,32 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-14
+
+### Added
+
+- 新增 V2.6 common tool harness foundation：`src/simple_ar/tools/` 现在包含 shared tool specs、permission/risk levels、组合现有 report / experiment tools 的 registry、带权限检查的本地 dispatch、紧凑 `tool_trace.jsonl` 写入，以及 OpenAI/MCP-style schema export。
+- 新增 V2.6 外部 agent handoff foundation：`src/simple_ar/agent_backends/` 现在可以写出 workspace-scoped `agent_handoff/<name>/` package，包含 instructions、真实 tool schema、permission policy、artifact handles、expected outputs、context files 和 workspace manifest。
+- 新增外部 agent 输出收集路径：backend 产物会先进入 `agent_outputs/<name>/`，在通过已有 validation、result guard、report audit 或 code-task patch checks 之前，不会被当作可信结果。
+- 新增 Codex、Claude Code 和 OpenCode profile Markdown，用于未来可选 backend。这些 profile 是 workspace-scoped guidance assets，不会默认安装到用户全局环境。
+- 新增可运行的 V2.6 backend wrappers：deterministic `fake`、`local_llm`、generic `external_cli`，以及 Codex / Claude Code / OpenCode CLI wrappers。这些 wrapper 会记录 cwd、timeout、env allowlist、stdout/stderr 和 `agent_run.json` provenance。
+- 新增 `simple-ar tools schema`、`simple-ar tools call` 和 `simple-ar tools serve-mcp`。MCP server 使用 stdio，并通过 `tools/list` 和 `tools/call` 暴露真实的 run-local 只读 experiment tools。
+- 新增 `examples/tool_mcp_codex_agent/`：一个受控的 Codex 外部 agent 示例，包含 MCP server 模板；示例默认保持 `[implementation].agent_model` 为空，让 Codex CLI 使用当前账号配置的模型。
+- 新增 `[implementation].agent_mode`，作为 V2.6 外部 agent 层唯一模式开关：`model`、`handoff`，以及预留的 `delegated_workspace` 契约。
+
+### Changed
+
+- 开发和使用文档现在说明 V2.6 的 tool/agent 边界：外部工具是可选 strong-path adapter，本地 research、report、experiment 和 code-task workflow 不依赖 MCP 或外部 agent CLI。
+- Greenfield generation 和 greenfield repair 现在可以在 `[implementation].provider` 选择 agent backend 时走 handoff 边界。外部输出仍然是不可信 candidate files，必须继续通过已有 code review、result guard、rerun 和 validation gates。
+- 预留的 code-task `external_agent` adapter 现在可以在显式 enabled 时通过 common handoff/ingestion 路径启动 backend；默认行为仍然只是输出可审查 invocation plan，不执行外部工具。
+- 外部 agent wrapper 现在支持 `[implementation].agent_model`，但示例默认留空；Codex、Claude Code 和 OpenCode 测试只有在确认 CLI/账号支持某个模型名时才建议显式填写。
+- 外部 agent 失败时，主流程错误现在会带上精简的 stderr/stdout 尾部，并对不支持的模型名、找不到 CLI binary 等常见问题给出提示。
+- Agent-backed greenfield/code-task 路径现在会归一化并校验 `agent_mode`，把它写入 backend artifacts，并且对预留的 delegated-workspace 强路径显式失败，避免静默降级成普通 handoff。
+- 外部 CLI backend 现在会在启动 subprocess 前解析 Windows command shim，例如 `codex.cmd`；Codex wrapper 也会使用绝对 handoff root，并加上 `--skip-git-repo-check`。
+- 外部 agent handoff package 现在会在重跑前自动归档旧目录，避免旧的 `stdout.txt`、`stderr.txt` 或 `agent_result.json` 污染下一次 Codex/Claude/OpenCode 尝试。旧 handoff 会移动到 git 忽略的本地 cache，而不是放在 sibling `agent_handoff/archives/` 里，避免下一次外部 agent 读到旧失败日志；旧版本已生成的 sibling archives 也会在新 handoff 创建前迁移到同一个 cache。
+- `simple-ar clean --shared-cache` 现在也会清理 `.simple_ar_cache/agent_handoff_archives`，因此现有 clean 命令可以完整移除跨 run 的外部 agent handoff transcripts。
+- Agent-backed greenfield generation 现在要求 `generated_files/` 非空后才会复制到 `06-code/generated_project`，空目录提案会在 handoff 边界失败，不再延后变成难懂的缺失 `main.py` review error。
+
 ## 2026-06-13
 
 ### Added

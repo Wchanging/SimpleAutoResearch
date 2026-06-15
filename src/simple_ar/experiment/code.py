@@ -71,6 +71,7 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
             "project_dir": "generated_project",
             "entrypoint": "python main.py",
             "timeout_sec": plan.get("timeout_sec") or experiment_timeout(ctx),
+            "agent_mode": str(ctx.config.get("implementation_agent_mode") or ""),
         },
     )
     result = implement_greenfield_project(
@@ -81,6 +82,13 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
         dependency_plan=dependency_plan,
         domain_profile=domain_profile,
         client=_llm_client(ctx),
+        implementation_provider=str(ctx.config.get("implementation_provider") or "local"),
+        agent_mode=str(ctx.config.get("implementation_agent_mode") or ""),
+        allow_external_agent=ctx.config.get("implementation_allow_external_agent") is True,
+        backend_timeout_sec=int(ctx.config.get("implementation_agent_timeout_sec") or plan.get("timeout_sec") or experiment_timeout(ctx)),
+        agent_model=str(ctx.config.get("implementation_agent_model") or ""),
+        agent_binary=str(ctx.config.get("implementation_agent_binary") or ""),
+        agent_args=[str(item) for item in (ctx.config.get("implementation_agent_args") or [])],
     )
     if result.review_status == "failed" and ctx.config.get("use_llm") is True:
         if ctx.config.get("generation_allow_fallback_scaffold") is not True:
@@ -116,6 +124,10 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
             dependency_plan=dependency_plan,
             domain_profile=domain_profile,
             client=None,
+            implementation_provider="local",
+            agent_mode="model",
+            allow_external_agent=False,
+            backend_timeout_sec=int(plan.get("timeout_sec") or experiment_timeout(ctx)),
         )
         write_json(
             ctx.artifact_path("review_failure_recovery.json"),

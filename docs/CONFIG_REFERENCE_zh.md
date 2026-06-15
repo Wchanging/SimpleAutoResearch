@@ -177,9 +177,14 @@ task_file = "examples/full_pipeline_tiny_mlp/task.md"
 [implementation]
 mode = "patch_existing"        # auto | patch_existing | generate_project | template
 domain_profile = "ml_experiment" # auto | generic_research_experiment | code_experiment | ml_experiment | code_agent_eval
-provider = "local"
+provider = "local"             # local | fake | local_llm | codex | claude_code | opencode | external_cli
+agent_mode = "model"           # model | handoff | delegated_workspace
+agent_model = ""               # 可选：覆盖外部 CLI 模型；留空则使用 CLI 默认模型
+agent_binary = ""              # 可选：外部 provider 的 CLI binary/path
+agent_args = []                # 可选：追加到外部 CLI 的参数
+agent_timeout_sec = 600        # 单次 backend invocation timeout
 task_handoff = "user_file"     # user_file | merge；merge 会把 task_file 与研究上下文合并
-allow_external_agent = false
+allow_external_agent = false   # 启动外部 CLI provider 前必须显式开启
 max_repair_attempts = 1
 
 [workspace]
@@ -482,7 +487,11 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[task].code_root` / `.task_file` | 源项目根目录和任务 Markdown；路径相对配置文件解析。 |
 | `[implementation].mode` | `patch_existing` 映射到当前受控 code-task 行为；`generate_project` 会在 `06-code/generated_project` 下规划、生成、审查并运行一个受控项目。 |
 | `[implementation].domain_profile` | 选择规划默认值，例如 `generic_research_experiment`、`code_experiment`、`ml_experiment` 或 `code_agent_eval`。 |
+| `[implementation].provider` | 代码实现 backend。`local` 是默认的进程内路径；`fake` 是 deterministic 测试 backend；`local_llm` 通过当前 LLM 写出有边界的 review 产物；`codex`、`claude_code`、`opencode` 和 `external_cli` 会走 V2.6 外部 agent handoff 边界，除非 `[implementation].allow_external_agent = true`，否则不会启动外部 CLI。 |
+| `[implementation].agent_mode` | 选择 backend 能接管多少实现循环。`model` 表示仍由 SimpleAutoResearch 拥有 harness，只把有界文本/代码生成交给模型或本地 backend；`handoff` 会写出可审计的 `agent_handoff/<name>/` package，并从外部 agent 收集 candidate files；`delegated_workspace` 是未来让外部 harness 接管 workspace loop 的强路径，现在只识别并显式失败，不会静默降级。 |
+| `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | 可选外部 backend 启动设置。`agent_model` 留空时会使用 Codex/Claude/OpenCode CLI 当前账号配置的默认模型；只有确认该 CLI/账号支持某个模型名时才建议显式填写。`agent_binary` 可指定自定义 executable path，也可用于 generic `external_cli`；`agent_args` 会追加 CLI 参数；`agent_timeout_sec` 限制单次 backend 调用时间。 |
 | `[implementation].task_handoff` | 仅用于 8 阶段内嵌已有项目代码任务。`user_file` 会原样使用 `[task].task_file`；`merge` 会在 `05-design/generated_code_task.md` 中把用户任务作为硬约束，并融合 goal/problem/synthesis/hypothesis 上下文。 |
+| `[implementation].allow_external_agent` | 是否允许启动可选外部 CLI，用于 agent-backed generation 或 repair。外部输出会先进入 `agent_outputs/<name>/`，仍需通过 SimpleAutoResearch 的 review、result guard 或 code-task validation 后才会影响结果。普通本地运行建议保持 false。 |
 | `[execution].command` / `.timeout_sec` | benchmark/execution 规划使用的命令和 timeout；已有项目会映射到旧 benchmark 设置。 |
 | `[resource].max_files` / `.max_generated_lines` | 写入 `05-design/resource_plan.json` 的代码前预算。 |
 | `[resource].max_memory_mb` / `.allow_gpu` | runtime 资源预算，会写入 `resource_plan.json`，并在生成或修改代码前作为 contract constraints 暴露。 |

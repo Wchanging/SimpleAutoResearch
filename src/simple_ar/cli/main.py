@@ -64,6 +64,7 @@ from simple_ar.app.run_config import RunConfigError, load_pipeline_run_config
 from simple_ar.pipeline_stages.registry import HANDLERS
 from simple_ar.core.stages import Stage, parse_stage
 from simple_ar.cli.parser import build_parser
+from simple_ar.tools.cli import call_tool, print_tool_schema, serve_mcp
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -111,6 +112,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "status":
         _print_status(Path(args.run_dir))
         return
+
+    if args.command == "tools":
+        if args.tools_command == "schema":
+            print_tool_schema(schema_format=args.format, output=args.output)
+            return
+        if args.tools_command == "call":
+            call_tool(Path(args.run_dir), args.tool_name, args_json=args.args_json, debug_payloads=args.debug_payloads)
+            return
+        if args.tools_command == "serve-mcp":
+            serve_mcp(Path(args.run_dir), debug_payloads=args.debug_payloads)
+            return
+        parser.error(f"Unknown tools command: {args.tools_command}")
 
     if args.command == "code-task":
         if args.code_task_command == "init":

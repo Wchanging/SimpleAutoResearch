@@ -345,6 +345,7 @@ Shared accelerator stores are written outside the run by default:
 
 ```text
 .simple_ar_cache/
+  agent_handoff_archives/ # prior external-agent handoff transcripts
   literature/      # shared provider metadata cache
   research_index/
     sqlite_fts.db  # shared SQLite FTS rows, keyed by run_id
@@ -391,16 +392,18 @@ lost until future runs rebuild the store. Use `--index-root PATH` when the
 shared index lives elsewhere. Paths outside the current workspace require
 `--allow-external-index-root`, because that can affect other projects.
 
-For the strongest shared cleanup, clear both the shared research index and the
-shared literature-provider cache:
+For the strongest shared cleanup, clear the shared research index, the shared
+literature-provider cache, and prior external-agent handoff archives:
 
 ```bash
 uv run simple-ar clean --shared-cache
 ```
 
-This usually removes `.simple_ar_cache/research_index/` and
-`.simple_ar_cache/literature/`. It does not delete run directories, but future
-runs may need to re-query providers and rebuild local search acceleration.
+This usually removes `.simple_ar_cache/research_index/`,
+`.simple_ar_cache/literature/`, and
+`.simple_ar_cache/agent_handoff_archives/`. It does not delete run directories,
+but future runs may need to re-query providers, rebuild local search
+acceleration, and will no longer keep old external-agent handoff transcripts.
 
 Key files, grouped by directory:
 
@@ -572,6 +575,81 @@ uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 ```
 
 See [CLI Reference](CLI_REFERENCE.md#artifact-tools) for option details.
+
+## Tool And External Agent Handoff Preview
+
+V2.6 adds an internal common tool and agent-handoff layer. This is a controlled
+extension point for future Codex, Claude Code, OpenCode, OpenAI tool-calling, or
+MCP adapters; it is not a new default runtime path.
+
+Current behavior:
+
+- registered tools are real local report/experiment tools, not placeholder MCP
+  stubs;
+- schema export is available for OpenAI-style and MCP-style tool definitions;
+- default permission policy is read-only/plan-only;
+- external-agent handoff packages are written under
+  `runs/<run-id>/agent_handoff/<name>/`;
+- backend outputs, when collected, go to `runs/<run-id>/agent_outputs/<name>/`
+  and still require SimpleAutoResearch validation before they can affect a
+  patch, result, or report.
+
+The handoff package is deliberately explicit:
+
+```text
+runs/<run-id>/agent_handoff/<name>/
+  instructions.md           # task + backend profile + permission summary
+  tool_schema.json          # exported real tool schemas
+  permission_policy.json    # write/shell/network/secret policy
+  artifact_handles.json     # reviewable run artifacts exposed to the backend
+  expected_outputs.json     # canonical files the backend may produce
+  workspace_manifest.json   # compact run/workspace view
+  context/
+```
+
+External tools remain optional strong-path adapters. Local research, report,
+greenfield experiment, and code-task workflows continue to work without Codex,
+Claude Code, OpenCode, or an MCP server.
+
+V2.6 also adds runnable backend wrappers behind this boundary:
+
+- `fake`: deterministic dry-run backend used for integration tests;
+- `local_llm`: uses the configured LLM to produce bounded review artifacts;
+- `codex`, `claude_code`, `opencode`, `external_cli`: optional CLI backends.
+
+Set `[implementation].provider` to one of those names when experimenting with
+agent-backed greenfield generation or repair. External CLI providers also
+require `[implementation].allow_external_agent = true`. Use
+`[implementation].agent_binary`, `.agent_args`, and `.agent_timeout_sec` when
+the executable is not on `PATH` or needs provider-specific flags. Even then, the backend
+may only write candidate files inside the handoff directory; SimpleAutoResearch
+copies them into the run workspace, then runs the normal code review, result
+guard, benchmark, or code-task validation gates.
+
+`[implementation].agent_mode` is the only mode switch for this layer:
+
+- `model`: keep SimpleAutoResearch as the harness and use a local/model backend
+  only for bounded generation.
+- `handoff`: write an auditable handoff package for Codex, Claude Code,
+  OpenCode, or another external CLI, then ingest candidate files back through
+  SimpleAutoResearch gates.
+- `delegated_workspace`: reserved for a future strong path where an external
+  harness owns the workspace loop. The value is recognized today, but execution
+  fails explicitly instead of silently falling back.
+
+Run-local read-only tools can also be exposed over MCP stdio:
+
+```bash
+uv run simple-ar tools schema --format mcp
+uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
+uv run simple-ar tools serve-mcp runs/<run-id>
+```
+
+The canonical Codex/MCP integration example lives in
+`examples/tool_mcp_codex_agent/`. It uses `[implementation].provider = "codex"`
+and leaves `[implementation].agent_model = ""` by default so Codex CLI can use
+the model configured for your account. Set `agent_model` only when you have
+confirmed the model name is supported by that CLI/account.
 
 ## Code Task Workflow
 

@@ -4,6 +4,81 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-14
+
+### Added
+
+- Added the V2.6 common tool harness foundation under `src/simple_ar/tools/`.
+  It provides shared tool specs, permission/risk levels, a registry that
+  composes existing report and experiment tools, permissioned local dispatch,
+  compact `tool_trace.jsonl` writing, and OpenAI/MCP-style schema export.
+- Added the V2.6 external-agent handoff foundation under
+  `src/simple_ar/agent_backends/`. It can write workspace-scoped
+  `agent_handoff/<name>/` packages with instructions, real tool schemas,
+  permission policy, artifact handles, expected outputs, context files, and
+  workspace manifests.
+- Added untrusted external-agent output ingestion into
+  `agent_outputs/<name>/`, keeping backend results separate until the existing
+  validation, result guard, report audit, or code-task patch checks approve
+  them.
+- Added Codex, Claude Code, and OpenCode profile Markdown files for future
+  optional backends. These profiles are workspace-scoped guidance assets, not
+  default global installations.
+- Added runnable V2.6 backend wrappers: deterministic `fake`, `local_llm`,
+  generic `external_cli`, and Codex / Claude Code / OpenCode CLI wrappers with
+  cwd, timeout, env allowlist, stdout/stderr capture, and `agent_run.json`
+  provenance.
+- Added `simple-ar tools schema`, `simple-ar tools call`, and
+  `simple-ar tools serve-mcp`. The MCP server is stdio-based and exposes real
+  run-local read-only experiment tools through `tools/list` and `tools/call`.
+- Added `examples/tool_mcp_codex_agent/`, a bounded Codex external-agent
+  example with an MCP server template. The example leaves
+  `[implementation].agent_model` empty by default so Codex CLI can use the
+  account's configured model.
+- Added `[implementation].agent_mode` as the single V2.6 external-agent mode
+  switch: `model`, `handoff`, and the reserved `delegated_workspace` contract.
+
+### Changed
+
+- Development and usage docs now describe the V2.6 tool/agent boundary:
+  external tools are optional strong-path adapters, while local research,
+  report, experiment, and code-task workflows remain available without MCP or
+  external agent CLIs.
+- Greenfield generation and greenfield repair can now route through the agent
+  handoff boundary when `[implementation].provider` selects an agent backend.
+  External outputs remain untrusted candidate files and still pass the existing
+  code review, result guard, rerun, and validation gates.
+- The reserved code-task `external_agent` adapter can now launch enabled
+  backends through the common handoff/ingestion path, while the default remains
+  non-executing invocation-plan output.
+- External agent wrappers now accept `[implementation].agent_model`, but
+  examples leave it empty by default. Codex, Claude Code, and OpenCode tests
+  should only set it when the CLI/account is known to support that model name.
+- External agent failures now surface a concise stderr/stdout tail in the main
+  runtime error, including hints for unsupported model names and missing CLI
+  binaries.
+- Agent-backed greenfield/code-task paths now normalize and validate
+  `agent_mode`, record it in backend artifacts, and fail explicitly for the
+  reserved delegated-workspace path instead of silently treating it as a normal
+  handoff.
+- External CLI backends now resolve Windows command shims such as `codex.cmd`
+  before launching subprocesses, and the Codex wrapper uses an absolute
+  handoff root with `--skip-git-repo-check`.
+- External-agent handoff packages are now archived before reruns, preventing
+  stale `stdout.txt`, `stderr.txt`, or `agent_result.json` files from steering
+  a later Codex/Claude/OpenCode attempt. Stale handoffs are moved to the ignored
+  local cache instead of a sibling `agent_handoff/archives/` directory so the
+  next external agent cannot accidentally read old failure logs. Existing
+  legacy sibling archives are relocated to the same cache before creating a new
+  handoff.
+- `simple-ar clean --shared-cache` now also clears
+  `.simple_ar_cache/agent_handoff_archives`, so the existing cleanup command can
+  fully remove cross-run external-agent handoff transcripts.
+- Agent-backed greenfield generation now requires non-empty `generated_files/`
+  before copying into `06-code/generated_project`, so empty directory proposals
+  fail at the handoff boundary instead of surfacing later as a confusing missing
+  `main.py` review error.
+
 ## 2026-06-13
 
 ### Added

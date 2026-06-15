@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "simple-ar-run-tools": {
+      "command": "uv",
+      "args": [
+        "run",
+        "simple-ar",
+        "tools",
+        "serve-mcp",
+        "runs/tool-mcp-codex-agent/<run-id>"
+      ]
+    }
+  }
+}

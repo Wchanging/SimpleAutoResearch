@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
+from simple_ar.agent_backends.modes import normalize_agent_mode
+
 
 @dataclass(slots=True)
 class TaskSettings:
@@ -26,6 +28,11 @@ class ImplementationSettings:
     mode: str = "auto"
     domain_profile: str = "auto"
     provider: str = "local"
+    agent_mode: str = "model"
+    agent_model: str = ""
+    agent_binary: str = ""
+    agent_args: list[str] = field(default_factory=list)
+    agent_timeout_sec: int = 600
     task_handoff: str = "user_file"
     allow_external_agent: bool = False
     max_repair_attempts: int = 1
@@ -155,6 +162,11 @@ def unified_task_config_from_runtime(config: Mapping[str, Any]) -> UnifiedTaskCo
         mode=implementation_mode,
         domain_profile=_str(config.get("implementation_domain_profile"), "auto"),
         provider=_str(config.get("implementation_provider"), "local"),
+        agent_mode=_agent_mode(config.get("implementation_agent_mode"), provider=_str(config.get("implementation_provider"), "local")),
+        agent_model=_str(config.get("implementation_agent_model"), ""),
+        agent_binary=_str(config.get("implementation_agent_binary"), ""),
+        agent_args=_str_list(config.get("implementation_agent_args")),
+        agent_timeout_sec=_int(config.get("implementation_agent_timeout_sec"), 600),
         task_handoff=_handoff_mode(_str(config.get("implementation_task_handoff"), "user_file")),
         allow_external_agent=_bool(config.get("implementation_allow_external_agent"), False),
         max_repair_attempts=_int(config.get("implementation_max_repair_attempts"), 1),
@@ -238,6 +250,11 @@ def _from_nested(data: Mapping[str, Any]) -> UnifiedTaskConfig:
             mode=_str(implementation.get("mode"), "auto"),
             domain_profile=_str(implementation.get("domain_profile"), "auto"),
             provider=_str(implementation.get("provider"), "local"),
+            agent_mode=_agent_mode(implementation.get("agent_mode"), provider=_str(implementation.get("provider"), "local")),
+            agent_model=_str(implementation.get("agent_model"), ""),
+            agent_binary=_str(implementation.get("agent_binary"), ""),
+            agent_args=_str_list(implementation.get("agent_args")),
+            agent_timeout_sec=_int(implementation.get("agent_timeout_sec"), 600),
             task_handoff=_handoff_mode(_str(implementation.get("task_handoff"), "user_file")),
             allow_external_agent=_bool(implementation.get("allow_external_agent"), False),
             max_repair_attempts=_int(implementation.get("max_repair_attempts"), 1),
@@ -345,6 +362,10 @@ def _direction(value: str) -> str:
     if normalized in {"ignore", "none"}:
         return "ignore"
     return normalized or "maximize"
+
+
+def _agent_mode(value: Any, *, provider: str) -> str:
+    return normalize_agent_mode(_str(value, ""), provider=provider).value
 
 
 def _handoff_mode(value: str) -> str:

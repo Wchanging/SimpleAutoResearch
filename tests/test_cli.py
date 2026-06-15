@@ -312,10 +312,14 @@ class CliTests(unittest.TestCase):
             cache_root = root / ".simple_ar_cache"
             index_root = cache_root / "research_index"
             literature_root = cache_root / "literature"
+            agent_archive_root = cache_root / "agent_handoff_archives"
             index_root.mkdir(parents=True)
             literature_root.mkdir(parents=True)
+            agent_archive_root.mkdir(parents=True)
             (index_root / "chunks.sqlite").write_text("index", encoding="utf-8")
             (literature_root / "cached-provider-response.json").write_text("{}", encoding="utf-8")
+            (agent_archive_root / "old-handoff" / "stderr.txt").parent.mkdir()
+            (agent_archive_root / "old-handoff" / "stderr.txt").write_text("old failure", encoding="utf-8")
 
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
@@ -333,9 +337,11 @@ class CliTests(unittest.TestCase):
 
             self.assertFalse(index_root.exists())
             self.assertFalse(literature_root.exists())
+            self.assertFalse(agent_archive_root.exists())
             output = stdout.getvalue()
             self.assertIn("Shared-cache cleanup is enabled", output)
             self.assertIn("literature", output)
+            self.assertIn("agent_handoff_archives", output)
 
     def test_resume_config_preserves_saved_values_without_cli_overrides(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

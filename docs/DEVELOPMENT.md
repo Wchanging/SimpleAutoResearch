@@ -193,6 +193,53 @@ them. New work should either move logic into the owning domain module or reduce
 these files. This is a maintenance rule, not a demand to split every small
 helper into a separate file.
 
+## Extending Tools And External Agent Backends
+
+V2.6 introduces a common tool and handoff layer without replacing the existing
+domain implementations:
+
+```text
+src/simple_ar/tools/
+  specs.py        CommonToolSpec, ToolCall, ToolResult, permission/risk enums
+  registry.py     compose report and experiment tools into one registry
+  gateway.py      permissioned local dispatch and compact trace writing
+  permissions.py  read/write/execution/network policy checks
+  openai_schema.py / mcp_schema.py
+                  schema export only; no server is started by default
+  mcp_server.py   explicit stdio MCP server for read-only run-local tools
+
+src/simple_ar/agent_backends/
+  base.py         AgentBackend protocol and run result models
+  policy.py       external-agent permission policy serialized into handoff
+  handoff.py      workspace-scoped handoff package and untrusted output ingestion
+  factory.py      provider selection for fake/local_llm/Codex/Claude/OpenCode
+  fake.py         deterministic backend for integration tests and dry-runs
+  local_llm.py    LLM-backed bounded reviewer/planner backend
+  external_cli.py subprocess wrapper with cwd, timeout, env allowlist, and logs
+  profiles/       Codex / Claude Code / OpenCode profile Markdown
+```
+
+The common layer is intentionally thin. `experiment/tools/` and
+`report/tool_gateway.py` still own their business logic; `tools/` only provides
+one audited surface for future OpenAI tool calling, MCP adapters, and external
+agent backends.
+
+Rules for new tool/backend work:
+
+- register real tools only; do not add MCP/OpenAI schemas for stub tools;
+- keep write, shell, network, and secret access disabled unless a config and
+  approval path explicitly enables them;
+- write external-agent context into `agent_handoff/<name>/`, never into a
+  user's global tool directory by default;
+- treat external-agent outputs as untrusted. Ingest them under
+  `agent_outputs/<name>/`, then route them through the existing patch,
+  result-guard, report-audit, or code-task validation paths;
+- keep external CLI providers opt-in. `fake` and `local_llm` are useful for
+  tests and local review; `codex`, `claude_code`, `opencode`, and
+  `external_cli` must stay disabled until the config explicitly allows them;
+- keep trace rows compact by default. Raw prompts, raw outputs, or large
+  payloads belong behind debug settings.
+
 ### Code-Task Environment Policy
 
 The current code-task runner has workspace isolation through `copy`,
