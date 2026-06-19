@@ -228,13 +228,28 @@ def _next_step(
 ) -> str:
     plan = manifest.get("plan", {})
     patch = manifest.get("patch", {})
+    code_task = manifest.get("code_task", {})
+    is_greenfield = isinstance(code_task, dict) and str(code_task.get("kind", "")).lower() == "greenfield"
     plan_status = plan.get("status", "not_started") if isinstance(plan, dict) else "not_started"
     patch_status = patch.get("status", "not_started") if isinstance(patch, dict) else "not_started"
     validation_status = validation.get("status") if validation else ""
     if not environment:
         return "Run `simple-ar code-task probe <run-dir>` to record environment signals."
-    if not baseline_execution:
+    if not baseline_execution and not is_greenfield:
         return "Run `simple-ar code-task baseline <run-dir>` before asking for edits."
+    if is_greenfield and patched_execution:
+        patched_status = str(patched_execution.get("status", "unknown"))
+        if patched_status == "passed":
+            return "Review `code_task/summary.md`, `code_task/workspace/generated_project/`, and run artifacts."
+        if failure:
+            return "Review failure analysis and rerun `simple-ar code-task execute <run-dir> --repair-rounds 1` for a bounded generated-project repair."
+        return "Rerun `simple-ar code-task execute <run-dir> --repair-rounds 1` to analyze and repair the generated benchmark failure."
+    if is_greenfield and patch_status == "applied" and not validation:
+        return "Run `simple-ar code-task execute <run-dir> --to-step run` to validate and benchmark the generated project."
+    if is_greenfield and validation_status == "failed":
+        return "Review `code_task/meta/validation_report.json`; rerun execute with repair budget if needed."
+    if is_greenfield and not patched_execution:
+        return "Run `simple-ar code-task execute <run-dir> --to-step run` to benchmark the generated project."
     if plan_status in {"not_started", "unknown"}:
         return "Run `simple-ar code-task plan <run-dir>` to create a reviewable patch plan."
     if plan_status == "pending_approval":
@@ -256,7 +271,11 @@ def _next_step(
     patched_status = str(patched_execution.get("status", "unknown"))
     if patched_status != "passed":
         if failure:
+            if is_greenfield:
+                return "Review failure analysis and rerun `simple-ar code-task execute <run-dir> --repair-rounds 1` for a bounded generated-project repair."
             return "Review failure analysis and consider `simple-ar code-task repair <run-dir>`."
+        if is_greenfield:
+            return "Rerun `simple-ar code-task execute <run-dir> --repair-rounds 1` to analyze and repair the generated benchmark failure."
         return "Run `simple-ar code-task analyze-failure <run-dir>` to summarize the benchmark failure."
     if comparison:
         verdict = str(comparison.get("verdict", "inconclusive"))

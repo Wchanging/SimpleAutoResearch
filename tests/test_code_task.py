@@ -33,6 +33,7 @@ from simple_ar.code_task import (
     validate_code_task,
 )
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
+from simple_ar.code_task.generation.generated_project_repair import repair_generated_project_from_run_failure
 from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
     prepare_code_task_experiment,
@@ -288,6 +289,104 @@ primary_metric = "accuracy"
             self.assertNotEqual(rereview["status"], "failed")
             metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
             self.assertIn("accuracy", metrics)
+
+    def test_greenfield_run_repair_handles_preset_and_runner_api_mismatch(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            package_dir = project_dir / "generated_experiment"
+            package_dir.mkdir(parents=True)
+            write_json(
+                project_dir / "config.json",
+                {
+                    "objective": "Greenfield run repair test.",
+                    "presets": {
+                        "{preset_name}": {
+                            "tasks": ["text"],
+                            "max_samples": 32,
+                        }
+                    },
+                },
+            )
+            write_text(
+                package_dir / "runner.py",
+                (
+                    "from . import data as data_module\n\n"
+                    "def run_experiment(preset='smoke', data_source='auto'):\n"
+                    "    return data_module.load_dataset('text', {})\n"
+                ),
+            )
+            write_text(
+                package_dir / "data.py",
+                (
+                    "from dataclasses import dataclass\n\n"
+                    "@dataclass(frozen=True)\n"
+                    "class Example:\n"
+                    "    text: str\n"
+                    "    label: int\n\n"
+                    "@dataclass(frozen=True)\n"
+                    "class Splits:\n"
+                    "    train: tuple[Example, ...]\n"
+                    "    test: tuple[Example, ...]\n\n"
+                    "@dataclass(frozen=True)\n"
+                    "class Metadata:\n"
+                    "    num_examples: int\n\n"
+                    "def generate_text_dataset(preset='smoke'):\n"
+                    "    train = (Example('alpha topic', 0), Example('beta topic', 1))\n"
+                    "    test = (Example('alpha', 0), Example('beta', 1))\n"
+                    "    return Splits(train=train, test=test), Metadata(num_examples=4)\n"
+                ),
+            )
+            write_text(
+                package_dir / "models.py",
+                (
+                    "class Majority:\n"
+                    "    def fit(self, x, y): self.label = y[0] if y else 0; return self\n"
+                    "    def predict(self, x): return [self.label for _ in x]\n"
+                    "    def count_parameters(self): return 1\n\n"
+                    "def create_model(name):\n"
+                    "    return Majority()\n"
+                ),
+            )
+            write_text(
+                package_dir / "metrics.py",
+                (
+                    "def accuracy_score(y_true, y_pred):\n"
+                    "    return sum(int(a == b) for a, b in zip(y_true, y_pred)) / float(len(y_true) or 1)\n\n"
+                    "def macro_f1_score(y_true, y_pred):\n"
+                    "    return accuracy_score(y_true, y_pred)\n"
+                ),
+            )
+
+            preset_repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair"},
+                stderr_text=(
+                    "raise KeyError(f\"Unknown preset '{preset_name}'. Available presets: {available}\")\n"
+                    "KeyError: \"Unknown preset 'smoke'. Available presets: {preset_name}\"\n"
+                ),
+                output_path=root / "run_repair_preset.json",
+            )
+
+            self.assertEqual(preset_repair["status"], "patched")
+            config = read_json(project_dir / "config.json")
+            self.assertIn("smoke", config["presets"])
+            self.assertNotIn("{preset_name}", config["presets"])
+
+            runner_repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair"},
+                stderr_text="AttributeError: module 'generated_experiment.data' has no attribute 'load_dataset'",
+                output_path=root / "run_repair_runner.json",
+            )
+
+            self.assertEqual(runner_repair["status"], "patched")
+            self.assertIn("generated_experiment/runner.py", runner_repair["changed_files"])
+            self.assertIn(
+                "Compatibility runner generated by SimpleAutoResearch run repair",
+                read_text(package_dir / "runner.py"),
+            )
 
     def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

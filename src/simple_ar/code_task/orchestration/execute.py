@@ -17,7 +17,10 @@ from simple_ar.code_task.execution.failure import analyze_code_task_failure
 from simple_ar.code_task.editing.patching import PatchValidationError, apply_patch_edits, propose_patch_edits
 from simple_ar.code_task.editing.planning import generate_patch_plan
 from simple_ar.code_task.generation.greenfield import generate_greenfield_code_task
-from simple_ar.code_task.generation.generated_project_repair import repair_generated_project_from_review
+from simple_ar.code_task.generation.generated_project_repair import (
+    repair_generated_project_from_review,
+    repair_generated_project_from_run_failure,
+)
 from simple_ar.code_task.generation.review import review_generated_project
 from simple_ar.code_task.execution.repair import propose_repair_edits
 from simple_ar.code_task.review import review_code_task_changes
@@ -961,8 +964,54 @@ def _execute_greenfield_code_task(
             ],
             metadata={"metrics": result.metrics},
         )
-        if result.status != "passed":
-            return _result(paths, steps, "benchmark_failed", "Review code_task/run/patched/ for generated project failure.")
+        while result.status != "passed":
+            repaired = _attempt_greenfield_run_repair(
+                root,
+                paths,
+                steps,
+                repair_rounds=repair_rounds,
+                message_callback=message_callback,
+            )
+            if not repaired:
+                return _result(paths, steps, "benchmark_failed", "Review code_task/run/patched/ for generated project failure.")
+            _emit(message_callback, "Run repair patched generated project; rerunning static validation.")
+            validation = validate_code_task(
+                root,
+                strict=strict_validation,
+                max_file_bytes=validation_max_file_bytes,
+            )
+            _record(steps, "validate", "done", f"post-repair status {validation.status}")
+            if validation.status == "failed":
+                return _result(
+                    paths,
+                    steps,
+                    "validation_failed",
+                    "Review code_task/meta/validation_report.json after generated project repair.",
+                )
+            _emit(message_callback, "Run repair patched generated project; rerunning benchmark.")
+            result = run_code_task_benchmark(
+                root,
+                timeout_sec=timeout_sec,
+                skip_validation=True,
+                run_label="patched",
+                env_mode=env_mode,
+                python_executable=python_executable,
+                stream_output=stream_benchmark_output,
+                output_callback=_benchmark_output_callback(message_callback),
+            )
+            _record(steps, "run", "done", f"post-repair status {result.status}")
+            _memory_event(
+                root,
+                "generated_run_repair",
+                f"Generated project benchmark after repair finished with status {result.status}.",
+                status=result.status,
+                artifacts=[
+                    _relative_to_run(root, result.report_path),
+                    _relative_to_run(root, result.metrics_path),
+                    "code_task/meta/run_repair.json",
+                ],
+                metadata={"metrics": result.metrics},
+            )
     if _stop_after("run", to_step):
         return _result(paths, steps, "completed", "Review code_task/summary.md and generated_project/.")
 
@@ -1183,6 +1232,52 @@ def _attempt_greenfield_review_repair(
     return True
 
 
+def _attempt_greenfield_run_repair(
+    run_dir: Path,
+    paths: object,
+    steps: list[ExecuteStepRecord],
+    *,
+    repair_rounds: int,
+    message_callback: MessageCallback | None,
+) -> bool:
+    if not _greenfield_run_repair_available(run_dir, repair_rounds):
+        _record(steps, "repair", "skipped", "run repair budget exhausted or disabled")
+        return False
+    _emit(message_callback, "Analyzing generated project benchmark failure.")
+    analysis = analyze_code_task_failure(run_dir)
+    _record(steps, "analyze-failure", "done", f"source {analysis.source}; status {analysis.status}")
+    _emit(message_callback, "Attempting bounded generated project run repair.")
+    stderr_path = paths.run_artifact_dir / "patched" / "stderr.txt"
+    repair = repair_generated_project_from_run_failure(
+        project_dir=paths.workspace_dir / "generated_project",
+        failure_analysis={
+            "status": analysis.status,
+            "source": analysis.source,
+            "analysis": _relative_to_run(run_dir, analysis.analysis_path),
+            "implicated_files": list(analysis.implicated_files),
+        },
+        stderr_text=stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else "",
+        output_path=paths.meta_dir / "run_repair.json",
+    )
+    _record(steps, "repair", "done", f"run repair {repair.get('status', 'unknown')}")
+    _update_greenfield_run_repair_manifest(run_dir, repair=repair)
+    write_code_task_summary(run_dir)
+    if repair.get("status") != "patched":
+        return False
+    _memory_event(
+        run_dir,
+        "greenfield_run_repair",
+        "Patched generated project after benchmark failure.",
+        status=str(repair.get("status", "unknown")),
+        artifacts=[
+            _relative_to_run(run_dir, analysis.analysis_path),
+            "code_task/meta/run_repair.json",
+        ],
+        metadata={"changed_files": repair.get("changed_files", [])},
+    )
+    return True
+
+
 def _repair_greenfield_review_failure(
     run_dir: Path,
     paths: object,
@@ -1261,6 +1356,41 @@ def _rerun_greenfield_review(
     save_code_task_manifest(run_dir, manifest)
     write_code_task_summary(run_dir)
     return review
+
+
+def _greenfield_run_repair_available(run_dir: Path, repair_rounds: int) -> bool:
+    if repair_rounds <= 0:
+        return False
+    manifest = load_code_task_manifest(run_dir)
+    repair = manifest.get("repair", {})
+    if not isinstance(repair, dict):
+        return True
+    try:
+        used = int(repair.get("run_repair_count", 0) or 0)
+    except (TypeError, ValueError):
+        used = 0
+    return used < repair_rounds
+
+
+def _update_greenfield_run_repair_manifest(run_dir: Path, *, repair: dict[str, Any]) -> None:
+    manifest = load_code_task_manifest(run_dir)
+    repair_section = manifest_section(manifest, "repair")
+    previous_count = int(repair_section.get("run_repair_count", 0) or 0)
+    repair_section.update(
+        {
+            "status": repair.get("status", "unknown"),
+            "run_repair_count": previous_count + 1,
+            "latest_run_repair": "code_task/meta/run_repair.json",
+            "latest_run_repair_at": utcnow_iso(),
+            "latest_run_repair_changed_files": repair.get("changed_files", []),
+        }
+    )
+    manifest["repair"] = repair_section
+    implementation = manifest_section(manifest, "implementation")
+    implementation["run_repair_status"] = repair.get("status", "unknown")
+    implementation["run_repair_changed_files"] = repair.get("changed_files", [])
+    manifest["implementation"] = implementation
+    save_code_task_manifest(run_dir, manifest)
 
 
 def _greenfield_result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
