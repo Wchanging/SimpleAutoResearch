@@ -21,7 +21,7 @@ from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
     repair_generated_project_from_run_failure,
 )
-from simple_ar.code_task.generation.review import review_generated_project
+from simple_ar.code_task.generation.review import is_current_greenfield_review, review_generated_project
 from simple_ar.code_task.execution.repair import propose_repair_edits
 from simple_ar.code_task.review import review_code_task_changes
 from simple_ar.code_task.execution.runner import run_code_task_baseline, run_code_task_benchmark
@@ -882,8 +882,18 @@ def _execute_greenfield_code_task(
     if _should_run("review", to_step):
         review_path = paths.meta_dir / "review_report.json"
         if review_path.is_file():
-            _record(steps, "review", "skipped", "greenfield review_report.json already exists")
             review = read_json(review_path)
+            if not isinstance(review, dict) or not is_current_greenfield_review(review):
+                _emit(message_callback, "Review contract changed; rerunning generated project review.")
+                review = _rerun_greenfield_review(
+                    root,
+                    paths,
+                    max_files=max_files,
+                    max_generated_lines=max_generated_lines,
+                )
+                _record(steps, "review", "done", f"refreshed status {review.get('status', 'unknown')}")
+            else:
+                _record(steps, "review", "skipped", "greenfield review_report.json is current")
             if isinstance(review, dict) and review.get("status") == "failed":
                 if not _attempt_greenfield_review_repair(
                     root,
@@ -1351,6 +1361,7 @@ def _rerun_greenfield_review(
     manifest = load_code_task_manifest(run_dir)
     implementation = manifest_section(manifest, "implementation")
     implementation["review_status"] = review.get("status", "unknown")
+    implementation["status"] = "generated" if review.get("status") != "failed" else "review_failed"
     implementation["reviewed_at"] = utcnow_iso()
     manifest["implementation"] = implementation
     save_code_task_manifest(run_dir, manifest)

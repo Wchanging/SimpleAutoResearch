@@ -101,13 +101,14 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
         )
     execute_result = execute_code_task(
         code_task_run_dir,
-        to_step="work-plan",
+        to_step="review",
         model=model_name(ctx),
         use_llm=ctx.config.get("use_llm") is True,
         timeout_sec=int(plan.get("timeout_sec") or experiment_timeout(ctx)),
         max_files=int(resource_plan.get("max_files") or ctx.config.get("execute_max_files") or 8),
         max_source_chars_per_file=int(ctx.config.get("execute_max_source_chars_per_file") or 4000),
         max_generated_lines=int(resource_plan.get("max_generated_lines") or 1600),
+        repair_rounds=int(ctx.config.get("implementation_max_repair_attempts", 1) or 1),
         implementation_provider=str(ctx.config.get("implementation_provider") or "local"),
         implementation_agent_mode=str(ctx.config.get("implementation_agent_mode") or ""),
         implementation_allow_external_agent=ctx.config.get("implementation_allow_external_agent") is True,
@@ -127,6 +128,11 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
             "summary": relative_or_string(ctx.run_dir, execute_result.summary_path),
         },
     )
+    if execute_result.stop_reason != "stop_point":
+        raise RuntimeError(
+            "Embedded greenfield code-task did not pass code review. "
+            f"Stop reason: {execute_result.stop_reason}. See {execute_result.summary_path}."
+        )
     _project_code_task_outputs(ctx, code_task_run_dir)
     ctx.emit(
         "stage_message",

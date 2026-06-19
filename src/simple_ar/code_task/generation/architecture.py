@@ -119,7 +119,7 @@ def fallback_architecture_plan(
             "Fallback generation is a conservative runnable scaffold, not a domain-specific breakthrough.",
             "LLM-generated files still require review and run guard validation.",
         ],
-        "files": _fallback_files(required_metrics, _positive_int(resource_plan.get("max_files"), 8)),
+        "files": _ensure_public_api(_fallback_files(required_metrics, _positive_int(resource_plan.get("max_files"), 8))),
     }
 
 
@@ -148,6 +148,8 @@ def render_architecture_markdown(plan: Mapping[str, Any]) -> str:
     for row in plan.get("files", []):
         if isinstance(row, Mapping):
             lines.append(f"- `{row.get('path', '')}`: {row.get('purpose', '')}")
+            for api in _list(row.get("public_api")):
+                lines.append(f"  - API: `{api}`")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -195,7 +197,8 @@ def greenfield_architecture_prompt(
         "Design a bounded greenfield project from this contract. "
         "Return JSON with fields: objective, architecture_summary, data_flow, "
         "interfaces, test_strategy, risks, and files. Each file must include "
-        "path, purpose, dependencies, acceptance_criteria, and entrypoint boolean.\n\n"
+        "path, purpose, dependencies, public_api, acceptance_criteria, and entrypoint boolean. "
+        "public_api must list exact exported class/function names and concise signatures used by dependent files.\n\n"
         "Hard rules:\n"
         "- Keep paths relative, POSIX-style, and inside the generated project.\n"
         "- Include `main.py` as the command-line entrypoint.\n"
@@ -204,6 +207,8 @@ def greenfield_architecture_prompt(
         "- The entrypoint must print all required metrics as `metric_name: number`.\n"
         "- Define exactly one authoritative experiment orchestrator. Helper modules "
         "must not each reimplement their own full dataset/model/metric pipeline.\n"
+        "- Design dependency interfaces before implementation. Every cross-file call must use an exact name "
+        "declared in the dependency file's public_api; do not use vague prose as an interface contract.\n"
         "- Make `main.py` a thin CLI wrapper when possible; put reusable logic in "
         "purpose-specific modules and call them from the orchestrator.\n"
         "- Avoid heavyweight dependencies, network access, and GPU use unless explicitly allowed.\n\n"
@@ -354,6 +359,7 @@ def _normalize_file(row: Mapping[str, Any]) -> dict[str, Any]:
         "path": path,
         "purpose": _text(row.get("purpose"))[:500] or "Generated project file.",
         "dependencies": _list(row.get("dependencies"))[:12],
+        "public_api": _list(row.get("public_api"))[:30] or _default_public_api(path),
         "acceptance_criteria": _list(row.get("acceptance_criteria"))[:12],
         "entrypoint": bool(row.get("entrypoint")),
     }
@@ -367,6 +373,34 @@ def _safe_path(value: str) -> str:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         return ""
     return path.as_posix()
+
+
+def _ensure_public_api(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for row in files:
+        path = str(row.get("path", ""))
+        row.setdefault("public_api", _default_public_api(path))
+    return files
+
+
+def _default_public_api(path: str) -> list[str]:
+    contracts = {
+        "main.py": ["main(argv=None)"],
+        "generated_experiment/data.py": [
+            "load_text_classification_splits(config_path=None) -> tuple[DatasetSplits, DatasetInfo]",
+        ],
+        "generated_experiment/features.py": ["FeatureExtractor.fit(...) and FeatureExtractor.transform(...)"],
+        "generated_experiment/models.py": ["build_model_conditions(x_train, y_train, config) -> list[ModelCondition]"],
+        "generated_experiment/metrics.py": [
+            "accuracy_score(y_true, y_pred) -> float",
+            "macro_f1_score(y_true, y_pred) -> float",
+        ],
+        "generated_experiment/runner.py": [
+            "run_experiment(preset='smoke', data_source='auto', config=None, mode='run') -> dict[str, float]",
+        ],
+        "generated_experiment/evaluation.py": ["evaluate_conditions(...) -> EvaluationSummary"],
+        "generated_experiment/reporting.py": ["final_metrics_from_evaluation(...) -> dict[str, float]"],
+    }
+    return contracts.get(path, [])
 
 
 def _positive_int(value: object, default: int) -> int:

@@ -48,6 +48,7 @@ from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.editing.planning import select_relevant_files
 from simple_ar.code_task.analysis.repo_map import build_repo_map
 from simple_ar.code_task.memory import task_memory_context
+from simple_ar.code_task.analysis.interfaces import snippet_api_contract
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.app.usage import summarize_usage
 
@@ -704,6 +705,8 @@ def _edit_user_prompt(
         f"Workspace file inventory JSON:\n{json.dumps(compact_files, indent=2, ensure_ascii=False)}\n\n"
         "Read-only context files omitted from editable snippets:\n"
         f"{json.dumps(read_only_context, indent=2, ensure_ascii=False)}\n\n"
+        "Selected Python API contract (derived from the exact snippets below):\n"
+        f"{json.dumps(snippet_api_contract(snippets), indent=2, ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
 

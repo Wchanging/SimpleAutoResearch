@@ -3361,6 +3361,8 @@ class _FakeRepairClient:
 
 class _FakeCodeTaskClient:
     def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+        if label.startswith("code-task-review-"):
+            return {"findings": []}
         if label == "code-task-work-plan":
             return {
                 "summary": "Improve prize-message classification in one small batch.",

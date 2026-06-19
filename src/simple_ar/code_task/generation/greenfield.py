@@ -454,7 +454,7 @@ def _update_manifest_after_generation(
     implementation = manifest_section(manifest, "implementation")
     implementation.update(
         {
-            "status": "generated",
+            "status": "generated" if review.get("status") != "failed" else "review_failed",
             "mode": "greenfield",
             "generated_at": utcnow_iso(),
             "project_dir": "code_task/workspace/generated_project",
@@ -479,7 +479,7 @@ def _update_manifest_after_generation(
     if not benchmark.get("command"):
         benchmark["command"] = "python generated_project/main.py"
     manifest["benchmark"] = benchmark
-    manifest["status"] = "generated"
+    manifest["status"] = "generated" if review.get("status") != "failed" else "review_failed"
     save_code_task_manifest(run_dir, manifest)
 
 

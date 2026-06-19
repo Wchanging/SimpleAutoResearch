@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from simple_ar.core.artifacts import write_text
 from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.code_task.analysis.interfaces import dependency_context, order_file_specs, public_api
 from simple_ar.code_task.generation.implementation_memory import record_generated_file, record_generation_batch
 from simple_ar.code_task.generation.scaffold import fallback_file_content
 
@@ -27,7 +28,7 @@ def write_generated_project(
     if project_dir.exists():
         shutil.rmtree(project_dir)
     project_dir.mkdir(parents=True, exist_ok=True)
-    files = [row for row in architecture_plan.get("files", []) if isinstance(row, Mapping)]
+    files = order_file_specs([row for row in architecture_plan.get("files", []) if isinstance(row, Mapping)])
     files = files[: max(1, len(files))]
     generated: list[dict[str, Any]] = []
     total_lines = 0
@@ -43,6 +44,7 @@ def write_generated_project(
             architecture_plan=architecture_plan,
             result_schema=result_schema,
             contract=contract,
+            dependency_api=dependency_context(project_dir, file_spec),
             client=client,
         )
         line_count = max(1, len(content.splitlines()))
@@ -51,6 +53,7 @@ def write_generated_project(
         target = project_dir / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         write_text(target, content)
+        exported_api = public_api(target) if target.suffix == ".py" else []
         total_lines += line_count
         generated.append(
             {
@@ -58,9 +61,10 @@ def write_generated_project(
                 "mode": mode,
                 "line_count": line_count,
                 "summary": summary,
+                "public_api": exported_api,
             }
         )
-        record_generated_file(memory, path=rel_path, summary=summary, mode=mode)
+        record_generated_file(memory, path=rel_path, summary=summary, mode=mode, public_api=exported_api)
         batch_files.append(rel_path)
         if len(batch_files) >= max(1, files_per_batch):
             record_generation_batch(memory, batch_id=batch_id, files=batch_files, mode=mode)
@@ -113,21 +117,29 @@ def _file_content(
     architecture_plan: Mapping[str, Any],
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
+    dependency_api: Mapping[str, Any],
     client: LLMClient | None,
 ) -> tuple[str, str, str]:
     path = _safe_path(str(file_spec.get("path", "")))
     if client is not None and path.endswith(".py"):
-        try:
-            response = client.ask_json(
-                GREENFIELD_FILE_SYSTEM,
-                greenfield_file_prompt(
-                    file_spec=file_spec,
-                    architecture_plan=architecture_plan,
-                    result_schema=result_schema,
-                    contract=contract,
-                ),
-                label=f"greenfield-file-{path}",
-            )
+        feedback = ""
+        for attempt in range(2):
+            try:
+                response = client.ask_json(
+                    GREENFIELD_FILE_SYSTEM,
+                    greenfield_file_prompt(
+                        file_spec=file_spec,
+                        architecture_plan=architecture_plan,
+                        result_schema=result_schema,
+                        contract=contract,
+                        dependency_api=dependency_api,
+                        retry_feedback=feedback,
+                    ),
+                    label=f"greenfield-file-{path}" if attempt == 0 else f"greenfield-file-retry-{path}",
+                )
+            except LLMError as exc:
+                feedback = f"The previous request failed validation: {exc}. Return smaller, complete Python."
+                continue
             content = str(response.get("content", "")).strip()
             summary = str(response.get("summary", "")).strip() or str(file_spec.get("purpose", ""))
             if content and not _looks_like_markdown_fence(content):
@@ -135,9 +147,12 @@ def _file_content(
                 if _is_valid_python_content(cleaned, filename=path):
                     mode = "llm_repaired" if cleaned != content.rstrip() + "\n" else "llm"
                     return cleaned, mode, summary[:500]
-        except LLMError:
-            pass
-    return fallback_file_content(path, result_schema, contract), "fallback", str(file_spec.get("purpose", ""))[:500]
+            feedback = (
+                "The previous response was empty, fenced, or invalid Python. "
+                "Return a complete, concise file in the JSON content field and preserve exact dependency APIs."
+            )
+    summary = str(file_spec.get("purpose", ""))[:420]
+    return fallback_file_content(path, result_schema, contract), "fallback", f"{summary} [LLM file generation unavailable]"
 
 
 def greenfield_file_prompt(
@@ -146,6 +161,8 @@ def greenfield_file_prompt(
     architecture_plan: Mapping[str, Any],
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
+    dependency_api: Mapping[str, Any] | None = None,
+    retry_feedback: str = "",
 ) -> str:
     return (
         "Generate exactly one file for this bounded Python project. "
@@ -162,10 +179,16 @@ def greenfield_file_prompt(
         "Simple helpers should stay small; core modules may be longer when the task genuinely requires it.\n"
         "- Prefer deterministic, testable logic over broad simulations, noisy logs, or unstructured frameworks.\n"
         "- Do not leave placeholders, unfinished functions, unterminated literals, or truncated JSON/Python.\n\n"
+        "Existing dependency contract:\n"
+        "- The dependency APIs below come from files already written to disk and are authoritative.\n"
+        "- Import and call the exact exported names and signatures. Do not invent synonyms or alternate helper names.\n"
+        "- If the planned file cannot work with an existing dependency API, adapt this file rather than assuming a missing API.\n\n"
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
+        f"Actual dependency APIs:\n{json.dumps(dict(dependency_api or {}), indent=2, ensure_ascii=False)}\n\n"
         f"Architecture plan:\n{json.dumps(dict(architecture_plan), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Experiment contract:\n{json.dumps(dict(contract), indent=2, ensure_ascii=False)}\n"
+        + (f"\nRetry feedback:\n{retry_feedback}\n" if retry_feedback else "")
     )
 
 

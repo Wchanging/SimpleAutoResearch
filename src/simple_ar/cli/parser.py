@@ -424,6 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
             "plan",
             "propose-edits",
             "apply-edits",
+            "review",
             "validate",
             "run",
             "analyze-failure",

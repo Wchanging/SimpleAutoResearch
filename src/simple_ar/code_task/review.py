@@ -10,6 +10,7 @@ from simple_ar.code_task.editing.scope import (
     protected_patterns_from_manifest,
 )
 from simple_ar.code_task.memory import record_review_finding, task_memory_context
+from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
 from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest
 from simple_ar.core.artifacts import read_json, read_text, write_json
 from simple_ar.reviewing.schema import ReviewFinding
@@ -123,6 +124,26 @@ def _deterministic_findings(root: Path, manifest: dict[str, Any], changed_files:
                     source="code-task.rule-review",
                 )
             )
+    for mismatch in find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files):
+        caller = str(mismatch.get("caller", ""))
+        target_path = str(mismatch.get("target_path", ""))
+        target_module = str(mismatch.get("target_module", ""))
+        missing_symbol = str(mismatch.get("missing_symbol", ""))
+        available = ", ".join(mismatch.get("available_symbols", [])) or "none"
+        findings.append(
+            ReviewFinding(
+                key=f"interface:{caller}:{mismatch.get('line', 0)}:{target_module}:{missing_symbol}",
+                severity="blocking",
+                category="interface_compatibility",
+                summary=(
+                    f"`{caller}` references missing local API `{target_module}.{missing_symbol}`; "
+                    f"available symbols: {available}."
+                ),
+                evidence=[caller, target_path, "code_task/patch.diff"],
+                recommendation="Align the caller with the actual local module API before running the benchmark.",
+                source="code-task.rule-review",
+            )
+        )
     if not changed_files and _patch_status(manifest) == "applied":
         findings.append(
             ReviewFinding(
@@ -185,6 +206,10 @@ def _review_prompt(
     max_source_chars_per_file: int,
 ) -> str:
     paths = code_task_paths(run_dir)
+    interface_mismatches = find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files)
+    interface_paths = _dedupe(
+        [*changed_files, *(str(row.get("target_path", "")) for row in interface_mismatches)]
+    )[:20]
     snippets = "\n\n".join(
         f"### {path}\n```text\n{_source_snippet(paths.workspace_dir / path, max_source_chars_per_file)}\n```"
         for path in changed_files[:8]
@@ -202,6 +227,11 @@ def _review_prompt(
             "validation_report": _read_optional_json(paths.meta_dir / "validation_report.json"),
             "patched_run_record": _run_record(manifest, "patched"),
             "patch_diff": _clip(_read_optional_text(paths.task_dir / "patch.diff"), 9000),
+            "local_api_contract": project_api_contract(
+                paths.workspace_dir,
+                relevant_paths=interface_paths,
+            ),
+            "local_api_mismatches": interface_mismatches,
         },
         snippets=[snippets] if snippets else [],
     )

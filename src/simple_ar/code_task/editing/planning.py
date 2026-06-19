@@ -25,6 +25,7 @@ from simple_ar.code_task.analysis.context import (
     load_latest_code_task_context_pack,
 )
 from simple_ar.code_task.memory import task_memory_context
+from simple_ar.code_task.analysis.interfaces import snippet_api_contract
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.app.usage import summarize_usage
 
@@ -425,6 +426,8 @@ def _plan_user_prompt(
         f"Run context JSON:\n{json.dumps(run_context, indent=2, ensure_ascii=False)}\n\n"
         f"Task memory:\n{memory_context}\n\n"
         f"Codebase index summary JSON:\n{json.dumps(compact_index, indent=2, ensure_ascii=False)}\n\n"
+        "Selected Python API contract (derived from the exact snippets below):\n"
+        f"{json.dumps(snippet_api_contract(snippets), indent=2, ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
 

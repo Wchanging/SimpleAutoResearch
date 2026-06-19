@@ -15,6 +15,7 @@ from simple_ar.code_task import (
     propose_patch_edits,
     propose_repair_edits,
     record_plan_decision,
+    review_code_task_changes,
     run_code_task_baseline,
     run_code_task_benchmark,
     validate_code_task,
@@ -169,6 +170,19 @@ def prepare_code_task_experiment(
             "tests or benchmark files. Improve source behavior without changing "
             "validation targets."
         )
+    _emit(message_callback, "Reviewing embedded code-task patch before validation.")
+    review = review_code_task_changes(
+        run_dir,
+        phase="post_apply",
+        model=model,
+        use_llm=use_llm,
+        message_callback=message_callback,
+    )
+    if review.status == "failed":
+        raise RuntimeError(
+            "Embedded code-task review blocked the applied patch. "
+            f"See {review.report_path}."
+        )
     validation = validate_code_task(run_dir)
     if validation.status == "failed":
         raise RuntimeError(
@@ -293,6 +307,19 @@ def _verify_or_repair_patch(
         raise RuntimeError(
             "Embedded code-task repair modified protected tests or benchmark files. "
             "Improve source behavior without changing validation targets."
+        )
+    _emit(message_callback, "Reviewing embedded code-task repair before validation.")
+    repaired_review = review_code_task_changes(
+        run_dir,
+        phase="post_repair",
+        model=model,
+        use_llm=use_llm,
+        message_callback=message_callback,
+    )
+    if repaired_review.status == "failed":
+        raise RuntimeError(
+            "Embedded code-task review blocked the repair patch. "
+            f"See {repaired_review.report_path}."
         )
     repaired_validation = validate_code_task(run_dir)
     if repaired_validation.status == "failed":

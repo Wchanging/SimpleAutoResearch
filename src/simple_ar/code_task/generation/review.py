@@ -7,6 +7,10 @@ from typing import Any, Mapping
 from simple_ar.integrations.llm import LLMClient
 from simple_ar.reviewing.schema import ReviewFinding
 from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
+from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
+
+
+GREENFIELD_REVIEW_CONTRACT_VERSION = 2
 
 
 def review_generated_project(
@@ -52,8 +56,16 @@ def review_generated_project(
             "max_lines": _int(resource_plan.get("max_generated_lines"), 1200),
             "generated_file_count": len(generated),
             "generated_line_count": total_lines,
+            "review_contract_version": GREENFIELD_REVIEW_CONTRACT_VERSION,
         },
     )
+
+
+def is_current_greenfield_review(report: Mapping[str, Any]) -> bool:
+    metadata = report.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    return _int(metadata.get("review_contract_version"), 0) == GREENFIELD_REVIEW_CONTRACT_VERSION
 
 
 def _deterministic_findings(
@@ -73,6 +85,18 @@ def _deterministic_findings(
         findings.append(_finding("blocking", "too_many_lines", f"Generated {total_lines} lines; budget is {max_lines}."))
     if not (project_dir / "main.py").is_file():
         findings.append(_finding("blocking", "missing_entrypoint", "`main.py` entrypoint is missing."))
+    has_llm_files = any(str(row.get("mode", "")).startswith("llm") for row in generated)
+    if has_llm_files:
+        for row in generated:
+            path = str(row.get("path", ""))
+            if row.get("mode") == "fallback" and path.endswith(".py") and not path.endswith("/__init__.py"):
+                findings.append(
+                    _finding(
+                        "blocking",
+                        "mixed_generation_fallback",
+                        f"Core file `{path}` fell back while related files were LLM-generated; cross-file contracts are unsafe.",
+                    )
+                )
     for row in generated:
         path = _safe_path(str(row.get("path", "")))
         if not path:
@@ -96,6 +120,19 @@ def _deterministic_findings(
                     f"Required metric `{metric}` is not visibly printed or returned in generated files.",
                 )
             )
+    for mismatch in find_local_api_mismatches(project_dir):
+        available = ", ".join(mismatch.get("available_symbols", [])) or "none"
+        findings.append(
+            _finding(
+                "blocking",
+                "missing_local_api",
+                (
+                    f"{mismatch.get('caller')}:{mismatch.get('line')} references "
+                    f"`{mismatch.get('target_module')}.{mismatch.get('missing_symbol')}`, "
+                    f"but the generated module does not export it. Available: {available}."
+                ),
+            )
+        )
     return findings
 
 
@@ -113,7 +150,7 @@ def _llm_findings(
     if client is None or meta_dir is None:
         return []
     snippets = []
-    for path in sorted(project_dir.rglob("*.py"))[:6]:
+    for path in _review_paths(project_dir)[:8]:
         try:
             rel = path.relative_to(project_dir).as_posix()
             text = _review_snippet(path)
@@ -130,6 +167,7 @@ def _llm_findings(
             "resource_plan": dict(resource_plan),
             "architecture_plan": _compact_mapping(architecture_plan),
             "implementation_memory": _compact_mapping(implementation_memory),
+            "actual_project_api": project_api_contract(project_dir),
         },
         snippets=snippets,
     )
@@ -185,6 +223,28 @@ def _review_snippet(path: Path, *, limit: int = 5000) -> str:
         return text
     half = max(1000, limit // 2)
     return text[:half].rstrip() + "\n\n# ... middle omitted for reviewer prompt ...\n\n" + text[-half:].lstrip()
+
+
+def _review_paths(project_dir: Path) -> list[Path]:
+    """Prioritize orchestration and dependency-boundary files for review."""
+
+    paths = sorted(project_dir.rglob("*.py"))
+    priorities = {
+        "main.py": 0,
+        "generated_experiment/runner.py": 1,
+        "generated_experiment/data.py": 2,
+        "generated_experiment/models.py": 3,
+        "generated_experiment/metrics.py": 4,
+        "generated_experiment/evaluation.py": 5,
+        "generated_experiment/reporting.py": 6,
+    }
+    return sorted(
+        paths,
+        key=lambda path: (
+            priorities.get(path.relative_to(project_dir).as_posix(), 100),
+            path.relative_to(project_dir).as_posix(),
+        ),
+    )
 
 
 def _safe_path(value: str) -> str:
