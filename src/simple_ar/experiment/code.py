@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
 from simple_ar.core.artifacts import read_json, write_json, write_text
+from simple_ar.code_task import execute_code_task, initialize_code_task
 from simple_ar.core.pipeline import Context
 from simple_ar.experiment.code_task_bridge import (
     build_code_task_experiment_script,
@@ -12,12 +14,12 @@ from simple_ar.experiment.code_task_bridge import (
     prepare_code_task_experiment,
     write_code_task_experiment_meta,
 )
-from simple_ar.experiment.coding import GREENFIELD_TEMPLATE, implement_greenfield_project, implementation_route
+from simple_ar.experiment.coding import GREENFIELD_TEMPLATE, implementation_route
+from simple_ar.code_task.generation.writer import build_greenfield_harness_script
 from simple_ar.experiment.rerun import preserve_stage_outputs
 from simple_ar.experiment.service import load_experiment_plan
 from simple_ar.experiment.stage_common import design_json, experiment_timeout, model_name, repo_root
 from simple_ar.experiment.templates import build_experiment_code
-from simple_ar.pipeline_stages.common import _llm_client
 
 
 def execute_code(ctx: Context) -> None:
@@ -55,7 +57,7 @@ def execute_code(ctx: Context) -> None:
 
 
 def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
-    ctx.emit("stage_message", "Planning and generating bounded greenfield experiment project.")
+    ctx.emit("stage_message", "Planning and generating greenfield project through unified code-task engine.")
     contract = design_json(ctx, "experiment_contract.json")
     result_schema = design_json(ctx, "result_schema.json")
     resource_plan = design_json(ctx, "resource_plan.json")
@@ -74,79 +76,134 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
             "agent_mode": str(ctx.config.get("implementation_agent_mode") or ""),
         },
     )
-    result = implement_greenfield_project(
-        stage_dir=ctx.stage_dir(),
-        contract=contract,
-        result_schema=result_schema,
-        resource_plan=resource_plan,
-        dependency_plan=dependency_plan,
-        domain_profile=domain_profile,
-        client=_llm_client(ctx),
-        implementation_provider=str(ctx.config.get("implementation_provider") or "local"),
-        agent_mode=str(ctx.config.get("implementation_agent_mode") or ""),
-        allow_external_agent=ctx.config.get("implementation_allow_external_agent") is True,
-        backend_timeout_sec=int(ctx.config.get("implementation_agent_timeout_sec") or plan.get("timeout_sec") or experiment_timeout(ctx)),
-        agent_model=str(ctx.config.get("implementation_agent_model") or ""),
-        agent_binary=str(ctx.config.get("implementation_agent_binary") or ""),
-        agent_args=[str(item) for item in (ctx.config.get("implementation_agent_args") or [])],
-    )
-    if result.review_status == "failed" and ctx.config.get("use_llm") is True:
-        if ctx.config.get("generation_allow_fallback_scaffold") is not True:
-            ctx.emit(
-                "stage_message",
-                "Greenfield LLM project failed deterministic review; keeping generated artifacts for inspection.",
-            )
-            raise RuntimeError(f"Greenfield code review failed. See {result.code_review_path}.")
-        ctx.emit(
-            "stage_message",
-            "Greenfield LLM project failed review; archiving it and using bounded fallback scaffold.",
-        )
-        archive = preserve_stage_outputs(
-            ctx,
-            artifact_paths=(
-                "architecture_plan.json",
-                "architecture_plan.md",
-                "file_plan.json",
-                "generated_project",
-                "code_artifacts.json",
-                "implementation_memory.json",
-                "code_review.json",
-                "code_backend.json",
-                "experiment.py",
-            ),
-            reason="greenfield LLM review failure",
-        )
-        result = implement_greenfield_project(
-            stage_dir=ctx.stage_dir(),
+    task_file = ctx.artifact_path("generated_code_task.md")
+    write_text(
+        task_file,
+        _greenfield_task_markdown(
             contract=contract,
             result_schema=result_schema,
             resource_plan=resource_plan,
             dependency_plan=dependency_plan,
             domain_profile=domain_profile,
-            client=None,
-            implementation_provider="local",
-            agent_mode="model",
-            allow_external_agent=False,
-            backend_timeout_sec=int(plan.get("timeout_sec") or experiment_timeout(ctx)),
+        ),
+    )
+    code_task_run_dir = ctx.stage_dir() / "code_task_run"
+    if not (code_task_run_dir / "manifest.json").is_file():
+        initialize_code_task(
+            run_dir=code_task_run_dir,
+            code_root=None,
+            task_file=task_file,
+            kind="greenfield",
+            benchmark_command="python generated_project/main.py",
+            workspace_mode="empty",
+            env_mode="current",
+            primary_metric=str(result_schema.get("primary_metric") or ""),
         )
-        write_json(
-            ctx.artifact_path("review_failure_recovery.json"),
-            {
-                "schema_version": "greenfield_review_recovery.v1",
-                "reason": "llm_project_failed_code_review",
-                "failed_archive_dir": archive.archive_dir.relative_to(ctx.stage_dir()).as_posix()
-                if archive is not None
-                else "",
-                "recovery_mode": "deterministic_fallback_scaffold",
-                "recovered_review_status": result.review_status,
-            },
-        )
+    execute_result = execute_code_task(
+        code_task_run_dir,
+        to_step="work-plan",
+        model=model_name(ctx),
+        use_llm=ctx.config.get("use_llm") is True,
+        timeout_sec=int(plan.get("timeout_sec") or experiment_timeout(ctx)),
+        max_files=int(resource_plan.get("max_files") or ctx.config.get("execute_max_files") or 8),
+        max_source_chars_per_file=int(ctx.config.get("execute_max_source_chars_per_file") or 4000),
+        max_generated_lines=int(resource_plan.get("max_generated_lines") or 1600),
+        implementation_provider=str(ctx.config.get("implementation_provider") or "local"),
+        implementation_agent_mode=str(ctx.config.get("implementation_agent_mode") or ""),
+        implementation_allow_external_agent=ctx.config.get("implementation_allow_external_agent") is True,
+        implementation_agent_model=str(ctx.config.get("implementation_agent_model") or ""),
+        implementation_agent_binary=str(ctx.config.get("implementation_agent_binary") or ""),
+        implementation_agent_args=tuple(str(item) for item in (ctx.config.get("implementation_agent_args") or [])),
+        implementation_agent_timeout_sec=int(ctx.config.get("implementation_agent_timeout_sec") or 600),
+        message_callback=lambda message: ctx.emit("stage_message", message),
+    )
+    write_json(
+        ctx.artifact_path("generated_code_task_meta.json"),
+        {
+            "schema_version": "embedded_greenfield_code_task.v1",
+            "code_task_run_dir": relative_or_string(ctx.run_dir, code_task_run_dir),
+            "stop_reason": execute_result.stop_reason,
+            "next_action": execute_result.next_action,
+            "summary": relative_or_string(ctx.run_dir, execute_result.summary_path),
+        },
+    )
+    _project_code_task_outputs(ctx, code_task_run_dir)
     ctx.emit(
         "stage_message",
-        f"Greenfield project generated at `{result.project_dir.name}` with review status {result.review_status}.",
+        "Greenfield project generated through nested code-task run.",
     )
-    if result.review_status == "failed":
-        raise RuntimeError(f"Greenfield code review failed. See {result.code_review_path}.")
+
+
+def _greenfield_task_markdown(
+    *,
+    contract: dict[str, Any],
+    result_schema: dict[str, Any],
+    resource_plan: dict[str, Any],
+    dependency_plan: dict[str, Any],
+    domain_profile: dict[str, Any],
+) -> str:
+    return (
+        "# Greenfield Code Task\n\n"
+        "Implement the experiment project described by the design artifacts below. "
+        "Create a runnable Python project under `generated_project/` and keep it bounded, "
+        "auditable, and reproducible.\n\n"
+        "## Experiment Contract\n\n"
+        f"```json\n{_json_block(contract)}\n```\n\n"
+        "## Result Schema\n\n"
+        f"```json\n{_json_block(result_schema)}\n```\n\n"
+        "## Resource Plan\n\n"
+        f"```json\n{_json_block(resource_plan)}\n```\n\n"
+        "## Dependency Plan\n\n"
+        f"```json\n{_json_block(dependency_plan)}\n```\n\n"
+        "## Domain Profile\n\n"
+        f"```json\n{_json_block(domain_profile)}\n```\n"
+    )
+
+
+def _json_block(value: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _project_code_task_outputs(ctx: Context, code_task_run_dir: Path) -> None:
+    task_dir = code_task_run_dir / "code_task"
+    nested_project = task_dir / "workspace" / "generated_project"
+    project_dir = ctx.stage_dir() / "generated_project"
+    if not nested_project.is_dir():
+        raise RuntimeError(f"Nested greenfield code-task did not generate project: {nested_project}")
+    if project_dir.exists():
+        shutil.rmtree(project_dir)
+    shutil.copytree(nested_project, project_dir)
+    copies = {
+        task_dir / "meta" / "architecture_plan.json": ctx.artifact_path("architecture_plan.json"),
+        task_dir / "meta" / "architecture_plan.md": ctx.artifact_path("architecture_plan.md"),
+        task_dir / "meta" / "file_plan.json": ctx.artifact_path("file_plan.json"),
+        task_dir / "meta" / "code_artifacts.json": ctx.artifact_path("code_artifacts.json"),
+        task_dir / "meta" / "review_report.json": ctx.artifact_path("code_review.json"),
+        task_dir / "memory" / "implementation_memory.json": ctx.artifact_path("implementation_memory.json"),
+    }
+    for source, target in copies.items():
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    nested_backend = {}
+    nested_backend_path = task_dir / "meta" / "code_backend.json"
+    if nested_backend_path.is_file():
+        nested_backend = read_json(nested_backend_path)
+    write_json(
+        ctx.artifact_path("code_backend.json"),
+        {
+            "schema_version": "code_backend.v1",
+            "backend": "unified_code_task_greenfield",
+            "provider": "code_task",
+            "code_task_run_dir": relative_or_string(ctx.run_dir, code_task_run_dir),
+            "project_dir": "generated_project",
+            "entrypoint": "python main.py",
+            "nested_code_backend": nested_backend,
+        },
+    )
+    write_text(ctx.artifact_path("experiment.py"), build_greenfield_harness_script())
 
 
 def _enforce_experiment_contract_gate(ctx: Context) -> None:

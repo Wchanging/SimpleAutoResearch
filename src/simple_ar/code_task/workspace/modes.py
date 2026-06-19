@@ -15,7 +15,7 @@ from simple_ar.code_task.workspace.copy import (
 )
 
 
-SUPPORTED_WORKSPACE_MODES = {"copy", "git_worktree", "sparse_copy"}
+SUPPORTED_WORKSPACE_MODES = {"copy", "empty", "git_worktree", "sparse_copy"}
 DEPENDENCY_FILE_NAMES = (
     "pyproject.toml",
     "requirements.txt",
@@ -37,10 +37,12 @@ class WorkspaceSpec:
     """Configuration for creating an editable code-task workspace.
 
     Args:
-        code_root: Source project directory provided by the user.
+        code_root: Source project directory provided by the user. Greenfield
+            runs may leave this empty when ``mode`` is ``empty``.
         task_dir: Code-task artifact directory.
         mode: Workspace strategy. V2.2 supports ``copy`` and
-            ``git_worktree``; ``sparse_copy`` is experimental.
+            ``git_worktree``; ``sparse_copy`` is experimental; ``empty`` is
+            used by greenfield code-task runs.
         max_file_bytes: Maximum copied file size for ``copy`` and
             ``sparse_copy`` modes.
         include: POSIX glob patterns copied by ``sparse_copy``.
@@ -51,7 +53,7 @@ class WorkspaceSpec:
             environment support. V2.2 does not execute it during init.
     """
 
-    code_root: Path
+    code_root: Path | None
     task_dir: Path
     mode: str = "copy"
     max_file_bytes: int = 2_000_000
@@ -114,6 +116,8 @@ class WorkspaceResult:
 def create_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     """Create the editable workspace requested by ``spec``."""
     mode = _normalize_mode(spec.mode)
+    if mode == "empty":
+        return _create_empty_workspace(spec)
     if mode == "copy":
         return _create_copy_workspace(spec)
     if mode == "git_worktree":
@@ -130,6 +134,8 @@ def suggested_python_executable(result: WorkspaceResult) -> str | None:
 
 
 def _create_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
+    if spec.code_root is None:
+        raise WorkspaceModeError("copy workspace mode requires code_root")
     source = _validated_source_root(spec.code_root)
     workspace = (spec.task_dir / "workspace").resolve()
     copy_report = copy_code_workspace(
@@ -159,6 +165,8 @@ def _create_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
 
 
 def _create_sparse_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
+    if spec.code_root is None:
+        raise WorkspaceModeError("sparse_copy workspace mode requires code_root")
     source = _validated_source_root(spec.code_root)
     workspace = (spec.task_dir / "workspace").resolve()
     copy_report = sparse_copy_code_workspace(
@@ -199,6 +207,8 @@ def _create_sparse_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
 
 
 def _create_git_worktree_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
+    if spec.code_root is None:
+        raise WorkspaceModeError("git_worktree workspace mode requires code_root")
     source = _validated_source_root(spec.code_root)
     workspace = (spec.task_dir / "workspace").resolve()
     if workspace.exists() and any(workspace.iterdir()):
@@ -254,6 +264,39 @@ def _create_git_worktree_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
             "Remove this workspace with `git worktree remove <workspace>` or "
             "delete the run directory and prune stale worktrees."
         ),
+    )
+
+
+def _create_empty_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
+    workspace = (spec.task_dir / "workspace").resolve()
+    if workspace.exists() and any(workspace.iterdir()):
+        raise FileExistsError(f"Workspace already contains files: {workspace}")
+    workspace.mkdir(parents=True, exist_ok=True)
+    return WorkspaceResult(
+        mode="empty",
+        source_root=workspace,
+        workspace_dir=workspace,
+        writable_root=workspace,
+        read_only_roots=(),
+        created_at=_utcnow_iso(),
+        copy_report=empty_copy_report(),
+        git=None,
+        environment_mapping={
+            "schema_version": 1,
+            "mode": "empty",
+            "dependency_files": [],
+            "reuse_source_venv": False,
+            "source_venv_detected": "",
+            "python_executable": "",
+            "setup_hook": spec.setup_hook.strip(),
+            "setup_hook_executed": False,
+            "notes": [
+                "Empty workspace prepared for a greenfield code-task run.",
+                "Generated code must stay inside this workspace.",
+            ],
+        },
+        patterns={},
+        cleanup_hint="Delete the run directory to remove this generated workspace.",
     )
 
 

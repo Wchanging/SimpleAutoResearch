@@ -71,6 +71,7 @@ class RunConfigTests(unittest.TestCase):
         self.assertEqual(execute_options.to_step, "run")
         self.assertEqual(execute_options.llm_retry_attempts, 2)
         self.assertFalse(execute_options.allow_planning_fallback)
+        self.assertEqual(execute_options.implementation_provider, "local")
 
     def test_research_section_is_flattened_for_pipeline_config(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -251,6 +252,45 @@ allow_fallback_scaffold = true
             self.assertEqual(task_config["resource"]["max_files"], 8)
             self.assertEqual(task_config["generation"]["files_per_batch"], 3)
             self.assertEqual(task_config["generation"]["allow_fallback_scaffold"], True)
+
+    def test_code_task_execute_options_read_shared_implementation_section(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            config = Path(tmp) / "code_task.toml"
+            config.write_text(
+                """
+[execute]
+to_step = "run"
+
+[resource]
+max_runtime_sec = 321
+max_files = 12
+max_generated_lines = 3456
+
+[implementation]
+provider = "fake"
+agent_mode = "handoff"
+allow_external_agent = true
+agent_model = "small"
+agent_binary = "fake-agent"
+agent_args = ["--quiet"]
+agent_timeout_sec = 123
+""".strip(),
+                encoding="utf-8",
+            )
+
+            options = load_code_task_execute_options(config_path=str(config))
+
+            self.assertEqual(options.implementation_provider, "fake")
+            self.assertEqual(options.implementation_agent_mode, "handoff")
+            self.assertTrue(options.implementation_allow_external_agent)
+            self.assertEqual(options.implementation_agent_model, "small")
+            self.assertEqual(options.implementation_agent_binary, "fake-agent")
+            self.assertEqual(options.implementation_agent_args, ("--quiet",))
+            self.assertEqual(options.implementation_agent_timeout_sec, 123)
+            self.assertEqual(options.timeout_sec, 321)
+            self.assertEqual(options.max_files, 12)
+            self.assertEqual(options.max_generated_lines, 3456)
 
 
 if __name__ == "__main__":

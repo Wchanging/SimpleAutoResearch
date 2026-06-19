@@ -14,6 +14,10 @@ DEFAULT_OUTPUT_ROOT = "runs"
 DEFAULT_MAX_FILE_BYTES = 2_000_000
 DEFAULT_ENV_MODE = "current"
 DEFAULT_WORKSPACE_MODE = "copy"
+DEFAULT_GREENFIELD_WORKSPACE_MODE = "empty"
+CODE_TASK_KIND_EXISTING = "existing_project"
+CODE_TASK_KIND_GREENFIELD = "greenfield"
+CODE_TASK_KINDS = {CODE_TASK_KIND_EXISTING, CODE_TASK_KIND_GREENFIELD}
 VALID_EXECUTE_STEPS = {
     "probe",
     "baseline",
@@ -22,6 +26,7 @@ VALID_EXECUTE_STEPS = {
     "plan",
     "propose-edits",
     "apply-edits",
+    "review",
     "validate",
     "run",
     "analyze-failure",
@@ -38,6 +43,7 @@ class _ConfigModel(BaseModel):
 
 
 class CodeTaskSection(_ConfigModel):
+    kind: str | None = None
     code_root: str | None = None
     task_file: str | None = None
     output_root: str | None = None
@@ -104,6 +110,25 @@ class ExecuteSection(_ConfigModel):
     cost_cap_usd: float | None = None
     max_files: int | None = None
     max_source_chars_per_file: int | None = None
+    max_generated_lines: int | None = None
+
+
+class ImplementationSection(_ConfigModel):
+    provider: str | None = None
+    agent_mode: str | None = None
+    allow_external_agent: bool | None = None
+    agent_model: str | None = None
+    agent_binary: str | None = None
+    agent_args: list[str] | None = None
+    agent_timeout_sec: int | None = None
+
+
+class ResourceSection(_ConfigModel):
+    max_runtime_sec: int | None = None
+    max_files: int | None = None
+    max_generated_lines: int | None = None
+    max_memory_mb: int | None = None
+    allow_gpu: bool | None = None
 
 
 class LLMSection(_ConfigModel):
@@ -147,6 +172,8 @@ class CodeTaskConfig(_ConfigModel):
     safety: SafetySection = Field(default_factory=SafetySection)
     edit_scope: EditScopeSection = Field(default_factory=EditScopeSection)
     execute: ExecuteSection = Field(default_factory=ExecuteSection)
+    implementation: ImplementationSection = Field(default_factory=ImplementationSection)
+    resource: ResourceSection = Field(default_factory=ResourceSection)
     llm: LLMSection = Field(default_factory=LLMSection)
     models: ModelsSection = Field(default_factory=ModelsSection)
     budget: BudgetSection = Field(default_factory=BudgetSection)
@@ -156,7 +183,8 @@ class CodeTaskConfig(_ConfigModel):
 class CodeTaskInitOptions:
     """Resolved options for ``code-task init`` after config/CLI merging."""
 
-    code_root: str
+    kind: str
+    code_root: str | None
     task_file: str | None
     output_root: str
     name: str | None
@@ -209,6 +237,14 @@ class CodeTaskExecuteOptions:
     cost_cap_usd: float | None
     max_files: int
     max_source_chars_per_file: int
+    max_generated_lines: int
+    implementation_provider: str
+    implementation_agent_mode: str
+    implementation_allow_external_agent: bool
+    implementation_agent_model: str
+    implementation_agent_binary: str
+    implementation_agent_args: tuple[str, ...]
+    implementation_agent_timeout_sec: int
     env_mode: str | None
     python_executable: str | None
     config_path: str | None
@@ -256,6 +292,8 @@ def load_code_task_execute_options(
     budget = config.budget
     environment = config.environment
     safety = config.safety
+    implementation = config.implementation
+    resource = config.resource
 
     to_step = _config_string(execute.to_step) or "run"
     if to_step not in VALID_EXECUTE_STEPS:
@@ -294,7 +332,8 @@ def load_code_task_execute_options(
         timeout_sec=_positive_int(
             _config_int(execute.timeout_sec)
             or _config_int(execute.timeout)
-            or _config_int(benchmark.timeout),
+            or _config_int(benchmark.timeout)
+            or _config_int(resource.max_runtime_sec),
             60,
         ),
         skip_validation=_resolve_bool(
@@ -334,10 +373,38 @@ def load_code_task_execute_options(
         edit_budget_overrides=_edit_budget_overrides(budget, budget_profile),
         max_batches=max_batches if max_batches and max_batches > 0 else None,
         cost_cap_usd=cost_cap if cost_cap is not None and cost_cap >= 0 else None,
-        max_files=_positive_int(_config_int(execute.max_files), 8),
+        max_files=_positive_int(
+            _config_int(execute.max_files)
+            or _config_int(resource.max_files)
+            or _config_int(budget.max_files),
+            8,
+        ),
         max_source_chars_per_file=_positive_int(
             _config_int(execute.max_source_chars_per_file),
             4000,
+        ),
+        max_generated_lines=_positive_int(
+            _config_int(execute.max_generated_lines)
+            or _config_int(resource.max_generated_lines),
+            1600,
+        ),
+        implementation_provider=_config_string(implementation.provider) or "local",
+        implementation_agent_mode=_config_string(implementation.agent_mode),
+        implementation_allow_external_agent=_resolve_bool(
+            override=None,
+            value=implementation.allow_external_agent,
+            default=False,
+        ),
+        implementation_agent_model=_config_string(implementation.agent_model),
+        implementation_agent_binary=_config_string(implementation.agent_binary),
+        implementation_agent_args=tuple(
+            str(item).strip()
+            for item in (implementation.agent_args or [])
+            if str(item).strip()
+        ),
+        implementation_agent_timeout_sec=_positive_int(
+            _config_int(implementation.agent_timeout_sec),
+            600,
         ),
         env_mode=_config_string(environment.mode),
         python_executable=(
@@ -351,6 +418,7 @@ def load_code_task_execute_options(
 def load_code_task_init_options(
     *,
     config_path: str | None = None,
+    kind: str | None = None,
     code_root: str | None = None,
     task_file: str | None = None,
     output_root: str | None = None,
@@ -384,13 +452,12 @@ def load_code_task_init_options(
     safety = config.safety
     edit_scope = config.edit_scope
 
-    resolved_code_root = _config_string(code_root) or _config_string(
-        code_task.code_root
-    )
+    resolved_kind = _normalize_code_task_kind(kind or code_task.kind)
+    resolved_code_root = _config_string(code_root) or _config_string(code_task.code_root)
     resolved_task_file = _config_string(task_file) or _config_string(
         code_task.task_file
     )
-    if not resolved_code_root:
+    if resolved_kind == CODE_TASK_KIND_EXISTING and not resolved_code_root:
         raise CodeTaskConfigError(
             "Missing code root. Pass --code-root or set [code_task].code_root."
         )
@@ -427,8 +494,25 @@ def load_code_task_init_options(
     resolved_workspace_mode = (
         _config_string(workspace_mode)
         or _config_string(workspace.mode)
-        or DEFAULT_WORKSPACE_MODE
+        or (
+            DEFAULT_GREENFIELD_WORKSPACE_MODE
+            if resolved_kind == CODE_TASK_KIND_GREENFIELD
+            else DEFAULT_WORKSPACE_MODE
+        )
     )
+    if resolved_kind == CODE_TASK_KIND_GREENFIELD and resolved_workspace_mode not in {
+        "empty",
+        "copy",
+        "sparse_copy",
+    }:
+        raise CodeTaskConfigError(
+            "Greenfield code-task runs support workspace.mode = empty, copy, or sparse_copy. "
+            "Use empty unless you deliberately provide a scaffold code_root."
+        )
+    if resolved_kind == CODE_TASK_KIND_GREENFIELD and resolved_workspace_mode != "empty" and not resolved_code_root:
+        raise CodeTaskConfigError(
+            "Greenfield workspace modes other than empty require [code_task].code_root as a scaffold/source root."
+        )
     resolved_reuse_source_venv = _resolve_bool(
         override=workspace_reuse_source_venv,
         value=workspace.reuse_source_venv,
@@ -447,6 +531,7 @@ def load_code_task_init_options(
     )
 
     return CodeTaskInitOptions(
+        kind=resolved_kind,
         code_root=resolved_code_root,
         task_file=resolved_task_file,
         output_root=resolved_output_root,
@@ -474,6 +559,27 @@ def load_code_task_init_options(
         edit_scope_protected_patterns=_config_string_list(edit_scope.protected_patterns),
         config_path=config_path,
     )
+
+
+def _normalize_code_task_kind(value: object) -> str:
+    text = (_config_string(value) or CODE_TASK_KIND_EXISTING).lower().replace("-", "_")
+    aliases = {
+        "existing": CODE_TASK_KIND_EXISTING,
+        "existing_code": CODE_TASK_KIND_EXISTING,
+        "existing_project": CODE_TASK_KIND_EXISTING,
+        "project": CODE_TASK_KIND_EXISTING,
+        "patch": CODE_TASK_KIND_EXISTING,
+        "greenfield": CODE_TASK_KIND_GREENFIELD,
+        "from_scratch": CODE_TASK_KIND_GREENFIELD,
+        "new_project": CODE_TASK_KIND_GREENFIELD,
+    }
+    normalized = aliases.get(text, text)
+    if normalized not in CODE_TASK_KINDS:
+        raise CodeTaskConfigError(
+            "[code_task].kind must be one of: "
+            + ", ".join(sorted(CODE_TASK_KINDS))
+        )
+    return normalized
 
 
 def _load_toml_config(path: str | None) -> CodeTaskConfig:

@@ -1,0 +1,74 @@
+[code_task]
+kind = "greenfield"
+task_file = "examples/code_task_greenfield_ml_suite/task.md"
+output_root = "runs/code-task-greenfield-ml-suite"
+name = "greenfield-ml-suite"
+
+[benchmark]
+command = "python generated_project/main.py --preset smoke --data-source auto"
+timeout = 1800
+primary_metric = "best_score"
+
+[benchmark.metric_directions]
+best_score = "higher"
+accuracy = "higher"
+macro_f1 = "higher"
+baseline_accuracy = "higher"
+neural_accuracy = "higher"
+ablation_gain = "higher"
+robustness_drop = "lower"
+condition_count = "higher"
+task_count = "higher"
+data_size = "resource"
+open_dataset_count = "higher"
+synthetic_fallback_used = "lower"
+test_count = "higher"
+config_preset_count = "higher"
+train_time_sec = "resource"
+inference_time_ms = "resource"
+parameter_count = "resource"
+
+[workspace]
+mode = "empty"
+
+[environment]
+mode = "current"
+
+[llm]
+enabled = true
+
+[execute]
+to_step = "run"
+timeout_sec = 1800
+stream_benchmark_output = "auto"
+llm_retry_attempts = 2
+repair_rounds = 1
+max_files = 48
+max_source_chars_per_file = 12000
+max_generated_lines = 6000
+
+[implementation]
+provider = "local"
+agent_mode = "model"
+allow_external_agent = false
+# To test Codex/Claude/OpenCode handoff later, change the three fields above:
+# provider = "codex"
+# agent_mode = "handoff"
+# allow_external_agent = true
+# Leave agent_model empty unless your external CLI account supports a specific model.
+agent_model = ""
+agent_binary = ""
+agent_args = []
+agent_timeout_sec = 1800
+
+[resource]
+max_runtime_sec = 1800
+max_files = 48
+max_generated_lines = 6000
+max_memory_mb = 24576
+allow_gpu = true
+
+[budget]
+profile = "large"
+max_batches = 6
+cost_cap_usd = 20.0

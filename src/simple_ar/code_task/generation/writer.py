@@ -7,8 +7,8 @@ from typing import Any, Mapping
 
 from simple_ar.core.artifacts import write_text
 from simple_ar.integrations.llm import LLMClient, LLMError
-from simple_ar.experiment.coding.memory import record_generated_file, record_generation_batch
-from simple_ar.experiment.coding.scaffold import fallback_file_content
+from simple_ar.code_task.generation.implementation_memory import record_generated_file, record_generation_batch
+from simple_ar.code_task.generation.scaffold import fallback_file_content
 
 
 def write_generated_project(
@@ -145,7 +145,7 @@ def greenfield_file_prompt(
     contract: Mapping[str, Any],
 ) -> str:
     return (
-        "Generate exactly one file for this bounded Python experiment project. "
+        "Generate exactly one file for this bounded Python project. "
         "Return JSON with string fields `content` and `summary`.\n\n"
         "Rules:\n"
         "- Use only Python standard library unless the contract explicitly implies a declared dependency.\n"
@@ -155,8 +155,9 @@ def greenfield_file_prompt(
         "experiment pipeline in helper modules when another planned file owns orchestration.\n"
         "- Keep one authoritative `run_experiment` path for metric calculation; helper "
         "modules should expose data/model/metric functions used by that path.\n"
-        "- Keep this single file complete and concise; target under 160 lines for core modules and under 100 lines for simple helpers.\n"
-        "- Prefer simple deterministic logic over broad simulations, logs, or test frameworks.\n"
+        "- Keep this single file complete, cohesive, and proportional to its planned responsibility. "
+        "Simple helpers should stay small; core modules may be longer when the task genuinely requires it.\n"
+        "- Prefer deterministic, testable logic over broad simulations, noisy logs, or unstructured frameworks.\n"
         "- Do not leave placeholders, unfinished functions, unterminated literals, or truncated JSON/Python.\n\n"
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Architecture plan:\n{json.dumps(dict(architecture_plan), indent=2, ensure_ascii=False)}\n\n"
@@ -166,8 +167,8 @@ def greenfield_file_prompt(
 
 
 GREENFIELD_FILE_SYSTEM = (
-    "You are a cautious code implementer for small reproducible experiments. "
-    "Write runnable, bounded Python files that satisfy the provided metric schema."
+    "You are a cautious code implementer for bounded reproducible projects. "
+    "Write runnable, maintainable Python files that satisfy the provided metric schema and architecture plan."
 )
 
 

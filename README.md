@@ -32,8 +32,9 @@ experimentation, and gradual extension.
   screening, coverage checks, follow-up rounds, document records, cache policy,
   and lightweight budgets. Normal runs keep compact evidence artifacts; set
   `debug_artifacts = true` when you also need planning/traces/coverage files.
-- **Code tasks**: improve an existing codebase inside an isolated editable
-  workspace with LLM planning, review gates, controlled patch proposals,
+- **Code tasks**: improve an existing codebase or generate a bounded
+  greenfield project inside an isolated editable workspace with LLM planning,
+  task memory, review gates, controlled patch/generation artifacts,
   validation, benchmark execution, and metric comparison.
 - **Workspace strategies**: use `copy` for the safest isolated copy,
   `git_worktree` for larger git repositories where full copying is wasteful,
@@ -165,7 +166,8 @@ uv run simple-ar status runs/<run-id>
 That sequence prepares an isolated workspace, runs the baseline benchmark,
 builds a work plan, stops for patch-plan review, generates
 `code_task/meta/proposed_edits.json`, applies the reviewed proposal, validates
-the patched workspace, runs the patched benchmark, and writes the final status.
+the patched workspace, runs structured post-apply/post-run reviews, runs the
+patched benchmark, and writes the final status.
 If the result needs a bounded follow-up, use the repair path documented in
 [Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
 
@@ -252,13 +254,14 @@ research context before entering code-task execution.
 
 ### 4. Greenfield Experiment
 
-Use this when the task has no existing source project yet. V2.5 writes an
-experiment contract, generates a bounded project under `06-code/generated_project`,
-reviews the generated files, runs `experiment.py`, and accepts only canonical
-`07-run/results.json` metrics guarded by `guard_report.json`. Rerunning `code`
-or `run` archives existing reviewed artifacts by default, and reports consume
-canonical results, resource limits, guard status, and code-review signals rather
-than raw stdout alone.
+Use this when the task has no existing source project yet. The current path
+uses the same code-task engine as existing-code tasks: `05-design` writes an
+experiment contract, `06-code` creates a nested `kind = "greenfield"` code-task
+run under `06-code/code_task_run/`, and the generated project is projected back
+to `06-code/generated_project/` for `07-run`. Rerunning `code` or `run` archives
+existing reviewed artifacts by default, and reports consume canonical results,
+resource limits, guard status, and code-review signals rather than raw stdout
+alone.
 
 A lightweight public example is available at
 `examples/greenfield_lightweight_training/configs/greenfield_training.toml`.

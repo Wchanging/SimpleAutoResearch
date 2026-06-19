@@ -19,7 +19,7 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
 
 - **研究报告**：从主题出发，运行可见的阶段式流程，生成文献笔记、综合分析和报告产物。
 - **研究源规划**：支持 OpenAlex/Semantic Scholar/arXiv/本地文件源、可选 LLM-backed query planning、facet-driven query expansion、筛选、覆盖度检查、follow-up retrieval rounds、document records、cache 策略和轻量预算。普通运行默认保留精简 evidence 产物；需要 planning/traces/coverage 文件时再设置 `debug_artifacts = true`。
-- **Code Task**：在隔离可编辑 workspace 中改进已有代码库，支持 LLM 规划、人工审核点、受控补丁 proposal、验证、benchmark 运行和指标对比。
+- **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：可以把 code task 嵌入 8 阶段流程，生成 repo map、context pack、work plan、patch 证据、benchmark 指标和报告证据。
 - **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
@@ -126,7 +126,7 @@ uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task
 uv run simple-ar status runs/<run-id>
 ```
 
-这套命令会准备隔离 workspace、运行 baseline benchmark、生成 work plan、停在 patch plan 审核点、生成 `code_task/meta/proposed_edits.json`、应用已审核 proposal、验证 patched workspace、运行 patched benchmark，并写入最终状态。如果结果还需要有限范围的后续修复，可以继续使用 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中的 repair 流程。
+这套命令会准备隔离 workspace、运行 baseline benchmark、生成 work plan、停在 patch plan 审核点、生成 `code_task/meta/proposed_edits.json`、应用已审核 proposal、执行结构化 post-apply / post-run review、验证并运行 patched benchmark，并写入最终状态。如果结果还需要有限范围的后续修复，可以继续使用 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中的 repair 流程。
 
 内置 standalone code-task 示例是 `examples/code_task_medium_review/configs/code_task.toml`，放在 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中作为辅助示例。
 
@@ -191,7 +191,7 @@ uv run simple-ar run --config path/to/your_pipeline.toml
 
 ### 4. Greenfield Experiment：从零生成受控实验项目
 
-当任务还没有现成源码项目时，可以使用 V2.5 的 greenfield 路径。它会先写出 experiment contract，再在 `06-code/generated_project` 下生成受控小项目，执行 code review，运行 `experiment.py`，最后只把通过 `guard_report.json` 检查的 canonical `07-run/results.json` 作为实验结果。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
+当任务还没有现成源码项目时，可以使用 greenfield 路径。当前实现会复用和已有代码任务相同的 code-task 引擎：`05-design` 先写出 experiment contract，`06-code` 在 `06-code/code_task_run/` 下创建 `kind = "greenfield"` 的嵌套 code-task run，再把生成项目投影回 `06-code/generated_project/` 供 `07-run` 兼容使用。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
 
 轻量公开示例位于 `examples/greenfield_lightweight_training/configs/greenfield_training.toml`。它会让 pipeline 从零生成一个 CPU-only 的中等偏轻量文本分类实验套件，使用本地确定性数据、多个 baseline/model condition 和可解析指标：
 

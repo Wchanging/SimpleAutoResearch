@@ -167,7 +167,17 @@ def greenfield_architecture_prompt(
 ) -> str:
     max_files = _positive_int(resource_plan.get("max_files"), 8)
     max_lines = _positive_int(resource_plan.get("max_generated_lines"), 1200)
-    if max_files >= 8 or max_lines >= 1400:
+    if max_files >= 16 or max_lines >= 4000:
+        size_guidance = (
+            "- This is a medium-scale greenfield project: use 10-18 cohesive files when the task warrants it, "
+            "with clear modules for configuration, data loading/adaptation, preprocessing, model or algorithm "
+            "registry, training/execution orchestration, evaluation, reporting, CLI, diagnostics, and smoke tests.\n"
+            "- Prefer a maintainable package layout over one very large file, but do not create filler files just "
+            "to hit the budget.\n"
+            "- Preserve the task file's requested capabilities and acceptance criteria unless they conflict with "
+            "explicit resource limits.\n"
+        )
+    elif max_files >= 8 or max_lines >= 1400:
         size_guidance = (
             "- This is a medium-light local experiment: use 6-10 cohesive files when helpful, "
             "with clear modules for data/task generation, feature extraction, models, metrics, "
@@ -182,7 +192,7 @@ def greenfield_architecture_prompt(
             "- Prefer a compact runnable project over a broad framework.\n"
         )
     return (
-        "Design a small greenfield experiment project from this contract. "
+        "Design a bounded greenfield project from this contract. "
         "Return JSON with fields: objective, architecture_summary, data_flow, "
         "interfaces, test_strategy, risks, and files. Each file must include "
         "path, purpose, dependencies, acceptance_criteria, and entrypoint boolean.\n\n"
@@ -206,7 +216,8 @@ def greenfield_architecture_prompt(
 
 GREENFIELD_ARCHITECT_SYSTEM = (
     "You are a cautious experiment software architect. Design bounded, "
-    "runnable Python projects that satisfy explicit result schemas and resource budgets."
+    "runnable Python projects that satisfy explicit result schemas and resource budgets. "
+    "Scale architecture to the requested task and budget without adding filler complexity."
 )
 
 

@@ -525,7 +525,7 @@ uv run simple-ar tools serve-mcp runs/<run-id>
 
 ## Code Task 工作流
 
-Code Task 会把源项目准备到一个隔离的可编辑 workspace 中，后续所有补丁都只改这个 workspace，不修改原始项目。默认 `copy` 模式最稳妥；工作流也支持面向较大 git 项目的 `git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。
+Code Task 会把代码任务准备到一个隔离的可编辑 workspace 中，后续所有补丁或生成都只发生在这个 workspace，不修改原始项目。已有项目默认 `copy` 模式，也支持面向较大 git 项目的 `git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。从零生成项目时使用 `kind = "greenfield"`，默认从 `empty` workspace 开始，并把生成项目写到 `code_task/workspace/generated_project/`。
 
 推荐先从 TOML 配置初始化，把项目路径、benchmark 指标、workspace 模式、模型路由和编辑预算都放在一个可审核文件里。内置 standalone 示例使用 medium review pipeline：
 
@@ -550,6 +550,28 @@ runs/<run-id>/
 ```
 
 它不会运行代码、不会调用 LLM，也不会修改原始项目。
+
+如果是 standalone 从零生成项目，也使用同一套 code-task 命令，只是不需要 `code_root`：
+
+```bash
+uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmark-command "python generated_project/main.py"
+uv run simple-ar code-task execute runs/<run-id> --to-step run
+```
+
+这种模式会复用 code-task 的 memory、reviewer、validation、runner 和 repair 产物，只是实现步骤不再应用 patch，而是在隔离 workspace 内生成 `generated_project/`。
+
+如果要做更大的服务器端验收任务，可以使用 standalone greenfield ML suite：
+
+```bash
+uv run simple-ar code-task init --config examples/code_task_greenfield_ml_suite/configs/code_task.toml
+uv run simple-ar code-task execute runs/code-task-greenfield-ml-suite/<run-id> --config examples/code_task_greenfield_ml_suite/configs/code_task.toml --yes
+```
+
+这个示例比本地 smoke test 更重，目标是生成一个模块化 ML workbench：优先使用本地可用的开源/打包数据集，必要时才退回 deterministic synthetic fallback，并包含多种模型/基线、ablation、资源自适应执行和可解析指标。如果要测试 Codex / Claude / OpenCode handoff，修改配置中的 `[implementation]` 即可。
+
+在规划 greenfield 实现前，`execute` 会写出 `code_task/meta/dependency_advice.json`
+和 `.md`，并在终端提示当前已安装和缺失的推荐库。这只是建议，不会自动安装依赖或修改环境；
+如果你希望模型走更强实现路径，可以按提示先手动执行 `uv add ...`，然后重跑 execute。
 
 如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。当前要求 `code_root` 是目标项目的 git 仓库根目录；如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入 repo root，或者改用 `copy` 模式。
 
@@ -597,7 +619,7 @@ runs/<run-id>/
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml
 ```
 
-在真实终端里，这一条命令可以一路经过 plan 审核、proposal 审核、应用补丁、验证和
+在真实终端里，这一条命令可以一路经过 plan 审核、proposal 审核、应用补丁、结构化 review、验证和
 patched benchmark；每个真实审核门都会用黄色 Rich 面板提示你看什么、下一步会做什么。
 如果在非交互 shell 中运行，或者你回答 `no`，它会停在当前审核门，方便你之后重跑。
 第一个审核门通常会生成：
@@ -608,6 +630,7 @@ code_task/
   patch_plan.md
   meta/
     environment_report.json
+    review_report.json
   attempts/
     attempt-001/
       batches/
@@ -632,6 +655,11 @@ skipped，然后 workflow 从下一个需要处理的位置继续。只有在调
 命令即可重新尝试模型调用；如果你明确想完全离线规划，使用 `--no-llm`；如果你希望
 先尝试 LLM、失败后接受较弱的 deterministic fallback，再使用
 `--allow-planning-fallback`。
+
+补丁应用后，`execute` 会在静态验证前写入 `code_task/meta/review_report.json`；
+patched benchmark 完成后还会写入 `code_task/meta/review_report_post_run.json`。
+阻塞性发现会同步记录到 `code_task/memory/`，后续 repair prompt 可以直接利用这些
+最新失败证据。
 
 3. 在 patch-plan 审核面板出现时，阅读 `code_task/work_plan.md` 和
 `code_task/patch_plan.md`。如果计划合理，输入 `yes` 继续。如果你在非交互环境运行、
@@ -776,7 +804,7 @@ uv run simple-ar code-task work-plan runs/<run-id>
 uv run simple-ar code-task batch runs/<run-id> --work-item W1
 ```
 
-`probe` 写入 `code_task/meta/environment_report.json`，包含 OS、Python、工具、GPU、依赖文件和 test 目录信号。它不安装依赖，也不运行项目代码。
+`probe` 写入 `code_task/meta/environment_report.json`，包含 OS、Python、工具、GPU、依赖文件和 test 目录信号。同时还会写出 `resource_probe.json` 和 `resource_decision.json`，给 greenfield 和外部 agent 路径提供紧凑硬件画像。它不安装依赖，也不运行项目代码。
 
 `baseline` 在任何补丁应用前运行记录的 benchmark command，结果存到 `code_task/run/baseline/`，包括 `execution_report.json`、`stdout.txt`、`stderr.txt` 和解析后的 `metrics.json`，并刷新 `code_task/summary.md`。
 
@@ -834,7 +862,7 @@ proposal 也会记录 `editor.backend = "controlled_patch"`，方便后续接入
 uv run simple-ar code-task apply-edits runs/<run-id>
 ```
 
-`apply-edits` 只修改 `code_task/workspace/`，写入 `code_task/patch.diff` 和 `code_task/meta/applied_edits.json`，并重建 codebase index。如果 edit 无法唯一匹配，会在写文件前停止。
+`apply-edits` 只修改 `code_task/workspace/`，写入 `code_task/patch.diff` 和 `code_task/meta/applied_edits.json`，并重建 codebase index。下一次 `execute` 会先运行结构化 reviewer，写入 `code_task/meta/review_report.json`，再进入静态验证。如果 edit 无法唯一匹配，会在写文件前停止。
 `applied_edits.json` 会记录实际应用的 proposal path 和 editor backend，包括手动提供的 edits file 或 repair proposal。
 
 验证并运行 patched benchmark：
@@ -1045,7 +1073,7 @@ uv run simple-ar run \
 
 ## 8 阶段流程中的 Greenfield Experiment
 
-当你只有研究或 benchmark-style 任务、还没有现成源码项目时，可以使用 greenfield 路径。它不是开放式自主 agent：`05-design` 先写出可执行 contract 和预算，`06-code` 只在 run 目录下生成一个受控小项目并审查，`07-run` 只信任 canonical `results.json` 中可解析的指标。
+当你只有研究或 benchmark-style 任务、还没有现成源码项目时，可以使用 greenfield 路径。它不是开放式自主 agent：`05-design` 先写出可执行 contract 和预算，`06-code` 现在会在 `06-code/code_task_run/` 下调用统一 code-task greenfield engine，再把生成项目投影回 `06-code/generated_project/`，供后续 `07-run` 兼容使用。`07-run` 只信任 canonical `results.json` 中可解析的指标。
 
 运行轻量本地 greenfield 示例：
 

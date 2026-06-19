@@ -24,7 +24,16 @@ def print_tool_schema(*, schema_format: str, output: str | None = None) -> None:
         print_line(text)
 
 
-def call_tool(run_dir: Path, tool_name: str, *, args_json: str = "{}", debug_payloads: bool = False) -> None:
+def call_tool(
+    run_dir: Path,
+    tool_name: str,
+    *,
+    args_json: str = "{}",
+    args_file: str | None = None,
+    debug_payloads: bool = False,
+) -> None:
+    if args_file:
+        args_json = Path(args_file).read_text(encoding="utf-8-sig")
     try:
         arguments = json.loads(args_json or "{}")
     except json.JSONDecodeError as exc:

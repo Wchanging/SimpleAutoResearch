@@ -12,7 +12,7 @@ from simple_ar.experiment.execution.diagnosis import (
     render_diagnosis_markdown,
 )
 from simple_ar.experiment.execution.guards import evaluate_result_guard
-from simple_ar.experiment.execution.repair import (
+from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_guard,
     repair_generated_project_with_agent_backend,
 )
@@ -200,6 +200,7 @@ def _compact_code_review(review: dict[str, Any]) -> dict[str, Any]:
         "schema_version": review.get("schema_version", "code_review.v1"),
         "status": review.get("status", "unknown"),
         "summary": review.get("summary", {}),
+        "review_contract": review.get("review_contract", {}),
         "findings": [item for item in findings if isinstance(item, dict)][:20],
     }
 

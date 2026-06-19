@@ -4,6 +4,64 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-18
+
+### Added
+
+- 新增一等公民的 greenfield code-task 模式。`code-task init` 现在可以使用
+  `--kind greenfield`，并且不再要求 `code_root`；系统会创建 `empty`
+  workspace，并把生成项目放在 `code_task/workspace/generated_project/`。
+- 新增 code-task resource artifacts：`code_task/meta/resource_probe.json`
+  记录紧凑机器信号，`code_task/meta/resource_decision.json` 将其归纳为
+  greenfield generation 和外部 agent handoff 可使用的资源 profile。
+- 新增 code-task memory artifacts，位于 `code_task/memory/`，包括
+  `task_memory.json`、`task_memory.md`、`edit_history.jsonl`、
+  `review_findings.jsonl` 和 `repair_memory.jsonl`。这些 memory 是对现有
+  artifacts 的紧凑索引，不替代 canonical logs、patches 或 benchmark 输出。
+- 新增自动 memory compaction。当前 active memory 过长时，旧事件会被压缩到
+  `compressed_memory.json` / `compressed_memory.md`，近期事件仍保留在
+  `task_memory.*`。
+- 新增只读 code-task tools：`read_code_task_memory`、`list_code_task_files`、
+  `search_code_task_code`、`read_code_task_file_range`、
+  `find_code_task_symbol`、`find_code_task_related_files` 和
+  `list_code_task_recent_edits`。
+- 新增 code-task 级 greenfield 外部 agent handoff。Standalone
+  `kind = "greenfield"` 任务现在可以通过 `[implementation]` 选择
+  `fake`、`local_llm`、`codex`、`claude_code`、`opencode` 或
+  `external_cli` backend；外部产物仍会先作为候选文件 ingest，再走原有
+  review、validation、benchmark、memory 和 repair 路径。
+- 新增 `examples/code_task_greenfield_ml_suite/`：一个更大的 standalone
+  greenfield code-task 验收示例，适合服务器或较强本地机器测试。它要求生成模块化
+  ML experiment workbench，优先使用本地可用的开源/打包数据集，必要时才退回
+  deterministic synthetic fallback，并包含多模型/基线、ablation、可解析指标和
+  resource-aware execution。
+- 新增 greenfield dependency advice artifacts。Standalone greenfield code-task
+  在 implementation planning 前会写出 `code_task/meta/dependency_advice.*`，
+  并在终端提示已安装/缺失的推荐库和可选安装命令；该功能只给建议，不会自动安装依赖。
+
+### Changed
+
+- Code-task work planning、patch planning、edit proposal 和 repair prompts
+  现在会读取紧凑 task memory，让重跑和外部 agent handoff 可以延续已有决策、
+  失败尝试、validation 结果和 repair context。
+- Code-task execute 现在会记录 probe、baseline、work-plan、patch-plan、
+  proposal、apply、validation、patched run、failure analysis 和 repair proposal
+  等步骤的 memory event；patch validation block 和静态 validation findings
+  也会写成 review finding。
+- 8 阶段 pipeline 中的 greenfield experiment generation 现在会委托给
+  `06-code/code_task_run/` 下的统一 code-task greenfield run，再把兼容产物投影回
+  `06-code/generated_project/` 供 `07-run` 使用。standalone greenfield code-task
+  和 research-to-code greenfield 由此共享 workspace、memory、review、validation
+  和 run 路径。
+- Greenfield code review 现在会读取 implementation memory、architecture 和
+  resource context，并保留兼容旧 `code_review.v1` 的同时，暴露更稳定的
+  `review_contract`。
+- 外部 agent handoff package 现在会包含 task memory context 和 code-task-only
+  tool schemas；greenfield handoff 则暴露 experiment-only tools，避免 agent 看到
+  与当前 workflow 无关的工具面。
+- `simple_ar.code_task` 包 facade 改为 lazy-load 公共导出，避免导入小型子模块时
+  顺带加载整个 code-task 和 agent-backend 图。
+
 ## 2026-06-14
 
 ### Added

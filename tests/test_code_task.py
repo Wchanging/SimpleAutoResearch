@@ -129,6 +129,137 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("# Repo Map Summary", repo_summary)
             self.assertIn("## Prompt Budget", repo_summary)
 
+    def test_greenfield_init_uses_empty_workspace_without_code_root(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(task_file, "# Task\n\nCreate a small runnable Python experiment.\n")
+            config = root / "greenfield.toml"
+            write_text(
+                config,
+                """
+[code_task]
+kind = "greenfield"
+task_file = "task.md"
+name = "greenfield-smoke"
+
+[benchmark]
+command = "python generated_project/main.py"
+primary_metric = "accuracy"
+""".strip(),
+            )
+
+            options = load_code_task_init_options(config_path=str(config))
+            self.assertEqual(options.kind, "greenfield")
+            self.assertIsNone(options.code_root)
+            self.assertEqual(options.workspace_mode, "empty")
+
+            run_dir = root / "runs" / "greenfield-run"
+            result = initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind=options.kind,
+                benchmark_command=options.benchmark_command,
+                workspace_mode=options.workspace_mode,
+                primary_metric=options.primary_metric,
+            )
+
+            self.assertEqual(result.kind, "greenfield")
+            self.assertTrue(result.workspace_dir.is_dir())
+            self.assertEqual(list(result.workspace_dir.iterdir()), [])
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["code_task"]["kind"], "greenfield")
+            self.assertEqual(manifest["workspace"]["mode"], "empty")
+            self.assertEqual(manifest["source"]["code_root"], "")
+
+    def test_greenfield_execute_generates_validates_and_runs_project(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nGenerate a deterministic project that prints accuracy and macro_f1 metrics.\n",
+            )
+            run_dir = root / "runs" / "greenfield-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="accuracy",
+                metric_directions={"accuracy": "higher_is_better"},
+            )
+
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="run",
+                timeout_sec=30,
+                max_files=8,
+            )
+
+            self.assertEqual(result.stop_reason, "completed")
+            self.assertTrue((run_dir / "code_task" / "workspace" / "generated_project" / "main.py").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "resource_probe.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "resource_decision.json").is_file())
+            advice = read_json(run_dir / "code_task" / "meta" / "dependency_advice.json")
+            self.assertEqual(advice["schema_version"], "code_task_dependency_advice.v1")
+            self.assertEqual(advice["policy"], "advice_only_no_auto_install")
+            validation = read_json(run_dir / "code_task" / "meta" / "validation_report.json")
+            self.assertEqual(validation["status"], "passed")
+            metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
+            self.assertIn("accuracy", metrics)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["implementation"]["status"], "generated")
+            self.assertEqual(manifest["patch"]["mode"], "greenfield_generated")
+
+    def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nUse an external handoff backend to generate a runnable metric project.\n",
+            )
+            run_dir = root / "runs" / "greenfield-agent-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="accuracy",
+            )
+
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="run",
+                timeout_sec=30,
+                implementation_provider="fake",
+                implementation_agent_mode="handoff",
+            )
+
+            self.assertEqual(result.stop_reason, "completed")
+            self.assertTrue((run_dir / "agent_handoff" / "code-task-greenfield-fake").is_dir())
+            self.assertTrue((run_dir / "agent_outputs" / "code-task-greenfield-fake" / "ingestion.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "dependency_advice.md").is_file())
+            backend = read_json(run_dir / "code_task" / "meta" / "code_backend.json")
+            self.assertEqual(backend["backend"], "greenfield_agent")
+            self.assertEqual(backend["provider"], "fake")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["implementation"]["provider"], "fake")
+            self.assertEqual(manifest["implementation"]["agent_mode"], "handoff")
+            metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
+            self.assertIn("accuracy", metrics)
+
     def test_configured_edit_scope_limits_editable_repo_map_and_apply(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from simple_ar.experiment.code_task_bridge import is_code_task_experiment_template
-from simple_ar.experiment.coding.architecture import GREENFIELD_TEMPLATE
+from simple_ar.code_task.generation.architecture import GREENFIELD_TEMPLATE
 
 
 def implementation_route(config: Mapping[str, Any], plan: Mapping[str, Any]) -> str:

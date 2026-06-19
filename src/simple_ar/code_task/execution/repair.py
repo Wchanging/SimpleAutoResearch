@@ -24,6 +24,7 @@ from simple_ar.code_task.runtime.state import (
     workspace_file,
 )
 from simple_ar.code_task.execution.summary import write_code_task_summary
+from simple_ar.code_task.memory import task_memory_context
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.app.usage import summarize_usage
 
@@ -105,6 +106,7 @@ def propose_repair_edits(
     task_text = _read_optional_text(paths.task_dir / "task.md")
     patch_plan = _read_optional_text(paths.task_dir / "patch_plan.md")
     patch_diff = _read_optional_text(paths.task_dir / "patch.diff")
+    memory_context = task_memory_context(run_dir)
     index = _read_required_json(paths.meta_dir / "codebase_index.json")
     allowed_patterns = allowed_patterns_from_manifest(manifest)
     protected_patterns = protected_patterns_from_manifest(manifest)
@@ -160,6 +162,7 @@ def propose_repair_edits(
                     task_text=task_text,
                     patch_plan=patch_plan,
                     patch_diff=patch_diff,
+                    memory_context=memory_context,
                     failure_analysis=failure_analysis,
                     execution_report=execution_report,
                     validation_report=validation_report,
@@ -209,6 +212,7 @@ def _repair_prompt(
     task_text: str,
     patch_plan: str,
     patch_diff: str,
+    memory_context: str,
     failure_analysis: str,
     execution_report: dict[str, Any],
     validation_report: dict[str, Any],
@@ -236,6 +240,7 @@ def _repair_prompt(
         f"Task:\n{task_text or 'No task text found.'}\n\n"
         f"Patch plan:\n{patch_plan or 'No patch plan found.'}\n\n"
         f"Current patch diff:\n```diff\n{patch_diff or 'No patch diff found.'}\n```\n\n"
+        f"Task memory:\n{memory_context}\n\n"
         f"Execution report JSON:\n{json.dumps(execution_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"
         f"Validation report JSON:\n{json.dumps(validation_report or {'status': 'not_available'}, indent=2, ensure_ascii=False)}\n\n"
         f"Failure analysis:\n{failure_analysis}\n\n"

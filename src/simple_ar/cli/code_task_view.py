@@ -21,6 +21,7 @@ STEP_DESCRIPTIONS = {
     "plan": "draft the human-reviewable patch plan",
     "propose-edits": "ask the model for controlled old/new edit proposals",
     "apply-edits": "apply reviewed edits to the isolated workspace",
+    "review": "review the applied patch for scope, interface, tests, and benchmark risk",
     "validate": "run static safety and syntax validation",
     "run": "run the patched benchmark and compare results",
     "analyze-failure": "summarize the latest validation or benchmark failure",
@@ -43,6 +44,7 @@ STOP_STYLES = {
     "proposal_review_required": "yellow",
     "large_edit_approval_required": "bold yellow",
     "patch_apply_failed": "bold red",
+    "review_failed": "bold red",
     "validation_failed": "bold red",
     "benchmark_failed": "bold red",
     "baseline_failed": "bold red",
@@ -204,6 +206,7 @@ def render_init_result(
     table.add_column(style="bold cyan", no_wrap=True)
     table.add_column(overflow="fold", no_wrap=False)
     table.add_row("Code task run:", escape(str(result.run_dir)))
+    table.add_row("Mode:", escape(result.kind))
     table.add_row("Workspace:", escape(str(result.workspace_dir)))
     table.add_row("Workspace mode:", escape(result.workspace.mode))
     table.add_row("Task:", escape(str(result.task_dir / "task.md")))

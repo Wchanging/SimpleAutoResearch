@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from simple_ar.code_task.tools.gateway import LocalCodeTaskToolGateway
 from simple_ar.experiment.tools.gateway import LocalExperimentToolGateway
 from simple_ar.report.schema import ReportContext, ReportToolCall
 from simple_ar.report.tool_gateway import ReportToolGateway
@@ -28,6 +29,7 @@ class CommonToolGateway:
         self.run_dir = Path(run_dir)
         self.registry = registry or default_tool_registry(include_report=report_context is not None)
         self.policy = policy or ToolPermissionPolicy.read_only()
+        self._code_task = LocalCodeTaskToolGateway(self.run_dir)
         self._experiment = LocalExperimentToolGateway(self.run_dir)
         self._report = ReportToolGateway(report_context) if report_context is not None else None
         self._trace = ToolTraceWriter(trace_path or self.run_dir / "tools" / "tool_trace.jsonl", debug_payloads=debug_payloads)
@@ -59,6 +61,8 @@ class CommonToolGateway:
         return result
 
     def _dispatch(self, spec: CommonToolSpec, call: ToolCall) -> ToolResult:
+        if spec.domain == "code_task":
+            return self._code_task.call(call.tool_name, call.arguments)
         if spec.domain == "experiment":
             result = self._experiment.call(call.tool_name, call.arguments)
             return ToolResult(

@@ -69,7 +69,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 | `--benchmark-command TEXT` | string | patch 前后运行的 benchmark command。 |
 | `--code-task-name TEXT` | string | 内嵌 code-task 实验展示名。 |
 | `--code-task-max-file-bytes N` | int | 内嵌 copy/sparse 模式最大复制文件大小。 |
-| `--code-task-workspace-mode MODE` | enum | `copy`、`git_worktree` 或 `sparse_copy`。 |
+| `--code-task-workspace-mode MODE` | enum | `copy`、`git_worktree`、`sparse_copy`，或 greenfield code-task 使用的 `empty`。 |
 | `--code-task-workspace-reuse-source-venv` | flag | 使用检测到的 source `.venv` Python。 |
 | `--code-task-workspace-setup-hook TEXT` | string | 为未来 managed environment 记录 setup command。 |
 | `--code-task-env-mode MODE` | enum | `current` 或 `external`。 |
@@ -184,6 +184,7 @@ uv run simple-ar tools call runs/<run-id> search_generated_code --args-json '{"q
 | `RUN_DIR` | path | 已有 run 目录。 |
 | `TOOL_NAME` | string | 已注册 tool 名称。 |
 | `--args-json JSON` | object | JSON object 形式的 tool 参数。 |
+| `--args-file PATH` | path | 从 JSON 文件读取 tool 参数。PowerShell 等 shell 中 inline JSON 不好转义时建议使用。 |
 | `--debug-payloads` | flag | 保留更大的 trace payload；默认 trace 保持紧凑。 |
 
 **生成产物**：
@@ -308,7 +309,7 @@ uv run simple-ar clean --shared-cache
 
 ## Code Task Commands
 
-Code-task 命令会把已有项目准备到 `runs/<run-id>/code_task/workspace`。后续修改只发生在隔离 workspace 中，不会直接修改原始项目。
+Code-task 命令会把代码任务准备到 `runs/<run-id>/code_task/workspace`。已有项目会通过 copy/worktree/sparse copy 进入隔离 workspace；greenfield 任务会从 empty workspace 开始生成项目。后续修改或生成只发生在隔离 workspace 中，不会直接修改原始项目。
 
 正常用户优先看“高级编排命令”。“底层原语命令”通常由 `execute` 自动调用，主要用于调试、学习或细粒度人工介入。
 
@@ -323,6 +324,7 @@ Code-task 命令会把已有项目准备到 `runs/<run-id>/code_task/workspace`�
 ```bash
 uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
 uv run simple-ar code-task init --code-root path/to/project --task-file task.md --benchmark-command "python main.py"
+uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmark-command "python generated_project/main.py"
 ```
 
 **参数表**：
@@ -330,7 +332,8 @@ uv run simple-ar code-task init --code-root path/to/project --task-file task.md 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `--config PATH` | path | init 设置 TOML；CLI 参数覆盖配置值。 |
-| `--code-root DIR` | path | 源项目。除非配置中已设置，否则必填。 |
+| `--kind MODE` | enum | `existing_project` 表示已有项目 patch；`greenfield` 表示从零生成项目。 |
+| `--code-root DIR` | path | 源项目。`existing_project` 必填；`greenfield` 仅在需要 scaffold/source root 时填写。 |
 | `--task-file PATH` | path | Markdown/text 任务描述。除非配置中已设置，否则必填。 |
 | `--output-root DIR` | path | code-task run 创建位置。 |
 | `--name TEXT` | string | run 名称后缀。 |
@@ -339,7 +342,7 @@ uv run simple-ar code-task init --code-root path/to/project --task-file task.md 
 | `--metric-direction NAME=DIRECTION` | repeatable | 指标方向：`higher`、`lower`、`resource` 或 `ignore`。 |
 | `--env-mode MODE` | enum | `current` 或 `external`。 |
 | `--python PATH` | path | `--env-mode external` 的 Python。 |
-| `--workspace-mode MODE` | enum | `copy`、`git_worktree` 或 `sparse_copy`。 |
+| `--workspace-mode MODE` | enum | `copy`、`git_worktree`、`sparse_copy` 或 `empty`。`greenfield` 默认 `empty`，已有项目默认 `copy`。 |
 | `--workspace-include GLOB` | repeatable | `sparse_copy` include pattern。 |
 | `--workspace-exclude GLOB` | repeatable | `sparse_copy` 额外 exclude pattern。 |
 | `--workspace-reuse-source-venv` | flag | 检测并复用 source `.venv` Python。 |
@@ -377,7 +380,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | --- | --- | --- |
 | `RUN_DIR` | path | code-task run 目录。 |
 | `--config PATH` | path | 可选 TOML，用于模型路由、预算和运行设置。 |
-| `--to-step STEP` | enum | 最多运行到 `probe`、`baseline`、`work-plan`、`batch`、`plan`、`propose-edits`、`apply-edits`、`validate`、`run`、`analyze-failure` 或 `repair`。 |
+| `--to-step STEP` | enum | 最多运行到 `probe`、`baseline`、`work-plan`、`batch`、`plan`、`propose-edits`、`apply-edits`、`review`、`validate`、`run`、`analyze-failure` 或 `repair`。 |
 | `--dry-run` | flag | 只打印下一步动作，不写产物。 |
 | `--model NAME` | string | LLM 步骤模型覆盖。 |
 | `--no-llm` | flag | 尽可能使用 deterministic fallback。 |
@@ -405,7 +408,10 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 - `code_task/patch_plan.md`
 - `code_task/meta/proposed_edits.json`
 - `code_task/meta/applied_edits.json`
+- `code_task/meta/review_report.json` 和 `review_report_post_run.json`
 - `code_task/meta/validation_report.json`
+- `probe` 后的 `code_task/meta/resource_probe.json` 和 `resource_decision.json`
+- `code_task/memory/task_memory.md`、`compressed_memory.md` 和 `review_findings.jsonl`
 - `code_task/run/baseline/`、`code_task/run/patched/`、`code_task/run/comparison.json`
 - `code_task/summary.md`
 
@@ -424,6 +430,15 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 `llm_planning_failed`，并且不会写入 offline fallback plan。此时直接重跑同一条
 `execute` 命令即可重新尝试模型调用；如果你明确接受 deterministic plan，再使用
 `--no-llm` 或 `--allow-planning-fallback`。
+
+补丁应用后，`execute` 会先运行结构化 reviewer，再进入静态验证；patched
+benchmark 完成后还会再运行一次 post-run reviewer。阻塞性发现会写入
+`code_task/memory/`，后续 repair 可以直接利用这些失败证据。
+
+传入 `--config PATH` 时，`execute` 也会读取 standalone code-task 的
+`[implementation]` 和 `[resource]`。Greenfield 任务正是通过这里选择本地
+backend 或显式的 Codex / Claude Code / OpenCode handoff，而不是新增一套
+provider-specific CLI 参数。
 
 #### `simple-ar code-task decide-plan`
 

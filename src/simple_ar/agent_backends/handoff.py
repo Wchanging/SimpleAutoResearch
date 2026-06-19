@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import shutil
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from simple_ar.agent_backends.policy import AgentPermissionPolicy
+from simple_ar.code_task.memory import code_task_memory_paths, task_memory_context
 from simple_ar.core.artifacts import write_json, write_text
 from simple_ar.tools.openai_schema import export_openai_tool_schemas
 from simple_ar.tools.registry import ToolRegistry, default_tool_registry
@@ -106,6 +109,11 @@ def build_code_task_handoff(
     task_path = run_dir / "code_task" / "task.md"
     if not task_text and task_path.is_file():
         task_text = task_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        memory_context = task_memory_context(run_dir)
+    except Exception:
+        memory_context = ""
+    memory_paths = code_task_memory_paths(run_dir)
     refs = [
         "code_task/task.md",
         "code_task/work_plan.md",
@@ -114,12 +122,26 @@ def build_code_task_handoff(
         "code_task/meta/environment_report.json",
         "code_task/meta/proposed_edits.json",
     ]
+    refs.extend(
+        ref
+        for ref in (
+            _artifact_ref_inside_run(run_dir, memory_paths.task_memory_md),
+            _artifact_ref_inside_run(run_dir, memory_paths.compressed_memory_md),
+            _artifact_ref_inside_run(run_dir, memory_paths.review_findings_jsonl),
+            _artifact_ref_inside_run(run_dir, memory_paths.repair_memory_jsonl),
+        )
+        if ref
+    )
+    context_files = {"task.md": task_text} if task_text else {}
+    if memory_context.strip():
+        context_files["task_memory.md"] = memory_context
     return create_agent_handoff(
         run_dir=run_dir,
         name=name,
         instructions=(
             "# Code Task Handoff\n\n"
-            "Use the task and listed code-task artifacts to propose or review implementation work. "
+            "Use the task, task memory, and listed code-task artifacts to propose or review implementation work. "
+            "Treat task memory as the compact continuity record for prior plans, edits, validation, and repair attempts. "
             "Do not apply edits directly unless the permission policy allows it.\n\n"
             "## User Task\n\n"
             f"{task_text.strip() or '(No task.md was found.)'}\n"
@@ -131,7 +153,80 @@ def build_code_task_handoff(
             "canonical_result": "agent_result.json",
         },
         artifact_refs=refs,
-        context_files={"task.md": task_text} if task_text else {},
+        context_files=context_files,
+        registry=default_tool_registry(include_report=False, include_experiment=False, include_code_task=True),
+    )
+
+
+def build_code_task_greenfield_handoff(
+    run_dir: Path,
+    *,
+    name: str = "code-task-greenfield",
+    task_text: str = "",
+    permission_policy: AgentPermissionPolicy | None = None,
+    extra_instructions: str = "",
+    context_files: dict[str, str] | None = None,
+) -> AgentHandoffPackage:
+    """Create a generated-files handoff package for greenfield code-task runs."""
+    run_dir = Path(run_dir)
+    task_path = run_dir / "code_task" / "task.md"
+    if not task_text and task_path.is_file():
+        task_text = task_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        memory_context = task_memory_context(run_dir)
+    except Exception:
+        memory_context = ""
+    memory_paths = code_task_memory_paths(run_dir)
+    refs = [
+        "code_task/task.md",
+        "code_task/summary.md",
+        "code_task/meta/environment_report.json",
+        "code_task/meta/resource_probe.json",
+        "code_task/meta/resource_decision.json",
+        "code_task/meta/implementation_plan.json",
+        "code_task/meta/architecture_plan.json",
+        "code_task/meta/file_plan.json",
+        "code_task/meta/repo_map_summary.md",
+    ]
+    refs.extend(
+        ref
+        for ref in (
+            _artifact_ref_inside_run(run_dir, memory_paths.task_memory_md),
+            _artifact_ref_inside_run(run_dir, memory_paths.compressed_memory_md),
+            _artifact_ref_inside_run(run_dir, memory_paths.review_findings_jsonl),
+            _artifact_ref_inside_run(run_dir, memory_paths.repair_memory_jsonl),
+        )
+        if ref
+    )
+    merged_context = dict(context_files or {})
+    if task_text.strip():
+        merged_context.setdefault("task.md", task_text)
+    if memory_context.strip():
+        merged_context.setdefault("task_memory.md", memory_context)
+    return create_agent_handoff(
+        run_dir=run_dir,
+        name=name,
+        instructions=(
+            "# Code Task Greenfield Handoff\n\n"
+            "Generate the project requested by the code-task contract. "
+            "Write source files only under `generated_files/`; do not write into "
+            "`code_task/workspace/` directly. SimpleAutoResearch will ingest, copy, "
+            "review, validate, and run the generated project.\n\n"
+            "Use task memory as the compact continuity record for task constraints, "
+            "prior generation attempts, review findings, and repair context.\n\n"
+            "## User Task\n\n"
+            f"{task_text.strip() or '(No task.md was found.)'}\n"
+            + (f"\n## Additional Attempt Context\n\n{extra_instructions.strip()}\n" if extra_instructions.strip() else "")
+        ),
+        permission_policy=permission_policy,
+        expected_outputs={
+            "mode": "code_task_greenfield",
+            "allowed_outputs": ["generated_files/", "review.md", "agent_result.json"],
+            "canonical_result": "agent_result.json",
+        },
+        artifact_refs=refs,
+        context_files=merged_context,
+        registry=default_tool_registry(include_report=False, include_experiment=False, include_code_task=True),
     )
 
 
@@ -140,6 +235,8 @@ def build_greenfield_handoff(
     *,
     name: str = "greenfield",
     permission_policy: AgentPermissionPolicy | None = None,
+    extra_instructions: str = "",
+    context_files: dict[str, str] | None = None,
 ) -> AgentHandoffPackage:
     """Create a handoff package from greenfield experiment artifacts."""
     refs = [
@@ -160,6 +257,7 @@ def build_greenfield_handoff(
             "# Greenfield Experiment Handoff\n\n"
             "Use the experiment contract, resource plan, and result schema to implement or review a generated project. "
             "Write canonical outputs only under the handoff output paths and let SimpleAutoResearch validate them.\n"
+            + (f"\n## Additional Attempt Context\n\n{extra_instructions.strip()}\n" if extra_instructions.strip() else "")
         ),
         permission_policy=permission_policy,
         expected_outputs={
@@ -168,6 +266,8 @@ def build_greenfield_handoff(
             "canonical_result": "agent_result.json",
         },
         artifact_refs=refs,
+        context_files=context_files,
+        registry=default_tool_registry(include_report=False, include_experiment=True, include_code_task=False),
     )
 
 
@@ -208,6 +308,10 @@ def ingest_agent_outputs(
                 "file_count": sum(1 for path in dst_generated.rglob("*") if path.is_file()),
             }
         )
+    output_snapshot = _agent_output_snapshot(output_dir)
+    normalized = _normalize_agent_outputs(output_dir, output_snapshot)
+    write_json(output_dir / "output_snapshot.json", output_snapshot)
+    write_json(output_dir / "normalized_outputs.json", normalized)
     summary = {
         "schema_version": "agent_output_ingestion.v1",
         "ingested_at": _utcnow_iso(),
@@ -216,6 +320,9 @@ def ingest_agent_outputs(
         "artifacts": copied,
         "status": "ok" if copied else "empty",
         "validation_required": True,
+        "snapshot": _rel(run_dir, output_dir / "output_snapshot.json"),
+        "normalized_outputs": _rel(run_dir, output_dir / "normalized_outputs.json"),
+        "changed_files": normalized.get("changed_files", []),
     }
     write_json(output_dir / "ingestion.json", summary)
     return summary
@@ -309,6 +416,129 @@ def _copy_file(src: Path, dst: Path, run_dir: Path) -> dict[str, Any]:
     return {"path": _rel(run_dir, dst), "kind": "file", "bytes": dst.stat().st_size}
 
 
+def _agent_output_snapshot(output_dir: Path) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(output_dir).as_posix()
+        if rel in {"output_snapshot.json", "normalized_outputs.json"}:
+            continue
+        rows.append(
+            {
+                "path": rel,
+                "bytes": path.stat().st_size,
+                "sha256": _sha256(path),
+                "line_count": _line_count(path),
+            }
+        )
+    return {
+        "schema_version": "agent_output_snapshot.v1",
+        "created_at": _utcnow_iso(),
+        "root": str(output_dir),
+        "files": rows,
+    }
+
+
+def _normalize_agent_outputs(output_dir: Path, snapshot: dict[str, Any]) -> dict[str, Any]:
+    patch_path = output_dir / "patch.diff"
+    proposed_path = output_dir / "proposed_edits.json"
+    generated_dir = output_dir / "generated_files"
+    result_path = output_dir / "agent_result.json"
+    review_path = output_dir / "review.md"
+    results_path = output_dir / "results.json"
+    changed = _parse_patch_changed_files(patch_path)
+    changed.extend(_parse_proposed_edit_files(proposed_path))
+    if generated_dir.is_dir():
+        changed.extend(
+            f"generated_files/{path.relative_to(generated_dir).as_posix()}"
+            for path in sorted(generated_dir.rglob("*"))
+            if path.is_file()
+        )
+    changed = _dedupe(changed)
+    return {
+        "schema_version": "agent_normalized_outputs.v1",
+        "created_at": _utcnow_iso(),
+        "output_dir": str(output_dir),
+        "changed_files": changed,
+        "outputs": {
+            "patch": _output_file_row(patch_path),
+            "proposed_edits": _output_file_row(proposed_path),
+            "generated_files": {
+                "path": "generated_files",
+                "exists": generated_dir.is_dir(),
+                "file_count": sum(1 for path in generated_dir.rglob("*") if path.is_file()) if generated_dir.is_dir() else 0,
+            },
+            "review": _output_file_row(review_path),
+            "results": _output_file_row(results_path),
+            "agent_result": _output_file_row(result_path),
+        },
+        "snapshot_file_count": len(snapshot.get("files", [])) if isinstance(snapshot.get("files"), list) else 0,
+    }
+
+
+def _output_file_row(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"path": path.name, "exists": False}
+    return {
+        "path": path.name,
+        "exists": True,
+        "bytes": path.stat().st_size,
+        "sha256": _sha256(path),
+    }
+
+
+def _parse_patch_changed_files(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    rows: list[str] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("+++ b/"):
+            rows.append(line.removeprefix("+++ b/").strip())
+        elif line.startswith("--- a/"):
+            rows.append(line.removeprefix("--- a/").strip())
+    return [row for row in rows if row and row != "/dev/null"]
+
+
+def _parse_proposed_edit_files(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    edits = data.get("edits") if isinstance(data, dict) else None
+    if not isinstance(edits, list):
+        return []
+    return [str(row.get("path", "")).strip() for row in edits if isinstance(row, dict) and str(row.get("path", "")).strip()]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _line_count(path: Path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+    except OSError:
+        return 0
+
+
+def _dedupe(values: Iterable[str]) -> list[str]:
+    rows: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value).replace("\\", "/").strip()
+        if text and text not in seen:
+            seen.add(text)
+            rows.append(text)
+    return rows
+
+
 def _archive_existing_handoff(handoff_dir: Path, run_dir: Path) -> None:
     if not handoff_dir.exists():
         return
@@ -369,6 +599,13 @@ def _rel(base: Path, path: Path) -> str:
         return path.relative_to(base).as_posix()
     except ValueError:
         return str(path)
+
+
+def _artifact_ref_inside_run(base: Path, path: Path) -> str:
+    try:
+        return path.relative_to(base).as_posix()
+    except ValueError:
+        return ""
 
 
 def _utcnow_iso() -> str:

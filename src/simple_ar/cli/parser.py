@@ -88,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     tools_call.add_argument("run_dir")
     tools_call.add_argument("tool_name")
     tools_call.add_argument("--args-json", default="{}")
+    tools_call.add_argument("--args-file", default=None, help="Read tool arguments from a JSON file.")
     tools_call.add_argument("--debug-payloads", action="store_true")
     tools_mcp = tools_subparsers.add_parser("serve-mcp", help="Serve read-only run tools over MCP stdio.")
     tools_mcp.add_argument("run_dir")
@@ -111,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional TOML config file for code-task init settings.",
     )
     code_task_init.add_argument("--code-root", default=None)
+    code_task_init.add_argument(
+        "--kind",
+        choices=("existing_project", "greenfield"),
+        default=None,
+        help="Code-task mode. Use greenfield for from-scratch project generation.",
+    )
     code_task_init.add_argument("--task-file", default=None)
     code_task_init.add_argument("--output-root", default=None)
     code_task_init.add_argument("--name", default=None)

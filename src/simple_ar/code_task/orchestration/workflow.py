@@ -38,8 +38,10 @@ class CodeTaskInitResult:
         repo_map: Generated layered repository map.
         environment_policy: Initial execution environment policy.
         workspace: Workspace creation metadata.
+        kind: Code-task mode, usually ``existing_project`` or ``greenfield``.
     """
 
+    kind: str
     run_dir: Path
     task_dir: Path
     workspace_dir: Path
@@ -58,8 +60,9 @@ class CodeTaskInitResult:
 def initialize_code_task(
     *,
     run_dir: Path,
-    code_root: Path,
+    code_root: Path | None,
     task_file: Path,
+    kind: str = "existing_project",
     benchmark_command: str | None = None,
     max_file_bytes: int = 2_000_000,
     workspace_mode: str = "copy",
@@ -79,7 +82,8 @@ def initialize_code_task(
 
     Args:
         run_dir: New run directory. It may exist, but must be empty.
-        code_root: Existing codebase or benchmark directory to copy.
+        code_root: Existing codebase or benchmark directory to copy. Greenfield
+            runs may leave this empty when ``workspace_mode`` is ``empty``.
         task_file: Markdown or text file describing the requested change.
         benchmark_command: Optional validation command to record for later
             stages. It is not executed during init.
@@ -118,7 +122,8 @@ def initialize_code_task(
         NotADirectoryError: If ``code_root`` is not a directory.
         FileExistsError: If ``run_dir`` already contains files.
     """
-    source_root = Path(code_root).resolve()
+    normalized_kind = _normalize_kind(kind)
+    source_root = Path(code_root).resolve() if code_root is not None else None
     task_source = Path(task_file).resolve()
     root = Path(run_dir)
     if root.exists() and any(root.iterdir()):
@@ -195,10 +200,12 @@ def initialize_code_task(
             repo_map=repo_map,
             edit_scope=edit_scope,
             environment_policy=environment_policy,
+            kind=normalized_kind,
         ),
     )
 
     return CodeTaskInitResult(
+        kind=normalized_kind,
         run_dir=root,
         task_dir=task_dir,
         workspace_dir=workspace_dir,
@@ -218,7 +225,7 @@ def initialize_code_task(
 def _manifest(
     *,
     run_dir: Path,
-    code_root: Path,
+    code_root: Path | None,
     task_file: Path,
     benchmark_command: str | None,
     primary_metric: str | None,
@@ -230,6 +237,7 @@ def _manifest(
     repo_map: dict[str, Any],
     edit_scope: dict[str, Any],
     environment_policy: dict[str, Any],
+    kind: str,
 ) -> dict[str, Any]:
     project = codebase_index.get("project", {})
     repo_project = repo_map.get("project", {})
@@ -239,10 +247,13 @@ def _manifest(
         "schema_version": 1,
         "workflow": "code_task",
         "status": "initialized",
+        "code_task": {
+            "kind": kind,
+        },
         "created_at": _utcnow_iso(),
         "run_dir": str(run_dir),
         "source": {
-            "code_root": str(code_root),
+            "code_root": str(code_root) if code_root is not None else "",
             "task_file": str(task_file),
         },
         "layout": {
@@ -285,6 +296,17 @@ def _manifest(
             "metric_directions": directions,
         },
     }
+
+
+def _normalize_kind(value: str) -> str:
+    kind = str(value or "existing_project").strip().lower().replace("-", "_")
+    if kind in {"existing", "existing_code", "project", "patch"}:
+        return "existing_project"
+    if kind in {"greenfield", "from_scratch", "new_project"}:
+        return "greenfield"
+    if kind == "existing_project":
+        return kind
+    raise ValueError("code-task kind must be existing_project or greenfield")
 
 
 def _utcnow_iso() -> str:

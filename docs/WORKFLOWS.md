@@ -39,7 +39,8 @@ Conceptual flow:
 init workspace -> index code -> map repo -> probe environment
 -> run baseline -> build context pack -> work-plan -> create batch
 -> plan patch -> approve -> propose edits -> apply edits
--> validate -> run patched benchmark -> compare results
+-> review changes -> validate -> run patched benchmark -> post-run review
+-> compare results
 -> analyze failure -> repair proposal
 ```
 
@@ -102,8 +103,10 @@ plan -> search -> read -> synthesize -> design experiment
 Current status:
 
 - `06-code` can generate a whitelisted template experiment, prepare an embedded
-  code-task workspace for existing projects, or create a bounded greenfield
-  project under `06-code/generated_project` when no source project exists yet.
+  code-task workspace for existing projects, or call the unified code-task
+  greenfield engine when no source project exists yet. In the greenfield case,
+  the real nested run lives under `06-code/code_task_run/`, while compatibility
+  artifacts are projected back to `06-code/generated_project/`.
 - `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, optional `--task-file`, and `--benchmark-command` flags. If no task file is supplied, `05-design` generates `generated_code_task.md` from the earlier research artifacts and a compact codebase summary.
 - `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
 - `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
@@ -137,7 +140,7 @@ Current status:
 | `read` | `review/`, `paper_notes.json`, `notes.md` | Screen and prioritize retrieved papers, then convert the shortlist into canonical Paper Briefs (LLM-backed when enabled). Larger LLM runs use coarse title/abstract batches before reranking the kept set. |
 | `synthesize` | `synthesis_brief.json`, `synthesis.md`, `hypothesis.md` | Analyze read-stage Paper Briefs into themes, gaps, bounded ideas, and testable hypotheses (LLM-backed when enabled). |
 | `design` | `experiment_plan.json`, `experiment_contract.json`, `result_schema.json`, `resource_plan.json`, `dependency_plan.json`, `domain_profile.json`, `contract_validation.json` | Select a safe experiment template and write the executable contract, metric schema, resource/dependency budget, domain profile, and pre-code validation. |
-| `code` | `code_task_run/`, `experiment.py`, or generated implementation artifacts | Prepare an embedded code-task harness or generate implementation artifacts from the design contract. |
+| `code` | `code_task_run/`, `generated_project/`, `experiment.py`, or template code | Prepare an embedded existing-code task, run unified greenfield code-task generation, or write a whitelisted template experiment from the design contract. |
 | `run` | `results.json`, `guard_report.json`, `stdout.txt`, `stderr.txt` | Execute the experiment, normalize canonical results, and guard against missing/invalid metrics before reporting. |
 | `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | Write a template-guided report with citations, bounded source backtracking, and audit artifacts (LLM-backed when enabled). |
 

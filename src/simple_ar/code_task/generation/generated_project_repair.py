@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+"""Repair helpers for generated-project code-task outputs.
+
+This module is intentionally separate from ``simple_ar.code_task.execution.repair``:
+that module proposes patch edits for existing-project code-task runs, while this
+module repairs a whole generated project after result-schema or run-guard failure.
+8-stage experiment runs call these helpers as an adapter because their
+``06-code/generated_project`` is projected from the unified greenfield code-task
+workspace.
+"""
+
 import shutil
 from pathlib import Path
 from pathlib import PurePosixPath

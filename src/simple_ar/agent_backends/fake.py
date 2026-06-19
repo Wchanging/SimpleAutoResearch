@@ -90,6 +90,8 @@ def run_experiment() -> dict:
 def main() -> None:
     metrics = run_experiment()
     Path("metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    for key, value in metrics.items():
+        print(f"{key}: {value}")
     print(json.dumps(metrics, indent=2))
 
 

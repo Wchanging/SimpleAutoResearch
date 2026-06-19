@@ -7,6 +7,7 @@ from simple_ar.agent_backends.fake import FakeAgentBackend
 from simple_ar.agent_backends.handoff import (
     AgentHandoffPackage,
     build_code_task_handoff,
+    build_code_task_greenfield_handoff,
     build_greenfield_handoff,
     create_agent_handoff,
     ingest_agent_outputs,
@@ -27,6 +28,7 @@ __all__ = [
     "FakeAgentBackend",
     "LocalLlmAgentBackend",
     "build_code_task_handoff",
+    "build_code_task_greenfield_handoff",
     "build_greenfield_handoff",
     "create_agent_handoff",
     "create_agent_backend",

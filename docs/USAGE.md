@@ -653,12 +653,13 @@ confirmed the model name is supported by that CLI/account.
 
 ## Code Task Workflow
 
-The code-task workflow prepares a source project under an isolated editable
-workspace and never mutates the original codebase. The default `copy` mode is
-the safest choice. The workflow also supports `git_worktree` for larger
-repo-root git projects where a full copy is wasteful, plus experimental
-`sparse_copy` for small allowlisted subsets. The workflow is intentionally step-by-step so each
-stage can be reviewed.
+The code-task workflow prepares an isolated editable workspace and never mutates
+the original source project. Existing-project tasks default to `copy`, support
+`git_worktree` for larger repo-root git projects, and support experimental
+`sparse_copy` for small allowlisted subsets. Greenfield tasks use
+`kind = "greenfield"` and default to an `empty` workspace where the generated
+project is written. The workflow is intentionally step-by-step so each stage can
+be reviewed.
 
 Initialize from a TOML config so project paths, benchmark metrics, workspace
 mode, model routing, and edit budgets stay in one reviewable file. The bundled
@@ -690,6 +691,40 @@ runs/<run-id>/
 ```
 
 It does not run code, call the LLM, or modify the original source project.
+
+For a standalone from-scratch project, use the same code-task command with
+`kind = "greenfield"` and no `code_root`:
+
+```bash
+uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmark-command "python generated_project/main.py"
+uv run simple-ar code-task execute runs/<run-id> --to-step run
+```
+
+In this mode, `execute` uses the shared code-task memory, reviewer,
+validation, runner, and repair artifacts, but the implementation step generates
+`code_task/workspace/generated_project/` instead of applying a patch to copied
+source files.
+
+For a larger server-oriented acceptance task, use the standalone greenfield ML
+suite:
+
+```bash
+uv run simple-ar code-task init --config examples/code_task_greenfield_ml_suite/configs/code_task.toml
+uv run simple-ar code-task execute runs/code-task-greenfield-ml-suite/<run-id> --config examples/code_task_greenfield_ml_suite/configs/code_task.toml --yes
+```
+
+This example is intentionally heavier than the laptop smoke tests. It asks for
+a modular ML workbench with packaged/local open datasets when available,
+synthetic fallback only when necessary, multiple model families, ablations,
+resource-aware execution, and parseable metrics. Edit `[implementation]` in the
+config when you want to test a Codex/Claude/OpenCode handoff instead of the
+local LLM path.
+
+Before planning the greenfield implementation, execute writes
+`code_task/meta/dependency_advice.json` and `.md`, then prints installed and
+missing recommended packages in the terminal. This is advice-only: the command
+will show an optional `uv add ...` suggestion for a stronger implementation
+path, but it will not install dependencies or mutate the environment for you.
 
 When `workspace.mode = "git_worktree"` or `--workspace-mode git_worktree` is
 used, `init` creates a detached git worktree at the same
@@ -788,7 +823,7 @@ uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_med
 ```
 
 On an interactive terminal, this one command can walk through the plan review,
-proposal review, apply, validation, and patched benchmark gates. On a
+proposal review, apply, structured review, validation, and patched benchmark gates. On a
 non-interactive shell, or when you answer `no`, it stops at the current review
 gate and can be rerun after review. The first review gate usually writes:
 
@@ -798,6 +833,7 @@ code_task/
   patch_plan.md
   meta/
     environment_report.json
+    review_report.json
   attempts/
     attempt-001/
       batches/
@@ -829,6 +865,12 @@ with `llm_planning_failed` and leaves the fallback artifacts unwritten. Rerun
 the same command to retry the LLM step. Use `--no-llm` for a deterministic
 offline plan, or `--allow-planning-fallback` only when that weaker fallback is
 acceptable for the task.
+
+After edits are applied, `execute` writes `code_task/meta/review_report.json`
+before static validation. After the patched benchmark runs, it writes
+`code_task/meta/review_report_post_run.json`. Blocking findings are also
+recorded under `code_task/memory/` so repair prompts can reuse the latest
+review evidence.
 
 3. At the patch-plan review panel, read `code_task/work_plan.md` and
 `code_task/patch_plan.md`. If the plan is reasonable, answer `yes` to continue.
@@ -984,7 +1026,7 @@ uv run simple-ar code-task work-plan runs/<run-id>
 uv run simple-ar code-task batch runs/<run-id> --work-item W1
 ```
 
-`probe` writes `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals. It does not install dependencies or run project code.
+`probe` writes `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals. It also writes `resource_probe.json` and `resource_decision.json`, which give greenfield and external-agent paths a compact hardware profile. It does not install dependencies or run project code.
 
 `baseline` runs the recorded benchmark command inside `code_task/workspace/`
 before any patch is applied. It stores `execution_report.json`, `stdout.txt`,
@@ -1087,9 +1129,10 @@ uv run simple-ar code-task apply-edits runs/<run-id>
 `apply-edits` applies the reviewed proposal only inside
 `code_task/workspace/`, writes a human-readable `code_task/patch.diff`, writes
 `code_task/meta/applied_edits.json` with changed files and hashes, and updates
-the codebase index. It still never mutates the original `--code-root`. If an
-edit cannot be matched safely, `execute` stops with `patch_apply_failed` before
-workspace files are changed.
+the codebase index. The next `execute` step runs the structured reviewer and
+writes `code_task/meta/review_report.json` before validation. It still never
+mutates the original `--code-root`. If an edit cannot be matched safely,
+`execute` stops with `patch_apply_failed` before workspace files are changed.
 `applied_edits.json` records the proposal path and editor backend used for the
 application, including manually supplied or repair proposal files.
 `apply-edits` also re-checks the edit scope, so manually supplied JSON cannot
@@ -1403,8 +1446,9 @@ first, then move to `code_task_project` after the benchmark and task are stable.
 
 Use this when you have a research or benchmark-style task but no existing source
 project yet. The greenfield path is intentionally bounded: `05-design` creates
-the executable contract and budgets, `06-code` writes a small generated project
-under the run directory, reviews it, and wraps it with `experiment.py`, and
+the executable contract and budgets, `06-code` now calls the unified code-task
+greenfield engine under `06-code/code_task_run/`, then projects the generated
+project back to `06-code/generated_project/` for compatibility with `07-run`.
 `07-run` only trusts parseable metrics in canonical `results.json`.
 
 Run the lightweight local greenfield example:

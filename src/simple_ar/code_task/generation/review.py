@@ -5,6 +5,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.reviewing.schema import normalize_review_findings, review_report
 
 
 def review_generated_project(
@@ -13,6 +14,8 @@ def review_generated_project(
     code_artifacts: Mapping[str, Any],
     result_schema: Mapping[str, Any],
     resource_plan: Mapping[str, Any],
+    implementation_memory: Mapping[str, Any] | None = None,
+    architecture_plan: Mapping[str, Any] | None = None,
     client: LLMClient | None = None,
 ) -> dict[str, Any]:
     findings: list[dict[str, str]] = []
@@ -50,12 +53,36 @@ def review_generated_project(
                     f"Required metric `{metric}` is not visibly printed or returned in generated files.",
                 )
             )
-    agent_findings = _agent_review(project_dir=project_dir, result_schema=result_schema, client=client)
+    agent_findings = _agent_review(
+        project_dir=project_dir,
+        result_schema=result_schema,
+        resource_plan=resource_plan,
+        implementation_memory=implementation_memory or {},
+        architecture_plan=architecture_plan or {},
+        client=client,
+    )
     findings.extend(agent_findings)
+    contract = review_report(
+        reviewer="greenfield-code-reviewer",
+        subject="generated_project",
+        findings=normalize_review_findings(
+            _legacy_findings_for_contract(findings),
+            source="greenfield.code-review",
+            default_category="generated_project",
+            default_evidence=["06-code/code_review.json", "06-code/code_artifacts.json"],
+        ),
+        metadata={
+            "project_dir": str(project_dir),
+            "required_metrics": _required_metrics(result_schema),
+            "max_files": max_files,
+            "max_lines": max_lines,
+        },
+    )
     return {
         "schema_version": "code_review.v1",
         "status": _status(findings),
         "findings": findings,
+        "review_contract": contract.model_dump(mode="json"),
         "summary": {
             "error_count": sum(1 for item in findings if item.get("severity") == "error"),
             "warning_count": sum(1 for item in findings if item.get("severity") == "warning"),
@@ -69,6 +96,9 @@ def _agent_review(
     *,
     project_dir: Path,
     result_schema: Mapping[str, Any],
+    resource_plan: Mapping[str, Any],
+    implementation_memory: Mapping[str, Any],
+    architecture_plan: Mapping[str, Any],
     client: LLMClient | None,
 ) -> list[dict[str, str]]:
     if client is None:
@@ -88,9 +118,13 @@ def _agent_review(
             "You are a strict but practical code reviewer for generated experiment projects.",
             (
                 "Review this generated project for runtime, scope, and metric-export risks. "
+                "Use the resource plan, architecture plan, and implementation memory as review context. "
                 "Return JSON with `findings`, a list of objects containing severity "
                 "(error|warning|info), code, and message. Do not request broad rewrites.\n\n"
                 f"Result schema:\n{dict(result_schema)}\n\n"
+                f"Resource plan:\n{dict(resource_plan)}\n\n"
+                f"Architecture summary:\n{_compact_mapping(architecture_plan)}\n\n"
+                f"Implementation memory:\n{_compact_mapping(implementation_memory)}\n\n"
                 + "\n\n".join(snippets)
             ),
             label="greenfield-code-review",
@@ -177,6 +211,27 @@ def _status(findings: list[Mapping[str, str]]) -> str:
     if any(item.get("severity") == "warning" for item in findings):
         return "warning"
     return "passed"
+
+
+def _legacy_findings_for_contract(findings: list[dict[str, str]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for row in findings:
+        rows.append(
+            {
+                "severity": "blocking" if row.get("severity") == "error" else row.get("severity", "info"),
+                "category": row.get("code", "greenfield_review"),
+                "summary": row.get("message", ""),
+                "evidence": ["06-code/code_review.json"],
+            }
+        )
+    return rows
+
+
+def _compact_mapping(value: Mapping[str, Any], *, limit: int = 2200) -> str:
+    text = str(dict(value))
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _int(value: object, default: int) -> int:

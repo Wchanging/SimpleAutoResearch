@@ -47,6 +47,7 @@ from simple_ar.code_task.editing.editor import (
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.editing.planning import select_relevant_files
 from simple_ar.code_task.analysis.repo_map import build_repo_map
+from simple_ar.code_task.memory import task_memory_context
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.app.usage import summarize_usage
 
@@ -289,6 +290,7 @@ def _propose_controlled_patch_edits(
     batch = load_latest_code_task_batch(root)
     batch_constraints = _batch_constraints(batch)
     allowed_edit_files = batch_constraints["target_files"]
+    memory_context = task_memory_context(root)
     budget = edit_budget_for_profile(
         budget_profile or batch_constraints["budget_profile"],
         overrides=edit_budget_overrides,
@@ -406,6 +408,7 @@ def _propose_controlled_patch_edits(
                 budget=budget,
                 allowed_edit_files=proposal_allowed_files,
                 batch_work_item=batch_constraints.get("work_item", {}),
+                memory_context=memory_context,
             )
             mode = "llm"
         except LLMError as exc:
@@ -594,6 +597,7 @@ def _ask_llm_for_edits(
     budget: EditBudget,
     allowed_edit_files: list[str],
     batch_work_item: object,
+    memory_context: str,
 ) -> dict[str, Any]:
     response = client.ask_json(
         CODE_TASK_EDIT_SYSTEM,
@@ -606,9 +610,10 @@ def _ask_llm_for_edits(
             allowed_patterns=allowed_patterns,
             protected_patterns=protected_patterns,
             budget=budget,
-            allowed_edit_files=allowed_edit_files,
-            batch_work_item=batch_work_item,
-        ),
+        allowed_edit_files=allowed_edit_files,
+        batch_work_item=batch_work_item,
+        memory_context=memory_context,
+    ),
         label="code-task-propose-edits",
     )
     return response
@@ -626,6 +631,7 @@ def _edit_user_prompt(
     budget: EditBudget,
     allowed_edit_files: list[str],
     batch_work_item: object,
+    memory_context: str,
 ) -> str:
     compact_files = [
         {
@@ -694,6 +700,7 @@ def _edit_user_prompt(
         f"{json.dumps(budget_profiles_json(), indent=2, ensure_ascii=False)}\n\n"
         f"Task:\n{task_text}\n\n"
         f"Approved patch plan:\n{patch_plan}\n\n"
+        f"Task memory:\n{memory_context}\n\n"
         f"Workspace file inventory JSON:\n{json.dumps(compact_files, indent=2, ensure_ascii=False)}\n\n"
         "Read-only context files omitted from editable snippets:\n"
         f"{json.dumps(read_only_context, indent=2, ensure_ascii=False)}\n\n"

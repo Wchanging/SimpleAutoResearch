@@ -118,7 +118,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             print_tool_schema(schema_format=args.format, output=args.output)
             return
         if args.tools_command == "call":
-            call_tool(Path(args.run_dir), args.tool_name, args_json=args.args_json, debug_payloads=args.debug_payloads)
+            call_tool(
+                Path(args.run_dir),
+                args.tool_name,
+                args_json=args.args_json,
+                args_file=args.args_file,
+                debug_payloads=args.debug_payloads,
+            )
             return
         if args.tools_command == "serve-mcp":
             serve_mcp(Path(args.run_dir), debug_payloads=args.debug_payloads)
@@ -792,6 +798,7 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     try:
         options = load_code_task_init_options(
             config_path=args.config,
+            kind=args.kind,
             code_root=args.code_root,
             task_file=args.task_file,
             output_root=args.output_root,
@@ -810,17 +817,20 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
         )
     except CodeTaskConfigError as exc:
         raise SystemExit(str(exc)) from exc
-    code_root = Path(options.code_root)
+    code_root = Path(options.code_root) if options.code_root else None
     if options.task_file is None:
         raise SystemExit("Missing task file. Pass --task-file or set [code_task].task_file.")
     task_file = Path(options.task_file)
-    name = options.name or f"code-task-{code_root.resolve().name}"
+    name = options.name or (
+        f"code-task-{code_root.resolve().name}" if code_root is not None else "greenfield-code-task"
+    )
     run_dir = _new_run_dir(Path(options.output_root), name)
     try:
         result = initialize_code_task(
             run_dir=run_dir,
             code_root=code_root,
             task_file=task_file,
+            kind=options.kind,
             benchmark_command=options.benchmark_command,
             max_file_bytes=options.max_file_bytes,
             workspace_mode=options.workspace_mode,
@@ -1300,6 +1310,14 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             cost_cap_usd=options.cost_cap_usd,
             max_files=max_files,
             max_source_chars_per_file=max_source_chars,
+            max_generated_lines=options.max_generated_lines,
+            implementation_provider=options.implementation_provider,
+            implementation_agent_mode=options.implementation_agent_mode,
+            implementation_allow_external_agent=options.implementation_allow_external_agent,
+            implementation_agent_model=options.implementation_agent_model,
+            implementation_agent_binary=options.implementation_agent_binary,
+            implementation_agent_args=options.implementation_agent_args,
+            implementation_agent_timeout_sec=options.implementation_agent_timeout_sec,
             message_callback=render_execute_message,
         )
 

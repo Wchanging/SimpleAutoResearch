@@ -34,14 +34,27 @@ class ToolRegistry:
         return [spec.model_dump(mode="json") for spec in self.list_specs()]
 
 
-def default_tool_registry(*, include_report: bool = True, include_experiment: bool = True) -> ToolRegistry:
+def default_tool_registry(
+    *,
+    include_report: bool = True,
+    include_experiment: bool = True,
+    include_code_task: bool = True,
+) -> ToolRegistry:
     """Build the default registry from existing domain-level tool specs."""
     registry = ToolRegistry()
+    if include_code_task:
+        registry.register_many(_code_task_specs())
     if include_experiment:
         registry.register_many(_experiment_specs())
     if include_report:
         registry.register_many(_report_specs())
     return registry
+
+
+def _code_task_specs() -> list[CommonToolSpec]:
+    from simple_ar.code_task.tools.registry import default_code_task_tool_specs
+
+    return default_code_task_tool_specs()
 
 
 def _experiment_specs() -> list[CommonToolSpec]:

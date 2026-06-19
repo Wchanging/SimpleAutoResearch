@@ -22,6 +22,10 @@ examples/
   greenfield_lightweight_training/
     configs/greenfield_training.toml full 8-stage greenfield generation workflow
     task.md                         from-scratch local training task
+
+  code_task_greenfield_ml_suite/
+    configs/code_task.toml          larger standalone greenfield code-task
+    task.md                         server-oriented ML workbench task
 ```
 
 Use `research_report` when you want a research-only survey, `code_task_medium_review`
@@ -30,3 +34,5 @@ when you want to test automated code edits in an isolated workspace, and
 project. Use `greenfield_lightweight_training` when you want a bounded from-zero
 implementation task that exercises a medium-light CPU-only experiment suite with
 multiple model conditions, parseable metrics, review, and run diagnosis.
+Use `code_task_greenfield_ml_suite` when you want a larger pure code-task
+greenfield acceptance run on a stronger local machine or server.

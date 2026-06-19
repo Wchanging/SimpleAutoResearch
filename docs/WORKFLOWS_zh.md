@@ -32,7 +32,8 @@ plan -> search -> read -> synthesize -> report
 ```text
 init workspace -> index code -> map repo -> probe environment
 -> run baseline -> plan patch -> approve -> propose edits -> apply edits
--> validate -> run patched benchmark -> compare results
+-> review changes -> validate -> run patched benchmark -> post-run review
+-> compare results
 -> analyze failure -> repair proposal
 ```
 
@@ -68,7 +69,7 @@ plan -> search -> read -> synthesize -> design experiment
 
 当前状态：
 
-- `06-code` 可以生成白名单 template experiment、为已有项目准备内嵌 code-task workspace，也可以在没有现成源码时创建受控的 `06-code/generated_project` greenfield 项目。
+- `06-code` 可以生成白名单 template experiment、为已有项目准备内嵌 code-task workspace，也可以在没有现成源码时调用统一 code-task greenfield engine。greenfield 情况下，真实嵌套 run 位于 `06-code/code_task_run/`，兼容产物会再投影回 `06-code/generated_project/`。
 - `--experiment-template code_task_project` 是通用内嵌 handoff，会接入 code-task workflow。它接受 `--code-task-config`，也接受显式 `--code-root`、可选 `--task-file` 和 `--benchmark-command`。如果没有 task file，`05-design` 会基于前面研究产物和紧凑代码摘要生成 `generated_code_task.md`。
 - `simple-ar run --config ...` 是保持多参数 research/code-task run 可读、可复现的推荐方式。
 - `--experiment-template llm_code_task_toy_spam` 仍保留为 bundled smoke-test template。
@@ -95,7 +96,7 @@ plan -> search -> read -> synthesize -> design experiment
 | `read` | `review/`、`paper_notes.json`、`notes.md` | 对检索结果做筛选和阅读优先级排序，再把 shortlist 转成规范化 Paper Brief；启用 LLM 且检索量较大时，先按 title/abstract 小批次粗筛，再重排保留集合。 |
 | `synthesize` | `synthesis_brief.json`、`synthesis.md`、`hypothesis.md` | 基于 read 阶段 Paper Brief 分析主题、gap、有限 ideas 和可测试假设；启用 LLM 时由 LLM 支持。 |
 | `design` | `experiment_plan.json`、`experiment_contract.json`、`result_schema.json`、`resource_plan.json`、`dependency_plan.json`、`domain_profile.json`、`contract_validation.json` | 选择安全实验模板，并写出可执行契约、指标 schema、资源/依赖预算、domain profile 和代码前检查。 |
-| `code` | `code_task_run/`、`experiment.py` 或生成式实现产物 | 基于 design contract 准备内嵌 code-task harness，或生成实现产物。 |
+| `code` | `code_task_run/`、`generated_project/`、`experiment.py` 或模板代码 | 基于 design contract 准备内嵌已有项目 code-task、运行统一 greenfield code-task 生成，或写出白名单模板实验。 |
 | `run` | `results.json`、`guard_report.json`、`stdout.txt`、`stderr.txt` | 执行实验，写出 canonical results，并在报告前检查缺失/异常指标。 |
 | `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | 基于模板写带 citation 的报告，并保留有界 source backtracking、报告记忆和审计产物；启用 LLM 时由 LLM 支持。 |
 

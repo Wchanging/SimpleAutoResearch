@@ -160,6 +160,9 @@ def _probe_code_task_environment(
     report = _build_environment_report(paths.workspace_dir, manifest, codebase_index, policy)
     report_path = paths.meta_dir / "environment_report.json"
     write_json(report_path, report)
+    resource_probe, resource_decision = _resource_artifacts(report)
+    write_json(paths.meta_dir / "resource_probe.json", resource_probe)
+    write_json(paths.meta_dir / "resource_decision.json", resource_decision)
     _update_manifest_after_probe(run_dir, manifest, report)
     write_code_task_summary(run_dir)
     return CodeTaskEnvironmentResult(
@@ -481,6 +484,8 @@ def _update_manifest_after_probe(
 ) -> None:
     layout = manifest_section(manifest, "layout")
     layout["environment_report"] = "code_task/meta/environment_report.json"
+    layout["resource_probe"] = "code_task/meta/resource_probe.json"
+    layout["resource_decision"] = "code_task/meta/resource_decision.json"
     manifest["layout"] = layout
     environment = manifest_section(manifest, "environment")
     environment.update(
@@ -495,7 +500,110 @@ def _update_manifest_after_probe(
             "warnings": report.get("warnings", []),
         }
     )
+    environment["resource_probe"] = "code_task/meta/resource_probe.json"
+    environment["resource_decision"] = "code_task/meta/resource_decision.json"
     manifest["environment"] = environment
     if manifest.get("status") == "initialized":
         manifest["status"] = "environment_probed"
     save_code_task_manifest(run_dir, manifest)
+
+
+def _resource_artifacts(report: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    gpu = report.get("gpu", {}) if isinstance(report.get("gpu"), dict) else {}
+    platform_info = report.get("platform", {}) if isinstance(report.get("platform"), dict) else {}
+    memory_total_mib = _system_memory_total_mib()
+    probe = {
+        "schema_version": "code_task_resource_probe.v1",
+        "generated_at": report.get("generated_at"),
+        "cpu": {
+            "logical_count": os.cpu_count() or 0,
+            "machine": platform_info.get("machine", ""),
+            "processor": platform_info.get("processor", ""),
+        },
+        "memory": {
+            "total_mib": memory_total_mib,
+            "probe": "available" if memory_total_mib is not None else "unavailable",
+        },
+        "gpu": gpu,
+        "tools": {
+            "nvidia_smi": _tool_available(report, "nvidia-smi"),
+            "uv": _tool_available(report, "uv"),
+            "pytest": _tool_available(report, "pytest"),
+        },
+        "python_modules": report.get("python_modules", {}),
+    }
+    gpu_devices = gpu.get("devices", []) if isinstance(gpu.get("devices"), list) else []
+    max_gpu_memory = 0
+    for device in gpu_devices:
+        if isinstance(device, dict) and isinstance(device.get("memory_total_mib"), int):
+            max_gpu_memory = max(max_gpu_memory, int(device["memory_total_mib"]))
+    allow_gpu = bool(gpu.get("available")) and max_gpu_memory > 0
+    if allow_gpu and max_gpu_memory >= 24_000:
+        profile = "gpu_large"
+    elif allow_gpu:
+        profile = "gpu_medium"
+    else:
+        profile = "local_cpu"
+    decision = {
+        "schema_version": "code_task_resource_decision.v1",
+        "generated_at": report.get("generated_at"),
+        "profile": profile,
+        "allow_gpu": allow_gpu,
+        "recommended": {
+            "prefer_gpu": allow_gpu,
+            "max_parallel_jobs": _recommended_parallel_jobs(profile),
+            "timeout_multiplier": 2.0 if profile == "local_cpu" else 1.0,
+            "notes": _resource_notes(profile, max_gpu_memory=max_gpu_memory),
+        },
+        "limits": {
+            "observed_memory_total_mib": memory_total_mib,
+            "observed_max_gpu_memory_mib": max_gpu_memory,
+        },
+    }
+    return probe, decision
+
+
+def _tool_available(report: dict[str, Any], name: str) -> bool:
+    tools = report.get("tools", {})
+    if not isinstance(tools, dict):
+        return False
+    row = tools.get(name)
+    return bool(isinstance(row, dict) and row.get("available"))
+
+
+def _recommended_parallel_jobs(profile: str) -> int:
+    if profile == "gpu_large":
+        return 4
+    if profile == "gpu_medium":
+        return 2
+    return 1
+
+
+def _resource_notes(profile: str, *, max_gpu_memory: int) -> list[str]:
+    if profile == "gpu_large":
+        return ["GPU is available with enough memory for moderate local ML experiments."]
+    if profile == "gpu_medium":
+        return [f"GPU is available with about {max_gpu_memory} MiB memory; keep batch sizes conservative."]
+    return ["No usable NVIDIA GPU was detected; prefer CPU-friendly smoke tests and small local datasets."]
+
+
+def _system_memory_total_mib() -> int | None:
+    try:
+        if platform.system().lower() == "windows":
+            completed = subprocess.run(
+                ["wmic", "computersystem", "get", "TotalPhysicalMemory", "/value"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            for line in completed.stdout.splitlines():
+                if line.startswith("TotalPhysicalMemory="):
+                    return int(int(line.split("=", 1)[1].strip()) / (1024 * 1024))
+        if hasattr(os, "sysconf"):
+            pages = os.sysconf("SC_PHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            return int((pages * page_size) / (1024 * 1024))
+    except Exception:
+        return None
+    return None
