@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.app.usage import summarize_usage
 from simple_ar.code_task.editing.scope import (
     allowed_patterns_from_manifest,
     is_edit_allowed_path,
@@ -13,19 +11,12 @@ from simple_ar.code_task.editing.scope import (
 )
 from simple_ar.code_task.memory import record_review_finding, task_memory_context
 from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest
-from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
-from simple_ar.reviewing.schema import ReviewFinding, normalize_review_findings, review_report
+from simple_ar.core.artifacts import read_json, read_text, write_json
+from simple_ar.reviewing.schema import ReviewFinding
+from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
 
 
 MessageCallback = Callable[[str], None]
-
-CODE_TASK_REVIEW_SYSTEM = (
-    "You are a strict but practical senior code reviewer for an isolated code-task workspace. "
-    "You cannot edit files. Review the applied patch for scope, interface, logic, tests, benchmark integrity, "
-    "and repair risk. Return only JSON."
-)
-
 
 @dataclass(frozen=True, slots=True)
 class CodeTaskReviewResult:
@@ -57,44 +48,29 @@ def review_code_task_changes(
     manifest = load_code_task_manifest(root)
     changed_files = _changed_files(manifest, paths)
     deterministic = _deterministic_findings(root, manifest, changed_files)
-    llm_findings: list[ReviewFinding] = []
-    if use_llm:
-        try:
-            _emit(message_callback, f"Calling LLM reviewer for code-task {phase}.")
-            client = LLMClient.from_env(
-                model=model,
-                usage_callback=lambda usage: _record_review_usage(
-                    paths.meta_dir,
-                    usage,
-                    message_callback=message_callback,
-                ),
-            )
-            response = client.ask_json(
-                CODE_TASK_REVIEW_SYSTEM,
-                _review_prompt(
-                    root,
-                    manifest=manifest,
-                    phase=phase,
-                    changed_files=changed_files,
-                    max_source_chars_per_file=max_source_chars_per_file,
-                ),
-                label=f"code-task-review-{phase}",
-            )
-            llm_findings = normalize_review_findings(
-                response.get("findings"),
-                source="code-task.llm-reviewer",
-                default_category="llm_review",
-                default_evidence=["code_task/patch.diff"],
-                max_findings=16,
-            )
-        except LLMError as exc:
-            _emit(message_callback, f"LLM reviewer unavailable; keeping deterministic review only. {exc}")
+    llm_findings = run_llm_review(
+        meta_dir=paths.meta_dir,
+        prompt=_review_prompt(
+            root,
+            manifest=manifest,
+            phase=phase,
+            changed_files=changed_files,
+            max_source_chars_per_file=max_source_chars_per_file,
+        ),
+        label=f"code-task-review-{phase}",
+        source="code-task.llm-reviewer",
+        default_category="llm_review",
+        default_evidence=["code_task/patch.diff"],
+        model=model,
+        use_llm=use_llm,
+        message_callback=message_callback,
+        max_findings=16,
+    )
 
-    findings = _dedupe_findings([*deterministic, *llm_findings])
-    report = review_report(
+    report = build_review_artifact(
         reviewer="code-task-reviewer",
         subject=phase,
-        findings=findings,
+        findings=[*deterministic, *llm_findings],
         metadata={
             "phase": phase,
             "changed_files": changed_files,
@@ -102,26 +78,30 @@ def review_code_task_changes(
         },
     )
     report_path = paths.meta_dir / ("review_report.json" if phase == "post_apply" else f"review_report_{phase}.json")
-    write_json(report_path, report.model_dump(mode="json"))
-    for finding in findings:
+    write_json(report_path, report)
+    findings = report.get("findings", [])
+    for row in findings:
+        if not isinstance(row, dict):
+            continue
         record_review_finding(
             root,
             {
-                "key": finding.key or f"{phase}:{finding.category}:{finding.summary[:40]}",
-                "severity": finding.severity,
-                "category": finding.category,
-                "summary": finding.summary,
-                "evidence": finding.evidence,
-                "recommendation": finding.recommendation,
-                "source": finding.source,
+                "key": row.get("key") or f"{phase}:{row.get('category', '')}:{str(row.get('summary', ''))[:40]}",
+                "severity": row.get("severity", "info"),
+                "category": row.get("category", "general"),
+                "summary": row.get("summary", ""),
+                "evidence": row.get("evidence", []),
+                "recommendation": row.get("recommendation", ""),
+                "source": row.get("source", "reviewer"),
             },
         )
+    summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
     return CodeTaskReviewResult(
         run_dir=root,
         report_path=report_path,
-        status=report.status,
-        blocking_count=report.summary.get("blocking_count", 0),
-        warning_count=report.summary.get("warning_count", 0),
+        status=str(report.get("status", "unknown")),
+        blocking_count=int(summary.get("blocking_count", 0) or 0),
+        warning_count=int(summary.get("warning_count", 0) or 0),
     )
 
 
@@ -209,19 +189,21 @@ def _review_prompt(
         f"### {path}\n```text\n{_source_snippet(paths.workspace_dir / path, max_source_chars_per_file)}\n```"
         for path in changed_files[:8]
     )
-    return (
-        "Return JSON with `findings`: a list of objects with fields "
-        "`severity` (blocking|warning|info), `category`, `summary`, `evidence`, and `recommendation`.\n"
-        "Use `blocking` only when the evidence clearly shows the patch should not proceed.\n"
-        "Prefer concrete, bounded findings over style feedback.\n\n"
-        f"Phase: {phase}\n\n"
-        f"Task:\n{_read_optional_text(paths.task_dir / 'task.md')}\n\n"
-        f"Task memory:\n{task_memory_context(run_dir)}\n\n"
-        f"Manifest patch section:\n{json.dumps(manifest.get('patch', {}), indent=2, ensure_ascii=False)}\n\n"
-        f"Validation report:\n{json.dumps(_read_optional_json(paths.meta_dir / 'validation_report.json'), indent=2, ensure_ascii=False)}\n\n"
-        f"Patched run record:\n{json.dumps(_run_record(manifest, 'patched'), indent=2, ensure_ascii=False)}\n\n"
-        f"Patch diff:\n```diff\n{_clip(_read_optional_text(paths.task_dir / 'patch.diff'), 9000)}\n```\n\n"
-        f"Changed file snippets:\n{snippets or 'No changed file snippets available.'}"
+    return review_prompt(
+        instructions=(
+            "Review the applied patch for scope, interface compatibility, logic, tests, benchmark integrity, "
+            "and repair risk."
+        ),
+        context={
+            "phase": phase,
+            "task": _read_optional_text(paths.task_dir / "task.md"),
+            "task_memory": task_memory_context(run_dir),
+            "manifest_patch": manifest.get("patch", {}),
+            "validation_report": _read_optional_json(paths.meta_dir / "validation_report.json"),
+            "patched_run_record": _run_record(manifest, "patched"),
+            "patch_diff": _clip(_read_optional_text(paths.task_dir / "patch.diff"), 9000),
+        },
+        snippets=[snippets] if snippets else [],
     )
 
 
@@ -277,34 +259,6 @@ def _source_snippet(path: Path, limit: int) -> str:
     return text[:half].rstrip() + "\n\n# ... middle omitted ...\n\n" + text[-half:].lstrip()
 
 
-def _record_review_usage(
-    meta_dir: Path,
-    usage: LLMUsage,
-    *,
-    message_callback: MessageCallback | None,
-) -> None:
-    usage_path = meta_dir / "llm_usage.jsonl"
-    row = usage.to_row()
-    row["stage"] = "code_task.review"
-    append_jsonl(usage_path, row)
-    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
-    _emit(
-        message_callback,
-        f"LLM usage {row.get('label', '')}: "
-        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
-        f"{row['total_tokens']} tokens ({row['source']}).",
-    )
-
-
-def _dedupe_findings(rows: list[ReviewFinding]) -> list[ReviewFinding]:
-    found: dict[str, ReviewFinding] = {}
-    for row in rows:
-        key = row.key or f"{row.severity}:{row.category}:{row.summary}"
-        if key not in found:
-            found[key] = row.model_copy(update={"key": key})
-    return list(found.values())
-
-
 def _dedupe(values: Any) -> list[str]:
     rows: list[str] = []
     seen: set[str] = set()
@@ -320,8 +274,3 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
-
-
-def _emit(callback: MessageCallback | None, message: str) -> None:
-    if callback is not None:
-        callback(message)

@@ -94,6 +94,7 @@ def review_report(
         findings=findings,
         summary={
             "blocking_count": blocking,
+            "error_count": blocking,
             "warning_count": warnings,
             "info_count": infos,
             "finding_count": len(findings),

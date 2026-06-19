@@ -11,6 +11,7 @@ from rich.text import Text
 from simple_ar.code_task.orchestration.workflow import CodeTaskInitResult
 from simple_ar.code_task.orchestration.execute import CodeTaskExecuteResult, ExecuteStepRecord
 from simple_ar.core.console import make_console
+from simple_ar.core.reporting import style_progress_message
 
 
 STEP_DESCRIPTIONS = {
@@ -179,7 +180,9 @@ def render_execute_message(message: str, *, console: Console | None = None) -> N
     """Render one low-noise progress message emitted by the orchestrator."""
 
     console = console or make_console()
-    console.print(f"[bright_blue]-[/bright_blue] {escape(message)}")
+    text = Text("  - ", style="dim")
+    text.append(str(message), style=style_progress_message(str(message)))
+    console.print(text)
 
 
 def render_init_result(

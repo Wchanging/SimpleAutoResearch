@@ -94,7 +94,12 @@ def generate_greenfield_code_task(
 
     task_text = _read_task(paths.task_dir / "task.md", limit=max_source_chars_per_file * 2)
     resource_decision = _optional_json(paths.meta_dir / "resource_decision.json")
-    contract = _contract_from_task(task_text, max_files=max_files, max_generated_lines=max_generated_lines)
+    contract = _contract_from_task(
+        task_text,
+        benchmark_command=_benchmark_command(manifest),
+        max_files=max_files,
+        max_generated_lines=max_generated_lines,
+    )
     result_schema = _result_schema_from_manifest(manifest)
     resource_plan = _resource_plan(resource_decision, max_files=max_files, max_generated_lines=max_generated_lines)
     dependency_plan = _dependency_plan(task_text)
@@ -211,6 +216,7 @@ def generate_greenfield_code_task(
         implementation_memory=memory,
         architecture_plan=architecture,
         client=client,
+        meta_dir=paths.meta_dir,
     )
     review_report_path = paths.meta_dir / "review_report.json"
     write_json(review_report_path, review)
@@ -279,16 +285,23 @@ def _record_usage(
     )
 
 
-def _contract_from_task(task_text: str, *, max_files: int, max_generated_lines: int) -> dict[str, Any]:
+def _contract_from_task(
+    task_text: str,
+    *,
+    benchmark_command: str,
+    max_files: int,
+    max_generated_lines: int,
+) -> dict[str, Any]:
     objective = _first_meaningful_line(task_text) or "Implement the requested greenfield project."
     return {
         "schema_version": "code_task_greenfield_contract.v1",
         "contract_id": "code-task-greenfield",
         "objective": objective,
         "task": task_text,
+        "benchmark_command": benchmark_command,
         "success_criteria": [
             "Generated project lives under code_task/workspace/generated_project.",
-            "The configured benchmark command exits with status 0.",
+            f"The configured benchmark command exits with status 0 exactly as written: `{benchmark_command}`.",
             "The entrypoint prints parseable metric lines when metrics are requested.",
             "No network access or destructive filesystem behavior is required.",
         ],

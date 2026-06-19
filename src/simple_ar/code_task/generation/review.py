@@ -4,8 +4,9 @@ import py_compile
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from simple_ar.integrations.llm import LLMClient, LLMError
-from simple_ar.reviewing.schema import normalize_review_findings, review_report
+from simple_ar.integrations.llm import LLMClient
+from simple_ar.reviewing.schema import ReviewFinding
+from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
 
 
 def review_generated_project(
@@ -17,33 +18,75 @@ def review_generated_project(
     implementation_memory: Mapping[str, Any] | None = None,
     architecture_plan: Mapping[str, Any] | None = None,
     client: LLMClient | None = None,
+    meta_dir: Path | None = None,
+    use_llm: bool = True,
 ) -> dict[str, Any]:
-    findings: list[dict[str, str]] = []
-    files = code_artifacts.get("generated_files")
-    generated = [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
+    """Review a generated greenfield project with the shared code-task format."""
+
+    generated = _generated_file_rows(code_artifacts)
+    deterministic = _deterministic_findings(
+        project_dir=project_dir,
+        generated=generated,
+        result_schema=result_schema,
+        resource_plan=resource_plan,
+    )
+    llm_findings = _llm_findings(
+        project_dir=project_dir,
+        result_schema=result_schema,
+        resource_plan=resource_plan,
+        implementation_memory=implementation_memory or {},
+        architecture_plan=architecture_plan or {},
+        client=client,
+        meta_dir=meta_dir,
+        use_llm=use_llm,
+    )
+    total_lines = sum(_int(row.get("line_count"), 0) for row in generated)
+    return build_review_artifact(
+        reviewer="greenfield-code-reviewer",
+        subject="generated_project",
+        findings=[*deterministic, *llm_findings],
+        metadata={
+            "project_dir": str(project_dir),
+            "required_metrics": _required_metrics(result_schema),
+            "max_files": _int(resource_plan.get("max_files"), 12),
+            "max_lines": _int(resource_plan.get("max_generated_lines"), 1200),
+            "generated_file_count": len(generated),
+            "generated_line_count": total_lines,
+        },
+    )
+
+
+def _deterministic_findings(
+    *,
+    project_dir: Path,
+    generated: list[Mapping[str, Any]],
+    result_schema: Mapping[str, Any],
+    resource_plan: Mapping[str, Any],
+) -> list[ReviewFinding]:
+    findings: list[ReviewFinding] = []
     max_files = _int(resource_plan.get("max_files"), 12)
     max_lines = _int(resource_plan.get("max_generated_lines"), 1200)
     if len(generated) > max_files:
-        findings.append(_finding("error", "too_many_files", f"Generated {len(generated)} files; budget is {max_files}."))
+        findings.append(_finding("blocking", "too_many_files", f"Generated {len(generated)} files; budget is {max_files}."))
     total_lines = sum(_int(row.get("line_count"), 0) for row in generated)
     if total_lines > max_lines:
-        findings.append(_finding("error", "too_many_lines", f"Generated {total_lines} lines; budget is {max_lines}."))
+        findings.append(_finding("blocking", "too_many_lines", f"Generated {total_lines} lines; budget is {max_lines}."))
     if not (project_dir / "main.py").is_file():
-        findings.append(_finding("error", "missing_entrypoint", "`main.py` entrypoint is missing."))
+        findings.append(_finding("blocking", "missing_entrypoint", "`main.py` entrypoint is missing."))
     for row in generated:
         path = _safe_path(str(row.get("path", "")))
         if not path:
-            findings.append(_finding("error", "unsafe_path", f"Unsafe generated path: {row.get('path', '')}"))
+            findings.append(_finding("blocking", "unsafe_path", f"Unsafe generated path: {row.get('path', '')}"))
             continue
         target = project_dir / path
         if not target.is_file():
-            findings.append(_finding("error", "missing_file", f"Planned file was not written: {path}"))
+            findings.append(_finding("blocking", "missing_file", f"Planned file was not written: {path}"))
             continue
         if path.endswith(".py"):
             try:
                 py_compile.compile(str(target), doraise=True)
             except py_compile.PyCompileError as exc:
-                findings.append(_finding("error", "python_compile_failed", f"{path}: {exc.msg}"))
+                findings.append(_finding("blocking", "python_compile_failed", f"{path}: {exc.msg}"))
     for metric in _required_metrics(result_schema):
         if not _metric_name_visible(project_dir, metric):
             findings.append(
@@ -53,46 +96,10 @@ def review_generated_project(
                     f"Required metric `{metric}` is not visibly printed or returned in generated files.",
                 )
             )
-    agent_findings = _agent_review(
-        project_dir=project_dir,
-        result_schema=result_schema,
-        resource_plan=resource_plan,
-        implementation_memory=implementation_memory or {},
-        architecture_plan=architecture_plan or {},
-        client=client,
-    )
-    findings.extend(agent_findings)
-    contract = review_report(
-        reviewer="greenfield-code-reviewer",
-        subject="generated_project",
-        findings=normalize_review_findings(
-            _legacy_findings_for_contract(findings),
-            source="greenfield.code-review",
-            default_category="generated_project",
-            default_evidence=["06-code/code_review.json", "06-code/code_artifacts.json"],
-        ),
-        metadata={
-            "project_dir": str(project_dir),
-            "required_metrics": _required_metrics(result_schema),
-            "max_files": max_files,
-            "max_lines": max_lines,
-        },
-    )
-    return {
-        "schema_version": "code_review.v1",
-        "status": _status(findings),
-        "findings": findings,
-        "review_contract": contract.model_dump(mode="json"),
-        "summary": {
-            "error_count": sum(1 for item in findings if item.get("severity") == "error"),
-            "warning_count": sum(1 for item in findings if item.get("severity") == "warning"),
-            "generated_file_count": len(generated),
-            "generated_line_count": total_lines,
-        },
-    }
+    return findings
 
 
-def _agent_review(
+def _llm_findings(
     *,
     project_dir: Path,
     result_schema: Mapping[str, Any],
@@ -100,8 +107,10 @@ def _agent_review(
     implementation_memory: Mapping[str, Any],
     architecture_plan: Mapping[str, Any],
     client: LLMClient | None,
-) -> list[dict[str, str]]:
-    if client is None:
+    meta_dir: Path | None,
+    use_llm: bool,
+) -> list[ReviewFinding]:
+    if client is None or meta_dir is None:
         return []
     snippets = []
     for path in sorted(project_dir.rglob("*.py"))[:6]:
@@ -111,48 +120,36 @@ def _agent_review(
         except OSError:
             continue
         snippets.append(f"### {rel}\n```python\n{text}\n```")
-    if not snippets:
-        return []
-    try:
-        response = client.ask_json(
-            "You are a strict but practical code reviewer for generated experiment projects.",
-            (
-                "Review this generated project for runtime, scope, and metric-export risks. "
-                "Use the resource plan, architecture plan, and implementation memory as review context. "
-                "Return JSON with `findings`, a list of objects containing severity "
-                "(error|warning|info), code, and message. Do not request broad rewrites.\n\n"
-                f"Result schema:\n{dict(result_schema)}\n\n"
-                f"Resource plan:\n{dict(resource_plan)}\n\n"
-                f"Architecture summary:\n{_compact_mapping(architecture_plan)}\n\n"
-                f"Implementation memory:\n{_compact_mapping(implementation_memory)}\n\n"
-                + "\n\n".join(snippets)
-            ),
-            label="greenfield-code-review",
-        )
-    except LLMError:
-        return []
-    rows = response.get("findings")
-    if not isinstance(rows, list):
-        return []
-    findings: list[dict[str, str]] = []
-    for row in rows[:12]:
-        if isinstance(row, Mapping):
-            severity = str(row.get("severity", "warning")).lower()
-            if severity not in {"error", "warning", "info"}:
-                severity = "warning"
-            if severity == "error":
-                # The LLM reviewer receives snippets, not a full executable view.
-                # Keep its feedback visible but leave hard failures to deterministic
-                # checks such as path safety, file budgets, py_compile, and run guards.
-                severity = "warning"
-            findings.append(
-                _finding(
-                    severity,
-                    str(row.get("code", "agent_review")),
-                    str(row.get("message", "")).strip()[:500] or "Agent reviewer finding.",
-                )
-            )
-    return findings
+    prompt = review_prompt(
+        instructions=(
+            "Review this generated project for runtime, scope, result-schema, resource, and metric-export risks. "
+            "Use the resource plan, architecture plan, and implementation memory as context. Do not request broad rewrites."
+        ),
+        context={
+            "result_schema": dict(result_schema),
+            "resource_plan": dict(resource_plan),
+            "architecture_plan": _compact_mapping(architecture_plan),
+            "implementation_memory": _compact_mapping(implementation_memory),
+        },
+        snippets=snippets,
+    )
+    return run_llm_review(
+        meta_dir=meta_dir,
+        prompt=prompt,
+        label="greenfield-code-review",
+        source="greenfield.llm-reviewer",
+        default_category="generated_project",
+        default_evidence=["code_task/meta/review_report.json", "code_task/meta/code_artifacts.json"],
+        use_llm=use_llm,
+        client=client,
+        message_callback=None,
+        max_findings=12,
+    )
+
+
+def _generated_file_rows(code_artifacts: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    files = code_artifacts.get("generated_files")
+    return [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
 
 
 def _required_metrics(schema: Mapping[str, Any]) -> list[str]:
@@ -187,11 +184,7 @@ def _review_snippet(path: Path, *, limit: int = 5000) -> str:
     if len(text) <= limit:
         return text
     half = max(1000, limit // 2)
-    return (
-        text[:half].rstrip()
-        + "\n\n# ... middle omitted for reviewer prompt ...\n\n"
-        + text[-half:].lstrip()
-    )
+    return text[:half].rstrip() + "\n\n# ... middle omitted for reviewer prompt ...\n\n" + text[-half:].lstrip()
 
 
 def _safe_path(value: str) -> str:
@@ -201,30 +194,16 @@ def _safe_path(value: str) -> str:
     return path.as_posix()
 
 
-def _finding(severity: str, code: str, message: str) -> dict[str, str]:
-    return {"severity": severity, "code": code, "message": message}
-
-
-def _status(findings: list[Mapping[str, str]]) -> str:
-    if any(item.get("severity") == "error" for item in findings):
-        return "failed"
-    if any(item.get("severity") == "warning" for item in findings):
-        return "warning"
-    return "passed"
-
-
-def _legacy_findings_for_contract(findings: list[dict[str, str]]) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for row in findings:
-        rows.append(
-            {
-                "severity": "blocking" if row.get("severity") == "error" else row.get("severity", "info"),
-                "category": row.get("code", "greenfield_review"),
-                "summary": row.get("message", ""),
-                "evidence": ["06-code/code_review.json"],
-            }
-        )
-    return rows
+def _finding(severity: str, category: str, summary: str) -> ReviewFinding:
+    return ReviewFinding(
+        key=f"greenfield:{category}:{summary[:80]}",
+        severity=severity,  # type: ignore[arg-type]
+        category=category,
+        summary=summary,
+        evidence=["code_task/meta/review_report.json", "code_task/meta/code_artifacts.json"],
+        recommendation="Repair the generated project before validation or execution.",
+        source="greenfield.rule-review",
+    )
 
 
 def _compact_mapping(value: Mapping[str, Any], *, limit: int = 2200) -> str:

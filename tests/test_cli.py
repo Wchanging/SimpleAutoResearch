@@ -8,15 +8,40 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from rich.console import Console
+
 from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.cli import _resume_config, main
-from simple_ar.cli.code_task_view import confirm_review_gate
+from simple_ar.cli.code_task_view import confirm_review_gate, render_execute_message
+from simple_ar.core.reporting import style_progress_message
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_code_task_execute_messages_use_shared_rich_styles(self) -> None:
+        self.assertEqual(style_progress_message("LLM usage greenfield-file-main.py: 1 input"), "gold1")
+        self.assertEqual(
+            style_progress_message("Dependency advice: missing optional packages: torch."),
+            "bright_yellow",
+        )
+
+        stream = io.StringIO()
+        console = Console(
+            file=stream,
+            force_terminal=True,
+            color_system="standard",
+            highlight=False,
+            soft_wrap=True,
+            emoji=False,
+        )
+        render_execute_message("LLM usage greenfield-file-main.py: 1 input", console=console)
+
+        output = stream.getvalue()
+        self.assertIn("LLM usage greenfield-file-main.py", output)
+        self.assertIn("\x1b[", output)
+
     def test_review_gate_without_input_stops_cleanly(self) -> None:
         class FakeConsole:
             def __init__(self) -> None:

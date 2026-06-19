@@ -131,7 +131,10 @@ def _file_content(
             content = str(response.get("content", "")).strip()
             summary = str(response.get("summary", "")).strip() or str(file_spec.get("purpose", ""))
             if content and not _looks_like_markdown_fence(content):
-                return content.rstrip() + "\n", "llm", summary[:500]
+                cleaned = _repair_common_python_generation_error(path, content.rstrip() + "\n")
+                if _is_valid_python_content(cleaned, filename=path):
+                    mode = "llm_repaired" if cleaned != content.rstrip() + "\n" else "llm"
+                    return cleaned, mode, summary[:500]
         except LLMError:
             pass
     return fallback_file_content(path, result_schema, contract), "fallback", str(file_spec.get("purpose", ""))[:500]
@@ -183,3 +186,29 @@ def _safe_path(value: str) -> str:
 def _looks_like_markdown_fence(value: str) -> bool:
     stripped = value.strip()
     return stripped.startswith("```") or stripped.endswith("```")
+
+
+def _is_valid_python_content(value: str, *, filename: str) -> bool:
+    try:
+        compile(value, filename, "exec")
+    except SyntaxError:
+        return False
+    return True
+
+
+def _repair_common_python_generation_error(path: str, value: str) -> str:
+    """Fix tiny deterministic generation glitches before writing a file.
+
+    This is deliberately narrow. Broad semantic fixes belong in the review and
+    repair loop, but accepting a package marker with two stray leading
+    underscores before a triple-quoted docstring would waste an otherwise
+    useful run.
+    """
+
+    stripped = value.lstrip("\ufeff")
+    leading = value[: len(value) - len(stripped)]
+    if path.endswith("__init__.py"):
+        for marker in ('__"""', "__'''"):
+            if stripped.startswith(marker):
+                return leading + stripped[2:]
+    return value

@@ -197,10 +197,9 @@ def _compact_code_review(review: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(findings, list):
         findings = []
     return {
-        "schema_version": review.get("schema_version", "code_review.v1"),
+        "schema_version": review.get("schema_version", "review_report.v1"),
         "status": review.get("status", "unknown"),
         "summary": review.get("summary", {}),
-        "review_contract": review.get("review_contract", {}),
         "findings": [item for item in findings if isinstance(item, dict)][:20],
     }
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.core.artifacts import read_json
+from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.code_task.editing.attempts import (
     LoadedCodeTaskBatch,
     create_code_task_batch,
@@ -17,6 +17,8 @@ from simple_ar.code_task.execution.failure import analyze_code_task_failure
 from simple_ar.code_task.editing.patching import PatchValidationError, apply_patch_edits, propose_patch_edits
 from simple_ar.code_task.editing.planning import generate_patch_plan
 from simple_ar.code_task.generation.greenfield import generate_greenfield_code_task
+from simple_ar.code_task.generation.generated_project_repair import repair_generated_project_from_review
+from simple_ar.code_task.generation.review import review_generated_project
 from simple_ar.code_task.execution.repair import propose_repair_edits
 from simple_ar.code_task.review import review_code_task_changes
 from simple_ar.code_task.execution.runner import run_code_task_baseline, run_code_task_benchmark
@@ -27,7 +29,14 @@ from simple_ar.code_task.memory import (
     record_repair_memory,
     record_review_finding,
 )
-from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest
+from simple_ar.code_task.runtime.state import (
+    code_task_paths,
+    load_code_task_manifest,
+    manifest_section,
+    save_code_task_manifest,
+    utcnow_iso,
+)
+from simple_ar.code_task.execution.summary import write_code_task_summary
 from simple_ar.code_task.execution.validation import validate_code_task
 from simple_ar.code_task.editing.work_plan import generate_code_task_work_plan
 from simple_ar.integrations.llm import LLMError
@@ -211,6 +220,7 @@ def execute_code_task(
             max_files=max_files,
             max_source_chars_per_file=max_source_chars_per_file,
             max_generated_lines=max_generated_lines,
+            repair_rounds=repair_rounds,
             implementation_provider=implementation_provider,
             implementation_agent_mode=implementation_agent_mode,
             implementation_allow_external_agent=implementation_allow_external_agent,
@@ -747,6 +757,7 @@ def _execute_greenfield_code_task(
     max_files: int,
     max_source_chars_per_file: int,
     max_generated_lines: int,
+    repair_rounds: int,
     implementation_provider: str,
     implementation_agent_mode: str,
     implementation_allow_external_agent: bool,
@@ -840,12 +851,22 @@ def _execute_greenfield_code_task(
                 metadata={"generated_files": list(result.generated_files)},
             )
             if result.review_status == "failed":
-                return _result(
+                if not _attempt_greenfield_review_repair(
+                    root,
                     paths,
                     steps,
-                    "review_failed",
-                    "Review code_task/meta/review_report.json before validation or execution.",
-                )
+                    repair_rounds=repair_rounds,
+                    max_files=max_files,
+                    max_generated_lines=max_generated_lines,
+                    message_callback=message_callback,
+                    summary="Repaired generated project after review failure and passed deterministic rereview.",
+                ):
+                    return _result(
+                        paths,
+                        steps,
+                        "review_failed",
+                        "Review code_task/meta/review_report.json before validation or execution.",
+                    )
     if _stop_after("work-plan", to_step):
         return _result(paths, steps, "stop_point", "Stopped after greenfield generation as requested.")
 
@@ -861,12 +882,22 @@ def _execute_greenfield_code_task(
             _record(steps, "review", "skipped", "greenfield review_report.json already exists")
             review = read_json(review_path)
             if isinstance(review, dict) and review.get("status") == "failed":
-                return _result(
+                if not _attempt_greenfield_review_repair(
+                    root,
                     paths,
                     steps,
-                    "review_failed",
-                    "Review code_task/meta/review_report.json before validation or execution.",
-                )
+                    repair_rounds=repair_rounds,
+                    max_files=max_files,
+                    max_generated_lines=max_generated_lines,
+                    message_callback=message_callback,
+                    summary="Repaired existing generated project after review failure and passed deterministic rereview.",
+                ):
+                    return _result(
+                        paths,
+                        steps,
+                        "review_failed",
+                        "Review code_task/meta/review_report.json before validation or execution.",
+                    )
         elif dry_run:
             return _dry_result(paths, steps, "review", "review generated project")
         else:
@@ -1089,6 +1120,203 @@ def _proposal_exists(paths: object) -> bool:
 def _review_report_exists(paths: object, phase: str) -> bool:
     name = "review_report.json" if phase == "post_apply" else f"review_report_{phase}.json"
     return (paths.meta_dir / name).is_file()
+
+
+def _greenfield_review_repair_available(run_dir: Path, repair_rounds: int) -> bool:
+    if repair_rounds <= 0:
+        return False
+    manifest = load_code_task_manifest(run_dir)
+    repair = manifest.get("repair", {})
+    if not isinstance(repair, dict):
+        return True
+    try:
+        used = int(repair.get("review_repair_count", 0) or 0)
+    except (TypeError, ValueError):
+        used = 0
+    return used < repair_rounds
+
+
+def _attempt_greenfield_review_repair(
+    run_dir: Path,
+    paths: object,
+    steps: list[ExecuteStepRecord],
+    *,
+    repair_rounds: int,
+    max_files: int,
+    max_generated_lines: int,
+    message_callback: MessageCallback | None,
+    summary: str,
+) -> bool:
+    if not _greenfield_review_repair_available(run_dir, repair_rounds):
+        _record(steps, "repair", "skipped", "review repair budget exhausted or disabled")
+        return False
+    _emit(message_callback, "Generated project review failed; attempting bounded review repair.")
+    repair = _repair_greenfield_review_failure(
+        run_dir,
+        paths,
+        max_files=max_files,
+        max_generated_lines=max_generated_lines,
+    )
+    _record(steps, "repair", "done", f"review repair {repair.get('status', 'unknown')}")
+    if repair.get("status") != "patched":
+        return False
+    _emit(message_callback, "Review repair patched generated project; rerunning review.")
+    review = _rerun_greenfield_review(
+        run_dir,
+        paths,
+        max_files=max_files,
+        max_generated_lines=max_generated_lines,
+    )
+    _record(steps, "review", "done", f"status {review.get('status', 'unknown')}")
+    if review.get("status") == "failed":
+        return False
+    _memory_event(
+        run_dir,
+        "greenfield_review_repair",
+        summary,
+        status=str(review.get("status", "unknown")),
+        artifacts=[
+            "code_task/meta/review_repair.json",
+            "code_task/meta/review_report.json",
+        ],
+    )
+    return True
+
+
+def _repair_greenfield_review_failure(
+    run_dir: Path,
+    paths: object,
+    *,
+    max_files: int,
+    max_generated_lines: int,
+) -> dict[str, Any]:
+    review_path = paths.meta_dir / "review_report.json"
+    review = read_json(review_path) if review_path.is_file() else {}
+    review = review if isinstance(review, dict) else {}
+    repair_path = paths.meta_dir / "review_repair.json"
+    repair = repair_generated_project_from_review(
+        project_dir=paths.workspace_dir / "generated_project",
+        review_report=review,
+        output_path=repair_path,
+    )
+    manifest = load_code_task_manifest(run_dir)
+    repair_section = manifest_section(manifest, "repair")
+    previous_count = int(repair_section.get("review_repair_count", 0) or 0)
+    repair_section.update(
+        {
+            "status": repair.get("status", "unknown"),
+            "review_repair_count": previous_count + 1,
+            "latest_review_repair": "code_task/meta/review_repair.json",
+            "latest_review_repair_at": utcnow_iso(),
+            "latest_review_repair_changed_files": repair.get("changed_files", []),
+        }
+    )
+    manifest["repair"] = repair_section
+    implementation = manifest_section(manifest, "implementation")
+    implementation["review_repair_status"] = repair.get("status", "unknown")
+    implementation["review_repair_changed_files"] = repair.get("changed_files", [])
+    manifest["implementation"] = implementation
+    save_code_task_manifest(run_dir, manifest)
+    if repair.get("status") == "patched":
+        code_artifacts_path = paths.meta_dir / "code_artifacts.json"
+        if code_artifacts_path.is_file():
+            code_artifacts = read_json(code_artifacts_path)
+            if isinstance(code_artifacts, dict):
+                _refresh_greenfield_code_artifacts(
+                    code_artifacts,
+                    project_dir=paths.workspace_dir / "generated_project",
+                    max_generated_lines=max_generated_lines,
+                )
+                write_json(code_artifacts_path, code_artifacts)
+    write_code_task_summary(run_dir)
+    return repair
+
+
+def _rerun_greenfield_review(
+    run_dir: Path,
+    paths: object,
+    *,
+    max_files: int,
+    max_generated_lines: int,
+) -> dict[str, Any]:
+    manifest = load_code_task_manifest(run_dir)
+    code_artifacts = _read_optional_dict(paths.meta_dir / "code_artifacts.json")
+    review = review_generated_project(
+        project_dir=paths.workspace_dir / "generated_project",
+        code_artifacts=code_artifacts,
+        result_schema=_greenfield_result_schema_from_manifest(manifest),
+        resource_plan=_greenfield_resource_plan(paths, max_files=max_files, max_generated_lines=max_generated_lines),
+        implementation_memory=_read_optional_dict(paths.task_dir / "memory" / "implementation_memory.json"),
+        architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
+        client=None,
+        meta_dir=paths.meta_dir,
+        use_llm=False,
+    )
+    write_json(paths.meta_dir / "review_report.json", review)
+    manifest = load_code_task_manifest(run_dir)
+    implementation = manifest_section(manifest, "implementation")
+    implementation["review_status"] = review.get("status", "unknown")
+    implementation["reviewed_at"] = utcnow_iso()
+    manifest["implementation"] = implementation
+    save_code_task_manifest(run_dir, manifest)
+    write_code_task_summary(run_dir)
+    return review
+
+
+def _greenfield_result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    benchmark = manifest.get("benchmark", {}) if isinstance(manifest.get("benchmark"), dict) else {}
+    primary = str(benchmark.get("primary_metric") or "score").strip() or "score"
+    directions = benchmark.get("metric_directions")
+    required = [primary]
+    if isinstance(directions, dict):
+        required.extend(str(name) for name in directions if str(name).strip() and str(name) != primary)
+    return {
+        "schema_version": "code_task_greenfield_result_schema.v1",
+        "primary_metric": primary,
+        "required_metrics": list(dict.fromkeys(required)),
+        "metric_directions": directions if isinstance(directions, dict) else {},
+    }
+
+
+def _greenfield_resource_plan(paths: object, *, max_files: int, max_generated_lines: int) -> dict[str, Any]:
+    decision = _read_optional_dict(paths.meta_dir / "resource_decision.json")
+    return {
+        "schema_version": "code_task_greenfield_resource_plan.v1",
+        "profile": str(decision.get("profile") or "local_cpu"),
+        "allow_gpu": bool(decision.get("allow_gpu")),
+        "max_files": max_files,
+        "max_generated_lines": max_generated_lines,
+        "decision": decision,
+    }
+
+
+def _refresh_greenfield_code_artifacts(
+    code_artifacts: dict[str, Any],
+    *,
+    project_dir: Path,
+    max_generated_lines: int,
+) -> None:
+    generated = code_artifacts.get("generated_files")
+    rows = [row for row in generated if isinstance(row, dict)] if isinstance(generated, list) else []
+    total_lines = 0
+    for row in rows:
+        path = str(row.get("path") or "").replace("\\", "/").strip()
+        if not path:
+            continue
+        target = project_dir / path
+        if not target.is_file():
+            continue
+        line_count = max(1, len(target.read_text(encoding="utf-8", errors="replace").splitlines()))
+        row["line_count"] = line_count
+        total_lines += line_count
+    code_artifacts["total_lines"] = min(total_lines, max_generated_lines + 1)
+
+
+def _read_optional_dict(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    data = read_json(path)
+    return data if isinstance(data, dict) else {}
 
 
 def _work_plan_exists(paths: object) -> bool:

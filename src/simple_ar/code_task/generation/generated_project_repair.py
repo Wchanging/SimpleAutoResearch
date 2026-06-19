@@ -11,6 +11,7 @@ workspace.
 """
 
 import shutil
+import py_compile
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Mapping
@@ -26,6 +27,80 @@ from simple_ar.agent_backends import (
 )
 from simple_ar.core.artifacts import write_json
 from simple_ar.integrations.llm import LLMClient
+
+
+def repair_generated_project_from_review(
+    *,
+    project_dir: Path,
+    review_report: Mapping[str, Any],
+    output_path: Path,
+) -> dict[str, Any]:
+    """Apply narrow deterministic repairs after generated-project review failure.
+
+    The review gate runs before validation and benchmark execution, so a small
+    syntax issue can otherwise strand an expensive generated project. This
+    helper fixes only objective, local problems such as Python files that fail
+    to compile due to common generation glitches. It does not try to rewrite
+    warnings or bypass the reviewer.
+    """
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    summary: dict[str, Any] = {
+        "schema_version": "greenfield_review_repair.v1",
+        "status": "skipped",
+        "strategy": "deterministic_compile_repair",
+        "review_status": str(review_report.get("status", "unknown")),
+        "changed_files": [],
+        "unresolved_errors": [],
+        "notes": [],
+    }
+    if not project_dir.is_dir():
+        summary["status"] = "failed"
+        summary["unresolved_errors"].append(f"Missing generated project directory: {project_dir}")
+        write_json(output_path, summary)
+        return summary
+
+    backup_dir = output_path.parent / "review_repair_backups" / "generated_project_before_review_repair"
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    shutil.copytree(project_dir, backup_dir)
+    summary["backup_dir"] = backup_dir.as_posix()
+
+    changed: list[str] = []
+    unresolved: list[str] = []
+    for path in sorted(project_dir.rglob("*.py")):
+        rel = path.relative_to(project_dir).as_posix()
+        error = _compile_error(path)
+        if not error:
+            continue
+        original = path.read_text(encoding="utf-8", errors="replace")
+        repaired = _repair_common_python_generation_error(rel, original)
+        if repaired != original:
+            path.write_text(repaired, encoding="utf-8")
+            if not _compile_error(path):
+                changed.append(rel)
+                continue
+            path.write_text(original, encoding="utf-8")
+        if path.name == "__init__.py":
+            path.write_text('"""Generated experiment package."""\n\n__all__ = []\n', encoding="utf-8")
+            if not _compile_error(path):
+                changed.append(rel)
+                summary["notes"].append(f"Replaced invalid package marker in {rel}.")
+                continue
+            path.write_text(original, encoding="utf-8")
+        unresolved.append(f"{rel}: {error}")
+
+    summary["changed_files"] = changed
+    summary["unresolved_errors"] = unresolved
+    if unresolved:
+        summary["status"] = "failed"
+    elif changed:
+        summary["status"] = "patched"
+        summary["notes"].append("Patched deterministic Python compile issues; rerun review before execution.")
+    else:
+        summary["notes"].append("No deterministic review repairs were available.")
+    write_json(output_path, summary)
+    return summary
 
 
 def repair_generated_project_from_guard(
@@ -270,6 +345,24 @@ def _safe_relative_path(value: str) -> str:
     if not value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         return ""
     return path.as_posix()
+
+
+def _compile_error(path: Path) -> str:
+    try:
+        py_compile.compile(str(path), doraise=True)
+    except py_compile.PyCompileError as exc:
+        return exc.msg
+    return ""
+
+
+def _repair_common_python_generation_error(path: str, value: str) -> str:
+    stripped = value.lstrip("\ufeff")
+    leading = value[: len(value) - len(stripped)]
+    if path.endswith("__init__.py"):
+        for marker in ('__"""', "__'''"):
+            if stripped.startswith(marker):
+                return leading + stripped[2:]
+    return value
 
 
 def _missing_metrics_from_diagnosis(diagnosis: Mapping[str, Any]) -> list[str]:

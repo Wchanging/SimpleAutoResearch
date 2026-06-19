@@ -218,6 +218,77 @@ primary_metric = "accuracy"
             self.assertEqual(manifest["implementation"]["status"], "generated")
             self.assertEqual(manifest["patch"]["mode"], "greenfield_generated")
 
+    def test_greenfield_review_failure_can_be_repaired_and_continue(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nGenerate a deterministic project that prints accuracy and macro_f1 metrics.\n",
+            )
+            run_dir = root / "runs" / "greenfield-review-repair"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="accuracy",
+                metric_directions={"accuracy": "higher_is_better", "macro_f1": "higher_is_better"},
+            )
+
+            first = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="work-plan",
+                timeout_sec=30,
+                max_files=8,
+            )
+            self.assertEqual(first.stop_reason, "stop_point")
+            init_file = (
+                run_dir
+                / "code_task"
+                / "workspace"
+                / "generated_project"
+                / "generated_experiment"
+                / "__init__.py"
+            )
+            write_text(init_file, '__"""generated_experiment package."""\n')
+            write_json(
+                run_dir / "code_task" / "meta" / "review_report.json",
+                {
+                    "schema_version": "review_report.v1",
+                    "status": "failed",
+                    "findings": [
+                        {
+                            "severity": "blocking",
+                            "category": "python_compile_failed",
+                            "summary": "generated_experiment/__init__.py does not compile.",
+                        }
+                    ],
+                    "summary": {"blocking_count": 1, "error_count": 1, "warning_count": 0},
+                },
+            )
+
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="run",
+                timeout_sec=30,
+                max_files=8,
+                repair_rounds=1,
+            )
+
+            self.assertEqual(result.stop_reason, "completed")
+            repair = read_json(run_dir / "code_task" / "meta" / "review_repair.json")
+            self.assertEqual(repair["status"], "patched")
+            rereview = read_json(run_dir / "code_task" / "meta" / "review_report.json")
+            self.assertNotEqual(rereview["status"], "failed")
+            metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
+            self.assertIn("accuracy", metrics)
+
     def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
