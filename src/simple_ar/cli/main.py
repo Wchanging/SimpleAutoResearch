@@ -879,7 +879,8 @@ def _code_task_init_error_message(
                 "",
                 "Check the task file path:",
                 f"- configured task_file: {task_file or '(missing)'}",
-                "- Pass --task-file path\\to\\task.md, or set [code_task].task_file in TOML.",
+                "- Pass --task-file path/to/task.md, or set [code_task].task_file in TOML.",
+                "- Windows-style backslashes are accepted, but forward slashes are portable across Linux/macOS/Windows.",
                 "- For embedded 8-stage code_task_project runs, omit task_file only if you want 05-design to generate one.",
             ]
         )

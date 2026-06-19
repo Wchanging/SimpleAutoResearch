@@ -292,6 +292,70 @@ agent_timeout_sec = 123
             self.assertEqual(options.max_files, 12)
             self.assertEqual(options.max_generated_lines, 3456)
 
+    def test_code_task_config_normalizes_windows_style_path_separators(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            config = root / "code_task.toml"
+            config.write_text(
+                r"""
+[code_task]
+kind = "greenfield"
+task_file = 'examples\code_task_greenfield_ml_suite\task.md'
+output_root = 'runs\code-task-greenfield-ml-suite'
+
+[environment]
+python = '.venv\bin\python'
+""".strip(),
+                encoding="utf-8",
+            )
+
+            options = load_code_task_init_options(config_path=str(config))
+
+            self.assertEqual(options.task_file, "examples/code_task_greenfield_ml_suite/task.md")
+            self.assertEqual(options.output_root, "runs/code-task-greenfield-ml-suite")
+            self.assertEqual(options.python_executable, ".venv/bin/python")
+
+    def test_run_config_normalizes_windows_style_config_and_relative_paths(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            config_dir = root / "configs"
+            config_dir.mkdir()
+            project = config_dir / "project"
+            project.mkdir()
+            task = config_dir / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            config = config_dir / "pipeline.toml"
+            config.write_text(
+                r"""
+[run]
+topic = "portable paths"
+output_root = 'runs\portable'
+
+[task]
+kind = "existing_project"
+code_root = 'project'
+task_file = 'task.md'
+
+[experiment]
+code_task_config = 'nested\code_task.toml'
+""".strip(),
+                encoding="utf-8",
+            )
+            portable_config_arg = str(config).replace("\\", "/")
+            windows_style_config_arg = portable_config_arg.replace("/", "\\")
+
+            parsed = load_pipeline_run_config(windows_style_config_arg)
+
+            self.assertEqual(parsed["output_root"], "runs/portable")
+            self.assertEqual(parsed["code_task_code_root"], str(project.resolve()))
+            self.assertEqual(parsed["code_task_task_file"], str(task.resolve()))
+            self.assertEqual(
+                parsed["code_task_config"],
+                str((config_dir / "nested" / "code_task.toml").resolve()),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

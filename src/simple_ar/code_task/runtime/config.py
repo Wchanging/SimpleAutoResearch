@@ -453,9 +453,11 @@ def load_code_task_init_options(
     edit_scope = config.edit_scope
 
     resolved_kind = _normalize_code_task_kind(kind or code_task.kind)
-    resolved_code_root = _config_string(code_root) or _config_string(code_task.code_root)
-    resolved_task_file = _config_string(task_file) or _config_string(
-        code_task.task_file
+    resolved_code_root = _portable_path_string(
+        _config_string(code_root) or _config_string(code_task.code_root)
+    )
+    resolved_task_file = _portable_path_string(
+        _config_string(task_file) or _config_string(code_task.task_file)
     )
     if resolved_kind == CODE_TASK_KIND_EXISTING and not resolved_code_root:
         raise CodeTaskConfigError(
@@ -466,7 +468,7 @@ def load_code_task_init_options(
             "Missing task file. Pass --task-file or set [code_task].task_file."
         )
 
-    resolved_output_root = (
+    resolved_output_root = _portable_path_string(
         _config_string(output_root)
         or _config_string(code_task.output_root)
         or DEFAULT_OUTPUT_ROOT
@@ -486,7 +488,7 @@ def load_code_task_init_options(
         or _config_string(environment.mode)
         or DEFAULT_ENV_MODE
     )
-    resolved_python = (
+    resolved_python = _portable_path_string(
         _config_string(python_executable)
         or _config_string(environment.python)
         or _config_string(environment.python_executable)
@@ -585,7 +587,7 @@ def _normalize_code_task_kind(value: object) -> str:
 def _load_toml_config(path: str | None) -> CodeTaskConfig:
     if not path:
         return CodeTaskConfig()
-    config_path = Path(path)
+    config_path = Path(_portable_path_string(path) or path)
     try:
         with config_path.open("rb") as handle:
             data = tomllib.load(handle)
@@ -607,6 +609,20 @@ def _config_string(value: object) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _portable_path_string(value: str | None) -> str | None:
+    """Normalize user-facing path separators without touching artifact IDs.
+
+    Python on Windows accepts forward slashes, but POSIX systems treat
+    backslashes as literal filename characters. Normalizing config/CLI path
+    inputs here lets examples copied from Windows shells still resolve on
+    Ubuntu, while all internal artifact paths remain POSIX-style elsewhere.
+    """
+
+    if value is None:
+        return None
+    return value.replace("\\", "/")
 
 
 def _config_int(value: object) -> int | None:

@@ -224,7 +224,7 @@ class PipelineRunConfig(_ConfigModel):
         result: dict[str, object] = {}
 
         _set_string(result, "topic", self.run.topic)
-        _set_string(result, "output_root", self.run.output_root)
+        _set_path_string(result, "output_root", self.run.output_root)
         _set_string(result, "from_stage", self.run.from_stage)
         _set_string(result, "to_stage", self.run.to_stage)
         _set_bool(result, "quiet", self.run.quiet)
@@ -264,7 +264,7 @@ class PipelineRunConfig(_ConfigModel):
         _set_int(result, "research_read_max_shortlist", self.research.read_max_shortlist)
         _set_bool(result, "research_cache", self.research.cache)
         _set_string(result, "research_index_backend", self.research.index_backend)
-        _set_string(result, "research_index_root", self.research.index_root)
+        _set_path_string(result, "research_index_root", self.research.index_root)
         _set_resolved_string_list(
             result,
             "research_local_documents",
@@ -393,7 +393,7 @@ def load_pipeline_run_config(config_path: str | None) -> dict[str, object]:
     """
     if not config_path:
         return {}
-    path = Path(config_path)
+    path = Path(_portable_path_string(config_path))
     data = _load_toml(path)
     try:
         parsed = PipelineRunConfig.model_validate(data)
@@ -421,8 +421,20 @@ def _set_string(result: dict[str, object], key: str, value: object) -> None:
         result[key] = text
 
 
+def _set_path_string(result: dict[str, object], key: str, value: object) -> None:
+    text = _string_value(value)
+    if text:
+        result[key] = _portable_path_string(text)
+
+
 def _string_value(value: object) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _portable_path_string(value: str) -> str:
+    """Normalize user-facing path separators for POSIX/Windows portability."""
+
+    return value.replace("\\", "/")
 
 
 def _set_int(result: dict[str, object], key: str, value: object) -> None:
@@ -531,7 +543,7 @@ def _contains_code_task_config(data: dict[str, Any]) -> bool:
 
 
 def _resolve_relative(config_path: Path, value: str) -> Path:
-    path = Path(value)
+    path = Path(_portable_path_string(value))
     if path.is_absolute():
         return path
     return (config_path.parent / path).resolve()
