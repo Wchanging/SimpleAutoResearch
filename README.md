@@ -42,6 +42,10 @@ experimentation, and gradual extension.
 - **Research-to-code runs**: embed a code task inside the 8-stage pipeline with
   repo maps, context packs, work plans, patch evidence, benchmark metrics, and
   report evidence.
+- **Tool and external-agent boundaries**: export real read-only tool schemas,
+  serve run-local tools over MCP stdio, and optionally hand off bounded
+  greenfield generation/repair to external CLI agents such as Codex while still
+  routing returned files through SimpleAutoResearch review and run guards.
 - **Reviewable artifacts**: each run writes inspectable files under `runs/`
   instead of hiding decisions inside process memory.
 - **Mature library foundation**: pipeline/code-task TOML configs are validated
@@ -145,7 +149,7 @@ accuracy = "higher"
 latency_ms = "resource"
 
 [workspace]
-mode = "copy"  # copy | git_worktree | sparse_copy
+mode = "auto"  # auto | copy | git_worktree | sparse_copy
 ```
 
 Then run the reviewed flow. `init` prints a run directory such as
@@ -221,7 +225,7 @@ accuracy = "higher"
 latency_ms = "resource"
 
 [workspace]
-mode = "copy"  # copy | git_worktree | sparse_copy
+mode = "auto"  # auto | copy | git_worktree | sparse_copy
 
 [environment]
 mode = "current"
@@ -288,16 +292,20 @@ still intentionally conservative.
   but it is weaker than a full autonomous coding agent.
 - The default edit scope protects tests, benchmark files, and secret-like paths
   from automated patching.
-- `git_worktree` requires a git repository root with at least one local commit;
-  it does not require a GitHub remote.
+- `auto` prefers a detached worktree for Git projects with at least one local
+  commit; `code_root` may be either the repository root or a project
+  subdirectory inside it. If Git cannot be used safely, `auto` falls back to
+  copy and records the reason; explicit `git_worktree` fails with a repair
+  checklist instead.
 - `sparse_copy` is experimental and can omit runtime dependencies if the
   allowlist is too narrow.
 - The tool does not yet install project dependencies or manage
   Docker/Conda/GPU/Slurm environments.
-- Large code-edit proposals may still produce long LLM completions. V2.5 is
-  moving experiment/code execution toward explicit contracts, resource budgets,
-  canonical results, guards, a bounded greenfield path, and future
-  external-agent adapters before recommending unattended large refactors.
+- Large code-edit proposals may still produce long LLM completions. Current
+  experiment/code execution uses explicit contracts, resource budgets,
+  canonical results, guards, bounded greenfield generation, and optional
+  external-agent handoff, but it is still not a recommended unattended large
+  refactoring tool.
 - Literature search now has an auditable source plan and document-store
   metadata, and can use OpenAlex, Semantic Scholar, arXiv, or local
   Markdown/text notes. It can parse local/cached Markdown, text, basic HTML, and

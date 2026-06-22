@@ -14,6 +14,7 @@ from simple_ar.code_task import (
     probe_code_task_environment,
     propose_patch_edits,
     propose_repair_edits,
+    record_provided_code_task_baseline,
     record_plan_decision,
     review_code_task_changes,
     run_code_task_baseline,
@@ -21,6 +22,16 @@ from simple_ar.code_task import (
     validate_code_task,
 )
 from simple_ar.code_task.editing.scope import is_protected_edit_path
+from simple_ar.code_task.execution.baseline_policy import (
+    load_provided_baseline_metrics,
+    normalize_baseline_policy,
+)
+from simple_ar.code_task.runtime.state import (
+    load_code_task_manifest,
+    manifest_section,
+    save_code_task_manifest,
+    utcnow_iso,
+)
 from simple_ar.core.artifacts import read_json
 from simple_ar.experiment.code_task_bridge.spec import (
     CodeTaskExperimentResult,
@@ -36,6 +47,8 @@ def prepare_code_task_experiment(
     model: str | None,
     use_llm: bool,
     timeout_sec: int,
+    baseline_policy: str = "auto",
+    baseline_metrics_file: str | Path | None = None,
     message_callback: MessageCallback | None = None,
 ) -> CodeTaskExperimentResult:
     """Prepare an LLM-assisted code-task experiment inside an 8-stage run."""
@@ -91,13 +104,34 @@ def prepare_code_task_experiment(
         python_executable=spec.python_executable,
     )
 
-    _emit(message_callback, "Running baseline benchmark for code-task evidence.")
-    baseline = run_code_task_baseline(
-        run_dir,
-        timeout_sec=timeout_sec,
-        env_mode=spec.env_mode,
-        python_executable=spec.python_executable,
-    )
+    baseline_policy = normalize_baseline_policy(baseline_policy)
+    baseline_status = "skipped" if baseline_policy in {"skip", "none"} else ""
+    baseline_report_path: Path | None = None
+    if baseline_policy in {"skip", "none"}:
+        _emit(message_callback, f"Skipping baseline benchmark because baseline_policy={baseline_policy}.")
+        _record_skipped_baseline_policy(run_dir, baseline_policy)
+    elif baseline_policy == "provided":
+        metrics, source = load_provided_baseline_metrics(run_dir, baseline_metrics_file)
+        _emit(message_callback, f"Recording provided baseline metrics from {source}.")
+        baseline = record_provided_code_task_baseline(
+            run_dir,
+            metrics=metrics,
+            source_path=source,
+            env_mode=spec.env_mode,
+            python_executable=spec.python_executable,
+        )
+        baseline_status = baseline.status
+        baseline_report_path = baseline.report_path
+    else:
+        _emit(message_callback, "Running baseline benchmark for code-task evidence.")
+        baseline = run_code_task_baseline(
+            run_dir,
+            timeout_sec=timeout_sec,
+            env_mode=spec.env_mode,
+            python_executable=spec.python_executable,
+        )
+        baseline_status = baseline.status
+        baseline_report_path = baseline.report_path
 
     _emit(message_callback, "Building prompt-ready code-task context pack.")
     context_pack = build_code_task_context_pack(
@@ -154,6 +188,7 @@ def prepare_code_task_experiment(
         run_dir,
         model=model,
         use_llm=True,
+        allow_large_edits=spec.allow_large_edits,
         message_callback=message_callback,
     )
     if proposal.mode != "llm" or proposal.edit_count == 0:
@@ -163,7 +198,7 @@ def prepare_code_task_experiment(
         )
 
     _emit(message_callback, "Applying code-task edits to isolated workspace.")
-    patch = apply_patch_edits(run_dir)
+    patch = apply_patch_edits(run_dir, allow_large_edits=spec.allow_large_edits)
     if not spec.allow_test_changes and any(is_protected_edit_path(path) for path in patch.changed_files):
         raise RuntimeError(
             "Code-task experiment rejected a patch that modified protected "
@@ -212,9 +247,9 @@ def prepare_code_task_experiment(
         changed_files=changed_files,
         validation_status=validation.status,
         template=spec.template,
-        baseline_status=baseline.status,
+        baseline_status=baseline_status,
         environment_report_path=environment.report_path,
-        baseline_report_path=baseline.report_path,
+        baseline_report_path=baseline_report_path,
         repo_map_path=init.repo_map_path,
         repo_map_summary_path=init.repo_map_summary_path,
         context_pack_path=context_pack.context_pack_path,
@@ -244,6 +279,18 @@ def _first_executable_work_item_id(work_plan_path: Path) -> str:
             if item_id:
                 return item_id
     raise RuntimeError(f"Work plan has no executable items: {work_plan_path}")
+
+
+def _record_skipped_baseline_policy(run_dir: Path, policy: str) -> None:
+    manifest = load_code_task_manifest(run_dir)
+    benchmark = manifest_section(manifest, "benchmark")
+    benchmark["baseline_policy"] = {
+        "policy": policy,
+        "status": "skipped",
+        "source": "config",
+        "updated_at": utcnow_iso(),
+    }
+    save_code_task_manifest(run_dir, manifest)
 
 
 def _work_item_target_files(item: dict[str, Any]) -> list[str]:

@@ -408,7 +408,7 @@ def _default_run_context_config() -> dict[str, object]:
         "llm_max_workers": 4,
         "max_papers": 5,
         "search_query": None,
-        "experiment_template": "toy_text_classification",
+        "experiment_template": "greenfield_project",
         "experiment_timeout_sec": 30,
         "use_llm": True,
         "use_arxiv": True,
@@ -891,7 +891,7 @@ def _code_task_init_error_message(
                 "Check the code root path:",
                 f"- configured code_root: {code_root or '(missing)'}",
                 "- It should point to the baseline project directory, not the task file.",
-                "- If you use git_worktree, code_root must be the baseline git repository root.",
+                "- If you use git_worktree, code_root may be the git repository root or a project subdirectory inside it.",
             ]
         )
     elif isinstance(exc, WorkspaceModeError) and workspace_mode == "git_worktree":
@@ -899,9 +899,10 @@ def _code_task_init_error_message(
             [
                 "",
                 "git_worktree quick checklist:",
-                "- code_root should be the baseline repository root.",
+                "- code_root should be inside the baseline git repository.",
                 "- The repository needs at least one local commit.",
                 "- GitHub or any remote is not required.",
+                "- If code_root is a monorepo subdirectory, SimpleAutoResearch will use the matching worktree subdirectory as project root.",
                 "- Use --workspace-mode copy when the baseline is not a git repository.",
             ]
         )
@@ -1263,6 +1264,8 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
     python_executable = args.python_executable or options.python_executable
     allow_planning_fallback = args.allow_planning_fallback or options.allow_planning_fallback
     llm_retry_attempts = args.llm_retry_attempts or options.llm_retry_attempts
+    baseline_policy = args.baseline_policy or options.baseline_policy
+    baseline_metrics_file = args.baseline_metrics_file or options.baseline_metrics_file
     inline_apply_proposed_edits = False
     inline_allow_large_edits = False
 
@@ -1292,6 +1295,8 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             strict_validation=args.strict_validation or options.strict_validation,
             validation_max_file_bytes=validation_max_file_bytes,
             stream_benchmark_output=options.stream_benchmark_output,
+            baseline_policy=baseline_policy,
+            baseline_metrics_file=baseline_metrics_file,
             apply_proposed_edits=(
                 args.apply_proposed_edits
                 or options.apply_proposed_edits

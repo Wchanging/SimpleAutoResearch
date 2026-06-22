@@ -97,6 +97,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "render_repo_map_summary": ("simple_ar.code_task.analysis.repo_map", "render_repo_map_summary"),
     "CodeTaskRunError": ("simple_ar.code_task.execution.runner", "CodeTaskRunError"),
     "CodeTaskRunResult": ("simple_ar.code_task.execution.runner", "CodeTaskRunResult"),
+    "record_provided_code_task_baseline": (
+        "simple_ar.code_task.execution.runner",
+        "record_provided_code_task_baseline",
+    ),
     "run_code_task_baseline": ("simple_ar.code_task.execution.runner", "run_code_task_baseline"),
     "run_code_task_benchmark": ("simple_ar.code_task.execution.runner", "run_code_task_benchmark"),
     "CodeTaskValidationResult": ("simple_ar.code_task.execution.validation", "CodeTaskValidationResult"),

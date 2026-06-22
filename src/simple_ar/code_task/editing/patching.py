@@ -31,6 +31,7 @@ from simple_ar.code_task.editing.scope import (
     is_protected_edit_path,
     protected_patterns_from_manifest,
 )
+from simple_ar.code_task.runtime.state import code_task_paths
 from simple_ar.code_task.analysis.context import (
     LoadedCodeTaskContextPack,
     load_latest_code_task_context_pack,
@@ -274,9 +275,10 @@ def _propose_controlled_patch_edits(
         RuntimeError: If the run is not a code-task workflow.
     """
     root = Path(run_dir)
-    task_dir = root / "code_task"
-    meta_dir = task_dir / "meta"
-    workspace_dir = task_dir / "workspace"
+    paths = code_task_paths(root)
+    task_dir = paths.task_dir
+    meta_dir = paths.meta_dir
+    workspace_dir = paths.workspace_dir
     proposal_path = meta_dir / "proposed_edits.json"
     if proposal_path.exists() and not force:
         raise FileExistsError(f"Proposed edits already exist: {proposal_path}")
@@ -318,17 +320,25 @@ def _propose_controlled_patch_edits(
             selected_files=selected,
             max_chars_per_file=max_source_chars_per_file,
         )
+        reference_snippets = _context_pack_reference_snippets(
+            loaded_context,
+            excluded_files=selected,
+            max_files=max_files,
+            max_chars_per_file=max_source_chars_per_file,
+        )
         context_pack_ref = _context_pack_manifest_ref(root, loaded_context)
         _emit(message_callback, f"Using code-task context pack: {context_pack_ref['path']}")
         if not selected:
             _emit(message_callback, "Context pack has no editable snippets; falling back to index selection.")
             selected_context = []
             context_pack_ref = None
+            reference_snippets = []
     else:
         selected_context = []
         selected = []
         read_only_context = []
         snippets = []
+        reference_snippets = []
 
     if not selected_context:
         selected_context = _selected_context_files(
@@ -359,6 +369,7 @@ def _propose_controlled_patch_edits(
             selected,
             max_chars_per_file=max_source_chars_per_file,
         )
+        reference_snippets = []
 
     if allowed_edit_files:
         selected_context = _ordered_allowed_context(
@@ -372,6 +383,13 @@ def _propose_controlled_patch_edits(
             selected,
             max_chars_per_file=max_source_chars_per_file,
         )
+        if loaded_context is not None:
+            reference_snippets = _context_pack_reference_snippets(
+                loaded_context,
+                excluded_files=selected,
+                max_files=max_files,
+                max_chars_per_file=max_source_chars_per_file,
+            )
     proposal_allowed_files = allowed_edit_files if allowed_edit_files else selected
     _write_batch_context(
         root,
@@ -403,6 +421,7 @@ def _propose_controlled_patch_edits(
                 patch_plan=patch_plan,
                 index=index,
                 snippets=snippets,
+                reference_snippets=reference_snippets,
                 read_only_context=read_only_context,
                 allowed_patterns=allowed_patterns,
                 protected_patterns=protected_patterns,
@@ -491,10 +510,11 @@ def _apply_controlled_patch_edits(
         PatchValidationError: If any edit is unsafe, ambiguous, or inconsistent.
     """
     root = Path(run_dir)
-    task_dir = root / "code_task"
-    meta_dir = task_dir / "meta"
-    workspace_dir = task_dir / "workspace"
-    manifest_path = root / "manifest.json"
+    paths = code_task_paths(root)
+    task_dir = paths.task_dir
+    meta_dir = paths.meta_dir
+    workspace_dir = paths.workspace_dir
+    manifest_path = paths.manifest_path
     manifest = _load_code_task_manifest(manifest_path)
     if not allow_unapproved_plan and _plan_status(manifest) != "approved":
         raise PermissionError(
@@ -592,6 +612,7 @@ def _ask_llm_for_edits(
     patch_plan: str,
     index: dict[str, Any],
     snippets: list[dict[str, str]],
+    reference_snippets: list[dict[str, str]],
     read_only_context: list[str],
     allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
@@ -600,24 +621,66 @@ def _ask_llm_for_edits(
     batch_work_item: object,
     memory_context: str,
 ) -> dict[str, Any]:
-    response = client.ask_json(
-        CODE_TASK_EDIT_SYSTEM,
-        _edit_user_prompt(
-            task_text=task_text,
-            patch_plan=patch_plan,
-            index=index,
-            snippets=snippets,
-            read_only_context=read_only_context,
-            allowed_patterns=allowed_patterns,
-            protected_patterns=protected_patterns,
-            budget=budget,
+    prompt = _edit_user_prompt(
+        task_text=task_text,
+        patch_plan=patch_plan,
+        index=index,
+        snippets=snippets,
+        reference_snippets=reference_snippets,
+        read_only_context=read_only_context,
+        allowed_patterns=allowed_patterns,
+        protected_patterns=protected_patterns,
+        budget=budget,
         allowed_edit_files=allowed_edit_files,
         batch_work_item=batch_work_item,
         memory_context=memory_context,
-    ),
+    )
+    response = client.ask_json(
+        CODE_TASK_EDIT_SYSTEM,
+        prompt,
         label="code-task-propose-edits",
     )
+    if _should_retry_empty_context_request(
+        response,
+        snippets=[*snippets, *reference_snippets],
+        allowed_edit_files=allowed_edit_files,
+    ):
+        response = client.ask_json(
+            CODE_TASK_EDIT_SYSTEM,
+            prompt
+            + "\n\n"
+            + "You returned no edits while the requested editable files and source snippets "
+            + "were already provided above. Do not ask to inspect those files again. "
+            + "Produce exact old/new replacements for the allowed editable files now. "
+            + "Only return an empty `edits` list if the approved patch plan is impossible "
+            + "within the edit scope, and then explain the concrete blocker in `validation`.",
+            label="code-task-propose-edits-retry",
+        )
     return response
+
+
+def _should_retry_empty_context_request(
+    response: dict[str, Any],
+    *,
+    snippets: list[dict[str, str]],
+    allowed_edit_files: list[str],
+) -> bool:
+    edits = response.get("edits")
+    if isinstance(edits, list) and edits:
+        return False
+    snippet_paths = {str(item.get("path", "")).strip() for item in snippets if str(item.get("path", "")).strip()}
+    editable_snippet_paths = snippet_paths.intersection(allowed_edit_files)
+    if not editable_snippet_paths:
+        return False
+    context_request = response.get("context_request")
+    if not isinstance(context_request, dict):
+        return True
+    requested_files = {
+        str(path).strip()
+        for path in context_request.get("files", [])
+        if str(path).strip()
+    }
+    return not requested_files or requested_files.issubset(snippet_paths)
 
 
 def _edit_user_prompt(
@@ -626,6 +689,7 @@ def _edit_user_prompt(
     patch_plan: str,
     index: dict[str, Any],
     snippets: list[dict[str, str]],
+    reference_snippets: list[dict[str, str]],
     read_only_context: list[str],
     allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
@@ -665,6 +729,12 @@ def _edit_user_prompt(
         f"```text\n{item.get('text', '')}\n```"
         for item in snippets
     )
+    reference_snippet_text = "\n\n".join(
+        f"### {item.get('path', '')} "
+        f"({item.get('access_role', 'reference')})\n"
+        f"```text\n{item.get('text', '')}\n```"
+        for item in reference_snippets
+    )
     return (
         "Return JSON with fields: `summary` string, `edits` list, "
         "`validation` list of strings, `risks` list of strings, and optional "
@@ -679,6 +749,10 @@ def _edit_user_prompt(
         "- Only propose edits for files whose inventory `edit_role` is `editable`.\n"
         "- Files whose `edit_role` is `read_only` are evidence only; do not "
         "modify tests, benchmarks, or validation targets.\n"
+        "- Reference source snippets are read-only dependency context. Use them "
+        "to understand imports, call signatures, configuration, and expected "
+        "behavior, but never edit a reference file unless it is also listed in "
+        "`Allowed editable files for this batch`.\n"
         "- Each `old` value must be an exact contiguous substring from the "
         "corresponding source snippet, including indentation and newlines.\n"
         "- Make each replacement large enough to be unique in the file.\n"
@@ -686,6 +760,15 @@ def _edit_user_prompt(
         "- Prefer one edit per file. If a file needs multiple nearby changes, "
         "combine them into one larger old/new replacement.\n"
         "- Keep the patch minimal and aligned with the approved patch plan.\n\n"
+        "Context discipline:\n"
+        "- If an allowed editable file appears in Selected source snippets, treat it "
+        "as already inspected and propose exact old/new replacements when the "
+        "approved plan calls for changes in that file.\n"
+        "- Do not return a context_request that only asks for files already present "
+        "in Selected source snippets or Reference source snippets.\n"
+        "- Return an empty `edits` list only when the task is impossible within the "
+        "allowed files, edit budget, or safety policy; explain the blocker in "
+        "`validation`.\n\n"
         "Current edit budget JSON. Stay within this budget. If the task cannot "
         "be completed within it, return a concise `context_request` or explain "
         "why a larger budget is required instead of emitting a giant patch:\n"
@@ -707,7 +790,9 @@ def _edit_user_prompt(
         f"{json.dumps(read_only_context, indent=2, ensure_ascii=False)}\n\n"
         "Selected Python API contract (derived from the exact snippets below):\n"
         f"{json.dumps(snippet_api_contract(snippets), indent=2, ensure_ascii=False)}\n\n"
-        f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
+        f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}\n\n"
+        "Reference source snippets (read-only dependency context):\n"
+        f"{reference_snippet_text or 'No reference source snippets selected.'}"
     )
 
 
@@ -1273,6 +1358,32 @@ def _context_pack_editable_snippets(
     return snippets
 
 
+def _context_pack_reference_snippets(
+    loaded: LoadedCodeTaskContextPack,
+    *,
+    excluded_files: list[str],
+    max_files: int,
+    max_chars_per_file: int,
+) -> list[dict[str, str]]:
+    excluded = set(excluded_files)
+    snippets: list[dict[str, str]] = []
+    for row in loaded.snippets:
+        path = _string(row.get("path"))
+        text = row.get("text")
+        if not path or path in excluded or not isinstance(text, str):
+            continue
+        snippets.append(
+            {
+                "path": path,
+                "access_role": "reference",
+                "text": _clip_text(text, max_chars=max(200, max_chars_per_file)),
+            }
+        )
+        if len(snippets) >= max(1, max_files):
+            break
+    return snippets
+
+
 def _context_pack_manifest_ref(
     run_dir: Path,
     loaded: LoadedCodeTaskContextPack,
@@ -1674,10 +1785,11 @@ def _load_code_task_manifest(path: Path) -> dict[str, Any]:
 
 def _editor_context_from_run(run_dir: Path) -> EditorContext:
     root = Path(run_dir)
-    task_dir = root / "code_task"
-    meta_dir = task_dir / "meta"
-    workspace_dir = task_dir / "workspace"
-    manifest = _load_code_task_manifest(root / "manifest.json")
+    paths = code_task_paths(root)
+    task_dir = paths.task_dir
+    meta_dir = paths.meta_dir
+    workspace_dir = paths.workspace_dir
+    manifest = _load_code_task_manifest(paths.manifest_path)
     batch = load_latest_code_task_batch(root)
     loaded_context = load_latest_code_task_context_pack(root)
     context_pack_ref = (

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.core.artifacts import read_json, write_json
+from simple_ar.core.artifacts import read_json, read_text, write_json
 from simple_ar.code_task.editing.attempts import (
     LoadedCodeTaskBatch,
     create_code_task_batch,
@@ -13,7 +13,15 @@ from simple_ar.code_task.editing.attempts import (
     update_code_task_batch_state,
 )
 from simple_ar.code_task.execution.environment import probe_code_task_environment
+from simple_ar.code_task.execution.baseline_policy import (
+    load_provided_baseline_metrics,
+    normalize_baseline_policy,
+)
 from simple_ar.code_task.execution.failure import analyze_code_task_failure
+from simple_ar.code_task.analysis.context import (
+    build_code_task_context_pack,
+    load_latest_code_task_context_pack,
+)
 from simple_ar.code_task.editing.patching import PatchValidationError, apply_patch_edits, propose_patch_edits
 from simple_ar.code_task.editing.planning import generate_patch_plan
 from simple_ar.code_task.generation.greenfield import generate_greenfield_code_task
@@ -24,7 +32,11 @@ from simple_ar.code_task.generation.generated_project_repair import (
 from simple_ar.code_task.generation.review import is_current_greenfield_review, review_generated_project
 from simple_ar.code_task.execution.repair import propose_repair_edits
 from simple_ar.code_task.review import review_code_task_changes
-from simple_ar.code_task.execution.runner import run_code_task_baseline, run_code_task_benchmark
+from simple_ar.code_task.execution.runner import (
+    record_provided_code_task_baseline,
+    run_code_task_baseline,
+    run_code_task_benchmark,
+)
 from simple_ar.code_task.memory import (
     ensure_task_memory,
     record_code_task_memory_event,
@@ -114,6 +126,8 @@ def execute_code_task(
     strict_validation: bool = False,
     validation_max_file_bytes: int = 500_000,
     stream_benchmark_output: bool | str = False,
+    baseline_policy: str = "auto",
+    baseline_metrics_file: str | Path | None = None,
     apply_proposed_edits: bool = False,
     allow_large_edits: bool = False,
     allow_planning_fallback: bool = False,
@@ -161,6 +175,11 @@ def execute_code_task(
         stream_benchmark_output: Relay benchmark stdout/stderr while baseline
             or patched runs are executing. ``True`` uses ``auto`` mode, which
             understands carriage-return progress output such as tqdm.
+        baseline_policy: Existing-project baseline handling. ``auto`` and
+            ``run`` execute the benchmark, ``skip``/``none`` continue without
+            comparison evidence, and ``provided`` records user-supplied metrics.
+        baseline_metrics_file: JSON or metric-line file used when
+            ``baseline_policy`` is ``provided``.
         apply_proposed_edits: Allow execute to apply an existing or generated
             proposal after the patch plan has been approved.
         allow_large_edits: Allow proposals that exceed the normal edit budget
@@ -198,6 +217,7 @@ def execute_code_task(
         raise ValueError("cost_cap_usd must be non-negative when provided")
     if llm_retry_attempts < 1:
         raise ValueError("llm_retry_attempts must be at least 1")
+    baseline_policy = normalize_baseline_policy(baseline_policy)
 
     root = Path(run_dir)
     paths = code_task_paths(root)
@@ -264,7 +284,47 @@ def execute_code_task(
         if baseline:
             _record(steps, "baseline", "skipped", f"baseline status is {baseline.get('status', 'unknown')}")
         elif dry_run:
-            return _dry_result(paths, steps, "baseline", "run unchanged benchmark")
+            return _dry_result(paths, steps, "baseline", _baseline_dry_run_detail(baseline_policy))
+        elif baseline_policy in {"skip", "none"}:
+            _record_baseline_policy(root, policy=baseline_policy, status="skipped")
+            write_code_task_summary(root)
+            _record(steps, "baseline", "skipped", f"baseline policy is {baseline_policy}")
+            _memory_event(
+                root,
+                "baseline",
+                f"Skipped unchanged baseline because baseline_policy={baseline_policy}.",
+                status="skipped",
+                metadata={"baseline_policy": baseline_policy},
+            )
+        elif baseline_policy == "provided":
+            metrics, source = load_provided_baseline_metrics(
+                root,
+                baseline_metrics_file,
+                missing_message=(
+                    "baseline_policy=provided requires [execute].baseline_metrics_file "
+                    "or --baseline-metrics-file."
+                ),
+            )
+            _emit(message_callback, f"Recording provided baseline metrics from {source}.")
+            result = record_provided_code_task_baseline(
+                root,
+                metrics=metrics,
+                source_path=source,
+                env_mode=env_mode,
+                python_executable=python_executable,
+            )
+            _record(steps, "baseline", "done", f"provided metrics from {source}")
+            _memory_event(
+                root,
+                "baseline",
+                "Recorded user-provided baseline metrics.",
+                status="provided",
+                artifacts=[
+                    _relative_to_run(root, result.report_path),
+                    _relative_to_run(root, result.metrics_path),
+                ],
+                metadata={"metrics": result.metrics, "source": source},
+            )
         else:
             _emit(message_callback, "Running baseline benchmark.")
             result = run_code_task_baseline(
@@ -437,7 +497,7 @@ def execute_code_task(
         proposal_exists = _proposal_exists(paths)
         if patch_status == "applied":
             _record(steps, "propose-edits", "skipped", "patch already applied")
-        elif proposal_exists:
+        elif proposal_exists and _proposal_edit_count(paths) > 0:
             _record(steps, "propose-edits", "skipped", "proposed_edits.json already exists")
         elif _plan_status(manifest) != "approved":
             return _result(paths, steps, "approval_required", "Approve the patch plan before proposing edits.")
@@ -446,11 +506,20 @@ def execute_code_task(
         elif _cost_cap_exceeded(paths.meta_dir, cost_cap_usd):
             return _result(paths, steps, "cost_cap_exceeded", "LLM cost cap reached before edit proposal.")
         else:
+            if proposal_exists:
+                _emit(message_callback, "Regenerating empty edit proposal with refreshed context.")
+            _ensure_context_pack_for_current_batch(
+                root,
+                max_files=max_files,
+                max_source_chars_per_file=max_source_chars_per_file,
+                message_callback=message_callback,
+            )
             _emit(message_callback, "Generating controlled edit proposal.")
             result = propose_patch_edits(
                 root,
                 model=editor_model or model,
                 use_llm=use_llm,
+                force=proposal_exists,
                 max_files=max_files,
                 max_source_chars_per_file=max_source_chars_per_file,
                 allow_large_edits=allow_large_edits,
@@ -1176,6 +1245,80 @@ def _proposal_exists(paths: object) -> bool:
     return (paths.meta_dir / "proposed_edits.json").is_file()
 
 
+def _proposal_edit_count(paths: object) -> int:
+    proposal_path = paths.meta_dir / "proposed_edits.json"
+    if not proposal_path.is_file():
+        return 0
+    try:
+        proposal = read_json(proposal_path)
+    except Exception:
+        return 0
+    if not isinstance(proposal, dict):
+        return 0
+    edits = proposal.get("edits")
+    return len(edits) if isinstance(edits, list) else 0
+
+
+def _ensure_context_pack_for_current_batch(
+    run_dir: Path,
+    *,
+    max_files: int,
+    max_source_chars_per_file: int,
+    message_callback: MessageCallback | None,
+) -> None:
+    loaded = load_latest_code_task_context_pack(run_dir)
+    if loaded is not None and loaded.selected_files:
+        _emit(message_callback, f"Using existing code-task context pack: {_relative_to_run(run_dir, loaded.context_pack_path)}")
+        return
+    latest_batch = load_latest_code_task_batch(run_dir)
+    query = _batch_context_query(latest_batch.state if latest_batch is not None else {})
+    _emit(message_callback, "Building code-task context pack for current batch.")
+    context_pack = build_code_task_context_pack(
+        run_dir,
+        query=query or None,
+        top_k=max(8, max_files * 2),
+        max_files=max_files,
+        max_source_chars_per_file=max_source_chars_per_file,
+        max_total_chars=max(max_files * max_source_chars_per_file, max_source_chars_per_file),
+    )
+    if latest_batch is not None:
+        update_code_task_batch_state(
+            run_dir,
+            latest_batch.batch_state_path,
+            state="context_ready",
+            artifacts={
+                "context_pack": _relative_to_run(run_dir, context_pack.context_pack_path),
+                "batch_context": _relative_to_run(run_dir, context_pack.prompt_context_path),
+            },
+            detail="Context pack built before edit proposal.",
+        )
+
+
+def _batch_context_query(batch_state: dict[str, Any]) -> str:
+    work_item = batch_state.get("work_item")
+    if not isinstance(work_item, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("title", "summary", "description"):
+        value = work_item.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    context_request = work_item.get("context_request")
+    if isinstance(context_request, dict):
+        query = context_request.get("query")
+        if isinstance(query, str) and query.strip():
+            parts.append(query.strip())
+        for key in ("files", "symbols"):
+            values = context_request.get(key)
+            if isinstance(values, list):
+                parts.extend(str(value).strip() for value in values if str(value).strip())
+    for key in ("target_files", "read_only_evidence"):
+        values = work_item.get(key)
+        if isinstance(values, list):
+            parts.extend(str(value).strip() for value in values if str(value).strip())
+    return "\n".join(dict.fromkeys(parts))
+
+
 def _review_report_exists(paths: object, phase: str) -> bool:
     name = "review_report.json" if phase == "post_apply" else f"review_report_{phase}.json"
     return (paths.meta_dir / name).is_file()
@@ -1351,6 +1494,8 @@ def _rerun_greenfield_review(
         code_artifacts=code_artifacts,
         result_schema=_greenfield_result_schema_from_manifest(manifest),
         resource_plan=_greenfield_resource_plan(paths, max_files=max_files, max_generated_lines=max_generated_lines),
+        contract=_greenfield_contract_for_review(paths),
+        dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         implementation_memory=_read_optional_dict(paths.task_dir / "memory" / "implementation_memory.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
         client=None,
@@ -1431,6 +1576,25 @@ def _greenfield_resource_plan(paths: object, *, max_files: int, max_generated_li
     }
 
 
+def _greenfield_contract_for_review(paths: object) -> dict[str, Any]:
+    task_path = paths.task_dir / "task.md"
+    task = read_text(task_path) if task_path.is_file() else ""
+    return {
+        "schema_version": "code_task_greenfield_contract.v1",
+        "objective": _first_meaningful_task_line(task),
+        "task": task,
+        "success_criteria": [],
+    }
+
+
+def _first_meaningful_task_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip().strip("#").strip()
+        if stripped:
+            return stripped[:240]
+    return ""
+
+
 def _refresh_greenfield_code_artifacts(
     code_artifacts: dict[str, Any],
     *,
@@ -1439,10 +1603,11 @@ def _refresh_greenfield_code_artifacts(
 ) -> None:
     generated = code_artifacts.get("generated_files")
     rows = [row for row in generated if isinstance(row, dict)] if isinstance(generated, list) else []
+    filtered_rows: list[dict[str, Any]] = []
     total_lines = 0
     for row in rows:
         path = str(row.get("path") or "").replace("\\", "/").strip()
-        if not path:
+        if not path or _is_non_deliverable_generated_path(path):
             continue
         target = project_dir / path
         if not target.is_file():
@@ -1450,7 +1615,24 @@ def _refresh_greenfield_code_artifacts(
         line_count = max(1, len(target.read_text(encoding="utf-8", errors="replace").splitlines()))
         row["line_count"] = line_count
         total_lines += line_count
+        filtered_rows.append(row)
+    code_artifacts["generated_files"] = filtered_rows
     code_artifacts["total_lines"] = min(total_lines, max_generated_lines + 1)
+
+
+def _is_non_deliverable_generated_path(value: str) -> bool:
+    normalized = value.replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return True
+    parts = normalized.split("/")
+    lowered = normalized.lower()
+    if "__pycache__" in parts or any(part.startswith(".") and part != ".env.example" for part in parts):
+        return True
+    if lowered.endswith((".pyc", ".pyo", ".log", ".tmp")):
+        return True
+    if parts[-1] in {"agent_result.json", "ingestion.json", "review.md"}:
+        return True
+    return False
 
 
 def _read_optional_dict(path: Path) -> dict[str, Any]:
@@ -1581,6 +1763,29 @@ def _run_record(manifest: dict[str, object], label: str) -> dict[str, object]:
         return {}
     record = runs.get(label, {})
     return record if isinstance(record, dict) else {}
+
+
+def _baseline_dry_run_detail(policy: str) -> str:
+    if policy in {"skip", "none"}:
+        return f"record baseline_policy={policy} without running unchanged benchmark"
+    if policy == "provided":
+        return "record provided baseline metrics"
+    return "run unchanged benchmark"
+
+
+def _record_baseline_policy(run_dir: Path, *, policy: str, status: str) -> None:
+    manifest = load_code_task_manifest(run_dir)
+    benchmark = manifest_section(manifest, "benchmark")
+    benchmark["baseline_policy"] = {
+        "policy": policy,
+        "status": status,
+        "updated_at": utcnow_iso(),
+        "source": "execute_config",
+    }
+    manifest["benchmark"] = benchmark
+    if policy in {"skip", "none"} and status == "skipped":
+        manifest["status"] = "baseline_skipped"
+    save_code_task_manifest(run_dir, manifest)
 
 
 def _plan_status(manifest: dict[str, object]) -> str:

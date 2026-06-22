@@ -10,7 +10,7 @@ from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, 
 from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
 
 
-GREENFIELD_REVIEW_CONTRACT_VERSION = 2
+GREENFIELD_REVIEW_CONTRACT_VERSION = 3
 
 
 def review_generated_project(
@@ -19,6 +19,8 @@ def review_generated_project(
     code_artifacts: Mapping[str, Any],
     result_schema: Mapping[str, Any],
     resource_plan: Mapping[str, Any],
+    contract: Mapping[str, Any] | None = None,
+    dependency_advice: Mapping[str, Any] | None = None,
     implementation_memory: Mapping[str, Any] | None = None,
     architecture_plan: Mapping[str, Any] | None = None,
     client: LLMClient | None = None,
@@ -33,11 +35,15 @@ def review_generated_project(
         generated=generated,
         result_schema=result_schema,
         resource_plan=resource_plan,
+        contract=contract or {},
+        dependency_advice=dependency_advice or {},
     )
     llm_findings = _llm_findings(
         project_dir=project_dir,
         result_schema=result_schema,
         resource_plan=resource_plan,
+        contract=contract or {},
+        dependency_advice=dependency_advice or {},
         implementation_memory=implementation_memory or {},
         architecture_plan=architecture_plan or {},
         client=client,
@@ -74,6 +80,8 @@ def _deterministic_findings(
     generated: list[Mapping[str, Any]],
     result_schema: Mapping[str, Any],
     resource_plan: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
 ) -> list[ReviewFinding]:
     findings: list[ReviewFinding] = []
     max_files = _int(resource_plan.get("max_files"), 12)
@@ -133,6 +141,7 @@ def _deterministic_findings(
                 ),
             )
         )
+    findings.extend(_task_acceptance_findings(project_dir, contract=contract, dependency_advice=dependency_advice))
     return findings
 
 
@@ -141,6 +150,8 @@ def _llm_findings(
     project_dir: Path,
     result_schema: Mapping[str, Any],
     resource_plan: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
     implementation_memory: Mapping[str, Any],
     architecture_plan: Mapping[str, Any],
     client: LLMClient | None,
@@ -165,6 +176,8 @@ def _llm_findings(
         context={
             "result_schema": dict(result_schema),
             "resource_plan": dict(resource_plan),
+            "task_contract": _compact_mapping(contract),
+            "dependency_advice": _compact_mapping(dependency_advice),
             "architecture_plan": _compact_mapping(architecture_plan),
             "implementation_memory": _compact_mapping(implementation_memory),
             "actual_project_api": project_api_contract(project_dir),
@@ -185,9 +198,118 @@ def _llm_findings(
     )
 
 
+def _task_acceptance_findings(
+    project_dir: Path,
+    *,
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
+) -> list[ReviewFinding]:
+    """Check explicit task-level acceptance requirements.
+
+    These checks intentionally trigger only when the task text asks for the
+    capability. They are a guard against "benchmark-only" green lights where a
+    project prints the right metrics but skips the requested project surface.
+    """
+
+    text = _task_text(contract)
+    findings: list[ReviewFinding] = []
+    if not text:
+        return findings
+
+    if "readme" in text and not _nonempty_file(project_dir / "README.md"):
+        findings.append(
+            _finding(
+                "blocking",
+                "missing_required_artifact",
+                "Task requests a README, but generated_project/README.md is missing or empty.",
+            )
+        )
+    expected_artifacts = [
+        ("artifacts/results.json", "results.json"),
+        ("artifacts/report.md", "report.md"),
+        ("artifacts/condition_results.jsonl", "condition_results.jsonl"),
+    ]
+    for phrase, filename in expected_artifacts:
+        if phrase in text and not _source_mentions(project_dir, filename):
+            findings.append(
+                _finding(
+                    "blocking",
+                    "missing_artifact_writer",
+                    f"Task requests `{phrase}`, but generated code does not visibly write or reference `{filename}`.",
+                )
+            )
+    for mode in ("self-check", "list-datasets", "list-models", "report"):
+        if _explicit_cli_mode_requested(text, mode) and not _source_mentions(project_dir, mode):
+            findings.append(
+                _finding(
+                    "blocking",
+                    "missing_cli_mode",
+                    f"Task requests CLI mode `{mode}`, but generated code does not visibly support it.",
+                )
+            )
+
+    for requirement in _explicit_installed_dependency_requirements(text, dependency_advice):
+        markers = requirement["markers"]
+        if not any(_source_mentions(project_dir, marker) for marker in markers):
+            findings.append(
+                _finding(
+                    "blocking",
+                    "missing_requested_dependency_path",
+                    (
+                        f"Task explicitly asks to use installed dependency `{requirement['package']}` "
+                        "when available, but generated code does not visibly import or reference it."
+                    ),
+                )
+            )
+    if _requires_multiple_tasks(text) and any(
+        _source_mentions(project_dir, marker)
+        for marker in ("task_count = 1", "'task_count': 1", '"task_count": 1')
+    ):
+        findings.append(
+            _finding(
+                "blocking",
+                "insufficient_task_count",
+                "Task asks for multiple tasks, but generated code visibly hard-codes task_count to 1.",
+            )
+        )
+    if "single authoritative" in text and _source_mentions(project_dir, "class ExperimentSummary") and _source_mentions(
+        project_dir, "final_metrics_from_evaluation"
+    ):
+        runner = project_dir / "generated_experiment" / "runner.py"
+        reporting_used = False
+        if runner.is_file():
+            content = runner.read_text(encoding="utf-8", errors="ignore")
+            reporting_used = "final_metrics_from_evaluation" in content or "write_run_artifacts" in content
+        if not reporting_used:
+            findings.append(
+                _finding(
+                    "warning",
+                    "duplicated_or_unused_reporting_path",
+                    "Reporting helpers exist but the runner appears to reimplement final metric aggregation instead of using them.",
+                )
+            )
+    return findings
+
+
 def _generated_file_rows(code_artifacts: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     files = code_artifacts.get("generated_files")
-    return [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
+    if not isinstance(files, list):
+        return []
+    return [row for row in files if isinstance(row, Mapping) and _is_reviewable_generated_path(str(row.get("path", "")))]
+
+
+def _is_reviewable_generated_path(value: str) -> bool:
+    path = PurePosixPath(value.replace("\\", "/").strip().lstrip("/"))
+    if not value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return False
+    lowered = path.as_posix().lower()
+    if "__pycache__" in path.parts or any(part.startswith(".") and part != ".env.example" for part in path.parts):
+        return False
+    if lowered.endswith((".pyc", ".pyo", ".log", ".tmp")):
+        return False
+    if path.name in {"agent_result.json", "ingestion.json", "review.md"}:
+        return False
+    return True
 
 
 def _required_metrics(schema: Mapping[str, Any]) -> list[str]:
@@ -252,6 +374,147 @@ def _safe_path(value: str) -> str:
     if not value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         return ""
     return path.as_posix()
+
+
+def _task_text(contract: Mapping[str, Any]) -> str:
+    parts = [
+        str(contract.get("objective") or ""),
+        str(contract.get("task") or ""),
+    ]
+    criteria = contract.get("success_criteria")
+    if isinstance(criteria, list):
+        parts.extend(str(item) for item in criteria)
+    return "\n".join(parts).lower()
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and bool(path.read_text(encoding="utf-8", errors="ignore").strip())
+    except OSError:
+        return False
+
+
+def _source_mentions(project_dir: Path, needle: str) -> bool:
+    target = needle.lower()
+    for path in project_dir.rglob("*"):
+        if not path.is_file() or path.suffix not in {".py", ".json", ".toml", ".md", ".txt"}:
+            continue
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            if target in path.read_text(encoding="utf-8", errors="ignore").lower():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _explicit_installed_dependency_requirements(
+    text: str,
+    dependency_advice: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    packages = dependency_advice.get("packages")
+    if not isinstance(packages, list):
+        return []
+    requirements: list[dict[str, Any]] = []
+    for row in packages:
+        if not isinstance(row, Mapping):
+            continue
+        package = str(row.get("package") or "").lower()
+        import_name = str(row.get("import_name") or "").lower()
+        status = str(row.get("status") or "").lower()
+        if status != "installed" or not package:
+            continue
+        aliases = {package, package.replace("-", "_")}
+        if import_name:
+            aliases.add(import_name)
+        aliases = {alias for alias in aliases if alias}
+        if not any(alias in text for alias in aliases):
+            continue
+        if _dependency_mention_is_negated(text, aliases):
+            continue
+        if not _dependency_use_is_requested(text):
+            continue
+        markers = [import_name or package.replace("-", "_"), package, *sorted(aliases)]
+        requirements.append({"package": package, "markers": list(dict.fromkeys(markers))})
+    return requirements
+
+
+def _dependency_use_is_requested(text: str) -> bool:
+    signals = (
+        "prefer",
+        "when available",
+        "if installed",
+        "if available",
+        "use installed",
+        "use packaged",
+        "required",
+        "must use",
+        "should use",
+        "may use",
+    )
+    return any(signal in text for signal in signals)
+
+
+def _dependency_mention_is_negated(text: str, aliases: set[str]) -> bool:
+    for alias in aliases:
+        if not alias:
+            continue
+        negations = (
+            f"do not use {alias}",
+            f"don't use {alias}",
+            f"avoid {alias}",
+            f"without {alias}",
+            f"no {alias}",
+        )
+        if any(negation in text for negation in negations):
+            return True
+    return False
+
+
+def _explicit_cli_mode_requested(text: str, mode: str) -> bool:
+    """Return true only for explicit CLI mode/subcommand requirements."""
+
+    mode = mode.lower()
+    if mode in {"self-check", "list-datasets", "list-models"}:
+        signals = (
+            mode,
+            f"--mode {mode}",
+            f"mode `{mode}`",
+            f"mode '{mode}'",
+            f"mode \"{mode}\"",
+            f"cli mode {mode}",
+            f"subcommand {mode}",
+        )
+        return any(signal in text for signal in signals)
+    signals = (
+        "--mode report",
+        "mode `report`",
+        "mode 'report'",
+        'mode "report"',
+        "report mode",
+        "cli mode report",
+        "subcommand report",
+        "`report` mode",
+        "`report` subcommand",
+    )
+    return any(signal in text for signal in signals)
+
+
+def _requires_multiple_tasks(text: str) -> bool:
+    signals = (
+        "at least two tasks",
+        "multiple tasks",
+        "two or more tasks",
+        "task matrix",
+        "condition matrix",
+        "at least two classification tasks",
+        "one tabular/numeric task",
+        "one additional task",
+        "dataset x model x feature",
+        "multiple conditions",
+    )
+    return any(signal in text for signal in signals)
 
 
 def _finding(severity: str, category: str, summary: str) -> ReviewFinding:

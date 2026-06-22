@@ -70,6 +70,14 @@ def write_generated_project(
             record_generation_batch(memory, batch_id=batch_id, files=batch_files, mode=mode)
             batch_files = []
             batch_id = f"batch-{index + 1:03d}"
+    total_lines = _ensure_required_entrypoint(
+        project_dir=project_dir,
+        result_schema=result_schema,
+        contract=contract,
+        generated=generated,
+        memory=memory,
+        total_lines=total_lines,
+    )
     if batch_files:
         record_generation_batch(memory, batch_id=batch_id, files=batch_files, mode="mixed")
     return {
@@ -79,6 +87,42 @@ def write_generated_project(
         "total_lines": total_lines,
         "entrypoint": "main.py",
     }
+
+
+def _ensure_required_entrypoint(
+    *,
+    project_dir: Path,
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    generated: list[dict[str, Any]],
+    memory: dict[str, Any],
+    total_lines: int,
+) -> int:
+    """Guarantee that line-budget truncation cannot remove the CLI entrypoint."""
+
+    if any(row.get("path") == "main.py" for row in generated) and (project_dir / "main.py").is_file():
+        return total_lines
+    content = fallback_file_content("main.py", result_schema, contract)
+    target = project_dir / "main.py"
+    write_text(target, content)
+    exported_api = public_api(target)
+    line_count = max(1, len(content.splitlines()))
+    row = {
+        "path": "main.py",
+        "mode": "deterministic_entrypoint_repair",
+        "line_count": line_count,
+        "summary": "Deterministic thin entrypoint added because the generated file set omitted main.py.",
+        "public_api": exported_api,
+    }
+    generated.insert(0, row)
+    record_generated_file(
+        memory,
+        path="main.py",
+        summary=str(row["summary"]),
+        mode=str(row["mode"]),
+        public_api=exported_api,
+    )
+    return total_lines + line_count
 
 
 def build_greenfield_harness_script(project_dir_name: str = "generated_project") -> str:
@@ -121,7 +165,7 @@ def _file_content(
     client: LLMClient | None,
 ) -> tuple[str, str, str]:
     path = _safe_path(str(file_spec.get("path", "")))
-    if client is not None and path.endswith(".py"):
+    if client is not None:
         feedback = ""
         for attempt in range(2):
             try:
@@ -143,12 +187,12 @@ def _file_content(
             content = str(response.get("content", "")).strip()
             summary = str(response.get("summary", "")).strip() or str(file_spec.get("purpose", ""))
             if content and not _looks_like_markdown_fence(content):
-                cleaned = _repair_common_python_generation_error(path, content.rstrip() + "\n")
-                if _is_valid_python_content(cleaned, filename=path):
+                cleaned = _repair_common_generation_error(path, content.rstrip() + "\n")
+                if _is_valid_file_content(cleaned, filename=path):
                     mode = "llm_repaired" if cleaned != content.rstrip() + "\n" else "llm"
                     return cleaned, mode, summary[:500]
             feedback = (
-                "The previous response was empty, fenced, or invalid Python. "
+                "The previous response was empty, fenced, or invalid for the requested file type. "
                 "Return a complete, concise file in the JSON content field and preserve exact dependency APIs."
             )
     summary = str(file_spec.get("purpose", ""))[:420]
@@ -164,8 +208,10 @@ def greenfield_file_prompt(
     dependency_api: Mapping[str, Any] | None = None,
     retry_feedback: str = "",
 ) -> str:
+    path = _safe_path(str(file_spec.get("path", "")))
+    file_kind = "Python" if path.endswith(".py") else ("JSON" if path.endswith(".json") else "text/Markdown")
     return (
-        "Generate exactly one file for this bounded Python project. "
+        f"Generate exactly one {file_kind} file for this bounded Python project. "
         "Return JSON with string fields `content` and `summary`.\n\n"
         "Rules:\n"
         "- Use only Python standard library unless the contract explicitly implies a declared dependency.\n"
@@ -178,7 +224,9 @@ def greenfield_file_prompt(
         "- Keep this single file complete, cohesive, and proportional to its planned responsibility. "
         "Simple helpers should stay small; core modules may be longer when the task genuinely requires it.\n"
         "- Prefer deterministic, testable logic over broad simulations, noisy logs, or unstructured frameworks.\n"
-        "- Do not leave placeholders, unfinished functions, unterminated literals, or truncated JSON/Python.\n\n"
+        "- Do not leave placeholders, unfinished functions, unterminated literals, or truncated JSON/Python/Markdown.\n"
+        "- For Markdown files, write useful user-facing documentation, not an empty placeholder.\n"
+        "- For JSON files, return valid JSON content only.\n\n"
         "Existing dependency contract:\n"
         "- The dependency APIs below come from files already written to disk and are authoritative.\n"
         "- Import and call the exact exported names and signatures. Do not invent synonyms or alternate helper names.\n"
@@ -211,15 +259,21 @@ def _looks_like_markdown_fence(value: str) -> bool:
     return stripped.startswith("```") or stripped.endswith("```")
 
 
-def _is_valid_python_content(value: str, *, filename: str) -> bool:
-    try:
-        compile(value, filename, "exec")
-    except SyntaxError:
-        return False
-    return True
+def _is_valid_file_content(value: str, *, filename: str) -> bool:
+    if filename.endswith(".py"):
+        try:
+            compile(value, filename, "exec")
+        except SyntaxError:
+            return False
+    if filename.endswith(".json"):
+        try:
+            json.loads(value)
+        except json.JSONDecodeError:
+            return False
+    return bool(value.strip())
 
 
-def _repair_common_python_generation_error(path: str, value: str) -> str:
+def _repair_common_generation_error(path: str, value: str) -> str:
     """Fix tiny deterministic generation glitches before writing a file.
 
     This is deliberately narrow. Broad semantic fixes belong in the review and

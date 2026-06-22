@@ -141,7 +141,7 @@ def editor_metadata(
     }
     if request is not None:
         metadata["run_dir"] = str(request.context.run_dir)
-        metadata["workspace_dir"] = "code_task/workspace"
+        metadata["workspace_dir"] = _relative_workspace_path(request.context)
         if request.context.batch:
             metadata["batch"] = request.context.batch
         if request.context.context_pack:
@@ -149,3 +149,11 @@ def editor_metadata(
     if extra:
         metadata.update(extra)
     return metadata
+
+
+def _relative_workspace_path(context: EditorContext) -> str:
+    """Return the run-relative editable project root for metadata."""
+    try:
+        return context.workspace_dir.resolve().relative_to(context.run_dir.resolve()).as_posix()
+    except ValueError:
+        return str(context.workspace_dir)

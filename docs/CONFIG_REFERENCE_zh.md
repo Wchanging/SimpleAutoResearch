@@ -188,7 +188,7 @@ allow_external_agent = false   # 启动外部 CLI provider 前必须显式开启
 max_repair_attempts = 1
 
 [workspace]
-mode = "copy"                  # copy | git_worktree | sparse_copy
+mode = "auto"                  # auto | copy | git_worktree | sparse_copy
 reuse_source_venv = false
 setup_hook = ""
 include = []
@@ -343,6 +343,12 @@ validation_max_file_bytes = 500000
 
 # 实时 benchmark 输出转发模式。
 stream_benchmark_output = "off"     # off | line | auto | summary
+
+# 已有项目 baseline 策略：
+# auto/run = 运行未修改 benchmark；skip/none = 不做 baseline comparison；
+# provided = 从 baseline_metrics_file 记录已有指标。
+baseline_policy = "auto"
+# baseline_metrics_file = "baseline_metrics.json"
 
 # review-first 流程建议保持 false；审核 proposal 后再显式应用。
 apply_proposed_edits = false
@@ -554,7 +560,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[benchmark].primary_metric` | objective verdict 使用的主指标。未知指标仍会记录，但最好声明方向。 |
 | `[benchmark.metric_directions]` | 指标方向表：`higher`、`lower`、`resource` 或 `ignore`。 |
 | `[environment].mode` | `current` 使用当前 SimpleAutoResearch Python；`external` 使用 `[environment].python`。不会自动安装依赖。 |
-| `[workspace].mode` | workspace 策略：`copy`、`git_worktree` 或 `sparse_copy`。 |
+| `[workspace].mode` | workspace 策略：`auto`、`copy`、`git_worktree` 或 `sparse_copy`。已有项目默认 `auto`，会优先尝试 git worktree，失败时降级为 copy 并记录原因。 |
 | `[workspace].reuse_source_venv` | 检测到 source `.venv` 或 `venv` 时，是否记录并使用其中 Python。 |
 | `[workspace].setup_hook` | 为未来 managed environment 支持预留记录；init 阶段不执行。 |
 | `[implementation].provider` | code-task 实现 backend。`local` 使用 SimpleAutoResearch 进程内路径；`fake` 用于确定性测试；`local_llm` 使用当前 LLM；`codex`、`claude_code`、`opencode` 和 `external_cli` 会在显式启用时走外部 agent handoff 边界。 |
@@ -578,6 +584,8 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[execute].use_llm` | 是否启用 LLM 支持的 work-plan、patch-plan、edit-proposal 和 repair 步骤。 |
 | `[execute].timeout_sec` | executor 管理的 baseline 和 patched benchmark timeout。省略时会依次回退到 `[benchmark].timeout` 和 `[resource].max_runtime_sec`。 |
 | `[execute].stream_benchmark_output` | 实时 benchmark log 模式：`off`、`line`、`auto` 或 `summary`。有 tqdm 这类进度条时建议 `auto`。 |
+| `[execute].baseline_policy` | 已有项目 baseline 策略：`auto`/`run` 会运行未修改 benchmark；`skip`/`none` 不做 baseline comparison；`provided` 从 `[execute].baseline_metrics_file` 记录用户已有指标。 |
+| `[execute].baseline_metrics_file` | `baseline_policy = "provided"` 时使用的 JSON 或 `metric=0.82` 文本指标文件。JSON 支持 `{"accuracy": 0.8}`、`{"metrics": {...}}` 和 `{"metric_values": {...}}`。 |
 | `[execute].apply_proposed_edits` | 允许 execute 应用已经审核过的 proposal。review-first 流程建议保持 false。 |
 | `[execute].allow_large_edits` | 允许应用超过 normal 预算但落在 large 预算内的已审核 proposal。 |
 | `[execute].allow_planning_fallback` | LLM work-plan / patch-plan 重试后仍失败时，是否允许写入 deterministic fallback plan。真实 LLM run 建议保持 false，这样坏输出会安全停止并可重跑。 |
@@ -674,9 +682,22 @@ max_queries = 4
 
 ## Workspace Mode Variants
 
+### `auto`
+
+`auto` 是已有项目推荐默认模式。它会在 `code_root` 位于本地 Git 仓库且仓库至少有一次 commit 时优先创建 detached `git_worktree`；如果 Git 条件不满足，则降级为受保护的 `copy`，并在 manifest 与终端输出中记录 `fallback_reason` 和 `user_next_steps`。
+
+```toml
+[workspace]
+mode = "auto"
+reuse_source_venv = false
+setup_hook = ""
+```
+
+如果 `code_root` 是较大仓库中的项目子目录，SimpleAutoResearch 会在仓库根创建 worktree，并把对应子目录作为后续索引、修改和运行的 project root。
+
 ### `copy`
 
-`copy` 是最稳妥的默认模式，会在 `code_task/workspace` 下创建受保护的物理复制。
+`copy` 会在 `code_task/workspace` 下创建受保护的物理复制。它适合非 Git 项目、尚未提交但希望包含当前文件状态的实验，或者你明确不想使用 Git worktree 的场景。
 
 ```toml
 [workspace]
@@ -690,7 +711,7 @@ max_file_bytes = 2000000
 
 ### `git_worktree`
 
-`git_worktree` 会为 repo-root git 项目创建 detached worktree。源项目必须是本地 git 仓库，并至少有一次 commit；不需要连接远程 GitHub 仓库。
+`git_worktree` 会创建 detached worktree。显式选择该模式时，如果 Git 隔离不可用会直接失败并给出修复提示，而不会静默降级。`code_root` 可以是仓库根目录，也可以是仓库中的项目子目录；源项目必须位于本地 git 仓库中，并至少有一次 commit；不需要连接远程 GitHub 仓库。
 
 ```toml
 [workspace]
@@ -755,6 +776,7 @@ use_llm = true
 timeout_sec = 120
 repair_rounds = 1
 stream_benchmark_output = "auto"
+baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
@@ -813,6 +835,7 @@ mode = "empty"
 to_step = "run"
 max_files = 16
 max_generated_lines = 4000
+baseline_policy = "none"
 
 [implementation]
 provider = "local"
@@ -868,6 +891,7 @@ repair_rounds = 1
 max_files = 8
 max_source_chars_per_file = 4000
 stream_benchmark_output = "auto"
+baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
@@ -900,6 +924,16 @@ max_proposal_chars = 24000
 | `line` | 转发普通换行日志。 |
 | `auto` / `true` | 同时处理普通日志和 `tqdm` 这类 carriage-return 进度输出。 |
 | `summary` | benchmark 结束后只打印尾部摘要。 |
+
+`baseline_policy` 取值：
+
+| 值 | 含义 |
+| --- | --- |
+| `auto` | 默认行为；需要比较时运行未修改 baseline。 |
+| `run` | 强制运行未修改 baseline。 |
+| `skip` | 跳过未修改 baseline，但仍允许代码理解、review、validation 和最终 benchmark。 |
+| `provided` | 从 `baseline_metrics_file` 记录用户已有指标；summary 会标注这些指标不是本次复测得到。 |
+| `none` | 任务没有有意义的 baseline comparison，适合纯生成或验收式任务。 |
 
 ## Edit Scope Behavior
 

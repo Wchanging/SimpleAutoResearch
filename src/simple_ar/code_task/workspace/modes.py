@@ -15,7 +15,7 @@ from simple_ar.code_task.workspace.copy import (
 )
 
 
-SUPPORTED_WORKSPACE_MODES = {"copy", "empty", "git_worktree", "sparse_copy"}
+SUPPORTED_WORKSPACE_MODES = {"auto", "copy", "empty", "git_worktree", "sparse_copy"}
 DEPENDENCY_FILE_NAMES = (
     "pyproject.toml",
     "requirements.txt",
@@ -40,9 +40,10 @@ class WorkspaceSpec:
         code_root: Source project directory provided by the user. Greenfield
             runs may leave this empty when ``mode`` is ``empty``.
         task_dir: Code-task artifact directory.
-        mode: Workspace strategy. V2.2 supports ``copy`` and
-            ``git_worktree``; ``sparse_copy`` is experimental; ``empty`` is
-            used by greenfield code-task runs.
+        mode: Workspace strategy. Existing-project runs default to ``auto``,
+            which prefers ``git_worktree`` for committed Git projects and
+            falls back to ``copy`` with a recorded reason. ``sparse_copy`` is
+            experimental; ``empty`` is used by greenfield code-task runs.
         max_file_bytes: Maximum copied file size for ``copy`` and
             ``sparse_copy`` modes.
         include: POSIX glob patterns copied by ``sparse_copy``.
@@ -70,7 +71,11 @@ class WorkspaceResult:
     Args:
         mode: Workspace strategy used.
         source_root: Resolved user source directory.
-        workspace_dir: Editable root consumed by downstream code-task stages.
+        workspace_dir: Isolated workspace root. In git worktree mode this is
+            the repository worktree root.
+        project_root: Project root consumed by downstream code-task stages. It
+            may be a subdirectory inside ``workspace_dir`` for monorepo-style
+            code roots.
         writable_root: Root that patching and benchmark execution may mutate.
         read_only_roots: Additional source roots used for provenance only.
         created_at: UTC creation timestamp.
@@ -82,8 +87,11 @@ class WorkspaceResult:
     """
 
     mode: str
+    requested_mode: str
+    selected_mode: str
     source_root: Path
     workspace_dir: Path
+    project_root: Path
     writable_root: Path
     read_only_roots: tuple[Path, ...]
     created_at: str
@@ -92,14 +100,25 @@ class WorkspaceResult:
     environment_mapping: dict[str, Any]
     patterns: dict[str, Any]
     cleanup_hint: str
+    fallback_reason: str = ""
+    warnings: tuple[str, ...] = ()
+    user_next_steps: tuple[str, ...] = ()
 
     def to_manifest(self, *, run_dir: Path) -> dict[str, Any]:
         """Return a compact manifest section for this workspace."""
         return {
             "schema_version": 1,
             "mode": self.mode,
+            "requested_mode": self.requested_mode,
+            "selected_mode": self.selected_mode,
+            "fallback_reason": self.fallback_reason,
             "source_root": str(self.source_root),
             "workspace_dir": _relative_or_string(run_dir, self.workspace_dir),
+            "project_root": _relative_or_string(run_dir, self.project_root),
+            "project_relative_path": _project_relative_path(
+                self.workspace_dir,
+                self.project_root,
+            ),
             "writable_root": _relative_or_string(run_dir, self.writable_root),
             "read_only_roots": [
                 _relative_or_string(run_dir, path) for path in self.read_only_roots
@@ -110,12 +129,16 @@ class WorkspaceResult:
             "environment_mapping": self.environment_mapping,
             "patterns": self.patterns,
             "cleanup_hint": self.cleanup_hint,
+            "warnings": list(self.warnings),
+            "user_next_steps": list(self.user_next_steps),
         }
 
 
 def create_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     """Create the editable workspace requested by ``spec``."""
     mode = _normalize_mode(spec.mode)
+    if mode == "auto":
+        return _create_auto_workspace(spec)
     if mode == "empty":
         return _create_empty_workspace(spec)
     if mode == "copy":
@@ -127,13 +150,40 @@ def create_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     raise WorkspaceModeError(f"Unsupported workspace mode: {spec.mode}")
 
 
+def _create_auto_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
+    """Prefer git worktree for existing projects, then fall back to copy."""
+    if spec.code_root is None:
+        raise WorkspaceModeError("auto workspace mode requires code_root")
+    try:
+        return _create_git_worktree_workspace(spec, requested_mode="auto")
+    except WorkspaceModeError as exc:
+        result = _create_copy_workspace(
+            spec,
+            requested_mode="auto",
+            fallback_reason=str(exc),
+            warnings=(
+                "Auto workspace mode fell back to copy because git worktree "
+                "could not be prepared.",
+            ),
+            user_next_steps=_worktree_failure_next_steps(str(exc)),
+        )
+        return result
+
+
 def suggested_python_executable(result: WorkspaceResult) -> str | None:
     """Return a mapped Python executable when workspace options request one."""
     value = result.environment_mapping.get("python_executable")
     return value if isinstance(value, str) and value else None
 
 
-def _create_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
+def _create_copy_workspace(
+    spec: WorkspaceSpec,
+    *,
+    requested_mode: str = "copy",
+    fallback_reason: str = "",
+    warnings: tuple[str, ...] = (),
+    user_next_steps: tuple[str, ...] = (),
+) -> WorkspaceResult:
     if spec.code_root is None:
         raise WorkspaceModeError("copy workspace mode requires code_root")
     source = _validated_source_root(spec.code_root)
@@ -145,8 +195,11 @@ def _create_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     )
     return WorkspaceResult(
         mode="copy",
+        requested_mode=requested_mode,
+        selected_mode="copy",
         source_root=source,
         workspace_dir=workspace,
+        project_root=workspace,
         writable_root=workspace,
         read_only_roots=(),
         created_at=_utcnow_iso(),
@@ -161,6 +214,9 @@ def _create_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
         ),
         patterns={},
         cleanup_hint="Delete the run directory to remove this copied workspace.",
+        fallback_reason=fallback_reason,
+        warnings=warnings,
+        user_next_steps=user_next_steps,
     )
 
 
@@ -178,8 +234,11 @@ def _create_sparse_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     )
     return WorkspaceResult(
         mode="sparse_copy",
+        requested_mode="sparse_copy",
+        selected_mode="sparse_copy",
         source_root=source,
         workspace_dir=workspace,
+        project_root=workspace,
         writable_root=workspace,
         read_only_roots=(),
         created_at=_utcnow_iso(),
@@ -206,44 +265,67 @@ def _create_sparse_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     )
 
 
-def _create_git_worktree_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
+def _create_git_worktree_workspace(
+    spec: WorkspaceSpec,
+    *,
+    requested_mode: str = "git_worktree",
+) -> WorkspaceResult:
     if spec.code_root is None:
         raise WorkspaceModeError("git_worktree workspace mode requires code_root")
     source = _validated_source_root(spec.code_root)
     workspace = (spec.task_dir / "workspace").resolve()
     if workspace.exists() and any(workspace.iterdir()):
-        raise FileExistsError(f"Workspace already contains files: {workspace}")
-
-    repo_root = _git_repo_root(source)
-    if not _same_path(source, repo_root):
-        raise WorkspaceModeError(
-            "git_worktree mode currently requires code_root to be the git "
-            f"repository root.\n"
-            f"code_root: {source}\n"
-            f"detected repo root: {repo_root}\n"
+        raise FileExistsError(
+            f"Workspace already contains files: {workspace}\n"
             "Next steps:\n"
-            "- Pass the detected repo root as --code-root and adjust the benchmark path if needed.\n"
-            "- Or make the intended baseline directory its own git repository: "
-            "`git init`, `git add .`, `git commit -m \"initial baseline\"`.\n"
-            "- Or rerun with --workspace-mode copy for a guarded physical copy."
+            f"- Remove the existing run workspace: {workspace}\n"
+            f"- If Git still tracks it as a stale worktree, run: git worktree remove {workspace}\n"
+            "- Then run: git worktree prune"
         )
 
+    repo_root = _git_repo_root(source)
+    project_relative = _relative_path_or_dot(source, repo_root)
+    project_root = workspace if project_relative == Path(".") else workspace / project_relative
     commit = _git_head_commit(repo_root)
     branch = _git_output(repo_root, "branch", "--show-current") or "detached"
     dirty_status = _git_output(repo_root, "status", "--short")
     workspace.parent.mkdir(parents=True, exist_ok=True)
     _run_git(repo_root, "worktree", "add", "--detach", str(workspace), commit)
+    if not project_root.exists() or not project_root.is_dir():
+        _remove_git_worktree_best_effort(repo_root, workspace)
+        raise WorkspaceModeError(
+            "git_worktree created the repository worktree, but the requested "
+            f"project subdirectory was not found inside it.\n"
+            f"code_root: {source}\n"
+            f"repo_root: {repo_root}\n"
+            f"expected project_root: {project_root}\n"
+            "Next steps:\n"
+            "- Check whether the code_root path is tracked in the committed baseline.\n"
+            "- Commit the intended project directory before using git_worktree.\n"
+            "- Or rerun with --workspace-mode copy to include the current filesystem state."
+        )
+    warnings = _worktree_warnings(
+        source_root=source,
+        repo_root=repo_root,
+        dirty_status=dirty_status,
+    )
 
     return WorkspaceResult(
         mode="git_worktree",
+        requested_mode=requested_mode,
+        selected_mode="git_worktree",
         source_root=source,
         workspace_dir=workspace,
-        writable_root=workspace,
+        project_root=project_root.resolve(),
+        writable_root=project_root.resolve(),
         read_only_roots=(source,),
         created_at=_utcnow_iso(),
         copy_report=empty_copy_report(),
         git={
             "repo_root": str(repo_root),
+            "source_root": str(source),
+            "project_root": str(project_root.resolve()),
+            "project_relative_path": "." if project_relative == Path(".") else project_relative.as_posix(),
             "origin_branch": branch,
             "origin_commit": commit,
             "origin_dirty": bool(dirty_status.strip()),
@@ -254,7 +336,7 @@ def _create_git_worktree_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
         },
         environment_mapping=_environment_mapping(
             source_root=source,
-            workspace_dir=workspace,
+            workspace_dir=project_root.resolve(),
             reuse_source_venv=spec.reuse_source_venv,
             setup_hook=spec.setup_hook,
             mode="git_worktree",
@@ -263,6 +345,12 @@ def _create_git_worktree_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
         cleanup_hint=(
             "Remove this workspace with `git worktree remove <workspace>` or "
             "delete the run directory and prune stale worktrees."
+        ),
+        warnings=warnings,
+        user_next_steps=_worktree_success_next_steps(
+            source_root=source,
+            repo_root=repo_root,
+            dirty_status=dirty_status,
         ),
     )
 
@@ -274,8 +362,11 @@ def _create_empty_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
     workspace.mkdir(parents=True, exist_ok=True)
     return WorkspaceResult(
         mode="empty",
+        requested_mode="empty",
+        selected_mode="empty",
         source_root=workspace,
         workspace_dir=workspace,
+        project_root=workspace,
         writable_root=workspace,
         read_only_roots=(),
         created_at=_utcnow_iso(),
@@ -310,13 +401,33 @@ def _validated_source_root(code_root: Path) -> Path:
 
 
 def _normalize_mode(value: str) -> str:
-    mode = str(value or "copy").strip().lower().replace("-", "_")
+    mode = str(value or "auto").strip().lower().replace("-", "_")
     if mode not in SUPPORTED_WORKSPACE_MODES:
         raise WorkspaceModeError(
             "workspace mode must be one of: "
             + ", ".join(sorted(SUPPORTED_WORKSPACE_MODES))
         )
     return mode
+
+
+def _relative_path_or_dot(path: Path, parent: Path) -> Path:
+    try:
+        relative = path.resolve().relative_to(parent.resolve())
+    except ValueError as exc:
+        raise WorkspaceModeError(
+            f"Expected code_root to be inside detected git repository.\n"
+            f"code_root: {path}\n"
+            f"detected repo root: {parent}"
+        ) from exc
+    return relative if str(relative) else Path(".")
+
+
+def _project_relative_path(workspace_dir: Path, project_root: Path) -> str:
+    try:
+        relative = project_root.resolve().relative_to(workspace_dir.resolve())
+    except ValueError:
+        return str(project_root)
+    return "." if str(relative) == "." else relative.as_posix()
 
 
 def _normalize_patterns(patterns: tuple[str, ...]) -> tuple[str, ...]:
@@ -341,7 +452,8 @@ def _git_repo_root(path: Path) -> Path:
             "- If this project does not need git isolation, rerun with --workspace-mode copy.\n"
             "- If you want git_worktree, run these commands in the baseline project root: "
             "`git init`, `git add .`, `git commit -m \"initial baseline\"`.\n"
-            "- If the project lives in a subdirectory, make that subdirectory its own git repository root."
+            "- If the project lives in a larger repository, pass that project subdirectory as code_root; "
+            "SimpleAutoResearch will create a repository worktree and use the matching subdirectory as the editable project root."
         ) from exc
     if not output:
         raise WorkspaceModeError(f"Path is not inside a git repository: {path}")
@@ -359,6 +471,82 @@ def _git_head_commit(repo_root: Path) -> str:
             "- Commit the baseline first: `git add .` then `git commit -m \"initial baseline\"`.\n"
             "- Or rerun with --workspace-mode copy if you do not want to use git yet."
         ) from exc
+
+
+def _worktree_warnings(
+    *,
+    source_root: Path,
+    repo_root: Path,
+    dirty_status: str,
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if not _same_path(source_root, repo_root):
+        warnings.append(
+            "code_root is inside a larger git repository; SimpleAutoResearch "
+            "created a repository-level worktree and will use the matching "
+            "subdirectory as the project root."
+        )
+    if dirty_status.strip():
+        warnings.append(
+            "The source repository has uncommitted changes. git_worktree uses "
+            "the committed HEAD snapshot; commit/stash changes first if the "
+            "task needs them."
+        )
+    if (repo_root / ".gitmodules").exists():
+        warnings.append(
+            "This repository declares submodules. If files are missing in the "
+            "workspace, run `git submodule update --init --recursive` in the source repo first."
+        )
+    if (repo_root / ".gitattributes").exists():
+        warnings.append(
+            "This repository may use Git LFS or attribute filters. If large "
+            "files are placeholders, run `git lfs pull` in the source repo first."
+        )
+    return tuple(warnings)
+
+
+def _worktree_success_next_steps(
+    *,
+    source_root: Path,
+    repo_root: Path,
+    dirty_status: str,
+) -> tuple[str, ...]:
+    steps: list[str] = []
+    if not _same_path(source_root, repo_root):
+        steps.append(
+            "The editable project root is the matching subdirectory inside "
+            "code_task/workspace, not the repository worktree root."
+        )
+    if dirty_status.strip():
+        steps.append(
+            "Uncommitted source changes were not included. Commit or stash them "
+            "and rerun if they are part of the baseline."
+        )
+    steps.append(
+        "Cleanup: delete the run directory; if Git reports a stale worktree, run `git worktree prune`."
+    )
+    return tuple(steps)
+
+
+def _worktree_failure_next_steps(reason: str) -> tuple[str, ...]:
+    text = reason.lower()
+    steps = [
+        "Auto mode used a guarded copy fallback for this run.",
+        "To force git worktree later, set workspace.mode = \"git_worktree\" or pass --workspace-mode git_worktree.",
+    ]
+    if "not find a usable repository" in text or "inside a local git repository" in text or "not inside a git repository" in text:
+        steps.append(
+            "Initialize a baseline repository first: `git init`, `git add .`, `git commit -m \"initial baseline\"`."
+        )
+    if "at least one commit" in text:
+        steps.append(
+            "Create a baseline commit first: `git add .` then `git commit -m \"initial baseline\"`."
+        )
+    if "git executable" in text:
+        steps.append("Install Git or make sure `git` is available on PATH.")
+    if "workspace already contains files" in text or "stale worktree" in text:
+        steps.append("Remove the old workspace and run `git worktree prune`.")
+    return tuple(steps)
 
 
 def _git_output(cwd: Path, *args: str) -> str:
@@ -385,6 +573,30 @@ def _run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
             f"git command failed ({' '.join(args)}): {message}"
         )
     return completed
+
+
+def _remove_git_worktree_best_effort(repo_root: Path, workspace: Path) -> None:
+    """Try to remove a partially-created worktree without masking the main error."""
+    try:
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "safe.directory=*",
+                "-C",
+                str(repo_root),
+                "worktree",
+                "remove",
+                "--force",
+                str(workspace),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception:
+        return
 
 
 def _environment_mapping(

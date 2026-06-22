@@ -20,6 +20,7 @@ from simple_ar.code_task.editing.scope import (
     is_edit_allowed_path,
     protected_patterns_from_manifest,
 )
+from simple_ar.code_task.runtime.state import code_task_paths
 from simple_ar.code_task.analysis.context import (
     LoadedCodeTaskContextPack,
     load_latest_code_task_context_pack,
@@ -102,11 +103,12 @@ def generate_patch_plan(
     if llm_retry_attempts < 1:
         raise ValueError("llm_retry_attempts must be at least 1")
     root = Path(run_dir)
-    task_dir = root / "code_task"
-    meta_dir = task_dir / "meta"
-    workspace_dir = task_dir / "workspace"
+    paths = code_task_paths(root)
+    task_dir = paths.task_dir
+    meta_dir = paths.meta_dir
+    workspace_dir = paths.workspace_dir
     patch_plan_path = task_dir / "patch_plan.md"
-    manifest_path = root / "manifest.json"
+    manifest_path = paths.manifest_path
     if patch_plan_path.exists() and not force:
         raise FileExistsError(f"Patch plan already exists: {patch_plan_path}")
 

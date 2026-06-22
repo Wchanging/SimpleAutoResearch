@@ -41,6 +41,7 @@ enabled = true
 to_step = "run"
 timeout_sec = 1800
 stream_benchmark_output = "auto"
+baseline_policy = "none"
 llm_retry_attempts = 2
 repair_rounds = 5
 max_files = 48

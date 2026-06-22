@@ -118,6 +118,56 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             self.assertEqual(review["status"], "failed")
             self.assertTrue(any(row["category"] == "mixed_generation_fallback" for row in review["findings"]))
 
+    def test_review_blocks_missing_explicit_greenfield_task_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(project / "main.py", "def main():\n    print('best_score: 1.0')\n")
+            write_text(project / "generated_experiment" / "__init__.py", "")
+            write_text(
+                project / "generated_experiment" / "runner.py",
+                "def run_experiment():\n    return {'best_score': 1.0, 'task_count': 1.0}\n",
+            )
+
+            review = review_generated_project(
+                project_dir=project,
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "main.py", "mode": "llm", "line_count": 2},
+                        {"path": "generated_experiment/__init__.py", "mode": "llm", "line_count": 1},
+                        {"path": "generated_experiment/runner.py", "mode": "llm", "line_count": 2},
+                    ]
+                },
+                result_schema={"primary_metric": "best_score", "required_metrics": ["best_score", "task_count"]},
+                resource_plan={"max_files": 16, "max_generated_lines": 2000},
+                contract={
+                    "objective": "Greenfield analysis suite",
+                    "task": (
+                        "Create README.md, self-check, prefer sample-lib/sample_lib when available, "
+                        "at least two tasks, artifacts/results.json, artifacts/report.md, "
+                        "and artifacts/condition_results.jsonl."
+                    ),
+                },
+                dependency_advice={
+                    "packages": [
+                        {
+                            "package": "sample-lib",
+                            "import_name": "sample_lib",
+                            "status": "installed",
+                            "matched_terms": ["sample-lib", "sample_lib"],
+                        }
+                    ]
+                },
+                use_llm=False,
+            )
+
+            categories = {row["category"] for row in review["findings"]}
+            self.assertEqual(review["status"], "failed")
+            self.assertIn("missing_required_artifact", categories)
+            self.assertIn("missing_artifact_writer", categories)
+            self.assertIn("missing_cli_mode", categories)
+            self.assertIn("missing_requested_dependency_path", categories)
+            self.assertIn("insufficient_task_count", categories)
+
     def test_existing_project_review_blocks_changed_local_api_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

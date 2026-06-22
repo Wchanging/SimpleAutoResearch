@@ -18,7 +18,7 @@ from simple_ar.experiment.coding import GREENFIELD_TEMPLATE, implementation_rout
 from simple_ar.code_task.generation.writer import build_greenfield_harness_script
 from simple_ar.experiment.rerun import preserve_stage_outputs
 from simple_ar.experiment.service import load_experiment_plan
-from simple_ar.experiment.stage_common import design_json, experiment_timeout, model_name, repo_root
+from simple_ar.experiment.stage_common import design_json, experiment_timeout, model_name, relative_or_string, repo_root
 from simple_ar.experiment.templates import build_experiment_code
 
 
@@ -240,6 +240,8 @@ def _execute_code_task_experiment_code(ctx: Context, plan: dict[str, Any]) -> No
         model=model_name(ctx),
         use_llm=ctx.config.get("use_llm") is True,
         timeout_sec=int(plan.get("timeout_sec") or experiment_timeout(ctx)),
+        baseline_policy=str(ctx.config.get("code_task_baseline_policy") or ctx.config.get("baseline_policy") or "auto"),
+        baseline_metrics_file=_optional_path_config(ctx.config.get("code_task_baseline_metrics_file") or ctx.config.get("baseline_metrics_file")),
         message_callback=lambda message: ctx.emit("stage_message", message),
     )
     write_text(
@@ -265,4 +267,10 @@ def _code_task_task_file_override(ctx: Context, plan: dict[str, Any]) -> Path | 
         if isinstance(task_file, str) and task_file.strip():
             path = Path(task_file)
             return path if path.is_absolute() else ctx.run_dir / path
+    return None
+
+
+def _optional_path_config(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return None

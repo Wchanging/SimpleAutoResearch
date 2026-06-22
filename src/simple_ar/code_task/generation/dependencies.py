@@ -83,6 +83,17 @@ DEPENDENCY_CATALOG: tuple[DependencyCandidate, ...] = (
         impact_if_missing="Generated code should use NumPy or standard-library neural-like fallbacks.",
         heavy=True,
     ),
+    DependencyCandidate(
+        package="requests",
+        import_name="requests",
+        priority="risky",
+        role="remote HTTP downloads or API calls",
+        trigger_terms=("download", "http", "https", "api", "network", "remote dataset", "web"),
+        impact_if_missing=(
+            "Prefer packaged datasets, user-provided local files, or a documented manual download path; "
+            "do not make network access a hidden requirement."
+        ),
+    ),
 )
 
 
@@ -124,6 +135,16 @@ def build_dependency_advice(task_text: str) -> dict[str, Any]:
         for row in rows
         if row["status"] == "missing" and row["priority"] in {"optional", "optional_heavy"}
     ]
+    missing_required = [
+        row["package"]
+        for row in rows
+        if row["status"] == "missing" and row["priority"] == "required"
+    ]
+    risky = [
+        row["package"]
+        for row in rows
+        if row["priority"] == "risky"
+    ]
     installed = [row["package"] for row in rows if row["status"] == "installed"]
     install_command = (
         "uv add " + " ".join(missing_recommended)
@@ -139,8 +160,10 @@ def build_dependency_advice(task_text: str) -> dict[str, Any]:
         "schema_version": "code_task_dependency_advice.v1",
         "policy": "advice_only_no_auto_install",
         "installed_packages": installed,
+        "missing_required": missing_required,
         "missing_recommended": missing_recommended,
         "missing_optional": missing_optional,
+        "risky_packages": risky,
         "install_command": install_command,
         "ephemeral_install_command": pip_install_command,
         "notes": [
@@ -148,6 +171,7 @@ def build_dependency_advice(task_text: str) -> dict[str, Any]:
             "SimpleAutoResearch does not install dependencies automatically.",
             "Install missing recommended packages before rerunning execute if you want the generated project to use the stronger implementation path.",
             "Heavy optional packages such as torch are never included in the default install command.",
+            "Risky packages indicate network or environment-sensitive paths; they require explicit task justification.",
         ],
         "packages": rows,
     }
@@ -163,8 +187,10 @@ def render_dependency_advice_markdown(advice: dict[str, Any]) -> str:
         "## Summary",
         "",
         "- Installed: " + _join_or_none(advice.get("installed_packages")),
+        "- Missing required: " + _join_or_none(advice.get("missing_required")),
         "- Missing recommended: " + _join_or_none(advice.get("missing_recommended")),
         "- Missing optional: " + _join_or_none(advice.get("missing_optional")),
+        "- Risky/task-sensitive: " + _join_or_none(advice.get("risky_packages")),
     ]
     if advice.get("install_command"):
         lines.extend(
@@ -202,12 +228,16 @@ def render_dependency_advice_markdown(advice: dict[str, Any]) -> str:
 
 def dependency_advice_messages(advice: dict[str, Any]) -> tuple[str, ...]:
     installed = _join_or_none(advice.get("installed_packages"))
+    missing_required = _join_or_none(advice.get("missing_required"))
     missing_recommended = _join_or_none(advice.get("missing_recommended"))
     missing_optional = _join_or_none(advice.get("missing_optional"))
+    risky = _join_or_none(advice.get("risky_packages"))
     messages = [
         f"Dependency advice: installed packages detected: {installed}.",
+        f"Dependency advice: missing required packages: {missing_required}.",
         f"Dependency advice: missing recommended packages: {missing_recommended}.",
         f"Dependency advice: missing optional packages: {missing_optional}.",
+        f"Dependency advice: risky/task-sensitive packages: {risky}.",
     ]
     if advice.get("install_command"):
         messages.append(

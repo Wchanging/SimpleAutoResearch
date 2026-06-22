@@ -483,6 +483,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM work/patch planning attempts before failing or explicitly falling back.",
     )
     code_task_execute.add_argument("--repair-rounds", type=int, default=0)
+    code_task_execute.add_argument(
+        "--baseline-policy",
+        choices=("auto", "run", "skip", "provided", "none"),
+        default=None,
+        help=(
+            "Existing-project baseline behavior: auto/run executes the unchanged "
+            "benchmark, skip/none continues without it, provided records metrics "
+            "from --baseline-metrics-file."
+        ),
+    )
+    code_task_execute.add_argument(
+        "--baseline-metrics-file",
+        default=None,
+        help="JSON or metric-line file used when --baseline-policy provided is selected.",
+    )
     code_task_execute.add_argument("--max-files", type=int, default=8)
     code_task_execute.add_argument("--max-source-chars-per-file", type=int, default=4000)
     _add_code_task_env_args(code_task_execute)
@@ -585,11 +600,12 @@ def _add_code_task_workspace_args(parser: argparse.ArgumentParser) -> None:
     """Add shared code-task workspace creation arguments."""
     parser.add_argument(
         "--workspace-mode",
-        choices=("copy", "git_worktree", "sparse_copy"),
+        choices=("auto", "copy", "git_worktree", "sparse_copy"),
         default=None,
         help=(
-            "Workspace strategy. `copy` copies a guarded source tree; "
-            "`git_worktree` creates a detached git worktree for repo-root projects; "
+            "Workspace strategy. `auto` prefers git_worktree for Git projects "
+            "and falls back to copy; `copy` copies a guarded source tree; "
+            "`git_worktree` creates a detached git worktree; "
             "`sparse_copy` is experimental and copies selected patterns."
         ),
     )
@@ -667,7 +683,7 @@ def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--code-task-workspace-mode",
-        choices=("copy", "git_worktree", "sparse_copy"),
+        choices=("auto", "copy", "git_worktree", "sparse_copy"),
         default=None,
         help="Embedded code-task workspace strategy.",
     )

@@ -64,7 +64,7 @@ class RunConfigTests(unittest.TestCase):
         execute_options = load_code_task_execute_options(config_path=str(code_task_config))
 
         self.assertEqual(init_options.name, "medium-review-pipeline")
-        self.assertEqual(init_options.workspace_mode, "copy")
+        self.assertEqual(init_options.workspace_mode, "auto")
         self.assertIn("review_pipeline/**", init_options.edit_scope_allowed_patterns)
         self.assertTrue((repo_root / init_options.code_root).is_dir())
         self.assertTrue((repo_root / str(init_options.task_file)).is_file())

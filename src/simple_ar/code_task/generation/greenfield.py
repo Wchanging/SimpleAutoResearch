@@ -213,6 +213,8 @@ def generate_greenfield_code_task(
         code_artifacts=code_artifacts,
         result_schema=result_schema,
         resource_plan=resource_plan,
+        contract=contract,
+        dependency_advice=dependency_advice,
         implementation_memory=memory,
         architecture_plan=architecture,
         client=client,

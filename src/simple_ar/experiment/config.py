@@ -172,7 +172,7 @@ def unified_task_config_from_runtime(config: Mapping[str, Any]) -> UnifiedTaskCo
         max_repair_attempts=_int(config.get("implementation_max_repair_attempts"), 1),
     )
     workspace = WorkspaceSettings(
-        mode=_str(config.get("workspace_mode"), _str(config.get("code_task_workspace_mode"), "copy")),
+        mode=_str(config.get("workspace_mode"), _str(config.get("code_task_workspace_mode"), "auto")),
         reuse_source_venv=_bool(config.get("workspace_reuse_source_venv"), False),
         setup_hook=_str(config.get("workspace_setup_hook"), _str(config.get("environment_setup_hook"), "")),
         include=_str_list(config.get("workspace_include")),

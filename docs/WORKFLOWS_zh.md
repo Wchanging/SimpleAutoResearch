@@ -31,7 +31,7 @@ plan -> search -> read -> synthesize -> report
 
 ```text
 init workspace -> index code -> map repo -> probe environment
--> run baseline -> plan patch -> approve -> propose edits -> apply edits
+-> apply baseline policy -> plan patch -> approve -> propose edits -> apply edits
 -> review changes -> validate -> run patched benchmark -> post-run review
 -> compare results
 -> analyze failure -> repair proposal
@@ -39,7 +39,7 @@ init workspace -> index code -> map repo -> probe environment
 
 关键边界：
 
-- 源项目会准备到 `code_task/workspace`。默认 `copy` 会建立受保护物理复制；`git_worktree` 会为 repo-root git 项目创建 detached worktree；实验性 `sparse_copy` 只复制配置的 include patterns，并始终排除 data/model/cache/secret-like 路径。原始代码不会被修改。
+- 源项目会准备到 `code_task/workspace`。已有项目默认 `auto`：优先为已有 commit 的 Git 项目创建 detached `git_worktree`，如果 Git 条件不满足则降级为受保护的 `copy`，并记录原因与下一步建议。monorepo 场景下会在仓库根创建 worktree，并把对应项目子目录作为可编辑 project root。实验性 `sparse_copy` 只复制配置的 include patterns，并始终排除 data/model/cache/secret-like 路径。原始代码不会被修改。
 - Patch application 必须经过显式人工 approval gate。
 - Edit proposal 是保守 old/new replacement，不是自由形式重写。
 - 默认 editor backend 是 `controlled_patch`；backend interface 现在已经显式存在，后续外部 agent 可以接到同一套安全和审核 gate 后面。
@@ -48,6 +48,7 @@ init workspace -> index code -> map repo -> probe environment
 - Work-plan item 应该是可执行的 implementation batch。executor 在选择第一个 active batch 时会跳过明显的纯分析 item，因此 LLM 生成的“先 inspect 项目”不会意外限制后续 edit 阶段。
 - 如果多个已审核 work-plan item 形成小型串行依赖链，且必须一起落地才可运行，比如 feature producer、model consumer 和 config switch，active batch 可以把它们合并。拆分后的计划仍然可见，`batch_state.json.work_item.source_work_item_ids` 和合并后的 `target_files` 会记录实际执行范围。
 - benchmark 通过的 repair 不自动等于任务成功。最终是否 improved 要看 `code_task/run/comparison.json`；如果 patched 指标仍低于 baseline，只能说明流程恢复到可运行或超过 benchmark floor，还没有真正完成“提升”目标。
+- baseline 运行是策略，不是无条件成本。`auto`/`run` 会记录未修改指标，`skip`/`none` 会继续执行但不做 comparison，`provided` 会把用户提供的指标写入 artifacts 并标注来源。
 - 当前执行有 workspace isolation 和明确 interpreter policy。支持 `current` 和 `external`；自动创建环境留到后续。`workspace.reuse_source_venv` 可以把 worktree/copy/sparse run 指向 source 项目已有 `.venv` Python，但不会安装依赖。
 
 内置示例：
@@ -71,6 +72,7 @@ plan -> search -> read -> synthesize -> design experiment
 
 - `06-code` 可以生成白名单 template experiment、为已有项目准备内嵌 code-task workspace，也可以在没有现成源码时调用统一 code-task greenfield engine。greenfield 情况下，真实嵌套 run 位于 `06-code/code_task_run/`，兼容产物会再投影回 `06-code/generated_project/`。
 - `--experiment-template code_task_project` 是通用内嵌 handoff，会接入 code-task workflow。它接受 `--code-task-config`，也接受显式 `--code-root`、可选 `--task-file` 和 `--benchmark-command`。如果没有 task file，`05-design` 会基于前面研究产物和紧凑代码摘要生成 `generated_code_task.md`。
+- 内嵌生成任务会包含来自 synthesis/design artifacts 的 Research-to-Code Bridge，让 code-task planning 能看到方法迁移线索、实现假设、指标契约、消融目标、资源约束和风险提示。
 - `simple-ar run --config ...` 是保持多参数 research/code-task run 可读、可复现的推荐方式。
 - `--experiment-template llm_code_task_toy_spam` 仍保留为 bundled smoke-test template。
 - 内嵌路径是端到端的：它会构建和 standalone code-task 一致的 repo map / context pack、work plan、attempt/batch 证据，然后在准备好的 workspace 内自动批准 patch plan。standalone code-task 仍是更安全的人工审核路径。
@@ -156,7 +158,7 @@ tests、benchmarks、环境文件、secrets 和用户配置的 protected paths �
 
 环境处理和源码隔离是两件事：
 
-- 源码隔离：用户代码会先准备到 `code_task/workspace`，再应用任何补丁。默认 `copy` 是物理复制；`git_worktree` 是 detached worktree；`sparse_copy` 是实验性 allowlist copy。
+- 源码隔离：用户代码会先准备到 `code_task/workspace`，再应用任何补丁。默认 `auto` 通常为已提交的 Git 项目创建 detached worktree，Git 不可用时降级为受保护 copy；monorepo 子目录会成为实际可编辑 project root。`sparse_copy` 是实验性 allowlist copy。
 - 执行隔离：benchmark 使用选择的 Python/runtime 环境运行。
 
 今天 code-task 已经有第一类隔离，并通过 `meta/environment_report.json` 记录环境信号。它可以选择当前 SimpleAutoResearch Python，也可以选择用户提供的 external interpreter。它还不会自动创建 venv 或安装依赖。

@@ -70,7 +70,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 | `--benchmark-command TEXT` | string | Benchmark command run before and after edits. |
 | `--code-task-name TEXT` | string | Display name for the embedded code-task experiment. |
 | `--code-task-max-file-bytes N` | int | Max copied file size for embedded copy/sparse modes. |
-| `--code-task-workspace-mode MODE` | enum | `copy`, `git_worktree`, `sparse_copy`, or `empty` for greenfield code-task runs. |
+| `--code-task-workspace-mode MODE` | enum | `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty` for greenfield code-task runs. `auto` prefers git worktree and falls back to copy. |
 | `--code-task-workspace-reuse-source-venv` | flag | Use a detected source `.venv` Python. |
 | `--code-task-workspace-setup-hook TEXT` | string | Record a setup command for future managed environments. |
 | `--code-task-env-mode MODE` | enum | `current` or `external`. |
@@ -332,8 +332,10 @@ and will no longer have prior external-agent handoff transcripts.
 ## Code Task Commands
 
 Code-task commands prepare an isolated workspace under
-`runs/<run-id>/code_task/workspace`. Existing-project runs copy/worktree/sparse
-copy source code into that workspace; greenfield runs start from an empty
+`runs/<run-id>/code_task/workspace`. Existing-project runs default to `auto`,
+which prefers a detached git worktree and falls back to a guarded copy when Git
+cannot be used safely. Explicit `git_worktree` fails with an actionable
+checklist instead of silently falling back. Greenfield runs start from an empty
 workspace and generate the project there. The original project is never edited.
 
 For normal use, start with the high-level orchestration commands. The low-level
@@ -370,7 +372,7 @@ uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmar
 | `--metric-direction NAME=DIRECTION` | repeatable | Metric direction: `higher`, `lower`, `resource`, or `ignore`. |
 | `--env-mode MODE` | enum | `current` or `external`. |
 | `--python PATH` | path | Python executable for `--env-mode external`. |
-| `--workspace-mode MODE` | enum | `copy`, `git_worktree`, `sparse_copy`, or `empty`. `greenfield` defaults to `empty`; existing projects default to `copy`. |
+| `--workspace-mode MODE` | enum | `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty`. `greenfield` defaults to `empty`; existing projects default to `auto`. |
 | `--workspace-include GLOB` | repeatable | Include pattern for `sparse_copy`. |
 | `--workspace-exclude GLOB` | repeatable | Additional exclude pattern for `sparse_copy`. |
 | `--workspace-reuse-source-venv` | flag | Reuse a detected source `.venv` Python as external execution policy. |
@@ -415,6 +417,8 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--model NAME` | string | Model override for LLM-backed steps. |
 | `--no-llm` | flag | Use deterministic fallbacks where possible. |
 | `--timeout N` | int | Benchmark timeout. |
+| `--baseline-policy MODE` | enum | Existing-project baseline handling: `auto`, `run`, `skip`, `provided`, or `none`. Use `skip`/`none` for expensive baselines, or `provided` with a metrics file. |
+| `--baseline-metrics-file PATH` | path | JSON or metric-line file used when `--baseline-policy provided`. |
 | `--yes` | flag | Auto-approve inline review gates in normal execute mode; with `--interactive`, auto-continue primitive prompts. Use only after you are comfortable approving the reviewed plan/proposal. |
 | `--interactive` | flag | Debug mode: confirm each primitive step instead of running continuously to the next review gate. |
 | `--no-review-inline` | flag | Disable inline review prompts and stop at review gates instead. |

@@ -22,7 +22,7 @@ def implementation_route(config: Mapping[str, Any], plan: Mapping[str, Any]) -> 
     return "template"
 
 
-def effective_experiment_template(config: Mapping[str, Any], default: str = "toy_text_classification") -> str:
+def effective_experiment_template(config: Mapping[str, Any], default: str = GREENFIELD_TEMPLATE) -> str:
     """Resolve the design-stage template, including unified greenfield settings."""
 
     raw = str(config.get("experiment_template") or "").strip()

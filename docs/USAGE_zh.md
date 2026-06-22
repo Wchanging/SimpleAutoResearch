@@ -525,7 +525,7 @@ uv run simple-ar tools serve-mcp runs/<run-id>
 
 ## Code Task 工作流
 
-Code Task 会把代码任务准备到一个隔离的可编辑 workspace 中，后续所有补丁或生成都只发生在这个 workspace，不修改原始项目。已有项目默认 `copy` 模式，也支持面向较大 git 项目的 `git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。从零生成项目时使用 `kind = "greenfield"`，默认从 `empty` workspace 开始，并把生成项目写到 `code_task/workspace/generated_project/`。
+Code Task 会把代码任务准备到一个隔离的可编辑 workspace 中，后续所有补丁或生成都只发生在这个 workspace，不修改原始项目。已有项目默认 `auto` 模式：优先为已有 commit 的 Git 项目创建 `git_worktree`，如果 Git 条件不满足则降级为受保护的 `copy`，并在 manifest 和终端输出中记录原因与下一步建议。也可以显式使用 `copy`、`git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。从零生成项目时使用 `kind = "greenfield"`，默认从 `empty` workspace 开始，并把生成项目写到 `code_task/workspace/generated_project/`。
 
 推荐先从 TOML 配置初始化，把项目路径、benchmark 指标、workspace 模式、模型路由和编辑预算都放在一个可审核文件里。内置 standalone 示例使用 medium review pipeline：
 
@@ -542,7 +542,8 @@ runs/<run-id>/
   manifest.json                 # benchmark、workspace、environment、safety policy
   code_task/
     task.md                     # 任务说明
-    workspace/                  # 隔离可编辑副本或 worktree
+    workspace/                  # 隔离 copy/worktree 根目录
+      ...                       # monorepo 场景下 project root 可能是其中的子目录
     meta/
       codebase_index.json       # 文件级代码索引
       repo_map.json             # 分层 repo/symbol map
@@ -573,11 +574,24 @@ uv run simple-ar code-task execute runs/code-task-greenfield-ml-suite/<run-id> -
 和 `.md`，并在终端提示当前已安装和缺失的推荐库。这只是建议，不会自动安装依赖或修改环境；
 如果你希望模型走更强实现路径，可以按提示先手动执行 `uv add ...`，然后重跑 execute。
 
-如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。当前要求 `code_root` 是目标项目的 git 仓库根目录；如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入 repo root，或者改用 `copy` 模式。
+如果省略或显式使用 `workspace.mode = "auto"`，已有项目会先尝试 detached git worktree。如果 Git 不可用、不在仓库内、仓库还没有 commit，或 worktree 无法安全创建，本次 run 会降级为受保护的 copy，并在 `manifest.json.workspace` 写入 `requested_mode`、`selected_mode`、`fallback_reason` 和 `user_next_steps`。
 
-如果使用 `workspace.mode = "sparse_copy"` 或 `--workspace-mode sparse_copy`，只会复制匹配 include pattern 的文件，同时始终排除 `.git`、virtualenv、`runs`、cache/build、`data`、`models`、`.env` 和 secret-like 路径。这个模式适合你明确知道需要哪些文件的小型实验；通用项目仍建议 `copy` 或 `git_worktree`。
+如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。这个模式要求 `code_root` 位于本地 Git 仓库中，并且仓库至少有一次 commit；`code_root` 可以是仓库根目录，也可以是 monorepo 中的项目子目录。子目录场景下，系统会在仓库根创建 worktree，并把 worktree 中对应子目录作为实际可编辑 project root，用于索引、修改和 benchmark 执行。如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入正确项目路径，或者改用 `copy` 模式包含当前未提交文件状态。
 
-benchmark 最好输出 `name: value` 数值行。自定义指标推荐在 TOML 中声明解释方向。显式 CLI 参数仍然支持，适合临时实验和快速测试，但公开使用路径建议优先用 TOML。完整参数表见 [CLI 参考](CLI_REFERENCE_zh.md#simple-ar-code-task-init)，配置 schema 见 [配置参考](CONFIG_REFERENCE_zh.md#standalone-code-task-config)。
+如果使用 `workspace.mode = "sparse_copy"` 或 `--workspace-mode sparse_copy`，只会复制匹配 include pattern 的文件，同时始终排除 `.git`、virtualenv、`runs`、cache/build、`data`、`models`、`.env` 和 secret-like 路径。这个模式适合你明确知道需要哪些文件的小型实验；通用项目优先使用 `auto`，或者按需求显式选择 `git_worktree` / `copy`。
+
+benchmark 最好输出稳定的数值指标行。当前支持 `name: value` 和 `METRIC name=value`；
+后者更适合 generated project 或外部 agent 项目，因为它明显是 machine-readable 输出。
+自定义指标推荐在 TOML 中声明解释方向。显式 CLI 参数仍然支持，适合临时实验和快速测试，
+但公开使用路径建议优先用 TOML。完整参数表见
+[CLI 参考](CLI_REFERENCE_zh.md#simple-ar-code-task-init)，配置 schema 见
+[配置参考](CONFIG_REFERENCE_zh.md#standalone-code-task-config)。
+
+已有项目任务可以用 `[execute].baseline_policy` 控制是否先跑未修改 baseline。
+默认 `auto` 会在需要比较证据时运行 baseline；baseline 很贵、或任务只是验收式目标时，
+可以设为 `skip` 或 `none`；如果你已经有可信 baseline 指标，可以设为 `provided`，
+并通过 `baseline_metrics_file` 提供 JSON 或 `metric=0.82` 文本文件。provided baseline
+会在 summary 中标注为用户提供指标，不会伪装成本次复测结果。
 
 ### 推荐路径：TOML + Execute
 
@@ -1028,8 +1042,9 @@ uv run simple-ar run \
 这种模式下，`05-design` 会从前面研究阶段的产物和紧凑代码摘要中写出 `generated_code_task.md` 和 `generated_code_task_meta.json`，`06-code` 再把生成任务作为普通 `code_task/task.md` 输入。
 
 如果你已经写好了精确的 `task.md`，但仍希望 8 阶段前面的 goal/problem/synthesis/hypothesis 帮助收束实现优先级，可以在 pipeline config 里设置 `[implementation].task_handoff = "merge"`。这时用户任务会作为硬约束保留，`05-design` 会额外生成融合后的 `generated_code_task.md`，再交给内嵌 code-task 执行。
+生成任务里还会包含一段紧凑的 Research-to-Code Bridge，来自 synthesis brief、experiment contract、metric schema 和 resource plan。这样 `06-code` 能看到方法迁移线索、实现假设、消融目标、指标方向和已知风险，而不是只拿到一个普通 task.md。
 
-`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、运行 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁、静态验证，并先运行一次 patched benchmark 做阶段内验证。如果这个验证 benchmark 失败，bridge 会基于 failure evidence 写出诊断并尝试一次受控 repair。`07-run` 会重新运行已验证的 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 canonical `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
+`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、按配置的 baseline policy 处理 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁、静态验证，并先运行一次 patched benchmark 做阶段内验证。如果这个验证 benchmark 失败，bridge 会基于 failure evidence 写出诊断并尝试一次受控 repair。`07-run` 会重新运行已验证的 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 canonical `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
 
 内嵌产物结构大致是：
 

@@ -119,7 +119,14 @@ def fallback_architecture_plan(
             "Fallback generation is a conservative runnable scaffold, not a domain-specific breakthrough.",
             "LLM-generated files still require review and run guard validation.",
         ],
-        "files": _ensure_public_api(_fallback_files(required_metrics, _positive_int(resource_plan.get("max_files"), 8))),
+        "files": _ensure_public_api(
+            _fallback_files(
+                required_metrics,
+                _positive_int(resource_plan.get("max_files"), 8),
+                contract=contract,
+                domain_profile=domain_profile,
+            )
+        ),
     }
 
 
@@ -172,8 +179,8 @@ def greenfield_architecture_prompt(
     if max_files >= 16 or max_lines >= 4000:
         size_guidance = (
             "- This is a medium-scale greenfield project: use 10-18 cohesive files when the task warrants it, "
-            "with clear modules for configuration, data loading/adaptation, preprocessing, model or algorithm "
-            "registry, training/execution orchestration, evaluation, reporting, CLI, diagnostics, and smoke tests.\n"
+            "with clear modules for configuration, input loading/adaptation, processing or analysis, reusable "
+            "domain logic, execution orchestration, evaluation, reporting, CLI, diagnostics, and smoke tests.\n"
             "- Prefer a maintainable package layout over one very large file, but do not create filler files just "
             "to hit the budget.\n"
             "- Preserve the task file's requested capabilities and acceptance criteria unless they conflict with "
@@ -182,8 +189,8 @@ def greenfield_architecture_prompt(
     elif max_files >= 8 or max_lines >= 1400:
         size_guidance = (
             "- This is a medium-light local experiment: use 6-10 cohesive files when helpful, "
-            "with clear modules for data/task generation, feature extraction, models, metrics, "
-            "evaluation orchestration, reporting/formatting, configuration, and self-checks.\n"
+            "with clear modules for inputs, processing or analysis, domain logic, metrics/checks, "
+            "execution orchestration, reporting/formatting, configuration, and self-checks.\n"
             "- Keep modules purposeful; do not create filler files just to hit the budget.\n"
             "- Preserve the task file's requested module boundaries unless they conflict with the resource budget.\n"
         )
@@ -226,89 +233,23 @@ GREENFIELD_ARCHITECT_SYSTEM = (
 )
 
 
-def _fallback_files(required_metrics: list[str], max_files: int = 4) -> list[dict[str, Any]]:
+def _fallback_files(
+    required_metrics: list[str],
+    max_files: int = 4,
+    *,
+    contract: Mapping[str, Any] | None = None,
+    domain_profile: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     metric_note = ", ".join(required_metrics) if required_metrics else "configured metrics"
+    task_text = " ".join(
+        [
+            _text((contract or {}).get("objective")),
+            _text((contract or {}).get("task")),
+            _text((domain_profile or {}).get("task_excerpt")),
+        ]
+    ).lower()
     if max_files >= 8:
-        return [
-            {
-                "path": "main.py",
-                "purpose": "Thin command-line entrypoint that loads config and prints metrics.",
-                "dependencies": ["generated_experiment/runner.py", "config.json"],
-                "acceptance_criteria": [f"Prints {metric_note} as parseable metric lines."],
-                "entrypoint": True,
-            },
-            {
-                "path": "generated_experiment/__init__.py",
-                "purpose": "Package marker for generated experiment code.",
-                "dependencies": [],
-                "acceptance_criteria": ["Importing generated_experiment succeeds."],
-                "entrypoint": False,
-            },
-            {
-                "path": "config.json",
-                "purpose": "Small, auditable experiment configuration.",
-                "dependencies": [],
-                "acceptance_criteria": ["Contains seed, dataset size, noise, and condition metadata."],
-                "entrypoint": False,
-            },
-            {
-                "path": "generated_experiment/data.py",
-                "purpose": "Generate deterministic noisy text-classification data and train/validation/test splits.",
-                "dependencies": ["config.json"],
-                "acceptance_criteria": ["Creates at least four classes and avoids mutating caller-owned data."],
-                "entrypoint": False,
-            },
-            {
-                "path": "generated_experiment/features.py",
-                "purpose": "Build unigram, bigram, and optional character n-gram feature views.",
-                "dependencies": [],
-                "acceptance_criteria": ["Feature extraction is deterministic and shared by all model conditions."],
-                "entrypoint": False,
-            },
-            {
-                "path": "generated_experiment/models.py",
-                "purpose": "Implement majority/keyword baselines and lightweight Naive Bayes-style model conditions.",
-                "dependencies": ["generated_experiment/features.py"],
-                "acceptance_criteria": ["Every model exposes fit/predict or equivalent deterministic behavior."],
-                "entrypoint": False,
-            },
-            {
-                "path": "generated_experiment/metrics.py",
-                "purpose": "Compute accuracy, macro F1, condition-level summary metrics, and resource counts.",
-                "dependencies": [],
-                "acceptance_criteria": ["Returns numeric values for all required metric calculations."],
-                "entrypoint": False,
-            },
-            {
-                "path": "generated_experiment/runner.py",
-                "purpose": "Single authoritative run_experiment orchestrator.",
-                "dependencies": [
-                    "config.json",
-                    "generated_experiment/data.py",
-                    "generated_experiment/models.py",
-                    "generated_experiment/metrics.py",
-                ],
-                "acceptance_criteria": [f"Returns numeric values for {metric_note}."],
-                "entrypoint": False,
-            },
-            {
-                "path": "generated_experiment/evaluation.py",
-                "purpose": "Run each condition under the same split and aggregate condition-level metrics.",
-                "dependencies": [
-                    "generated_experiment/models.py",
-                    "generated_experiment/metrics.py",
-                ],
-                "acceptance_criteria": ["Produces best-condition, margin, and ablation values without duplicated orchestration."],
-                "entrypoint": False,
-            },
-            {
-                "path": "generated_experiment/reporting.py",
-                "purpose": "Format condition-level summaries and final metric dictionaries.",
-                "dependencies": ["generated_experiment/evaluation.py"],
-                "acceptance_criteria": ["Keeps CLI output parseable while preserving an auditable condition table in code."],
-                "entrypoint": False,
-            },
-        ][:max(1, max_files)]
+        return _fallback_capability_files(metric_note, max_files, task_text)
     return [
         {
             "path": "main.py",
@@ -339,6 +280,207 @@ def _fallback_files(required_metrics: list[str], max_files: int = 4) -> list[dic
             "entrypoint": False,
         },
     ]
+
+
+def _fallback_capability_files(metric_note: str, max_files: int, task_text: str) -> list[dict[str, Any]]:
+    """Build a generic fallback plan from requested capabilities.
+
+    The LLM planner remains the preferred path. This fallback only prevents a
+    planning failure from collapsing a medium task into one tiny file. It
+    deliberately avoids domain-specific templates; modules are selected by
+    broad capability words present in the task, then filled to a sensible
+    minimum when the resource budget is large.
+    """
+
+    selected = {"main", "package", "config_json", "runner", "core", "metrics"}
+    if _mentions_any(task_text, ("config", "preset", "setting", "schema", "option", "parameter")):
+        selected.add("config")
+    if _mentions_any(task_text, ("input", "data", "dataset", "file", "csv", "jsonl", "source", "ingest", "load")):
+        selected.add("inputs")
+    if _mentions_any(task_text, ("parse", "preprocess", "feature", "transform", "normalize", "token", "extract")):
+        selected.add("processing")
+    if _mentions_any(task_text, ("analy", "inspect", "audit", "rank", "screen", "compare", "evaluate", "experiment")):
+        selected.add("analysis")
+    if _mentions_any(task_text, ("report", "artifact", "result", "table", "markdown", "jsonl", "rich", "export")):
+        selected.add("reporting")
+    if _mentions_any(task_text, ("self-check", "self check", "test", "validate", "quality", "guard", "review")):
+        selected.add("validation")
+    if _mentions_any(task_text, ("resource", "gpu", "cuda", "memory", "hardware", "profile", "timeout")):
+        selected.add("resources")
+    if _mentions_any(task_text, ("readme", "documentation", "docs", "usage guide", "open-source", "open source")):
+        selected.add("readme")
+
+    if max_files >= 8:
+        selected.update(("config", "inputs", "analysis", "reporting"))
+    if max_files >= 12:
+        selected.update(("processing", "validation", "resources", "readme"))
+
+    catalog = _generic_file_catalog(metric_note)
+    order = [
+        "main",
+        "readme",
+        "config_json",
+        "package",
+        "runner",
+        "config",
+        "inputs",
+        "processing",
+        "core",
+        "metrics",
+        "analysis",
+        "reporting",
+        "validation",
+        "resources",
+    ]
+    files = [catalog[key] for key in order if key in selected][: max(1, max_files)]
+    return _prune_file_dependencies(files)
+
+
+def _generic_file_catalog(metric_note: str) -> dict[str, dict[str, Any]]:
+    return {
+        "main": {
+            "path": "main.py",
+            "purpose": "Thin command-line entrypoint that resolves arguments, calls the orchestrator, and prints metrics.",
+            "dependencies": [
+                "generated_experiment/runner.py",
+                "generated_experiment/validation.py",
+                "generated_experiment/reporting.py",
+                "config.json",
+            ],
+            "acceptance_criteria": [f"Prints {metric_note} as parseable metric lines."],
+            "entrypoint": True,
+            "public_api": ["main(argv=None)"],
+        },
+        "readme": {
+            "path": "README.md",
+            "purpose": "Generated project usage guide and extension notes.",
+            "dependencies": [],
+            "acceptance_criteria": ["Documents the run command, extension points, and fallback behavior."],
+            "entrypoint": False,
+            "public_api": [],
+        },
+        "config_json": {
+            "path": "config.json",
+            "purpose": "Auditable default configuration with bounded presets or settings.",
+            "dependencies": [],
+            "acceptance_criteria": ["Declares default runtime settings and required metric names."],
+            "entrypoint": False,
+            "public_api": [],
+        },
+        "package": {
+            "path": "generated_experiment/__init__.py",
+            "purpose": "Package marker for generated project code.",
+            "dependencies": [],
+            "acceptance_criteria": ["Importing generated_experiment succeeds."],
+            "entrypoint": False,
+            "public_api": [],
+        },
+        "config": {
+            "path": "generated_experiment/config.py",
+            "purpose": "Configuration loading, normalization, and preset resolution helpers.",
+            "dependencies": ["config.json"],
+            "acceptance_criteria": ["Resolves user settings into a bounded runtime configuration."],
+            "entrypoint": False,
+            "public_api": ["load_config(config_path=None) -> RuntimeConfig", "resolve_runtime_options(config, overrides=None) -> RuntimeOptions"],
+        },
+        "inputs": {
+            "path": "generated_experiment/inputs.py",
+            "purpose": "Input/source loading and provenance tracking for the generated task.",
+            "dependencies": ["generated_experiment/config.py"],
+            "acceptance_criteria": ["Loads task inputs deterministically and records provenance/fallback status."],
+            "entrypoint": False,
+            "public_api": ["list_sources() -> list[SourceSpec]", "load_input_bundle(config, source='auto') -> InputBundle"],
+        },
+        "processing": {
+            "path": "generated_experiment/processing.py",
+            "purpose": "Deterministic preprocessing or transformation pipeline shared by the runner.",
+            "dependencies": ["generated_experiment/inputs.py"],
+            "acceptance_criteria": ["Transforms loaded inputs without hidden global state or network access."],
+            "entrypoint": False,
+            "public_api": ["build_processor(config) -> Processor", "process_bundle(bundle, processor) -> ProcessedBundle"],
+        },
+        "core": {
+            "path": "generated_experiment/core.py",
+            "purpose": "Reusable domain logic for the requested project.",
+            "dependencies": ["generated_experiment/processing.py"],
+            "acceptance_criteria": ["Exposes cohesive functions/classes used by the orchestrator instead of embedding all logic in main.py."],
+            "entrypoint": False,
+            "public_api": ["build_conditions(config, processed=None) -> list[Condition]", "run_condition(condition, processed, config) -> ConditionResult"],
+        },
+        "metrics": {
+            "path": "generated_experiment/metrics.py",
+            "purpose": "Metric, score, and resource accounting helpers.",
+            "dependencies": [],
+            "acceptance_criteria": ["Returns numeric values for required metric calculations."],
+            "entrypoint": False,
+            "public_api": ["compute_metrics(records, config=None) -> dict[str, float]", "safe_float(value, default=0.0) -> float"],
+        },
+        "analysis": {
+            "path": "generated_experiment/analysis.py",
+            "purpose": "Aggregate condition/task outputs into comparisons, diagnostics, or evaluation summaries.",
+            "dependencies": ["generated_experiment/core.py", "generated_experiment/metrics.py"],
+            "acceptance_criteria": ["Produces auditable records and final summary values without duplicating orchestration."],
+            "entrypoint": False,
+            "public_api": ["analyze_records(records, config=None) -> AnalysisSummary"],
+        },
+        "reporting": {
+            "path": "generated_experiment/reporting.py",
+            "purpose": "Write human-readable and machine-readable run artifacts.",
+            "dependencies": ["generated_experiment/analysis.py"],
+            "acceptance_criteria": ["Keeps stdout parseable while preserving detailed outputs in artifact files."],
+            "entrypoint": False,
+            "public_api": ["final_metrics_from_summary(summary, context=None) -> dict[str, float]", "write_run_artifacts(summary, metrics, output_dir) -> dict[str, str]"],
+        },
+        "validation": {
+            "path": "generated_experiment/validation.py",
+            "purpose": "Offline self-checks and validation gates for generated behavior.",
+            "dependencies": ["generated_experiment/config.py", "generated_experiment/metrics.py"],
+            "acceptance_criteria": ["Self-checks run without network and return numeric status metrics."],
+            "entrypoint": False,
+            "public_api": ["run_self_check(config=None) -> dict[str, float]"],
+        },
+        "resources": {
+            "path": "generated_experiment/resources.py",
+            "purpose": "Runtime resource detection and bounded profile selection.",
+            "dependencies": [],
+            "acceptance_criteria": ["Detects CPU/GPU/resource hints without assuming a specific machine."],
+            "entrypoint": False,
+            "public_api": ["detect_resources() -> ResourceInfo", "select_profile(resources, config=None) -> str"],
+        },
+        "runner": {
+            "path": "generated_experiment/runner.py",
+            "purpose": "Single authoritative orchestrator for the requested task.",
+            "dependencies": [
+                "generated_experiment/config.py",
+                "generated_experiment/inputs.py",
+                "generated_experiment/processing.py",
+                "generated_experiment/core.py",
+                "generated_experiment/analysis.py",
+                "generated_experiment/reporting.py",
+                "generated_experiment/validation.py",
+                "generated_experiment/resources.py",
+            ],
+            "acceptance_criteria": [f"Returns numeric values for {metric_note} and writes required artifacts when requested."],
+            "entrypoint": False,
+            "public_api": ["run_experiment(preset='smoke', data_source='auto', mode='run', config=None) -> dict[str, float]"],
+        },
+    }
+
+
+def _mentions_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _prune_file_dependencies(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected_paths = {str(row.get("path", "")) for row in files}
+    pruned: list[dict[str, Any]] = []
+    for row in files:
+        copy = dict(row)
+        dependencies = copy.get("dependencies")
+        if isinstance(dependencies, list):
+            copy["dependencies"] = [str(dep) for dep in dependencies if str(dep) in selected_paths]
+        pruned.append(copy)
+    return pruned
 
 
 def _main_file_spec() -> dict[str, Any]:
@@ -385,20 +527,39 @@ def _ensure_public_api(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _default_public_api(path: str) -> list[str]:
     contracts = {
         "main.py": ["main(argv=None)"],
-        "generated_experiment/data.py": [
-            "load_text_classification_splits(config_path=None) -> tuple[DatasetSplits, DatasetInfo]",
+        "generated_experiment/config.py": [
+            "load_config(config_path=None) -> RuntimeConfig",
+            "resolve_runtime_options(config, overrides=None) -> RuntimeOptions",
         ],
-        "generated_experiment/features.py": ["FeatureExtractor.fit(...) and FeatureExtractor.transform(...)"],
-        "generated_experiment/models.py": ["build_model_conditions(x_train, y_train, config) -> list[ModelCondition]"],
+        "generated_experiment/inputs.py": [
+            "list_sources() -> list[SourceSpec]",
+            "load_input_bundle(config, source='auto') -> InputBundle",
+        ],
+        "generated_experiment/processing.py": [
+            "build_processor(config) -> Processor",
+            "process_bundle(bundle, processor) -> ProcessedBundle",
+        ],
+        "generated_experiment/core.py": [
+            "build_conditions(config, processed=None) -> list[Condition]",
+            "run_condition(condition, processed, config) -> ConditionResult",
+        ],
         "generated_experiment/metrics.py": [
-            "accuracy_score(y_true, y_pred) -> float",
-            "macro_f1_score(y_true, y_pred) -> float",
+            "compute_metrics(records, config=None) -> dict[str, float]",
+            "safe_float(value, default=0.0) -> float",
         ],
+        "generated_experiment/analysis.py": ["analyze_records(records, config=None) -> AnalysisSummary"],
         "generated_experiment/runner.py": [
-            "run_experiment(preset='smoke', data_source='auto', config=None, mode='run') -> dict[str, float]",
+            "run_experiment(preset='smoke', data_source='auto', mode='run', config=None) -> dict[str, float]",
         ],
-        "generated_experiment/evaluation.py": ["evaluate_conditions(...) -> EvaluationSummary"],
-        "generated_experiment/reporting.py": ["final_metrics_from_evaluation(...) -> dict[str, float]"],
+        "generated_experiment/reporting.py": [
+            "final_metrics_from_summary(summary, context=None) -> dict[str, float]",
+            "write_run_artifacts(summary, metrics, output_dir) -> dict[str, str]",
+        ],
+        "generated_experiment/validation.py": ["run_self_check(config=None) -> dict[str, float]"],
+        "generated_experiment/resources.py": [
+            "detect_resources() -> ResourceInfo",
+            "select_profile(resources, config=None) -> str",
+        ],
     }
     return contracts.get(path, [])
 

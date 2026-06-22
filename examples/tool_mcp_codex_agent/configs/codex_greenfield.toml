@@ -55,7 +55,7 @@ allow_external_agent = true
 agent_mode = "handoff"
 # Leave empty to use the Codex CLI default configured for your account.
 # Set only to a model that your Codex CLI account explicitly supports.
-agent_model = "gpt-5.4-mini"
+agent_model = ""
 agent_binary = "codex"
 agent_args = []
 agent_timeout_sec = 900
@@ -70,7 +70,7 @@ allow_dependency_install = false
 
 [resource]
 max_runtime_sec = 60
-max_files = 10
+max_files = 12
 max_generated_lines = 1800
 max_memory_mb = 2048
 allow_gpu = false

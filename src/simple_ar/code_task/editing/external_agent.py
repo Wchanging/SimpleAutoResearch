@@ -182,15 +182,22 @@ class ExternalAgentEditorBackend:
         )
 
     def _run_enabled_backend(self, request: EditRequest, plan_path: Path) -> EditResult:
+        workspace_rel = _workspace_rel(request)
         policy = AgentPermissionPolicy(
             allow_file_write=True,
             allow_shell_commands=self.spec.permissions.allow_shell_commands,
             allow_network=self.spec.permissions.allow_network,
-            allowed_write_patterns=["code_task/workspace/**", "proposed_edits.json", "patch.diff", "review.md"],
+            allowed_write_patterns=[
+                f"{workspace_rel}/**",
+                "proposed_edits.json",
+                "patch.diff",
+                "review.md",
+            ],
             protected_patterns=list(self.spec.permissions.blocked_read_patterns),
             notes=[
                 "External code-task adapters must produce proposals only.",
                 "Do not apply edits directly; SimpleAutoResearch will validate and apply reviewed proposals.",
+                f"Editable project root: {workspace_rel}",
             ],
         )
         package = build_code_task_handoff(
@@ -262,6 +269,7 @@ def build_external_agent_invocation_plan(
     agent_mode = normalize_agent_mode(spec.agent_mode, provider=provider)
     binary = spec.binary_path.strip() or _default_binary(provider)
     binary_found = bool(shutil.which(binary)) if not Path(binary).is_absolute() else Path(binary).exists()
+    workspace_rel = _workspace_rel(request)
     prompt_path = "code_task/meta/external_agent_prompt.md"
     log_path = "code_task/meta/external_agent_log.txt"
     diff_path = "code_task/meta/external_agent.diff"
@@ -274,7 +282,7 @@ def build_external_agent_invocation_plan(
         enabled=spec.enabled,
         binary=binary,
         binary_found=binary_found,
-        cwd="code_task/workspace",
+        cwd=workspace_rel,
         command_preview=_command_preview(
             provider=provider,
             binary=binary,
@@ -282,6 +290,7 @@ def build_external_agent_invocation_plan(
             extra_args=spec.extra_args,
             permissions=spec.permissions,
             prompt_path=prompt_path,
+            workspace_rel=workspace_rel,
         ),
         prompt_path=prompt_path,
         log_path=log_path,
@@ -378,10 +387,11 @@ def _command_preview(
     extra_args: tuple[str, ...],
     permissions: ExternalAgentPermissionPolicy,
     prompt_path: str,
+    workspace_rel: str,
 ) -> tuple[str, ...]:
     prompt = f"<prompt-from:{prompt_path}>"
     if provider == "codex":
-        cmd = [binary, "exec", "--sandbox", "workspace-write", "-C", "code_task/workspace"]
+        cmd = [binary, "exec", "--sandbox", "workspace-write", "-C", workspace_rel]
         if model:
             cmd.extend(["-m", model])
         cmd.append(prompt)
@@ -398,7 +408,7 @@ def _command_preview(
             "--allowed-tools",
             allowed_tools,
             "--add-dir",
-            "code_task/workspace",
+            workspace_rel,
         ]
         if model:
             cmd.extend(["--model", model])
@@ -415,7 +425,7 @@ def _permission_dict(
     request: EditRequest,
 ) -> dict[str, Any]:
     return {
-        "writable_root": "code_task/workspace",
+        "writable_root": _workspace_rel(request),
         "allow_write_outside_workspace": permissions.allow_write_outside_workspace,
         "allow_shell_commands": permissions.allow_shell_commands or request.safety.allow_command_execution,
         "allow_network": permissions.allow_network or request.safety.allow_network,
@@ -454,3 +464,11 @@ def _invocation_warnings(
     if spec.permissions.allow_network:
         warnings.append("Network access would require explicit user approval.")
     return tuple(warnings)
+
+
+def _workspace_rel(request: EditRequest) -> str:
+    """Return the run-relative editable project root for external-agent contracts."""
+    try:
+        return request.context.workspace_dir.resolve().relative_to(request.context.run_dir.resolve()).as_posix()
+    except ValueError:
+        return str(request.context.workspace_dir)

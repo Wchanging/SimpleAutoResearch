@@ -160,7 +160,7 @@ def write_greenfield_project_from_agent_backend(
         )
     if project_dir.exists():
         shutil.rmtree(project_dir)
-    shutil.copytree(generated_dir, project_dir)
+    shutil.copytree(generated_dir, project_dir, ignore=_copy_ignore)
     code_artifacts = _code_artifacts_from_project(project_dir, source=f"agent:{normalized_provider}")
     agent_result = {
         "provider": normalized_provider,
@@ -246,7 +246,7 @@ def _code_artifacts_from_project(project_dir: Path, *, source: str) -> dict[str,
         if not path.is_file():
             continue
         rel = _safe_project_path(path.relative_to(project_dir).as_posix())
-        if not rel:
+        if not rel or not _is_deliverable_project_file(rel):
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -274,7 +274,51 @@ def _code_artifacts_from_project(project_dir: Path, *, source: str) -> dict[str,
 def _generated_file_paths(generated_dir: Path) -> list[Path]:
     if not generated_dir.is_dir():
         return []
-    return [path for path in generated_dir.rglob("*") if path.is_file()]
+    files: list[Path] = []
+    for path in generated_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = _safe_project_path(path.relative_to(generated_dir).as_posix())
+        if rel and _is_deliverable_project_file(rel):
+            files.append(path)
+    return files
+
+
+def _copy_ignore(directory: str, names: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for name in names:
+        rel = _safe_project_path((Path(directory).name + "/" + name).replace("\\", "/"))
+        if name in {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}:
+            ignored.add(name)
+            continue
+        if name.endswith((".pyc", ".pyo")):
+            ignored.add(name)
+            continue
+        if name in {"agent_result.json", "ingestion.json"}:
+            ignored.add(name)
+            continue
+        if name == "review.md":
+            ignored.add(name)
+            continue
+        if rel and not _is_deliverable_project_file(name):
+            ignored.add(name)
+    return ignored
+
+
+def _is_deliverable_project_file(value: str) -> bool:
+    path = PurePosixPath(value.replace("\\", "/").strip().lstrip("/"))
+    if not path.parts:
+        return False
+    lowered = path.as_posix().lower()
+    if "__pycache__" in path.parts or any(part.startswith(".") and part != ".env.example" for part in path.parts):
+        return False
+    if lowered.endswith((".pyc", ".pyo", ".log", ".tmp")):
+        return False
+    if path.name in {"agent_result.json", "ingestion.json"}:
+        return False
+    if path.name == "review.md":
+        return False
+    return True
 
 
 def _safe_project_path(value: str) -> str:

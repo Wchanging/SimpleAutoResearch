@@ -654,9 +654,11 @@ confirmed the model name is supported by that CLI/account.
 ## Code Task Workflow
 
 The code-task workflow prepares an isolated editable workspace and never mutates
-the original source project. Existing-project tasks default to `copy`, support
-`git_worktree` for larger repo-root git projects, and support experimental
-`sparse_copy` for small allowlisted subsets. Greenfield tasks use
+the original source project. Existing-project tasks default to `auto`, which
+prefers `git_worktree` for committed Git projects and falls back to `copy` with
+a recorded reason and next-step hints. It also supports explicit `copy`,
+explicit `git_worktree`, and experimental `sparse_copy` for small allowlisted
+subsets. Greenfield tasks use
 `kind = "greenfield"` and default to an `empty` workspace where the generated
 project is written. The workflow is intentionally step-by-step so each stage can
 be reviewed.
@@ -683,7 +685,8 @@ runs/<run-id>/
   manifest.json                 # benchmark, workspace, environment, safety policy
   code_task/
     task.md                     # task prompt
-    workspace/                  # isolated editable copy or worktree
+    workspace/                  # isolated copy/worktree root
+      ...                       # project root may be a subdirectory in monorepos
     meta/
       codebase_index.json       # file-level code index
       repo_map.json             # layered symbol/repo map
@@ -726,17 +729,28 @@ missing recommended packages in the terminal. This is advice-only: the command
 will show an optional `uv add ...` suggestion for a stronger implementation
 path, but it will not install dependencies or mutate the environment for you.
 
+When `workspace.mode = "auto"` is omitted or selected explicitly, existing
+projects first try a detached git worktree. If Git cannot be used safely, the
+run falls back to a guarded copy and records `requested_mode`, `selected_mode`,
+`fallback_reason`, and `user_next_steps` under `manifest.json.workspace`.
+
 When `workspace.mode = "git_worktree"` or `--workspace-mode git_worktree` is
-used, `init` creates a detached git worktree at the same
-`code_task/workspace/` path instead of copying files. This mode currently
-requires `code_root` to be the repository root, records git provenance under
-`manifest.json.workspace`, and keeps `.git`/`.env` metadata out of the codebase
-index and model context. It still does not install dependencies.
+used explicitly, `init` creates a detached git worktree at
+`code_task/workspace/` and stops with an actionable checklist if Git isolation
+is not possible. `code_root` may be either the repository root or a project
+subdirectory inside a larger repository. In the subdirectory case,
+SimpleAutoResearch creates the worktree at the repository root and uses the
+matching subdirectory as the editable project root for indexing, editing, and
+benchmark execution. It records git provenance under `manifest.json.workspace`
+and keeps `.git`/`.env` metadata out of the codebase index and model context.
+It still does not install dependencies.
 
 If `git_worktree` init fails, the CLI prints a checklist instead of a Python
-traceback. The usual fixes are: pass the baseline repository root as
-`--code-root`, create an initial local commit with `git init`, `git add .`, and
-`git commit -m "initial baseline"`, or switch back to `--workspace-mode copy`.
+traceback. The usual fixes are: pass a path inside the intended baseline Git
+repository as `--code-root`, create an initial local commit with `git init`,
+`git add .`, and `git commit -m "initial baseline"`, or switch to
+`--workspace-mode copy` when the current filesystem state should be included
+without committing first.
 
 When `workspace.mode = "sparse_copy"` or `--workspace-mode sparse_copy` is
 used, init copies only selected files. Configure patterns with
@@ -744,7 +758,8 @@ used, init copies only selected files. Configure patterns with
 `--workspace-include` / `--workspace-exclude`. Built-in exclusions still block
 `.git`, virtualenvs, `runs`, cache/build directories, `data`, `models`, `.env`,
 and secret-like paths. This mode is useful for small known subsets, but it can
-omit runtime dependencies; prefer `copy` or `git_worktree` for general projects.
+omit runtime dependencies; prefer `auto` or explicit `git_worktree`/`copy` for
+general projects.
 
 Use `[edit_scope]` when the workspace contains files that may be read but must
 not be changed by the model. `[workspace]` controls what is copied or mounted;
@@ -760,13 +775,23 @@ allowed_patterns = ["review_pipeline/**", "main.py"]
 protected_patterns = ["configs/locked/**"]
 ```
 
-Benchmarks should print numeric metric lines as `name: value`. Custom metric
-names work when you declare their direction in TOML. Explicit CLI flags are
-still supported for experiments and quick tests, but the TOML path is the
+Benchmarks should print stable numeric metric lines. Supported formats are
+`name: value` and `METRIC name=value`; the prefixed form is useful for generated
+or external-agent projects because it is visibly machine-readable. Custom
+metric names work when you declare their direction in TOML. Explicit CLI flags
+are still supported for experiments and quick tests, but the TOML path is the
 recommended public workflow. See
 [CLI Reference](CLI_REFERENCE.md#simple-ar-code-task-init) for the full option
 table and [Configuration Reference](CONFIG_REFERENCE.md#standalone-code-task-config)
 for the config schema.
+
+For existing-project tasks, `[execute].baseline_policy` controls whether the
+unchanged benchmark is run before editing. The default `auto` behavior runs it
+when comparison evidence is useful. Use `skip` or `none` when the baseline is
+too expensive or the task is acceptance-style, and use `provided` with
+`baseline_metrics_file` when you already have trusted baseline metrics. Provided
+baselines are recorded as user-supplied evidence in the run summary; they are
+not presented as reproduced results.
 
 ### Recommended Path: TOML + Execute
 
@@ -1376,11 +1401,15 @@ context to shape implementation priorities, set
 task file remains the hard requirement, while `05-design` writes a merged
 `generated_code_task.md` that adds goal/problem/synthesis/hypothesis context,
 benchmark criteria, and codebase signals for the embedded code-task run.
+The generated task also includes a compact Research-to-Code Bridge built from
+the synthesis brief, experiment contract, metric schema, and resource plan, so
+the code stage can see method-transfer hints, implementation hypotheses,
+ablation targets, metric directions, and known risks.
 
 `code_task_project` writes a normal pipeline run plus nested code-task artifacts
 under `06-code/code_task_run/`. During `06-code`, it copies or worktrees the
-user project, probes the environment, runs a baseline benchmark, builds a repo
-map/context pack, generates a batch-oriented work plan, creates an
+user project, probes the environment, applies the configured baseline policy,
+builds a repo map/context pack, generates a batch-oriented work plan, creates an
 attempt/batch record, generates a patch plan, records an automatic pipeline
 approval, asks for controlled edits, applies them inside the prepared
 workspace, validates the result, and runs the patched benchmark once before

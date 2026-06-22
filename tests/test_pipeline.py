@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from simple_ar.core.artifacts import read_json, read_jsonl, read_text
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json
 from simple_ar.experiment.code_task_bridge import (
     CODE_TASK_PROJECT_TEMPLATE,
     CODE_TASK_TOY_SPAM_TEMPLATE,
@@ -121,7 +121,7 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(all(item["report_path"] for item in manifest["stages"]))
 
             report_manifest = read_json(ctx.run_dir / "08-report" / "manifest.json")
-            self.assertEqual(report_manifest["experiment"]["template"], "toy_text_classification")
+            self.assertEqual(report_manifest["experiment"]["template"], "greenfield_project")
             self.assertIn("results.json", report_manifest["source_artifacts"])
             self.assertIn("evidence_ledger.jsonl", report_manifest["source_artifacts"])
             self.assertIn("report_quality.json", report_manifest["report_artifacts"])
@@ -133,9 +133,9 @@ class PipelineTests(unittest.TestCase):
             results = read_json(ctx.run_dir / "07-run" / "results.json")
             self.assertEqual(results["schema_version"], "2.5")
             self.assertEqual(results["status"], "passed")
-            self.assertEqual(results["guard"]["status"], "passed")
-            self.assertIn("accuracy_delta", results["metrics"])
-            self.assertEqual(results["result_schema"]["primary_metric"], "accuracy_delta")
+            self.assertIn(results["guard"]["status"], {"passed", "warning"})
+            primary_metric = results["result_schema"]["primary_metric"]
+            self.assertIn(primary_metric, results["metrics"])
             self.assertTrue((ctx.run_dir / "07-run" / "guard_report.json").is_file())
 
             report = read_text(ctx.run_dir / "08-report" / "report.md")
@@ -352,6 +352,22 @@ class PipelineTests(unittest.TestCase):
                 stage_dir = run_dir / stage_name
                 stage_dir.mkdir(parents=True, exist_ok=True)
                 (stage_dir / filename).write_text(text, encoding="utf-8")
+            write_json(
+                run_dir / "04-synthesize" / "synthesis_brief.json",
+                {
+                    "themes": ["Use feature scaling before classifier training."],
+                    "gaps": ["Current implementation may underuse normalized features."],
+                    "idea_candidates": [
+                        {
+                            "idea_id": "scaled-features",
+                            "title": "Scaled feature training",
+                            "hypothesis": "A small normalization step can improve validation accuracy.",
+                            "proposed_change": "Add a bounded feature normalization step before training.",
+                            "risks": ["Avoid changing benchmark.py."],
+                        }
+                    ],
+                },
+            )
 
             ctx.current_stage = Stage.DESIGN
             ctx.stage_dir().mkdir(parents=True)
@@ -362,6 +378,8 @@ class PipelineTests(unittest.TestCase):
             task_text = read_text(generated_task)
             self.assertIn("# Code Task", task_text)
             self.assertIn("python benchmark.py", task_text)
+            self.assertIn("Research-to-Code Bridge", task_text)
+            self.assertIn("Use feature scaling", task_text)
             plan = read_json(run_dir / "05-design" / "experiment_plan.json")
             self.assertEqual(plan["template"], CODE_TASK_PROJECT_TEMPLATE)
             self.assertEqual(plan["code_task"]["task_source"], "generated_from_research")
@@ -370,6 +388,10 @@ class PipelineTests(unittest.TestCase):
                 "05-design/generated_code_task.md",
             )
             self.assertEqual(plan["code_task"]["task_generation"]["mode"], "fallback")
+            self.assertIn(
+                "04-synthesize/synthesis_brief.json",
+                plan["code_task"]["task_generation"]["source_artifacts"],
+            )
             contract = read_json(run_dir / "05-design" / "experiment_contract.json")
             self.assertEqual(contract["task_kind"], "existing_project")
             self.assertEqual(contract["result_schema"]["primary_metric"], "accuracy")

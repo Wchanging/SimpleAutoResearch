@@ -27,7 +27,8 @@ class CodeTaskInitResult:
     Args:
         run_dir: Root run directory for this code task.
         task_dir: Directory containing all code-task artifacts.
-        workspace_dir: Isolated editable workspace for the source code.
+        workspace_dir: Editable project root for the code task. In worktree
+            mode this may be a subdirectory inside the repository worktree.
         meta_dir: Metadata directory for indexes and manifests.
         manifest_path: Root workflow manifest path.
         codebase_index_path: Path to the generated codebase index.
@@ -89,9 +90,10 @@ def initialize_code_task(
             stages. It is not executed during init.
         max_file_bytes: Maximum file size copied in ``copy`` and
             ``sparse_copy`` modes. Use ``0`` to disable the size guard.
-        workspace_mode: Workspace strategy. ``copy`` preserves the V2.1
-            behavior; ``git_worktree`` creates a detached git worktree when
-            ``code_root`` is a repository root; ``sparse_copy`` is experimental.
+        workspace_mode: Workspace strategy. ``auto`` prefers a detached git
+            worktree for Git projects and falls back to copy; ``copy``
+            preserves the V2.1 behavior; ``git_worktree`` forces a detached
+            worktree; ``sparse_copy`` is experimental.
         workspace_include: POSIX glob patterns copied by sparse mode.
         workspace_exclude: Additional POSIX glob patterns skipped by sparse
             mode.
@@ -153,7 +155,7 @@ def initialize_code_task(
             setup_hook=workspace_setup_hook,
         )
     )
-    workspace_dir = workspace.workspace_dir
+    workspace_dir = workspace.project_root
     copy_report = workspace.copy_report
     codebase_index_path = meta_dir / "codebase_index.json"
     codebase_index = build_codebase_index(workspace_dir, output_path=codebase_index_path)
@@ -259,6 +261,7 @@ def _manifest(
         "layout": {
             "task": "code_task/task.md",
             "workspace": "code_task/workspace",
+            "project_root": workspace.to_manifest(run_dir=run_dir).get("project_root", "code_task/workspace"),
             "meta": "code_task/meta",
             "codebase_index": "code_task/meta/codebase_index.json",
             "repo_map": "code_task/meta/repo_map.json",

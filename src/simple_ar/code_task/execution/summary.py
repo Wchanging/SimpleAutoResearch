@@ -182,6 +182,13 @@ def _result_overview(
         lines.append(f"- Primary metric: {primary}")
     if baseline_execution:
         lines.append(f"- Baseline status: `{baseline_execution.get('status', 'unknown')}`")
+    baseline_policy = _baseline_policy_record(manifest)
+    if baseline_policy and not baseline_execution:
+        lines.append(
+            "- Baseline policy: "
+            f"`{baseline_policy.get('policy', 'unknown')}` "
+            f"({baseline_policy.get('status', 'unknown')})"
+        )
     if patched_execution:
         lines.append(f"- Patched status: `{patched_execution.get('status', 'unknown')}`")
     if changed_files:
@@ -235,7 +242,7 @@ def _next_step(
     validation_status = validation.get("status") if validation else ""
     if not environment:
         return "Run `simple-ar code-task probe <run-dir>` to record environment signals."
-    if not baseline_execution and not is_greenfield:
+    if not baseline_execution and not is_greenfield and not _baseline_not_required(manifest):
         return "Run `simple-ar code-task baseline <run-dir>` before asking for edits."
     if is_greenfield and patched_execution:
         patched_status = str(patched_execution.get("status", "unknown"))
@@ -284,7 +291,24 @@ def _next_step(
         if verdict in {"regressed", "mixed"}:
             return "Inspect `comparison.json` and consider revising or repairing the patch."
         return "Inspect `comparison.json`; add metric directions or a stronger benchmark if the verdict is inconclusive."
+    if _baseline_not_required(manifest):
+        return "Review patched benchmark artifacts; no baseline comparison was requested for this run."
     return "Run the baseline or patched benchmark again if comparison artifacts are missing."
+
+
+def _baseline_not_required(manifest: dict[str, Any]) -> bool:
+    record = _baseline_policy_record(manifest)
+    policy = str(record.get("policy", "")).lower()
+    status = str(record.get("status", "")).lower()
+    return policy in {"skip", "none"} and status in {"skipped", "recorded"}
+
+
+def _baseline_policy_record(manifest: dict[str, Any]) -> dict[str, Any]:
+    benchmark = manifest.get("benchmark", {})
+    if not isinstance(benchmark, dict):
+        return {}
+    record = benchmark.get("baseline_policy", {})
+    return record if isinstance(record, dict) else {}
 
 
 def _primary_metric_text(manifest: dict[str, Any], comparison: dict[str, Any]) -> str:

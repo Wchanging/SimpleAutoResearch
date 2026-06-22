@@ -3,13 +3,16 @@ from __future__ import annotations
 import re
 
 
+NUMBER_PATTERN = r"-?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
 METRIC_RE = re.compile(
-    r"^\s*([A-Za-z][A-Za-z0-9_.-]*)\s*:\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\s*$"
+    rf"^\s*(?:METRIC\s+)?([A-Za-z][A-Za-z0-9_.-]*)\s*(?::|=)\s*({NUMBER_PATTERN})\s*$"
 )
 
 
 def parse_metric_lines(text: str) -> dict[str, float]:
-    """Parse ``name: value`` metric lines from captured stdout.
+    """Parse stable numeric metric lines from captured stdout.
+
+    Supported formats are ``name: value`` and ``METRIC name=value``.
 
     Args:
         text: Captured stdout from an experiment or benchmark script.

@@ -4,11 +4,52 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-22
+
+### Added
+
+- 新增 V2.6 收尾验收记录：真实运行了 `examples/code_task_medium_review/`、
+  `examples/full_pipeline_tiny_mlp/`、`examples/research_report/`、
+  `examples/greenfield_lightweight_training/` 和 `examples/tool_mcp_codex_agent/`
+  的 LLM-backed 路径；大型 `code_task_greenfield_ml_suite` 保留为服务器端压力验收示例。
+- 新增 `METRIC name=value` 指标输出格式支持；实验 runner 现在同时解析
+  `name: value` 和 `METRIC name=value`，方便外部 agent 或自定义实验脚本用更明确的
+  machine-readable 输出格式。
+- 新增 greenfield deterministic entrypoint 的非数值字段过滤。`run_experiment()` 可以返回
+  `best_condition` 这类描述字段，入口脚本只打印数值指标，避免实验因说明字段无法
+  `float()` 而失败。
+
+### Changed
+
+- Code-task 在 `git_worktree` / monorepo 子目录场景下的 planning、patch planning 和
+  edit proposal 现在使用实际 project root，而不是误把 workspace 根目录当成项目根目录；
+  模型可见上下文会同时包含可编辑目标文件和只读依赖/引用片段。
+- 内嵌 8 阶段 code-task bridge 现在会把 `allow_large_edits` 传入 proposal/apply 路径；
+  `full_pipeline_tiny_mlp` 示例因此可以在隔离 workspace、review 和 benchmark guard
+  保护下应用一次较大的但受控的 old/new replacement。
+- Report agent 现在按 section 做 retry/recovery。单个 section 的 JSON 或审查输出失败时，
+  不再导致整篇报告退回 evidence-limited fallback；失败 section 会单独重试并在必要时局部兜底。
+- Greenfield generation 现在保证 `main.py` 入口不会因为文件预算/依赖排序被截断；
+  review repair 也能补齐缺失入口，减少“项目主体已生成但入口缺失”的半成品状态。
+- 外部 agent greenfield ingestion 现在只把可交付项目文件计入 `code_artifacts` 和文件预算，
+  会忽略 `__pycache__`、`.pyc`、agent metadata 和 review notes；候选项目仍需继续通过
+  SimpleAutoResearch 的 code review、run guard 和 metric schema 检查。
+- `examples/tool_mcp_codex_agent/` 的文件预算调整为 12，并将 `agent_model` 恢复为空字符串，
+  让 Codex CLI 使用用户账号当前默认模型；只有确认账号支持某个模型名时才建议显式填写。
+
+### Fixed
+
+- 修复 standalone medium review 在 worktree 模式下因为上下文定位错误而产生 0 edits 的问题。
+- 修复 8 阶段 tiny MLP 在 code 阶段因大编辑配置未传递而被误拦截的问题。
+- 修复 report writer 某个 section 返回非预期 JSON 时整篇报告降级的问题。
+- 修复外部 Codex handoff 产物因缓存文件被计入预算而误判 `too_many_files` 的问题。
+- 修复外部 Codex 项目使用 `METRIC key=value` 输出时，`07-run` 无法解析指标并误判 guard failed 的问题。
+
 ## 2026-06-18
 
 ### Added
 
-- 新增一等公民的 greenfield code-task 模式。`code-task init` 现在可以使用
+- 新增的 greenfield code-task 模式。`code-task init` 现在可以使用
   `--kind greenfield`，并且不再要求 `code_root`；系统会创建 `empty`
   workspace，并把生成项目放在 `code_task/workspace/generated_project/`。
 - 新增 code-task resource artifacts：`code_task/meta/resource_probe.json`

@@ -197,7 +197,7 @@ allow_external_agent = false   # required before launching external CLI provider
 max_repair_attempts = 1
 
 [workspace]
-mode = "copy"                  # copy | git_worktree | sparse_copy
+mode = "auto"                  # auto | copy | git_worktree | sparse_copy
 reuse_source_venv = false
 setup_hook = ""
 include = []
@@ -356,6 +356,12 @@ validation_max_file_bytes = 500000
 
 # Live benchmark output relay mode.
 stream_benchmark_output = "off"     # off | line | auto | summary
+
+# Existing-project baseline policy:
+# auto/run = run unchanged benchmark; skip/none = no baseline comparison;
+# provided = record metrics from baseline_metrics_file.
+baseline_policy = "auto"
+# baseline_metrics_file = "baseline_metrics.json"
 
 # Keep false for review-first flow. Set true only after proposal review.
 apply_proposed_edits = false
@@ -575,7 +581,7 @@ package rather than parsing stdout directly.
 | `[benchmark].primary_metric` | Main metric used for the objective verdict. Unknown metrics are still recorded, but need directions to decide improvement. |
 | `[benchmark.metric_directions]` | Direction map for metrics: `higher`, `lower`, `resource`, or `ignore`. |
 | `[environment].mode` | `current` uses the active SimpleAutoResearch Python; `external` uses `[environment].python`. No dependencies are installed automatically. |
-| `[workspace].mode` | Workspace strategy: `copy`, `git_worktree`, or `sparse_copy`. |
+| `[workspace].mode` | Workspace strategy: `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty` for greenfield code-task runs. Existing projects default to `auto`, which tries git worktree first and falls back to guarded copy when needed. |
 | `[workspace].reuse_source_venv` | If a source `.venv` or `venv` is detected, record and use that Python as the execution interpreter. |
 | `[workspace].setup_hook` | Stored for future managed environment support. It is not executed during init. |
 | `[implementation].provider` | Code-task implementation backend. `local` keeps the in-process SimpleAutoResearch path; `fake` is deterministic for tests; `local_llm` uses the configured LLM; `codex`, `claude_code`, `opencode`, and `external_cli` use the external-agent handoff boundary when explicitly enabled. |
@@ -599,6 +605,8 @@ package rather than parsing stdout directly.
 | `[execute].use_llm` | Enables or disables LLM-backed work-plan, patch-plan, edit-proposal, and repair steps. |
 | `[execute].timeout_sec` | Benchmark timeout used by executor-managed baseline and patched runs. If omitted, execute falls back to `[benchmark].timeout`, then `[resource].max_runtime_sec`. |
 | `[execute].stream_benchmark_output` | Live benchmark log mode: `off`, `line`, `auto`, or `summary`. Use `auto` for tqdm-like progress output. |
+| `[execute].baseline_policy` | Existing-project baseline behavior: `auto`/`run` executes the unchanged benchmark; `skip`/`none` continues without baseline comparison; `provided` records metrics from `[execute].baseline_metrics_file`. |
+| `[execute].baseline_metrics_file` | JSON or metric-line file used with `baseline_policy = "provided"`. Accepted JSON shapes include `{"accuracy": 0.8}`, `{"metrics": {...}}`, and `{"metric_values": {...}}`. |
 | `[execute].apply_proposed_edits` | Lets execute apply an already reviewed proposal. Keep false for review-first workflows. |
 | `[execute].allow_large_edits` | Allows application of reviewed proposals that exceed the normal budget but fit the large budget. |
 | `[execute].allow_planning_fallback` | Allows deterministic offline work/patch plans after all LLM planning retries fail. Keep false for real LLM runs so malformed model output stops safely and can be retried. |
@@ -695,10 +703,29 @@ max_queries = 4
 
 ## Workspace Mode Variants
 
+### `auto`
+
+`auto` is the recommended existing-project default. It prefers a detached
+`git_worktree` when `code_root` is inside a local Git repository with at least
+one commit. If worktree preparation is not possible, it falls back to `copy`
+and records the reason plus next steps in the manifest and CLI output.
+
+```toml
+[workspace]
+mode = "auto"
+reuse_source_venv = false
+setup_hook = ""
+```
+
+When `code_root` points to a subdirectory inside a larger repository,
+SimpleAutoResearch creates the worktree at the repository root and uses the
+matching subdirectory as the project root for indexing, editing, and running.
+
 ### `copy`
 
-`copy` is the safest default. It creates a guarded physical copy under
-`code_task/workspace`.
+`copy` creates a guarded physical copy under `code_task/workspace`. Use it for
+non-Git projects, dirty filesystem experiments that are not committed yet, or
+cases where you deliberately want to include the current working tree state.
 
 ```toml
 [workspace]
@@ -712,9 +739,11 @@ max_file_bytes = 2000000
 
 ### `git_worktree`
 
-`git_worktree` creates a detached worktree for repo-root git projects. The
-source project must be a local git repository with at least one commit. A remote
-GitHub repository is not required.
+`git_worktree` creates a detached worktree and fails instead of falling back
+when Git isolation is not possible. `code_root` may be the repository root or a
+project subdirectory inside the repository. The source project must be a local
+Git repository with at least one commit. A remote GitHub repository is not
+required.
 
 ```toml
 [workspace]
@@ -782,6 +811,7 @@ use_llm = true
 timeout_sec = 120
 repair_rounds = 1
 stream_benchmark_output = "auto"
+baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
@@ -841,6 +871,7 @@ mode = "empty"
 to_step = "run"
 max_files = 16
 max_generated_lines = 4000
+baseline_policy = "none"
 
 [implementation]
 provider = "local"
@@ -902,6 +933,7 @@ repair_rounds = 1
 max_files = 8
 max_source_chars_per_file = 4000
 stream_benchmark_output = "auto"
+baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
@@ -934,6 +966,16 @@ max_proposal_chars = 24000
 | `line` | Relay newline-delimited output. |
 | `auto` / `true` | Handle regular line logs and carriage-return progress such as `tqdm`. |
 | `summary` | Print only a tail summary after the benchmark finishes. |
+
+`baseline_policy` values for existing-project tasks:
+
+| Value | Meaning |
+| --- | --- |
+| `auto` | Default behavior. Run the unchanged benchmark when a baseline is needed for comparison. |
+| `run` | Force an unchanged baseline run. |
+| `skip` | Skip the unchanged baseline but still allow code understanding, review, validation, and final benchmark execution. |
+| `provided` | Record user-supplied metrics from `baseline_metrics_file`; summaries mark them as provided, not reproduced. |
+| `none` | Mark the task as having no meaningful baseline comparison. Useful for pure generation or acceptance-style tasks. |
 
 ## Edit Scope Behavior
 

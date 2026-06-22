@@ -22,6 +22,7 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
 - **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：可以把 code task 嵌入 8 阶段流程，生成 repo map、context pack、work plan、patch 证据、benchmark 指标和报告证据。
+- **Tool 与外部 Agent 边界**：可以导出真实只读 tool schema，通过 MCP stdio 暴露 run-local tools，并可选把受控 greenfield generation/repair handoff 给 Codex 等外部 CLI agent；外部返回文件仍必须经过 SimpleAutoResearch 的 review 和 run guard。
 - **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
 - **成熟库基础设施**：pipeline/code-task TOML 配置通过 Pydantic 校验，LLM 调用通过 LiteLLM，OpenAlex 访问通过 pyalex，终端进度输出开始走 Rich，为后续更清晰的 human-in-the-loop 审核打基础。
 
@@ -109,7 +110,7 @@ accuracy = "higher"
 latency_ms = "resource"
 
 [workspace]
-mode = "copy"  # copy | git_worktree | sparse_copy
+mode = "auto"  # auto | copy | git_worktree | sparse_copy
 ```
 
 接着运行完整的人工审核流程。`init` 会打印一个新的 run 目录，例如
@@ -173,7 +174,7 @@ accuracy = "higher"
 latency_ms = "resource"
 
 [workspace]
-mode = "copy"  # copy | git_worktree | sparse_copy
+mode = "auto"  # auto | copy | git_worktree | sparse_copy
 
 [environment]
 mode = "current"
@@ -207,10 +208,10 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 
 - 当前代码编辑是受控 old/new replacement，更可审计，但弱于完整自主 coding agent。
 - 默认 edit scope 会保护 tests、benchmark 文件和 secret-like 路径，避免模型通过修改评测来刷指标。
-- `git_worktree` 要求目标项目是 git 仓库根目录，并且至少有一个本地 commit；不要求连接 GitHub 远程仓库。
+- `auto` 会优先为已有 commit 的 Git 项目创建 detached worktree；`code_root` 可以是仓库根目录或仓库内项目子目录。Git 条件不满足时会降级 copy 并记录原因；显式 `git_worktree` 则会失败并给出修复提示。
 - `sparse_copy` 仍是实验性功能，如果 include 范围过窄，可能漏掉运行依赖。
 - 目前不会自动安装项目依赖，也不会自动管理 Docker/Conda/GPU/Slurm 环境。
-- 较大的代码修改 proposal 仍可能触发很长的 LLM completion。V2.5 正在把实验/代码执行收束到明确 contract、资源预算、canonical results、guard、受控 greenfield 路径和后续 external-agent adapter；在这些能力稳定前，不建议把它当作大型无人值守重构工具。
+- 较大的代码修改 proposal 仍可能触发很长的 LLM completion。当前实验/代码执行已经收束到明确 contract、资源预算、canonical results、guard、受控 greenfield 路径和可选 external-agent handoff；但它仍不适合作为大型无人值守重构工具。
 - 文献检索现在会写入可审计的 source plan 和 document-store metadata，并支持 OpenAlex、Semantic Scholar、arXiv 和本地 Markdown/text 笔记。它可以解析本地/缓存的 Markdown、text、基础 HTML，以及轻量 `pypdf` PDF。当前已预留可选 `unstructured` 和 LanceDB hooks，但还不是完整 section-aware PDF parser 或向量 RAG survey 系统。
 - LLM 报告有引用、指标和边界规则保护；如果草稿不合格，会回退到结构化 deterministic report。
 

@@ -69,7 +69,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 | `--benchmark-command TEXT` | string | patch 前后运行的 benchmark command。 |
 | `--code-task-name TEXT` | string | 内嵌 code-task 实验展示名。 |
 | `--code-task-max-file-bytes N` | int | 内嵌 copy/sparse 模式最大复制文件大小。 |
-| `--code-task-workspace-mode MODE` | enum | `copy`、`git_worktree`、`sparse_copy`，或 greenfield code-task 使用的 `empty`。 |
+| `--code-task-workspace-mode MODE` | enum | `auto`、`copy`、`git_worktree`、`sparse_copy`，或 greenfield code-task 使用的 `empty`。`auto` 优先 git worktree，失败时降级 copy。 |
 | `--code-task-workspace-reuse-source-venv` | flag | 使用检测到的 source `.venv` Python。 |
 | `--code-task-workspace-setup-hook TEXT` | string | 为未来 managed environment 记录 setup command。 |
 | `--code-task-env-mode MODE` | enum | `current` 或 `external`。 |
@@ -309,7 +309,7 @@ uv run simple-ar clean --shared-cache
 
 ## Code Task Commands
 
-Code-task 命令会把代码任务准备到 `runs/<run-id>/code_task/workspace`。已有项目会通过 copy/worktree/sparse copy 进入隔离 workspace；greenfield 任务会从 empty workspace 开始生成项目。后续修改或生成只发生在隔离 workspace 中，不会直接修改原始项目。
+Code-task 命令会把代码任务准备到 `runs/<run-id>/code_task/workspace`。已有项目默认 `auto`：优先创建 detached git worktree，Git 条件不满足时降级为受保护 copy；显式 `git_worktree` 失败时会给出可操作 checklist，而不是静默降级。greenfield 任务会从 empty workspace 开始生成项目。后续修改或生成只发生在隔离 workspace 的 project root 中，不会直接修改原始项目。
 
 正常用户优先看“高级编排命令”。“底层原语命令”通常由 `execute` 自动调用，主要用于调试、学习或细粒度人工介入。
 
@@ -342,7 +342,7 @@ uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmar
 | `--metric-direction NAME=DIRECTION` | repeatable | 指标方向：`higher`、`lower`、`resource` 或 `ignore`。 |
 | `--env-mode MODE` | enum | `current` 或 `external`。 |
 | `--python PATH` | path | `--env-mode external` 的 Python。 |
-| `--workspace-mode MODE` | enum | `copy`、`git_worktree`、`sparse_copy` 或 `empty`。`greenfield` 默认 `empty`，已有项目默认 `copy`。 |
+| `--workspace-mode MODE` | enum | `auto`、`copy`、`git_worktree`、`sparse_copy` 或 `empty`。`greenfield` 默认 `empty`，已有项目默认 `auto`。 |
 | `--workspace-include GLOB` | repeatable | `sparse_copy` include pattern。 |
 | `--workspace-exclude GLOB` | repeatable | `sparse_copy` 额外 exclude pattern。 |
 | `--workspace-reuse-source-venv` | flag | 检测并复用 source `.venv` Python。 |
@@ -385,6 +385,8 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--model NAME` | string | LLM 步骤模型覆盖。 |
 | `--no-llm` | flag | 尽可能使用 deterministic fallback。 |
 | `--timeout N` | int | benchmark timeout。 |
+| `--baseline-policy MODE` | enum | 已有项目 baseline 策略：`auto`、`run`、`skip`、`provided` 或 `none`。昂贵 baseline 可用 `skip`/`none` 跳过，或用 `provided` 记录已有指标。 |
+| `--baseline-metrics-file PATH` | path | `--baseline-policy provided` 时读取的 JSON 或 `metric=0.82` 文本指标文件。 |
 | `--yes` | flag | 普通 execute 模式下自动批准 inline 审核门；与 `--interactive` 一起使用时，自动继续 primitive prompts。只有明确接受审核风险、想自动化跑通时才使用。 |
 | `--interactive` | flag | 调试模式：逐个 primitive step 确认，而不是连续运行到下一个审核门。 |
 | `--no-review-inline` | flag | 禁用 inline 审核提示，在审核门直接停止。 |

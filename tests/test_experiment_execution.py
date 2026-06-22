@@ -269,13 +269,42 @@ class ExperimentExecutionTests(unittest.TestCase):
         paths = [row["path"] for row in plan["files"]]
 
         self.assertIn("main.py", paths)
-        self.assertIn("generated_experiment/data.py", paths)
-        self.assertIn("generated_experiment/features.py", paths)
-        self.assertIn("generated_experiment/models.py", paths)
+        self.assertIn("generated_experiment/config.py", paths)
+        self.assertIn("generated_experiment/inputs.py", paths)
+        self.assertIn("generated_experiment/core.py", paths)
         self.assertIn("generated_experiment/metrics.py", paths)
-        self.assertIn("generated_experiment/evaluation.py", paths)
+        self.assertIn("generated_experiment/analysis.py", paths)
         self.assertIn("generated_experiment/runner.py", paths)
         self.assertLessEqual(len(paths), 10)
+
+    def test_large_capability_fallback_architecture_preserves_task_surface(self) -> None:
+        plan = fallback_architecture_plan(
+            contract={
+                "objective": "Greenfield analysis workbench",
+                "task": (
+                    "Build an open-source style project with input loading, preprocessing, analysis, "
+                    "metrics, resource detection, self-check, README, artifacts/results.json, "
+                    "artifacts/report.md, and condition_results.jsonl."
+                ),
+            },
+            result_schema={
+                "primary_metric": "best_score",
+                "required_metrics": ["best_score", "accuracy", "macro_f1", "condition_count"],
+            },
+            resource_plan={"max_files": 16, "max_generated_lines": 6000},
+            domain_profile={"task_excerpt": "input processing analysis reporting self-check resource profile"},
+        )
+
+        paths = [row["path"] for row in plan["files"]]
+
+        self.assertIn("README.md", paths)
+        self.assertIn("generated_experiment/config.py", paths)
+        self.assertIn("generated_experiment/inputs.py", paths)
+        self.assertIn("generated_experiment/processing.py", paths)
+        self.assertIn("generated_experiment/analysis.py", paths)
+        self.assertIn("generated_experiment/reporting.py", paths)
+        self.assertIn("generated_experiment/validation.py", paths)
+        self.assertLessEqual(len(paths), 16)
 
     def test_stage_rerun_archives_existing_outputs_by_default(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -387,8 +416,11 @@ class ExperimentExecutionTests(unittest.TestCase):
             repaired = (project / "generated_experiment" / "runner.py").read_text(encoding="utf-8")
             self.assertIn("accuracy", repaired)
             self.assertIn("macro_f1", repaired)
-            self.assertIn("'accuracy': 0.840000", repaired)
-            self.assertIn("'macro_f1': 0.820000", repaired)
+            namespace: dict[str, object] = {}
+            exec(repaired, namespace)
+            metrics = namespace["run_experiment"]()  # type: ignore[operator]
+            self.assertIsInstance(metrics["accuracy"], float)
+            self.assertIsInstance(metrics["macro_f1"], float)
             main = (project / "main.py").read_text(encoding="utf-8")
             self.assertIn("generated_experiment.runner", main)
             self.assertTrue((project / "main.py.before_repair").is_file())

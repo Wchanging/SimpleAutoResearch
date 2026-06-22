@@ -273,6 +273,66 @@ def run_code_task_baseline(
     )
 
 
+def record_provided_code_task_baseline(
+    run_dir: Path,
+    *,
+    metrics: dict[str, float],
+    source_path: str,
+    env_mode: str | None = None,
+    python_executable: str | Path | None = None,
+) -> CodeTaskRunResult:
+    """Record user-provided baseline metrics without running the benchmark.
+
+    This is for expensive existing-project tasks where the unchanged baseline
+    has already been measured elsewhere. The artifact is deliberately explicit:
+    reports and manifests mark the baseline as provided so downstream summaries
+    do not confuse it with a fresh subprocess run.
+    """
+
+    numeric_metrics = {
+        str(name): float(value)
+        for name, value in metrics.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if not numeric_metrics:
+        raise CodeTaskRunError("Provided baseline metrics must include at least one numeric metric.")
+
+    manifest = load_code_task_manifest(run_dir)
+    environment_policy = ensure_code_task_environment_policy(
+        run_dir,
+        manifest,
+        env_mode=env_mode,
+        python_executable=python_executable,
+    )
+    return _write_execution_result(
+        run_dir,
+        manifest=manifest,
+        command_text="provided-baseline-metrics",
+        command_args=[],
+        environment_policy=environment_policy,
+        timeout_sec=0,
+        duration_sec=0.0,
+        status="passed",
+        returncode=None,
+        timed_out=False,
+        stdout=f"Baseline metrics were provided by the user from {source_path}.\n",
+        stderr="",
+        metrics=numeric_metrics,
+        stdout_truncated=False,
+        stderr_truncated=False,
+        run_label="baseline",
+        report_metadata={
+            "provided_baseline": True,
+            "provided_source": source_path,
+        },
+        run_metadata={
+            "provided": True,
+            "provided_source": source_path,
+            "baseline_policy": "provided",
+        },
+    )
+
+
 def _run_command(
     command_args: list[str],
     *,
@@ -512,6 +572,8 @@ def _write_execution_result(
     stdout_truncated: bool,
     stderr_truncated: bool,
     run_label: str,
+    report_metadata: dict[str, Any] | None = None,
+    run_metadata: dict[str, Any] | None = None,
 ) -> CodeTaskRunResult:
     paths = code_task_paths(run_dir)
     run_dir_for_label = _run_label_dir(paths.run_artifact_dir, run_label)
@@ -545,6 +607,8 @@ def _write_execution_result(
         "stdout_truncated": stdout_truncated,
         "stderr_truncated": stderr_truncated,
     }
+    if report_metadata:
+        report.update(report_metadata)
     write_json(report_path, report)
     _update_manifest_after_run(
         run_dir,
@@ -556,6 +620,7 @@ def _write_execution_result(
         timed_out=timed_out,
         metric_values=metrics,
         run_label=run_label,
+        run_metadata=run_metadata,
     )
     comparison = _maybe_compare_runs(run_dir)
     if run_label == "patched":
@@ -764,6 +829,7 @@ def _update_manifest_after_run(
     timed_out: bool,
     metric_values: dict[str, float],
     run_label: str,
+    run_metadata: dict[str, Any] | None = None,
 ) -> None:
     layout = manifest_section(manifest, "layout")
     layout["run"] = "code_task/run"
@@ -786,6 +852,8 @@ def _update_manifest_after_run(
         "metric_values": metric_values,
         "environment": _execution_environment_record(environment_policy),
     }
+    if run_metadata:
+        run_record.update(run_metadata)
     runs[run_label] = run_record
     benchmark.update(
         {
@@ -804,6 +872,14 @@ def _update_manifest_after_run(
             "runs": runs,
         }
     )
+    if run_label == "baseline":
+        policy = "provided" if run_record.get("provided") else "run"
+        benchmark["baseline_policy"] = {
+            "policy": policy,
+            "status": "recorded",
+            "source": run_record.get("provided_source") or "benchmark_run",
+            "updated_at": run_record["run_at"],
+        }
     manifest["layout"] = layout
     manifest["benchmark"] = benchmark
     if run_label == "baseline":

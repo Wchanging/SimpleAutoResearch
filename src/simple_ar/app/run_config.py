@@ -130,6 +130,8 @@ class ExecutionSection(_ConfigModel):
     command: str | None = None
     timeout_sec: int | None = None
     stream_output: str | None = None
+    baseline_policy: str | None = None
+    baseline_metrics_file: str | None = None
     allow_dependency_install: bool | None = None
 
 
@@ -317,6 +319,13 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "execution_command", self.execution.command)
         _set_int(result, "execution_timeout_sec", self.execution.timeout_sec)
         _set_string(result, "execution_stream_output", self.execution.stream_output)
+        _set_string(result, "execution_baseline_policy", self.execution.baseline_policy)
+        _set_resolved_string(
+            result,
+            "execution_baseline_metrics_file",
+            self.execution.baseline_metrics_file,
+            config_path,
+        )
         _set_bool(result, "execution_allow_dependency_install", self.execution.allow_dependency_install)
 
         _set_int(result, "resource_max_runtime_sec", self.resource.max_runtime_sec)
@@ -512,6 +521,8 @@ def _apply_unified_compatibility(result: dict[str, object]) -> None:
     _copy_if_missing(result, "evaluation_primary_metric", "code_task_primary_metric")
     _copy_if_missing(result, "evaluation_metric_directions", "code_task_metric_directions")
     _copy_if_missing(result, "resource_max_runtime_sec", "code_task_timeout_sec")
+    _copy_if_missing(result, "execution_baseline_policy", "code_task_baseline_policy")
+    _copy_if_missing(result, "execution_baseline_metrics_file", "code_task_baseline_metrics_file")
 
     if "experiment_template" not in result and (
         result.get("task_kind") == "existing_project" or "code_task_code_root" in result

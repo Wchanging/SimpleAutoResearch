@@ -7,13 +7,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from simple_ar.code_task.execution.baseline_policy import normalize_baseline_policy
 from simple_ar.code_task.execution.comparison import normalize_metric_direction
 
 
 DEFAULT_OUTPUT_ROOT = "runs"
 DEFAULT_MAX_FILE_BYTES = 2_000_000
 DEFAULT_ENV_MODE = "current"
-DEFAULT_WORKSPACE_MODE = "copy"
+DEFAULT_WORKSPACE_MODE = "auto"
 DEFAULT_GREENFIELD_WORKSPACE_MODE = "empty"
 CODE_TASK_KIND_EXISTING = "existing_project"
 CODE_TASK_KIND_GREENFIELD = "greenfield"
@@ -100,6 +101,8 @@ class ExecuteSection(_ConfigModel):
     strict_validation: bool | None = None
     validation_max_file_bytes: int | None = None
     stream_benchmark_output: str | bool | None = None
+    baseline_policy: str | None = None
+    baseline_metrics_file: str | None = None
     apply_proposed_edits: bool | None = None
     allow_large_edits: bool | None = None
     allow_planning_fallback: bool | None = None
@@ -226,6 +229,8 @@ class CodeTaskExecuteOptions:
     strict_validation: bool
     validation_max_file_bytes: int
     stream_benchmark_output: str
+    baseline_policy: str
+    baseline_metrics_file: str | None
     apply_proposed_edits: bool
     allow_large_edits: bool
     allow_planning_fallback: bool
@@ -352,6 +357,8 @@ def load_code_task_execute_options(
             500_000,
         ),
         stream_benchmark_output=_stream_output_mode(execute.stream_benchmark_output),
+        baseline_policy=_baseline_policy(execute.baseline_policy),
+        baseline_metrics_file=_config_string(execute.baseline_metrics_file),
         apply_proposed_edits=_resolve_bool(
             override=None,
             value=execute.apply_proposed_edits,
@@ -502,6 +509,8 @@ def load_code_task_init_options(
             else DEFAULT_WORKSPACE_MODE
         )
     )
+    if resolved_kind == CODE_TASK_KIND_GREENFIELD and resolved_workspace_mode == "auto":
+        resolved_workspace_mode = DEFAULT_GREENFIELD_WORKSPACE_MODE
     if resolved_kind == CODE_TASK_KIND_GREENFIELD and resolved_workspace_mode not in {
         "empty",
         "copy",
@@ -688,6 +697,16 @@ def _stream_output_mode(value: object) -> str:
             "or one of: off, line, auto, summary."
         )
     return normalized
+
+
+def _baseline_policy(value: str | None) -> str:
+    try:
+        return normalize_baseline_policy(_config_string(value))
+    except ValueError as exc:
+        raise CodeTaskConfigError(
+            "Unsupported [execute].baseline_policy. Expected one of: "
+            "auto, none, provided, run, skip."
+        ) from exc
 
 
 def _resolve_string_list(
