@@ -64,6 +64,7 @@ from simple_ar.app.run_config import RunConfigError, load_pipeline_run_config
 from simple_ar.pipeline_stages.registry import HANDLERS
 from simple_ar.core.stages import Stage, parse_stage
 from simple_ar.cli.parser import build_parser
+from simple_ar.tools.cli import call_tool, print_tool_schema, serve_mcp
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -111,6 +112,24 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "status":
         _print_status(Path(args.run_dir))
         return
+
+    if args.command == "tools":
+        if args.tools_command == "schema":
+            print_tool_schema(schema_format=args.format, output=args.output)
+            return
+        if args.tools_command == "call":
+            call_tool(
+                Path(args.run_dir),
+                args.tool_name,
+                args_json=args.args_json,
+                args_file=args.args_file,
+                debug_payloads=args.debug_payloads,
+            )
+            return
+        if args.tools_command == "serve-mcp":
+            serve_mcp(Path(args.run_dir), debug_payloads=args.debug_payloads)
+            return
+        parser.error(f"Unknown tools command: {args.tools_command}")
 
     if args.command == "code-task":
         if args.code_task_command == "init":
@@ -389,7 +408,7 @@ def _default_run_context_config() -> dict[str, object]:
         "llm_max_workers": 4,
         "max_papers": 5,
         "search_query": None,
-        "experiment_template": "toy_text_classification",
+        "experiment_template": "greenfield_project",
         "experiment_timeout_sec": 30,
         "use_llm": True,
         "use_arxiv": True,
@@ -779,6 +798,7 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
     try:
         options = load_code_task_init_options(
             config_path=args.config,
+            kind=args.kind,
             code_root=args.code_root,
             task_file=args.task_file,
             output_root=args.output_root,
@@ -797,17 +817,20 @@ def _print_code_task_init(args: argparse.Namespace) -> None:
         )
     except CodeTaskConfigError as exc:
         raise SystemExit(str(exc)) from exc
-    code_root = Path(options.code_root)
+    code_root = Path(options.code_root) if options.code_root else None
     if options.task_file is None:
         raise SystemExit("Missing task file. Pass --task-file or set [code_task].task_file.")
     task_file = Path(options.task_file)
-    name = options.name or f"code-task-{code_root.resolve().name}"
+    name = options.name or (
+        f"code-task-{code_root.resolve().name}" if code_root is not None else "greenfield-code-task"
+    )
     run_dir = _new_run_dir(Path(options.output_root), name)
     try:
         result = initialize_code_task(
             run_dir=run_dir,
             code_root=code_root,
             task_file=task_file,
+            kind=options.kind,
             benchmark_command=options.benchmark_command,
             max_file_bytes=options.max_file_bytes,
             workspace_mode=options.workspace_mode,
@@ -856,7 +879,8 @@ def _code_task_init_error_message(
                 "",
                 "Check the task file path:",
                 f"- configured task_file: {task_file or '(missing)'}",
-                "- Pass --task-file path\\to\\task.md, or set [code_task].task_file in TOML.",
+                "- Pass --task-file path/to/task.md, or set [code_task].task_file in TOML.",
+                "- Windows-style backslashes are accepted, but forward slashes are portable across Linux/macOS/Windows.",
                 "- For embedded 8-stage code_task_project runs, omit task_file only if you want 05-design to generate one.",
             ]
         )
@@ -867,7 +891,7 @@ def _code_task_init_error_message(
                 "Check the code root path:",
                 f"- configured code_root: {code_root or '(missing)'}",
                 "- It should point to the baseline project directory, not the task file.",
-                "- If you use git_worktree, code_root must be the baseline git repository root.",
+                "- If you use git_worktree, code_root may be the git repository root or a project subdirectory inside it.",
             ]
         )
     elif isinstance(exc, WorkspaceModeError) and workspace_mode == "git_worktree":
@@ -875,9 +899,10 @@ def _code_task_init_error_message(
             [
                 "",
                 "git_worktree quick checklist:",
-                "- code_root should be the baseline repository root.",
+                "- code_root should be inside the baseline git repository.",
                 "- The repository needs at least one local commit.",
                 "- GitHub or any remote is not required.",
+                "- If code_root is a monorepo subdirectory, SimpleAutoResearch will use the matching worktree subdirectory as project root.",
                 "- Use --workspace-mode copy when the baseline is not a git repository.",
             ]
         )
@@ -1239,6 +1264,8 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
     python_executable = args.python_executable or options.python_executable
     allow_planning_fallback = args.allow_planning_fallback or options.allow_planning_fallback
     llm_retry_attempts = args.llm_retry_attempts or options.llm_retry_attempts
+    baseline_policy = args.baseline_policy or options.baseline_policy
+    baseline_metrics_file = args.baseline_metrics_file or options.baseline_metrics_file
     inline_apply_proposed_edits = False
     inline_allow_large_edits = False
 
@@ -1268,6 +1295,8 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             strict_validation=args.strict_validation or options.strict_validation,
             validation_max_file_bytes=validation_max_file_bytes,
             stream_benchmark_output=options.stream_benchmark_output,
+            baseline_policy=baseline_policy,
+            baseline_metrics_file=baseline_metrics_file,
             apply_proposed_edits=(
                 args.apply_proposed_edits
                 or options.apply_proposed_edits
@@ -1287,6 +1316,14 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             cost_cap_usd=options.cost_cap_usd,
             max_files=max_files,
             max_source_chars_per_file=max_source_chars,
+            max_generated_lines=options.max_generated_lines,
+            implementation_provider=options.implementation_provider,
+            implementation_agent_mode=options.implementation_agent_mode,
+            implementation_allow_external_agent=options.implementation_allow_external_agent,
+            implementation_agent_model=options.implementation_agent_model,
+            implementation_agent_binary=options.implementation_agent_binary,
+            implementation_agent_args=options.implementation_agent_args,
+            implementation_agent_timeout_sec=options.implementation_agent_timeout_sec,
             message_callback=render_execute_message,
         )
 

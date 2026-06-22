@@ -20,10 +20,13 @@ from simple_ar.code_task.editing.scope import (
     is_edit_allowed_path,
     protected_patterns_from_manifest,
 )
+from simple_ar.code_task.runtime.state import code_task_paths
 from simple_ar.code_task.analysis.context import (
     LoadedCodeTaskContextPack,
     load_latest_code_task_context_pack,
 )
+from simple_ar.code_task.memory import task_memory_context
+from simple_ar.code_task.analysis.interfaces import snippet_api_contract
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
 from simple_ar.app.usage import summarize_usage
 
@@ -100,11 +103,12 @@ def generate_patch_plan(
     if llm_retry_attempts < 1:
         raise ValueError("llm_retry_attempts must be at least 1")
     root = Path(run_dir)
-    task_dir = root / "code_task"
-    meta_dir = task_dir / "meta"
-    workspace_dir = task_dir / "workspace"
+    paths = code_task_paths(root)
+    task_dir = paths.task_dir
+    meta_dir = paths.meta_dir
+    workspace_dir = paths.workspace_dir
     patch_plan_path = task_dir / "patch_plan.md"
-    manifest_path = root / "manifest.json"
+    manifest_path = paths.manifest_path
     if patch_plan_path.exists() and not force:
         raise FileExistsError(f"Patch plan already exists: {patch_plan_path}")
 
@@ -114,6 +118,7 @@ def generate_patch_plan(
     allowed_patterns = allowed_patterns_from_manifest(manifest)
     protected_patterns = protected_patterns_from_manifest(manifest)
     run_context = _collect_run_context(root, manifest)
+    memory_context = task_memory_context(root)
     loaded_context = load_latest_code_task_context_pack(root)
     context_pack_ref: dict[str, Any] | None = None
     if loaded_context is not None and loaded_context.selected_files:
@@ -165,6 +170,7 @@ def generate_patch_plan(
                     snippets=snippets,
                     benchmark_command=_benchmark_command(manifest),
                     run_context=run_context,
+                    memory_context=memory_context,
                     allowed_patterns=allowed_patterns,
                     protected_patterns=protected_patterns,
                 )
@@ -349,6 +355,7 @@ def _ask_llm_for_plan(
     snippets: list[dict[str, Any]],
     benchmark_command: str,
     run_context: dict[str, Any],
+    memory_context: str,
     allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> dict[str, Any]:
@@ -358,6 +365,7 @@ def _ask_llm_for_plan(
         snippets=snippets,
         benchmark_command=benchmark_command,
         run_context=run_context,
+        memory_context=memory_context,
         protected_patterns=protected_patterns,
         allowed_patterns=allowed_patterns,
     )
@@ -377,6 +385,7 @@ def _plan_user_prompt(
     snippets: list[dict[str, Any]],
     benchmark_command: str,
     run_context: dict[str, Any],
+    memory_context: str,
     allowed_patterns: tuple[str, ...],
     protected_patterns: tuple[str, ...],
 ) -> str:
@@ -417,7 +426,10 @@ def _plan_user_prompt(
         f"Task:\n{task_text}\n\n"
         f"Benchmark command recorded for later validation:\n{benchmark_command or 'None'}\n\n"
         f"Run context JSON:\n{json.dumps(run_context, indent=2, ensure_ascii=False)}\n\n"
+        f"Task memory:\n{memory_context}\n\n"
         f"Codebase index summary JSON:\n{json.dumps(compact_index, indent=2, ensure_ascii=False)}\n\n"
+        "Selected Python API contract (derived from the exact snippets below):\n"
+        f"{json.dumps(snippet_api_contract(snippets), indent=2, ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
 

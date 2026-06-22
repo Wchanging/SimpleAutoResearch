@@ -64,13 +64,14 @@ class RunConfigTests(unittest.TestCase):
         execute_options = load_code_task_execute_options(config_path=str(code_task_config))
 
         self.assertEqual(init_options.name, "medium-review-pipeline")
-        self.assertEqual(init_options.workspace_mode, "copy")
+        self.assertEqual(init_options.workspace_mode, "auto")
         self.assertIn("review_pipeline/**", init_options.edit_scope_allowed_patterns)
         self.assertTrue((repo_root / init_options.code_root).is_dir())
         self.assertTrue((repo_root / str(init_options.task_file)).is_file())
         self.assertEqual(execute_options.to_step, "run")
         self.assertEqual(execute_options.llm_retry_attempts, 2)
         self.assertFalse(execute_options.allow_planning_fallback)
+        self.assertEqual(execute_options.implementation_provider, "local")
 
     def test_research_section_is_flattened_for_pipeline_config(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -192,6 +193,7 @@ task_file = "task.md"
 mode = "patch_existing"
 domain_profile = "code_agent_eval"
 provider = "local"
+agent_mode = "model"
 task_handoff = "merge"
 max_repair_attempts = 2
 
@@ -239,15 +241,120 @@ allow_fallback_scaffold = true
             self.assertEqual(parsed["code_task_workspace_include"], ["src/**"])
             self.assertEqual(parsed["code_task_primary_metric"], "accuracy")
             self.assertEqual(parsed["code_task_metric_directions"]["runtime_sec"], "lower")
+            self.assertEqual(parsed["implementation_agent_mode"], "model")
             self.assertEqual(parsed["implementation_task_handoff"], "merge")
             task_config = parsed["task_config"]
             self.assertIsInstance(task_config, dict)
             self.assertEqual(task_config["task"]["kind"], "existing_project")
             self.assertEqual(task_config["implementation"]["domain_profile"], "code_agent_eval")
+            self.assertEqual(task_config["implementation"]["agent_mode"], "model")
             self.assertEqual(task_config["implementation"]["task_handoff"], "merge")
             self.assertEqual(task_config["resource"]["max_files"], 8)
             self.assertEqual(task_config["generation"]["files_per_batch"], 3)
             self.assertEqual(task_config["generation"]["allow_fallback_scaffold"], True)
+
+    def test_code_task_execute_options_read_shared_implementation_section(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            config = Path(tmp) / "code_task.toml"
+            config.write_text(
+                """
+[execute]
+to_step = "run"
+
+[resource]
+max_runtime_sec = 321
+max_files = 12
+max_generated_lines = 3456
+
+[implementation]
+provider = "fake"
+agent_mode = "handoff"
+allow_external_agent = true
+agent_model = "small"
+agent_binary = "fake-agent"
+agent_args = ["--quiet"]
+agent_timeout_sec = 123
+""".strip(),
+                encoding="utf-8",
+            )
+
+            options = load_code_task_execute_options(config_path=str(config))
+
+            self.assertEqual(options.implementation_provider, "fake")
+            self.assertEqual(options.implementation_agent_mode, "handoff")
+            self.assertTrue(options.implementation_allow_external_agent)
+            self.assertEqual(options.implementation_agent_model, "small")
+            self.assertEqual(options.implementation_agent_binary, "fake-agent")
+            self.assertEqual(options.implementation_agent_args, ("--quiet",))
+            self.assertEqual(options.implementation_agent_timeout_sec, 123)
+            self.assertEqual(options.timeout_sec, 321)
+            self.assertEqual(options.max_files, 12)
+            self.assertEqual(options.max_generated_lines, 3456)
+
+    def test_code_task_config_normalizes_windows_style_path_separators(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            config = root / "code_task.toml"
+            config.write_text(
+                r"""
+[code_task]
+kind = "greenfield"
+task_file = 'examples\code_task_greenfield_ml_suite\task.md'
+output_root = 'runs\code-task-greenfield-ml-suite'
+
+[environment]
+python = '.venv\bin\python'
+""".strip(),
+                encoding="utf-8",
+            )
+
+            options = load_code_task_init_options(config_path=str(config))
+
+            self.assertEqual(options.task_file, "examples/code_task_greenfield_ml_suite/task.md")
+            self.assertEqual(options.output_root, "runs/code-task-greenfield-ml-suite")
+            self.assertEqual(options.python_executable, ".venv/bin/python")
+
+    def test_run_config_normalizes_windows_style_config_and_relative_paths(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            config_dir = root / "configs"
+            config_dir.mkdir()
+            project = config_dir / "project"
+            project.mkdir()
+            task = config_dir / "task.md"
+            task.write_text("# Task\n", encoding="utf-8")
+            config = config_dir / "pipeline.toml"
+            config.write_text(
+                r"""
+[run]
+topic = "portable paths"
+output_root = 'runs\portable'
+
+[task]
+kind = "existing_project"
+code_root = 'project'
+task_file = 'task.md'
+
+[experiment]
+code_task_config = 'nested\code_task.toml'
+""".strip(),
+                encoding="utf-8",
+            )
+            portable_config_arg = str(config).replace("\\", "/")
+            windows_style_config_arg = portable_config_arg.replace("/", "\\")
+
+            parsed = load_pipeline_run_config(windows_style_config_arg)
+
+            self.assertEqual(parsed["output_root"], "runs/portable")
+            self.assertEqual(parsed["code_task_code_root"], str(project.resolve()))
+            self.assertEqual(parsed["code_task_task_file"], str(task.resolve()))
+            self.assertEqual(
+                parsed["code_task_config"],
+                str((config_dir / "nested" / "code_task.toml").resolve()),
+            )
 
 
 if __name__ == "__main__":

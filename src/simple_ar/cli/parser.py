@@ -79,6 +79,21 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
 
+    tools_parser = subparsers.add_parser("tools", help="Inspect or serve run-local SimpleAutoResearch tools.")
+    tools_subparsers = tools_parser.add_subparsers(dest="tools_command", required=True)
+    tools_schema = tools_subparsers.add_parser("schema", help="Export OpenAI or MCP tool schemas.")
+    tools_schema.add_argument("--format", choices=("mcp", "openai"), default="mcp")
+    tools_schema.add_argument("--output", default=None)
+    tools_call = tools_subparsers.add_parser("call", help="Call one run-local read-only tool.")
+    tools_call.add_argument("run_dir")
+    tools_call.add_argument("tool_name")
+    tools_call.add_argument("--args-json", default="{}")
+    tools_call.add_argument("--args-file", default=None, help="Read tool arguments from a JSON file.")
+    tools_call.add_argument("--debug-payloads", action="store_true")
+    tools_mcp = tools_subparsers.add_parser("serve-mcp", help="Serve read-only run tools over MCP stdio.")
+    tools_mcp.add_argument("run_dir")
+    tools_mcp.add_argument("--debug-payloads", action="store_true")
+
     code_task_parser = subparsers.add_parser(
         "code-task",
         help="Work with an existing codebase in an isolated run workspace.",
@@ -97,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional TOML config file for code-task init settings.",
     )
     code_task_init.add_argument("--code-root", default=None)
+    code_task_init.add_argument(
+        "--kind",
+        choices=("existing_project", "greenfield"),
+        default=None,
+        help="Code-task mode. Use greenfield for from-scratch project generation.",
+    )
     code_task_init.add_argument("--task-file", default=None)
     code_task_init.add_argument("--output-root", default=None)
     code_task_init.add_argument("--name", default=None)
@@ -403,6 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
             "plan",
             "propose-edits",
             "apply-edits",
+            "review",
             "validate",
             "run",
             "analyze-failure",
@@ -461,6 +483,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="LLM work/patch planning attempts before failing or explicitly falling back.",
     )
     code_task_execute.add_argument("--repair-rounds", type=int, default=0)
+    code_task_execute.add_argument(
+        "--baseline-policy",
+        choices=("auto", "run", "skip", "provided", "none"),
+        default=None,
+        help=(
+            "Existing-project baseline behavior: auto/run executes the unchanged "
+            "benchmark, skip/none continues without it, provided records metrics "
+            "from --baseline-metrics-file."
+        ),
+    )
+    code_task_execute.add_argument(
+        "--baseline-metrics-file",
+        default=None,
+        help="JSON or metric-line file used when --baseline-policy provided is selected.",
+    )
     code_task_execute.add_argument("--max-files", type=int, default=8)
     code_task_execute.add_argument("--max-source-chars-per-file", type=int, default=4000)
     _add_code_task_env_args(code_task_execute)
@@ -563,11 +600,12 @@ def _add_code_task_workspace_args(parser: argparse.ArgumentParser) -> None:
     """Add shared code-task workspace creation arguments."""
     parser.add_argument(
         "--workspace-mode",
-        choices=("copy", "git_worktree", "sparse_copy"),
+        choices=("auto", "copy", "git_worktree", "sparse_copy"),
         default=None,
         help=(
-            "Workspace strategy. `copy` copies a guarded source tree; "
-            "`git_worktree` creates a detached git worktree for repo-root projects; "
+            "Workspace strategy. `auto` prefers git_worktree for Git projects "
+            "and falls back to copy; `copy` copies a guarded source tree; "
+            "`git_worktree` creates a detached git worktree; "
             "`sparse_copy` is experimental and copies selected patterns."
         ),
     )
@@ -645,7 +683,7 @@ def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--code-task-workspace-mode",
-        choices=("copy", "git_worktree", "sparse_copy"),
+        choices=("auto", "copy", "git_worktree", "sparse_copy"),
         default=None,
         help="Embedded code-task workspace strategy.",
     )

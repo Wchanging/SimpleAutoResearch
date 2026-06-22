@@ -76,7 +76,7 @@ class LocalExperimentToolGateway:
             if not stage_dir.is_dir():
                 continue
             for path in sorted(stage_dir.rglob("*")):
-                if path.is_file():
+                if path.is_file() and not _is_rebuildable_noise(path):
                     rows.append(
                         {
                             "path": path.relative_to(self.run_dir).as_posix(),
@@ -100,7 +100,7 @@ class LocalExperimentToolGateway:
         } if isinstance(extensions_raw, list) else set()
         rows: list[dict[str, Any]] = []
         for path in sorted(root.rglob("*")):
-            if not path.is_file() or "__pycache__" in path.parts:
+            if not path.is_file() or _is_rebuildable_noise(path):
                 continue
             if extensions and path.suffix.lower() not in extensions:
                 continue
@@ -150,7 +150,7 @@ class LocalExperimentToolGateway:
         for path in sorted(root.rglob("*")):
             if not path.is_file() or path.suffix.lower() not in {".py", ".json", ".toml", ".md", ".txt"}:
                 continue
-            if "__pycache__" in path.parts:
+            if _is_rebuildable_noise(path):
                 continue
             try:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -171,6 +171,11 @@ def _tail_text(path: Path, limit: int = 4000) -> str:
         return ""
     text = path.read_text(encoding="utf-8", errors="replace")
     return text[-limit:]
+
+
+def _is_rebuildable_noise(path: Path) -> bool:
+    parts = {part.lower() for part in path.parts}
+    return "__pycache__" in parts or path.suffix.lower() in {".pyc", ".pyo"}
 
 
 def _safe_relative_path(value: str) -> str:

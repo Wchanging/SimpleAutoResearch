@@ -11,6 +11,37 @@ from simple_ar.core.console import make_console
 from simple_ar.core.pipeline import PipelineEvent
 
 
+def style_progress_message(message: str) -> str:
+    """Return the Rich style for one progress line.
+
+    The classifier is intentionally small and shared by the pipeline reporter
+    and code-task CLI views so long-running commands feel visually consistent.
+    """
+
+    lower = message.lower()
+    if "failed" in lower or "error" in lower:
+        return "bright_red"
+    if "llm usage" in lower:
+        return "gold1"
+    if "calling llm" in lower:
+        return "orchid1"
+    if "dependency advice" in lower:
+        if "missing" in lower:
+            return "bright_yellow"
+        if "installed" in lower:
+            return "spring_green2"
+        return "deep_sky_blue1"
+    if "search" in lower or "retriev" in lower or "arxiv" in lower or "openalex" in lower:
+        return "deep_sky_blue1"
+    if "rate limit" in lower or "fallback" in lower or "warning" in lower or "skipped" in lower:
+        return "bright_yellow"
+    if "archived" in lower:
+        return "bright_yellow"
+    if "running" in lower or "generating" in lower or "building" in lower or "writing" in lower:
+        return "dodger_blue1"
+    return "white"
+
+
 class ConsoleReporter:
     """Render pipeline progress events to stdout.
 
@@ -100,27 +131,14 @@ class ConsoleReporter:
         )
 
     def _print_stage_message(self, message: str) -> None:
-        style = self._message_style(message)
+        style = style_progress_message(message)
         bullet = Text("  - ", style="dim")
         text = Text(str(message), style=style)
         self.console.print(bullet + text)
 
     @staticmethod
     def _message_style(message: str) -> str:
-        lower = message.lower()
-        if "llm usage" in lower:
-            return "gold1"
-        if "calling llm" in lower:
-            return "orchid1"
-        if "search" in lower or "retriev" in lower or "arxiv" in lower or "openalex" in lower:
-            return "deep_sky_blue1"
-        if "failed" in lower or "error" in lower:
-            return "bright_red"
-        if "rate limit" in lower or "fallback" in lower or "warning" in lower or "skipped" in lower:
-            return "bright_yellow"
-        if "running" in lower or "generating" in lower or "building" in lower:
-            return "dodger_blue1"
-        return "white"
+        return style_progress_message(message)
 
     @staticmethod
     def _format_duration(value: object) -> str:

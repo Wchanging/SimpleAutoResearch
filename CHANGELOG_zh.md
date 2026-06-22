@@ -4,6 +4,131 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-22
+
+### Added
+
+- 新增 V2.6 收尾验收记录：真实运行了 `examples/code_task_medium_review/`、
+  `examples/full_pipeline_tiny_mlp/`、`examples/research_report/`、
+  `examples/greenfield_lightweight_training/` 和 `examples/tool_mcp_codex_agent/`
+  的 LLM-backed 路径；大型 `code_task_greenfield_ml_suite` 保留为服务器端压力验收示例。
+- 新增 `METRIC name=value` 指标输出格式支持；实验 runner 现在同时解析
+  `name: value` 和 `METRIC name=value`，方便外部 agent 或自定义实验脚本用更明确的
+  machine-readable 输出格式。
+- 新增 greenfield deterministic entrypoint 的非数值字段过滤。`run_experiment()` 可以返回
+  `best_condition` 这类描述字段，入口脚本只打印数值指标，避免实验因说明字段无法
+  `float()` 而失败。
+
+### Changed
+
+- Code-task 在 `git_worktree` / monorepo 子目录场景下的 planning、patch planning 和
+  edit proposal 现在使用实际 project root，而不是误把 workspace 根目录当成项目根目录；
+  模型可见上下文会同时包含可编辑目标文件和只读依赖/引用片段。
+- 内嵌 8 阶段 code-task bridge 现在会把 `allow_large_edits` 传入 proposal/apply 路径；
+  `full_pipeline_tiny_mlp` 示例因此可以在隔离 workspace、review 和 benchmark guard
+  保护下应用一次较大的但受控的 old/new replacement。
+- Report agent 现在按 section 做 retry/recovery。单个 section 的 JSON 或审查输出失败时，
+  不再导致整篇报告退回 evidence-limited fallback；失败 section 会单独重试并在必要时局部兜底。
+- Greenfield generation 现在保证 `main.py` 入口不会因为文件预算/依赖排序被截断；
+  review repair 也能补齐缺失入口，减少“项目主体已生成但入口缺失”的半成品状态。
+- 外部 agent greenfield ingestion 现在只把可交付项目文件计入 `code_artifacts` 和文件预算，
+  会忽略 `__pycache__`、`.pyc`、agent metadata 和 review notes；候选项目仍需继续通过
+  SimpleAutoResearch 的 code review、run guard 和 metric schema 检查。
+- `examples/tool_mcp_codex_agent/` 的文件预算调整为 12，并将 `agent_model` 恢复为空字符串，
+  让 Codex CLI 使用用户账号当前默认模型；只有确认账号支持某个模型名时才建议显式填写。
+
+### Fixed
+
+- 修复 standalone medium review 在 worktree 模式下因为上下文定位错误而产生 0 edits 的问题。
+- 修复 8 阶段 tiny MLP 在 code 阶段因大编辑配置未传递而被误拦截的问题。
+- 修复 report writer 某个 section 返回非预期 JSON 时整篇报告降级的问题。
+- 修复外部 Codex handoff 产物因缓存文件被计入预算而误判 `too_many_files` 的问题。
+- 修复外部 Codex 项目使用 `METRIC key=value` 输出时，`07-run` 无法解析指标并误判 guard failed 的问题。
+
+## 2026-06-18
+
+### Added
+
+- 新增的 greenfield code-task 模式。`code-task init` 现在可以使用
+  `--kind greenfield`，并且不再要求 `code_root`；系统会创建 `empty`
+  workspace，并把生成项目放在 `code_task/workspace/generated_project/`。
+- 新增 code-task resource artifacts：`code_task/meta/resource_probe.json`
+  记录紧凑机器信号，`code_task/meta/resource_decision.json` 将其归纳为
+  greenfield generation 和外部 agent handoff 可使用的资源 profile。
+- 新增 code-task memory artifacts，位于 `code_task/memory/`，包括
+  `task_memory.json`、`task_memory.md`、`edit_history.jsonl`、
+  `review_findings.jsonl` 和 `repair_memory.jsonl`。这些 memory 是对现有
+  artifacts 的紧凑索引，不替代 canonical logs、patches 或 benchmark 输出。
+- 新增自动 memory compaction。当前 active memory 过长时，旧事件会被压缩到
+  `compressed_memory.json` / `compressed_memory.md`，近期事件仍保留在
+  `task_memory.*`。
+- 新增只读 code-task tools：`read_code_task_memory`、`list_code_task_files`、
+  `search_code_task_code`、`read_code_task_file_range`、
+  `find_code_task_symbol`、`find_code_task_related_files` 和
+  `list_code_task_recent_edits`。
+- 新增 code-task 级 greenfield 外部 agent handoff。Standalone
+  `kind = "greenfield"` 任务现在可以通过 `[implementation]` 选择
+  `fake`、`local_llm`、`codex`、`claude_code`、`opencode` 或
+  `external_cli` backend；外部产物仍会先作为候选文件 ingest，再走原有
+  review、validation、benchmark、memory 和 repair 路径。
+- 新增 `examples/code_task_greenfield_ml_suite/`：一个更大的 standalone
+  greenfield code-task 验收示例，适合服务器或较强本地机器测试。它要求生成模块化
+  ML experiment workbench，优先使用本地可用的开源/打包数据集，必要时才退回
+  deterministic synthetic fallback，并包含多模型/基线、ablation、可解析指标和
+  resource-aware execution。
+- 新增 greenfield dependency advice artifacts。Standalone greenfield code-task
+  在 implementation planning 前会写出 `code_task/meta/dependency_advice.*`，
+  并在终端提示已安装/缺失的推荐库和可选安装命令；该功能只给建议，不会自动安装依赖。
+
+### Changed
+
+- Code-task work planning、patch planning、edit proposal 和 repair prompts
+  现在会读取紧凑 task memory，让重跑和外部 agent handoff 可以延续已有决策、
+  失败尝试、validation 结果和 repair context。
+- Code-task execute 现在会记录 probe、baseline、work-plan、patch-plan、
+  proposal、apply、validation、patched run、failure analysis 和 repair proposal
+  等步骤的 memory event；patch validation block 和静态 validation findings
+  也会写成 review finding。
+- 8 阶段 pipeline 中的 greenfield experiment generation 现在会委托给
+  `06-code/code_task_run/` 下的统一 code-task greenfield run，再把兼容产物投影回
+  `06-code/generated_project/` 供 `07-run` 使用。standalone greenfield code-task
+  和 research-to-code greenfield 由此共享 workspace、memory、review、validation
+  和 run 路径。
+- Greenfield code review 现在会读取 implementation memory、architecture 和
+  resource context，并保留兼容旧 `code_review.v1` 的同时，暴露更稳定的
+  `review_contract`。
+- 外部 agent handoff package 现在会包含 task memory context 和 code-task-only
+  tool schemas；greenfield handoff 则暴露 experiment-only tools，避免 agent 看到
+  与当前 workflow 无关的工具面。
+- `simple_ar.code_task` 包 facade 改为 lazy-load 公共导出，避免导入小型子模块时
+  顺带加载整个 code-task 和 agent-backend 图。
+
+## 2026-06-14
+
+### Added
+
+- 新增 V2.6 common tool harness foundation：`src/simple_ar/tools/` 现在包含 shared tool specs、permission/risk levels、组合现有 report / experiment tools 的 registry、带权限检查的本地 dispatch、紧凑 `tool_trace.jsonl` 写入，以及 OpenAI/MCP-style schema export。
+- 新增 V2.6 外部 agent handoff foundation：`src/simple_ar/agent_backends/` 现在可以写出 workspace-scoped `agent_handoff/<name>/` package，包含 instructions、真实 tool schema、permission policy、artifact handles、expected outputs、context files 和 workspace manifest。
+- 新增外部 agent 输出收集路径：backend 产物会先进入 `agent_outputs/<name>/`，在通过已有 validation、result guard、report audit 或 code-task patch checks 之前，不会被当作可信结果。
+- 新增 Codex、Claude Code 和 OpenCode profile Markdown，用于未来可选 backend。这些 profile 是 workspace-scoped guidance assets，不会默认安装到用户全局环境。
+- 新增可运行的 V2.6 backend wrappers：deterministic `fake`、`local_llm`、generic `external_cli`，以及 Codex / Claude Code / OpenCode CLI wrappers。这些 wrapper 会记录 cwd、timeout、env allowlist、stdout/stderr 和 `agent_run.json` provenance。
+- 新增 `simple-ar tools schema`、`simple-ar tools call` 和 `simple-ar tools serve-mcp`。MCP server 使用 stdio，并通过 `tools/list` 和 `tools/call` 暴露真实的 run-local 只读 experiment tools。
+- 新增 `examples/tool_mcp_codex_agent/`：一个受控的 Codex 外部 agent 示例，包含 MCP server 模板；示例默认保持 `[implementation].agent_model` 为空，让 Codex CLI 使用当前账号配置的模型。
+- 新增 `[implementation].agent_mode`，作为 V2.6 外部 agent 层唯一模式开关：`model`、`handoff`，以及预留的 `delegated_workspace` 契约。
+
+### Changed
+
+- 开发和使用文档现在说明 V2.6 的 tool/agent 边界：外部工具是可选 strong-path adapter，本地 research、report、experiment 和 code-task workflow 不依赖 MCP 或外部 agent CLI。
+- Greenfield generation 和 greenfield repair 现在可以在 `[implementation].provider` 选择 agent backend 时走 handoff 边界。外部输出仍然是不可信 candidate files，必须继续通过已有 code review、result guard、rerun 和 validation gates。
+- 预留的 code-task `external_agent` adapter 现在可以在显式 enabled 时通过 common handoff/ingestion 路径启动 backend；默认行为仍然只是输出可审查 invocation plan，不执行外部工具。
+- 外部 agent wrapper 现在支持 `[implementation].agent_model`，但示例默认留空；Codex、Claude Code 和 OpenCode 测试只有在确认 CLI/账号支持某个模型名时才建议显式填写。
+- 外部 agent 失败时，主流程错误现在会带上精简的 stderr/stdout 尾部，并对不支持的模型名、找不到 CLI binary 等常见问题给出提示。
+- Agent-backed greenfield/code-task 路径现在会归一化并校验 `agent_mode`，把它写入 backend artifacts，并且对预留的 delegated-workspace 强路径显式失败，避免静默降级成普通 handoff。
+- 外部 CLI backend 现在会在启动 subprocess 前解析 Windows command shim，例如 `codex.cmd`；Codex wrapper 也会使用绝对 handoff root，并加上 `--skip-git-repo-check`。
+- 外部 agent handoff package 现在会在重跑前自动归档旧目录，避免旧的 `stdout.txt`、`stderr.txt` 或 `agent_result.json` 污染下一次 Codex/Claude/OpenCode 尝试。旧 handoff 会移动到 git 忽略的本地 cache，而不是放在 sibling `agent_handoff/archives/` 里，避免下一次外部 agent 读到旧失败日志；旧版本已生成的 sibling archives 也会在新 handoff 创建前迁移到同一个 cache。
+- `simple-ar clean --shared-cache` 现在也会清理 `.simple_ar_cache/agent_handoff_archives`，因此现有 clean 命令可以完整移除跨 run 的外部 agent handoff transcripts。
+- Agent-backed greenfield generation 现在要求 `generated_files/` 非空后才会复制到 `06-code/generated_project`，空目录提案会在 handoff 边界失败，不再延后变成难懂的缺失 `main.py` review error。
+
 ## 2026-06-13
 
 ### Added

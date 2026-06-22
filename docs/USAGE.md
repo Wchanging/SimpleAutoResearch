@@ -345,6 +345,7 @@ Shared accelerator stores are written outside the run by default:
 
 ```text
 .simple_ar_cache/
+  agent_handoff_archives/ # prior external-agent handoff transcripts
   literature/      # shared provider metadata cache
   research_index/
     sqlite_fts.db  # shared SQLite FTS rows, keyed by run_id
@@ -391,16 +392,18 @@ lost until future runs rebuild the store. Use `--index-root PATH` when the
 shared index lives elsewhere. Paths outside the current workspace require
 `--allow-external-index-root`, because that can affect other projects.
 
-For the strongest shared cleanup, clear both the shared research index and the
-shared literature-provider cache:
+For the strongest shared cleanup, clear the shared research index, the shared
+literature-provider cache, and prior external-agent handoff archives:
 
 ```bash
 uv run simple-ar clean --shared-cache
 ```
 
-This usually removes `.simple_ar_cache/research_index/` and
-`.simple_ar_cache/literature/`. It does not delete run directories, but future
-runs may need to re-query providers and rebuild local search acceleration.
+This usually removes `.simple_ar_cache/research_index/`,
+`.simple_ar_cache/literature/`, and
+`.simple_ar_cache/agent_handoff_archives/`. It does not delete run directories,
+but future runs may need to re-query providers, rebuild local search
+acceleration, and will no longer keep old external-agent handoff transcripts.
 
 Key files, grouped by directory:
 
@@ -573,14 +576,92 @@ uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 
 See [CLI Reference](CLI_REFERENCE.md#artifact-tools) for option details.
 
+## Tool And External Agent Handoff Preview
+
+V2.6 adds an internal common tool and agent-handoff layer. This is a controlled
+extension point for future Codex, Claude Code, OpenCode, OpenAI tool-calling, or
+MCP adapters; it is not a new default runtime path.
+
+Current behavior:
+
+- registered tools are real local report/experiment tools, not placeholder MCP
+  stubs;
+- schema export is available for OpenAI-style and MCP-style tool definitions;
+- default permission policy is read-only/plan-only;
+- external-agent handoff packages are written under
+  `runs/<run-id>/agent_handoff/<name>/`;
+- backend outputs, when collected, go to `runs/<run-id>/agent_outputs/<name>/`
+  and still require SimpleAutoResearch validation before they can affect a
+  patch, result, or report.
+
+The handoff package is deliberately explicit:
+
+```text
+runs/<run-id>/agent_handoff/<name>/
+  instructions.md           # task + backend profile + permission summary
+  tool_schema.json          # exported real tool schemas
+  permission_policy.json    # write/shell/network/secret policy
+  artifact_handles.json     # reviewable run artifacts exposed to the backend
+  expected_outputs.json     # canonical files the backend may produce
+  workspace_manifest.json   # compact run/workspace view
+  context/
+```
+
+External tools remain optional strong-path adapters. Local research, report,
+greenfield experiment, and code-task workflows continue to work without Codex,
+Claude Code, OpenCode, or an MCP server.
+
+V2.6 also adds runnable backend wrappers behind this boundary:
+
+- `fake`: deterministic dry-run backend used for integration tests;
+- `local_llm`: uses the configured LLM to produce bounded review artifacts;
+- `codex`, `claude_code`, `opencode`, `external_cli`: optional CLI backends.
+
+Set `[implementation].provider` to one of those names when experimenting with
+agent-backed greenfield generation or repair. External CLI providers also
+require `[implementation].allow_external_agent = true`. Use
+`[implementation].agent_binary`, `.agent_args`, and `.agent_timeout_sec` when
+the executable is not on `PATH` or needs provider-specific flags. Even then, the backend
+may only write candidate files inside the handoff directory; SimpleAutoResearch
+copies them into the run workspace, then runs the normal code review, result
+guard, benchmark, or code-task validation gates.
+
+`[implementation].agent_mode` is the only mode switch for this layer:
+
+- `model`: keep SimpleAutoResearch as the harness and use a local/model backend
+  only for bounded generation.
+- `handoff`: write an auditable handoff package for Codex, Claude Code,
+  OpenCode, or another external CLI, then ingest candidate files back through
+  SimpleAutoResearch gates.
+- `delegated_workspace`: reserved for a future strong path where an external
+  harness owns the workspace loop. The value is recognized today, but execution
+  fails explicitly instead of silently falling back.
+
+Run-local read-only tools can also be exposed over MCP stdio:
+
+```bash
+uv run simple-ar tools schema --format mcp
+uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
+uv run simple-ar tools serve-mcp runs/<run-id>
+```
+
+The canonical Codex/MCP integration example lives in
+`examples/tool_mcp_codex_agent/`. It uses `[implementation].provider = "codex"`
+and leaves `[implementation].agent_model = ""` by default so Codex CLI can use
+the model configured for your account. Set `agent_model` only when you have
+confirmed the model name is supported by that CLI/account.
+
 ## Code Task Workflow
 
-The code-task workflow prepares a source project under an isolated editable
-workspace and never mutates the original codebase. The default `copy` mode is
-the safest choice. The workflow also supports `git_worktree` for larger
-repo-root git projects where a full copy is wasteful, plus experimental
-`sparse_copy` for small allowlisted subsets. The workflow is intentionally step-by-step so each
-stage can be reviewed.
+The code-task workflow prepares an isolated editable workspace and never mutates
+the original source project. Existing-project tasks default to `auto`, which
+prefers `git_worktree` for committed Git projects and falls back to `copy` with
+a recorded reason and next-step hints. It also supports explicit `copy`,
+explicit `git_worktree`, and experimental `sparse_copy` for small allowlisted
+subsets. Greenfield tasks use
+`kind = "greenfield"` and default to an `empty` workspace where the generated
+project is written. The workflow is intentionally step-by-step so each stage can
+be reviewed.
 
 Initialize from a TOML config so project paths, benchmark metrics, workspace
 mode, model routing, and edit budgets stay in one reviewable file. The bundled
@@ -604,7 +685,8 @@ runs/<run-id>/
   manifest.json                 # benchmark, workspace, environment, safety policy
   code_task/
     task.md                     # task prompt
-    workspace/                  # isolated editable copy or worktree
+    workspace/                  # isolated copy/worktree root
+      ...                       # project root may be a subdirectory in monorepos
     meta/
       codebase_index.json       # file-level code index
       repo_map.json             # layered symbol/repo map
@@ -613,17 +695,62 @@ runs/<run-id>/
 
 It does not run code, call the LLM, or modify the original source project.
 
+For a standalone from-scratch project, use the same code-task command with
+`kind = "greenfield"` and no `code_root`:
+
+```bash
+uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmark-command "python generated_project/main.py"
+uv run simple-ar code-task execute runs/<run-id> --to-step run
+```
+
+In this mode, `execute` uses the shared code-task memory, reviewer,
+validation, runner, and repair artifacts, but the implementation step generates
+`code_task/workspace/generated_project/` instead of applying a patch to copied
+source files.
+
+For a larger server-oriented acceptance task, use the standalone greenfield ML
+suite:
+
+```bash
+uv run simple-ar code-task init --config examples/code_task_greenfield_ml_suite/configs/code_task.toml
+uv run simple-ar code-task execute runs/code-task-greenfield-ml-suite/<run-id> --config examples/code_task_greenfield_ml_suite/configs/code_task.toml --yes
+```
+
+This example is intentionally heavier than the laptop smoke tests. It asks for
+a modular ML workbench with packaged/local open datasets when available,
+synthetic fallback only when necessary, multiple model families, ablations,
+resource-aware execution, and parseable metrics. Edit `[implementation]` in the
+config when you want to test a Codex/Claude/OpenCode handoff instead of the
+local LLM path.
+
+Before planning the greenfield implementation, execute writes
+`code_task/meta/dependency_advice.json` and `.md`, then prints installed and
+missing recommended packages in the terminal. This is advice-only: the command
+will show an optional `uv add ...` suggestion for a stronger implementation
+path, but it will not install dependencies or mutate the environment for you.
+
+When `workspace.mode = "auto"` is omitted or selected explicitly, existing
+projects first try a detached git worktree. If Git cannot be used safely, the
+run falls back to a guarded copy and records `requested_mode`, `selected_mode`,
+`fallback_reason`, and `user_next_steps` under `manifest.json.workspace`.
+
 When `workspace.mode = "git_worktree"` or `--workspace-mode git_worktree` is
-used, `init` creates a detached git worktree at the same
-`code_task/workspace/` path instead of copying files. This mode currently
-requires `code_root` to be the repository root, records git provenance under
-`manifest.json.workspace`, and keeps `.git`/`.env` metadata out of the codebase
-index and model context. It still does not install dependencies.
+used explicitly, `init` creates a detached git worktree at
+`code_task/workspace/` and stops with an actionable checklist if Git isolation
+is not possible. `code_root` may be either the repository root or a project
+subdirectory inside a larger repository. In the subdirectory case,
+SimpleAutoResearch creates the worktree at the repository root and uses the
+matching subdirectory as the editable project root for indexing, editing, and
+benchmark execution. It records git provenance under `manifest.json.workspace`
+and keeps `.git`/`.env` metadata out of the codebase index and model context.
+It still does not install dependencies.
 
 If `git_worktree` init fails, the CLI prints a checklist instead of a Python
-traceback. The usual fixes are: pass the baseline repository root as
-`--code-root`, create an initial local commit with `git init`, `git add .`, and
-`git commit -m "initial baseline"`, or switch back to `--workspace-mode copy`.
+traceback. The usual fixes are: pass a path inside the intended baseline Git
+repository as `--code-root`, create an initial local commit with `git init`,
+`git add .`, and `git commit -m "initial baseline"`, or switch to
+`--workspace-mode copy` when the current filesystem state should be included
+without committing first.
 
 When `workspace.mode = "sparse_copy"` or `--workspace-mode sparse_copy` is
 used, init copies only selected files. Configure patterns with
@@ -631,7 +758,8 @@ used, init copies only selected files. Configure patterns with
 `--workspace-include` / `--workspace-exclude`. Built-in exclusions still block
 `.git`, virtualenvs, `runs`, cache/build directories, `data`, `models`, `.env`,
 and secret-like paths. This mode is useful for small known subsets, but it can
-omit runtime dependencies; prefer `copy` or `git_worktree` for general projects.
+omit runtime dependencies; prefer `auto` or explicit `git_worktree`/`copy` for
+general projects.
 
 Use `[edit_scope]` when the workspace contains files that may be read but must
 not be changed by the model. `[workspace]` controls what is copied or mounted;
@@ -647,13 +775,23 @@ allowed_patterns = ["review_pipeline/**", "main.py"]
 protected_patterns = ["configs/locked/**"]
 ```
 
-Benchmarks should print numeric metric lines as `name: value`. Custom metric
-names work when you declare their direction in TOML. Explicit CLI flags are
-still supported for experiments and quick tests, but the TOML path is the
+Benchmarks should print stable numeric metric lines. Supported formats are
+`name: value` and `METRIC name=value`; the prefixed form is useful for generated
+or external-agent projects because it is visibly machine-readable. Custom
+metric names work when you declare their direction in TOML. Explicit CLI flags
+are still supported for experiments and quick tests, but the TOML path is the
 recommended public workflow. See
 [CLI Reference](CLI_REFERENCE.md#simple-ar-code-task-init) for the full option
 table and [Configuration Reference](CONFIG_REFERENCE.md#standalone-code-task-config)
 for the config schema.
+
+For existing-project tasks, `[execute].baseline_policy` controls whether the
+unchanged benchmark is run before editing. The default `auto` behavior runs it
+when comparison evidence is useful. Use `skip` or `none` when the baseline is
+too expensive or the task is acceptance-style, and use `provided` with
+`baseline_metrics_file` when you already have trusted baseline metrics. Provided
+baselines are recorded as user-supplied evidence in the run summary; they are
+not presented as reproduced results.
 
 ### Recommended Path: TOML + Execute
 
@@ -710,7 +848,7 @@ uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_med
 ```
 
 On an interactive terminal, this one command can walk through the plan review,
-proposal review, apply, validation, and patched benchmark gates. On a
+proposal review, apply, structured review, validation, and patched benchmark gates. On a
 non-interactive shell, or when you answer `no`, it stops at the current review
 gate and can be rerun after review. The first review gate usually writes:
 
@@ -720,6 +858,7 @@ code_task/
   patch_plan.md
   meta/
     environment_report.json
+    review_report.json
   attempts/
     attempt-001/
       batches/
@@ -751,6 +890,12 @@ with `llm_planning_failed` and leaves the fallback artifacts unwritten. Rerun
 the same command to retry the LLM step. Use `--no-llm` for a deterministic
 offline plan, or `--allow-planning-fallback` only when that weaker fallback is
 acceptable for the task.
+
+After edits are applied, `execute` writes `code_task/meta/review_report.json`
+before static validation. After the patched benchmark runs, it writes
+`code_task/meta/review_report_post_run.json`. Blocking findings are also
+recorded under `code_task/memory/` so repair prompts can reuse the latest
+review evidence.
 
 3. At the patch-plan review panel, read `code_task/work_plan.md` and
 `code_task/patch_plan.md`. If the plan is reasonable, answer `yes` to continue.
@@ -906,7 +1051,7 @@ uv run simple-ar code-task work-plan runs/<run-id>
 uv run simple-ar code-task batch runs/<run-id> --work-item W1
 ```
 
-`probe` writes `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals. It does not install dependencies or run project code.
+`probe` writes `code_task/meta/environment_report.json` with OS, Python, tool, GPU, dependency-file, and test-directory signals. It also writes `resource_probe.json` and `resource_decision.json`, which give greenfield and external-agent paths a compact hardware profile. It does not install dependencies or run project code.
 
 `baseline` runs the recorded benchmark command inside `code_task/workspace/`
 before any patch is applied. It stores `execution_report.json`, `stdout.txt`,
@@ -1009,9 +1154,10 @@ uv run simple-ar code-task apply-edits runs/<run-id>
 `apply-edits` applies the reviewed proposal only inside
 `code_task/workspace/`, writes a human-readable `code_task/patch.diff`, writes
 `code_task/meta/applied_edits.json` with changed files and hashes, and updates
-the codebase index. It still never mutates the original `--code-root`. If an
-edit cannot be matched safely, `execute` stops with `patch_apply_failed` before
-workspace files are changed.
+the codebase index. The next `execute` step runs the structured reviewer and
+writes `code_task/meta/review_report.json` before validation. It still never
+mutates the original `--code-root`. If an edit cannot be matched safely,
+`execute` stops with `patch_apply_failed` before workspace files are changed.
 `applied_edits.json` records the proposal path and editor backend used for the
 application, including manually supplied or repair proposal files.
 `apply-edits` also re-checks the edit scope, so manually supplied JSON cannot
@@ -1255,11 +1401,15 @@ context to shape implementation priorities, set
 task file remains the hard requirement, while `05-design` writes a merged
 `generated_code_task.md` that adds goal/problem/synthesis/hypothesis context,
 benchmark criteria, and codebase signals for the embedded code-task run.
+The generated task also includes a compact Research-to-Code Bridge built from
+the synthesis brief, experiment contract, metric schema, and resource plan, so
+the code stage can see method-transfer hints, implementation hypotheses,
+ablation targets, metric directions, and known risks.
 
 `code_task_project` writes a normal pipeline run plus nested code-task artifacts
 under `06-code/code_task_run/`. During `06-code`, it copies or worktrees the
-user project, probes the environment, runs a baseline benchmark, builds a repo
-map/context pack, generates a batch-oriented work plan, creates an
+user project, probes the environment, applies the configured baseline policy,
+builds a repo map/context pack, generates a batch-oriented work plan, creates an
 attempt/batch record, generates a patch plan, records an automatic pipeline
 approval, asks for controlled edits, applies them inside the prepared
 workspace, validates the result, and runs the patched benchmark once before
@@ -1325,8 +1475,9 @@ first, then move to `code_task_project` after the benchmark and task are stable.
 
 Use this when you have a research or benchmark-style task but no existing source
 project yet. The greenfield path is intentionally bounded: `05-design` creates
-the executable contract and budgets, `06-code` writes a small generated project
-under the run directory, reviews it, and wraps it with `experiment.py`, and
+the executable contract and budgets, `06-code` now calls the unified code-task
+greenfield engine under `06-code/code_task_run/`, then projects the generated
+project back to `06-code/generated_project/` for compatibility with `07-run`.
 `07-run` only trusts parseable metrics in canonical `results.json`.
 
 Run the lightweight local greenfield example:

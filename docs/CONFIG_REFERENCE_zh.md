@@ -177,13 +177,18 @@ task_file = "examples/full_pipeline_tiny_mlp/task.md"
 [implementation]
 mode = "patch_existing"        # auto | patch_existing | generate_project | template
 domain_profile = "ml_experiment" # auto | generic_research_experiment | code_experiment | ml_experiment | code_agent_eval
-provider = "local"
+provider = "local"             # local | fake | local_llm | codex | claude_code | opencode | external_cli
+agent_mode = "model"           # model | handoff | delegated_workspace
+agent_model = ""               # 可选：覆盖外部 CLI 模型；留空则使用 CLI 默认模型
+agent_binary = ""              # 可选：外部 provider 的 CLI binary/path
+agent_args = []                # 可选：追加到外部 CLI 的参数
+agent_timeout_sec = 600        # 单次 backend invocation timeout
 task_handoff = "user_file"     # user_file | merge；merge 会把 task_file 与研究上下文合并
-allow_external_agent = false
+allow_external_agent = false   # 启动外部 CLI provider 前必须显式开启
 max_repair_attempts = 1
 
 [workspace]
-mode = "copy"                  # copy | git_worktree | sparse_copy
+mode = "auto"                  # auto | copy | git_worktree | sparse_copy
 reuse_source_venv = false
 setup_hook = ""
 include = []
@@ -339,6 +344,12 @@ validation_max_file_bytes = 500000
 # 实时 benchmark 输出转发模式。
 stream_benchmark_output = "off"     # off | line | auto | summary
 
+# 已有项目 baseline 策略：
+# auto/run = 运行未修改 benchmark；skip/none = 不做 baseline comparison；
+# provided = 从 baseline_metrics_file 记录已有指标。
+baseline_policy = "auto"
+# baseline_metrics_file = "baseline_metrics.json"
+
 # review-first 流程建议保持 false；审核 proposal 后再显式应用。
 apply_proposed_edits = false
 
@@ -482,7 +493,11 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[task].code_root` / `.task_file` | 源项目根目录和任务 Markdown；路径相对配置文件解析。 |
 | `[implementation].mode` | `patch_existing` 映射到当前受控 code-task 行为；`generate_project` 会在 `06-code/generated_project` 下规划、生成、审查并运行一个受控项目。 |
 | `[implementation].domain_profile` | 选择规划默认值，例如 `generic_research_experiment`、`code_experiment`、`ml_experiment` 或 `code_agent_eval`。 |
+| `[implementation].provider` | 代码实现 backend。`local` 是默认的进程内路径；`fake` 是 deterministic 测试 backend；`local_llm` 通过当前 LLM 写出有边界的 review 产物；`codex`、`claude_code`、`opencode` 和 `external_cli` 会走 V2.6 外部 agent handoff 边界，除非 `[implementation].allow_external_agent = true`，否则不会启动外部 CLI。 |
+| `[implementation].agent_mode` | 选择 backend 能接管多少实现循环。`model` 表示仍由 SimpleAutoResearch 拥有 harness，只把有界文本/代码生成交给模型或本地 backend；`handoff` 会写出可审计的 `agent_handoff/<name>/` package，并从外部 agent 收集 candidate files；`delegated_workspace` 是未来让外部 harness 接管 workspace loop 的强路径，现在只识别并显式失败，不会静默降级。 |
+| `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | 可选外部 backend 启动设置。`agent_model` 留空时会使用 Codex/Claude/OpenCode CLI 当前账号配置的默认模型；只有确认该 CLI/账号支持某个模型名时才建议显式填写。`agent_binary` 可指定自定义 executable path，也可用于 generic `external_cli`；`agent_args` 会追加 CLI 参数；`agent_timeout_sec` 限制单次 backend 调用时间。 |
 | `[implementation].task_handoff` | 仅用于 8 阶段内嵌已有项目代码任务。`user_file` 会原样使用 `[task].task_file`；`merge` 会在 `05-design/generated_code_task.md` 中把用户任务作为硬约束，并融合 goal/problem/synthesis/hypothesis 上下文。 |
+| `[implementation].allow_external_agent` | 是否允许启动可选外部 CLI，用于 agent-backed generation 或 repair。外部输出会先进入 `agent_outputs/<name>/`，仍需通过 SimpleAutoResearch 的 review、result guard 或 code-task validation 后才会影响结果。普通本地运行建议保持 false。 |
 | `[execution].command` / `.timeout_sec` | benchmark/execution 规划使用的命令和 timeout；已有项目会映射到旧 benchmark 设置。 |
 | `[resource].max_files` / `.max_generated_lines` | 写入 `05-design/resource_plan.json` 的代码前预算。 |
 | `[resource].max_memory_mb` / `.allow_gpu` | runtime 资源预算，会写入 `resource_plan.json`，并在生成或修改代码前作为 contract constraints 暴露。 |
@@ -538,15 +553,23 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[experiment].template` | `code_task_project` 会把 code-task workflow 嵌入 8 阶段 pipeline；其他模板多为教学/demo 路径。 |
 | `[experiment].timeout` | stage `07-run` 的 timeout；对 embedded code task，也会约束嵌套 benchmark 调用。 |
 | `[experiment].code_task_config` | 可选 standalone code-task TOML 路径。想把 pipeline 和 code-task 配置拆开时使用。 |
-| `[code_task].code_root` | 源项目路径。原始项目不会被直接修改，系统会在 run 目录下准备 workspace。 |
+| `[code_task].kind` | `existing_project` 表示已有源码项目 patch；`greenfield` 从 empty workspace 开始，并在 `code_task/workspace/generated_project` 下生成项目。 |
+| `[code_task].code_root` | `existing_project` 的源项目路径；`greenfield` 仅在需要 scaffold/source root 时填写。原始项目不会被直接修改。 |
 | `[code_task].task_file` | 用户任务说明。standalone `code-task init` 必填；内嵌 8 阶段 run 可在省略时自动生成，也可在 `[implementation].task_handoff = "merge"` 时与研究上下文融合。 |
 | `[benchmark].command` | 在 `code_task/workspace` 中 patch 前后运行的命令。建议输出 `accuracy: 0.82` 这类可解析指标。 |
 | `[benchmark].primary_metric` | objective verdict 使用的主指标。未知指标仍会记录，但最好声明方向。 |
 | `[benchmark.metric_directions]` | 指标方向表：`higher`、`lower`、`resource` 或 `ignore`。 |
 | `[environment].mode` | `current` 使用当前 SimpleAutoResearch Python；`external` 使用 `[environment].python`。不会自动安装依赖。 |
-| `[workspace].mode` | workspace 策略：`copy`、`git_worktree` 或 `sparse_copy`。 |
+| `[workspace].mode` | workspace 策略：`auto`、`copy`、`git_worktree` 或 `sparse_copy`。已有项目默认 `auto`，会优先尝试 git worktree，失败时降级为 copy 并记录原因。 |
 | `[workspace].reuse_source_venv` | 检测到 source `.venv` 或 `venv` 时，是否记录并使用其中 Python。 |
 | `[workspace].setup_hook` | 为未来 managed environment 支持预留记录；init 阶段不执行。 |
+| `[implementation].provider` | code-task 实现 backend。`local` 使用 SimpleAutoResearch 进程内路径；`fake` 用于确定性测试；`local_llm` 使用当前 LLM；`codex`、`claude_code`、`opencode` 和 `external_cli` 会在显式启用时走外部 agent handoff 边界。 |
+| `[implementation].agent_mode` | backend 实现模式：`model` 表示 SimpleAutoResearch 仍拥有 harness；`handoff` 会从外部 agent package ingest candidate files；`delegated_workspace` 目前只识别并显式失败，等 snapshot/diff/rollback 执行边界完成后再开放。 |
+| `[implementation].allow_external_agent` | 外部 CLI backend 启动前必须显式设为 true。外部输出仍需通过 SimpleAutoResearch 的 review、validation、benchmark 或 result guard 才能被接受。 |
+| `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | 可选外部 backend 启动设置。除非确认外部 CLI/账号支持某个模型名，否则建议让 `agent_model` 留空。 |
+| `[resource].max_runtime_sec` | 暴露给 greenfield planning 和 external-agent handoff 的运行预算。 |
+| `[resource].max_files` / `.max_generated_lines` | code-task 生成预算。`code-task execute` 会优先使用 `[execute].max_files` 和 `[execute].max_generated_lines`，缺省时再读取这里。 |
+| `[resource].max_memory_mb` / `.allow_gpu` | 暴露给规划阶段的内存/GPU 约束，只描述允许的资源 profile，不会自动安装依赖。 |
 | `[edit_scope].allowed_patterns` | automated edits 可以修改的 workspace-relative glob allowlist。空列表表示所有 normalized、非 protected workspace 路径都可编辑。 |
 | `[edit_scope].protected_patterns` | 额外只读路径。tests、benchmark、`.env`、secret/credential-like 路径等默认 protected patterns 始终保留。 |
 | `[edit_scope].mode` | 可选标签，写入 `manifest.json` 供审计使用；它本身不改变行为。 |
@@ -557,10 +580,12 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 
 | 字段 | 含义 |
 | --- | --- |
-| `[execute].to_step` | 状态感知 executor 最多推进到哪一步。例如设为 `propose-edits` 可停在应用补丁之前。 |
+| `[execute].to_step` | 状态感知 executor 最多推进到哪一步。例如设为 `propose-edits` 可停在应用补丁之前，设为 `review` 可停在应用补丁后的结构化 review 之后。 |
 | `[execute].use_llm` | 是否启用 LLM 支持的 work-plan、patch-plan、edit-proposal 和 repair 步骤。 |
-| `[execute].timeout_sec` | executor 管理的 baseline 和 patched benchmark timeout。 |
+| `[execute].timeout_sec` | executor 管理的 baseline 和 patched benchmark timeout。省略时会依次回退到 `[benchmark].timeout` 和 `[resource].max_runtime_sec`。 |
 | `[execute].stream_benchmark_output` | 实时 benchmark log 模式：`off`、`line`、`auto` 或 `summary`。有 tqdm 这类进度条时建议 `auto`。 |
+| `[execute].baseline_policy` | 已有项目 baseline 策略：`auto`/`run` 会运行未修改 benchmark；`skip`/`none` 不做 baseline comparison；`provided` 从 `[execute].baseline_metrics_file` 记录用户已有指标。 |
+| `[execute].baseline_metrics_file` | `baseline_policy = "provided"` 时使用的 JSON 或 `metric=0.82` 文本指标文件。JSON 支持 `{"accuracy": 0.8}`、`{"metrics": {...}}` 和 `{"metric_values": {...}}`。 |
 | `[execute].apply_proposed_edits` | 允许 execute 应用已经审核过的 proposal。review-first 流程建议保持 false。 |
 | `[execute].allow_large_edits` | 允许应用超过 normal 预算但落在 large 预算内的已审核 proposal。 |
 | `[execute].allow_planning_fallback` | LLM work-plan / patch-plan 重试后仍失败时，是否允许写入 deterministic fallback plan。真实 LLM run 建议保持 false，这样坏输出会安全停止并可重跑。 |
@@ -568,6 +593,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[execute].repair_rounds` | validation/benchmark 失败后最多生成几轮 bounded repair proposal；repair 仍需审核。 |
 | `[execute].max_files` | plan/proposal/repair 步骤纳入 LLM 上下文的最大文件数。 |
 | `[execute].max_source_chars_per_file` | LLM 上下文中单个文件的 source snippet 字符预算。 |
+| `[execute].max_generated_lines` | greenfield 生成行数预算。省略时会回退到 `[resource].max_generated_lines`，再回退到保守默认值。 |
 | `[models.code_task].planner` | work-plan 和 patch-plan 使用的模型。 |
 | `[models.code_task].editor` | edit proposal 使用的模型。 |
 | `[models.code_task].repair` | 失败后 repair proposal 使用的模型。 |
@@ -656,9 +682,22 @@ max_queries = 4
 
 ## Workspace Mode Variants
 
+### `auto`
+
+`auto` 是已有项目推荐默认模式。它会在 `code_root` 位于本地 Git 仓库且仓库至少有一次 commit 时优先创建 detached `git_worktree`；如果 Git 条件不满足，则降级为受保护的 `copy`，并在 manifest 与终端输出中记录 `fallback_reason` 和 `user_next_steps`。
+
+```toml
+[workspace]
+mode = "auto"
+reuse_source_venv = false
+setup_hook = ""
+```
+
+如果 `code_root` 是较大仓库中的项目子目录，SimpleAutoResearch 会在仓库根创建 worktree，并把对应子目录作为后续索引、修改和运行的 project root。
+
 ### `copy`
 
-`copy` 是最稳妥的默认模式，会在 `code_task/workspace` 下创建受保护的物理复制。
+`copy` 会在 `code_task/workspace` 下创建受保护的物理复制。它适合非 Git 项目、尚未提交但希望包含当前文件状态的实验，或者你明确不想使用 Git worktree 的场景。
 
 ```toml
 [workspace]
@@ -672,7 +711,7 @@ max_file_bytes = 2000000
 
 ### `git_worktree`
 
-`git_worktree` 会为 repo-root git 项目创建 detached worktree。源项目必须是本地 git 仓库，并至少有一次 commit；不需要连接远程 GitHub 仓库。
+`git_worktree` 会创建 detached worktree。显式选择该模式时，如果 Git 隔离不可用会直接失败并给出修复提示，而不会静默降级。`code_root` 可以是仓库根目录，也可以是仓库中的项目子目录；源项目必须位于本地 git 仓库中，并至少有一次 commit；不需要连接远程 GitHub 仓库。
 
 ```toml
 [workspace]
@@ -702,6 +741,7 @@ reuse_source_venv = false
 
 ```toml
 [code_task]
+kind = "existing_project"     # existing_project | greenfield
 code_root = "path/to/project"
 task_file = "tasks/improve_model.md"
 output_root = "runs"
@@ -736,10 +776,30 @@ use_llm = true
 timeout_sec = 120
 repair_rounds = 1
 stream_benchmark_output = "auto"
+baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
 llm_retry_attempts = 2
+max_files = 8
+max_source_chars_per_file = 4000
+max_generated_lines = 1600
+
+[implementation]
+provider = "local"            # local | fake | local_llm | codex | claude_code | opencode | external_cli
+agent_mode = "model"          # model | handoff | delegated_workspace
+allow_external_agent = false
+agent_model = ""              # 留空表示使用外部 CLI / 账号默认模型
+agent_binary = ""
+agent_args = []
+agent_timeout_sec = 600
+
+[resource]
+max_runtime_sec = 120
+max_files = 8
+max_generated_lines = 1600
+max_memory_mb = 4096
+allow_gpu = false
 
 [budget]
 profile = "normal"
@@ -753,6 +813,57 @@ max_new_chars = 4000
 max_total_edit_chars = 12000
 max_proposal_chars = 24000
 ```
+
+独立 greenfield code-task 不需要填写 `code_root`，除非你有意从 scaffold/template
+目录开始。workspace 默认使用 `empty`，`execute` 会把生成项目写到
+`code_task/workspace/generated_project`：
+
+```toml
+[code_task]
+kind = "greenfield"
+task_file = "tasks/build_new_project.md"
+name = "greenfield-project"
+
+[benchmark]
+command = "python generated_project/main.py"
+primary_metric = "accuracy"
+
+[workspace]
+mode = "empty"
+
+[execute]
+to_step = "run"
+max_files = 16
+max_generated_lines = 4000
+baseline_policy = "none"
+
+[implementation]
+provider = "local"
+agent_mode = "model"
+allow_external_agent = false
+
+[resource]
+max_runtime_sec = 600
+max_files = 16
+max_generated_lines = 4000
+allow_gpu = false
+```
+
+如果要用同一个 greenfield 任务测试 Codex、Claude Code 或 OpenCode handoff，
+保留 `[code_task]`、`[benchmark]` 和 `[resource]`，只切换实现 backend：
+
+```toml
+[implementation]
+provider = "codex"
+agent_mode = "handoff"
+allow_external_agent = true
+agent_model = ""          # 使用外部 CLI / 账号当前配置的模型
+agent_timeout_sec = 1800
+```
+
+外部 agent 写出的仍然只是未信任候选文件。SimpleAutoResearch 会先 ingest，
+再复制到 `code_task/workspace/generated_project`，之后继续走 review、validation、
+benchmark、guard、memory 和 repair 路径。
 
 ## 内嵌 Code-Task Config
 
@@ -780,6 +891,7 @@ repair_rounds = 1
 max_files = 8
 max_source_chars_per_file = 4000
 stream_benchmark_output = "auto"
+baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
@@ -812,6 +924,16 @@ max_proposal_chars = 24000
 | `line` | 转发普通换行日志。 |
 | `auto` / `true` | 同时处理普通日志和 `tqdm` 这类 carriage-return 进度输出。 |
 | `summary` | benchmark 结束后只打印尾部摘要。 |
+
+`baseline_policy` 取值：
+
+| 值 | 含义 |
+| --- | --- |
+| `auto` | 默认行为；需要比较时运行未修改 baseline。 |
+| `run` | 强制运行未修改 baseline。 |
+| `skip` | 跳过未修改 baseline，但仍允许代码理解、review、validation 和最终 benchmark。 |
+| `provided` | 从 `baseline_metrics_file` 记录用户已有指标；summary 会标注这些指标不是本次复测得到。 |
+| `none` | 任务没有有意义的 baseline comparison，适合纯生成或验收式任务。 |
 
 ## Edit Scope Behavior
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.editing.scope import is_protected_edit_path
-from simple_ar.core.artifacts import read_text, write_json, write_text
+from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
 from simple_ar.core.pipeline import Context
 from simple_ar.experiment.code_task_bridge.spec import CODE_TASK_PROJECT_TEMPLATE
 from simple_ar.integrations.llm import LLMError
@@ -59,8 +59,19 @@ def _generate_merged_code_task_design_markdown(ctx: Context, spec: Any) -> tuple
     problem = _safe_read_artifact(ctx, "problem.md")
     synthesis = _safe_read_artifact(ctx, "synthesis.md")
     hypothesis = _safe_read_artifact(ctx, "hypothesis.md")
+    bridge = _research_code_bridge_context(ctx)
+    if bridge["markdown"]:
+        synthesis = _append_bridge_context(synthesis, bridge["markdown"])
+        hypothesis = _append_bridge_context(hypothesis, bridge["markdown"])
     codebase_summary = _codebase_design_summary(spec.code_root)
-    source_artifacts = ["user_task.md", "goal.md", "problem.md", "synthesis.md", "hypothesis.md"]
+    source_artifacts = [
+        "user_task.md",
+        "goal.md",
+        "problem.md",
+        "synthesis.md",
+        "hypothesis.md",
+        *bridge["source_artifacts"],
+    ]
     client = _llm_client(ctx)
     if client is not None:
         try:
@@ -86,6 +97,7 @@ def _generate_merged_code_task_design_markdown(ctx: Context, spec: Any) -> tuple
                     "mode": "llm_merge",
                     "user_task_file": str(spec.task_file),
                     "source_artifacts": source_artifacts,
+                    "research_code_bridge": bridge["metadata"],
                     "codebase_summary": codebase_summary,
                 }
         except LLMError as exc:
@@ -105,6 +117,7 @@ def _generate_merged_code_task_design_markdown(ctx: Context, spec: Any) -> tuple
         "mode": "fallback_merge",
         "user_task_file": str(spec.task_file),
         "source_artifacts": source_artifacts,
+        "research_code_bridge": bridge["metadata"],
         "codebase_summary": codebase_summary,
     }
 
@@ -114,6 +127,10 @@ def _generate_code_task_design_markdown(ctx: Context, spec: Any) -> tuple[str, d
     problem = _safe_read_artifact(ctx, "problem.md")
     synthesis = _safe_read_artifact(ctx, "synthesis.md")
     hypothesis = _safe_read_artifact(ctx, "hypothesis.md")
+    bridge = _research_code_bridge_context(ctx)
+    if bridge["markdown"]:
+        synthesis = _append_bridge_context(synthesis, bridge["markdown"])
+        hypothesis = _append_bridge_context(hypothesis, bridge["markdown"])
     codebase_summary = _codebase_design_summary(spec.code_root)
     client = _llm_client(ctx)
     if client is not None:
@@ -137,7 +154,14 @@ def _generate_code_task_design_markdown(ctx: Context, spec: Any) -> tuple[str, d
             if task:
                 return _ensure_heading(task, "Code Task"), {
                     "mode": "llm",
-                    "source_artifacts": ["goal.md", "problem.md", "synthesis.md", "hypothesis.md"],
+                    "source_artifacts": [
+                        "goal.md",
+                        "problem.md",
+                        "synthesis.md",
+                        "hypothesis.md",
+                        *bridge["source_artifacts"],
+                    ],
+                    "research_code_bridge": bridge["metadata"],
                     "codebase_summary": codebase_summary,
                 }
         except LLMError as exc:
@@ -154,7 +178,14 @@ def _generate_code_task_design_markdown(ctx: Context, spec: Any) -> tuple[str, d
         primary_metric=spec.primary_metric or "",
     ), {
         "mode": "fallback",
-        "source_artifacts": ["goal.md", "problem.md", "synthesis.md", "hypothesis.md"],
+        "source_artifacts": [
+            "goal.md",
+            "problem.md",
+            "synthesis.md",
+            "hypothesis.md",
+            *bridge["source_artifacts"],
+        ],
+        "research_code_bridge": bridge["metadata"],
         "codebase_summary": codebase_summary,
     }
 
@@ -212,6 +243,157 @@ def _fallback_merged_code_task_design_markdown(
         "- Inspect the codebase index and baseline benchmark output before editing.\n"
         "- Propose controlled edits only inside the allowed implementation scope.\n"
     )
+
+
+def _research_code_bridge_context(ctx: Context) -> dict[str, Any]:
+    """Build a compact implementation handoff from research/design artifacts."""
+
+    artifacts: list[str] = []
+    sections: list[str] = []
+    synthesis_brief = _read_run_json(ctx, "04-synthesize/synthesis_brief.json")
+    if synthesis_brief:
+        artifacts.append("04-synthesize/synthesis_brief.json")
+        sections.extend(_synthesis_bridge_sections(synthesis_brief))
+
+    contract = _read_run_json(ctx, "05-design/experiment_contract.json")
+    if not contract:
+        contract = _read_run_json(ctx, "05-design/evidence/experiment_contract.json")
+        if contract:
+            artifacts.append("05-design/evidence/experiment_contract.json")
+    else:
+        artifacts.append("05-design/experiment_contract.json")
+    if contract:
+        sections.extend(_contract_bridge_sections(contract))
+
+    result_schema = _read_run_json(ctx, "05-design/result_schema.json")
+    if result_schema:
+        artifacts.append("05-design/result_schema.json")
+        sections.extend(_result_schema_bridge_sections(result_schema))
+
+    resource_plan = _read_run_json(ctx, "05-design/resource_plan.json")
+    if resource_plan:
+        artifacts.append("05-design/resource_plan.json")
+        sections.extend(_resource_bridge_sections(resource_plan))
+
+    if not sections:
+        return {"markdown": "", "source_artifacts": [], "metadata": {"status": "empty"}}
+    markdown = "## Research-to-Code Bridge\n\n" + "\n\n".join(sections)
+    return {
+        "markdown": markdown[:5000],
+        "source_artifacts": artifacts,
+        "metadata": {
+            "status": "available",
+            "source_artifacts": artifacts,
+            "section_count": len(sections),
+        },
+    }
+
+
+def _append_bridge_context(text: str, bridge_markdown: str) -> str:
+    body = text.strip()
+    if not body:
+        return bridge_markdown
+    return body + "\n\n" + bridge_markdown
+
+
+def _read_run_json(ctx: Context, relative_path: str) -> dict[str, Any]:
+    path = ctx.run_dir / relative_path
+    if not path.exists():
+        return {}
+    try:
+        data = read_json(path)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _synthesis_bridge_sections(brief: dict[str, Any]) -> list[str]:
+    sections: list[str] = []
+    themes = _string_list(brief.get("themes"))[:5]
+    if themes:
+        sections.append("### Method Transfer Signals\n" + _bullets(themes))
+    gaps = _string_list(brief.get("gaps"))[:5]
+    if gaps:
+        sections.append("### Research Gaps To Address\n" + _bullets(gaps))
+    limitations = _string_list(brief.get("limitations"))[:5]
+    if limitations:
+        sections.append("### Evidence Boundaries And Risks\n" + _bullets(limitations))
+    ideas = _list_of_dicts(brief.get("idea_candidates"))[:4]
+    if ideas:
+        rows = []
+        for idea in ideas:
+            name = _first_text(idea.get("name"), idea.get("idea_id"), "idea")
+            change = _first_text(
+                idea.get("proposed_change"),
+                idea.get("hypothesis"),
+                idea.get("synthesis_hint"),
+                "",
+            )
+            risk = "; ".join(_string_list(idea.get("risks"))[:2])
+            rows.append(f"- `{name}`: {change[:240]}" + (f" Risk: {risk[:180]}" if risk else ""))
+        sections.append("### Implementation Hypotheses\n" + "\n".join(rows))
+    return sections
+
+
+def _contract_bridge_sections(contract: dict[str, Any]) -> list[str]:
+    sections: list[str] = []
+    objective = _first_text(contract.get("objective"), contract.get("hypothesis"), contract.get("summary"), "")
+    if objective:
+        sections.append("### Experiment Objective\n" + f"- {objective[:500]}")
+    variables = _string_list(contract.get("variables"))[:6]
+    if variables:
+        sections.append("### Variables Or Ablations\n" + _bullets(variables))
+    risks = _string_list(contract.get("risks"))[:5]
+    if risks:
+        sections.append("### Design Risks\n" + _bullets(risks))
+    outputs = _string_list(contract.get("expected_outputs"))[:6]
+    if outputs:
+        sections.append("### Required Outputs\n" + _bullets(outputs))
+    return sections
+
+
+def _result_schema_bridge_sections(schema: dict[str, Any]) -> list[str]:
+    primary = _first_text(schema.get("primary_metric"), schema.get("primary"), "")
+    required = _string_list(schema.get("required_metrics"))[:8]
+    direction = _first_text(schema.get("direction"), schema.get("primary_direction"), "")
+    lines = []
+    if primary:
+        lines.append(f"- Primary metric: `{primary}`" + (f" ({direction})" if direction else ""))
+    if required:
+        lines.append("- Required metrics: " + ", ".join(f"`{item}`" for item in required))
+    return ["### Metric Contract\n" + "\n".join(lines)] if lines else []
+
+
+def _resource_bridge_sections(plan: dict[str, Any]) -> list[str]:
+    fields = []
+    for key in ("max_runtime_sec", "max_memory_mb", "hardware", "device", "notes"):
+        value = plan.get(key)
+        if value not in (None, "", [], {}):
+            fields.append(f"- {key}: {value}")
+    return ["### Resource Constraints\n" + "\n".join(fields[:6])] if fields else []
+
+
+def _list_of_dicts(value: object) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _bullets(items: list[str]) -> str:
+    return "\n".join(f"- {item[:320]}" for item in items if item)
+
+
+def _first_text(*values: object) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _codebase_design_summary(code_root: Path) -> dict[str, Any]:

@@ -16,10 +16,11 @@ on command syntax, options, outputs, and short operational notes.
 | `simple-ar run` | Start a new 8-stage research pipeline run. |
 | `simple-ar resume` | Continue an existing research pipeline run. |
 | `simple-ar status` | Print status for a research run or code-task run. |
+| `simple-ar tools ...` | Export tool schemas, call run-local tools, or serve read-only tools over MCP stdio. |
 | `simple-ar inspect` | Build a local artifact index for a run. |
 | `simple-ar search-artifacts` | Search indexed run artifacts. |
 | `simple-ar clean` | Preview and remove rebuildable run caches. |
-| `simple-ar code-task ...` | Work with an existing codebase in an isolated editable workspace. |
+| `simple-ar code-task ...` | Work with an existing codebase or a greenfield code task in an isolated editable workspace. |
 
 ## Research Pipeline
 
@@ -69,7 +70,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 | `--benchmark-command TEXT` | string | Benchmark command run before and after edits. |
 | `--code-task-name TEXT` | string | Display name for the embedded code-task experiment. |
 | `--code-task-max-file-bytes N` | int | Max copied file size for embedded copy/sparse modes. |
-| `--code-task-workspace-mode MODE` | enum | `copy`, `git_worktree`, or `sparse_copy`. |
+| `--code-task-workspace-mode MODE` | enum | `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty` for greenfield code-task runs. `auto` prefers git worktree and falls back to copy. |
 | `--code-task-workspace-reuse-source-venv` | flag | Use a detected source `.venv` Python. |
 | `--code-task-workspace-setup-hook TEXT` | string | Record a setup command for future managed environments. |
 | `--code-task-env-mode MODE` | enum | `current` or `external`. |
@@ -149,6 +150,76 @@ uv run simple-ar status runs/<run-id>
 
 This command is read-only.
 
+## Tools And MCP
+
+### `simple-ar tools schema`
+
+**Purpose**: export registered real tool schemas in MCP or OpenAI function-tool
+format.
+
+**Usage**:
+
+```bash
+uv run simple-ar tools schema --format mcp
+uv run simple-ar tools schema --format openai --output tool_schema.json
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `--format` | enum | `mcp` or `openai`. Default: `mcp`. |
+| `--output PATH` | path | Optional file output. Prints to stdout when omitted. |
+
+### `simple-ar tools call`
+
+**Purpose**: call one run-local read-only tool and write a compact trace.
+
+**Usage**:
+
+```bash
+uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
+uv run simple-ar tools call runs/<run-id> search_generated_code --args-json '{"query":"run_experiment","max_matches":10}'
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Existing run directory. |
+| `TOOL_NAME` | string | Registered tool name. |
+| `--args-json JSON` | object | Tool arguments as a JSON object. |
+| `--args-file PATH` | path | Read tool arguments from a JSON file. Useful on shells where inline JSON quoting is awkward. |
+| `--debug-payloads` | flag | Keep larger trace payloads. Default traces are compact. |
+
+**Outputs**:
+
+- tool result JSON on stdout;
+- `RUN_DIR/tools/tool_trace.jsonl`.
+
+### `simple-ar tools serve-mcp`
+
+**Purpose**: expose run-local read-only tools over MCP stdio.
+
+**Usage**:
+
+```bash
+uv run simple-ar tools serve-mcp runs/<run-id>
+```
+
+**Options**:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `RUN_DIR` | path | Existing run directory whose artifacts tools may inspect. |
+| `--debug-payloads` | flag | Keep larger trace payloads. |
+
+**Notes**:
+
+- current server methods: `initialize`, `ping`, `tools/list`, `tools/call`;
+- only real registered read-only experiment tools are exposed by default;
+- no write, shell, network, or dependency-install tool is enabled by this command.
+
 ## Artifact Tools
 
 ### `simple-ar inspect`
@@ -226,7 +297,7 @@ uv run simple-ar clean --shared-cache
 | `--yes` | flag | Delete the displayed targets without the interactive `yes` prompt. |
 | `--all-caches` | flag | Delete every known rebuildable cache/index/context artifact for this run after a stronger warning. |
 | `--shared-index` | flag | Strong cleanup: clear the shared research index store across runs/tests. |
-| `--shared-cache` | flag | Strongest shared cleanup: clear shared research indexes and literature provider cache. |
+| `--shared-cache` | flag | Strongest shared cleanup: clear shared research indexes, literature provider cache, and external-agent handoff archives. |
 | `--index-root PATH` | path | Shared index root for `--shared-index`/`--shared-cache`; defaults to `SIMPLE_AR_RESEARCH_INDEX_ROOT` or `.simple_ar_cache/research_index`. |
 | `--literature-cache-root PATH` | path | Literature provider cache root for `--shared-cache`; defaults to `.simple_ar_cache/literature`. |
 | `--allow-external-index-root` | flag | Allow shared cleanup to touch a path outside the current workspace. |
@@ -253,15 +324,19 @@ SQLite/LanceDB accelerator store across runs, so future runs must rebuild index
 state. It keeps run-local audit artifacts because it does not touch run
 directories.
 
-`--shared-cache` is stronger again: it clears both the shared research index
-and `.simple_ar_cache/literature`, so future runs may need to re-query
-literature providers as well as rebuild local indexes.
+`--shared-cache` is stronger again: it clears the shared research index,
+`.simple_ar_cache/literature`, and `.simple_ar_cache/agent_handoff_archives`,
+so future runs may need to re-query literature providers, rebuild local indexes,
+and will no longer have prior external-agent handoff transcripts.
 
 ## Code Task Commands
 
-Code-task commands prepare an existing project under
-`runs/<run-id>/code_task/workspace`. Later edits are applied to that isolated
-workspace, not to the original project.
+Code-task commands prepare an isolated workspace under
+`runs/<run-id>/code_task/workspace`. Existing-project runs default to `auto`,
+which prefers a detached git worktree and falls back to a guarded copy when Git
+cannot be used safely. Explicit `git_worktree` fails with an actionable
+checklist instead of silently falling back. Greenfield runs start from an empty
+workspace and generate the project there. The original project is never edited.
 
 For normal use, start with the high-level orchestration commands. The low-level
 primitive commands are mainly for debugging, learning, or fine-grained human
@@ -279,6 +354,7 @@ the first code index.
 ```bash
 uv run simple-ar code-task init --config examples/code_task_medium_review/configs/code_task.toml
 uv run simple-ar code-task init --code-root path/to/project --task-file task.md --benchmark-command "python main.py"
+uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmark-command "python generated_project/main.py"
 ```
 
 **Options**:
@@ -286,7 +362,8 @@ uv run simple-ar code-task init --code-root path/to/project --task-file task.md 
 | Option | Type | Description |
 | --- | --- | --- |
 | `--config PATH` | path | TOML config for init settings. CLI flags override config values. |
-| `--code-root DIR` | path | Source project. Required unless set in config. |
+| `--kind MODE` | enum | `existing_project` for patching an existing codebase, or `greenfield` for from-scratch generation. |
+| `--code-root DIR` | path | Source project. Required for `existing_project`; optional scaffold/source root for `greenfield`. |
 | `--task-file PATH` | path | Markdown/text task description. Required unless set in config. |
 | `--output-root DIR` | path | Directory where the code-task run is created. |
 | `--name TEXT` | string | Run name suffix. |
@@ -295,7 +372,7 @@ uv run simple-ar code-task init --code-root path/to/project --task-file task.md 
 | `--metric-direction NAME=DIRECTION` | repeatable | Metric direction: `higher`, `lower`, `resource`, or `ignore`. |
 | `--env-mode MODE` | enum | `current` or `external`. |
 | `--python PATH` | path | Python executable for `--env-mode external`. |
-| `--workspace-mode MODE` | enum | `copy`, `git_worktree`, or `sparse_copy`. |
+| `--workspace-mode MODE` | enum | `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty`. `greenfield` defaults to `empty`; existing projects default to `auto`. |
 | `--workspace-include GLOB` | repeatable | Include pattern for `sparse_copy`. |
 | `--workspace-exclude GLOB` | repeatable | Additional exclude pattern for `sparse_copy`. |
 | `--workspace-reuse-source-venv` | flag | Reuse a detected source `.venv` Python as external execution policy. |
@@ -335,11 +412,13 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | --- | --- | --- |
 | `RUN_DIR` | path | Code-task run directory. |
 | `--config PATH` | path | Optional TOML for model routing, budget, and runtime settings. |
-| `--to-step STEP` | enum | Stop no later than `probe`, `baseline`, `work-plan`, `batch`, `plan`, `propose-edits`, `apply-edits`, `validate`, `run`, `analyze-failure`, or `repair`. |
+| `--to-step STEP` | enum | Stop no later than `probe`, `baseline`, `work-plan`, `batch`, `plan`, `propose-edits`, `apply-edits`, `review`, `validate`, `run`, `analyze-failure`, or `repair`. |
 | `--dry-run` | flag | Print the next action without writing artifacts. |
 | `--model NAME` | string | Model override for LLM-backed steps. |
 | `--no-llm` | flag | Use deterministic fallbacks where possible. |
 | `--timeout N` | int | Benchmark timeout. |
+| `--baseline-policy MODE` | enum | Existing-project baseline handling: `auto`, `run`, `skip`, `provided`, or `none`. Use `skip`/`none` for expensive baselines, or `provided` with a metrics file. |
+| `--baseline-metrics-file PATH` | path | JSON or metric-line file used when `--baseline-policy provided`. |
 | `--yes` | flag | Auto-approve inline review gates in normal execute mode; with `--interactive`, auto-continue primitive prompts. Use only after you are comfortable approving the reviewed plan/proposal. |
 | `--interactive` | flag | Debug mode: confirm each primitive step instead of running continuously to the next review gate. |
 | `--no-review-inline` | flag | Disable inline review prompts and stop at review gates instead. |
@@ -363,7 +442,10 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 - `code_task/patch_plan.md`
 - `code_task/meta/proposed_edits.json`
 - `code_task/meta/applied_edits.json`
+- `code_task/meta/review_report.json` and `review_report_post_run.json`
 - `code_task/meta/validation_report.json`
+- `code_task/meta/resource_probe.json` and `resource_decision.json` after `probe`
+- `code_task/memory/task_memory.md`, `compressed_memory.md`, and `review_findings.jsonl`
 - `code_task/run/baseline/`, `code_task/run/patched/`, `code_task/run/comparison.json`
 - `code_task/summary.md`
 
@@ -385,6 +467,16 @@ with `llm_planning_failed` and does not write an offline fallback plan. Rerun
 the same `execute` command to retry the LLM step. Use `--no-llm` for a fully
 deterministic plan, or `--allow-planning-fallback` only when a fallback plan is
 acceptable for the current task.
+
+After edits are applied, `execute` also runs a structured reviewer step before
+static validation, then repeats a post-run review when patched metrics are
+available. Blocking reviewer findings are written to `code_task/memory/` so the
+next repair attempt can reason from the latest failure evidence.
+
+When `--config PATH` is provided, `execute` also reads standalone code-task
+generation settings from `[implementation]` and `[resource]`. This is how
+greenfield tasks select the local backend or an explicit Codex/Claude/OpenCode
+handoff without adding provider-specific CLI flags.
 
 #### `simple-ar code-task decide-plan`
 
@@ -532,6 +624,8 @@ uv run simple-ar code-task probe runs/<run-id>
 **Outputs**:
 
 - `code_task/meta/environment_report.json`
+- `code_task/meta/resource_probe.json`
+- `code_task/meta/resource_decision.json`
 
 **Notes**:
 

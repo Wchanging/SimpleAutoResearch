@@ -25,7 +25,7 @@ class CodeTaskExperimentSpec:
     primary_metric: str | None = None
     metric_directions: dict[str, str] = field(default_factory=dict)
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
-    workspace_mode: str = "copy"
+    workspace_mode: str = "auto"
     workspace_include: tuple[str, ...] = ()
     workspace_exclude: tuple[str, ...] = ()
     workspace_reuse_source_venv: bool = False
@@ -38,6 +38,7 @@ class CodeTaskExperimentSpec:
     config_path: str | None = None
     name: str | None = None
     allow_test_changes: bool = False
+    allow_large_edits: bool = False
     approval_note: str = "Auto-approved inside isolated 8-stage code-task workspace."
 
 
@@ -147,6 +148,7 @@ def code_task_project_spec(
         config_path=options.config_path,
         name=options.name,
         allow_test_changes=False,
+        allow_large_edits=_config_bool(config.get("safety_allow_large_edits")) or False,
     )
 
 

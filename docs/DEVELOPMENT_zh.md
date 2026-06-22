@@ -166,6 +166,46 @@ src/simple_ar/report/
 需要视为黄灯。不要继续往这些文件里添加无关行为；新的工作应该迁移到对应领域模块，
 或者顺手减少这些文件的职责。这是维护规则，不是要求把每个小 helper 都拆成独立文件。
 
+## 扩展 Tools 和外部 Agent Backend
+
+V2.6 新增 common tool 与 handoff 层，但不替换已有领域实现：
+
+```text
+src/simple_ar/tools/
+  specs.py        CommonToolSpec、ToolCall、ToolResult、permission/risk enums
+  registry.py     把 report 和 experiment tools 组合成统一 registry
+  gateway.py      带权限检查的本地 dispatch 和紧凑 trace 写入
+  permissions.py  read/write/execution/network policy checks
+  openai_schema.py / mcp_schema.py
+                  只导出 schema；默认不启动 server
+  mcp_server.py   显式启动的 stdio MCP server，只暴露 run-local 只读 tools
+
+src/simple_ar/agent_backends/
+  base.py         AgentBackend protocol 和 run result models
+  policy.py       写入 handoff 的外部 agent permission policy
+  handoff.py      workspace-scoped handoff package 和不可信输出收集
+  factory.py      fake/local_llm/Codex/Claude/OpenCode 的 provider selection
+  fake.py         deterministic backend，用于集成测试和 dry-run
+  local_llm.py    LLM-backed bounded reviewer/planner backend
+  external_cli.py subprocess wrapper，包含 cwd、timeout、env allowlist 和日志
+  profiles/       Codex / Claude Code / OpenCode profile Markdown
+```
+
+这个 common layer 刻意保持很薄。`experiment/tools/` 和
+`report/tool_gateway.py` 仍然拥有具体业务逻辑；`tools/` 只负责给未来
+OpenAI tool calling、MCP adapter 和外部 agent backend 提供统一、可审计的出口。
+
+新增 tool/backend 时：
+
+- 只注册真实可用的工具；不要为了展示 MCP/OpenAI schema 添加 stub tool；
+- write、shell、network、secret access 默认关闭，除非配置和审批路径明确开启；
+- 外部 agent 上下文写入 `agent_handoff/<name>/`，默认不要写用户全局工具目录；
+- 外部 agent 输出一律视为不可信。先收集到 `agent_outputs/<name>/`，再交给已有
+  patch、result guard、report audit 或 code-task validation 路径；
+- 外部 CLI provider 必须保持 opt-in。`fake` 和 `local_llm` 可用于测试与本地 review；
+  `codex`、`claude_code`、`opencode` 和 `external_cli` 必须等配置显式允许后才能启动；
+- trace 默认保持紧凑。raw prompt、raw output 或大 payload 只能在 debug 设置下保留。
+
 ### Code-Task Environment Policy
 
 当前 code-task runner 通过 `copy`、`git_worktree` 或实验性 `sparse_copy` 提供 workspace isolation，并支持 command timeout、可选 benchmark output streaming、stdout/stderr 捕获、受限 environment map 和显式 execution interpreter policy。它支持 `current` 和 `external`，但还不会创建或安装到单独 Python environment。除非未来功能明确改变这一点，否则不要默认把用户项目依赖安装到 SimpleAutoResearch 自己的 `.venv`。

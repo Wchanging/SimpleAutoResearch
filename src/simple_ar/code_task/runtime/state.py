@@ -15,7 +15,8 @@ class CodeTaskPaths:
     Args:
         run_dir: Root run directory.
         task_dir: Directory containing code-task artifacts.
-        workspace_dir: Copied editable workspace.
+        workspace_dir: Editable project root. For git worktree runs this may
+            be a subdirectory inside the repository worktree.
         meta_dir: Metadata directory.
         run_artifact_dir: Latest benchmark execution directory.
         repairs_dir: Directory containing repair attempts.
@@ -35,15 +36,38 @@ def code_task_paths(run_dir: Path) -> CodeTaskPaths:
     """Return the standard path layout for a code-task run."""
     root = Path(run_dir)
     task_dir = root / "code_task"
+    workspace_dir = _manifest_project_root(root, task_dir)
     return CodeTaskPaths(
         run_dir=root,
         task_dir=task_dir,
-        workspace_dir=task_dir / "workspace",
+        workspace_dir=workspace_dir,
         meta_dir=task_dir / "meta",
         run_artifact_dir=task_dir / "run",
         repairs_dir=task_dir / "repairs",
         manifest_path=root / "manifest.json",
     )
+
+
+def _manifest_project_root(run_dir: Path, task_dir: Path) -> Path:
+    """Return project_root from manifest when available."""
+    manifest_path = run_dir / "manifest.json"
+    default = task_dir / "workspace"
+    if not manifest_path.exists():
+        return default
+    try:
+        data = read_json(manifest_path)
+    except Exception:
+        return default
+    if not isinstance(data, dict):
+        return default
+    workspace = data.get("workspace")
+    if not isinstance(workspace, dict):
+        return default
+    value = workspace.get("project_root") or workspace.get("workspace_dir")
+    if not isinstance(value, str) or not value.strip():
+        return default
+    path = Path(value)
+    return path if path.is_absolute() else run_dir / path
 
 
 def load_code_task_manifest(run_dir: Path) -> dict[str, Any]:

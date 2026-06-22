@@ -19,9 +19,10 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
 
 - **研究报告**：从主题出发，运行可见的阶段式流程，生成文献笔记、综合分析和报告产物。
 - **研究源规划**：支持 OpenAlex/Semantic Scholar/arXiv/本地文件源、可选 LLM-backed query planning、facet-driven query expansion、筛选、覆盖度检查、follow-up retrieval rounds、document records、cache 策略和轻量预算。普通运行默认保留精简 evidence 产物；需要 planning/traces/coverage 文件时再设置 `debug_artifacts = true`。
-- **Code Task**：在隔离可编辑 workspace 中改进已有代码库，支持 LLM 规划、人工审核点、受控补丁 proposal、验证、benchmark 运行和指标对比。
+- **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：可以把 code task 嵌入 8 阶段流程，生成 repo map、context pack、work plan、patch 证据、benchmark 指标和报告证据。
+- **Tool 与外部 Agent 边界**：可以导出真实只读 tool schema，通过 MCP stdio 暴露 run-local tools，并可选把受控 greenfield generation/repair handoff 给 Codex 等外部 CLI agent；外部返回文件仍必须经过 SimpleAutoResearch 的 review 和 run guard。
 - **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
 - **成熟库基础设施**：pipeline/code-task TOML 配置通过 Pydantic 校验，LLM 调用通过 LiteLLM，OpenAlex 访问通过 pyalex，终端进度输出开始走 Rich，为后续更清晰的 human-in-the-loop 审核打基础。
 
@@ -109,7 +110,7 @@ accuracy = "higher"
 latency_ms = "resource"
 
 [workspace]
-mode = "copy"  # copy | git_worktree | sparse_copy
+mode = "auto"  # auto | copy | git_worktree | sparse_copy
 ```
 
 接着运行完整的人工审核流程。`init` 会打印一个新的 run 目录，例如
@@ -126,7 +127,7 @@ uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task
 uv run simple-ar status runs/<run-id>
 ```
 
-这套命令会准备隔离 workspace、运行 baseline benchmark、生成 work plan、停在 patch plan 审核点、生成 `code_task/meta/proposed_edits.json`、应用已审核 proposal、验证 patched workspace、运行 patched benchmark，并写入最终状态。如果结果还需要有限范围的后续修复，可以继续使用 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中的 repair 流程。
+这套命令会准备隔离 workspace、运行 baseline benchmark、生成 work plan、停在 patch plan 审核点、生成 `code_task/meta/proposed_edits.json`、应用已审核 proposal、执行结构化 post-apply / post-run review、验证并运行 patched benchmark，并写入最终状态。如果结果还需要有限范围的后续修复，可以继续使用 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中的 repair 流程。
 
 内置 standalone code-task 示例是 `examples/code_task_medium_review/configs/code_task.toml`，放在 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中作为辅助示例。
 
@@ -173,7 +174,7 @@ accuracy = "higher"
 latency_ms = "resource"
 
 [workspace]
-mode = "copy"  # copy | git_worktree | sparse_copy
+mode = "auto"  # auto | copy | git_worktree | sparse_copy
 
 [environment]
 mode = "current"
@@ -191,7 +192,7 @@ uv run simple-ar run --config path/to/your_pipeline.toml
 
 ### 4. Greenfield Experiment：从零生成受控实验项目
 
-当任务还没有现成源码项目时，可以使用 V2.5 的 greenfield 路径。它会先写出 experiment contract，再在 `06-code/generated_project` 下生成受控小项目，执行 code review，运行 `experiment.py`，最后只把通过 `guard_report.json` 检查的 canonical `07-run/results.json` 作为实验结果。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
+当任务还没有现成源码项目时，可以使用 greenfield 路径。当前实现会复用和已有代码任务相同的 code-task 引擎：`05-design` 先写出 experiment contract，`06-code` 在 `06-code/code_task_run/` 下创建 `kind = "greenfield"` 的嵌套 code-task run，再把生成项目投影回 `06-code/generated_project/` 供 `07-run` 兼容使用。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
 
 轻量公开示例位于 `examples/greenfield_lightweight_training/configs/greenfield_training.toml`。它会让 pipeline 从零生成一个 CPU-only 的中等偏轻量文本分类实验套件，使用本地确定性数据、多个 baseline/model condition 和可解析指标：
 
@@ -207,10 +208,10 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 
 - 当前代码编辑是受控 old/new replacement，更可审计，但弱于完整自主 coding agent。
 - 默认 edit scope 会保护 tests、benchmark 文件和 secret-like 路径，避免模型通过修改评测来刷指标。
-- `git_worktree` 要求目标项目是 git 仓库根目录，并且至少有一个本地 commit；不要求连接 GitHub 远程仓库。
+- `auto` 会优先为已有 commit 的 Git 项目创建 detached worktree；`code_root` 可以是仓库根目录或仓库内项目子目录。Git 条件不满足时会降级 copy 并记录原因；显式 `git_worktree` 则会失败并给出修复提示。
 - `sparse_copy` 仍是实验性功能，如果 include 范围过窄，可能漏掉运行依赖。
 - 目前不会自动安装项目依赖，也不会自动管理 Docker/Conda/GPU/Slurm 环境。
-- 较大的代码修改 proposal 仍可能触发很长的 LLM completion。V2.5 正在把实验/代码执行收束到明确 contract、资源预算、canonical results、guard、受控 greenfield 路径和后续 external-agent adapter；在这些能力稳定前，不建议把它当作大型无人值守重构工具。
+- 较大的代码修改 proposal 仍可能触发很长的 LLM completion。当前实验/代码执行已经收束到明确 contract、资源预算、canonical results、guard、受控 greenfield 路径和可选 external-agent handoff；但它仍不适合作为大型无人值守重构工具。
 - 文献检索现在会写入可审计的 source plan 和 document-store metadata，并支持 OpenAlex、Semantic Scholar、arXiv 和本地 Markdown/text 笔记。它可以解析本地/缓存的 Markdown、text、基础 HTML，以及轻量 `pypdf` PDF。当前已预留可选 `unstructured` 和 LanceDB hooks，但还不是完整 section-aware PDF parser 或向量 RAG survey 系统。
 - LLM 报告有引用、指标和边界规则保护；如果草稿不合格，会回退到结构化 deterministic report。
 

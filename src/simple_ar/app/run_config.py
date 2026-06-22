@@ -107,6 +107,11 @@ class ImplementationSection(_ConfigModel):
     mode: str | None = None
     domain_profile: str | None = None
     provider: str | None = None
+    agent_mode: str | None = None
+    agent_model: str | None = None
+    agent_binary: str | None = None
+    agent_args: list[str] | None = None
+    agent_timeout_sec: int | None = None
     task_handoff: str | None = None
     allow_external_agent: bool | None = None
     max_repair_attempts: int | None = None
@@ -125,6 +130,8 @@ class ExecutionSection(_ConfigModel):
     command: str | None = None
     timeout_sec: int | None = None
     stream_output: str | None = None
+    baseline_policy: str | None = None
+    baseline_metrics_file: str | None = None
     allow_dependency_install: bool | None = None
 
 
@@ -219,7 +226,7 @@ class PipelineRunConfig(_ConfigModel):
         result: dict[str, object] = {}
 
         _set_string(result, "topic", self.run.topic)
-        _set_string(result, "output_root", self.run.output_root)
+        _set_path_string(result, "output_root", self.run.output_root)
         _set_string(result, "from_stage", self.run.from_stage)
         _set_string(result, "to_stage", self.run.to_stage)
         _set_bool(result, "quiet", self.run.quiet)
@@ -259,7 +266,7 @@ class PipelineRunConfig(_ConfigModel):
         _set_int(result, "research_read_max_shortlist", self.research.read_max_shortlist)
         _set_bool(result, "research_cache", self.research.cache)
         _set_string(result, "research_index_backend", self.research.index_backend)
-        _set_string(result, "research_index_root", self.research.index_root)
+        _set_path_string(result, "research_index_root", self.research.index_root)
         _set_resolved_string_list(
             result,
             "research_local_documents",
@@ -293,6 +300,11 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "implementation_mode", self.implementation.mode)
         _set_string(result, "implementation_domain_profile", self.implementation.domain_profile)
         _set_string(result, "implementation_provider", self.implementation.provider)
+        _set_string(result, "implementation_agent_mode", self.implementation.agent_mode)
+        _set_string(result, "implementation_agent_model", self.implementation.agent_model)
+        _set_string(result, "implementation_agent_binary", self.implementation.agent_binary)
+        _set_string_list(result, "implementation_agent_args", self.implementation.agent_args)
+        _set_int(result, "implementation_agent_timeout_sec", self.implementation.agent_timeout_sec)
         _set_string(result, "implementation_task_handoff", self.implementation.task_handoff)
         _set_bool(result, "implementation_allow_external_agent", self.implementation.allow_external_agent)
         _set_int(result, "implementation_max_repair_attempts", self.implementation.max_repair_attempts)
@@ -307,6 +319,13 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "execution_command", self.execution.command)
         _set_int(result, "execution_timeout_sec", self.execution.timeout_sec)
         _set_string(result, "execution_stream_output", self.execution.stream_output)
+        _set_string(result, "execution_baseline_policy", self.execution.baseline_policy)
+        _set_resolved_string(
+            result,
+            "execution_baseline_metrics_file",
+            self.execution.baseline_metrics_file,
+            config_path,
+        )
         _set_bool(result, "execution_allow_dependency_install", self.execution.allow_dependency_install)
 
         _set_int(result, "resource_max_runtime_sec", self.resource.max_runtime_sec)
@@ -383,7 +402,7 @@ def load_pipeline_run_config(config_path: str | None) -> dict[str, object]:
     """
     if not config_path:
         return {}
-    path = Path(config_path)
+    path = Path(_portable_path_string(config_path))
     data = _load_toml(path)
     try:
         parsed = PipelineRunConfig.model_validate(data)
@@ -411,8 +430,20 @@ def _set_string(result: dict[str, object], key: str, value: object) -> None:
         result[key] = text
 
 
+def _set_path_string(result: dict[str, object], key: str, value: object) -> None:
+    text = _string_value(value)
+    if text:
+        result[key] = _portable_path_string(text)
+
+
 def _string_value(value: object) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _portable_path_string(value: str) -> str:
+    """Normalize user-facing path separators for POSIX/Windows portability."""
+
+    return value.replace("\\", "/")
 
 
 def _set_int(result: dict[str, object], key: str, value: object) -> None:
@@ -490,6 +521,8 @@ def _apply_unified_compatibility(result: dict[str, object]) -> None:
     _copy_if_missing(result, "evaluation_primary_metric", "code_task_primary_metric")
     _copy_if_missing(result, "evaluation_metric_directions", "code_task_metric_directions")
     _copy_if_missing(result, "resource_max_runtime_sec", "code_task_timeout_sec")
+    _copy_if_missing(result, "execution_baseline_policy", "code_task_baseline_policy")
+    _copy_if_missing(result, "execution_baseline_metrics_file", "code_task_baseline_metrics_file")
 
     if "experiment_template" not in result and (
         result.get("task_kind") == "existing_project" or "code_task_code_root" in result
@@ -521,7 +554,7 @@ def _contains_code_task_config(data: dict[str, Any]) -> bool:
 
 
 def _resolve_relative(config_path: Path, value: str) -> Path:
-    path = Path(value)
+    path = Path(_portable_path_string(value))
     if path.is_absolute():
         return path
     return (config_path.parent / path).resolve()

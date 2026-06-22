@@ -182,6 +182,13 @@ def _result_overview(
         lines.append(f"- Primary metric: {primary}")
     if baseline_execution:
         lines.append(f"- Baseline status: `{baseline_execution.get('status', 'unknown')}`")
+    baseline_policy = _baseline_policy_record(manifest)
+    if baseline_policy and not baseline_execution:
+        lines.append(
+            "- Baseline policy: "
+            f"`{baseline_policy.get('policy', 'unknown')}` "
+            f"({baseline_policy.get('status', 'unknown')})"
+        )
     if patched_execution:
         lines.append(f"- Patched status: `{patched_execution.get('status', 'unknown')}`")
     if changed_files:
@@ -228,13 +235,28 @@ def _next_step(
 ) -> str:
     plan = manifest.get("plan", {})
     patch = manifest.get("patch", {})
+    code_task = manifest.get("code_task", {})
+    is_greenfield = isinstance(code_task, dict) and str(code_task.get("kind", "")).lower() == "greenfield"
     plan_status = plan.get("status", "not_started") if isinstance(plan, dict) else "not_started"
     patch_status = patch.get("status", "not_started") if isinstance(patch, dict) else "not_started"
     validation_status = validation.get("status") if validation else ""
     if not environment:
         return "Run `simple-ar code-task probe <run-dir>` to record environment signals."
-    if not baseline_execution:
+    if not baseline_execution and not is_greenfield and not _baseline_not_required(manifest):
         return "Run `simple-ar code-task baseline <run-dir>` before asking for edits."
+    if is_greenfield and patched_execution:
+        patched_status = str(patched_execution.get("status", "unknown"))
+        if patched_status == "passed":
+            return "Review `code_task/summary.md`, `code_task/workspace/generated_project/`, and run artifacts."
+        if failure:
+            return "Review failure analysis and rerun `simple-ar code-task execute <run-dir> --repair-rounds 1` for a bounded generated-project repair."
+        return "Rerun `simple-ar code-task execute <run-dir> --repair-rounds 1` to analyze and repair the generated benchmark failure."
+    if is_greenfield and patch_status == "applied" and not validation:
+        return "Run `simple-ar code-task execute <run-dir> --to-step run` to validate and benchmark the generated project."
+    if is_greenfield and validation_status == "failed":
+        return "Review `code_task/meta/validation_report.json`; rerun execute with repair budget if needed."
+    if is_greenfield and not patched_execution:
+        return "Run `simple-ar code-task execute <run-dir> --to-step run` to benchmark the generated project."
     if plan_status in {"not_started", "unknown"}:
         return "Run `simple-ar code-task plan <run-dir>` to create a reviewable patch plan."
     if plan_status == "pending_approval":
@@ -256,7 +278,11 @@ def _next_step(
     patched_status = str(patched_execution.get("status", "unknown"))
     if patched_status != "passed":
         if failure:
+            if is_greenfield:
+                return "Review failure analysis and rerun `simple-ar code-task execute <run-dir> --repair-rounds 1` for a bounded generated-project repair."
             return "Review failure analysis and consider `simple-ar code-task repair <run-dir>`."
+        if is_greenfield:
+            return "Rerun `simple-ar code-task execute <run-dir> --repair-rounds 1` to analyze and repair the generated benchmark failure."
         return "Run `simple-ar code-task analyze-failure <run-dir>` to summarize the benchmark failure."
     if comparison:
         verdict = str(comparison.get("verdict", "inconclusive"))
@@ -265,7 +291,24 @@ def _next_step(
         if verdict in {"regressed", "mixed"}:
             return "Inspect `comparison.json` and consider revising or repairing the patch."
         return "Inspect `comparison.json`; add metric directions or a stronger benchmark if the verdict is inconclusive."
+    if _baseline_not_required(manifest):
+        return "Review patched benchmark artifacts; no baseline comparison was requested for this run."
     return "Run the baseline or patched benchmark again if comparison artifacts are missing."
+
+
+def _baseline_not_required(manifest: dict[str, Any]) -> bool:
+    record = _baseline_policy_record(manifest)
+    policy = str(record.get("policy", "")).lower()
+    status = str(record.get("status", "")).lower()
+    return policy in {"skip", "none"} and status in {"skipped", "recorded"}
+
+
+def _baseline_policy_record(manifest: dict[str, Any]) -> dict[str, Any]:
+    benchmark = manifest.get("benchmark", {})
+    if not isinstance(benchmark, dict):
+        return {}
+    record = benchmark.get("baseline_policy", {})
+    return record if isinstance(record, dict) else {}
 
 
 def _primary_metric_text(manifest: dict[str, Any], comparison: dict[str, Any]) -> str:

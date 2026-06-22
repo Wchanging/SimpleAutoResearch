@@ -70,8 +70,40 @@ class ExternalAgentEditorTests(unittest.TestCase):
             self.assertIn("private/**", plan.blocked_read_patterns)
             self.assertFalse(plan.permissions["allow_shell_commands"])
             self.assertFalse(plan.permissions["allow_network"])
+            self.assertEqual(plan.permissions["writable_root"], "code_task/workspace")
             self.assertIn("--allowed-tools", plan.command_preview)
             self.assertIn("Read Edit Write", plan.command_preview)
+
+    def test_invocation_plan_uses_project_subdirectory_workspace(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_dir = root / "code_task"
+            workspace = task_dir / "workspace"
+            project = workspace / "packages" / "core"
+            meta = task_dir / "meta"
+            project.mkdir(parents=True)
+            meta.mkdir(parents=True)
+            request = EditRequest(
+                context=EditorContext(
+                    run_dir=root,
+                    task_dir=task_dir,
+                    workspace_dir=project,
+                    meta_dir=meta,
+                    manifest={"workflow": "code_task"},
+                    task_text="Improve the package.",
+                ),
+                safety=EditorSafetyPolicy(),
+            )
+
+            plan = build_external_agent_invocation_plan(
+                request,
+                ExternalAgentAdapterSpec(provider="codex"),
+            )
+
+            self.assertEqual(plan.cwd, "code_task/workspace/packages/core")
+            self.assertEqual(plan.permissions["writable_root"], "code_task/workspace/packages/core")
+            self.assertIn("code_task/workspace/packages/core", plan.command_preview)
 
     def test_external_backend_writes_plan_then_refuses_execution(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

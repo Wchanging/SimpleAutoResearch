@@ -27,7 +27,8 @@ class CodeTaskInitResult:
     Args:
         run_dir: Root run directory for this code task.
         task_dir: Directory containing all code-task artifacts.
-        workspace_dir: Isolated editable workspace for the source code.
+        workspace_dir: Editable project root for the code task. In worktree
+            mode this may be a subdirectory inside the repository worktree.
         meta_dir: Metadata directory for indexes and manifests.
         manifest_path: Root workflow manifest path.
         codebase_index_path: Path to the generated codebase index.
@@ -38,8 +39,10 @@ class CodeTaskInitResult:
         repo_map: Generated layered repository map.
         environment_policy: Initial execution environment policy.
         workspace: Workspace creation metadata.
+        kind: Code-task mode, usually ``existing_project`` or ``greenfield``.
     """
 
+    kind: str
     run_dir: Path
     task_dir: Path
     workspace_dir: Path
@@ -58,8 +61,9 @@ class CodeTaskInitResult:
 def initialize_code_task(
     *,
     run_dir: Path,
-    code_root: Path,
+    code_root: Path | None,
     task_file: Path,
+    kind: str = "existing_project",
     benchmark_command: str | None = None,
     max_file_bytes: int = 2_000_000,
     workspace_mode: str = "copy",
@@ -79,15 +83,17 @@ def initialize_code_task(
 
     Args:
         run_dir: New run directory. It may exist, but must be empty.
-        code_root: Existing codebase or benchmark directory to copy.
+        code_root: Existing codebase or benchmark directory to copy. Greenfield
+            runs may leave this empty when ``workspace_mode`` is ``empty``.
         task_file: Markdown or text file describing the requested change.
         benchmark_command: Optional validation command to record for later
             stages. It is not executed during init.
         max_file_bytes: Maximum file size copied in ``copy`` and
             ``sparse_copy`` modes. Use ``0`` to disable the size guard.
-        workspace_mode: Workspace strategy. ``copy`` preserves the V2.1
-            behavior; ``git_worktree`` creates a detached git worktree when
-            ``code_root`` is a repository root; ``sparse_copy`` is experimental.
+        workspace_mode: Workspace strategy. ``auto`` prefers a detached git
+            worktree for Git projects and falls back to copy; ``copy``
+            preserves the V2.1 behavior; ``git_worktree`` forces a detached
+            worktree; ``sparse_copy`` is experimental.
         workspace_include: POSIX glob patterns copied by sparse mode.
         workspace_exclude: Additional POSIX glob patterns skipped by sparse
             mode.
@@ -118,7 +124,8 @@ def initialize_code_task(
         NotADirectoryError: If ``code_root`` is not a directory.
         FileExistsError: If ``run_dir`` already contains files.
     """
-    source_root = Path(code_root).resolve()
+    normalized_kind = _normalize_kind(kind)
+    source_root = Path(code_root).resolve() if code_root is not None else None
     task_source = Path(task_file).resolve()
     root = Path(run_dir)
     if root.exists() and any(root.iterdir()):
@@ -148,7 +155,7 @@ def initialize_code_task(
             setup_hook=workspace_setup_hook,
         )
     )
-    workspace_dir = workspace.workspace_dir
+    workspace_dir = workspace.project_root
     copy_report = workspace.copy_report
     codebase_index_path = meta_dir / "codebase_index.json"
     codebase_index = build_codebase_index(workspace_dir, output_path=codebase_index_path)
@@ -195,10 +202,12 @@ def initialize_code_task(
             repo_map=repo_map,
             edit_scope=edit_scope,
             environment_policy=environment_policy,
+            kind=normalized_kind,
         ),
     )
 
     return CodeTaskInitResult(
+        kind=normalized_kind,
         run_dir=root,
         task_dir=task_dir,
         workspace_dir=workspace_dir,
@@ -218,7 +227,7 @@ def initialize_code_task(
 def _manifest(
     *,
     run_dir: Path,
-    code_root: Path,
+    code_root: Path | None,
     task_file: Path,
     benchmark_command: str | None,
     primary_metric: str | None,
@@ -230,6 +239,7 @@ def _manifest(
     repo_map: dict[str, Any],
     edit_scope: dict[str, Any],
     environment_policy: dict[str, Any],
+    kind: str,
 ) -> dict[str, Any]:
     project = codebase_index.get("project", {})
     repo_project = repo_map.get("project", {})
@@ -239,15 +249,19 @@ def _manifest(
         "schema_version": 1,
         "workflow": "code_task",
         "status": "initialized",
+        "code_task": {
+            "kind": kind,
+        },
         "created_at": _utcnow_iso(),
         "run_dir": str(run_dir),
         "source": {
-            "code_root": str(code_root),
+            "code_root": str(code_root) if code_root is not None else "",
             "task_file": str(task_file),
         },
         "layout": {
             "task": "code_task/task.md",
             "workspace": "code_task/workspace",
+            "project_root": workspace.to_manifest(run_dir=run_dir).get("project_root", "code_task/workspace"),
             "meta": "code_task/meta",
             "codebase_index": "code_task/meta/codebase_index.json",
             "repo_map": "code_task/meta/repo_map.json",
@@ -285,6 +299,17 @@ def _manifest(
             "metric_directions": directions,
         },
     }
+
+
+def _normalize_kind(value: str) -> str:
+    kind = str(value or "existing_project").strip().lower().replace("-", "_")
+    if kind in {"existing", "existing_code", "project", "patch"}:
+        return "existing_project"
+    if kind in {"greenfield", "from_scratch", "new_project"}:
+        return "greenfield"
+    if kind == "existing_project":
+        return kind
+    raise ValueError("code-task kind must be existing_project or greenfield")
 
 
 def _utcnow_iso() -> str:

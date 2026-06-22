@@ -186,13 +186,18 @@ task_file = "examples/full_pipeline_tiny_mlp/task.md"
 [implementation]
 mode = "patch_existing"        # auto | patch_existing | generate_project | template
 domain_profile = "ml_experiment" # auto | generic_research_experiment | code_experiment | ml_experiment | code_agent_eval
-provider = "local"
+provider = "local"             # local | fake | local_llm | codex | claude_code | opencode | external_cli
+agent_mode = "model"           # model | handoff | delegated_workspace
+agent_model = ""               # optional model override; empty uses the external CLI default
+agent_binary = ""              # optional custom CLI binary/path for external providers
+agent_args = []                # optional extra CLI arguments
+agent_timeout_sec = 600        # timeout for one backend invocation
 task_handoff = "user_file"     # user_file | merge; merge combines task_file with research context
-allow_external_agent = false
+allow_external_agent = false   # required before launching external CLI providers
 max_repair_attempts = 1
 
 [workspace]
-mode = "copy"                  # copy | git_worktree | sparse_copy
+mode = "auto"                  # auto | copy | git_worktree | sparse_copy
 reuse_source_venv = false
 setup_hook = ""
 include = []
@@ -352,6 +357,12 @@ validation_max_file_bytes = 500000
 # Live benchmark output relay mode.
 stream_benchmark_output = "off"     # off | line | auto | summary
 
+# Existing-project baseline policy:
+# auto/run = run unchanged benchmark; skip/none = no baseline comparison;
+# provided = record metrics from baseline_metrics_file.
+baseline_policy = "auto"
+# baseline_metrics_file = "baseline_metrics.json"
+
 # Keep false for review-first flow. Set true only after proposal review.
 apply_proposed_edits = false
 
@@ -496,7 +507,11 @@ needed, so existing embedded `code_task_project` runs keep working.
 | `[task].code_root` / `.task_file` | Source project root and task Markdown. Paths are resolved relative to the config file. |
 | `[implementation].mode` | `patch_existing` maps to controlled code-task behavior. `generate_project` plans, writes, reviews, and runs a bounded generated project under `06-code/generated_project`. |
 | `[implementation].domain_profile` | Chooses planning defaults such as `generic_research_experiment`, `code_experiment`, `ml_experiment`, or `code_agent_eval`. |
+| `[implementation].provider` | Code implementation backend. `local` is the default in-process path. `fake` is a deterministic test backend. `local_llm` writes bounded review artifacts through the configured LLM. `codex`, `claude_code`, `opencode`, and `external_cli` use the V2.6 external-agent handoff boundary and stay disabled unless `[implementation].allow_external_agent = true`. |
+| `[implementation].agent_mode` | Chooses how much of the implementation loop the selected backend may own. `model` keeps SimpleAutoResearch as the harness and only uses the configured model/backend for bounded text/code generation. `handoff` writes an auditable `agent_handoff/<name>/` package and ingests candidate files from an external agent. `delegated_workspace` is the future strong path where an external harness owns the workspace loop; it is recognized but currently fails explicitly instead of silently degrading. |
+| `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | Optional external backend launch settings. Leave `agent_model` empty to use the Codex/Claude/OpenCode CLI default configured for the account; set it only when you know the CLI supports that model name. Use `agent_binary` for a custom executable path or for generic `external_cli`; `agent_args` appends extra CLI arguments; `agent_timeout_sec` bounds one backend invocation. |
 | `[implementation].task_handoff` | Embedded existing-project runs only. `user_file` passes `[task].task_file` through unchanged. `merge` writes `05-design/generated_code_task.md` by combining the user task file as hard requirements with goal/problem/synthesis/hypothesis context. |
+| `[implementation].allow_external_agent` | Enables optional external CLI launches for agent-backed generation or repair. External outputs are copied into `agent_outputs/<name>/` and still pass SimpleAutoResearch review, result guards, or code-task validation before they matter. Keep this false for ordinary local runs. |
 | `[execution].command` / `.timeout_sec` | Command and timeout used for benchmark/execution planning; for existing projects these map to legacy benchmark settings. |
 | `[resource].max_files` / `.max_generated_lines` | Pre-code generation/edit budget written into `05-design/resource_plan.json`. |
 | `[resource].max_memory_mb` / `.allow_gpu` | Runtime resource budget recorded in `resource_plan.json` and surfaced as contract constraints before code is generated or modified. |
@@ -559,15 +574,23 @@ package rather than parsing stdout directly.
 | `[experiment].template` | `code_task_project` embeds the code-task workflow in the 8-stage pipeline. Other templates are deterministic teaching/demo paths. |
 | `[experiment].timeout` | Timeout for stage `07-run`; for embedded code tasks it also constrains nested benchmark calls. |
 | `[experiment].code_task_config` | Optional path to a standalone code-task TOML. Use this when you want pipeline and code-task settings in separate files. |
-| `[code_task].code_root` | Source project path. The original project is not edited; a workspace is prepared under the run directory. |
+| `[code_task].kind` | `existing_project` patches an existing source project; `greenfield` starts from an empty workspace and generates a project under `code_task/workspace/generated_project`. |
+| `[code_task].code_root` | Source project path for `existing_project`; optional scaffold/source root for `greenfield`. The original project is not edited. |
 | `[code_task].task_file` | User-facing task description. Required for standalone `code-task init`; embedded 8-stage runs can generate one when omitted, or merge it with research context when `[implementation].task_handoff = "merge"`. |
 | `[benchmark].command` | Command executed inside `code_task/workspace` before and after edits. It should print parseable metrics such as `accuracy: 0.82`. |
 | `[benchmark].primary_metric` | Main metric used for the objective verdict. Unknown metrics are still recorded, but need directions to decide improvement. |
 | `[benchmark.metric_directions]` | Direction map for metrics: `higher`, `lower`, `resource`, or `ignore`. |
 | `[environment].mode` | `current` uses the active SimpleAutoResearch Python; `external` uses `[environment].python`. No dependencies are installed automatically. |
-| `[workspace].mode` | Workspace strategy: `copy`, `git_worktree`, or `sparse_copy`. |
+| `[workspace].mode` | Workspace strategy: `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty` for greenfield code-task runs. Existing projects default to `auto`, which tries git worktree first and falls back to guarded copy when needed. |
 | `[workspace].reuse_source_venv` | If a source `.venv` or `venv` is detected, record and use that Python as the execution interpreter. |
 | `[workspace].setup_hook` | Stored for future managed environment support. It is not executed during init. |
+| `[implementation].provider` | Code-task implementation backend. `local` keeps the in-process SimpleAutoResearch path; `fake` is deterministic for tests; `local_llm` uses the configured LLM; `codex`, `claude_code`, `opencode`, and `external_cli` use the external-agent handoff boundary when explicitly enabled. |
+| `[implementation].agent_mode` | Implementation mode for the backend: `model` keeps SimpleAutoResearch as the harness, `handoff` ingests candidate files from an external agent package, and `delegated_workspace` is recognized but currently fails explicitly until snapshot/diff/rollback execution is implemented. |
+| `[implementation].allow_external_agent` | Required before external CLI backends may launch. External outputs remain untrusted until SimpleAutoResearch review, validation, benchmark, or result guards accept them. |
+| `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | Optional external backend launch controls. Leave `agent_model` empty unless you know the external CLI/account supports the model name. |
+| `[resource].max_runtime_sec` | Runtime budget surfaced to greenfield planning and external-agent handoff context. |
+| `[resource].max_files` / `.max_generated_lines` | Code-task generation budgets. `[execute].max_files` and `[execute].max_generated_lines` override these during `code-task execute`; otherwise execute reads these values. |
+| `[resource].max_memory_mb` / `.allow_gpu` | Memory/GPU constraints exposed to planning. They describe the allowed resource profile; dependency installation is still not automatic. |
 | `[edit_scope].allowed_patterns` | Optional workspace-relative glob allowlist for files automated edits may touch. Empty means all normalized non-protected workspace paths are editable. |
 | `[edit_scope].protected_patterns` | Additional workspace-relative glob patterns treated as read-only evidence. Defaults for tests, benchmarks, `.env`, secrets, and credentials are always retained. |
 | `[edit_scope].mode` | Optional label stored in `manifest.json`; it does not change behavior by itself. |
@@ -578,10 +601,12 @@ package rather than parsing stdout directly.
 
 | Field | Meaning |
 | --- | --- |
-| `[execute].to_step` | Last step the state-aware executor may attempt. Use `propose-edits` to stop before applying patches. |
+| `[execute].to_step` | Last step the state-aware executor may attempt. Use `propose-edits` to stop before applying patches, or `review` to stop after post-apply structured review. |
 | `[execute].use_llm` | Enables or disables LLM-backed work-plan, patch-plan, edit-proposal, and repair steps. |
-| `[execute].timeout_sec` | Benchmark timeout used by executor-managed baseline and patched runs. |
+| `[execute].timeout_sec` | Benchmark timeout used by executor-managed baseline and patched runs. If omitted, execute falls back to `[benchmark].timeout`, then `[resource].max_runtime_sec`. |
 | `[execute].stream_benchmark_output` | Live benchmark log mode: `off`, `line`, `auto`, or `summary`. Use `auto` for tqdm-like progress output. |
+| `[execute].baseline_policy` | Existing-project baseline behavior: `auto`/`run` executes the unchanged benchmark; `skip`/`none` continues without baseline comparison; `provided` records metrics from `[execute].baseline_metrics_file`. |
+| `[execute].baseline_metrics_file` | JSON or metric-line file used with `baseline_policy = "provided"`. Accepted JSON shapes include `{"accuracy": 0.8}`, `{"metrics": {...}}`, and `{"metric_values": {...}}`. |
 | `[execute].apply_proposed_edits` | Lets execute apply an already reviewed proposal. Keep false for review-first workflows. |
 | `[execute].allow_large_edits` | Allows application of reviewed proposals that exceed the normal budget but fit the large budget. |
 | `[execute].allow_planning_fallback` | Allows deterministic offline work/patch plans after all LLM planning retries fail. Keep false for real LLM runs so malformed model output stops safely and can be retried. |
@@ -589,6 +614,7 @@ package rather than parsing stdout directly.
 | `[execute].repair_rounds` | Number of bounded repair proposals after validation/benchmark failure. Repairs still require review. |
 | `[execute].max_files` | Max files included in LLM context for plan/proposal/repair steps. |
 | `[execute].max_source_chars_per_file` | Per-file source snippet budget for LLM context. |
+| `[execute].max_generated_lines` | Greenfield generation line budget. If omitted, execute falls back to `[resource].max_generated_lines`, then to a conservative default. |
 | `[models.code_task].planner` | Model used for work-plan and patch-plan generation. |
 | `[models.code_task].editor` | Model used for edit proposal generation. |
 | `[models.code_task].repair` | Model used for repair proposals after failures. |
@@ -677,10 +703,29 @@ max_queries = 4
 
 ## Workspace Mode Variants
 
+### `auto`
+
+`auto` is the recommended existing-project default. It prefers a detached
+`git_worktree` when `code_root` is inside a local Git repository with at least
+one commit. If worktree preparation is not possible, it falls back to `copy`
+and records the reason plus next steps in the manifest and CLI output.
+
+```toml
+[workspace]
+mode = "auto"
+reuse_source_venv = false
+setup_hook = ""
+```
+
+When `code_root` points to a subdirectory inside a larger repository,
+SimpleAutoResearch creates the worktree at the repository root and uses the
+matching subdirectory as the project root for indexing, editing, and running.
+
 ### `copy`
 
-`copy` is the safest default. It creates a guarded physical copy under
-`code_task/workspace`.
+`copy` creates a guarded physical copy under `code_task/workspace`. Use it for
+non-Git projects, dirty filesystem experiments that are not committed yet, or
+cases where you deliberately want to include the current working tree state.
 
 ```toml
 [workspace]
@@ -694,9 +739,11 @@ max_file_bytes = 2000000
 
 ### `git_worktree`
 
-`git_worktree` creates a detached worktree for repo-root git projects. The
-source project must be a local git repository with at least one commit. A remote
-GitHub repository is not required.
+`git_worktree` creates a detached worktree and fails instead of falling back
+when Git isolation is not possible. `code_root` may be the repository root or a
+project subdirectory inside the repository. The source project must be a local
+Git repository with at least one commit. A remote GitHub repository is not
+required.
 
 ```toml
 [workspace]
@@ -729,6 +776,7 @@ Use this with `simple-ar code-task init --config PATH` and later
 
 ```toml
 [code_task]
+kind = "existing_project"     # existing_project | greenfield
 code_root = "path/to/project"
 task_file = "tasks/improve_model.md"
 output_root = "runs"
@@ -763,10 +811,30 @@ use_llm = true
 timeout_sec = 120
 repair_rounds = 1
 stream_benchmark_output = "auto"
+baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
 llm_retry_attempts = 2
+max_files = 8
+max_source_chars_per_file = 4000
+max_generated_lines = 1600
+
+[implementation]
+provider = "local"            # local | fake | local_llm | codex | claude_code | opencode | external_cli
+agent_mode = "model"          # model | handoff | delegated_workspace
+allow_external_agent = false
+agent_model = ""              # empty means use the external CLI/account default
+agent_binary = ""
+agent_args = []
+agent_timeout_sec = 600
+
+[resource]
+max_runtime_sec = 120
+max_files = 8
+max_generated_lines = 1600
+max_memory_mb = 4096
+allow_gpu = false
 
 [budget]
 profile = "normal"
@@ -780,6 +848,59 @@ max_new_chars = 4000
 max_total_edit_chars = 12000
 max_proposal_chars = 24000
 ```
+
+For a standalone greenfield code task, omit `code_root` unless you deliberately
+want to start from a scaffold/template directory. The workspace defaults to
+`empty`, and `execute` generates the project under
+`code_task/workspace/generated_project`:
+
+```toml
+[code_task]
+kind = "greenfield"
+task_file = "tasks/build_new_project.md"
+name = "greenfield-project"
+
+[benchmark]
+command = "python generated_project/main.py"
+primary_metric = "accuracy"
+
+[workspace]
+mode = "empty"
+
+[execute]
+to_step = "run"
+max_files = 16
+max_generated_lines = 4000
+baseline_policy = "none"
+
+[implementation]
+provider = "local"
+agent_mode = "model"
+allow_external_agent = false
+
+[resource]
+max_runtime_sec = 600
+max_files = 16
+max_generated_lines = 4000
+allow_gpu = false
+```
+
+To test a Codex/Claude/OpenCode handoff for the same greenfield task, keep the
+same `[code_task]`, `[benchmark]`, and `[resource]` sections, then change only
+the implementation backend:
+
+```toml
+[implementation]
+provider = "codex"
+agent_mode = "handoff"
+allow_external_agent = true
+agent_model = ""          # use the model configured by the external CLI/account
+agent_timeout_sec = 1800
+```
+
+The external agent still writes untrusted candidate files first. SimpleAutoResearch
+ingests them, copies them into `code_task/workspace/generated_project`, and then
+runs the normal review, validation, benchmark, guard, memory, and repair path.
 
 ## Embedded Code-Task Config
 
@@ -812,6 +933,7 @@ repair_rounds = 1
 max_files = 8
 max_source_chars_per_file = 4000
 stream_benchmark_output = "auto"
+baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
@@ -844,6 +966,16 @@ max_proposal_chars = 24000
 | `line` | Relay newline-delimited output. |
 | `auto` / `true` | Handle regular line logs and carriage-return progress such as `tqdm`. |
 | `summary` | Print only a tail summary after the benchmark finishes. |
+
+`baseline_policy` values for existing-project tasks:
+
+| Value | Meaning |
+| --- | --- |
+| `auto` | Default behavior. Run the unchanged benchmark when a baseline is needed for comparison. |
+| `run` | Force an unchanged baseline run. |
+| `skip` | Skip the unchanged baseline but still allow code understanding, review, validation, and final benchmark execution. |
+| `provided` | Record user-supplied metrics from `baseline_metrics_file`; summaries mark them as provided, not reproduced. |
+| `none` | Mark the task as having no meaningful baseline comparison. Useful for pure generation or acceptance-style tasks. |
 
 ## Edit Scope Behavior
 

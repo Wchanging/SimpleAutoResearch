@@ -1,0 +1,133 @@
+[run]
+topic = "tool and MCP backed Codex greenfield experiment"
+output_root = "runs/tool-mcp-codex-agent"
+to_stage = "run"
+debug_artifacts = false
+
+[llm]
+enabled = true
+workers = 2
+
+[search]
+offline = true
+max_papers = 4
+allow_fixture_fallback = true
+
+[research]
+mode = "lite"
+planner = "auto"
+sources = ["local_files"]
+queries = ["lightweight local text classification ablation"]
+auto_query_expansion = false
+max_retrieval_rounds = 1
+max_queries = 3
+required_facets = ["method", "benchmark", "dataset"]
+cache = true
+index_backend = "keyword"
+local_documents = ["../../greenfield_lightweight_training/evidence/lightweight_text_classification_notes.md"]
+
+[research.budget]
+max_documents = 4
+max_chunks = 40
+max_context_tokens = 5000
+max_llm_calls = 4
+
+[experiment]
+template = "greenfield_project"
+timeout = 60
+
+[task]
+kind = "greenfield"
+name = "tool-mcp-codex-agent"
+objective = """
+Use a Codex external-agent backend to generate a bounded Python text
+classification experiment project, then validate the generated project through
+SimpleAutoResearch code review and result guards. The resulting run should be
+usable with `simple-ar tools serve-mcp` for read-only experiment inspection.
+"""
+task_file = "../task.md"
+
+[implementation]
+mode = "generate_project"
+domain_profile = "ml_experiment"
+provider = "codex"
+allow_external_agent = true
+agent_mode = "handoff"
+# Leave empty to use the Codex CLI default configured for your account.
+# Set only to a model that your Codex CLI account explicitly supports.
+agent_model = ""
+agent_binary = "codex"
+agent_args = []
+agent_timeout_sec = 900
+max_repair_attempts = 1
+
+[execution]
+backend = "local"
+command = "python experiment.py"
+timeout_sec = 60
+stream_output = "auto"
+allow_dependency_install = false
+
+[resource]
+max_runtime_sec = 60
+max_files = 12
+max_generated_lines = 1800
+max_memory_mb = 2048
+allow_gpu = false
+
+[evaluation]
+primary_metric = "accuracy"
+direction = "maximize"
+required_metrics = [
+  "accuracy",
+  "macro_f1",
+  "majority_accuracy",
+  "keyword_accuracy",
+  "unigram_accuracy",
+  "bigram_accuracy",
+  "ablation_gain",
+  "condition_count",
+  "data_size",
+  "train_time_sec",
+  "inference_time_ms",
+  "parameter_count",
+]
+success_criteria = [
+  "external Codex backend should produce generated_files under agent_handoff",
+  "SimpleAutoResearch should ingest and review the candidate project",
+  "generated project should emit all required metrics",
+  "read-only tools should inspect generated code and canonical results after run",
+]
+
+[evaluation.metric_directions]
+accuracy = "higher"
+macro_f1 = "higher"
+majority_accuracy = "higher"
+keyword_accuracy = "higher"
+unigram_accuracy = "higher"
+bigram_accuracy = "higher"
+ablation_gain = "higher"
+condition_count = "higher"
+data_size = "resource"
+train_time_sec = "resource"
+inference_time_ms = "resource"
+parameter_count = "resource"
+
+[generation]
+enabled = true
+max_batches = 3
+files_per_batch = 4
+review_required = true
+allow_fallback_scaffold = false
+
+[report]
+mode = "experiment"
+template = "experiment"
+criteria = "auto"
+style = "technical"
+agent = "llm"
+reviewer = "llm"
+max_review_iterations = 1
+max_section_tokens = 900
+max_report_tokens = 3500
+source_strategy = "full"

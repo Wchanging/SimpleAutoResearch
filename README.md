@@ -32,8 +32,9 @@ experimentation, and gradual extension.
   screening, coverage checks, follow-up rounds, document records, cache policy,
   and lightweight budgets. Normal runs keep compact evidence artifacts; set
   `debug_artifacts = true` when you also need planning/traces/coverage files.
-- **Code tasks**: improve an existing codebase inside an isolated editable
-  workspace with LLM planning, review gates, controlled patch proposals,
+- **Code tasks**: improve an existing codebase or generate a bounded
+  greenfield project inside an isolated editable workspace with LLM planning,
+  task memory, review gates, controlled patch/generation artifacts,
   validation, benchmark execution, and metric comparison.
 - **Workspace strategies**: use `copy` for the safest isolated copy,
   `git_worktree` for larger git repositories where full copying is wasteful,
@@ -41,6 +42,10 @@ experimentation, and gradual extension.
 - **Research-to-code runs**: embed a code task inside the 8-stage pipeline with
   repo maps, context packs, work plans, patch evidence, benchmark metrics, and
   report evidence.
+- **Tool and external-agent boundaries**: export real read-only tool schemas,
+  serve run-local tools over MCP stdio, and optionally hand off bounded
+  greenfield generation/repair to external CLI agents such as Codex while still
+  routing returned files through SimpleAutoResearch review and run guards.
 - **Reviewable artifacts**: each run writes inspectable files under `runs/`
   instead of hiding decisions inside process memory.
 - **Mature library foundation**: pipeline/code-task TOML configs are validated
@@ -144,7 +149,7 @@ accuracy = "higher"
 latency_ms = "resource"
 
 [workspace]
-mode = "copy"  # copy | git_worktree | sparse_copy
+mode = "auto"  # auto | copy | git_worktree | sparse_copy
 ```
 
 Then run the reviewed flow. `init` prints a run directory such as
@@ -165,7 +170,8 @@ uv run simple-ar status runs/<run-id>
 That sequence prepares an isolated workspace, runs the baseline benchmark,
 builds a work plan, stops for patch-plan review, generates
 `code_task/meta/proposed_edits.json`, applies the reviewed proposal, validates
-the patched workspace, runs the patched benchmark, and writes the final status.
+the patched workspace, runs structured post-apply/post-run reviews, runs the
+patched benchmark, and writes the final status.
 If the result needs a bounded follow-up, use the repair path documented in
 [Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
 
@@ -219,7 +225,7 @@ accuracy = "higher"
 latency_ms = "resource"
 
 [workspace]
-mode = "copy"  # copy | git_worktree | sparse_copy
+mode = "auto"  # auto | copy | git_worktree | sparse_copy
 
 [environment]
 mode = "current"
@@ -252,13 +258,14 @@ research context before entering code-task execution.
 
 ### 4. Greenfield Experiment
 
-Use this when the task has no existing source project yet. V2.5 writes an
-experiment contract, generates a bounded project under `06-code/generated_project`,
-reviews the generated files, runs `experiment.py`, and accepts only canonical
-`07-run/results.json` metrics guarded by `guard_report.json`. Rerunning `code`
-or `run` archives existing reviewed artifacts by default, and reports consume
-canonical results, resource limits, guard status, and code-review signals rather
-than raw stdout alone.
+Use this when the task has no existing source project yet. The current path
+uses the same code-task engine as existing-code tasks: `05-design` writes an
+experiment contract, `06-code` creates a nested `kind = "greenfield"` code-task
+run under `06-code/code_task_run/`, and the generated project is projected back
+to `06-code/generated_project/` for `07-run`. Rerunning `code` or `run` archives
+existing reviewed artifacts by default, and reports consume canonical results,
+resource limits, guard status, and code-review signals rather than raw stdout
+alone.
 
 A lightweight public example is available at
 `examples/greenfield_lightweight_training/configs/greenfield_training.toml`.
@@ -285,16 +292,20 @@ still intentionally conservative.
   but it is weaker than a full autonomous coding agent.
 - The default edit scope protects tests, benchmark files, and secret-like paths
   from automated patching.
-- `git_worktree` requires a git repository root with at least one local commit;
-  it does not require a GitHub remote.
+- `auto` prefers a detached worktree for Git projects with at least one local
+  commit; `code_root` may be either the repository root or a project
+  subdirectory inside it. If Git cannot be used safely, `auto` falls back to
+  copy and records the reason; explicit `git_worktree` fails with a repair
+  checklist instead.
 - `sparse_copy` is experimental and can omit runtime dependencies if the
   allowlist is too narrow.
 - The tool does not yet install project dependencies or manage
   Docker/Conda/GPU/Slurm environments.
-- Large code-edit proposals may still produce long LLM completions. V2.5 is
-  moving experiment/code execution toward explicit contracts, resource budgets,
-  canonical results, guards, a bounded greenfield path, and future
-  external-agent adapters before recommending unattended large refactors.
+- Large code-edit proposals may still produce long LLM completions. Current
+  experiment/code execution uses explicit contracts, resource budgets,
+  canonical results, guards, bounded greenfield generation, and optional
+  external-agent handoff, but it is still not a recommended unattended large
+  refactoring tool.
 - Literature search now has an auditable source plan and document-store
   metadata, and can use OpenAlex, Semantic Scholar, arXiv, or local
   Markdown/text notes. It can parse local/cached Markdown, text, basic HTML, and

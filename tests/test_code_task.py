@@ -33,6 +33,7 @@ from simple_ar.code_task import (
     validate_code_task,
 )
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
+from simple_ar.code_task.generation.generated_project_repair import repair_generated_project_from_run_failure
 from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
     prepare_code_task_experiment,
@@ -129,6 +130,261 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("# Repo Map Summary", repo_summary)
             self.assertIn("## Prompt Budget", repo_summary)
 
+    def test_greenfield_init_uses_empty_workspace_without_code_root(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(task_file, "# Task\n\nCreate a small runnable Python experiment.\n")
+            config = root / "greenfield.toml"
+            write_text(
+                config,
+                """
+[code_task]
+kind = "greenfield"
+task_file = "task.md"
+name = "greenfield-smoke"
+
+[benchmark]
+command = "python generated_project/main.py"
+primary_metric = "accuracy"
+""".strip(),
+            )
+
+            options = load_code_task_init_options(config_path=str(config))
+            self.assertEqual(options.kind, "greenfield")
+            self.assertIsNone(options.code_root)
+            self.assertEqual(options.workspace_mode, "empty")
+
+            run_dir = root / "runs" / "greenfield-run"
+            result = initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind=options.kind,
+                benchmark_command=options.benchmark_command,
+                workspace_mode=options.workspace_mode,
+                primary_metric=options.primary_metric,
+            )
+
+            self.assertEqual(result.kind, "greenfield")
+            self.assertTrue(result.workspace_dir.is_dir())
+            self.assertEqual(list(result.workspace_dir.iterdir()), [])
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["code_task"]["kind"], "greenfield")
+            self.assertEqual(manifest["workspace"]["mode"], "empty")
+            self.assertEqual(manifest["source"]["code_root"], "")
+
+    def test_greenfield_execute_generates_validates_and_runs_project(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nGenerate a deterministic project that prints accuracy and macro_f1 metrics.\n",
+            )
+            run_dir = root / "runs" / "greenfield-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="accuracy",
+                metric_directions={"accuracy": "higher_is_better"},
+            )
+
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="run",
+                timeout_sec=30,
+                max_files=8,
+            )
+
+            self.assertEqual(result.stop_reason, "completed")
+            self.assertTrue((run_dir / "code_task" / "workspace" / "generated_project" / "main.py").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "resource_probe.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "resource_decision.json").is_file())
+            advice = read_json(run_dir / "code_task" / "meta" / "dependency_advice.json")
+            self.assertEqual(advice["schema_version"], "code_task_dependency_advice.v1")
+            self.assertEqual(advice["policy"], "advice_only_no_auto_install")
+            validation = read_json(run_dir / "code_task" / "meta" / "validation_report.json")
+            self.assertEqual(validation["status"], "passed")
+            metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
+            self.assertIn("accuracy", metrics)
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["implementation"]["status"], "generated")
+            self.assertEqual(manifest["patch"]["mode"], "greenfield_generated")
+
+    def test_greenfield_review_failure_can_be_repaired_and_continue(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nGenerate a deterministic project that prints accuracy and macro_f1 metrics.\n",
+            )
+            run_dir = root / "runs" / "greenfield-review-repair"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="accuracy",
+                metric_directions={"accuracy": "higher_is_better", "macro_f1": "higher_is_better"},
+            )
+
+            first = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="work-plan",
+                timeout_sec=30,
+                max_files=8,
+            )
+            self.assertEqual(first.stop_reason, "stop_point")
+            init_file = (
+                run_dir
+                / "code_task"
+                / "workspace"
+                / "generated_project"
+                / "generated_experiment"
+                / "__init__.py"
+            )
+            write_text(init_file, '__"""generated_experiment package."""\n')
+            write_json(
+                run_dir / "code_task" / "meta" / "review_report.json",
+                {
+                    "schema_version": "review_report.v1",
+                    "status": "failed",
+                    "findings": [
+                        {
+                            "severity": "blocking",
+                            "category": "python_compile_failed",
+                            "summary": "generated_experiment/__init__.py does not compile.",
+                        }
+                    ],
+                    "summary": {"blocking_count": 1, "error_count": 1, "warning_count": 0},
+                },
+            )
+
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="run",
+                timeout_sec=30,
+                max_files=8,
+                repair_rounds=1,
+            )
+
+            self.assertEqual(result.stop_reason, "completed")
+            repair = read_json(run_dir / "code_task" / "meta" / "review_repair.json")
+            self.assertEqual(repair["status"], "patched")
+            rereview = read_json(run_dir / "code_task" / "meta" / "review_report.json")
+            self.assertNotEqual(rereview["status"], "failed")
+            metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
+            self.assertIn("accuracy", metrics)
+
+    def test_greenfield_run_repair_handles_preset_and_function_signature_mismatch(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            package_dir = project_dir / "generated_experiment"
+            package_dir.mkdir(parents=True)
+            write_json(
+                project_dir / "config.json",
+                {
+                    "objective": "Greenfield run repair test.",
+                    "presets": {
+                        "{preset_name}": {
+                            "conditions": ["baseline", "candidate"],
+                            "max_items": 32,
+                        }
+                    },
+                },
+            )
+            write_text(
+                package_dir / "runner.py",
+                (
+                    "def run_experiment(preset='smoke'):\n"
+                    "    return {'score': 1.0}\n"
+                ),
+            )
+
+            preset_repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair"},
+                stderr_text=(
+                    "raise KeyError(f\"Unknown preset '{preset_name}'. Available presets: {available}\")\n"
+                    "KeyError: \"Unknown preset 'smoke'. Available presets: {preset_name}\"\n"
+                ),
+                output_path=root / "run_repair_preset.json",
+            )
+
+            self.assertEqual(preset_repair["status"], "patched")
+            config = read_json(project_dir / "config.json")
+            self.assertIn("smoke", config["presets"])
+            self.assertNotIn("{preset_name}", config["presets"])
+
+            signature_repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair"},
+                stderr_text="TypeError: run_experiment() got an unexpected keyword argument 'data_source'",
+                output_path=root / "run_repair_signature.json",
+            )
+
+            self.assertEqual(signature_repair["status"], "patched")
+            self.assertIn("generated_experiment/runner.py", signature_repair["changed_files"])
+            self.assertIn("def run_experiment(preset='smoke', data_source=None):", read_text(package_dir / "runner.py"))
+
+    def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nUse an external handoff backend to generate a runnable metric project.\n",
+            )
+            run_dir = root / "runs" / "greenfield-agent-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="accuracy",
+            )
+
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="run",
+                timeout_sec=30,
+                implementation_provider="fake",
+                implementation_agent_mode="handoff",
+            )
+
+            self.assertEqual(result.stop_reason, "completed")
+            self.assertTrue((run_dir / "agent_handoff" / "code-task-greenfield-fake").is_dir())
+            self.assertTrue((run_dir / "agent_outputs" / "code-task-greenfield-fake" / "ingestion.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "dependency_advice.md").is_file())
+            backend = read_json(run_dir / "code_task" / "meta" / "code_backend.json")
+            self.assertEqual(backend["backend"], "greenfield_agent")
+            self.assertEqual(backend["provider"], "fake")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["implementation"]["provider"], "fake")
+            self.assertEqual(manifest["implementation"]["agent_mode"], "handoff")
+            metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
+            self.assertIn("accuracy", metrics)
+
     def test_configured_edit_scope_limits_editable_repo_map_and_apply(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -223,6 +479,7 @@ protected_patterns = ["pyproject.toml"]
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["workspace"]["mode"], "git_worktree")
             self.assertEqual(manifest["workspace"]["workspace_dir"], "code_task/workspace")
+            self.assertEqual(manifest["workspace"]["project_root"], "code_task/workspace")
             self.assertEqual(manifest["copy"]["files_copied"], 0)
             self.assertTrue(manifest["workspace"]["git"]["origin_commit"])
             self.assertEqual(manifest["workspace"]["environment_mapping"]["mode"], "git_worktree")
@@ -230,7 +487,42 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(index["project"]["python_file_count"], 2)
             self.assertNotIn(".env", {item["path"] for item in index["files"]})
 
-    def test_git_worktree_requires_repo_root(self) -> None:
+    def test_auto_workspace_prefers_git_worktree_for_git_project(self) -> None:
+        if shutil.which("git") is None:
+            self.skipTest("git executable is not available")
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "git_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            shutil.rmtree(code_root / ".git")
+            write_text(task_file, "# Task\n\nImprove the spam classifier.\n")
+            _git(code_root, "init")
+            _git(code_root, "config", "user.email", "test@example.com")
+            _git(code_root, "config", "user.name", "SimpleAR Test")
+            _git(code_root, "add", ".")
+            _git(code_root, "commit", "-m", "initial")
+
+            run_dir = root / "runs" / "auto-worktree-run"
+            result = initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                workspace_mode="auto",
+                max_file_bytes=10_000,
+            )
+
+            self.assertEqual(result.workspace.mode, "git_worktree")
+            self.assertEqual(result.workspace.requested_mode, "auto")
+            self.assertEqual(result.workspace.selected_mode, "git_worktree")
+            self.assertTrue((result.workspace.workspace_dir / ".git").exists())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["workspace"]["requested_mode"], "auto")
+            self.assertEqual(manifest["workspace"]["selected_mode"], "git_worktree")
+            self.assertEqual(manifest["workspace"]["fallback_reason"], "")
+
+    def test_git_worktree_supports_project_subdirectory(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git executable is not available")
         TEST_ROOT.mkdir(exist_ok=True)
@@ -240,6 +532,7 @@ protected_patterns = ["pyproject.toml"]
             code_root = repo / "package"
             code_root.mkdir(parents=True)
             write_text(code_root / "module.py", "VALUE = 1\n")
+            write_text(repo / "root_only.py", "ROOT_VALUE = 1\n")
             task_file = root / "task.md"
             write_text(task_file, "# Task\n\nChange VALUE.\n")
             _git(repo, "init")
@@ -248,13 +541,71 @@ protected_patterns = ["pyproject.toml"]
             _git(repo, "add", ".")
             _git(repo, "commit", "-m", "initial")
 
-            with self.assertRaisesRegex(RuntimeError, "requires code_root"):
-                initialize_code_task(
-                    run_dir=root / "runs" / "subdir-worktree-run",
-                    code_root=code_root,
-                    task_file=task_file,
-                    workspace_mode="git_worktree",
-                )
+            run_dir = root / "runs" / "subdir-worktree-run"
+            result = initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                workspace_mode="git_worktree",
+            )
+
+            self.assertEqual(result.workspace_dir, result.workspace.project_root)
+            self.assertTrue((result.workspace_dir / "module.py").is_file())
+            self.assertFalse((result.workspace_dir / ".git").exists())
+            self.assertTrue((result.workspace.workspace_dir / ".git").exists())
+            manifest = read_json(root / "runs" / "subdir-worktree-run" / "manifest.json")
+            self.assertEqual(manifest["workspace"]["mode"], "git_worktree")
+            self.assertEqual(manifest["workspace"]["workspace_dir"], "code_task/workspace")
+            self.assertEqual(manifest["workspace"]["project_root"], "code_task/workspace/package")
+            self.assertEqual(manifest["workspace"]["project_relative_path"], "package")
+            self.assertIn("subdirectory", " ".join(manifest["workspace"]["warnings"]))
+            index = read_json(result.codebase_index_path)
+            self.assertEqual(index["project"]["file_count"], 1)
+            proposal = run_dir / "code_task" / "meta" / "escape_proposal.json"
+            write_json(
+                proposal,
+                {
+                    "edits": [
+                        {
+                            "path": "../root_only.py",
+                            "old": "ROOT_VALUE = 1",
+                            "new": "ROOT_VALUE = 2",
+                            "reason": "This must not escape the package project root.",
+                        }
+                    ]
+                },
+            )
+            with self.assertRaises(PatchValidationError):
+                apply_patch_edits(run_dir, edits_file=proposal, allow_unapproved_plan=True)
+            self.assertEqual(read_text(repo / "root_only.py"), "ROOT_VALUE = 1\n")
+
+    def test_auto_workspace_falls_back_to_copy_for_non_git_project(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "plain_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove the plain project.\n")
+
+            run_dir = root / "runs" / "auto-copy-run"
+            result = initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                workspace_mode="auto",
+                max_file_bytes=10_000,
+            )
+
+            self.assertEqual(result.workspace.mode, "copy")
+            self.assertEqual(result.workspace.requested_mode, "auto")
+            self.assertEqual(result.workspace.selected_mode, "copy")
+            self.assertTrue((result.workspace_dir / "spam_model.py").is_file())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["workspace"]["requested_mode"], "auto")
+            self.assertEqual(manifest["workspace"]["selected_mode"], "copy")
+            self.assertTrue(manifest["workspace"]["fallback_reason"])
+            self.assertTrue(manifest["workspace"]["user_next_steps"])
 
     def test_init_can_create_sparse_copy_workspace(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -2293,6 +2644,73 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(fake_client.calls, 2)
             self.assertFalse((run_dir / "code_task" / "patch_plan.md").exists())
 
+    def test_execute_can_skip_expensive_baseline(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nSkip unchanged baseline for an expensive task.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="baseline",
+                baseline_policy="skip",
+            )
+
+            self.assertEqual(result.stop_reason, "stop_point")
+            self.assertFalse((run_dir / "code_task" / "run" / "baseline" / "execution_report.json").exists())
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["benchmark"]["baseline_policy"]["policy"], "skip")
+            self.assertEqual(manifest["benchmark"]["baseline_policy"]["status"], "skipped")
+            summary = read_text(run_dir / "code_task" / "summary.md")
+            self.assertIn("Baseline policy", summary)
+            self.assertIn("skip", summary)
+
+    def test_execute_can_record_provided_baseline_metrics(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            metrics_file = root / "baseline_metrics.json"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nUse existing baseline evidence.\n")
+            write_json(metrics_file, {"accuracy": 0.75, "loss": 1.25})
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="baseline",
+                baseline_policy="provided",
+                baseline_metrics_file=metrics_file,
+            )
+
+            self.assertEqual(result.stop_reason, "stop_point")
+            report = read_json(run_dir / "code_task" / "run" / "baseline" / "execution_report.json")
+            self.assertTrue(report["provided_baseline"])
+            self.assertEqual(report["metric_values"]["accuracy"], 0.75)
+            manifest = read_json(run_dir / "manifest.json")
+            baseline = manifest["benchmark"]["runs"]["baseline"]
+            self.assertTrue(baseline["provided"])
+            self.assertEqual(manifest["benchmark"]["baseline_policy"]["policy"], "provided")
+
     def test_execute_dry_run_has_no_side_effects(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -3060,6 +3478,8 @@ class _FakeRepairClient:
 
 class _FakeCodeTaskClient:
     def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+        if label.startswith("code-task-review-"):
+            return {"findings": []}
         if label == "code-task-work-plan":
             return {
                 "summary": "Improve prize-message classification in one small batch.",

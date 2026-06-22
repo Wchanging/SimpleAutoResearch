@@ -31,12 +31,20 @@ def initial_implementation_memory(
     }
 
 
-def record_generated_file(memory: dict[str, Any], *, path: str, summary: str, mode: str) -> None:
+def record_generated_file(
+    memory: dict[str, Any],
+    *,
+    path: str,
+    summary: str,
+    mode: str,
+    public_api: list[str] | None = None,
+) -> None:
     memory.setdefault("file_summaries", []).append(
         {
             "path": path,
             "summary": summary,
             "mode": mode,
+            "public_api": list(public_api or []),
         }
     )
 

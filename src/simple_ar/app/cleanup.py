@@ -18,6 +18,7 @@ from simple_ar.research.store.index import DEFAULT_SHARED_INDEX_ROOT
 
 
 CleanTargetKind = Literal["file", "directory", "sqlite_rows", "lancedb_rows"]
+DEFAULT_AGENT_HANDOFF_ARCHIVE_ROOT = Path(".simple_ar_cache") / "agent_handoff_archives"
 
 
 class CleanError(RuntimeError):
@@ -174,18 +175,26 @@ def build_shared_cache_clean_plan(
     """Build a destructive cleanup plan for all shared cache stores.
 
     This is stronger than ``build_shared_index_clean_plan``. It clears the
-    shared research index store and the shared literature-provider cache under
-    ``.simple_ar_cache`` by default. Run-local audit artifacts remain untouched.
+    shared research index store, the shared literature-provider cache, and
+    external-agent handoff archives under ``.simple_ar_cache`` by default.
+    Run-local audit artifacts remain untouched.
     """
 
+    shared_index_root = _resolve_shared_index_root(index_root)
+    literature_root = _resolve_literature_cache_root(literature_cache_root)
+    agent_handoff_archive_root = _resolve_agent_handoff_archive_root(shared_index_root, literature_root)
     roots = [
         (
-            _resolve_shared_index_root(index_root),
+            shared_index_root,
             "shared research index store used across runs",
         ),
         (
-            _resolve_literature_cache_root(literature_cache_root),
+            literature_root,
             "shared literature provider cache used across runs",
+        ),
+        (
+            agent_handoff_archive_root,
+            "external-agent handoff archives from prior runs",
         ),
     ]
     for root, _reason in roots:
@@ -248,10 +257,11 @@ def render_clean_plan(plan: CleanPlan, *, console: Console | None = None) -> Non
                 (
                     "[bold red]Shared-cache cleanup is enabled.[/bold red]\n"
                     "This clears cross-run cache stores, including the shared "
-                    "research index and the literature provider cache. Future "
-                    "runs can rebuild these artifacts, but they may need to "
-                    "re-query providers, re-download metadata, and rebuild local "
-                    "search acceleration."
+                    "research index, the literature provider cache, and external "
+                    "agent handoff archives. Future runs can rebuild these artifacts, "
+                    "but they may need to re-query providers, re-download metadata, "
+                    "rebuild local search acceleration, or lose prior external-agent "
+                    "handoff transcripts."
                 ),
                 title="[bold red]Strong Cleanup Warning[/bold red]",
                 border_style="red",
@@ -642,6 +652,12 @@ def _resolve_literature_cache_root(value: str | Path | None) -> Path:
     if value is not None and str(value).strip():
         return Path(str(value)).resolve()
     return DEFAULT_LITERATURE_CACHE_DIR.resolve()
+
+
+def _resolve_agent_handoff_archive_root(index_root: Path, literature_root: Path) -> Path:
+    if index_root.parent.resolve() == literature_root.parent.resolve():
+        return (index_root.parent / DEFAULT_AGENT_HANDOFF_ARCHIVE_ROOT.name).resolve()
+    return DEFAULT_AGENT_HANDOFF_ARCHIVE_ROOT.resolve()
 
 
 def _common_root(paths: list[Path]) -> Path:

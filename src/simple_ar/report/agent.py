@@ -101,7 +101,7 @@ def run_report_agent(
             first_batch = source_batches[0] if source_batches else section.evidence_handles
             draft_section = _section_with_evidence(section, first_batch)
             _emit(emit, f"Writer drafting `{section.heading}`.")
-            draft = _draft_section(
+            draft = _draft_section_with_recovery(
                 client=client,
                 context=context,
                 template=template,
@@ -112,6 +112,7 @@ def run_report_agent(
                 label=f"report-writer-{section.section_id}",
                 source_batch_index=1,
                 source_batch_count=len(source_batches),
+                emit=emit,
             )
             iterations.append(_iteration(section_index, section, "draft", draft.status, draft.used_sources))
 
@@ -125,7 +126,7 @@ def run_report_agent(
                         ),
                     )
                     batch_section = _section_with_evidence(section, batch)
-                    revised = _draft_section(
+                    revised = _draft_section_with_recovery(
                         client=client,
                         context=context,
                         template=template,
@@ -137,6 +138,7 @@ def run_report_agent(
                         label=f"report-integrator-{section.section_id}-{batch_index}",
                         source_batch_index=batch_index,
                         source_batch_count=len(source_batches),
+                        emit=emit,
                     )
                     draft = _merge_incremental_draft(draft, revised)
                     iterations.append(
@@ -150,7 +152,7 @@ def run_report_agent(
                                 f"{len(source_batches)} for `{section.heading}`."
                             ),
                         )
-                        batch_review = _review_section(
+                        batch_review = _review_section_with_recovery(
                             client=client,
                             context=context,
                             template=template,
@@ -158,6 +160,7 @@ def run_report_agent(
                             section=batch_section,
                             draft=draft,
                             label=f"report-batch-reviewer-{section.section_id}-{batch_index}",
+                            emit=emit,
                         )
                         batch_tool_results = _run_context_requests(gateway, batch_review, config)
                         all_tool_results.extend(batch_tool_results)
@@ -175,7 +178,7 @@ def run_report_agent(
                         )
                         if _needs_revision(batch_review) and config.max_review_iterations > 0:
                             _emit(emit, f"Writer revising `{section.heading}` from batch reviewer findings.")
-                            batch_revised = _draft_section(
+                            batch_revised = _draft_section_with_recovery(
                                 client=client,
                                 context=context,
                                 template=template,
@@ -188,6 +191,7 @@ def run_report_agent(
                                 label=f"report-batch-reviser-{section.section_id}-{batch_index}",
                                 source_batch_index=batch_index,
                                 source_batch_count=len(source_batches),
+                                emit=emit,
                             )
                             draft = _merge_incremental_draft(draft, batch_revised)
                             iterations.append(
@@ -206,7 +210,7 @@ def run_report_agent(
                 continue
 
             _emit(emit, f"Reviewer checking `{section.heading}`.")
-            review = _review_section(
+            review = _review_section_with_recovery(
                 client=client,
                 context=context,
                 template=template,
@@ -214,6 +218,7 @@ def run_report_agent(
                 section=section,
                 draft=draft,
                 label=f"report-reviewer-{section.section_id}",
+                emit=emit,
             )
             tool_results = _run_context_requests(gateway, review, config)
             all_tool_results.extend(tool_results)
@@ -232,7 +237,7 @@ def run_report_agent(
 
             if _needs_revision(review) and config.max_review_iterations > 0:
                 _emit(emit, f"Writer revising `{section.heading}` from reviewer findings.")
-                revised = _draft_section(
+                revised = _draft_section_with_recovery(
                     client=client,
                     context=context,
                     template=template,
@@ -243,12 +248,13 @@ def run_report_agent(
                     review=review,
                     extra_context=tool_results,
                     label=f"report-reviser-{section.section_id}",
+                    emit=emit,
                 )
                 draft = revised
                 iterations.append(_iteration(section_index, section, "revise", draft.status, draft.used_sources))
 
                 if config.max_review_iterations > 1:
-                    second_review = _review_section(
+                    second_review = _review_section_with_recovery(
                         client=client,
                         context=context,
                         template=template,
@@ -256,6 +262,7 @@ def run_report_agent(
                         section=section,
                         draft=draft,
                         label=f"report-reviewer-{section.section_id}-revise",
+                        emit=emit,
                     )
                     all_findings.extend(second_review.findings)
                     iterations.append(
@@ -319,21 +326,25 @@ def _draft_section(
     review: ReportSectionReview | None = None,
     source_batch_index: int = 1,
     source_batch_count: int = 1,
+    prompt_suffix: str = "",
 ) -> ReportSectionDraft:
+    prompt = _writer_prompt(
+        context=context,
+        template=template,
+        memory=memory,
+        section=section,
+        config=config,
+        extra_context=extra_context,
+        previous_draft=previous_draft,
+        review=review,
+        source_batch_index=source_batch_index,
+        source_batch_count=source_batch_count,
+    )
+    if prompt_suffix:
+        prompt = prompt + "\n\n" + prompt_suffix
     response = client.ask_json(
         WRITER_SYSTEM,
-        _writer_prompt(
-            context=context,
-            template=template,
-            memory=memory,
-            section=section,
-            config=config,
-            extra_context=extra_context,
-            previous_draft=previous_draft,
-            review=review,
-            source_batch_index=source_batch_index,
-            source_batch_count=source_batch_count,
-        ),
+        prompt,
         label=label,
     )
     draft = ReportSectionDraft.model_validate(_normalize_draft_response(response, section))
@@ -351,19 +362,168 @@ def _review_section(
     section: ReportSectionPlan,
     draft: ReportSectionDraft,
     label: str,
+    prompt_suffix: str = "",
 ) -> ReportSectionReview:
+    prompt = _reviewer_prompt(
+        context=context,
+        template=template,
+        memory=memory,
+        section=section,
+        draft=draft,
+    )
+    if prompt_suffix:
+        prompt = prompt + "\n\n" + prompt_suffix
     response = client.ask_json(
         REVIEWER_SYSTEM,
-        _reviewer_prompt(
+        prompt,
+        label=label,
+    )
+    return ReportSectionReview.model_validate(_normalize_review_response(response, section))
+
+
+def _draft_section_with_recovery(
+    *,
+    client: LLMClient,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    section: ReportSectionPlan,
+    config: ReportRuntimeConfig,
+    extra_context: list[ReportToolResult],
+    label: str,
+    previous_draft: ReportSectionDraft | None = None,
+    review: ReportSectionReview | None = None,
+    source_batch_index: int = 1,
+    source_batch_count: int = 1,
+    emit: Callable[[str], None] | None = None,
+) -> ReportSectionDraft:
+    try:
+        return _draft_section(
+            client=client,
+            context=context,
+            template=template,
+            memory=memory,
+            section=section,
+            config=config,
+            extra_context=extra_context,
+            label=label,
+            previous_draft=previous_draft,
+            review=review,
+            source_batch_index=source_batch_index,
+            source_batch_count=source_batch_count,
+        )
+    except (LLMError, ValidationError, ValueError) as exc:
+        _emit(emit, f"Writer JSON validation failed for `{section.heading}`; retrying once. {exc}")
+    try:
+        return _draft_section(
+            client=client,
+            context=context,
+            template=template,
+            memory=memory,
+            section=section,
+            config=config,
+            extra_context=extra_context,
+            label=f"{label}-retry",
+            previous_draft=previous_draft,
+            review=review,
+            source_batch_index=source_batch_index,
+            source_batch_count=source_batch_count,
+            prompt_suffix=(
+                "The previous response was not accepted as valid JSON. "
+                "Return exactly one JSON object matching the requested schema. "
+                "Do not include Markdown fences, commentary, or partial prose outside JSON."
+            ),
+        )
+    except (LLMError, ValidationError, ValueError) as exc:
+        _emit(emit, f"Writer fallback used for `{section.heading}` after retry failed. {exc}")
+        return _fallback_section_draft(section)
+
+
+def _review_section_with_recovery(
+    *,
+    client: LLMClient,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    section: ReportSectionPlan,
+    draft: ReportSectionDraft,
+    label: str,
+    emit: Callable[[str], None] | None = None,
+) -> ReportSectionReview:
+    try:
+        return _review_section(
+            client=client,
             context=context,
             template=template,
             memory=memory,
             section=section,
             draft=draft,
-        ),
-        label=label,
+            label=label,
+        )
+    except (LLMError, ValidationError, ValueError) as exc:
+        _emit(emit, f"Reviewer JSON validation failed for `{section.heading}`; retrying once. {exc}")
+    try:
+        return _review_section(
+            client=client,
+            context=context,
+            template=template,
+            memory=memory,
+            section=section,
+            draft=draft,
+            label=f"{label}-retry",
+            prompt_suffix=(
+                "The previous response was not accepted as valid JSON. "
+                "Return exactly one JSON object matching the reviewer schema, with "
+                "`revision_instructions` as a list of strings."
+            ),
+        )
+    except (LLMError, ValidationError, ValueError) as exc:
+        _emit(emit, f"Reviewer fallback used for `{section.heading}` after retry failed. {exc}")
+        return ReportSectionReview(
+            section_id=section.section_id,
+            verdict="warning",
+            findings=[
+                ReviewerFinding(
+                    finding_id=f"{section.section_id}-review-fallback",
+                    type="review_agent_fallback",
+                    severity="minor",
+                    message="Reviewer returned invalid structured output; section kept with fallback warning.",
+                    section_id=section.section_id,
+                    evidence_handles=section.evidence_handles[:5],
+                    suggested_action="Manually inspect this section before publishing.",
+                )
+            ],
+            revision_instructions=["Manually inspect this section before publishing."],
+            notes="Reviewer fallback used after invalid structured output.",
+        )
+
+
+def _fallback_section_draft(section: ReportSectionPlan) -> ReportSectionDraft:
+    handles = [handle for handle in section.evidence_handles if handle][:5]
+    citation_text = " ".join(f"[@{handle}]" for handle in handles[:3])
+    body = (
+        f"## {section.heading}\n\n"
+        "This section could not be fully drafted by the report writer after a "
+        "structured-output retry. The available evidence should still be "
+        "reviewed before publication"
+        + (f" ({citation_text})." if citation_text else ".")
+        + "\n\n"
+        f"Section goal: {section.goal.strip() or 'No section goal was recorded.'}"
     )
-    return ReportSectionReview.model_validate(_normalize_review_response(response, section))
+    return ReportSectionDraft(
+        section_id=section.section_id,
+        heading=section.heading,
+        status="drafted",
+        draft_markdown=body,
+        used_sources=handles,
+        citations=handles,
+        open_questions=[
+            "Report writer failed structured-output validation for this section; inspect evidence manually."
+        ],
+        limitations=[
+            "This section is a conservative section-level fallback, not a polished model-written section."
+        ],
+    )
 
 
 def _writer_prompt(

@@ -11,6 +11,7 @@ from rich.text import Text
 from simple_ar.code_task.orchestration.workflow import CodeTaskInitResult
 from simple_ar.code_task.orchestration.execute import CodeTaskExecuteResult, ExecuteStepRecord
 from simple_ar.core.console import make_console
+from simple_ar.core.reporting import style_progress_message
 
 
 STEP_DESCRIPTIONS = {
@@ -21,6 +22,7 @@ STEP_DESCRIPTIONS = {
     "plan": "draft the human-reviewable patch plan",
     "propose-edits": "ask the model for controlled old/new edit proposals",
     "apply-edits": "apply reviewed edits to the isolated workspace",
+    "review": "review the applied patch for scope, interface, tests, and benchmark risk",
     "validate": "run static safety and syntax validation",
     "run": "run the patched benchmark and compare results",
     "analyze-failure": "summarize the latest validation or benchmark failure",
@@ -43,6 +45,7 @@ STOP_STYLES = {
     "proposal_review_required": "yellow",
     "large_edit_approval_required": "bold yellow",
     "patch_apply_failed": "bold red",
+    "review_failed": "bold red",
     "validation_failed": "bold red",
     "benchmark_failed": "bold red",
     "baseline_failed": "bold red",
@@ -177,7 +180,9 @@ def render_execute_message(message: str, *, console: Console | None = None) -> N
     """Render one low-noise progress message emitted by the orchestrator."""
 
     console = console or make_console()
-    console.print(f"[bright_blue]-[/bright_blue] {escape(message)}")
+    text = Text("  - ", style="dim")
+    text.append(str(message), style=style_progress_message(str(message)))
+    console.print(text)
 
 
 def render_init_result(
@@ -204,8 +209,18 @@ def render_init_result(
     table.add_column(style="bold cyan", no_wrap=True)
     table.add_column(overflow="fold", no_wrap=False)
     table.add_row("Code task run:", escape(str(result.run_dir)))
-    table.add_row("Workspace:", escape(str(result.workspace_dir)))
+    table.add_row("Mode:", escape(result.kind))
+    table.add_row("Workspace:", escape(str(result.workspace.workspace_dir)))
+    if result.workspace.project_root != result.workspace.workspace_dir:
+        table.add_row("Project root:", escape(str(result.workspace.project_root)))
     table.add_row("Workspace mode:", escape(result.workspace.mode))
+    if result.workspace.requested_mode != result.workspace.selected_mode:
+        table.add_row(
+            "Mode decision:",
+            escape(f"{result.workspace.requested_mode} -> {result.workspace.selected_mode}"),
+        )
+    if result.workspace.fallback_reason:
+        table.add_row("Fallback:", escape(result.workspace.fallback_reason.splitlines()[0]))
     table.add_row("Task:", escape(str(result.task_dir / "task.md")))
     table.add_row("Index:", escape(str(result.codebase_index_path)))
     table.add_row("Repo map:", escape(str(result.repo_map_path)))
@@ -227,6 +242,16 @@ def render_init_result(
     table.add_row("Environment mode:", escape(str(result.environment_policy.get("mode", "current"))))
     table.add_row("Python executable:", escape(str(result.environment_policy.get("python_executable", ""))))
     console.print(Panel(table, title="[bold cyan]Code Task Init[/bold cyan]", border_style="cyan"))
+
+    if result.workspace.warnings or result.workspace.user_next_steps:
+        notes = Table(title="Workspace notes", show_header=False, expand=False)
+        notes.add_column("Kind", style="bold yellow")
+        notes.add_column("Message", overflow="fold")
+        for warning in result.workspace.warnings:
+            notes.add_row("warning", escape(warning))
+        for step in result.workspace.user_next_steps:
+            notes.add_row("next", escape(step))
+        console.print(notes)
 
     if metric_directions:
         metrics = Table(title="Metric directions:", show_header=True, header_style="bold cyan")

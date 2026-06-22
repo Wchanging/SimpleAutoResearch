@@ -37,19 +37,22 @@ Conceptual flow:
 
 ```text
 init workspace -> index code -> map repo -> probe environment
--> run baseline -> build context pack -> work-plan -> create batch
+-> apply baseline policy -> build context pack -> work-plan -> create batch
 -> plan patch -> approve -> propose edits -> apply edits
--> validate -> run patched benchmark -> compare results
+-> review changes -> validate -> run patched benchmark -> post-run review
+-> compare results
 -> analyze failure -> repair proposal
 ```
 
 Key boundaries:
 
-- The source project is prepared under `code_task/workspace`; default `copy`
-  mode creates a guarded physical copy, while `git_worktree` creates a detached
-  worktree for repo-root git projects. Experimental `sparse_copy` copies only
-  configured include patterns and always excludes data/model/cache/secret-like
-  paths. The original code is never modified.
+- The source project is prepared under `code_task/workspace`; existing-project
+  runs default to `auto`, which prefers a detached `git_worktree` for committed
+  Git projects and falls back to a guarded `copy` with recorded next-step hints.
+  For monorepos, the worktree is created at the repository root and the matching
+  project subdirectory becomes the editable project root. Experimental
+  `sparse_copy` copies only configured include patterns and always excludes
+  data/model/cache/secret-like paths. The original code is never modified.
 - Patch application is gated by an explicit human approval step.
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
 - The default editor backend is `controlled_patch`; the backend interface is
@@ -72,6 +75,9 @@ Key boundaries:
   before/after verdict comes from `code_task/run/comparison.json`; if patched
   metrics remain below baseline, the system has recovered execution but has not
   achieved an improvement objective yet.
+- Baseline execution is a policy, not an unconditional cost. `auto`/`run`
+  records unchanged metrics, `skip`/`none` continues without comparison, and
+  `provided` stores user-supplied metrics with an explicit provenance marker.
 - Current execution uses workspace isolation plus an explicit interpreter
   policy. It supports `current` and `external`; managed environment creation is
   planned later. `workspace.reuse_source_venv` can point a worktree/copy/sparse
@@ -102,9 +108,15 @@ plan -> search -> read -> synthesize -> design experiment
 Current status:
 
 - `06-code` can generate a whitelisted template experiment, prepare an embedded
-  code-task workspace for existing projects, or create a bounded greenfield
-  project under `06-code/generated_project` when no source project exists yet.
+  code-task workspace for existing projects, or call the unified code-task
+  greenfield engine when no source project exists yet. In the greenfield case,
+  the real nested run lives under `06-code/code_task_run/`, while compatibility
+  artifacts are projected back to `06-code/generated_project/`.
 - `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, optional `--task-file`, and `--benchmark-command` flags. If no task file is supplied, `05-design` generates `generated_code_task.md` from the earlier research artifacts and a compact codebase summary.
+- The generated embedded task includes a compact Research-to-Code Bridge from
+  synthesis/design artifacts, so code-task planning sees method-transfer hints,
+  implementation hypotheses, metric contracts, ablation targets, resource
+  constraints, and risk notes.
 - `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
 - `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
 - The embedded path is end-to-end: it builds the same repo-map/context-pack,
@@ -137,7 +149,7 @@ Current status:
 | `read` | `review/`, `paper_notes.json`, `notes.md` | Screen and prioritize retrieved papers, then convert the shortlist into canonical Paper Briefs (LLM-backed when enabled). Larger LLM runs use coarse title/abstract batches before reranking the kept set. |
 | `synthesize` | `synthesis_brief.json`, `synthesis.md`, `hypothesis.md` | Analyze read-stage Paper Briefs into themes, gaps, bounded ideas, and testable hypotheses (LLM-backed when enabled). |
 | `design` | `experiment_plan.json`, `experiment_contract.json`, `result_schema.json`, `resource_plan.json`, `dependency_plan.json`, `domain_profile.json`, `contract_validation.json` | Select a safe experiment template and write the executable contract, metric schema, resource/dependency budget, domain profile, and pre-code validation. |
-| `code` | `code_task_run/`, `experiment.py`, or generated implementation artifacts | Prepare an embedded code-task harness or generate implementation artifacts from the design contract. |
+| `code` | `code_task_run/`, `generated_project/`, `experiment.py`, or template code | Prepare an embedded existing-code task, run unified greenfield code-task generation, or write a whitelisted template experiment from the design contract. |
 | `run` | `results.json`, `guard_report.json`, `stdout.txt`, `stderr.txt` | Execute the experiment, normalize canonical results, and guard against missing/invalid metrics before reporting. |
 | `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | Write a template-guided report with citations, bounded source backtracking, and audit artifacts (LLM-backed when enabled). |
 
@@ -238,8 +250,10 @@ in [Usage And Configuration](USAGE.md) and [Configuration Reference](CONFIG_REFE
 Environment handling is intentionally separated from source-code isolation:
 
 - Source-code isolation means user code is prepared under `code_task/workspace`
-  before any patch is applied. In default `copy` mode that is a physical copy;
-  in `git_worktree` mode it is a detached worktree.
+  before any patch is applied. In default `auto` mode this is usually a detached
+  worktree for committed Git projects, with guarded copy fallback when Git is
+  unavailable. The editable project root may be a subdirectory inside the
+  worktree for monorepo-style code roots.
 - Execution isolation means benchmarks run with a selected Python/runtime environment.
 
 Today, code-task has the first kind of isolation and records environment signals

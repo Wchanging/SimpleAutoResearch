@@ -67,6 +67,10 @@ backend = "local"
 command = "python benchmark.py"
 timeout_sec = 60
 stream_output = "auto"
+# auto/run executes the unchanged benchmark before patching; expensive
+# baselines can use skip/none or provided + baseline_metrics_file.
+baseline_policy = "auto"
+# baseline_metrics_file = "baseline_metrics.json"
 allow_dependency_install = false
 
 [resource]
@@ -112,10 +116,11 @@ task_file = "examples/full_pipeline_tiny_mlp/task.md"
 name = "tiny-digits-mlp-pipeline"
 
 [workspace]
-# copy is the safest default. git_worktree is available for repo-root projects
-# when copying a larger git repository would be wasteful.
+# auto prefers git_worktree for committed Git projects and falls back to copy
+# with a recorded reason. Use explicit copy when you need uncommitted local
+# files; use explicit git_worktree when fallback should be treated as an error.
 # sparse_copy is experimental; if used, uncomment include/exclude patterns.
-mode = "copy"
+mode = "auto"
 # include = ["digits_mlp/**", "tests/**", "benchmark.py", "pyproject.toml"]
 # exclude = ["data/**", "models/**"]
 reuse_source_venv = false
@@ -148,3 +153,7 @@ mode = "current"
 # Maximum copied source file size. Use 0 to disable.
 # Tests and benchmark files remain read-only patch evidence by default.
 max_file_bytes = 2000000
+# Embedded 8-stage code-task runs operate inside an isolated workspace and run
+# post-apply review/validation/benchmark gates, so this example allows a single
+# larger old/new replacement when the model proposes a cohesive implementation.
+allow_large_edits = true

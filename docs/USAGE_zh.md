@@ -302,6 +302,7 @@ novelty_backend = "local"
 
 ```text
 .simple_ar_cache/
+  agent_handoff_archives/ # 旧外部 agent handoff transcripts
   literature/      # 共享 literature provider metadata cache
   research_index/
     sqlite_fts.db  # 按 run_id 区分 rows 的共享 SQLite FTS store
@@ -343,15 +344,15 @@ uv run simple-ar clean --shared-index
 使用 `--index-root PATH`；如果路径在当前 workspace 外，还必须显式加
 `--allow-external-index-root`，因为这可能影响其他项目。
 
-如果要进行最强共享清理，同时清空 research index 和 literature provider cache：
+如果要进行最强共享清理，同时清空 research index、literature provider cache 和旧外部 agent handoff archives：
 
 ```bash
 uv run simple-ar clean --shared-cache
 ```
 
-这通常会删除 `.simple_ar_cache/research_index/` 和
-`.simple_ar_cache/literature/`。它不会删除任何 run 目录，但后续运行可能需要重新请求
-literature provider，并重新构建本地检索加速索引。
+这通常会删除 `.simple_ar_cache/research_index/`、`.simple_ar_cache/literature/`
+和 `.simple_ar_cache/agent_handoff_archives/`。它不会删除任何 run 目录，但后续运行可能需要重新请求
+literature provider、重新构建本地检索加速索引，并且不再保留旧的外部 agent handoff transcripts。
 
 关键文件按目录看：
 
@@ -456,9 +457,75 @@ uv run simple-ar run --topic "toy topic" --to-stage report --no-retrieval
 
 参数细节见 [CLI 参考](CLI_REFERENCE_zh.md#artifact-tools)。
 
+## Tool 和外部 Agent Handoff 预览
+
+V2.6 新增内部 common tool 与 agent-handoff 层。它是未来 Codex、Claude Code、
+OpenCode、OpenAI tool calling 或 MCP adapter 的受控扩展点，不是新的默认运行路径。
+
+当前行为：
+
+- 注册的 tool 必须是真实可用的本地 report / experiment tool，不添加空壳 MCP stub；
+- 可以导出 OpenAI-style 和 MCP-style tool schema；
+- 默认权限策略是 read-only / plan-only；
+- 外部 agent handoff package 写到 `runs/<run-id>/agent_handoff/<name>/`；
+- backend 输出如果被收集，会进入 `runs/<run-id>/agent_outputs/<name>/`，
+  仍必须经过 SimpleAutoResearch validation，才能影响 patch、result 或 report。
+
+handoff package 会显式列出上下文、权限和期望输出：
+
+```text
+runs/<run-id>/agent_handoff/<name>/
+  instructions.md           # task、backend profile、permission summary
+  tool_schema.json          # 真实 tool schema
+  permission_policy.json    # write/shell/network/secret policy
+  artifact_handles.json     # 暴露给 backend 的 run artifacts
+  expected_outputs.json     # backend 可产出的 canonical files
+  workspace_manifest.json   # 紧凑 run/workspace 视图
+  context/
+```
+
+外部工具仍然只是可选 strong path adapter。本地 research、report、greenfield
+experiment 和 code-task workflow 不需要 Codex、Claude Code、OpenCode 或 MCP server
+也能继续运行。
+
+V2.6 也在这个边界后面接入了可运行 backend：
+
+- `fake`：deterministic dry-run backend，用于集成测试；
+- `local_llm`：用当前 LLM 生成有边界的 review 产物；
+- `codex`、`claude_code`、`opencode`、`external_cli`：可选 CLI backend。
+
+如果要试 agent-backed greenfield generation 或 repair，可以设置
+`[implementation].provider`。外部 CLI provider 还必须显式设置
+`[implementation].allow_external_agent = true`。如果 executable 不在 `PATH`，或者需要
+provider-specific flags，可以使用 `[implementation].agent_binary`、`.agent_args` 和
+`.agent_timeout_sec`。即使开启，backend 也只能把候选文件
+写到 handoff 目录；SimpleAutoResearch 会再复制到 run workspace，并继续执行原有的
+code review、result guard、benchmark 或 code-task validation gate。
+
+`[implementation].agent_mode` 是这一层唯一新增的模式开关：
+
+- `model`：SimpleAutoResearch 仍然拥有 harness，只把有界生成交给本地/模型 backend。
+- `handoff`：为 Codex、Claude Code、OpenCode 或其他外部 CLI 写出可审计 handoff package，
+  再把 candidate files 收回 SimpleAutoResearch 的 gate。
+- `delegated_workspace`：预留给未来“外部 harness 接管 workspace loop”的强路径。当前版本会识别
+  这个值，但执行时会显式失败，不会静默降级。
+
+run-local 只读 tools 也可以通过 MCP stdio 暴露：
+
+```bash
+uv run simple-ar tools schema --format mcp
+uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
+uv run simple-ar tools serve-mcp runs/<run-id>
+```
+
+标准的 Codex/MCP 集成示例位于 `examples/tool_mcp_codex_agent/`。它使用
+`[implementation].provider = "codex"`，并默认保持 `[implementation].agent_model = ""`，
+让 Codex CLI 使用当前账号配置的默认模型。只有确认 CLI/账号支持某个模型名时，
+再显式填写 `agent_model`。
+
 ## Code Task 工作流
 
-Code Task 会把源项目准备到一个隔离的可编辑 workspace 中，后续所有补丁都只改这个 workspace，不修改原始项目。默认 `copy` 模式最稳妥；工作流也支持面向较大 git 项目的 `git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。
+Code Task 会把代码任务准备到一个隔离的可编辑 workspace 中，后续所有补丁或生成都只发生在这个 workspace，不修改原始项目。已有项目默认 `auto` 模式：优先为已有 commit 的 Git 项目创建 `git_worktree`，如果 Git 条件不满足则降级为受保护的 `copy`，并在 manifest 和终端输出中记录原因与下一步建议。也可以显式使用 `copy`、`git_worktree`，以及适合小型 allowlist 子集的实验性 `sparse_copy`。从零生成项目时使用 `kind = "greenfield"`，默认从 `empty` workspace 开始，并把生成项目写到 `code_task/workspace/generated_project/`。
 
 推荐先从 TOML 配置初始化，把项目路径、benchmark 指标、workspace 模式、模型路由和编辑预算都放在一个可审核文件里。内置 standalone 示例使用 medium review pipeline：
 
@@ -475,7 +542,8 @@ runs/<run-id>/
   manifest.json                 # benchmark、workspace、environment、safety policy
   code_task/
     task.md                     # 任务说明
-    workspace/                  # 隔离可编辑副本或 worktree
+    workspace/                  # 隔离 copy/worktree 根目录
+      ...                       # monorepo 场景下 project root 可能是其中的子目录
     meta/
       codebase_index.json       # 文件级代码索引
       repo_map.json             # 分层 repo/symbol map
@@ -484,11 +552,46 @@ runs/<run-id>/
 
 它不会运行代码、不会调用 LLM，也不会修改原始项目。
 
-如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。当前要求 `code_root` 是目标项目的 git 仓库根目录；如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入 repo root，或者改用 `copy` 模式。
+如果是 standalone 从零生成项目，也使用同一套 code-task 命令，只是不需要 `code_root`：
 
-如果使用 `workspace.mode = "sparse_copy"` 或 `--workspace-mode sparse_copy`，只会复制匹配 include pattern 的文件，同时始终排除 `.git`、virtualenv、`runs`、cache/build、`data`、`models`、`.env` 和 secret-like 路径。这个模式适合你明确知道需要哪些文件的小型实验；通用项目仍建议 `copy` 或 `git_worktree`。
+```bash
+uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmark-command "python generated_project/main.py"
+uv run simple-ar code-task execute runs/<run-id> --to-step run
+```
 
-benchmark 最好输出 `name: value` 数值行。自定义指标推荐在 TOML 中声明解释方向。显式 CLI 参数仍然支持，适合临时实验和快速测试，但公开使用路径建议优先用 TOML。完整参数表见 [CLI 参考](CLI_REFERENCE_zh.md#simple-ar-code-task-init)，配置 schema 见 [配置参考](CONFIG_REFERENCE_zh.md#standalone-code-task-config)。
+这种模式会复用 code-task 的 memory、reviewer、validation、runner 和 repair 产物，只是实现步骤不再应用 patch，而是在隔离 workspace 内生成 `generated_project/`。
+
+如果要做更大的服务器端验收任务，可以使用 standalone greenfield ML suite：
+
+```bash
+uv run simple-ar code-task init --config examples/code_task_greenfield_ml_suite/configs/code_task.toml
+uv run simple-ar code-task execute runs/code-task-greenfield-ml-suite/<run-id> --config examples/code_task_greenfield_ml_suite/configs/code_task.toml --yes
+```
+
+这个示例比本地 smoke test 更重，目标是生成一个模块化 ML workbench：优先使用本地可用的开源/打包数据集，必要时才退回 deterministic synthetic fallback，并包含多种模型/基线、ablation、资源自适应执行和可解析指标。如果要测试 Codex / Claude / OpenCode handoff，修改配置中的 `[implementation]` 即可。
+
+在规划 greenfield 实现前，`execute` 会写出 `code_task/meta/dependency_advice.json`
+和 `.md`，并在终端提示当前已安装和缺失的推荐库。这只是建议，不会自动安装依赖或修改环境；
+如果你希望模型走更强实现路径，可以按提示先手动执行 `uv add ...`，然后重跑 execute。
+
+如果省略或显式使用 `workspace.mode = "auto"`，已有项目会先尝试 detached git worktree。如果 Git 不可用、不在仓库内、仓库还没有 commit，或 worktree 无法安全创建，本次 run 会降级为受保护的 copy，并在 `manifest.json.workspace` 写入 `requested_mode`、`selected_mode`、`fallback_reason` 和 `user_next_steps`。
+
+如果使用 `workspace.mode = "git_worktree"` 或 `--workspace-mode git_worktree`，`init` 会在 `code_task/workspace/` 创建 detached git worktree，而不是完整复制文件。这个模式要求 `code_root` 位于本地 Git 仓库中，并且仓库至少有一次 commit；`code_root` 可以是仓库根目录，也可以是 monorepo 中的项目子目录。子目录场景下，系统会在仓库根创建 worktree，并把 worktree 中对应子目录作为实际可编辑 project root，用于索引、修改和 benchmark 执行。如果目录不满足要求，CLI 会给出可操作提示，比如初始化 git、提交初始 baseline、传入正确项目路径，或者改用 `copy` 模式包含当前未提交文件状态。
+
+如果使用 `workspace.mode = "sparse_copy"` 或 `--workspace-mode sparse_copy`，只会复制匹配 include pattern 的文件，同时始终排除 `.git`、virtualenv、`runs`、cache/build、`data`、`models`、`.env` 和 secret-like 路径。这个模式适合你明确知道需要哪些文件的小型实验；通用项目优先使用 `auto`，或者按需求显式选择 `git_worktree` / `copy`。
+
+benchmark 最好输出稳定的数值指标行。当前支持 `name: value` 和 `METRIC name=value`；
+后者更适合 generated project 或外部 agent 项目，因为它明显是 machine-readable 输出。
+自定义指标推荐在 TOML 中声明解释方向。显式 CLI 参数仍然支持，适合临时实验和快速测试，
+但公开使用路径建议优先用 TOML。完整参数表见
+[CLI 参考](CLI_REFERENCE_zh.md#simple-ar-code-task-init)，配置 schema 见
+[配置参考](CONFIG_REFERENCE_zh.md#standalone-code-task-config)。
+
+已有项目任务可以用 `[execute].baseline_policy` 控制是否先跑未修改 baseline。
+默认 `auto` 会在需要比较证据时运行 baseline；baseline 很贵、或任务只是验收式目标时，
+可以设为 `skip` 或 `none`；如果你已经有可信 baseline 指标，可以设为 `provided`，
+并通过 `baseline_metrics_file` 提供 JSON 或 `metric=0.82` 文本文件。provided baseline
+会在 summary 中标注为用户提供指标，不会伪装成本次复测结果。
 
 ### 推荐路径：TOML + Execute
 
@@ -530,7 +633,7 @@ runs/<run-id>/
 uv run simple-ar code-task execute runs/<run-id> --config examples/code_task_medium_review/configs/code_task.toml
 ```
 
-在真实终端里，这一条命令可以一路经过 plan 审核、proposal 审核、应用补丁、验证和
+在真实终端里，这一条命令可以一路经过 plan 审核、proposal 审核、应用补丁、结构化 review、验证和
 patched benchmark；每个真实审核门都会用黄色 Rich 面板提示你看什么、下一步会做什么。
 如果在非交互 shell 中运行，或者你回答 `no`，它会停在当前审核门，方便你之后重跑。
 第一个审核门通常会生成：
@@ -541,6 +644,7 @@ code_task/
   patch_plan.md
   meta/
     environment_report.json
+    review_report.json
   attempts/
     attempt-001/
       batches/
@@ -565,6 +669,11 @@ skipped，然后 workflow 从下一个需要处理的位置继续。只有在调
 命令即可重新尝试模型调用；如果你明确想完全离线规划，使用 `--no-llm`；如果你希望
 先尝试 LLM、失败后接受较弱的 deterministic fallback，再使用
 `--allow-planning-fallback`。
+
+补丁应用后，`execute` 会在静态验证前写入 `code_task/meta/review_report.json`；
+patched benchmark 完成后还会写入 `code_task/meta/review_report_post_run.json`。
+阻塞性发现会同步记录到 `code_task/memory/`，后续 repair prompt 可以直接利用这些
+最新失败证据。
 
 3. 在 patch-plan 审核面板出现时，阅读 `code_task/work_plan.md` 和
 `code_task/patch_plan.md`。如果计划合理，输入 `yes` 继续。如果你在非交互环境运行、
@@ -709,7 +818,7 @@ uv run simple-ar code-task work-plan runs/<run-id>
 uv run simple-ar code-task batch runs/<run-id> --work-item W1
 ```
 
-`probe` 写入 `code_task/meta/environment_report.json`，包含 OS、Python、工具、GPU、依赖文件和 test 目录信号。它不安装依赖，也不运行项目代码。
+`probe` 写入 `code_task/meta/environment_report.json`，包含 OS、Python、工具、GPU、依赖文件和 test 目录信号。同时还会写出 `resource_probe.json` 和 `resource_decision.json`，给 greenfield 和外部 agent 路径提供紧凑硬件画像。它不安装依赖，也不运行项目代码。
 
 `baseline` 在任何补丁应用前运行记录的 benchmark command，结果存到 `code_task/run/baseline/`，包括 `execution_report.json`、`stdout.txt`、`stderr.txt` 和解析后的 `metrics.json`，并刷新 `code_task/summary.md`。
 
@@ -767,7 +876,7 @@ proposal 也会记录 `editor.backend = "controlled_patch"`，方便后续接入
 uv run simple-ar code-task apply-edits runs/<run-id>
 ```
 
-`apply-edits` 只修改 `code_task/workspace/`，写入 `code_task/patch.diff` 和 `code_task/meta/applied_edits.json`，并重建 codebase index。如果 edit 无法唯一匹配，会在写文件前停止。
+`apply-edits` 只修改 `code_task/workspace/`，写入 `code_task/patch.diff` 和 `code_task/meta/applied_edits.json`，并重建 codebase index。下一次 `execute` 会先运行结构化 reviewer，写入 `code_task/meta/review_report.json`，再进入静态验证。如果 edit 无法唯一匹配，会在写文件前停止。
 `applied_edits.json` 会记录实际应用的 proposal path 和 editor backend，包括手动提供的 edits file 或 repair proposal。
 
 验证并运行 patched benchmark：
@@ -933,8 +1042,9 @@ uv run simple-ar run \
 这种模式下，`05-design` 会从前面研究阶段的产物和紧凑代码摘要中写出 `generated_code_task.md` 和 `generated_code_task_meta.json`，`06-code` 再把生成任务作为普通 `code_task/task.md` 输入。
 
 如果你已经写好了精确的 `task.md`，但仍希望 8 阶段前面的 goal/problem/synthesis/hypothesis 帮助收束实现优先级，可以在 pipeline config 里设置 `[implementation].task_handoff = "merge"`。这时用户任务会作为硬约束保留，`05-design` 会额外生成融合后的 `generated_code_task.md`，再交给内嵌 code-task 执行。
+生成任务里还会包含一段紧凑的 Research-to-Code Bridge，来自 synthesis brief、experiment contract、metric schema 和 resource plan。这样 `06-code` 能看到方法迁移线索、实现假设、消融目标、指标方向和已知风险，而不是只拿到一个普通 task.md。
 
-`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、运行 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁、静态验证，并先运行一次 patched benchmark 做阶段内验证。如果这个验证 benchmark 失败，bridge 会基于 failure evidence 写出诊断并尝试一次受控 repair。`07-run` 会重新运行已验证的 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 canonical `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
+`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、按配置的 baseline policy 处理 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁、静态验证，并先运行一次 patched benchmark 做阶段内验证。如果这个验证 benchmark 失败，bridge 会基于 failure evidence 写出诊断并尝试一次受控 repair。`07-run` 会重新运行已验证的 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 canonical `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
 
 内嵌产物结构大致是：
 
@@ -978,7 +1088,7 @@ uv run simple-ar run \
 
 ## 8 阶段流程中的 Greenfield Experiment
 
-当你只有研究或 benchmark-style 任务、还没有现成源码项目时，可以使用 greenfield 路径。它不是开放式自主 agent：`05-design` 先写出可执行 contract 和预算，`06-code` 只在 run 目录下生成一个受控小项目并审查，`07-run` 只信任 canonical `results.json` 中可解析的指标。
+当你只有研究或 benchmark-style 任务、还没有现成源码项目时，可以使用 greenfield 路径。它不是开放式自主 agent：`05-design` 先写出可执行 contract 和预算，`06-code` 现在会在 `06-code/code_task_run/` 下调用统一 code-task greenfield engine，再把生成项目投影回 `06-code/generated_project/`，供后续 `07-run` 兼容使用。`07-run` 只信任 canonical `results.json` 中可解析的指标。
 
 运行轻量本地 greenfield 示例：
 

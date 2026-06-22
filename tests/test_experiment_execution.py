@@ -6,16 +6,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from simple_ar.experiment.coding.provider import implement_greenfield_project
-from simple_ar.experiment.coding.architecture import fallback_architecture_plan
+from simple_ar.code_task import execute_code_task, initialize_code_task
+from simple_ar.code_task.generation.architecture import fallback_architecture_plan
 from simple_ar.experiment.contracts import build_experiment_design_package
 from simple_ar.experiment.execution.backend import LocalExecutionBackend, RunRequest
 from simple_ar.experiment.execution.diagnosis import diagnose_experiment_run, render_diagnosis_markdown
 from simple_ar.experiment.execution.guards import evaluate_result_guard
-from simple_ar.experiment.execution.repair import repair_generated_project_from_guard
+from simple_ar.code_task.generation.generated_project_repair import repair_generated_project_from_guard
 from simple_ar.experiment.execution.results import build_canonical_results
 from simple_ar.experiment.rerun import preserve_stage_outputs
 from simple_ar.experiment.tools.gateway import LocalExperimentToolGateway
+from simple_ar.core.artifacts import read_json
 from simple_ar.core.pipeline import Context
 from simple_ar.core.stages import Stage
 from simple_ar.report.context import build_report_context
@@ -183,53 +184,46 @@ class ExperimentExecutionTests(unittest.TestCase):
         codes = {issue["code"] for issue in guard["issues"]}
         self.assertIn("experiment_repaired", codes)
 
-    def test_greenfield_provider_writes_reviewed_runnable_project(self) -> None:
+    def test_greenfield_code_task_writes_reviewed_runnable_project(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            stage_dir = Path(tmp) / "06-code"
-            stage_dir.mkdir()
-            contract = {
-                "contract_id": "exp-test",
-                "task_kind": "greenfield",
-                "objective": "Create a tiny local experiment.",
-            }
-            result_schema = {
-                "primary_metric": "accuracy",
-                "required_metrics": ["accuracy", "macro_f1"],
-            }
-            resource_plan = {
-                "max_files": 6,
-                "max_generated_lines": 300,
-                "max_runtime_sec": 20,
-            }
-
-            result = implement_greenfield_project(
-                stage_dir=stage_dir,
-                contract=contract,
-                result_schema=result_schema,
-                resource_plan=resource_plan,
-                dependency_plan={"install_allowed": False},
-                domain_profile={"expected_entrypoints": ["python main.py"]},
-                client=None,
+            root = Path(tmp)
+            task_file = root / "task.md"
+            task_file.write_text(
+                "# Task\n\nCreate a tiny local experiment that reports accuracy and macro_f1.\n",
+                encoding="utf-8",
+            )
+            run_dir = root / "greenfield-code-task"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                workspace_mode="empty",
+                benchmark_command="python generated_project/main.py",
+                primary_metric="accuracy",
+                metric_directions={"accuracy": "higher_is_better", "macro_f1": "higher_is_better"},
             )
 
-            self.assertTrue(result.project_dir.is_dir())
-            self.assertTrue((result.project_dir / "main.py").is_file())
-            self.assertTrue(result.experiment_script_path.is_file())
-            self.assertTrue(result.architecture_plan_path.is_file())
-            self.assertTrue(result.file_plan_path.is_file())
-            self.assertIn(result.review_status, {"passed", "warning"})
-
-            run = LocalExecutionBackend().run(
-                RunRequest(
-                    command=[sys.executable, "experiment.py"],
-                    cwd=stage_dir,
-                    timeout_sec=10,
-                )
+            result = execute_code_task(
+                run_dir,
+                use_llm=False,
+                to_step="run",
+                timeout_sec=10,
+                max_files=6,
+                max_generated_lines=300,
             )
-            self.assertEqual(run.returncode, 0)
-            self.assertIn("accuracy", run.metrics)
-            self.assertIn("macro_f1", run.metrics)
+
+            self.assertEqual(result.stop_reason, "completed")
+            project_dir = run_dir / "code_task" / "workspace" / "generated_project"
+            self.assertTrue(project_dir.is_dir())
+            self.assertTrue((project_dir / "main.py").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "architecture_plan.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "file_plan.json").is_file())
+            self.assertTrue((run_dir / "code_task" / "meta" / "review_report.json").is_file())
+            metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
+            self.assertIn("accuracy", metrics)
+            self.assertIn("macro_f1", metrics)
 
     def test_greenfield_contract_includes_task_file_requirements(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -275,13 +269,42 @@ class ExperimentExecutionTests(unittest.TestCase):
         paths = [row["path"] for row in plan["files"]]
 
         self.assertIn("main.py", paths)
-        self.assertIn("generated_experiment/data.py", paths)
-        self.assertIn("generated_experiment/features.py", paths)
-        self.assertIn("generated_experiment/models.py", paths)
+        self.assertIn("generated_experiment/config.py", paths)
+        self.assertIn("generated_experiment/inputs.py", paths)
+        self.assertIn("generated_experiment/core.py", paths)
         self.assertIn("generated_experiment/metrics.py", paths)
-        self.assertIn("generated_experiment/evaluation.py", paths)
+        self.assertIn("generated_experiment/analysis.py", paths)
         self.assertIn("generated_experiment/runner.py", paths)
         self.assertLessEqual(len(paths), 10)
+
+    def test_large_capability_fallback_architecture_preserves_task_surface(self) -> None:
+        plan = fallback_architecture_plan(
+            contract={
+                "objective": "Greenfield analysis workbench",
+                "task": (
+                    "Build an open-source style project with input loading, preprocessing, analysis, "
+                    "metrics, resource detection, self-check, README, artifacts/results.json, "
+                    "artifacts/report.md, and condition_results.jsonl."
+                ),
+            },
+            result_schema={
+                "primary_metric": "best_score",
+                "required_metrics": ["best_score", "accuracy", "macro_f1", "condition_count"],
+            },
+            resource_plan={"max_files": 16, "max_generated_lines": 6000},
+            domain_profile={"task_excerpt": "input processing analysis reporting self-check resource profile"},
+        )
+
+        paths = [row["path"] for row in plan["files"]]
+
+        self.assertIn("README.md", paths)
+        self.assertIn("generated_experiment/config.py", paths)
+        self.assertIn("generated_experiment/inputs.py", paths)
+        self.assertIn("generated_experiment/processing.py", paths)
+        self.assertIn("generated_experiment/analysis.py", paths)
+        self.assertIn("generated_experiment/reporting.py", paths)
+        self.assertIn("generated_experiment/validation.py", paths)
+        self.assertLessEqual(len(paths), 16)
 
     def test_stage_rerun_archives_existing_outputs_by_default(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -393,8 +416,11 @@ class ExperimentExecutionTests(unittest.TestCase):
             repaired = (project / "generated_experiment" / "runner.py").read_text(encoding="utf-8")
             self.assertIn("accuracy", repaired)
             self.assertIn("macro_f1", repaired)
-            self.assertIn("'accuracy': 0.840000", repaired)
-            self.assertIn("'macro_f1': 0.820000", repaired)
+            namespace: dict[str, object] = {}
+            exec(repaired, namespace)
+            metrics = namespace["run_experiment"]()  # type: ignore[operator]
+            self.assertIsInstance(metrics["accuracy"], float)
+            self.assertIsInstance(metrics["macro_f1"], float)
             main = (project / "main.py").read_text(encoding="utf-8")
             self.assertIn("generated_experiment.runner", main)
             self.assertTrue((project / "main.py.before_repair").is_file())

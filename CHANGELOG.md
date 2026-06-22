@@ -4,6 +4,161 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-18
+
+### Added
+
+- Added first-class greenfield code-task support. `code-task init` can now use
+  `--kind greenfield` without a `code_root`; the workspace is created with the
+  new `empty` mode and generated code lives under
+  `code_task/workspace/generated_project/`.
+- Added code-task memory artifacts under `code_task/memory/`, including
+  `task_memory.json`, `task_memory.md`, `edit_history.jsonl`,
+  `review_findings.jsonl`, and `repair_memory.jsonl`. The memory is a compact
+  index over existing artifacts rather than a replacement for canonical logs,
+  patches, or benchmark outputs.
+- Added shared code-task resource artifacts:
+  `code_task/meta/resource_probe.json` records compact machine signals, while
+  `code_task/meta/resource_decision.json` turns them into a bounded execution
+  profile for greenfield generation and external-agent handoffs.
+- Added automatic code-task memory compaction. When active memory grows too
+  large, older events are summarized into `compressed_memory.json` and
+  `compressed_memory.md`, while recent events remain in `task_memory.*`.
+- Added a shared reviewer contract plus code-task review artifacts. Code-task
+  execute now writes structured `review_report*.json` files and stores
+  reviewer findings in task memory so repair prompts can reuse them.
+- Added external-agent output normalization during ingestion:
+  `output_snapshot.json` and `normalized_outputs.json` record file hashes,
+  generated-file manifests, patch/proposal outputs, and changed files without
+  trusting agent self-reports.
+- Added read-only code-task tools to the common tool harness:
+  `read_code_task_memory`, `list_code_task_files`, `search_code_task_code`,
+  `read_code_task_file_range`, `find_code_task_symbol`,
+  `find_code_task_related_files`, and `list_code_task_recent_edits`.
+- Added code-task-level greenfield external-agent handoff. Standalone
+  `kind = "greenfield"` tasks can now route generation through `[implementation]`
+  providers such as `fake`, `local_llm`, `codex`, `claude_code`, `opencode`, or
+  `external_cli`, while still ingesting candidate files through the normal
+  review, validation, benchmark, memory, and repair path.
+- Added `examples/code_task_greenfield_ml_suite/`, a larger standalone
+  greenfield code-task acceptance scenario for server or stronger local testing.
+  It asks for a modular ML experiment workbench with packaged/local open
+  datasets when available, synthetic fallback only when necessary, multiple
+  model families, ablations, parseable metrics, and resource-aware execution.
+- Added greenfield dependency advice artifacts. Before implementation planning,
+  standalone greenfield code tasks now write `code_task/meta/dependency_advice.*`
+  and print installed/missing recommended packages plus optional install
+  commands. This remains advice-only and never installs dependencies
+  automatically.
+
+### Changed
+
+- Code-task work planning, patch planning, edit proposal, and repair prompts now
+  receive compact task memory so reruns and external-agent handoffs can preserve
+  prior decisions, failed attempts, validation results, and repair context.
+- Code-task execute now records memory events for probe, baseline, work-plan,
+  patch-plan, proposal, apply, validation, patched run, failure analysis, and
+  repair proposal steps. Patch validation blocks and static validation findings
+  are also written as review findings.
+- Code-task external-agent handoff packages now include task memory context and
+  code-task-only tool schemas, while greenfield handoffs expose experiment-only
+  tools. This keeps external agents focused on the current workflow.
+- Embedded code-task runs inside the 8-stage pipeline now store active memory
+  under `06-code/memory/`, keeping stage-local continuity beside code artifacts
+  instead of burying it under `06-code/code_task_run/`.
+- Greenfield code review now receives implementation memory, architecture, and
+  resource context, and also exposes a normalized `review_contract` for report
+  and guard consumers while keeping the legacy `code_review.v1` shape intact.
+- External-agent greenfield generation now attempts one bounded retry when the
+  first handoff finishes without a valid non-empty `generated_files/` output.
+- Reserved `delegated_workspace` mode now writes
+  `06-code/delegated_workspace_dry_run.json` before failing explicitly, making
+  the future snapshot/diff/rollback boundary inspectable without enabling the
+  dangerous path.
+- The `simple_ar.code_task` package facade now lazy-loads public exports,
+  preventing small submodule imports such as code-task tools from importing the
+  entire code-task and agent-backend graph.
+- Greenfield experiment generation in the 8-stage pipeline now delegates to a
+  nested unified code-task run under `06-code/code_task_run/`, then projects
+  compatibility artifacts back to `06-code/generated_project/` for `07-run`.
+  This keeps standalone greenfield code tasks and research-to-code greenfield
+  tasks on the same workspace, memory, review, validation, and run path.
+
+## 2026-06-14
+
+### Added
+
+- Added the V2.6 common tool harness foundation under `src/simple_ar/tools/`.
+  It provides shared tool specs, permission/risk levels, a registry that
+  composes existing report and experiment tools, permissioned local dispatch,
+  compact `tool_trace.jsonl` writing, and OpenAI/MCP-style schema export.
+- Added the V2.6 external-agent handoff foundation under
+  `src/simple_ar/agent_backends/`. It can write workspace-scoped
+  `agent_handoff/<name>/` packages with instructions, real tool schemas,
+  permission policy, artifact handles, expected outputs, context files, and
+  workspace manifests.
+- Added untrusted external-agent output ingestion into
+  `agent_outputs/<name>/`, keeping backend results separate until the existing
+  validation, result guard, report audit, or code-task patch checks approve
+  them.
+- Added Codex, Claude Code, and OpenCode profile Markdown files for future
+  optional backends. These profiles are workspace-scoped guidance assets, not
+  default global installations.
+- Added runnable V2.6 backend wrappers: deterministic `fake`, `local_llm`,
+  generic `external_cli`, and Codex / Claude Code / OpenCode CLI wrappers with
+  cwd, timeout, env allowlist, stdout/stderr capture, and `agent_run.json`
+  provenance.
+- Added `simple-ar tools schema`, `simple-ar tools call`, and
+  `simple-ar tools serve-mcp`. The MCP server is stdio-based and exposes real
+  run-local read-only experiment tools through `tools/list` and `tools/call`.
+- Added `examples/tool_mcp_codex_agent/`, a bounded Codex external-agent
+  example with an MCP server template. The example leaves
+  `[implementation].agent_model` empty by default so Codex CLI can use the
+  account's configured model.
+- Added `[implementation].agent_mode` as the single V2.6 external-agent mode
+  switch: `model`, `handoff`, and the reserved `delegated_workspace` contract.
+
+### Changed
+
+- Development and usage docs now describe the V2.6 tool/agent boundary:
+  external tools are optional strong-path adapters, while local research,
+  report, experiment, and code-task workflows remain available without MCP or
+  external agent CLIs.
+- Greenfield generation and greenfield repair can now route through the agent
+  handoff boundary when `[implementation].provider` selects an agent backend.
+  External outputs remain untrusted candidate files and still pass the existing
+  code review, result guard, rerun, and validation gates.
+- The reserved code-task `external_agent` adapter can now launch enabled
+  backends through the common handoff/ingestion path, while the default remains
+  non-executing invocation-plan output.
+- External agent wrappers now accept `[implementation].agent_model`, but
+  examples leave it empty by default. Codex, Claude Code, and OpenCode tests
+  should only set it when the CLI/account is known to support that model name.
+- External agent failures now surface a concise stderr/stdout tail in the main
+  runtime error, including hints for unsupported model names and missing CLI
+  binaries.
+- Agent-backed greenfield/code-task paths now normalize and validate
+  `agent_mode`, record it in backend artifacts, and fail explicitly for the
+  reserved delegated-workspace path instead of silently treating it as a normal
+  handoff.
+- External CLI backends now resolve Windows command shims such as `codex.cmd`
+  before launching subprocesses, and the Codex wrapper uses an absolute
+  handoff root with `--skip-git-repo-check`.
+- External-agent handoff packages are now archived before reruns, preventing
+  stale `stdout.txt`, `stderr.txt`, or `agent_result.json` files from steering
+  a later Codex/Claude/OpenCode attempt. Stale handoffs are moved to the ignored
+  local cache instead of a sibling `agent_handoff/archives/` directory so the
+  next external agent cannot accidentally read old failure logs. Existing
+  legacy sibling archives are relocated to the same cache before creating a new
+  handoff.
+- `simple-ar clean --shared-cache` now also clears
+  `.simple_ar_cache/agent_handoff_archives`, so the existing cleanup command can
+  fully remove cross-run external-agent handoff transcripts.
+- Agent-backed greenfield generation now requires non-empty `generated_files/`
+  before copying into `06-code/generated_project`, so empty directory proposals
+  fail at the handoff boundary instead of surfacing later as a confusing missing
+  `main.py` review error.
+
 ## 2026-06-13
 
 ### Added
