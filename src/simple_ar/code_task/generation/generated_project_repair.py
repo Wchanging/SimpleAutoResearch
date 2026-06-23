@@ -28,6 +28,7 @@ from simple_ar.agent_backends import (
     validate_agent_mode_for_provider,
 )
 from simple_ar.core.artifacts import write_json
+from simple_ar.code_task.analysis.interfaces import dependency_context, public_api
 from simple_ar.integrations.llm import LLMClient
 
 
@@ -36,6 +37,12 @@ def repair_generated_project_from_review(
     project_dir: Path,
     review_report: Mapping[str, Any],
     output_path: Path,
+    code_artifacts: Mapping[str, Any] | None = None,
+    architecture_plan: Mapping[str, Any] | None = None,
+    result_schema: Mapping[str, Any] | None = None,
+    contract: Mapping[str, Any] | None = None,
+    dependency_advice: Mapping[str, Any] | None = None,
+    client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Apply narrow deterministic repairs after generated-project review failure.
 
@@ -92,6 +99,23 @@ def repair_generated_project_from_review(
             path.write_text(original, encoding="utf-8")
         unresolved.append(f"{rel}: {error}")
 
+    if client is not None:
+        regenerated = _regenerate_review_failed_files(
+            project_dir=project_dir,
+            review_report=review_report,
+            code_artifacts=code_artifacts or {},
+            architecture_plan=architecture_plan or {},
+            result_schema=result_schema or {},
+            contract=contract or {},
+            dependency_advice=dependency_advice or {},
+            client=client,
+            changed=changed,
+            notes=summary["notes"],
+            unresolved=unresolved,
+        )
+        if regenerated:
+            summary["regenerated_files"] = regenerated
+
     _repair_missing_static_artifacts(project_dir, review_report, changed, summary["notes"])
 
     summary["changed_files"] = changed
@@ -105,6 +129,182 @@ def repair_generated_project_from_review(
         summary["notes"].append("No deterministic review repairs were available.")
     write_json(output_path, summary)
     return summary
+
+
+def _regenerate_review_failed_files(
+    *,
+    project_dir: Path,
+    review_report: Mapping[str, Any],
+    code_artifacts: Mapping[str, Any],
+    architecture_plan: Mapping[str, Any],
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
+    client: LLMClient,
+    changed: list[str],
+    notes: list[str],
+    unresolved: list[str],
+) -> list[dict[str, Any]]:
+    target_paths = _review_repair_target_paths(review_report=review_report, code_artifacts=code_artifacts)
+    if not target_paths:
+        return []
+    file_specs = _architecture_file_specs(architecture_plan)
+    regenerated: list[dict[str, Any]] = []
+    for rel_path in target_paths:
+        spec = file_specs.get(rel_path, {"path": rel_path, "purpose": "Repair generated project file.", "dependencies": []})
+        target = project_dir / rel_path
+        previous = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+        try:
+            response = client.ask_json(
+                "You repair generated Python project files. Return only JSON with string fields `content` and `summary`.",
+                _review_file_repair_prompt(
+                    rel_path=rel_path,
+                    file_spec=spec,
+                    project_dir=project_dir,
+                    result_schema=result_schema,
+                    contract=contract,
+                    dependency_advice=dependency_advice,
+                    review_report=review_report,
+                ),
+                label=f"greenfield-review-repair-{rel_path}",
+            )
+        except Exception as exc:
+            unresolved.append(f"{rel_path}: LLM review repair failed: {exc}")
+            continue
+        content = str(response.get("content", "")).strip()
+        if not content:
+            unresolved.append(f"{rel_path}: LLM review repair returned empty content.")
+            continue
+        content = _strip_markdown_fence(content.rstrip() + "\n")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        error = _compile_error(target) if target.suffix == ".py" else ""
+        if error:
+            target.write_text(previous, encoding="utf-8")
+            unresolved.append(f"{rel_path}: repaired file failed to compile: {error}")
+            continue
+        if rel_path not in changed:
+            changed.append(rel_path)
+        summary = str(response.get("summary") or "Regenerated after review failure.")[:500]
+        notes.append(f"Regenerated {rel_path} with LLM review repair.")
+        regenerated.append(
+            {
+                "path": rel_path,
+                "mode": "llm_review_repair",
+                "line_count": max(1, len(content.splitlines())),
+                "summary": summary,
+                "public_api": public_api(target) if target.suffix == ".py" else [],
+            }
+        )
+    return regenerated
+
+
+def _review_repair_target_paths(
+    *,
+    review_report: Mapping[str, Any],
+    code_artifacts: Mapping[str, Any],
+) -> list[str]:
+    targets: list[str] = []
+    generated = code_artifacts.get("generated_files")
+    if isinstance(generated, list):
+        for row in generated:
+            if not isinstance(row, Mapping):
+                continue
+            path = _safe_relative_path(str(row.get("path", "")))
+            if not path or not path.endswith(".py") or path.endswith("/__init__.py"):
+                continue
+            if row.get("mode") == "fallback":
+                targets.append(path)
+    findings = _review_findings(review_report)
+    categories = {str(item.get("category", "")).strip() for item in findings}
+    summaries = " ".join(str(item.get("summary", "")) for item in findings).lower()
+    if "missing_artifact_writer" in categories:
+        targets.extend(["generated_experiment/reporting.py", "generated_experiment/runner.py", "main.py"])
+    if "missing_local_api" in categories:
+        targets.extend(_paths_from_review_summaries(summaries))
+    return list(dict.fromkeys(path for path in targets if path))
+
+
+def _paths_from_review_summaries(text: str) -> list[str]:
+    return [
+        _safe_relative_path(match.group(0))
+        for match in re.finditer(r"generated_experiment/[a-zA-Z0-9_/]+\.py|main\.py", text)
+        if _safe_relative_path(match.group(0))
+    ]
+
+
+def _architecture_file_specs(architecture_plan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    files = architecture_plan.get("files")
+    rows = [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
+    return {
+        path: row
+        for row in rows
+        if (path := _safe_relative_path(str(row.get("path", ""))))
+    }
+
+
+def _review_file_repair_prompt(
+    *,
+    rel_path: str,
+    file_spec: Mapping[str, Any],
+    project_dir: Path,
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
+    review_report: Mapping[str, Any],
+) -> str:
+    return (
+        "Repair exactly one generated project file. The surrounding project already exists on disk; "
+        "your file must integrate with the actual dependency APIs and must not install packages.\n\n"
+        "Hard rules:\n"
+        "- Return a complete file in JSON field `content`; do not use markdown fences.\n"
+        "- Keep paths and behavior local; no network, shell, credentials, or hidden downloads.\n"
+        "- If task-relevant installed packages are available in dependency_advice, you may use them.\n"
+        "- Preserve the exact public API requested by the file spec when practical.\n"
+        "- If this file writes run artifacts, write under `artifacts/` relative to the current working directory.\n"
+        "- Required task artifacts include `artifacts/results.json` and `artifacts/report.md` whenever requested by the task.\n"
+        "- The benchmark parser still needs metrics printed by main.py as `metric_name: number`.\n\n"
+        f"Target path: {rel_path}\n\n"
+        f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
+        f"Actual dependency APIs:\n{json.dumps(dependency_context(project_dir, file_spec), indent=2, ensure_ascii=False)}\n\n"
+        f"Existing project APIs:\n{json.dumps(_project_api_snapshot(project_dir), indent=2, ensure_ascii=False)}\n\n"
+        f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
+        f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"
+        f"Dependency advice:\n{json.dumps(_compact_for_prompt(dependency_advice), indent=2, ensure_ascii=False)}\n\n"
+        f"Review report:\n{json.dumps(_compact_for_prompt(review_report), indent=2, ensure_ascii=False)}\n"
+    )
+
+
+def _project_api_snapshot(project_dir: Path) -> dict[str, list[str]]:
+    rows: dict[str, list[str]] = {}
+    for path in sorted(project_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(project_dir).as_posix()
+        rows[rel] = public_api(path)
+    return rows
+
+
+def _compact_for_prompt(value: Mapping[str, Any], *, limit: int = 12000) -> dict[str, Any]:
+    text = json.dumps(dict(value), ensure_ascii=False, default=str)
+    if len(text) <= limit:
+        return dict(value)
+    return {"truncated_json": text[:limit], "truncated": True}
+
+
+def _looks_like_fenced_block(value: str) -> bool:
+    stripped = value.strip()
+    return stripped.startswith("```") and stripped.endswith("```")
+
+
+def _strip_markdown_fence(value: str) -> str:
+    stripped = value.strip()
+    if not stripped.startswith("```"):
+        return value
+    lines = stripped.splitlines()
+    if len(lines) >= 3 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).rstrip() + "\n"
+    return value
 
 
 def _repair_missing_static_artifacts(

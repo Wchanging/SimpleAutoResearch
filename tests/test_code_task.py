@@ -34,7 +34,10 @@ from simple_ar.code_task import (
 )
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
 from simple_ar.code_task.generation.dependencies import DEPENDENCY_CATALOG, build_dependency_advice
-from simple_ar.code_task.generation.generated_project_repair import repair_generated_project_from_run_failure
+from simple_ar.code_task.generation.generated_project_repair import (
+    repair_generated_project_from_review,
+    repair_generated_project_from_run_failure,
+)
 from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
     prepare_code_task_experiment,
@@ -77,6 +80,66 @@ class CodeTaskTests(unittest.TestCase):
                     for row in dynamic["packages"]
                 )
             )
+
+    def test_greenfield_review_repair_regenerates_fallback_core_file(self) -> None:
+        class FakeClient:
+            def ask_json(self, _system: str, _prompt: str, *, label: str = "") -> dict[str, str]:
+                self.label = label
+                return {
+                    "content": (
+                        "from __future__ import annotations\n\n"
+                        "def run_experiment() -> dict[str, float]:\n"
+                        "    return {'accuracy': 1.0}\n"
+                    ),
+                    "summary": "Regenerated runner with real metric path.",
+                }
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "generated_project"
+            runner = project / "generated_experiment" / "runner.py"
+            runner.parent.mkdir(parents=True)
+            write_text(runner, "from __future__ import annotations\n\n# Reserved generated module.\n")
+            review = {
+                "status": "failed",
+                "findings": [
+                    {
+                        "category": "mixed_generation_fallback",
+                        "summary": "Core file `generated_experiment/runner.py` fell back while related files were LLM-generated.",
+                    }
+                ],
+            }
+            artifacts = {
+                "generated_files": [
+                    {"path": "generated_experiment/runner.py", "mode": "fallback", "line_count": 3}
+                ]
+            }
+            architecture = {
+                "files": [
+                    {
+                        "path": "generated_experiment/runner.py",
+                        "purpose": "Single authoritative orchestrator.",
+                        "dependencies": [],
+                        "public_api": ["run_experiment() -> dict[str, float]"],
+                    }
+                ]
+            }
+
+            result = repair_generated_project_from_review(
+                project_dir=project,
+                review_report=review,
+                output_path=root / "review_repair.json",
+                code_artifacts=artifacts,
+                architecture_plan=architecture,
+                result_schema={"required_metrics": ["accuracy"]},
+                contract={"objective": "Generate a runnable metric project."},
+                client=FakeClient(),  # type: ignore[arg-type]
+            )
+
+            self.assertEqual(result["status"], "patched")
+            self.assertEqual(result["regenerated_files"][0]["path"], "generated_experiment/runner.py")
+            self.assertIn("return {'accuracy': 1.0}", read_text(runner))
 
     def test_init_copies_workspace_and_indexes_python_ast(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

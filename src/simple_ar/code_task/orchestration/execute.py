@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.core.artifacts import read_json, read_text, write_json
+from simple_ar.app.usage import summarize_usage
+from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
 from simple_ar.code_task.editing.attempts import (
     LoadedCodeTaskBatch,
     create_code_task_batch,
@@ -54,7 +55,7 @@ from simple_ar.code_task.runtime.state import (
 from simple_ar.code_task.execution.summary import write_code_task_summary
 from simple_ar.code_task.execution.validation import validate_code_task
 from simple_ar.code_task.editing.work_plan import generate_code_task_work_plan
-from simple_ar.integrations.llm import LLMError
+from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
 
 
 MessageCallback = Callable[[str], None]
@@ -927,6 +928,8 @@ def _execute_greenfield_code_task(
                     root,
                     paths,
                     steps,
+                    model=model,
+                    use_llm=use_llm,
                     repair_rounds=repair_rounds,
                     max_files=max_files,
                     max_generated_lines=max_generated_lines,
@@ -968,6 +971,8 @@ def _execute_greenfield_code_task(
                     root,
                     paths,
                     steps,
+                    model=model,
+                    use_llm=use_llm,
                     repair_rounds=repair_rounds,
                     max_files=max_files,
                     max_generated_lines=max_generated_lines,
@@ -1338,11 +1343,55 @@ def _greenfield_review_repair_available(run_dir: Path, repair_rounds: int) -> bo
     return used < repair_rounds
 
 
+def _greenfield_repair_client(
+    meta_dir: Path,
+    *,
+    model: str | None,
+    use_llm: bool,
+    message_callback: MessageCallback | None,
+) -> LLMClient | None:
+    if not use_llm:
+        return None
+    try:
+        return LLMClient.from_env(
+            model=model,
+            usage_callback=lambda usage: _record_greenfield_repair_usage(
+                meta_dir,
+                usage,
+                message_callback=message_callback,
+            ),
+        )
+    except LLMError as exc:
+        _emit(message_callback, f"LLM unavailable for review repair; using deterministic repair only. {exc}")
+        return None
+
+
+def _record_greenfield_repair_usage(
+    meta_dir: Path,
+    usage: LLMUsage,
+    *,
+    message_callback: MessageCallback | None,
+) -> None:
+    usage_path = meta_dir / "llm_usage.jsonl"
+    row = usage.to_row()
+    row["stage"] = "code_task.greenfield_review_repair"
+    append_jsonl(usage_path, row)
+    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
+    _emit(
+        message_callback,
+        f"LLM usage {row.get('label', '')}: "
+        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
+        f"{row['total_tokens']} tokens ({row['source']}).",
+    )
+
+
 def _attempt_greenfield_review_repair(
     run_dir: Path,
     paths: object,
     steps: list[ExecuteStepRecord],
     *,
+    model: str | None,
+    use_llm: bool,
     repair_rounds: int,
     max_files: int,
     max_generated_lines: int,
@@ -1356,6 +1405,9 @@ def _attempt_greenfield_review_repair(
     repair = _repair_greenfield_review_failure(
         run_dir,
         paths,
+        model=model,
+        use_llm=use_llm,
+        message_callback=message_callback,
         max_files=max_files,
         max_generated_lines=max_generated_lines,
     )
@@ -1435,6 +1487,9 @@ def _repair_greenfield_review_failure(
     run_dir: Path,
     paths: object,
     *,
+    model: str | None,
+    use_llm: bool,
+    message_callback: MessageCallback | None,
     max_files: int,
     max_generated_lines: int,
 ) -> dict[str, Any]:
@@ -1442,10 +1497,24 @@ def _repair_greenfield_review_failure(
     review = read_json(review_path) if review_path.is_file() else {}
     review = review if isinstance(review, dict) else {}
     repair_path = paths.meta_dir / "review_repair.json"
+    manifest = load_code_task_manifest(run_dir)
+    code_artifacts = _read_optional_dict(paths.meta_dir / "code_artifacts.json")
+    client = _greenfield_repair_client(
+        paths.meta_dir,
+        model=model,
+        use_llm=use_llm,
+        message_callback=message_callback,
+    )
     repair = repair_generated_project_from_review(
         project_dir=paths.workspace_dir / "generated_project",
         review_report=review,
         output_path=repair_path,
+        code_artifacts=code_artifacts,
+        architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
+        result_schema=_greenfield_result_schema_from_manifest(manifest),
+        contract=_greenfield_contract_for_review(paths),
+        dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
+        client=client,
     )
     manifest = load_code_task_manifest(run_dir)
     repair_section = manifest_section(manifest, "repair")
@@ -1470,6 +1539,7 @@ def _repair_greenfield_review_failure(
         if code_artifacts_path.is_file():
             code_artifacts = read_json(code_artifacts_path)
             if isinstance(code_artifacts, dict):
+                _apply_greenfield_review_repair_metadata(code_artifacts, repair)
                 _refresh_greenfield_code_artifacts(
                     code_artifacts,
                     project_dir=paths.workspace_dir / "generated_project",
@@ -1618,6 +1688,41 @@ def _refresh_greenfield_code_artifacts(
         filtered_rows.append(row)
     code_artifacts["generated_files"] = filtered_rows
     code_artifacts["total_lines"] = min(total_lines, max_generated_lines + 1)
+
+
+def _apply_greenfield_review_repair_metadata(code_artifacts: dict[str, Any], repair: dict[str, Any]) -> None:
+    regenerated = repair.get("regenerated_files")
+    if not isinstance(regenerated, list):
+        return
+    by_path = {
+        str(row.get("path") or "").replace("\\", "/").strip(): row
+        for row in regenerated
+        if isinstance(row, dict) and row.get("path")
+    }
+    rows = code_artifacts.get("generated_files")
+    if not isinstance(rows, list):
+        return
+    known_paths = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path") or "").replace("\\", "/").strip()
+        known_paths.add(path)
+        replacement = by_path.get(path)
+        if not replacement:
+            continue
+        row.update(
+            {
+                "mode": replacement.get("mode", "llm_review_repair"),
+                "line_count": replacement.get("line_count", row.get("line_count", 0)),
+                "summary": replacement.get("summary", row.get("summary", "")),
+                "public_api": replacement.get("public_api", row.get("public_api", [])),
+            }
+        )
+    for path, replacement in by_path.items():
+        if path in known_paths:
+            continue
+        rows.append(dict(replacement))
 
 
 def _is_non_deliverable_generated_path(value: str) -> bool:
