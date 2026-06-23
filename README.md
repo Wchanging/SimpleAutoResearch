@@ -88,6 +88,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_TIMEOUT_SEC=120
 SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
+SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
+SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
+SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -95,6 +98,9 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 For third-party OpenAI-compatible providers, set `OPENAI_BASE_URL` to that
 provider's `/v1` endpoint. Price fields are optional; when unset,
 SimpleAutoResearch records token counts but leaves estimated cost as `null`.
+Transient provider failures such as connection resets, rate limits, timeouts,
+and 5xx responses use bounded exponential backoff controlled by the retry
+settings above.
 
 ## Quickstart
 

@@ -53,6 +53,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_TIMEOUT_SEC=120
 SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
+SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
+SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
+SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -64,6 +67,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `SIMPLE_AR_MODEL` 是没有传入 `--model` 时的默认模型。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 限制单次 provider 请求等待时间；较大的 coding prompt 如果确实需要更久，可以适当调高。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 限制模型输出长度，避免较长 coding prompt 生成过大的结果。
+- `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时和 5xx 响应。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
 
 ## Research Pipeline：从主题到报告

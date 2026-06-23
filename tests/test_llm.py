@@ -4,7 +4,14 @@ import os
 import unittest
 from unittest.mock import patch
 
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMRequest, estimate_tokens, parse_json_object
+from simple_ar.integrations.llm import (
+    LLMClient,
+    LLMError,
+    LLMRequest,
+    LLMSettings,
+    estimate_tokens,
+    parse_json_object,
+)
 
 
 class LLMParsingTests(unittest.TestCase):
@@ -55,6 +62,9 @@ class LLMParsingTests(unittest.TestCase):
                 "SIMPLE_AR_MODEL": "test-model",
                 "SIMPLE_AR_LLM_TIMEOUT_SEC": "42.5",
                 "SIMPLE_AR_MAX_OUTPUT_TOKENS": "1234",
+                "SIMPLE_AR_LLM_RETRY_ATTEMPTS": "5",
+                "SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC": "0.5",
+                "SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC": "9",
             },
             clear=True,
         ), patch("simple_ar.integrations.llm.litellm.completion") as completion:
@@ -64,7 +74,44 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(client._provider_model, "openai/test-model")
         self.assertEqual(client._settings.request_timeout_sec, 42.5)
         self.assertEqual(client._settings.max_output_tokens, 1234)
+        self.assertEqual(client._settings.retry_attempts, 5)
+        self.assertEqual(client._settings.retry_base_delay_sec, 0.5)
+        self.assertEqual(client._settings.retry_max_delay_sec, 9)
         completion.assert_not_called()
+
+    def test_ask_retries_transient_connection_error(self) -> None:
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                retry_attempts=3,
+                retry_base_delay_sec=0.25,
+                retry_max_delay_sec=2.0,
+            )
+        )
+        response = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch(
+            "simple_ar.integrations.llm.litellm.completion",
+            side_effect=[RuntimeError("Connection error."), response],
+        ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+            output = client.ask("system", "user", label="retry-test")
+
+        self.assertEqual(output, "ok")
+        self.assertEqual(completion.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
+    def test_ask_does_not_retry_permanent_auth_error(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", retry_attempts=3))
+
+        with patch(
+            "simple_ar.integrations.llm.litellm.completion",
+            side_effect=RuntimeError("Authentication failed: invalid API key."),
+        ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+            with self.assertRaises(LLMError):
+                client.ask("system", "user", label="auth-test")
+
+        self.assertEqual(completion.call_count, 1)
+        sleep.assert_not_called()
 
     def test_estimate_tokens_is_deterministic_and_nonzero_for_text(self) -> None:
         self.assertEqual(estimate_tokens(""), 0)

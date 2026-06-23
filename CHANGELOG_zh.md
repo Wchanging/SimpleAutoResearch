@@ -15,6 +15,11 @@
   例如核心文件仍是 fallback、缺少 artifact writer 或缺少本地 API。修复后会同步
   `code_task/meta/code_artifacts.json`，避免旧 metadata 继续把已修文件判为 fallback；
   即使只有部分文件修复成功，也会刷新 `review_report.json`，让后续执行聚焦真正剩余的问题。
+  通用资源探测 support module 现在有确定性修复路径，避免因为临时 LLM 连接错误卡在
+  非任务领域逻辑的 fallback 文件上。
+- LiteLLM provider 调用现在会对连接中断、超时、限流和 5xx 等临时错误做有限指数退避重试。
+  可通过 `SIMPLE_AR_LLM_RETRY_ATTEMPTS`、`SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC`
+  和 `SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC` 调整。
 - ARC-Bench adapter 生成的 `benchmark.metric_directions` 现在只来自每个 topic manifest
   明确声明的实验指标，并额外保留 `runtime_sec = "resource"`。`condition_count`、
   `dataset_count`、`hypothesis_coverage` 等结构完整性信号仍可出现在结果 artifact 中，

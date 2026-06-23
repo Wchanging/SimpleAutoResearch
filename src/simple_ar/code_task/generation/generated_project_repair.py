@@ -99,6 +99,15 @@ def repair_generated_project_from_review(
             path.write_text(original, encoding="utf-8")
         unresolved.append(f"{rel}: {error}")
 
+    _repair_fallback_support_modules(
+        project_dir,
+        review_report=review_report,
+        code_artifacts=code_artifacts or {},
+        changed=changed,
+        notes=summary["notes"],
+        unresolved=unresolved,
+    )
+
     if client is not None:
         regenerated = _regenerate_review_failed_files(
             project_dir=project_dir,
@@ -151,8 +160,10 @@ def _regenerate_review_failed_files(
     file_specs = _architecture_file_specs(architecture_plan)
     regenerated: list[dict[str, Any]] = []
     for rel_path in target_paths:
-        spec = file_specs.get(rel_path, {"path": rel_path, "purpose": "Repair generated project file.", "dependencies": []})
         target = project_dir / rel_path
+        if rel_path in changed and target.is_file() and not _compile_error(target):
+            continue
+        spec = file_specs.get(rel_path, {"path": rel_path, "purpose": "Repair generated project file.", "dependencies": []})
         previous = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
         try:
             response = client.ask_json(
@@ -197,6 +208,37 @@ def _regenerate_review_failed_files(
             }
         )
     return regenerated
+
+
+def _repair_fallback_support_modules(
+    project_dir: Path,
+    *,
+    review_report: Mapping[str, Any],
+    code_artifacts: Mapping[str, Any],
+    changed: list[str],
+    notes: list[str],
+    unresolved: list[str],
+) -> None:
+    """Repair generic generated-project support modules without task-specific code.
+
+    These modules are framework-level helpers, not domain logic. Keeping them
+    deterministic prevents a transient provider failure from blocking an
+    otherwise coherent generated experiment.
+    """
+
+    targets = set(_review_repair_target_paths(review_report=review_report, code_artifacts=code_artifacts))
+    if "generated_experiment/resources.py" not in targets:
+        return
+    target = project_dir / "generated_experiment" / "resources.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_resources_module(), encoding="utf-8")
+    error = _compile_error(target)
+    if error:
+        unresolved.append(f"generated_experiment/resources.py: deterministic support repair failed: {error}")
+        return
+    if "generated_experiment/resources.py" not in changed:
+        changed.append("generated_experiment/resources.py")
+    notes.append("Generated a deterministic generic resources.py support module.")
 
 
 def _review_repair_target_paths(
@@ -377,6 +419,151 @@ def _generated_readme(project_dir: Path) -> str:
         "## Artifacts\n\n"
         "Runtime outputs should be written under an `artifacts/` directory when the task requests structured results.\n"
     )
+
+
+def _resources_module() -> str:
+    return '''from __future__ import annotations
+
+"""Generic local resource detection for generated experiments.
+
+The module is intentionally conservative and dependency-free. It provides a
+small stable API that generated runners can use to choose bounded presets
+without assuming a specific machine, GPU driver, or optional package.
+"""
+
+from dataclasses import asdict, dataclass
+import os
+import platform
+import shutil
+import subprocess
+from typing import Any, Mapping
+
+
+@dataclass(frozen=True)
+class ResourceInfo:
+    cpu_count: int
+    memory_gb: float | None
+    gpu_available: bool
+    gpu_count: int
+    gpu_names: tuple[str, ...]
+    platform: str
+    max_runtime_sec_hint: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["gpu_names"] = list(self.gpu_names)
+        return data
+
+
+def detect_resources(max_runtime_sec_hint: float | None = None) -> ResourceInfo:
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    memory_gb = _detect_memory_gb()
+    gpu_names = _detect_gpu_names()
+    return ResourceInfo(
+        cpu_count=cpu_count,
+        memory_gb=memory_gb,
+        gpu_available=bool(gpu_names),
+        gpu_count=len(gpu_names),
+        gpu_names=tuple(gpu_names),
+        platform=platform.platform(),
+        max_runtime_sec_hint=max_runtime_sec_hint,
+    )
+
+
+def select_profile(
+    resources: ResourceInfo | None = None,
+    config: Mapping[str, Any] | Any | None = None,
+    max_runtime_sec: float | None = None,
+) -> str:
+    if resources is None:
+        resources = detect_resources(max_runtime_sec_hint=max_runtime_sec)
+    runtime_hint = _runtime_hint(config, max_runtime_sec, resources.max_runtime_sec_hint)
+    if runtime_hint is not None and runtime_hint <= 60:
+        return "tiny"
+    if resources.gpu_available and resources.gpu_count > 0 and (runtime_hint is None or runtime_hint >= 300):
+        return "gpu"
+    if resources.cpu_count >= 8 and (resources.memory_gb is None or resources.memory_gb >= 16):
+        return "medium"
+    if resources.cpu_count >= 4:
+        return "small"
+    return "tiny"
+
+
+def resource_summary(resources: ResourceInfo | None = None) -> dict[str, Any]:
+    return (resources or detect_resources()).to_dict()
+
+
+def _runtime_hint(
+    config: Mapping[str, Any] | Any | None,
+    explicit: float | None,
+    fallback: float | None,
+) -> float | None:
+    if explicit is not None:
+        return _as_float(explicit)
+    for key in ("max_runtime_sec", "timeout_sec", "timeout"):
+        value = _lookup(config, key)
+        if value is not None:
+            return _as_float(value)
+    return fallback
+
+
+def _lookup(config: Mapping[str, Any] | Any | None, key: str) -> Any:
+    if config is None:
+        return None
+    if isinstance(config, Mapping):
+        value = config.get(key)
+        if value is not None:
+            return value
+        runtime = config.get("runtime")
+        if isinstance(runtime, Mapping):
+            return runtime.get(key)
+        return None
+    value = getattr(config, key, None)
+    if value is not None:
+        return value
+    runtime = getattr(config, "runtime", None)
+    return getattr(runtime, key, None) if runtime is not None else None
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _detect_memory_gb() -> float | None:
+    if hasattr(os, "sysconf"):
+        try:
+            pages = os.sysconf("SC_PHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            return round(float(pages) * float(page_size) / (1024 ** 3), 3)
+        except (OSError, ValueError, TypeError):
+            return None
+    return None
+
+
+def _detect_gpu_names() -> list[str]:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible and visible.strip() and visible.strip() != "-1":
+        values = [item.strip() for item in visible.split(",") if item.strip()]
+        if values:
+            return [f"cuda:{item}" for item in values]
+    if shutil.which("nvidia-smi"):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except Exception:
+            return []
+        if result.returncode == 0:
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return []
+'''
 
 
 def repair_generated_project_from_guard(

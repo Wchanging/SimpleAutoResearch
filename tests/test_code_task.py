@@ -173,6 +173,46 @@ class CodeTaskTests(unittest.TestCase):
         self.assertEqual(rows["README.md"]["mode"], "deterministic_review_repair")
         self.assertEqual(rows["generated_experiment/runner.py"]["mode"], "fallback")
 
+    def test_greenfield_review_repair_fills_generic_resources_without_llm(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "generated_project"
+            package = project / "generated_experiment"
+            package.mkdir(parents=True)
+            resources = package / "resources.py"
+            write_text(resources, "from __future__ import annotations\n\n# Reserved generated module.\n")
+            review = {
+                "status": "failed",
+                "findings": [
+                    {
+                        "severity": "blocking",
+                        "category": "mixed_generation_fallback",
+                        "summary": "Core file `generated_experiment/resources.py` fell back.",
+                    }
+                ],
+            }
+            artifacts = {
+                "generated_files": [
+                    {"path": "generated_experiment/resources.py", "mode": "fallback", "line_count": 3}
+                ]
+            }
+
+            repair = repair_generated_project_from_review(
+                project_dir=project,
+                review_report=review,
+                output_path=root / "review_repair.json",
+                code_artifacts=artifacts,
+                client=None,
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            self.assertIn("generated_experiment/resources.py", repair["changed_files"])
+            content = read_text(resources)
+            self.assertIn("class ResourceInfo", content)
+            self.assertIn("def detect_resources", content)
+            self.assertIn("def select_profile", content)
+
     def test_init_copies_workspace_and_indexes_python_ast(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

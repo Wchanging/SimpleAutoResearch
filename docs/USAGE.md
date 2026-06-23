@@ -57,6 +57,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_TIMEOUT_SEC=120
 SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
+SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
+SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
+SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -70,6 +73,9 @@ Notes:
   when deliberately running large prompts.
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` limits the model response size for long coding
   prompts.
+- `SIMPLE_AR_LLM_RETRY_ATTEMPTS` and the retry delay settings control bounded
+  exponential backoff for transient provider errors such as connection resets,
+  rate limits, timeouts, and 5xx responses.
 - Price fields are optional and only affect cost estimates in usage summaries.
 
 ## Research Pipeline (Topic To Report)

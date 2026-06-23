@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence, TypeVar
 
@@ -35,6 +36,10 @@ class LLMSettings:
             cost estimates.
         request_timeout_sec: Per-request provider timeout in seconds.
         max_output_tokens: Optional maximum output-token budget per request.
+        retry_attempts: Total provider attempts for transient transport/server
+            failures. Includes the first request.
+        retry_base_delay_sec: Initial exponential-backoff delay.
+        retry_max_delay_sec: Maximum delay between provider retries.
     """
 
     model: str = "gpt-4o-mini"
@@ -44,6 +49,9 @@ class LLMSettings:
     output_price_per_million: float | None = None
     request_timeout_sec: float = 120.0
     max_output_tokens: int | None = 4096
+    retry_attempts: int = 3
+    retry_base_delay_sec: float = 1.0
+    retry_max_delay_sec: float = 12.0
 
 
 @dataclass(frozen=True)
@@ -155,6 +163,9 @@ class LLMClient:
             output_price_per_million=_optional_float("SIMPLE_AR_OUTPUT_PRICE_PER_1M"),
             request_timeout_sec=_positive_float("SIMPLE_AR_LLM_TIMEOUT_SEC", default=120.0),
             max_output_tokens=_optional_positive_int("SIMPLE_AR_MAX_OUTPUT_TOKENS", default=4096),
+            retry_attempts=_positive_int("SIMPLE_AR_LLM_RETRY_ATTEMPTS", default=3),
+            retry_base_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC", default=1.0),
+            retry_max_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC", default=12.0),
         )
         return cls(settings, usage_callback=usage_callback)
 
@@ -186,16 +197,29 @@ class LLMClient:
             request["base_url"] = self._settings.base_url
         if self._settings.max_output_tokens is not None:
             request["max_tokens"] = self._settings.max_output_tokens
-        try:
-            response = litellm.completion(**request)
-        except Exception as exc:
-            if _is_timeout_error(exc):
-                raise LLMError(f"LLM request timed out: {exc}") from exc
-            raise LLMError(f"LLM request failed: {exc}") from exc
+        response = self._completion_with_retry(request)
 
         output = _content_from_response(response).strip()
         self._record_usage(response, system, user, output, label=label)
         return output
+
+    def _completion_with_retry(self, request: dict[str, Any]) -> object:
+        """Call LiteLLM with bounded exponential backoff for transient errors."""
+        attempts = max(1, int(self._settings.retry_attempts or 1))
+        last_error: Exception | None = None
+        attempted = 0
+        for attempt in range(1, attempts + 1):
+            attempted = attempt
+            try:
+                return litellm.completion(**request)
+            except Exception as exc:
+                last_error = exc
+                if attempt >= attempts or not _is_transient_llm_error(exc):
+                    break
+                time.sleep(_retry_delay(self._settings, attempt))
+        if last_error is not None and _is_timeout_error(last_error):
+            raise LLMError(f"LLM request timed out after {attempted} attempt(s): {last_error}") from last_error
+        raise LLMError(f"LLM request failed after {attempted} attempt(s): {last_error}") from last_error
 
     def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, Any]:
         """Send one request and parse the response as a JSON object.
@@ -497,6 +521,71 @@ def _optional_positive_int(env_name: str, *, default: int | None) -> int | None:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _positive_int(env_name: str, *, default: int) -> int:
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _retry_delay(settings: LLMSettings, attempt: int) -> float:
+    base = settings.retry_base_delay_sec if settings.retry_base_delay_sec > 0 else 1.0
+    maximum = settings.retry_max_delay_sec if settings.retry_max_delay_sec > 0 else base
+    return min(maximum, base * (2 ** max(0, attempt - 1)))
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    transient_markers = (
+        "timeout",
+        "timed out",
+        "connection error",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "api connection",
+        "service unavailable",
+        "temporarily unavailable",
+        "rate limit",
+        "ratelimit",
+        "too many requests",
+        "internalservererror",
+        "internal server error",
+        "bad gateway",
+        "gateway timeout",
+        "server disconnected",
+        "remote protocol error",
+        "httpstatuserror",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+    )
+    permanent_markers = (
+        "authentication",
+        "invalid api key",
+        "permission denied",
+        "not found",
+        "context_length",
+        "context length",
+        "invalid request",
+        "badrequest",
+        "400",
+        "401",
+        "403",
+        "404",
+    )
+    if any(marker in message or marker in name for marker in permanent_markers):
+        return False
+    return any(marker in message or marker in name for marker in transient_markers)
 
 
 def _is_timeout_error(exc: Exception) -> bool:

@@ -19,6 +19,14 @@ This file records user-visible project changes in reverse chronological order. P
   is synchronized so stale metadata does not keep repaired files marked as
   fallback; partial repairs now also refresh `review_report.json` so follow-up
   runs target the remaining findings instead of replaying stale review output.
+  Generic resource-detection support modules now have a deterministic repair
+  path, so transient provider failures do not strand generated experiments on
+  a non-domain fallback file.
+- LiteLLM provider calls now use bounded exponential backoff for transient
+  failures such as connection resets, timeouts, rate limits, and 5xx responses.
+  The behavior is controlled by `SIMPLE_AR_LLM_RETRY_ATTEMPTS`,
+  `SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC`, and
+  `SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC`.
 - ARC-Bench adapter configs now generate `benchmark.metric_directions` from the
   topic manifest's declared experiment metrics, plus `runtime_sec = "resource"`.
   Structural completeness signals such as `condition_count`, `dataset_count`,
