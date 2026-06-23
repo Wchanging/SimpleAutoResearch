@@ -4,6 +4,26 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-23
+
+### Changed
+
+- Greenfield dependency advice now uses a dynamic scan of the active Python
+  environment plus task-relevant filtering. `code_task/meta/dependency_advice.json`
+  keeps the full installed-package snapshot, while terminal output and model
+  context use the compact relevant subset. The built-in catalog is now semantic
+  hints rather than a whitelist.
+- Greenfield review repair can run bounded LLM regeneration before validation
+  for generic recoverable findings such as fallback core files, missing artifact
+  writers, or missing local APIs. After repair, `code_task/meta/code_artifacts.json`
+  is synchronized so stale metadata does not keep repaired files marked as
+  fallback.
+- ARC-Bench adapter configs now generate `benchmark.metric_directions` from the
+  topic manifest's declared experiment metrics, plus `runtime_sec = "resource"`.
+  Structural completeness signals such as `condition_count`, `dataset_count`,
+  and `hypothesis_coverage` may still appear in result artifacts, but they are
+  no longer predeclared as benchmark objectives for every topic.
+
 ## 2026-06-18
 
 ### Added

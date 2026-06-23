@@ -202,6 +202,12 @@ uv run simple-ar run --config examples/greenfield_lightweight_training/configs/g
 
 这个示例适合做本地 greenfield 结构检查：它会测试任务 Markdown handoff、architecture/file planning、多文件生成、code review、run guard 和 diagnosis。更强的 greenfield 任务可以复用同样的配置形态，但需要有意识地提高资源预算，并明确任务自己的指标 schema。
 
+Greenfield code-task run 还会通过扫描当前 Python 环境写出
+`code_task/meta/dependency_advice.json`。终端只展示和任务相关的可用库子集，JSON
+则保留完整 package snapshot，供规划和审计使用。评审失败时，通用可修复问题
+（例如核心文件仍是 fallback、缺少 artifact writer）可以进入有限轮次 LLM repair；
+修复后的文件 metadata 会同步后再进入 validation 和 benchmark。
+
 ## 当前能力边界
 
 SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它仍然故意保持保守。

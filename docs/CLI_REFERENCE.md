@@ -478,6 +478,18 @@ generation settings from `[implementation]` and `[resource]`. This is how
 greenfield tasks select the local backend or an explicit Codex/Claude/OpenCode
 handoff without adding provider-specific CLI flags.
 
+For greenfield tasks, `execute` also writes
+`code_task/meta/dependency_advice.json` and `.md` before implementation
+planning. The JSON contains a full scan of installed Python distributions; the
+terminal output and model context use the compact task-relevant subset. This is
+advice-only and never installs packages automatically.
+
+If greenfield review fails with generic recoverable findings, bounded repair
+rounds may regenerate only the affected generated files and resync
+`code_task/meta/code_artifacts.json` before review/validation continues. If the
+finding is still blocking, execution stops with the generated files and review
+report preserved.
+
 #### `simple-ar code-task decide-plan`
 
 **Purpose**: record a human decision for the current patch plan.

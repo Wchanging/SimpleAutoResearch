@@ -1534,7 +1534,7 @@ def _repair_greenfield_review_failure(
     implementation["review_repair_changed_files"] = repair.get("changed_files", [])
     manifest["implementation"] = implementation
     save_code_task_manifest(run_dir, manifest)
-    if repair.get("status") == "patched":
+    if repair.get("changed_files") or repair.get("regenerated_files"):
         code_artifacts_path = paths.meta_dir / "code_artifacts.json"
         if code_artifacts_path.is_file():
             code_artifacts = read_json(code_artifacts_path)
@@ -1692,8 +1692,13 @@ def _refresh_greenfield_code_artifacts(
 
 def _apply_greenfield_review_repair_metadata(code_artifacts: dict[str, Any], repair: dict[str, Any]) -> None:
     regenerated = repair.get("regenerated_files")
+    changed_files = {
+        str(path).replace("\\", "/").strip()
+        for path in repair.get("changed_files", [])
+        if str(path).strip()
+    }
     if not isinstance(regenerated, list):
-        return
+        regenerated = []
     by_path = {
         str(row.get("path") or "").replace("\\", "/").strip(): row
         for row in regenerated
@@ -1709,16 +1714,22 @@ def _apply_greenfield_review_repair_metadata(code_artifacts: dict[str, Any], rep
         path = str(row.get("path") or "").replace("\\", "/").strip()
         known_paths.add(path)
         replacement = by_path.get(path)
-        if not replacement:
-            continue
-        row.update(
-            {
-                "mode": replacement.get("mode", "llm_review_repair"),
-                "line_count": replacement.get("line_count", row.get("line_count", 0)),
-                "summary": replacement.get("summary", row.get("summary", "")),
-                "public_api": replacement.get("public_api", row.get("public_api", [])),
-            }
-        )
+        if replacement:
+            row.update(
+                {
+                    "mode": replacement.get("mode", "llm_review_repair"),
+                    "line_count": replacement.get("line_count", row.get("line_count", 0)),
+                    "summary": replacement.get("summary", row.get("summary", "")),
+                    "public_api": replacement.get("public_api", row.get("public_api", [])),
+                }
+            )
+        elif path in changed_files and row.get("mode") == "fallback":
+            row.update(
+                {
+                    "mode": "deterministic_review_repair",
+                    "summary": "Repaired by greenfield review repair.",
+                }
+            )
     for path, replacement in by_path.items():
         if path in known_paths:
             continue

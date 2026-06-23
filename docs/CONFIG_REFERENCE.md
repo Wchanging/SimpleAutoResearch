@@ -194,7 +194,7 @@ agent_args = []                # optional extra CLI arguments
 agent_timeout_sec = 600        # timeout for one backend invocation
 task_handoff = "user_file"     # user_file | merge; merge combines task_file with research context
 allow_external_agent = false   # required before launching external CLI providers
-max_repair_attempts = 1
+max_repair_attempts = 1        # bounded implementation/review repair attempts
 
 [workspace]
 mode = "auto"                  # auto | copy | git_worktree | sparse_copy
@@ -208,7 +208,7 @@ backend = "local"              # local for the current V2.5 foundation path
 command = "python benchmark.py"
 timeout_sec = 60
 stream_output = "auto"
-allow_dependency_install = false
+allow_dependency_install = false # dependency advice is shown, not auto-installed
 
 [resource]
 max_runtime_sec = 60
@@ -512,6 +512,7 @@ needed, so existing embedded `code_task_project` runs keep working.
 | `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | Optional external backend launch settings. Leave `agent_model` empty to use the Codex/Claude/OpenCode CLI default configured for the account; set it only when you know the CLI supports that model name. Use `agent_binary` for a custom executable path or for generic `external_cli`; `agent_args` appends extra CLI arguments; `agent_timeout_sec` bounds one backend invocation. |
 | `[implementation].task_handoff` | Embedded existing-project runs only. `user_file` passes `[task].task_file` through unchanged. `merge` writes `05-design/generated_code_task.md` by combining the user task file as hard requirements with goal/problem/synthesis/hypothesis context. |
 | `[implementation].allow_external_agent` | Enables optional external CLI launches for agent-backed generation or repair. External outputs are copied into `agent_outputs/<name>/` and still pass SimpleAutoResearch review, result guards, or code-task validation before they matter. Keep this false for ordinary local runs. |
+| `[implementation].max_repair_attempts` | Upper bound for implementation-side repair attempts. For greenfield runs this includes targeted review repair before validation, such as regenerating fallback core files or missing artifact writers. |
 | `[execution].command` / `.timeout_sec` | Command and timeout used for benchmark/execution planning; for existing projects these map to legacy benchmark settings. |
 | `[resource].max_files` / `.max_generated_lines` | Pre-code generation/edit budget written into `05-design/resource_plan.json`. |
 | `[resource].max_memory_mb` / `.allow_gpu` | Runtime resource budget recorded in `resource_plan.json` and surfaced as contract constraints before code is generated or modified. |
@@ -519,11 +520,16 @@ needed, so existing embedded `code_task_project` runs keep working.
 | `[evaluation].required_metrics` / `.success_criteria` | Required metric checks and success notes used by `07-run/guard_report.json` and the final report. |
 | `[generation].enabled` | Enables the greenfield project-generation path. Leave false for existing-project code-task runs. |
 | `[generation].max_batches` / `.files_per_batch` / `.review_required` | Project-generation planning and review budget recorded into `05-design/experiment_contract.json` and consumed by `06-code`. |
-| `[generation].allow_fallback_scaffold` | Defaults to false. When false, failed generated code stays available for inspection instead of being silently replaced by a deterministic scaffold. |
+| `[generation].allow_fallback_scaffold` | Defaults to false. When false, failed generated code stays available for inspection instead of being silently replaced by a deterministic scaffold. Review repair may still regenerate specific faulty generated files within the configured repair budget. |
 
 During `05-design`, these fields materialize as `experiment_plan.json`,
 `experiment_contract.json`, `result_schema.json`, `resource_plan.json`,
 `dependency_plan.json`, `domain_profile.json`, and `contract_validation.json`.
+For greenfield code-task execution, dependency advice is written under
+`code_task/meta/dependency_advice.json` / `.md`: the JSON records a full scan of
+installed Python packages, while the planner receives a compact task-relevant
+subset plus semantic dependency hints. This is advisory and does not override
+`[execution].allow_dependency_install = false`.
 `06-code` refuses to continue when `contract_validation.json` reports a failed
 pre-code contract.
 During `07-run`, `results.json` is the canonical experiment result and includes
@@ -588,6 +594,7 @@ package rather than parsing stdout directly.
 | `[implementation].agent_mode` | Implementation mode for the backend: `model` keeps SimpleAutoResearch as the harness, `handoff` ingests candidate files from an external agent package, and `delegated_workspace` is recognized but currently fails explicitly until snapshot/diff/rollback execution is implemented. |
 | `[implementation].allow_external_agent` | Required before external CLI backends may launch. External outputs remain untrusted until SimpleAutoResearch review, validation, benchmark, or result guards accept them. |
 | `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | Optional external backend launch controls. Leave `agent_model` empty unless you know the external CLI/account supports the model name. |
+| `[implementation].max_repair_attempts` | Upper bound for implementation-side repair attempts, including greenfield review repair before validation. |
 | `[resource].max_runtime_sec` | Runtime budget surfaced to greenfield planning and external-agent handoff context. |
 | `[resource].max_files` / `.max_generated_lines` | Code-task generation budgets. `[execute].max_files` and `[execute].max_generated_lines` override these during `code-task execute`; otherwise execute reads these values. |
 | `[resource].max_memory_mb` / `.allow_gpu` | Memory/GPU constraints exposed to planning. They describe the allowed resource profile; dependency installation is still not automatic. |

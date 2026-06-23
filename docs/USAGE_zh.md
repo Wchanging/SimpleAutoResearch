@@ -571,8 +571,11 @@ uv run simple-ar code-task execute runs/code-task-greenfield-ml-suite/<run-id> -
 这个示例比本地 smoke test 更重，目标是生成一个模块化 ML workbench：优先使用本地可用的开源/打包数据集，必要时才退回 deterministic synthetic fallback，并包含多种模型/基线、ablation、资源自适应执行和可解析指标。如果要测试 Codex / Claude / OpenCode handoff，修改配置中的 `[implementation]` 即可。
 
 在规划 greenfield 实现前，`execute` 会写出 `code_task/meta/dependency_advice.json`
-和 `.md`，并在终端提示当前已安装和缺失的推荐库。这只是建议，不会自动安装依赖或修改环境；
-如果你希望模型走更强实现路径，可以按提示先手动执行 `uv add ...`，然后重跑 execute。
+和 `.md`。它会扫描当前 Python 环境，把完整 installed-package snapshot 写入 JSON，
+并在终端只展示和任务相关的可用库子集。内置 dependency catalog 只是语义提示，不是
+白名单，因此服务器上额外安装的任务库也可以进入规划上下文。这只是建议，不会自动安装
+依赖或修改环境；如果你希望模型走更强实现路径，可以按提示先手动执行 `uv add ...`，
+然后重跑 execute。
 
 如果省略或显式使用 `workspace.mode = "auto"`，已有项目会先尝试 detached git worktree。如果 Git 不可用、不在仓库内、仓库还没有 commit，或 worktree 无法安全创建，本次 run 会降级为受保护的 copy，并在 `manifest.json.workspace` 写入 `requested_mode`、`selected_mode`、`fallback_reason` 和 `user_next_steps`。
 
@@ -674,6 +677,12 @@ skipped，然后 workflow 从下一个需要处理的位置继续。只有在调
 patched benchmark 完成后还会写入 `code_task/meta/review_report_post_run.json`。
 阻塞性发现会同步记录到 `code_task/memory/`，后续 repair prompt 可以直接利用这些
 最新失败证据。
+
+对于 greenfield run，同一套 review gate 会在验证前检查生成项目。如果 review 发现
+通用可修复问题，例如核心文件仍是 fallback、缺少 artifact writer、缺少本地 API 等，
+`execute` 可以用有限轮次的 LLM repair 只重写受影响文件，重新同步
+`code_task/meta/code_artifacts.json`，再跑一次 review。若问题仍然阻塞，run 会停住并
+保留当前生成产物和 review 报告，方便人工接管。
 
 3. 在 patch-plan 审核面板出现时，阅读 `code_task/work_plan.md` 和
 `code_task/patch_plan.md`。如果计划合理，输入 `yes` 继续。如果你在非交互环境运行、

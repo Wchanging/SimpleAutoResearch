@@ -283,6 +283,13 @@ guards, and diagnosis. For stronger greenfield tasks, keep the same config shape
 but raise budgets deliberately and make the task-specific metric schema
 explicit.
 
+Greenfield code-task runs also write `code_task/meta/dependency_advice.json`
+from a dynamic scan of the active Python environment. The terminal only shows
+the task-relevant subset, while the JSON keeps the full package snapshot for
+planning and audit. Review failures can trigger bounded LLM repair for generic
+recoverable issues such as fallback core files or missing artifact writers; the
+repaired file metadata is synced before validation and benchmark execution.
+
 ## Capability Boundaries
 
 SimpleAutoResearch is useful as a learning and prototyping framework, but it is

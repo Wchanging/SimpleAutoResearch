@@ -498,6 +498,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | 可选外部 backend 启动设置。`agent_model` 留空时会使用 Codex/Claude/OpenCode CLI 当前账号配置的默认模型；只有确认该 CLI/账号支持某个模型名时才建议显式填写。`agent_binary` 可指定自定义 executable path，也可用于 generic `external_cli`；`agent_args` 会追加 CLI 参数；`agent_timeout_sec` 限制单次 backend 调用时间。 |
 | `[implementation].task_handoff` | 仅用于 8 阶段内嵌已有项目代码任务。`user_file` 会原样使用 `[task].task_file`；`merge` 会在 `05-design/generated_code_task.md` 中把用户任务作为硬约束，并融合 goal/problem/synthesis/hypothesis 上下文。 |
 | `[implementation].allow_external_agent` | 是否允许启动可选外部 CLI，用于 agent-backed generation 或 repair。外部输出会先进入 `agent_outputs/<name>/`，仍需通过 SimpleAutoResearch 的 review、result guard 或 code-task validation 后才会影响结果。普通本地运行建议保持 false。 |
+| `[implementation].max_repair_attempts` | implementation 侧修复尝试上限。对 greenfield run 来说，也包括 validation 前的定向 review repair，例如重写 fallback 核心文件或补齐 artifact writer。 |
 | `[execution].command` / `.timeout_sec` | benchmark/execution 规划使用的命令和 timeout；已有项目会映射到旧 benchmark 设置。 |
 | `[resource].max_files` / `.max_generated_lines` | 写入 `05-design/resource_plan.json` 的代码前预算。 |
 | `[resource].max_memory_mb` / `.allow_gpu` | runtime 资源预算，会写入 `resource_plan.json`，并在生成或修改代码前作为 contract constraints 暴露。 |
@@ -505,11 +506,14 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[evaluation].required_metrics` / `.success_criteria` | 必需指标检查和成功条件说明，会被 `07-run/guard_report.json` 和最终报告使用。 |
 | `[generation].enabled` | 启用 greenfield 项目生成路径；已有项目 code-task 运行保持 false。 |
 | `[generation].max_batches` / `.files_per_batch` / `.review_required` | 后续项目生成路径的计划提示；已有项目 patch run 只记录用于审计。 |
-| `[generation].allow_fallback_scaffold` | 默认 false。false 时，生成代码失败会保留产物供检查，而不是静默替换成 deterministic scaffold。 |
+| `[generation].allow_fallback_scaffold` | 默认 false。false 时，生成代码失败会保留产物供检查，而不是静默替换成 deterministic scaffold。review repair 仍可在修复预算内只重写具体有问题的 generated files。 |
 
 `05-design` 会把这些字段落成 `experiment_plan.json`、`experiment_contract.json`、
 `result_schema.json`、`resource_plan.json`、`dependency_plan.json`、
-`domain_profile.json` 和 `contract_validation.json`。如果
+`domain_profile.json` 和 `contract_validation.json`。greenfield code-task 执行会额外在
+`code_task/meta/dependency_advice.json` / `.md` 写入依赖建议：JSON 记录当前 Python
+环境的完整 installed-package 扫描结果，planner 只接收紧凑的任务相关子集和语义依赖提示。
+这只是建议，不会覆盖 `[execution].allow_dependency_install = false` 的默认边界。如果
 `contract_validation.json` 报告失败，`06-code` 会拒绝继续进入代码阶段。
 `07-run/results.json` 是实验结果的 canonical 入口，会集中记录指标、执行 provenance、comparison/verdict，以及 `resource_plan.json`、`code_review.json`、`guard_report.json` 和 `diagnosis.json` 的紧凑证据信号。`diagnosis.json` 会把 guard/code-review/runtime 问题整理成可读诊断和修复建议；报告阶段应引用这组 canonical 结果，而不是直接从 stdout 猜测实验结论。
 
@@ -567,6 +571,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[implementation].agent_mode` | backend 实现模式：`model` 表示 SimpleAutoResearch 仍拥有 harness；`handoff` 会从外部 agent package ingest candidate files；`delegated_workspace` 目前只识别并显式失败，等 snapshot/diff/rollback 执行边界完成后再开放。 |
 | `[implementation].allow_external_agent` | 外部 CLI backend 启动前必须显式设为 true。外部输出仍需通过 SimpleAutoResearch 的 review、validation、benchmark 或 result guard 才能被接受。 |
 | `[implementation].agent_model` / `.agent_binary` / `.agent_args` / `.agent_timeout_sec` | 可选外部 backend 启动设置。除非确认外部 CLI/账号支持某个模型名，否则建议让 `agent_model` 留空。 |
+| `[implementation].max_repair_attempts` | implementation 侧修复尝试上限，也覆盖 greenfield validation 前的 review repair。 |
 | `[resource].max_runtime_sec` | 暴露给 greenfield planning 和 external-agent handoff 的运行预算。 |
 | `[resource].max_files` / `.max_generated_lines` | code-task 生成预算。`code-task execute` 会优先使用 `[execute].max_files` 和 `[execute].max_generated_lines`，缺省时再读取这里。 |
 | `[resource].max_memory_mb` / `.allow_gpu` | 暴露给规划阶段的内存/GPU 约束，只描述允许的资源 profile，不会自动安装依赖。 |

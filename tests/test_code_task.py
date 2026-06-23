@@ -38,6 +38,7 @@ from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
     repair_generated_project_from_run_failure,
 )
+from simple_ar.code_task.orchestration.execute import _apply_greenfield_review_repair_metadata
 from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
     prepare_code_task_experiment,
@@ -140,6 +141,37 @@ class CodeTaskTests(unittest.TestCase):
             self.assertEqual(result["status"], "patched")
             self.assertEqual(result["regenerated_files"][0]["path"], "generated_experiment/runner.py")
             self.assertIn("return {'accuracy': 1.0}", read_text(runner))
+
+    def test_greenfield_review_repair_metadata_syncs_partial_progress(self) -> None:
+        artifacts = {
+            "generated_files": [
+                {"path": "generated_experiment/processing.py", "mode": "fallback", "line_count": 3},
+                {"path": "README.md", "mode": "fallback", "line_count": 1},
+                {"path": "generated_experiment/runner.py", "mode": "fallback", "line_count": 3},
+            ]
+        }
+        repair = {
+            "status": "failed",
+            "changed_files": ["generated_experiment/processing.py", "README.md"],
+            "unresolved_errors": ["generated_experiment/runner.py: provider error"],
+            "regenerated_files": [
+                {
+                    "path": "generated_experiment/processing.py",
+                    "mode": "llm_review_repair",
+                    "line_count": 42,
+                    "summary": "Repaired processor.",
+                    "public_api": ["def build_processor(config)"],
+                }
+            ],
+        }
+
+        _apply_greenfield_review_repair_metadata(artifacts, repair)
+
+        rows = {row["path"]: row for row in artifacts["generated_files"]}
+        self.assertEqual(rows["generated_experiment/processing.py"]["mode"], "llm_review_repair")
+        self.assertEqual(rows["generated_experiment/processing.py"]["line_count"], 42)
+        self.assertEqual(rows["README.md"]["mode"], "deterministic_review_repair")
+        self.assertEqual(rows["generated_experiment/runner.py"]["mode"], "fallback")
 
     def test_init_copies_workspace_and_indexes_python_ast(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

@@ -724,10 +724,13 @@ config when you want to test a Codex/Claude/OpenCode handoff instead of the
 local LLM path.
 
 Before planning the greenfield implementation, execute writes
-`code_task/meta/dependency_advice.json` and `.md`, then prints installed and
-missing recommended packages in the terminal. This is advice-only: the command
-will show an optional `uv add ...` suggestion for a stronger implementation
-path, but it will not install dependencies or mutate the environment for you.
+`code_task/meta/dependency_advice.json` and `.md`. It scans the active Python
+environment, records a full installed-package snapshot in JSON, and prints the
+task-relevant subset in the terminal. The built-in dependency catalog is used as
+semantic hints, not as a whitelist, so packages installed for your server task
+can still be surfaced to the planner. This is advice-only: the command may show
+an optional `uv add ...` suggestion for a stronger implementation path, but it
+will not install dependencies or mutate the environment for you.
 
 When `workspace.mode = "auto"` is omitted or selected explicitly, existing
 projects first try a detached git worktree. If Git cannot be used safely, the
@@ -896,6 +899,13 @@ before static validation. After the patched benchmark runs, it writes
 `code_task/meta/review_report_post_run.json`. Blocking findings are also
 recorded under `code_task/memory/` so repair prompts can reuse the latest
 review evidence.
+
+For greenfield runs, the same review gate checks generated files before
+validation. If the review detects generic recoverable issues such as fallback
+core files, missing artifact writers, or missing local APIs, `execute` can use a
+bounded LLM repair round to regenerate only the affected files, resync
+`code_task/meta/code_artifacts.json`, and rerun review. If the problem is still
+blocking, the run stops with the reviewed artifacts intact for inspection.
 
 3. At the patch-plan review panel, read `code_task/work_plan.md` and
 `code_task/patch_plan.md`. If the plan is reasonable, answer `yes` to continue.

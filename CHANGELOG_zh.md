@@ -4,6 +4,21 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-23
+
+### Changed
+
+- Greenfield dependency advice 从固定候选清单改为“当前 Python 环境动态扫描 + 任务相关筛选”。
+  `code_task/meta/dependency_advice.json` 会保留完整 installed-package snapshot，终端和模型上下文
+  只展示紧凑的任务相关库；内置 catalog 现在只是语义提示，不再限制可用库范围。
+- Greenfield review repair 现在可以在 validation 前针对通用可修复问题做有限 LLM 重写，
+  例如核心文件仍是 fallback、缺少 artifact writer 或缺少本地 API。修复后会同步
+  `code_task/meta/code_artifacts.json`，避免旧 metadata 继续把已修文件判为 fallback。
+- ARC-Bench adapter 生成的 `benchmark.metric_directions` 现在只来自每个 topic manifest
+  明确声明的实验指标，并额外保留 `runtime_sec = "resource"`。`condition_count`、
+  `dataset_count`、`hypothesis_coverage` 等结构完整性信号仍可出现在结果 artifact 中，
+  但不再作为所有任务的预设 benchmark 目标。
+
 ## 2026-06-22
 
 ### Added

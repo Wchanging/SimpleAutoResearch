@@ -442,6 +442,16 @@ benchmark 完成后还会再运行一次 post-run reviewer。阻塞性发现会�
 backend 或显式的 Codex / Claude Code / OpenCode handoff，而不是新增一套
 provider-specific CLI 参数。
 
+对于 greenfield 任务，`execute` 还会在 implementation planning 前写出
+`code_task/meta/dependency_advice.json` 和 `.md`。JSON 会记录当前 Python 环境的
+完整 installed distributions snapshot；终端输出和模型上下文只使用紧凑的任务相关子集。
+这只是建议，不会自动安装依赖。
+
+如果 greenfield review 发现通用可修复的 blocking finding，有限 repair 轮次可以只重写
+受影响的 generated files，并在继续 review/validation 前同步
+`code_task/meta/code_artifacts.json`。如果 finding 仍然阻塞，执行会停住并保留生成文件和
+review 报告。
+
 #### `simple-ar code-task decide-plan`
 
 **一句话说明**：记录当前 patch plan 的人工审核决定。
