@@ -33,6 +33,7 @@ from simple_ar.code_task import (
     validate_code_task,
 )
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
+from simple_ar.code_task.generation.dependencies import DEPENDENCY_CATALOG, build_dependency_advice
 from simple_ar.code_task.generation.generated_project_repair import repair_generated_project_from_run_failure
 from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
@@ -46,6 +47,37 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CodeTaskTests(unittest.TestCase):
+    def test_dependency_advice_scans_environment_beyond_static_hints(self) -> None:
+        base = build_dependency_advice("Use pydantic if available for schema validation.")
+        self.assertEqual(base["selection_policy"], "dynamic_environment_scan_plus_semantic_hints")
+        self.assertGreater(base["environment_package_count"], 0)
+        self.assertTrue(base["environment_packages"])
+        self.assertTrue(
+            any(
+                row.get("package", "").lower() == "pydantic" and row.get("status") == "installed"
+                for row in base["packages"]
+            )
+        )
+
+        hinted = {candidate.package.lower() for candidate in DEPENDENCY_CATALOG}
+        dynamic_package = next(
+            (
+                str(row["package"])
+                for row in base["environment_packages"]
+                if row.get("package") and str(row["package"]).lower() not in hinted
+            ),
+            "",
+        )
+        if dynamic_package:
+            dynamic = build_dependency_advice(f"Use {dynamic_package} if available for this task.")
+            self.assertTrue(
+                any(
+                    str(row.get("package", "")).lower() == dynamic_package.lower()
+                    and row.get("status") == "installed"
+                    for row in dynamic["packages"]
+                )
+            )
+
     def test_init_copies_workspace_and_indexes_python_ast(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

@@ -28,6 +28,7 @@ wheels/
 runs/
 artifacts/
 .researchclaw_cache/
+benchmark/
 
 # Local planning notes
 MDfiles/

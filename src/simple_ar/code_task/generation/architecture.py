@@ -214,6 +214,8 @@ def greenfield_architecture_prompt(
         "- The entrypoint must print all required metrics as `metric_name: number`.\n"
         "- Define exactly one authoritative experiment orchestrator. Helper modules "
         "must not each reimplement their own full dataset/model/metric pipeline.\n"
+        "- You may use task-relevant installed packages listed in domain_profile.available_task_relevant_packages. "
+        "Do not require package installation during execution; provide fallbacks for optional packages when practical.\n"
         "- Design dependency interfaces before implementation. Every cross-file call must use an exact name "
         "declared in the dependency file's public_api; do not use vague prose as an interface contract.\n"
         "- Make `main.py` a thin CLI wrapper when possible; put reusable logic in "

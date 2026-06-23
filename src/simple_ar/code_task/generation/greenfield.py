@@ -102,9 +102,9 @@ def generate_greenfield_code_task(
     )
     result_schema = _result_schema_from_manifest(manifest)
     resource_plan = _resource_plan(resource_decision, max_files=max_files, max_generated_lines=max_generated_lines)
-    dependency_plan = _dependency_plan(task_text)
-    domain_profile = _domain_profile(task_text)
     dependency_advice = build_dependency_advice(task_text)
+    dependency_plan = _dependency_plan(task_text, dependency_advice=dependency_advice)
+    domain_profile = _domain_profile(task_text, dependency_advice=dependency_advice)
     dependency_advice_path = paths.meta_dir / "dependency_advice.json"
     write_json(dependency_advice_path, dependency_advice)
     write_text(paths.meta_dir / "dependency_advice.md", render_dependency_advice_markdown(dependency_advice))
@@ -347,16 +347,22 @@ def _resource_plan(
     }
 
 
-def _dependency_plan(task_text: str) -> dict[str, Any]:
+def _dependency_plan(task_text: str, *, dependency_advice: dict[str, Any]) -> dict[str, Any]:
     mentioned = _mentioned_packages(task_text)
+    available = [
+        str(row.get("package"))
+        for row in dependency_advice.get("packages", [])
+        if isinstance(row, dict) and row.get("status") == "installed"
+    ]
     return {
         "schema_version": "code_task_greenfield_dependency_plan.v1",
         "install_allowed": False,
         "allowed_dependency_policy": "standard_library_preferred_or_explicitly_available",
         "mentioned_packages": mentioned,
+        "available_task_relevant_packages": available,
         "notes": [
             "Generated code should prefer the Python standard library for local smoke paths.",
-            "If the task explicitly names installed packages, generated code may use them but must not install new dependencies.",
+            "Generated code may use task-relevant installed packages listed in dependency_advice, but must not install new dependencies.",
             "If an optional package is missing, fail clearly or provide a bounded fallback when the task allows it.",
         ],
     }
@@ -381,11 +387,26 @@ def _mentioned_packages(task_text: str) -> list[str]:
     return [name for name in candidates if name in text]
 
 
-def _domain_profile(task_text: str) -> dict[str, Any]:
+def _domain_profile(task_text: str, *, dependency_advice: dict[str, Any]) -> dict[str, Any]:
+    relevant_packages = []
+    for row in dependency_advice.get("packages", []):
+        if not isinstance(row, dict) or row.get("status") != "installed":
+            continue
+        relevant_packages.append(
+            {
+                "package": row.get("package"),
+                "version": row.get("version"),
+                "import_names": row.get("import_names") or [row.get("import_name")],
+                "role": row.get("role"),
+                "priority": row.get("priority"),
+            }
+        )
     return {
         "schema_version": "code_task_greenfield_domain_profile.v1",
         "task_excerpt": task_text[:2000],
         "expected_entrypoints": ["python generated_project/main.py"],
+        "environment_package_count": dependency_advice.get("environment_package_count", 0),
+        "available_task_relevant_packages": relevant_packages[:60],
     }
 
 
