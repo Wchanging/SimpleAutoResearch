@@ -1412,9 +1412,13 @@ def _attempt_greenfield_review_repair(
         max_generated_lines=max_generated_lines,
     )
     _record(steps, "repair", "done", f"review repair {repair.get('status', 'unknown')}")
-    if repair.get("status") != "patched":
+    made_changes = bool(repair.get("changed_files") or repair.get("regenerated_files"))
+    if repair.get("status") != "patched" and not made_changes:
         return False
-    _emit(message_callback, "Review repair patched generated project; rerunning review.")
+    if repair.get("status") == "patched":
+        _emit(message_callback, "Review repair patched generated project; rerunning review.")
+    else:
+        _emit(message_callback, "Review repair made partial progress; refreshing review state.")
     review = _rerun_greenfield_review(
         run_dir,
         paths,

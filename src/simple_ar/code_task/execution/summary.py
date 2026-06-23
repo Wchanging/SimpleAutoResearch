@@ -537,12 +537,26 @@ def _comparison_summary(comparison: dict[str, Any]) -> str:
 
 
 def _repair_summary(repair: dict[str, Any]) -> str:
+    legacy_attempts = repair.get("repair_count")
+    review_attempts = repair.get("review_repair_count")
+    run_attempts = repair.get("run_repair_count")
     lines = [
         f"- Status: `{repair.get('status', 'unknown')}`",
-        f"- Attempts: `{repair.get('repair_count', 0)}`",
     ]
+    if legacy_attempts is not None:
+        lines.append(f"- Attempts: `{legacy_attempts}`")
+    if review_attempts is not None:
+        lines.append(f"- Review repair attempts: `{review_attempts}`")
+    if run_attempts is not None:
+        lines.append(f"- Run repair attempts: `{run_attempts}`")
+    if legacy_attempts is None and review_attempts is None and run_attempts is None:
+        lines.append("- Attempts: `0`")
     if repair.get("latest_proposed_edits"):
         lines.append(f"- Latest proposal: `{repair.get('latest_proposed_edits')}`")
+    if repair.get("latest_review_repair"):
+        lines.append(f"- Latest review repair: `{repair.get('latest_review_repair')}`")
+    if repair.get("latest_run_repair"):
+        lines.append(f"- Latest run repair: `{repair.get('latest_run_repair')}`")
     if repair.get("latest_edit_count") is not None:
         lines.append(f"- Proposed edits: `{repair.get('latest_edit_count')}`")
     selected = repair.get("selected_files")

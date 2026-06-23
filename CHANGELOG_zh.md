@@ -13,7 +13,8 @@
   只展示紧凑的任务相关库；内置 catalog 现在只是语义提示，不再限制可用库范围。
 - Greenfield review repair 现在可以在 validation 前针对通用可修复问题做有限 LLM 重写，
   例如核心文件仍是 fallback、缺少 artifact writer 或缺少本地 API。修复后会同步
-  `code_task/meta/code_artifacts.json`，避免旧 metadata 继续把已修文件判为 fallback。
+  `code_task/meta/code_artifacts.json`，避免旧 metadata 继续把已修文件判为 fallback；
+  即使只有部分文件修复成功，也会刷新 `review_report.json`，让后续执行聚焦真正剩余的问题。
 - ARC-Bench adapter 生成的 `benchmark.metric_directions` 现在只来自每个 topic manifest
   明确声明的实验指标，并额外保留 `runtime_sec = "resource"`。`condition_count`、
   `dataset_count`、`hypothesis_coverage` 等结构完整性信号仍可出现在结果 artifact 中，

@@ -17,7 +17,8 @@ This file records user-visible project changes in reverse chronological order. P
   for generic recoverable findings such as fallback core files, missing artifact
   writers, or missing local APIs. After repair, `code_task/meta/code_artifacts.json`
   is synchronized so stale metadata does not keep repaired files marked as
-  fallback.
+  fallback; partial repairs now also refresh `review_report.json` so follow-up
+  runs target the remaining findings instead of replaying stale review output.
 - ARC-Bench adapter configs now generate `benchmark.metric_directions` from the
   topic manifest's declared experiment metrics, plus `runtime_sec = "resource"`.
   Structural completeness signals such as `condition_count`, `dataset_count`,
