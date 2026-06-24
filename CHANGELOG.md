@@ -4,6 +4,20 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-24
+
+### Fixed
+
+- Greenfield benchmark execution now rejects hollow successful runs where
+  `generated_project/artifacts/results.json` contains no condition-level
+  records or summaries and all non-resource metrics are zero. These runs are
+  recorded as benchmark failures so repair can continue instead of accepting a
+  parseable but meaningless metric table.
+- Greenfield run repair prompts and target selection now discourage swallowing
+  unresolved runtime errors as all-zero metrics. Empty-evidence failures target
+  the entrypoint and experiment execution/analysis path, while data-contract
+  failures prioritize input and processing modules before entrypoint changes.
+
 ## 2026-06-23
 
 ### Changed

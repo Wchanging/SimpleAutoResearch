@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import codecs
+import json
 import os
 import shlex
 import subprocess
@@ -184,6 +185,22 @@ def run_code_task_benchmark(
         stderr, stderr_truncated = _clip_output(completed.stderr)
         metrics = parse_metric_lines(stdout)
         status = "passed" if completed.returncode == 0 else "failed"
+        report_metadata: dict[str, Any] | None = None
+        run_metadata: dict[str, Any] | None = None
+        quality_guard = _greenfield_result_quality_guard(
+            run_dir,
+            manifest,
+            status=status,
+            metrics=metrics,
+        )
+        if quality_guard is not None:
+            status = "failed"
+            guard_message = str(quality_guard.get("message") or "Generated benchmark quality guard failed.")
+            stderr_prefix = stderr.rstrip()
+            stderr_text = f"{stderr_prefix}\n{guard_message}\n" if stderr_prefix else guard_message + "\n"
+            stderr, stderr_truncated = _clip_output(stderr_text)
+            report_metadata = {"quality_guard": quality_guard}
+            run_metadata = {"quality_guard": quality_guard}
         return _write_execution_result(
             run_dir,
             manifest=manifest,
@@ -201,6 +218,8 @@ def run_code_task_benchmark(
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
             run_label=label,
+            report_metadata=report_metadata,
+            run_metadata=run_metadata,
         )
     except subprocess.TimeoutExpired as exc:
         duration_sec = round(time.monotonic() - started, 3)
@@ -816,6 +835,113 @@ def _benchmark_command(manifest: dict[str, Any]) -> str:
         command = benchmark.get("command")
         return str(command) if command else ""
     return ""
+
+
+def _greenfield_result_quality_guard(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    status: str,
+    metrics: dict[str, float],
+) -> dict[str, Any] | None:
+    if status != "passed":
+        return None
+    code_task = manifest.get("code_task")
+    if not isinstance(code_task, dict) or str(code_task.get("kind") or "") != "greenfield":
+        return None
+    paths = code_task_paths(run_dir)
+    results_path = _greenfield_results_artifact_path(paths.workspace_dir)
+    if not results_path.is_file():
+        return None
+    try:
+        results = json.loads(results_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "status": "failed",
+            "reason": "unreadable_results_artifact",
+            "message": (
+                "Generated benchmark quality guard failed: "
+                f"could not read generated_project/artifacts/results.json ({exc})."
+            ),
+            "artifact": _relative_to_run(run_dir, results_path),
+        }
+    if not isinstance(results, dict):
+        return None
+
+    record_count = _count_result_records(results.get("raw_records"))
+    condition_summary_count = _mapping_size(results.get("condition_summaries"))
+    dataset_summary_count = _mapping_size(results.get("dataset_comparisons"))
+    non_resource_metrics = _non_resource_metric_names(manifest, metrics)
+    all_non_resource_zero = bool(non_resource_metrics) and all(
+        abs(float(metrics.get(name, 0.0))) <= 1e-12 for name in non_resource_metrics
+    )
+    no_structured_evidence = (
+        record_count == 0 and condition_summary_count == 0 and dataset_summary_count == 0
+    )
+    if not (no_structured_evidence and all_non_resource_zero):
+        return None
+    return {
+        "status": "failed",
+        "reason": "empty_greenfield_evidence",
+        "message": (
+            "Generated benchmark quality guard failed: artifacts/results.json contains "
+            "no condition-level records or summaries, and all non-resource metrics are "
+            "zero. Treating this run as failed instead of benchmark_passed."
+        ),
+        "artifact": _relative_to_run(run_dir, results_path),
+        "record_count": record_count,
+        "condition_summary_count": condition_summary_count,
+        "dataset_summary_count": dataset_summary_count,
+        "non_resource_metrics": non_resource_metrics,
+    }
+
+
+def _count_result_records(value: object) -> int:
+    if isinstance(value, list):
+        total = 0
+        for item in value:
+            if isinstance(item, dict) and isinstance(item.get("records"), list):
+                total += len(item["records"])
+            elif isinstance(item, dict):
+                total += 1
+            else:
+                total += _count_result_records(item)
+        return total
+    if isinstance(value, dict):
+        records = value.get("records")
+        if isinstance(records, list):
+            return len(records)
+        return sum(_count_result_records(item) for item in value.values())
+    return 0
+
+
+def _mapping_size(value: object) -> int:
+    return len(value) if isinstance(value, dict) else 0
+
+
+def _non_resource_metric_names(manifest: dict[str, Any], metrics: dict[str, float]) -> list[str]:
+    benchmark = manifest.get("benchmark")
+    directions = benchmark.get("metric_directions") if isinstance(benchmark, dict) else {}
+    directions = directions if isinstance(directions, dict) else {}
+    names: list[str] = []
+    for name in metrics:
+        direction = str(directions.get(name, "")).strip().lower()
+        lowered = name.lower()
+        if direction == "resource" or "runtime" in lowered or lowered.endswith("_sec"):
+            continue
+        names.append(name)
+    return names
+
+
+def _greenfield_results_artifact_path(workspace_dir: Path) -> Path:
+    candidates = [
+        workspace_dir / "generated_project" / "artifacts" / "results.json",
+        workspace_dir / "artifacts" / "results.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return candidates[0]
 
 
 def _update_manifest_after_run(

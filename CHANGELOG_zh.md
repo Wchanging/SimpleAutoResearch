@@ -4,6 +4,18 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-24
+
+### Fixed
+
+- Greenfield benchmark 执行现在会拒绝“空结果成功”：如果
+  `generated_project/artifacts/results.json` 没有 condition-level records 或
+  summaries，并且所有非资源指标都是 0，即使进程返回 0，也会记录为 benchmark
+  failed，让 repair 继续介入，而不是接受一张可解析但没有实验意义的指标表。
+- Greenfield run repair 的 prompt 和目标文件选择现在会明确禁止把未解决的 runtime
+  错误吞掉后输出全 0 指标。空证据失败会修复入口和实验执行/分析路径；数据契约失败则优先修复
+  input / processing 模块，再考虑入口文件。
+
 ## 2026-06-23
 
 ### Changed

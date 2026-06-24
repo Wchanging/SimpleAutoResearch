@@ -560,7 +560,73 @@ primary_metric = "accuracy"
             self.assertIn("generated_experiment/inputs.py", repair["changed_files"])
             self.assertIn("generated_experiment/processing.py", repair["changed_files"])
             self.assertTrue(fake.labels)
+            self.assertEqual(
+                fake.labels[:3],
+                [
+                    "greenfield-run-repair-generated_experiment/inputs.py",
+                    "greenfield-run-repair-generated_experiment/processing.py",
+                    "greenfield-run-repair-generated_experiment/runner.py",
+                ],
+            )
             self.assertIn("REPAIRED_PATH", read_text(package_dir / "inputs.py"))
+
+    def test_greenfield_benchmark_rejects_empty_zero_evidence(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(task_file, "# Task\n\nRun a greenfield experiment with condition-level evidence.\n")
+            run_dir = root / "runs" / "empty-greenfield-evidence"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="test_accuracy",
+                metric_directions={
+                    "test_accuracy": "higher",
+                    "macro_f1": "higher",
+                    "accuracy_std": "lower",
+                    "runtime_sec": "resource",
+                },
+            )
+            project_dir = run_dir / "code_task" / "workspace" / "generated_project"
+            project_dir.mkdir(parents=True)
+            write_text(
+                project_dir / "main.py",
+                (
+                    "from pathlib import Path\n"
+                    "import json\n\n"
+                    "artifacts = Path('generated_project') / 'artifacts'\n"
+                    "artifacts.mkdir(parents=True, exist_ok=True)\n"
+                    "(artifacts / 'results.json').write_text(json.dumps({\n"
+                    "    'condition_summaries': {},\n"
+                    "    'dataset_comparisons': {},\n"
+                    "    'raw_records': [{'condition': {'name': 'baseline'}, 'records': []}],\n"
+                    "    'global_metrics': {'test_accuracy': 0.0, 'macro_f1': 0.0, 'accuracy_std': 0.0, 'runtime_sec': 0.0},\n"
+                    "}), encoding='utf-8')\n"
+                    "print('test_accuracy: 0.0')\n"
+                    "print('macro_f1: 0.0')\n"
+                    "print('accuracy_std: 0.0')\n"
+                    "print('runtime_sec: 0.0')\n"
+                ),
+            )
+
+            result = run_code_task_benchmark(
+                run_dir,
+                timeout_sec=30,
+                skip_validation=True,
+                run_label="patched",
+            )
+
+            self.assertEqual(result.status, "failed")
+            self.assertIn("Generated benchmark quality guard failed", read_text(result.stderr_path))
+            report = read_json(result.report_path)
+            self.assertEqual(report["quality_guard"]["reason"], "empty_greenfield_evidence")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["status"], "benchmark_failed")
 
     def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

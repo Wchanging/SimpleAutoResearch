@@ -760,7 +760,7 @@ def _regenerate_run_failed_files(
         return []
     file_specs = _architecture_file_specs(architecture_plan)
     regenerated: list[dict[str, Any]] = []
-    for rel_path in target_paths[:4]:
+    for rel_path in target_paths[:5]:
         target = project_dir / rel_path
         if not target.is_file() or target.suffix != ".py":
             continue
@@ -824,14 +824,32 @@ def _run_repair_target_paths(
         ]
     )
     candidates: list[str] = []
+    lowered = text.lower()
+    if _is_empty_greenfield_evidence_failure(lowered):
+        candidates.extend(
+            [
+                "main.py",
+                "generated_experiment/runner.py",
+                "generated_experiment/core.py",
+                "generated_experiment/analysis.py",
+                "generated_experiment/reporting.py",
+            ]
+        )
+    elif "features" in lowered and "labels" in lowered and "metadata" in lowered:
+        candidates.extend(
+            [
+                "generated_experiment/inputs.py",
+                "generated_experiment/processing.py",
+                "generated_experiment/runner.py",
+            ]
+        )
     implicated = failure_analysis.get("implicated_files")
     if isinstance(implicated, list):
         candidates.extend(_normalize_generated_project_path(str(path)) for path in implicated)
     candidates.extend(_paths_from_review_summaries(text))
-    lowered = text.lower()
-    if "features" in lowered and "labels" in lowered and "metadata" in lowered:
-        candidates.extend(["generated_experiment/inputs.py", "generated_experiment/processing.py"])
-    if "run_experiment" in lowered or "experiment run failed" in lowered:
+    if (
+        "run_experiment" in lowered or "experiment run failed" in lowered
+    ) and not _is_empty_greenfield_evidence_failure(lowered):
         candidates.append("generated_experiment/runner.py")
     if not candidates:
         candidates.extend(_fallback_run_repair_targets(code_artifacts))
@@ -844,6 +862,15 @@ def _run_repair_target_paths(
         if target.is_file():
             normalized.append(rel)
     return list(dict.fromkeys(normalized))
+
+
+def _is_empty_greenfield_evidence_failure(text: str) -> bool:
+    return (
+        "quality guard" in text
+        or "empty_greenfield_evidence" in text
+        or "condition-level records" in text
+        or "all non-resource metrics are zero" in text
+    )
 
 
 def _fallback_run_repair_targets(code_artifacts: Mapping[str, Any]) -> list[str]:
@@ -892,6 +919,9 @@ def _run_file_repair_prompt(
         "- Preserve the file's public API unless the failure proves that API is wrong.\n"
         "- Keep behavior local and deterministic; no network, shell, credentials, or hidden downloads.\n"
         "- Do not fake metrics. Fix the runtime path so the benchmark can produce measured outputs.\n"
+        "- Do not convert unresolved runtime errors into a successful all-zero run.\n"
+        "- Do not use self-check, empty datasets, or placeholder records as substitutes for full benchmark mode.\n"
+        "- If the experiment cannot produce condition-level evidence, the entrypoint must fail clearly instead of exiting 0.\n"
         "- Required metrics must remain parseable by main.py as `metric_name: number`.\n\n"
         f"Target path: {rel_path}\n\n"
         f"Current file content:\n```python\n{current_content[:16000]}\n```\n\n"
