@@ -510,6 +510,58 @@ primary_metric = "accuracy"
             self.assertIn("generated_experiment/runner.py", signature_repair["changed_files"])
             self.assertIn("def run_experiment(preset='smoke', data_source=None):", read_text(package_dir / "runner.py"))
 
+    def test_greenfield_run_repair_uses_llm_for_runtime_contract_mismatch(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.labels: list[str] = []
+
+            def ask_json(self, _system: str, _prompt: str, *, label: str = "") -> dict[str, str]:
+                self.labels.append(label)
+                path = label.removeprefix("greenfield-run-repair-")
+                return {
+                    "content": (
+                        "from __future__ import annotations\n\n"
+                        f"REPAIRED_PATH = {path!r}\n"
+                    ),
+                    "summary": f"Repaired {path}.",
+                }
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            package_dir = project_dir / "generated_experiment"
+            package_dir.mkdir(parents=True)
+            for name in ["inputs.py", "processing.py", "runner.py", "__init__.py"]:
+                write_text(package_dir / name, "from __future__ import annotations\n")
+            write_text(project_dir / "main.py", "from __future__ import annotations\n")
+
+            fake = FakeClient()
+            repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair", "implicated_files": ["generated_project/main.py"]},
+                stderr_text=(
+                    "ERROR: Experiment run failed: "
+                    "\"DatasetInput.metadata for 'wine' is missing required keys: features, labels\""
+                ),
+                output_path=root / "run_repair_contract.json",
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "generated_experiment/inputs.py", "mode": "llm"},
+                        {"path": "generated_experiment/processing.py", "mode": "llm"},
+                        {"path": "generated_experiment/runner.py", "mode": "llm"},
+                        {"path": "main.py", "mode": "llm"},
+                    ]
+                },
+                client=fake,
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            self.assertIn("generated_experiment/inputs.py", repair["changed_files"])
+            self.assertIn("generated_experiment/processing.py", repair["changed_files"])
+            self.assertTrue(fake.labels)
+            self.assertIn("REPAIRED_PATH", read_text(package_dir / "inputs.py"))
+
     def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

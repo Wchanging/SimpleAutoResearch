@@ -27,6 +27,11 @@ This file records user-visible project changes in reverse chronological order. P
   The behavior is controlled by `SIMPLE_AR_LLM_RETRY_ATTEMPTS`,
   `SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC`, and
   `SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC`.
+- Greenfield run repair now falls back to bounded LLM file regeneration when
+  deterministic runtime repairs cannot handle a benchmark failure. The repair
+  prompt includes stderr, failure analysis, current file content, project APIs,
+  dependency advice, and metric schema, then compiles the generated project
+  before the next validation/run loop.
 - ARC-Bench adapter configs now generate `benchmark.metric_directions` from the
   topic manifest's declared experiment metrics, plus `runtime_sec = "resource"`.
   Structural completeness signals such as `condition_count`, `dataset_count`,

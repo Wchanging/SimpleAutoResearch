@@ -20,6 +20,9 @@
 - LiteLLM provider 调用现在会对连接中断、超时、限流和 5xx 等临时错误做有限指数退避重试。
   可通过 `SIMPLE_AR_LLM_RETRY_ATTEMPTS`、`SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC`
   和 `SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC` 调整。
+- Greenfield run repair 现在会在确定性 runtime 修复无法处理 benchmark 失败时，退到有边界的
+  LLM 文件级重写。修复 prompt 会包含 stderr、failure analysis、当前文件内容、项目 API、
+  dependency advice 和 metric schema，并在下一轮 validation/run 前先编译检查生成项目。
 - ARC-Bench adapter 生成的 `benchmark.metric_directions` 现在只来自每个 topic manifest
   明确声明的实验指标，并额外保留 `runtime_sec = "resource"`。`condition_count`、
   `dataset_count`、`hypothesis_coverage` 等结构完整性信号仍可出现在结果 artifact 中，

@@ -1054,6 +1054,9 @@ def _execute_greenfield_code_task(
                 paths,
                 steps,
                 repair_rounds=repair_rounds,
+                model=model,
+                use_llm=use_llm,
+                max_generated_lines=max_generated_lines,
                 message_callback=message_callback,
             )
             if not repaired:
@@ -1447,6 +1450,9 @@ def _attempt_greenfield_run_repair(
     steps: list[ExecuteStepRecord],
     *,
     repair_rounds: int,
+    model: str | None,
+    use_llm: bool,
+    max_generated_lines: int,
     message_callback: MessageCallback | None,
 ) -> bool:
     if not _greenfield_run_repair_available(run_dir, repair_rounds):
@@ -1457,6 +1463,12 @@ def _attempt_greenfield_run_repair(
     _record(steps, "analyze-failure", "done", f"source {analysis.source}; status {analysis.status}")
     _emit(message_callback, "Attempting bounded generated project run repair.")
     stderr_path = paths.run_artifact_dir / "patched" / "stderr.txt"
+    client = _greenfield_repair_client(
+        paths.meta_dir,
+        model=model,
+        use_llm=use_llm,
+        message_callback=message_callback,
+    )
     repair = repair_generated_project_from_run_failure(
         project_dir=paths.workspace_dir / "generated_project",
         failure_analysis={
@@ -1467,8 +1479,26 @@ def _attempt_greenfield_run_repair(
         },
         stderr_text=stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else "",
         output_path=paths.meta_dir / "run_repair.json",
+        code_artifacts=_read_optional_dict(paths.meta_dir / "code_artifacts.json"),
+        architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
+        result_schema=_greenfield_result_schema_from_manifest(load_code_task_manifest(run_dir)),
+        contract=_greenfield_contract_for_review(paths),
+        dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
+        client=client,
     )
     _record(steps, "repair", "done", f"run repair {repair.get('status', 'unknown')}")
+    if repair.get("changed_files") or repair.get("regenerated_files"):
+        code_artifacts_path = paths.meta_dir / "code_artifacts.json"
+        if code_artifacts_path.is_file():
+            code_artifacts = read_json(code_artifacts_path)
+            if isinstance(code_artifacts, dict):
+                _apply_greenfield_review_repair_metadata(code_artifacts, repair)
+                _refresh_greenfield_code_artifacts(
+                    code_artifacts,
+                    project_dir=paths.workspace_dir / "generated_project",
+                    max_generated_lines=max_generated_lines,
+                )
+                write_json(code_artifacts_path, code_artifacts)
     _update_greenfield_run_repair_manifest(run_dir, repair=repair)
     write_code_task_summary(run_dir)
     if repair.get("status") != "patched":

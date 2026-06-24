@@ -638,6 +638,12 @@ def repair_generated_project_from_run_failure(
     failure_analysis: Mapping[str, Any],
     stderr_text: str,
     output_path: Path,
+    code_artifacts: Mapping[str, Any] | None = None,
+    architecture_plan: Mapping[str, Any] | None = None,
+    result_schema: Mapping[str, Any] | None = None,
+    contract: Mapping[str, Any] | None = None,
+    dependency_advice: Mapping[str, Any] | None = None,
+    client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Apply narrow deterministic repairs after generated-project run failure.
 
@@ -690,11 +696,214 @@ def repair_generated_project_from_run_failure(
             if project_dir.exists():
                 shutil.rmtree(project_dir)
             shutil.copytree(backup_dir, project_dir)
+            changed.clear()
+
+    if client is not None:
+        regenerated = _regenerate_run_failed_files(
+            project_dir=project_dir,
+            failure_analysis=failure_analysis,
+            stderr_text=stderr_text,
+            code_artifacts=code_artifacts or {},
+            architecture_plan=architecture_plan or {},
+            result_schema=result_schema or {},
+            contract=contract or {},
+            dependency_advice=dependency_advice or {},
+            client=client,
+            changed=changed,
+            notes=summary["notes"],
+            unresolved=summary["unresolved_errors"],
+        )
+        if regenerated:
+            summary["regenerated_files"] = regenerated
+            compile_errors = _compile_project(project_dir)
+            if not compile_errors:
+                summary["status"] = "patched"
+                summary["changed_files"] = changed
+                summary["notes"].append("Regenerated bounded files after benchmark runtime failure.")
+                write_json(output_path, summary)
+                return summary
+            summary["unresolved_errors"].extend(compile_errors)
+            if backup_dir.is_dir():
+                if project_dir.exists():
+                    shutil.rmtree(project_dir)
+                shutil.copytree(backup_dir, project_dir)
+                changed.clear()
 
     summary["changed_files"] = changed
     summary["notes"].append("No deterministic run-failure repair was available.")
     write_json(output_path, summary)
     return summary
+
+
+def _regenerate_run_failed_files(
+    *,
+    project_dir: Path,
+    failure_analysis: Mapping[str, Any],
+    stderr_text: str,
+    code_artifacts: Mapping[str, Any],
+    architecture_plan: Mapping[str, Any],
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
+    client: LLMClient,
+    changed: list[str],
+    notes: list[str],
+    unresolved: list[str],
+) -> list[dict[str, Any]]:
+    target_paths = _run_repair_target_paths(
+        project_dir=project_dir,
+        failure_analysis=failure_analysis,
+        stderr_text=stderr_text,
+        code_artifacts=code_artifacts,
+    )
+    if not target_paths:
+        return []
+    file_specs = _architecture_file_specs(architecture_plan)
+    regenerated: list[dict[str, Any]] = []
+    for rel_path in target_paths[:4]:
+        target = project_dir / rel_path
+        if not target.is_file() or target.suffix != ".py":
+            continue
+        previous = target.read_text(encoding="utf-8", errors="replace")
+        spec = file_specs.get(rel_path, {"path": rel_path, "purpose": "Repair generated runtime failure.", "dependencies": []})
+        try:
+            response = client.ask_json(
+                "You repair one file in a generated Python experiment project after a benchmark runtime failure. Return only JSON with string fields `content` and `summary`.",
+                _run_file_repair_prompt(
+                    rel_path=rel_path,
+                    current_content=previous,
+                    file_spec=spec,
+                    project_dir=project_dir,
+                    failure_analysis=failure_analysis,
+                    stderr_text=stderr_text,
+                    result_schema=result_schema,
+                    contract=contract,
+                    dependency_advice=dependency_advice,
+                ),
+                label=f"greenfield-run-repair-{rel_path}",
+            )
+        except Exception as exc:
+            unresolved.append(f"{rel_path}: LLM run repair failed: {exc}")
+            continue
+        content = _strip_markdown_fence(str(response.get("content", "")).strip().rstrip() + "\n")
+        if not content.strip():
+            unresolved.append(f"{rel_path}: LLM run repair returned empty content.")
+            continue
+        target.write_text(content, encoding="utf-8")
+        error = _compile_error(target)
+        if error:
+            target.write_text(previous, encoding="utf-8")
+            unresolved.append(f"{rel_path}: repaired file failed to compile: {error}")
+            continue
+        if rel_path not in changed:
+            changed.append(rel_path)
+        notes.append(f"Regenerated {rel_path} with LLM run repair.")
+        regenerated.append(
+            {
+                "path": rel_path,
+                "mode": "llm_run_repair",
+                "line_count": max(1, len(content.splitlines())),
+                "summary": str(response.get("summary") or "Regenerated after benchmark runtime failure.")[:500],
+                "public_api": public_api(target),
+            }
+        )
+    return regenerated
+
+
+def _run_repair_target_paths(
+    *,
+    project_dir: Path,
+    failure_analysis: Mapping[str, Any],
+    stderr_text: str,
+    code_artifacts: Mapping[str, Any],
+) -> list[str]:
+    text = " ".join(
+        [
+            stderr_text,
+            json.dumps(dict(failure_analysis), ensure_ascii=False, default=str),
+        ]
+    )
+    candidates: list[str] = []
+    implicated = failure_analysis.get("implicated_files")
+    if isinstance(implicated, list):
+        candidates.extend(_normalize_generated_project_path(str(path)) for path in implicated)
+    candidates.extend(_paths_from_review_summaries(text))
+    lowered = text.lower()
+    if "features" in lowered and "labels" in lowered and "metadata" in lowered:
+        candidates.extend(["generated_experiment/inputs.py", "generated_experiment/processing.py"])
+    if "run_experiment" in lowered or "experiment run failed" in lowered:
+        candidates.append("generated_experiment/runner.py")
+    if not candidates:
+        candidates.extend(_fallback_run_repair_targets(code_artifacts))
+    normalized = []
+    for path in candidates:
+        rel = _safe_relative_path(path)
+        if not rel or not rel.endswith(".py"):
+            continue
+        target = project_dir / rel
+        if target.is_file():
+            normalized.append(rel)
+    return list(dict.fromkeys(normalized))
+
+
+def _fallback_run_repair_targets(code_artifacts: Mapping[str, Any]) -> list[str]:
+    generated = code_artifacts.get("generated_files")
+    rows = [row for row in generated if isinstance(row, Mapping)] if isinstance(generated, list) else []
+    preferred = [
+        "generated_experiment/runner.py",
+        "generated_experiment/inputs.py",
+        "generated_experiment/processing.py",
+        "generated_experiment/core.py",
+        "main.py",
+    ]
+    known = {
+        _safe_relative_path(str(row.get("path", "")))
+        for row in rows
+        if isinstance(row.get("path", ""), str)
+    }
+    return [path for path in preferred if path in known]
+
+
+def _normalize_generated_project_path(value: str) -> str:
+    normalized = value.replace("\\", "/").strip()
+    marker = "generated_project/"
+    if marker in normalized:
+        normalized = normalized.split(marker, 1)[1]
+    return normalized.lstrip("/")
+
+
+def _run_file_repair_prompt(
+    *,
+    rel_path: str,
+    current_content: str,
+    file_spec: Mapping[str, Any],
+    project_dir: Path,
+    failure_analysis: Mapping[str, Any],
+    stderr_text: str,
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
+) -> str:
+    return (
+        "Repair exactly one generated project file after a benchmark runtime failure. "
+        "The full project already exists on disk, and this file must integrate with the existing public APIs.\n\n"
+        "Hard rules:\n"
+        "- Return a complete replacement file in JSON field `content`; do not use markdown fences.\n"
+        "- Preserve the file's public API unless the failure proves that API is wrong.\n"
+        "- Keep behavior local and deterministic; no network, shell, credentials, or hidden downloads.\n"
+        "- Do not fake metrics. Fix the runtime path so the benchmark can produce measured outputs.\n"
+        "- Required metrics must remain parseable by main.py as `metric_name: number`.\n\n"
+        f"Target path: {rel_path}\n\n"
+        f"Current file content:\n```python\n{current_content[:16000]}\n```\n\n"
+        f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
+        f"Benchmark stderr:\n{stderr_text[:6000]}\n\n"
+        f"Failure analysis:\n{json.dumps(_compact_for_prompt(failure_analysis), indent=2, ensure_ascii=False)}\n\n"
+        f"Actual dependency APIs:\n{json.dumps(dependency_context(project_dir, file_spec), indent=2, ensure_ascii=False)}\n\n"
+        f"Existing project APIs:\n{json.dumps(_project_api_snapshot(project_dir), indent=2, ensure_ascii=False)}\n\n"
+        f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
+        f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"
+        f"Dependency advice:\n{json.dumps(_compact_for_prompt(dependency_advice), indent=2, ensure_ascii=False)}\n"
+    )
 
 
 def repair_generated_project_with_agent_backend(
