@@ -67,6 +67,23 @@ arc_adapter_meta.json
 `finalize` must not overwrite a non-empty output directory unless the user
 passes `--force`.
 
+`finalize` also writes a generic `result_analysis/` folder. This folder is
+produced through SimpleAutoResearch's benchmark-agnostic result-analysis layer:
+
+```text
+result_analysis/
+  analysis_context.json
+  metric_summary.json
+  claims.json
+  analysis_report.md
+  analysis_audit.json
+```
+
+When `--analyze` is passed, the adapter may call the configured LLM through the
+generic result-analysis layer and use the analyzed README/claims in the
+submission. Without `--analyze`, the analysis remains deterministic and does
+not spend model tokens.
+
 ## Judge Wrapper
 
 `judge` runs a user-supplied external command. It only records:
@@ -92,4 +109,4 @@ Keep these ARC-specific concepts out of `src/simple_ar`:
 
 Only promote a feature into core when it is benchmark-agnostic, such as metric
 normalization, claim grounding, result analysis, run failure diagnosis, or
-artifact references.
+artifact references. ARC-specific projection stays in this adapter.

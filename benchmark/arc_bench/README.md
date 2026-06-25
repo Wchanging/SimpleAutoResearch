@@ -133,9 +133,11 @@ uv run python benchmark/arc_bench/adapter.py finalize \
 `--output-dir`, or pass `--force` only when you intentionally want to replace
 the previous submission package.
 
-By default `finalize` only projects existing run artifacts. If you want the
-adapter to call the configured LLM and regenerate the benchmark-facing README
-and claims from measured metrics, add `--analyze`:
+`finalize` always writes a generic `result_analysis/` folder with deterministic
+metric and claim-audit artifacts. By default it does not spend LLM tokens and it
+keeps the submission README/claims close to the original run artifacts. If you
+want the adapter to call the configured LLM and regenerate the benchmark-facing
+README and claims from measured metrics, add `--analyze`:
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py finalize \
@@ -151,11 +153,13 @@ Use `--analysis-model <model>` only when you want to override
 ```text
 result_analysis/
   analysis_context.json
-  analysis_response.json
+  metric_summary.json
+  claims.json
   analysis_report.md
   analysis_audit.json
-  llm_usage.jsonl
-  llm_usage_summary.json
+  analysis_response.json      # only when --analyze is used
+  llm_usage.jsonl             # only when --analyze is used
+  llm_usage_summary.json      # only when --analyze is used
 ```
 
 The finalizer writes:

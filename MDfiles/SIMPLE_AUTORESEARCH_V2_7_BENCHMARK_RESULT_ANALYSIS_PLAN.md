@@ -359,6 +359,15 @@ Week 0.5 / Week 1 的实现边界：
 | Day 22 | Judge feedback | 收集 judge 失败原因，形成修复清单 | 失败可进入下一轮 repair |
 | Day 23 | Adapter hardening | 路径、覆盖、重复运行、清理 | 服务器和本机路径都能跑 |
 
+Week 2-5 首轮实现状态：
+
+- 新增通用 `simple_ar.result_analysis` 层，包含 `AnalysisContext`、metric summary、claim schema、audit 和 artifact 写出；
+- result analysis 默认可确定性运行，不需要 LLM，也会标记 missing metrics、全 0 指标、无 claim 等弱证据；
+- LLM analyzer 作为可选增强，通过统一 schema 输出 README、claims 和 audit；无证据的 supported claim 会被自动降级；
+- ARC adapter 的 `finalize` 会始终写出 `result_analysis/`，并在 `--analyze` 时调用通用 result analysis 层重写 `submission/README.md` 与 `submission/claims.json`；
+- ARC adapter 仍保持在 `benchmark/arc_bench/`，ARC manifest/rubric/submission/judge 细节没有进入核心 pipeline；
+- Week5 的真实 ML02/ML04 judge-level 验收仍需要在服务器上结合 ARC-Bench judge 继续跑，当前实现先保证 adapter 与通用分析层具备可测入口。
+
 ### Week 6：General Benchmark Interface
 
 | Day | 任务 | 目标 | 验收 |
