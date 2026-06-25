@@ -757,14 +757,39 @@ def _regenerate_run_failed_files(
     notes: list[str],
     unresolved: list[str],
 ) -> list[dict[str, Any]]:
-    target_paths = _run_repair_target_paths(
+    heuristic_targets = _run_repair_target_paths(
         project_dir=project_dir,
         failure_analysis=failure_analysis,
         stderr_text=stderr_text,
         code_artifacts=code_artifacts,
     )
+    repair_context = _run_repair_context(
+        project_dir=project_dir,
+        failure_analysis=failure_analysis,
+        stderr_text=stderr_text,
+        code_artifacts=code_artifacts,
+        heuristic_targets=heuristic_targets,
+    )
+    repair_plan = _plan_run_repair_targets(
+        failure_analysis=failure_analysis,
+        stderr_text=stderr_text,
+        result_schema=result_schema,
+        contract=contract,
+        dependency_advice=dependency_advice,
+        context=repair_context,
+        client=client,
+        unresolved=unresolved,
+    )
+    target_paths = _repair_plan_targets(
+        project_dir=project_dir,
+        repair_plan=repair_plan,
+        heuristic_targets=heuristic_targets,
+    )
     if not target_paths:
         return []
+    diagnosis = str(repair_plan.get("diagnosis") or repair_plan.get("root_cause") or "").strip()
+    if diagnosis:
+        notes.append(f"Run repair diagnosis: {diagnosis[:500]}")
     file_specs = _architecture_file_specs(architecture_plan)
     regenerated: list[dict[str, Any]] = []
     for rel_path in target_paths[:5]:
@@ -783,6 +808,8 @@ def _regenerate_run_failed_files(
                     project_dir=project_dir,
                     failure_analysis=failure_analysis,
                     stderr_text=stderr_text,
+                    repair_plan=repair_plan,
+                    repair_context=repair_context,
                     result_schema=result_schema,
                     contract=contract,
                     dependency_advice=dependency_advice,
@@ -817,6 +844,172 @@ def _regenerate_run_failed_files(
     return regenerated
 
 
+def _plan_run_repair_targets(
+    *,
+    failure_analysis: Mapping[str, Any],
+    stderr_text: str,
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
+    context: Mapping[str, Any],
+    client: LLMClient,
+    unresolved: list[str],
+) -> dict[str, Any]:
+    try:
+        response = client.ask_json(
+            "You diagnose a Python project runtime failure before any code rewrite. Return only JSON.",
+            _run_repair_plan_prompt(
+                context=context,
+                failure_analysis=failure_analysis,
+                stderr_text=stderr_text,
+                result_schema=result_schema,
+                contract=contract,
+                dependency_advice=dependency_advice,
+            ),
+            label="greenfield-run-repair-plan",
+        )
+    except Exception as exc:
+        unresolved.append(f"run-repair-plan: LLM diagnosis failed: {exc}")
+        return {}
+    if not isinstance(response, Mapping):
+        return {}
+    return dict(response)
+
+
+def _repair_plan_targets(
+    *,
+    project_dir: Path,
+    repair_plan: Mapping[str, Any],
+    heuristic_targets: list[str],
+) -> list[str]:
+    planned = repair_plan.get("target_files")
+    rows = planned if isinstance(planned, list) else []
+    selected: list[str] = []
+    for row in rows:
+        raw_path = row.get("path") if isinstance(row, Mapping) else row
+        path = _safe_relative_path(str(raw_path or ""))
+        if not path or not path.endswith(".py"):
+            continue
+        if (project_dir / path).is_file():
+            selected.append(path)
+    return list(dict.fromkeys([*selected, *heuristic_targets]))
+
+
+def _run_repair_context(
+    *,
+    project_dir: Path,
+    failure_analysis: Mapping[str, Any],
+    stderr_text: str,
+    code_artifacts: Mapping[str, Any],
+    heuristic_targets: list[str],
+) -> dict[str, Any]:
+    all_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
+    signal_text = " ".join(
+        [
+            stderr_text,
+            json.dumps(dict(failure_analysis), ensure_ascii=False, default=str),
+        ]
+    ).lower()
+    ranked = _rank_repair_candidates(
+        all_paths,
+        signal_text=signal_text,
+        preferred_roles=("orchestrator", "data", "preprocess", "config", "core", "artifact", "entrypoint"),
+    )
+    matched = _source_signal_matches(project_dir, all_paths, signal_text)
+    candidate_paths = list(dict.fromkeys([*heuristic_targets, *matched, *ranked]))[:10]
+    return {
+        "schema_version": "code_task_runtime_repair_context.v1",
+        "heuristic_targets": heuristic_targets,
+        "candidate_files": [
+            _candidate_file_context(project_dir, path)
+            for path in candidate_paths
+            if (project_dir / path).is_file()
+        ],
+        "project_api": _project_api_snapshot(project_dir),
+    }
+
+
+def _candidate_file_context(project_dir: Path, rel_path: str) -> dict[str, Any]:
+    target = project_dir / rel_path
+    try:
+        source = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        source = ""
+    return {
+        "path": rel_path,
+        "roles": sorted(_path_roles(rel_path)),
+        "public_api": public_api(target) if target.suffix == ".py" else [],
+        "source_excerpt": _head_tail_excerpt(source, limit=3600),
+    }
+
+
+def _source_signal_matches(project_dir: Path, paths: list[str], signal_text: str) -> list[str]:
+    terms = _failure_terms(signal_text)
+    if not terms:
+        return []
+    matches: list[str] = []
+    for path in paths:
+        target = project_dir / path
+        if not target.is_file():
+            continue
+        try:
+            source = target.read_text(encoding="utf-8", errors="ignore").lower()
+        except OSError:
+            continue
+        if any(term in source for term in terms):
+            matches.append(path)
+    return matches
+
+
+def _failure_terms(text: str) -> list[str]:
+    terms = []
+    for quoted in re.findall(r"'([^']{2,80})'|\"([^\"]{2,80})\"", text):
+        value = next((part for part in quoted if part), "")
+        if value:
+            terms.append(value.lower())
+    terms.extend(
+        token.lower()
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)
+        if token.lower() not in {"the", "and", "for", "with", "object", "failed", "error", "cannot", "proceed"}
+    )
+    return list(dict.fromkeys(terms))[:24]
+
+
+def _head_tail_excerpt(text: str, *, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    half = max(1000, limit // 2)
+    return text[:half].rstrip() + "\n\n# ... middle omitted for repair context ...\n\n" + text[-half:].lstrip()
+
+
+def _run_repair_plan_prompt(
+    *,
+    context: Mapping[str, Any],
+    failure_analysis: Mapping[str, Any],
+    stderr_text: str,
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
+) -> str:
+    return (
+        "Diagnose the runtime failure before editing files. Choose a small ordered list of existing Python files "
+        "that most likely own the root cause.\n\n"
+        "Rules:\n"
+        "- Prefer producer/consumer contract fixes over entrypoint-only changes.\n"
+        "- If the error mentions a missing dataset/source/field, inspect data loading, preprocessing, config, and orchestrator files.\n"
+        "- If the error mentions an attribute/type mismatch, inspect the object producer, object consumer, and the call site.\n"
+        "- Do not choose files only because they appear in validation warnings if benchmark stderr contains a clearer runtime failure.\n"
+        "- Return JSON with fields: diagnosis, root_cause, target_files, repair_strategy, risks.\n"
+        "- target_files must use only paths from candidate_files.\n\n"
+        f"Benchmark stderr:\n{stderr_text[:6000]}\n\n"
+        f"Failure analysis:\n{json.dumps(_compact_for_prompt(failure_analysis), indent=2, ensure_ascii=False)}\n\n"
+        f"Candidate context:\n{json.dumps(_compact_for_prompt(context, limit=36000), indent=2, ensure_ascii=False)}\n\n"
+        f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
+        f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"
+        f"Dependency advice:\n{json.dumps(_compact_for_prompt(dependency_advice), indent=2, ensure_ascii=False)}\n"
+    )
+
+
 def _run_repair_target_paths(
     *,
     project_dir: Path,
@@ -846,7 +1039,17 @@ def _run_repair_target_paths(
             _rank_repair_candidates(
                 known_paths,
                 signal_text=lowered,
-                preferred_roles=("data", "preprocess", "orchestrator"),
+                preferred_roles=("data", "preprocess", "config", "orchestrator"),
+            )
+        )
+    elif ("dataset" in lowered or "source" in lowered or "field" in lowered or "bundle" in lowered) and (
+        "not found" in lowered or "missing" in lowered or "cannot proceed" in lowered
+    ):
+        candidates.extend(
+            _rank_repair_candidates(
+                known_paths,
+                signal_text=lowered,
+                preferred_roles=("data", "preprocess", "config", "orchestrator", "core", "entrypoint"),
             )
         )
     elif "has no attribute" in lowered or "attributeerror" in lowered:
@@ -901,7 +1104,7 @@ def _fallback_run_repair_targets(
     return _rank_repair_candidates(
         _generated_python_paths(code_artifacts, project_dir=project_dir),
         signal_text="",
-        preferred_roles=("orchestrator", "entrypoint", "data", "preprocess", "core", "artifact"),
+        preferred_roles=("orchestrator", "entrypoint", "data", "preprocess", "config", "core", "artifact"),
     )
 
 
@@ -960,6 +1163,8 @@ def _path_roles(path: str) -> set[str]:
         roles.add("data")
     if _contains_any(full, ("process", "preprocess", "transform", "prepare", "clean", "split")):
         roles.add("preprocess")
+    if _contains_any(full, ("config", "setting", "option", "param", "schema")):
+        roles.add("config")
     if _contains_any(full, ("core", "model", "algorithm", "logic", "method", "estimator", "classif", "regress")):
         roles.add("core")
     if _contains_any(full, ("analysis", "metric", "score", "report", "artifact", "output", "result", "summary", "writer")):
@@ -995,6 +1200,8 @@ def _run_file_repair_prompt(
     project_dir: Path,
     failure_analysis: Mapping[str, Any],
     stderr_text: str,
+    repair_plan: Mapping[str, Any],
+    repair_context: Mapping[str, Any],
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
@@ -1016,7 +1223,9 @@ def _run_file_repair_prompt(
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Benchmark stderr:\n{stderr_text[:6000]}\n\n"
         f"Failure analysis:\n{json.dumps(_compact_for_prompt(failure_analysis), indent=2, ensure_ascii=False)}\n\n"
-        f"Actual dependency APIs:\n{json.dumps(dependency_context(project_dir, file_spec), indent=2, ensure_ascii=False)}\n\n"
+        f"Runtime repair plan:\n{json.dumps(_compact_for_prompt(repair_plan), indent=2, ensure_ascii=False)}\n\n"
+        f"Relevant project context for this repair:\n{json.dumps(_compact_for_prompt(repair_context, limit=24000), indent=2, ensure_ascii=False)}\n\n"
+        f"Actual dependency APIs:\n{json.dumps(dependency_context(project_dir, file_spec, max_source_chars=5000), indent=2, ensure_ascii=False)}\n\n"
         f"Existing project APIs:\n{json.dumps(_project_api_snapshot(project_dir), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"

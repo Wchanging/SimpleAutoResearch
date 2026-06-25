@@ -4,6 +4,14 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-25
+
+### Changed
+
+- Generated-project run repair 现在会先做一次诊断式规划，再进入逐文件重写。规划 prompt 会同时看到 benchmark stderr、failure analysis、候选文件片段、项目 public API、任务 contract、dependency advice 和 result schema，然后给出根因、目标文件和修复策略。
+- 单文件 run repair prompt 现在会携带 runtime repair plan 和相关项目上下文，跨文件的 producer/consumer 契约错误不再只依赖入口文件或 validation warning 进行猜测式修补。
+- 修复目标排序现在会把 dataset/source/field 缺失或找不到的问题视为通用数据契约错误，并把配置文件纳入角色模型；即使诊断 LLM 调用失败，也能更合理地优先检查数据加载、预处理、配置和编排路径。
+
 ## 2026-06-24
 
 ### Fixed

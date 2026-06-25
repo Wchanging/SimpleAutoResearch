@@ -514,9 +514,23 @@ primary_metric = "accuracy"
         class FakeClient:
             def __init__(self) -> None:
                 self.labels: list[str] = []
+                self.prompts: list[str] = []
 
             def ask_json(self, _system: str, _prompt: str, *, label: str = "") -> dict[str, str]:
                 self.labels.append(label)
+                self.prompts.append(_prompt)
+                if label == "greenfield-run-repair-plan":
+                    return {
+                        "diagnosis": "The data producer and processing consumer disagree on metadata fields.",
+                        "root_cause": "DatasetInput metadata contract mismatch.",
+                        "target_files": [
+                            {"path": "generated_experiment/inputs.py", "reason": "producer"},
+                            {"path": "generated_experiment/processing.py", "reason": "consumer"},
+                            {"path": "generated_experiment/runner.py", "reason": "orchestrator"},
+                        ],
+                        "repair_strategy": "Make the generated data bundle and processing path share one contract.",
+                        "risks": [],
+                    }
                 path = label.removeprefix("greenfield-run-repair-")
                 return {
                     "content": (
@@ -560,14 +574,18 @@ primary_metric = "accuracy"
             self.assertIn("generated_experiment/inputs.py", repair["changed_files"])
             self.assertIn("generated_experiment/processing.py", repair["changed_files"])
             self.assertTrue(fake.labels)
+            file_labels = [label for label in fake.labels if label != "greenfield-run-repair-plan"]
             self.assertEqual(
-                fake.labels[:3],
+                file_labels[:3],
                 [
                     "greenfield-run-repair-generated_experiment/inputs.py",
                     "greenfield-run-repair-generated_experiment/processing.py",
                     "greenfield-run-repair-generated_experiment/runner.py",
                 ],
             )
+            repair_prompts = [prompt for label, prompt in zip(fake.labels, fake.prompts) if label != "greenfield-run-repair-plan"]
+            self.assertTrue(any("Runtime repair plan" in prompt for prompt in repair_prompts))
+            self.assertTrue(any("Relevant project context" in prompt for prompt in repair_prompts))
             self.assertIn("REPAIRED_PATH", read_text(package_dir / "inputs.py"))
 
     def test_greenfield_benchmark_rejects_empty_zero_evidence(self) -> None:
@@ -635,6 +653,27 @@ primary_metric = "accuracy"
 
             def ask_json(self, _system: str, _prompt: str, *, label: str = "") -> dict[str, str]:
                 self.labels.append(label)
+                if label == "greenfield-run-repair-plan":
+                    if "has no attribute" in _prompt:
+                        targets = [
+                            "src/loaders.py",
+                            "src/preprocess.py",
+                            "src/model_core.py",
+                            "src/pipeline.py",
+                        ]
+                    else:
+                        targets = [
+                            {"path": "src/loaders.py"},
+                            {"path": "src/preprocess.py"},
+                            {"path": "src/pipeline.py"},
+                        ]
+                    return {
+                        "diagnosis": "Use project-specific producer and consumer files instead of fixed generated_experiment names.",
+                        "root_cause": "The generated project has a custom package layout.",
+                        "target_files": targets,
+                        "repair_strategy": "Repair the producer, transformer, and orchestrator in that order.",
+                        "risks": [],
+                    }
                 path = label.removeprefix("greenfield-run-repair-")
                 return {
                     "content": (
@@ -681,8 +720,9 @@ primary_metric = "accuracy"
             )
 
             self.assertEqual(repair["status"], "patched")
+            file_labels = [label for label in fake.labels if label != "greenfield-run-repair-plan"]
             self.assertEqual(
-                fake.labels[:3],
+                file_labels[:3],
                 [
                     "greenfield-run-repair-src/loaders.py",
                     "greenfield-run-repair-src/preprocess.py",
@@ -710,8 +750,9 @@ primary_metric = "accuracy"
             )
 
             self.assertEqual(attr_repair["status"], "patched")
+            attr_file_labels = [label for label in fake_attr.labels if label != "greenfield-run-repair-plan"]
             self.assertEqual(
-                fake_attr.labels[:4],
+                attr_file_labels[:4],
                 [
                     "greenfield-run-repair-src/loaders.py",
                     "greenfield-run-repair-src/preprocess.py",

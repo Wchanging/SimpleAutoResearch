@@ -4,6 +4,23 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-25
+
+### Changed
+
+- Generated-project run repair now performs a diagnosis-first planning step before
+  rewriting files. The repair planner receives benchmark stderr, failure analysis,
+  candidate file excerpts, public APIs, task contract, dependency advice, and
+  result schema, then selects target files and a repair strategy for the bounded
+  file-level repair pass.
+- File-level run repair prompts now include the runtime repair plan and relevant
+  project context, so cross-file producer/consumer contract failures can be fixed
+  with more complete context instead of repeatedly patching whichever entrypoint
+  or warning file appeared first.
+- The repair target ranker now treats missing dataset/source/field failures as
+  generic data-contract issues and includes configuration files in the role
+  model, improving fallback behavior when the diagnosis LLM call is unavailable.
+
 ## 2026-06-24
 
 ### Fixed
