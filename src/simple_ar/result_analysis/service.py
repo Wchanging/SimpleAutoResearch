@@ -524,20 +524,34 @@ def deterministic_rubric_coverage(
 def parse_rubric_coverage(value: Any, *, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return fallback
+    fallback_by_category = {
+        str(row.get("category") or "Uncategorized"): row
+        for row in fallback
+        if isinstance(row, dict)
+    }
+    seen: set[str] = set()
     rows: list[dict[str, Any]] = []
     for row in value:
         if not isinstance(row, dict):
             continue
+        category = str(row.get("category") or "Uncategorized")
+        base = fallback_by_category.get(category, {})
+        leaf_count = safe_positive_int(row.get("leaf_count"), default=safe_positive_int(base.get("leaf_count"), default=0))
+        weight = row.get("weight", base.get("weight", 0.0))
         rows.append(
             {
-                "category": str(row.get("category") or "Uncategorized"),
-                "leaf_count": int(row.get("leaf_count") or 0),
-                "weight": row.get("weight", 0.0),
+                "category": category,
+                "leaf_count": leaf_count,
+                "weight": weight,
                 "verdict": normalize_verdict(row.get("verdict")),
                 "evidence": str(row.get("evidence") or ""),
                 "limitations": [str(item) for item in row.get("limitations", []) if item],
             }
         )
+        seen.add(category)
+    for category, row in fallback_by_category.items():
+        if category not in seen:
+            rows.append(row)
     return rows or fallback
 
 
@@ -607,6 +621,14 @@ def normalize_verdict(value: Any) -> str:
     if text in {"unsupported", "failed", "fail", "refuted", "contradicted", "false"}:
         return "unsupported"
     return "not_evaluated"
+
+
+def safe_positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def normalize_confidence(value: Any) -> str:

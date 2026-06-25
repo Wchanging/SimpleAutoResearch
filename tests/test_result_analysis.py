@@ -152,6 +152,43 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertIn("Rubric Coverage", result.readme_markdown)
         self.assertIn("Result Analysis", result.readme_markdown)
 
+    def test_llm_rubric_coverage_keeps_deterministic_leaf_counts(self) -> None:
+        context = AnalysisContext(
+            task_id="T6",
+            metrics={"score": 1.0},
+            criteria=[
+                {"id": "c1", "task_category": "Code Development", "weight": 2.0},
+                {"id": "c2", "task_category": "Code Development", "weight": 3.0},
+                {"id": "c3", "task_category": "Result Analysis", "weight": 5.0},
+            ],
+        )
+        client = FakeAnalysisClient(
+            {
+                "summary": {
+                    "method": "Implemented and analyzed.",
+                    "results": "Metrics are present.",
+                    "limitations": "Limited task.",
+                    "reproduction_notes": "Run command.",
+                },
+                "rubric_coverage": [
+                    {
+                        "category": "Code Development",
+                        "verdict": "partially_supported",
+                        "evidence": "Implementation artifacts are present.",
+                    }
+                ],
+                "claims": [],
+                "analysis_audit": {},
+            }
+        )
+
+        result = run_result_analysis(context, client=client, use_llm=True)
+
+        coverage = {row["category"]: row for row in result.rubric_coverage}
+        self.assertEqual(coverage["Code Development"]["leaf_count"], 2)
+        self.assertEqual(coverage["Result Analysis"]["leaf_count"], 1)
+        self.assertIn("| Code Development | 2 |", result.readme_markdown)
+
 
 if __name__ == "__main__":
     unittest.main()
