@@ -691,6 +691,35 @@ primary_metric = "accuracy"
             )
             self.assertIn("src/loaders.py", repair["changed_files"])
 
+            fake_attr = FakeClient()
+            attr_repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair", "implicated_files": ["generated_project/app.py"]},
+                stderr_text="Experiment failed: 'str' object has no attribute 'X'",
+                output_path=root / "run_repair_custom_attribute_error.json",
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "app.py", "mode": "llm"},
+                        {"path": "src/loaders.py", "mode": "llm"},
+                        {"path": "src/preprocess.py", "mode": "llm"},
+                        {"path": "src/pipeline.py", "mode": "llm"},
+                        {"path": "src/model_core.py", "mode": "llm"},
+                    ]
+                },
+                client=fake_attr,
+            )
+
+            self.assertEqual(attr_repair["status"], "patched")
+            self.assertEqual(
+                fake_attr.labels[:4],
+                [
+                    "greenfield-run-repair-src/loaders.py",
+                    "greenfield-run-repair-src/preprocess.py",
+                    "greenfield-run-repair-src/model_core.py",
+                    "greenfield-run-repair-src/pipeline.py",
+                ],
+            )
+
     def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -2842,6 +2871,39 @@ protected_patterns = ["pyproject.toml"]
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["repair"]["status"], "repair_proposed")
             self.assertIn("## Repair", read_text(run_dir / "code_task" / "summary.md"))
+
+    def test_failure_analysis_prefers_runtime_stderr_over_validation_warning(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nDiagnose runtime stderr before validation warnings.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python broken_runtime.py",
+            )
+            write_text(
+                run_dir / "code_task" / "workspace" / "broken_runtime.py",
+                (
+                    "import sys\n"
+                    "print(\"Experiment failed: 'str' object has no attribute 'X'\", file=sys.stderr)\n"
+                    "raise SystemExit(1)\n"
+                ),
+            )
+            failed = run_code_task_benchmark(run_dir, timeout_sec=10, skip_validation=True)
+            self.assertEqual(failed.status, "failed")
+
+            analysis = analyze_code_task_failure(run_dir)
+
+            self.assertEqual(analysis.status, "needs_repair")
+            analysis_text = read_text(analysis.analysis_path)
+            self.assertIn("Experiment failed: 'str' object has no attribute 'X'", analysis_text)
+            self.assertNotIn("strongest error signal is: `warning", analysis_text)
 
     def test_execute_runs_to_approval_gate(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

@@ -849,6 +849,14 @@ def _run_repair_target_paths(
                 preferred_roles=("data", "preprocess", "orchestrator"),
             )
         )
+    elif "has no attribute" in lowered or "attributeerror" in lowered:
+        candidates.extend(
+            _rank_repair_candidates(
+                known_paths,
+                signal_text=lowered,
+                preferred_roles=("data", "preprocess", "core", "orchestrator", "entrypoint"),
+            )[:5]
+        )
     implicated = failure_analysis.get("implicated_files")
     if isinstance(implicated, list):
         candidates.extend(_normalize_generated_project_path(str(path)) for path in implicated)

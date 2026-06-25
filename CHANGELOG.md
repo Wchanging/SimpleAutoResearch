@@ -22,6 +22,12 @@ This file records user-visible project changes in reverse chronological order. P
   `generated_experiment/inputs.py` when choosing repair targets. They now rank
   actual project files by generic roles such as entrypoint, orchestration,
   data loading, preprocessing, core logic, and artifact/report writing.
+- Code-task failure analysis now prefers failed benchmark stderr over static
+  validation warnings. Runtime messages such as `Experiment failed` and
+  `has no attribute` are preserved as repair signals, and generated-project
+  run repair expands attribute/data-shape failures toward data, preprocessing,
+  core, and orchestration files instead of repeatedly rewriting only the
+  entrypoint.
 
 ## 2026-06-23
 

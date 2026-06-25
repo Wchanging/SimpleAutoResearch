@@ -20,13 +20,16 @@ from simple_ar.code_task.execution.summary import write_code_task_summary
 TRACEBACK_RE = re.compile(r"Traceback \(most recent call last\):[\s\S]*", re.MULTILINE)
 FILE_LINE_RE = re.compile(r'File "([^"]+)", line (\d+)(?:, in ([^\n]+))?')
 SIGNAL_LINES = (
+    "Experiment failed",
     "AssertionError",
+    "AttributeError",
     "ModuleNotFoundError",
     "ImportError",
     "SyntaxError",
     "NameError",
     "TypeError",
     "ValueError",
+    "has no attribute",
     "FAILED",
     "ERROR",
     "Timed out",
@@ -92,11 +95,16 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         )
 
     traceback_block = _traceback_block(stderr)
+    runtime_implicated = _implicated_files(traceback_block or stderr, paths.workspace_dir)
+    validation_implicated = _validation_issue_files(validation, paths.workspace_dir)
     implicated_files = _dedupe(
-        _implicated_files(traceback_block or stderr, paths.workspace_dir)
-        + _validation_issue_files(validation, paths.workspace_dir)
+        runtime_implicated + ([] if (stderr or traceback_block) else validation_implicated)
     )
-    signal_lines = _signal_lines(stdout, stderr) or _validation_signal_lines(validation)
+    signal_lines = _signal_lines(stdout, stderr)
+    if not signal_lines and stderr.strip():
+        signal_lines = _stderr_fallback_signal_lines(stderr)
+    if not signal_lines:
+        signal_lines = _validation_signal_lines(validation)
     changed_files = _changed_files(manifest)
 
     status = "no_failure" if report.get("status") == "passed" else "needs_repair"
@@ -285,6 +293,15 @@ def _signal_lines(stdout: str, stderr: str) -> list[str]:
         if any(signal in stripped for signal in SIGNAL_LINES):
             found.append(_clip(stripped, max_chars=240))
     return found
+
+
+def _stderr_fallback_signal_lines(stderr: str) -> list[str]:
+    lines: list[str] = []
+    for line in stderr.splitlines():
+        stripped = " ".join(line.strip().split())
+        if stripped:
+            lines.append(_clip(stripped, max_chars=240))
+    return lines[:3]
 
 
 def _changed_files(manifest: dict[str, Any]) -> list[str]:

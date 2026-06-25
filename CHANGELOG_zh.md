@@ -18,6 +18,10 @@
 - Code-task generated-project review 和 run repair 现在不再假设固定文件名，例如
   `generated_experiment/runner.py` 或 `generated_experiment/inputs.py`。修复目标会按实际项目文件的
   通用角色排序，包括入口、编排、数据加载、预处理、核心逻辑和 artifact/report 写出等。
+- Code-task failure analysis 现在会优先使用失败 benchmark 的 stderr，而不是被静态 validation
+  warning 抢走诊断焦点。`Experiment failed`、`has no attribute` 这类 runtime 信息会保留为
+  repair 信号；generated-project run repair 遇到属性/数据结构错配时，会扩展到数据、预处理、
+  核心逻辑和编排文件，而不是反复只重写入口。
 
 ## 2026-06-23
 
