@@ -70,13 +70,18 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertIn("c1", result.audit.downgraded_claims)
 
     def test_writes_analysis_artifacts(self) -> None:
-        context = AnalysisContext(task_id="T3", metrics={"score": 1.0})
+        context = AnalysisContext(
+            task_id="T3",
+            metrics={"score": 1.0},
+            criteria=[{"id": "c1", "task_category": "Code Execution", "weight": 1.0}],
+        )
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
             run_result_analysis(context, output_dir=out)
 
             self.assertTrue((out / "analysis_context.json").is_file())
             self.assertTrue((out / "metric_summary.json").is_file())
+            self.assertTrue((out / "rubric_coverage.json").is_file())
             self.assertTrue((out / "claims.json").is_file())
             self.assertTrue((out / "analysis_report.md").is_file())
             self.assertTrue((out / "analysis_audit.json").is_file())
@@ -96,6 +101,56 @@ class ResultAnalysisTests(unittest.TestCase):
             self.assertTrue((out / "analysis_prompt.txt").is_file())
             self.assertTrue((out / "analysis_raw_response.txt").is_file())
             self.assertIn("Markdown response", (out / "analysis_raw_response.txt").read_text(encoding="utf-8"))
+
+    def test_refuted_claim_and_dict_metric_refs_are_normalized(self) -> None:
+        context = AnalysisContext(
+            task_id="T5",
+            expected_metrics=[{"name": "rmse", "direction": "minimize"}],
+            metrics={"rmse": 2.0},
+            criteria=[{"id": "r1", "task_category": "Result Analysis", "weight": 1.0}],
+        )
+        client = FakeAnalysisClient(
+            {
+                "summary": {
+                    "method": "Compared two conditions.",
+                    "results": "The hypothesis was refuted by RMSE.",
+                    "limitations": "Small run.",
+                    "reproduction_notes": "Run the provided command.",
+                },
+                "rubric_coverage": [
+                    {
+                        "category": "Result Analysis",
+                        "leaf_count": 1,
+                        "verdict": "supported",
+                        "evidence": "Hypothesis is discussed.",
+                    }
+                ],
+                "claims": [
+                    {
+                        "claim_id": "H1",
+                        "claim": "Bagging beats boosting.",
+                        "verdict": "refuted",
+                        "metric_refs": [
+                            {
+                                "dataset_name": "d1",
+                                "condition_name": "bagging",
+                                "metric": "rmse",
+                                "mean": 2.0,
+                            }
+                        ],
+                        "evidence": ["rmse:d1:bagging was worse."],
+                    }
+                ],
+                "analysis_audit": {},
+            }
+        )
+
+        result = run_result_analysis(context, client=client, use_llm=True)
+
+        self.assertEqual(result.claims[0].verdict, "unsupported")
+        self.assertEqual(result.claims[0].metric_refs, ["rmse:d1:bagging"])
+        self.assertIn("Rubric Coverage", result.readme_markdown)
+        self.assertIn("Result Analysis", result.readme_markdown)
 
 
 if __name__ == "__main__":

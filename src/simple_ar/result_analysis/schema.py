@@ -64,5 +64,6 @@ class AnalysisResult(_Model):
     claims: list[AnalysisClaim] = Field(default_factory=list)
     claims_payload: dict[str, Any] = Field(default_factory=dict)
     metric_summary: dict[str, Any] = Field(default_factory=dict)
+    rubric_coverage: list[dict[str, Any]] = Field(default_factory=list)
     audit: AnalysisAudit = Field(default_factory=AnalysisAudit)
     raw_llm_response: dict[str, Any] | None = None

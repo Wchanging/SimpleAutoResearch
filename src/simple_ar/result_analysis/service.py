@@ -36,6 +36,8 @@ def run_result_analysis(
 ) -> AnalysisResult:
     ctx = context if isinstance(context, AnalysisContext) else AnalysisContext.model_validate(context)
     metric_summary = build_metric_summary(ctx)
+    metric_summary["result_tables"] = build_result_tables(ctx)
+    metric_summary["rubric_categories"] = build_rubric_categories(ctx)
     result = deterministic_result(ctx, metric_summary)
     raw_response: dict[str, Any] | None = None
 
@@ -88,6 +90,7 @@ def deterministic_result(context: AnalysisContext, metric_summary: dict[str, Any
     claims = existing_claims(context)
     if not claims:
         claims = hypothesis_placeholder_claims(context, metric_summary)
+    rubric_coverage = deterministic_rubric_coverage(context, metric_summary)
     audit = AnalysisAudit(
         llm_used=False,
         missing_required_metrics=list(metric_summary.get("missing_required_metrics") or []),
@@ -95,12 +98,13 @@ def deterministic_result(context: AnalysisContext, metric_summary: dict[str, Any
         limitations=deterministic_limitations(metric_summary),
         notes=["deterministic result-analysis fallback"],
     )
-    readme = deterministic_markdown(context, metric_summary, claims, audit)
+    readme = deterministic_markdown(context, metric_summary, claims, rubric_coverage, audit)
     return AnalysisResult(
         readme_markdown=readme,
         claims=claims,
-        claims_payload=claims_payload(context, metric_summary, claims),
+        claims_payload=claims_payload(context, metric_summary, claims, rubric_coverage),
         metric_summary=metric_summary,
+        rubric_coverage=rubric_coverage,
         audit=audit,
     )
 
@@ -128,7 +132,7 @@ def existing_claims(context: AnalysisContext) -> list[AnalysisClaim]:
                 claim=claim_text,
                 verdict=normalize_verdict(row.get("verdict")),
                 evidence=normalize_evidence(row.get("evidence")),
-                metric_refs=[str(item) for item in row.get("metric_refs", []) if item],
+                metric_refs=normalize_metric_refs(row.get("metric_refs")),
                 limitations=[str(item) for item in row.get("limitations", []) if item],
                 confidence=normalize_confidence(row.get("confidence")),
             )
@@ -171,6 +175,7 @@ def deterministic_markdown(
     context: AnalysisContext,
     metric_summary: dict[str, Any],
     claims: list[AnalysisClaim],
+    rubric_coverage: list[dict[str, Any]],
     audit: AnalysisAudit,
 ) -> str:
     lines = [
@@ -180,16 +185,40 @@ def deterministic_markdown(
         "",
         context.research_question or context.title or "(not provided)",
         "",
+        "## Rubric Coverage",
+        "",
+        "| Category | Leaves | Status | Evidence |",
+        "| --- | ---: | --- | --- |",
+    ]
+    for row in rubric_coverage:
+        lines.append(
+            f"| {row.get('category', 'Uncategorized')} | {row.get('leaf_count', 0)} | "
+            f"{row.get('verdict', 'not_evaluated')} | {escape_table_text(row.get('evidence', ''))} |"
+        )
+    lines.extend(
+        [
+            "",
         "## Metrics",
         "",
         "| Metric | Value | Direction | Issues |",
         "| --- | ---: | --- | --- |",
-    ]
+        ]
+    )
     for metric in metric_summary.get("metrics", []):
         lines.append(
             f"| `{metric.get('name')}` | {format_metric_value(metric.get('value'))} | "
             f"{metric.get('direction')} | {', '.join(metric.get('issues') or []) or '-'} |"
         )
+    result_tables = metric_summary.get("result_tables") or {}
+    primary_rows = result_tables.get("primary_metric_rows") if isinstance(result_tables, dict) else None
+    if isinstance(primary_rows, list) and primary_rows:
+        lines.extend(["", "## Primary Metric Table", "", "| Dataset | Condition | Metric | Mean | Std | Count | Evidence ID |", "| --- | --- | --- | ---: | ---: | ---: | --- |"])
+        for row in primary_rows[:40]:
+            lines.append(
+                f"| {row.get('dataset', '')} | {row.get('condition', '')} | {row.get('metric', '')} | "
+                f"{format_metric_value(row.get('mean'))} | {format_metric_value(row.get('std'))} | "
+                f"{row.get('count', '-')} | `{row.get('evidence_id', '')}` |"
+            )
     lines.extend(["", "## Claims", ""])
     for claim in claims:
         lines.append(f"- **{claim.verdict}** `{claim.claim_id}`: {claim.claim}")
@@ -219,12 +248,15 @@ def build_prompt(
         "Regenerate an experiment result analysis from the provided JSON.\n\n"
         "Return JSON with exactly these keys:\n"
         "- summary: object with method, results, limitations, reproduction_notes. Values must be short plain strings, not Markdown.\n"
+        "- rubric_coverage: list of objects with category, verdict, evidence, limitations. Use categories from rubric_categories.\n"
         "- claims: list of claim objects. Each needs claim_id, claim, verdict, evidence, metric_refs, limitations, confidence.\n"
         "- analysis_audit: object with missing_required_metrics, weak_metric_signals, unsupported_claims, limitations, notes.\n\n"
         "Rules:\n"
         "- Use only provided metrics and artifacts.\n"
         "- Do not claim judge success unless judge evidence appears in context.\n"
         "- supported/partially_supported claims must include metric_refs or evidence.\n"
+        "- Use metric_refs from result_tables evidence_id values, not raw JSON objects.\n"
+        "- Use unsupported when the measured evidence refutes a hypothesis; do not use not_evaluated for refuted hypotheses.\n"
         "- If metrics are weak, missing, all zero, or only resource signals, say so clearly.\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2, default=str)}"
     )
@@ -238,6 +270,7 @@ def normalize_llm_result(
     fallback: AnalysisResult,
 ) -> AnalysisResult:
     claims = parse_claims(response.get("claims"), fallback=fallback.claims)
+    rubric_coverage = parse_rubric_coverage(response.get("rubric_coverage"), fallback=fallback.rubric_coverage)
     audit_data = response.get("analysis_audit") if isinstance(response.get("analysis_audit"), dict) else {}
     audit = AnalysisAudit(
         llm_used=True,
@@ -247,12 +280,13 @@ def normalize_llm_result(
         limitations=[str(item) for item in audit_data.get("limitations", []) if item],
         notes=[str(item) for item in audit_data.get("notes", []) if item],
     )
-    readme = render_analyzed_markdown(response.get("summary"), context, metric_summary, claims, audit)
+    readme = render_analyzed_markdown(response.get("summary"), context, metric_summary, claims, rubric_coverage, audit)
     return AnalysisResult(
         readme_markdown=readme.strip() + "\n",
         claims=claims,
-        claims_payload=claims_payload(context, metric_summary, claims),
+        claims_payload=claims_payload(context, metric_summary, claims, rubric_coverage),
         metric_summary=metric_summary,
+        rubric_coverage=rubric_coverage,
         audit=audit,
     )
 
@@ -278,7 +312,7 @@ def parse_claims(value: Any, *, fallback: list[AnalysisClaim]) -> list[AnalysisC
                 claim=claim,
                 verdict=normalize_verdict(row.get("verdict")),
                 evidence=normalize_evidence(row.get("evidence")),
-                metric_refs=[str(item) for item in row.get("metric_refs", []) if item],
+                metric_refs=normalize_metric_refs(row.get("metric_refs")),
                 limitations=[str(item) for item in row.get("limitations", []) if item],
                 confidence=normalize_confidence(row.get("confidence")),
             )
@@ -291,10 +325,11 @@ def render_analyzed_markdown(
     context: AnalysisContext,
     metric_summary: dict[str, Any],
     claims: list[AnalysisClaim],
+    rubric_coverage: list[dict[str, Any]],
     audit: AnalysisAudit,
 ) -> str:
     if not isinstance(summary, dict):
-        return deterministic_markdown(context, metric_summary, claims, audit)
+        return deterministic_markdown(context, metric_summary, claims, rubric_coverage, audit)
     lines = [
         f"# Result Analysis: {context.task_id or context.title or 'experiment'}",
         "",
@@ -310,14 +345,48 @@ def render_analyzed_markdown(
         "",
         str(summary.get("results") or "(not provided)").strip(),
         "",
-        "| Metric | Value | Direction | Issues |",
+        "## Rubric Coverage",
+        "",
+        "| Category | Leaves | Status | Evidence |",
         "| --- | ---: | --- | --- |",
     ]
+    for row in rubric_coverage:
+        lines.append(
+            f"| {row.get('category', 'Uncategorized')} | {row.get('leaf_count', 0)} | "
+            f"{row.get('verdict', 'not_evaluated')} | {escape_table_text(row.get('evidence', ''))} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Global Metrics",
+            "",
+        "| Metric | Value | Direction | Issues |",
+        "| --- | ---: | --- | --- |",
+        ]
+    )
     for metric in metric_summary.get("metrics", []):
         lines.append(
             f"| `{metric.get('name')}` | {format_metric_value(metric.get('value'))} | "
             f"{metric.get('direction')} | {', '.join(metric.get('issues') or []) or '-'} |"
         )
+    result_tables = metric_summary.get("result_tables") or {}
+    primary_rows = result_tables.get("primary_metric_rows") if isinstance(result_tables, dict) else None
+    if isinstance(primary_rows, list) and primary_rows:
+        lines.extend(
+            [
+                "",
+                "## Primary Metric Table",
+                "",
+                "| Dataset | Condition | Metric | Mean | Std | Count | Evidence ID |",
+                "| --- | --- | --- | ---: | ---: | ---: | --- |",
+            ]
+        )
+        for row in primary_rows[:40]:
+            lines.append(
+                f"| {row.get('dataset', '')} | {row.get('condition', '')} | {row.get('metric', '')} | "
+                f"{format_metric_value(row.get('mean'))} | {format_metric_value(row.get('std'))} | "
+                f"{row.get('count', '-')} | `{row.get('evidence_id', '')}` |"
+            )
     lines.extend(["", "## Claim Verdicts", ""])
     for claim in claims:
         lines.append(f"- **{claim.verdict}** `{claim.claim_id}`: {claim.claim}")
@@ -374,6 +443,7 @@ def write_analysis_artifacts(output_dir: Path, context: AnalysisContext, result:
     output_dir.mkdir(parents=True, exist_ok=True)
     write_json(output_dir / "analysis_context.json", context.model_dump(mode="json"))
     write_json(output_dir / "metric_summary.json", result.metric_summary)
+    write_json(output_dir / "rubric_coverage.json", result.rubric_coverage)
     write_json(output_dir / "claims.json", result.claims_payload)
     write_text(output_dir / "analysis_report.md", result.readme_markdown)
     write_json(output_dir / "analysis_audit.json", result.audit.model_dump(mode="json"))
@@ -385,6 +455,7 @@ def claims_payload(
     context: AnalysisContext,
     metric_summary: dict[str, Any],
     claims: list[AnalysisClaim],
+    rubric_coverage: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "schema_version": "simple_ar_result_claims.v1",
@@ -392,9 +463,128 @@ def claims_payload(
         "topic_id": context.task_id,
         "summary_metrics": context.metrics,
         "metric_summary": metric_summary,
+        "rubric_coverage": rubric_coverage,
         "hypothesis_verdicts": [claim.model_dump(mode="json") for claim in claims],
         "claims": [claim.model_dump(mode="json") for claim in claims],
     }
+
+
+def build_rubric_categories(context: AnalysisContext) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for criterion in context.criteria:
+        if not isinstance(criterion, dict):
+            continue
+        category = str(criterion.get("task_category") or "Uncategorized")
+        group = groups.setdefault(category, {"category": category, "leaf_count": 0, "weight": 0.0, "leaves": []})
+        group["leaf_count"] += 1
+        try:
+            group["weight"] += float(criterion.get("weight") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        group["leaves"].append(
+            {
+                "id": criterion.get("id"),
+                "requirements": criterion.get("requirements"),
+                "weight": criterion.get("weight"),
+                "finegrained_task_category": criterion.get("finegrained_task_category"),
+            }
+        )
+    return list(groups.values())
+
+
+def deterministic_rubric_coverage(
+    context: AnalysisContext,
+    metric_summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for group in metric_summary.get("rubric_categories", []) or build_rubric_categories(context):
+        category = str(group.get("category") or "Uncategorized")
+        if category == "Code Execution" and metric_summary.get("metric_count"):
+            verdict = "partially_supported"
+            evidence = "Numeric metrics were produced; detailed criterion coverage still needs review."
+        elif category == "Result Analysis" and context.existing_writeup:
+            verdict = "partially_supported"
+            evidence = "A writeup was found; claim grounding still needs review."
+        else:
+            verdict = "not_evaluated"
+            evidence = "No category-specific review was generated."
+        rows.append(
+            {
+                "category": category,
+                "leaf_count": group.get("leaf_count", 0),
+                "weight": group.get("weight", 0.0),
+                "verdict": verdict,
+                "evidence": evidence,
+                "limitations": [],
+            }
+        )
+    return rows
+
+
+def parse_rubric_coverage(value: Any, *, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return fallback
+    rows: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        rows.append(
+            {
+                "category": str(row.get("category") or "Uncategorized"),
+                "leaf_count": int(row.get("leaf_count") or 0),
+                "weight": row.get("weight", 0.0),
+                "verdict": normalize_verdict(row.get("verdict")),
+                "evidence": str(row.get("evidence") or ""),
+                "limitations": [str(item) for item in row.get("limitations", []) if item],
+            }
+        )
+    return rows or fallback
+
+
+def build_result_tables(context: AnalysisContext) -> dict[str, Any]:
+    per_cell = find_per_cell_records(context.project_results)
+    primary_metric = ""
+    expected = context.expected_metrics or []
+    if expected and isinstance(expected[0], dict):
+        primary_metric = str(expected[0].get("name") or "")
+    primary_metric = primary_metric or "rmse"
+    primary_rows: list[dict[str, Any]] = []
+    all_rows: list[dict[str, Any]] = []
+    for record in per_cell:
+        dataset = str(record.get("dataset_name") or record.get("dataset") or "")
+        condition = str(record.get("condition_name") or record.get("condition") or record.get("model") or "")
+        for key, value in record.items():
+            if not isinstance(value, dict) or "mean" not in value:
+                continue
+            evidence_id = f"{key}:{dataset}:{condition}".replace(" ", "_")
+            row = {
+                "evidence_id": evidence_id,
+                "dataset": dataset,
+                "condition": condition,
+                "metric": str(key),
+                "mean": value.get("mean"),
+                "std": value.get("std"),
+                "count": value.get("count"),
+            }
+            all_rows.append(row)
+            if key == primary_metric:
+                primary_rows.append(row)
+    return {
+        "primary_metric": primary_metric,
+        "primary_metric_rows": primary_rows,
+        "all_metric_rows": all_rows[:240],
+    }
+
+
+def find_per_cell_records(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    summary = data.get("summary")
+    if isinstance(summary, dict) and isinstance(summary.get("per_cell"), list):
+        return [row for row in summary["per_cell"] if isinstance(row, dict)]
+    if isinstance(data.get("per_cell"), list):
+        return [row for row in data["per_cell"] if isinstance(row, dict)]
+    return []
 
 
 def deterministic_limitations(metric_summary: dict[str, Any]) -> list[str]:
@@ -414,7 +604,7 @@ def normalize_verdict(value: Any) -> str:
         return "supported"
     if text in {"partial", "partially_supported", "partially supported"}:
         return "partially_supported"
-    if text in {"unsupported", "failed", "fail"}:
+    if text in {"unsupported", "failed", "fail", "refuted", "contradicted", "false"}:
         return "unsupported"
     return "not_evaluated"
 
@@ -436,6 +626,26 @@ def normalize_evidence(value: Any) -> list[dict[str, Any]]:
     return []
 
 
+def normalize_metric_refs(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    refs: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            metric = item.get("metric")
+            dataset = item.get("dataset_name") or item.get("dataset")
+            condition = item.get("condition_name") or item.get("condition") or item.get("model")
+            if metric and dataset and condition:
+                refs.append(f"{metric}:{dataset}:{condition}".replace(" ", "_"))
+            elif metric:
+                refs.append(str(metric))
+            else:
+                refs.append(json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))
+        elif item:
+            refs.append(str(item))
+    return refs
+
+
 def available_metric_names(metric_summary: dict[str, Any]) -> list[str]:
     names: list[str] = []
     for row in metric_summary.get("metrics", []):
@@ -450,6 +660,10 @@ def format_metric_value(value: Any) -> str:
     if isinstance(value, float):
         return f"{value:.6g}"
     return str(value)
+
+
+def escape_table_text(value: Any) -> str:
+    return str(value or "").replace("|", "\\|").replace("\n", " ")
 
 
 def write_json(path: Path, data: Any) -> None:
