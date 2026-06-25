@@ -706,6 +706,7 @@ def finalize_submission(
     experiment_summary = build_experiment_summary(manifest, rubric, metrics, project_results, run_dir)
     readme = build_submission_readme(manifest, run_dir, code_src)
     claims = build_claims(manifest, metrics, project_results)
+    print("Building result-analysis artifacts.")
     analysis = analyze_submission_results(
         manifest=manifest,
         rubric=rubric,
@@ -721,6 +722,7 @@ def finalize_submission(
     )
     analysis_audit = analysis["analysis_audit"]
     if analyze:
+        print("Using LLM-analyzed README and claims for submission.")
         readme = analysis["readme_markdown"]
         claims = analysis["claims"]
     write_json(results_dst / "metrics.json", {"metrics": metrics, "project_results": project_results})
@@ -758,6 +760,7 @@ def analyze_submission_results(
     use_llm: bool,
     model: str | None,
 ) -> dict[str, Any]:
+    print("Preparing result-analysis context.")
     context = build_analysis_context(
         manifest=manifest,
         rubric=rubric,
@@ -778,6 +781,7 @@ def analyze_submission_results(
     usage_rows: list[dict[str, Any]] = []
     client = None
     if use_llm:
+        print("Calling LLM for ARC result analysis.")
         try:
             from simple_ar.integrations.llm import LLMClient
         except Exception as exc:  # pragma: no cover - environment issue
@@ -799,6 +803,7 @@ def analyze_submission_results(
     )
     if usage_rows:
         write_json(output_dir / "llm_usage_summary.json", summarize_usage_rows(usage_rows))
+    print(f"Result-analysis artifacts written to {output_dir}")
     return {
         "readme_markdown": result.readme_markdown,
         "claims": result.claims_payload,

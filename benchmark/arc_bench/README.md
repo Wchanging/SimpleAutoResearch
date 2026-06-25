@@ -157,10 +157,17 @@ result_analysis/
   claims.json
   analysis_report.md
   analysis_audit.json
+  analysis_prompt.txt        # only when --analyze is used
+  analysis_raw_response.txt  # only when --analyze is used
   analysis_response.json      # only when --analyze is used
   llm_usage.jsonl             # only when --analyze is used
   llm_usage_summary.json      # only when --analyze is used
 ```
+
+If the model does not return valid JSON, `finalize --analyze` stops and keeps
+`analysis_raw_response.txt` for diagnosis. This is intentional: invalid analysis
+should be inspected instead of silently replacing the submission with a weak
+fallback.
 
 The finalizer writes:
 

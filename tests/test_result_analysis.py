@@ -8,14 +8,26 @@ from simple_ar.result_analysis import AnalysisContext, run_result_analysis
 
 
 class FakeAnalysisClient:
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: dict | str) -> None:
         self.payload = payload
+
+    def ask(self, system: str, user: str, *, label: str = "") -> str:
+        self.system = system
+        self.user = user
+        self.label = label
+        if isinstance(self.payload, str):
+            return self.payload
+        import json
+
+        return json.dumps(self.payload)
 
     def ask_json(self, system: str, user: str, *, label: str = "") -> dict:
         self.system = system
         self.user = user
         self.label = label
-        return self.payload
+        if isinstance(self.payload, dict):
+            return self.payload
+        raise ValueError("not json")
 
 
 class ResultAnalysisTests(unittest.TestCase):
@@ -68,6 +80,22 @@ class ResultAnalysisTests(unittest.TestCase):
             self.assertTrue((out / "claims.json").is_file())
             self.assertTrue((out / "analysis_report.md").is_file())
             self.assertTrue((out / "analysis_audit.json").is_file())
+
+    def test_invalid_llm_json_writes_raw_response_for_diagnosis(self) -> None:
+        context = AnalysisContext(task_id="T4", metrics={"score": 1.0})
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with self.assertRaises(ValueError):
+                run_result_analysis(
+                    context,
+                    output_dir=out,
+                    client=FakeAnalysisClient("# Markdown response\nnot json"),
+                    use_llm=True,
+                )
+
+            self.assertTrue((out / "analysis_prompt.txt").is_file())
+            self.assertTrue((out / "analysis_raw_response.txt").is_file())
+            self.assertIn("Markdown response", (out / "analysis_raw_response.txt").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -4,11 +4,16 @@ import json
 from pathlib import Path
 from typing import Any, Protocol
 
+from simple_ar.integrations.llm import parse_json_object
+
 from .metrics import build_metric_summary
 from .schema import AnalysisAudit, AnalysisClaim, AnalysisContext, AnalysisResult
 
 
 class JsonLLMClient(Protocol):
+    def ask(self, system: str, user: str, *, label: str = "") -> str:
+        ...
+
     def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, Any]:
         ...
 
@@ -18,7 +23,7 @@ Use only the provided task, criteria, metrics, artifacts, and writeup.
 Do not invent metrics, datasets, judge outcomes, or unsupported claims.
 Every supported or partially_supported claim must cite metric_refs or concrete evidence.
 If evidence is missing, mark the claim as not_evaluated or unsupported.
-Prefer concise, reviewable Markdown over promotional language."""
+Prefer concise, reviewable evidence over promotional language."""
 
 
 def run_result_analysis(
@@ -38,7 +43,13 @@ def run_result_analysis(
         if client is None:
             result.audit.notes.append("LLM analysis requested but no client was provided; used deterministic fallback.")
         else:
-            raw_response = client.ask_json(SYSTEM_PROMPT, build_prompt(ctx, metric_summary, result), label=label)
+            raw_response = request_json_with_diagnostics(
+                client,
+                SYSTEM_PROMPT,
+                build_prompt(ctx, metric_summary, result),
+                label=label,
+                output_dir=output_dir,
+            )
             result = normalize_llm_result(raw_response, ctx, metric_summary, fallback=result)
 
     result.raw_llm_response = raw_response
@@ -46,6 +57,31 @@ def run_result_analysis(
     if output_dir is not None:
         write_analysis_artifacts(output_dir, ctx, result)
     return result
+
+
+def request_json_with_diagnostics(
+    client: JsonLLMClient,
+    system: str,
+    user: str,
+    *,
+    label: str,
+    output_dir: Path | None,
+) -> dict[str, Any]:
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_text(output_dir / "analysis_prompt.txt", user)
+
+    raw = client.ask(system, user + "\n\nReturn valid JSON only. Do not include markdown or extra text.", label=label)
+    if output_dir is not None:
+        write_text(output_dir / "analysis_raw_response.txt", raw)
+
+    parsed = parse_json_object(raw)
+    if parsed is None:
+        hint = ""
+        if output_dir is not None:
+            hint = f" Raw response saved to {output_dir / 'analysis_raw_response.txt'}."
+        raise ValueError("LLM result-analysis response did not contain a valid JSON object." + hint)
+    return parsed
 
 
 def deterministic_result(context: AnalysisContext, metric_summary: dict[str, Any]) -> AnalysisResult:
@@ -182,7 +218,7 @@ def build_prompt(
     return (
         "Regenerate an experiment result analysis from the provided JSON.\n\n"
         "Return JSON with exactly these keys:\n"
-        "- readme_markdown: Markdown with Task, Method, Results, Claim Verdicts, Limitations, Reproduction Notes.\n"
+        "- summary: object with method, results, limitations, reproduction_notes. Values must be short plain strings, not Markdown.\n"
         "- claims: list of claim objects. Each needs claim_id, claim, verdict, evidence, metric_refs, limitations, confidence.\n"
         "- analysis_audit: object with missing_required_metrics, weak_metric_signals, unsupported_claims, limitations, notes.\n\n"
         "Rules:\n"
@@ -201,9 +237,6 @@ def normalize_llm_result(
     *,
     fallback: AnalysisResult,
 ) -> AnalysisResult:
-    readme = response.get("readme_markdown")
-    if not isinstance(readme, str) or not readme.strip():
-        readme = fallback.readme_markdown
     claims = parse_claims(response.get("claims"), fallback=fallback.claims)
     audit_data = response.get("analysis_audit") if isinstance(response.get("analysis_audit"), dict) else {}
     audit = AnalysisAudit(
@@ -214,6 +247,7 @@ def normalize_llm_result(
         limitations=[str(item) for item in audit_data.get("limitations", []) if item],
         notes=[str(item) for item in audit_data.get("notes", []) if item],
     )
+    readme = render_analyzed_markdown(response.get("summary"), context, metric_summary, claims, audit)
     return AnalysisResult(
         readme_markdown=readme.strip() + "\n",
         claims=claims,
@@ -250,6 +284,60 @@ def parse_claims(value: Any, *, fallback: list[AnalysisClaim]) -> list[AnalysisC
             )
         )
     return claims or fallback
+
+
+def render_analyzed_markdown(
+    summary: Any,
+    context: AnalysisContext,
+    metric_summary: dict[str, Any],
+    claims: list[AnalysisClaim],
+    audit: AnalysisAudit,
+) -> str:
+    if not isinstance(summary, dict):
+        return deterministic_markdown(context, metric_summary, claims, audit)
+    lines = [
+        f"# Result Analysis: {context.task_id or context.title or 'experiment'}",
+        "",
+        "## Task",
+        "",
+        context.research_question or context.title or "(not provided)",
+        "",
+        "## Method",
+        "",
+        str(summary.get("method") or "(not provided)").strip(),
+        "",
+        "## Results",
+        "",
+        str(summary.get("results") or "(not provided)").strip(),
+        "",
+        "| Metric | Value | Direction | Issues |",
+        "| --- | ---: | --- | --- |",
+    ]
+    for metric in metric_summary.get("metrics", []):
+        lines.append(
+            f"| `{metric.get('name')}` | {format_metric_value(metric.get('value'))} | "
+            f"{metric.get('direction')} | {', '.join(metric.get('issues') or []) or '-'} |"
+        )
+    lines.extend(["", "## Claim Verdicts", ""])
+    for claim in claims:
+        lines.append(f"- **{claim.verdict}** `{claim.claim_id}`: {claim.claim}")
+        if claim.metric_refs:
+            lines.append(f"  Metric refs: {', '.join(claim.metric_refs)}")
+        if claim.limitations:
+            lines.append(f"  Limitations: {'; '.join(claim.limitations)}")
+    lines.extend(
+        [
+            "",
+            "## Limitations",
+            "",
+            str(summary.get("limitations") or "; ".join(audit.limitations) or "(not provided)").strip(),
+            "",
+            "## Reproduction Notes",
+            "",
+            str(summary.get("reproduction_notes") or "(not provided)").strip(),
+        ]
+    )
+    return "\n".join(lines)
 
 
 def audit_result(result: AnalysisResult, metric_summary: dict[str, Any]) -> AnalysisAudit:
