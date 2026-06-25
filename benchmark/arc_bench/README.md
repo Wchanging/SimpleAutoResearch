@@ -1,5 +1,7 @@
 # ARC-Bench Adapter for SimpleAutoResearch
 
+Chinese version: [README_zh.md](README_zh.md)
+
 This directory is a local, ignored benchmark harness. It is intentionally kept
 outside `src/simple_ar/` so ARC-Bench experiments do not become part of the
 open-source package surface.
