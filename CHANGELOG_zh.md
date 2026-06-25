@@ -15,6 +15,9 @@
 - Greenfield run repair 的 prompt 和目标文件选择现在会明确禁止把未解决的 runtime
   错误吞掉后输出全 0 指标。空证据失败会修复入口和实验执行/分析路径；数据契约失败则优先修复
   input / processing 模块，再考虑入口文件。
+- Code-task generated-project review 和 run repair 现在不再假设固定文件名，例如
+  `generated_experiment/runner.py` 或 `generated_experiment/inputs.py`。修复目标会按实际项目文件的
+  通用角色排序，包括入口、编排、数据加载、预处理、核心逻辑和 artifact/report 写出等。
 
 ## 2026-06-23
 

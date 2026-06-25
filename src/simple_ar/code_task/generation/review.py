@@ -351,22 +351,36 @@ def _review_paths(project_dir: Path) -> list[Path]:
     """Prioritize orchestration and dependency-boundary files for review."""
 
     paths = sorted(project_dir.rglob("*.py"))
-    priorities = {
-        "main.py": 0,
-        "generated_experiment/runner.py": 1,
-        "generated_experiment/data.py": 2,
-        "generated_experiment/models.py": 3,
-        "generated_experiment/metrics.py": 4,
-        "generated_experiment/evaluation.py": 5,
-        "generated_experiment/reporting.py": 6,
-    }
     return sorted(
         paths,
         key=lambda path: (
-            priorities.get(path.relative_to(project_dir).as_posix(), 100),
+            _review_path_priority(path.relative_to(project_dir).as_posix()),
             path.relative_to(project_dir).as_posix(),
         ),
     )
+
+
+def _review_path_priority(path: str) -> int:
+    lowered = path.lower()
+    name = PurePosixPath(path).name.lower()
+    stem = PurePosixPath(path).stem.lower()
+    if name in {"main.py", "__main__.py", "cli.py", "app.py"} or stem in {"main", "cli", "app"}:
+        return 0
+    if _contains_any(lowered, ("runner", "run_", "execute", "executor", "orchestr", "workflow", "pipeline", "experiment", "train", "eval")):
+        return 1
+    if _contains_any(lowered, ("input", "data", "dataset", "loader", "source", "ingest", "feature", "label")):
+        return 2
+    if _contains_any(lowered, ("process", "preprocess", "transform", "prepare", "clean", "split")):
+        return 3
+    if _contains_any(lowered, ("core", "model", "algorithm", "logic", "method", "estimator", "classif", "regress")):
+        return 4
+    if _contains_any(lowered, ("analysis", "metric", "score", "report", "artifact", "output", "result", "summary", "writer")):
+        return 5
+    return 100
+
+
+def _contains_any(value: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in value for needle in needles)
 
 
 def _safe_path(value: str) -> str:

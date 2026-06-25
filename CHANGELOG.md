@@ -17,6 +17,11 @@ This file records user-visible project changes in reverse chronological order. P
   unresolved runtime errors as all-zero metrics. Empty-evidence failures target
   the entrypoint and experiment execution/analysis path, while data-contract
   failures prioritize input and processing modules before entrypoint changes.
+- Code-task generated-project review and run repair no longer assume fixed
+  filenames such as `generated_experiment/runner.py` or
+  `generated_experiment/inputs.py` when choosing repair targets. They now rank
+  actual project files by generic roles such as entrypoint, orchestration,
+  data loading, preprocessing, core logic, and artifact/report writing.
 
 ## 2026-06-23
 

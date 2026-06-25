@@ -261,18 +261,25 @@ def _review_repair_target_paths(
     categories = {str(item.get("category", "")).strip() for item in findings}
     summaries = " ".join(str(item.get("summary", "")) for item in findings).lower()
     if "missing_artifact_writer" in categories:
-        targets.extend(["generated_experiment/reporting.py", "generated_experiment/runner.py", "main.py"])
+        targets.extend(
+            _rank_repair_candidates(
+                _generated_python_paths(code_artifacts),
+                signal_text=summaries,
+                preferred_roles=("artifact", "orchestrator", "entrypoint"),
+            )
+        )
     if "missing_local_api" in categories:
         targets.extend(_paths_from_review_summaries(summaries))
     return list(dict.fromkeys(path for path in targets if path))
 
 
 def _paths_from_review_summaries(text: str) -> list[str]:
-    return [
-        _safe_relative_path(match.group(0))
-        for match in re.finditer(r"generated_experiment/[a-zA-Z0-9_/]+\.py|main\.py", text)
-        if _safe_relative_path(match.group(0))
-    ]
+    paths: list[str] = []
+    for match in re.finditer(r"(?<![\w./-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py", text):
+        path = _safe_relative_path(match.group(0))
+        if path:
+            paths.append(path)
+    return list(dict.fromkeys(paths))
 
 
 def _architecture_file_specs(architecture_plan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -825,23 +832,22 @@ def _run_repair_target_paths(
     )
     candidates: list[str] = []
     lowered = text.lower()
+    known_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
     if _is_empty_greenfield_evidence_failure(lowered):
         candidates.extend(
-            [
-                "main.py",
-                "generated_experiment/runner.py",
-                "generated_experiment/core.py",
-                "generated_experiment/analysis.py",
-                "generated_experiment/reporting.py",
-            ]
+            _rank_repair_candidates(
+                known_paths,
+                signal_text=lowered,
+                preferred_roles=("entrypoint", "orchestrator", "core", "artifact", "data"),
+            )
         )
     elif "features" in lowered and "labels" in lowered and "metadata" in lowered:
         candidates.extend(
-            [
-                "generated_experiment/inputs.py",
-                "generated_experiment/processing.py",
-                "generated_experiment/runner.py",
-            ]
+            _rank_repair_candidates(
+                known_paths,
+                signal_text=lowered,
+                preferred_roles=("data", "preprocess", "orchestrator"),
+            )
         )
     implicated = failure_analysis.get("implicated_files")
     if isinstance(implicated, list):
@@ -850,9 +856,15 @@ def _run_repair_target_paths(
     if (
         "run_experiment" in lowered or "experiment run failed" in lowered
     ) and not _is_empty_greenfield_evidence_failure(lowered):
-        candidates.append("generated_experiment/runner.py")
+        candidates.extend(
+            _rank_repair_candidates(
+                known_paths,
+                signal_text=lowered,
+                preferred_roles=("orchestrator", "entrypoint"),
+            )[:3]
+        )
     if not candidates:
-        candidates.extend(_fallback_run_repair_targets(code_artifacts))
+        candidates.extend(_fallback_run_repair_targets(code_artifacts, project_dir=project_dir))
     normalized = []
     for path in candidates:
         rel = _safe_relative_path(path)
@@ -873,22 +885,90 @@ def _is_empty_greenfield_evidence_failure(text: str) -> bool:
     )
 
 
-def _fallback_run_repair_targets(code_artifacts: Mapping[str, Any]) -> list[str]:
+def _fallback_run_repair_targets(
+    code_artifacts: Mapping[str, Any],
+    *,
+    project_dir: Path | None = None,
+) -> list[str]:
+    return _rank_repair_candidates(
+        _generated_python_paths(code_artifacts, project_dir=project_dir),
+        signal_text="",
+        preferred_roles=("orchestrator", "entrypoint", "data", "preprocess", "core", "artifact"),
+    )
+
+
+def _generated_python_paths(
+    code_artifacts: Mapping[str, Any],
+    *,
+    project_dir: Path | None = None,
+) -> list[str]:
     generated = code_artifacts.get("generated_files")
     rows = [row for row in generated if isinstance(row, Mapping)] if isinstance(generated, list) else []
-    preferred = [
-        "generated_experiment/runner.py",
-        "generated_experiment/inputs.py",
-        "generated_experiment/processing.py",
-        "generated_experiment/core.py",
-        "main.py",
-    ]
-    known = {
-        _safe_relative_path(str(row.get("path", "")))
+    paths = [
+        path
         for row in rows
         if isinstance(row.get("path", ""), str)
-    }
-    return [path for path in preferred if path in known]
+        if (path := _safe_relative_path(str(row.get("path", "")))) and path.endswith(".py")
+    ]
+    if project_dir is not None and project_dir.is_dir():
+        paths.extend(
+            path.relative_to(project_dir).as_posix()
+            for path in project_dir.rglob("*.py")
+            if "__pycache__" not in path.parts
+        )
+    return list(dict.fromkeys(path for path in paths if not path.endswith("/__init__.py")))
+
+
+def _rank_repair_candidates(
+    paths: list[str],
+    *,
+    signal_text: str,
+    preferred_roles: tuple[str, ...],
+) -> list[str]:
+    role_order = {role: index for index, role in enumerate(preferred_roles)}
+
+    def score(path: str) -> tuple[int, int, int, str]:
+        roles = _path_roles(path)
+        matching_roles = [role_order[role] for role in roles if role in role_order]
+        role_score = min(matching_roles) if matching_roles else len(role_order) + 3
+        signal_bonus = 0 if _path_matches_signal(path, signal_text) else 1
+        depth = path.count("/")
+        return role_score, signal_bonus, depth, path
+
+    ranked = sorted((_safe_relative_path(path) for path in paths), key=score)
+    return [path for path in ranked if path]
+
+
+def _path_roles(path: str) -> set[str]:
+    name = PurePosixPath(path).name.lower()
+    stem = PurePosixPath(path).stem.lower()
+    full = path.lower()
+    roles: set[str] = set()
+    if name in {"main.py", "__main__.py", "cli.py", "app.py"} or stem in {"main", "cli", "app"}:
+        roles.add("entrypoint")
+    if _contains_any(full, ("runner", "run_", "execute", "executor", "orchestr", "workflow", "pipeline", "experiment", "train", "eval")):
+        roles.add("orchestrator")
+    if _contains_any(full, ("input", "data", "dataset", "loader", "source", "ingest", "feature", "label")):
+        roles.add("data")
+    if _contains_any(full, ("process", "preprocess", "transform", "prepare", "clean", "split")):
+        roles.add("preprocess")
+    if _contains_any(full, ("core", "model", "algorithm", "logic", "method", "estimator", "classif", "regress")):
+        roles.add("core")
+    if _contains_any(full, ("analysis", "metric", "score", "report", "artifact", "output", "result", "summary", "writer")):
+        roles.add("artifact")
+    return roles or {"support"}
+
+
+def _path_matches_signal(path: str, signal_text: str) -> bool:
+    if not signal_text:
+        return False
+    parts = {part.lower() for part in PurePosixPath(path).parts}
+    parts.add(PurePosixPath(path).stem.lower())
+    return any(part and part in signal_text for part in parts)
+
+
+def _contains_any(value: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in value for needle in needles)
 
 
 def _normalize_generated_project_path(value: str) -> str:
