@@ -40,6 +40,8 @@ agent_model = ""
 # run_dir = "benchmark/arc_bench/runs/ML02/<run-id>"
 # output_dir = "benchmark/arc_bench/submissions/ML02/<run-id>"
 # force = false
+# analyze = false
+# analysis_model = ""
 
 [judge]
 # Optional wrapper around ARC-Bench's own judge command. The command is run

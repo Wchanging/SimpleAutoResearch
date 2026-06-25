@@ -101,6 +101,13 @@ def main() -> int:
         default=None,
         help="Overwrite output dir if it already contains files.",
     )
+    finalize.add_argument(
+        "--analyze",
+        action="store_true",
+        default=None,
+        help="Call the configured LLM to regenerate README and claims from run results.",
+    )
+    finalize.add_argument("--analysis-model", help="Optional model override for --analyze.")
 
     judge = sub.add_parser("judge", help="Run an external ARC-Bench judge command and save raw output.")
     judge.add_argument("--submission-dir", type=Path)
@@ -137,13 +144,22 @@ def main() -> int:
         run_dir = Path(value_from(args, cfg, "finalize", "run_dir", ""))
         output_dir = Path(value_from(args, cfg, "finalize", "output_dir", ""))
         force = bool(value_from(args, cfg, "finalize", "force", False))
+        analyze = bool(value_from(args, cfg, "finalize", "analyze", False))
+        analysis_model = str(value_from(args, cfg, "finalize", "analysis_model", ""))
         if not prepared_dir:
             raise SystemExit("--prepared-dir is required")
         if not run_dir:
             raise SystemExit("--run-dir is required")
         if not output_dir:
             output_dir = prepared_dir / "submission_from_run"
-        finalize_submission(prepared_dir, run_dir, output_dir, force=force)
+        finalize_submission(
+            prepared_dir,
+            run_dir,
+            output_dir,
+            force=force,
+            analyze=analyze,
+            analysis_model=analysis_model,
+        )
         return 0
 
     if args.command == "judge":
@@ -642,11 +658,23 @@ def render_commands(options: PrepareOptions, config_path: Path) -> str:
             "  --output-dir benchmark/arc_bench/submissions/<TOPIC>/<RUN_ID>",
             "```",
             "",
+            "Add `--analyze` if you want the adapter to call the configured LLM",
+            "and regenerate `submission/README.md` plus `submission/claims.json`",
+            "from the measured metrics and project results.",
+            "",
         ]
     )
 
 
-def finalize_submission(prepared_dir: Path, run_dir: Path, output_dir: Path, *, force: bool = False) -> None:
+def finalize_submission(
+    prepared_dir: Path,
+    run_dir: Path,
+    output_dir: Path,
+    *,
+    force: bool = False,
+    analyze: bool = False,
+    analysis_model: str = "",
+) -> None:
     if not prepared_dir.is_dir():
         raise SystemExit(f"prepared dir not found: {prepared_dir}")
     if not run_dir.is_dir():
@@ -676,10 +704,29 @@ def finalize_submission(prepared_dir: Path, run_dir: Path, output_dir: Path, *, 
     metrics = load_simple_ar_metrics(run_dir)
     project_results = load_project_results(code_src) if code_src else {}
     experiment_summary = build_experiment_summary(manifest, rubric, metrics, project_results, run_dir)
+    readme = build_submission_readme(manifest, run_dir, code_src)
+    claims = build_claims(manifest, metrics, project_results)
+    analysis_audit: dict[str, Any] = {"mode": "deterministic", "llm_used": False}
+    if analyze:
+        analysis = analyze_submission_with_llm(
+            manifest=manifest,
+            rubric=rubric,
+            metrics=metrics,
+            project_results=project_results,
+            run_dir=run_dir,
+            code_src=code_src,
+            fallback_readme=readme,
+            fallback_claims=claims,
+            output_dir=output_dir / "result_analysis",
+            model=analysis_model or None,
+        )
+        readme = analysis["readme_markdown"]
+        claims = analysis["claims"]
+        analysis_audit = analysis["analysis_audit"]
     write_json(results_dst / "metrics.json", {"metrics": metrics, "project_results": project_results})
     write_json(output_dir / "stage-14" / "experiment_summary.json", experiment_summary)
-    write_text(submission / "README.md", build_submission_readme(manifest, run_dir, code_src))
-    write_json(submission / "claims.json", build_claims(manifest, metrics, project_results))
+    write_text(submission / "README.md", readme)
+    write_json(submission / "claims.json", claims)
     write_text(submission / "reproduce.sh", build_reproduce_script(run_dir))
     write_json(
         output_dir / "arc_adapter_meta.json",
@@ -691,9 +738,156 @@ def finalize_submission(prepared_dir: Path, run_dir: Path, output_dir: Path, *, 
             "code_source": str(code_src) if code_src else "",
             "metric_count": len(metrics),
             "topic_id": manifest.get("id"),
+            "analysis": analysis_audit,
         },
     )
     print(f"Finalized ARC-style submission at {output_dir}")
+
+
+def analyze_submission_with_llm(
+    *,
+    manifest: dict[str, Any],
+    rubric: dict[str, Any],
+    metrics: dict[str, float],
+    project_results: dict[str, Any],
+    run_dir: Path,
+    code_src: Path | None,
+    fallback_readme: str,
+    fallback_claims: dict[str, Any],
+    output_dir: Path,
+    model: str | None,
+) -> dict[str, Any]:
+    context = build_analysis_context(
+        manifest=manifest,
+        rubric=rubric,
+        metrics=metrics,
+        project_results=project_results,
+        run_dir=run_dir,
+        code_src=code_src,
+        fallback_readme=fallback_readme,
+        fallback_claims=fallback_claims,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_json(output_dir / "analysis_context.json", context)
+
+    usage_rows: list[dict[str, Any]] = []
+
+    def usage_callback(usage: Any) -> None:
+        row = usage.to_row() if hasattr(usage, "to_row") else dict(usage)
+        usage_rows.append(row)
+        append_jsonl(output_dir / "llm_usage.jsonl", row)
+
+    try:
+        from simple_ar.integrations.llm import LLMClient
+    except Exception as exc:  # pragma: no cover - environment issue
+        raise SystemExit(
+            "--analyze requires SimpleAutoResearch's LLM integration to be importable."
+        ) from exc
+
+    client = LLMClient.from_env(model=model, usage_callback=usage_callback)
+    response = client.ask_json(
+        ARC_ANALYSIS_SYSTEM_PROMPT,
+        build_analysis_prompt(context),
+        label="arc-bench-result-analysis",
+    )
+    analysis = normalize_analysis_response(response, fallback_readme=fallback_readme, fallback_claims=fallback_claims)
+    write_json(output_dir / "analysis_response.json", response)
+    write_text(output_dir / "analysis_report.md", analysis["readme_markdown"])
+    write_json(output_dir / "analysis_audit.json", analysis["analysis_audit"])
+    if usage_rows:
+        write_json(output_dir / "llm_usage_summary.json", summarize_usage_rows(usage_rows))
+    return analysis
+
+
+ARC_ANALYSIS_SYSTEM_PROMPT = """You are a benchmark result analyst for SimpleAutoResearch.
+You rewrite ARC-Bench submission summaries and claims from actual run artifacts.
+Use only the provided metrics, project results, task manifest, rubric, and writeup.
+Do not invent numbers, datasets, hypotheses, or judge results.
+If evidence is missing, mark the claim as not_evaluated or partially_supported.
+Prefer concise, benchmark-facing writing over promotional language."""
+
+
+def build_analysis_context(
+    *,
+    manifest: dict[str, Any],
+    rubric: dict[str, Any],
+    metrics: dict[str, float],
+    project_results: dict[str, Any],
+    run_dir: Path,
+    code_src: Path | None,
+    fallback_readme: str,
+    fallback_claims: dict[str, Any],
+) -> dict[str, Any]:
+    design = manifest.get("experiment_design") or {}
+    return {
+        "schema_version": "simple_ar_arc_analysis_context.v1",
+        "topic": {
+            "id": manifest.get("id"),
+            "title": manifest.get("title"),
+            "research_question": design.get("research_question"),
+            "hypotheses": manifest.get("hypotheses", []),
+            "expected_conditions": design.get("conditions", []),
+            "expected_datasets": design.get("datasets", []),
+            "expected_metrics": design.get("metrics", []),
+        },
+        "rubric_leaves": list(iter_rubric_leaves(rubric)),
+        "metrics": metrics,
+        "project_results": clip_data(project_results, max_chars=24000),
+        "existing_writeup": clip_text(extract_project_writeup(run_dir, code_src) or fallback_readme, 16000),
+        "fallback_claims": clip_data(fallback_claims, max_chars=12000),
+        "run_dir": str(run_dir),
+        "code_source": str(code_src) if code_src else "",
+    }
+
+
+def build_analysis_prompt(context: dict[str, Any]) -> str:
+    return (
+        "Regenerate the ARC-style submission analysis for this completed SimpleAutoResearch run.\n\n"
+        "Return JSON with exactly these top-level keys:\n"
+        "- readme_markdown: a concise Markdown README for the submission. Include Method, Results, "
+        "Hypothesis Verdicts, Limitations, and Reproduction Notes.\n"
+        "- claims: an object with topic_id, summary_metrics, hypothesis_verdicts, and claims. "
+        "Each claim should include claim, verdict, evidence, metric_refs, limitations, and confidence.\n"
+        "- analysis_audit: an object with llm_used=true, missing_evidence, unsupported_claims, "
+        "limitations, and notes.\n\n"
+        "Rules:\n"
+        "- Ground every supported or partially_supported claim in provided metrics or project_results.\n"
+        "- Do not claim benchmark judge success unless a judge result is provided.\n"
+        "- If metrics are weak or missing, say that plainly.\n"
+        "- Keep the README useful for ARC-Bench review, not a generic project advertisement.\n\n"
+        "Context JSON:\n"
+        f"{json.dumps(context, ensure_ascii=False, indent=2, default=str)}"
+    )
+
+
+def normalize_analysis_response(
+    response: dict[str, Any],
+    *,
+    fallback_readme: str,
+    fallback_claims: dict[str, Any],
+) -> dict[str, Any]:
+    readme = response.get("readme_markdown")
+    if not isinstance(readme, str) or not readme.strip():
+        readme = fallback_readme
+
+    claims = response.get("claims")
+    if not isinstance(claims, dict):
+        claims = fallback_claims
+
+    audit = response.get("analysis_audit")
+    if not isinstance(audit, dict):
+        audit = {}
+    audit.setdefault("mode", "llm")
+    audit["llm_used"] = True
+    audit.setdefault("missing_evidence", [])
+    audit.setdefault("unsupported_claims", [])
+    audit.setdefault("limitations", [])
+
+    return {
+        "readme_markdown": readme.strip() + "\n",
+        "claims": claims,
+        "analysis_audit": audit,
+    }
 
 
 def run_judge_command(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
@@ -868,6 +1062,25 @@ def build_submission_readme(manifest: dict[str, Any], run_dir: Path, code_src: P
     )
 
 
+def extract_project_writeup(run_dir: Path, code_src: Path | None) -> str:
+    if code_src:
+        for candidate in [
+            code_src / "artifacts" / "report.md",
+            code_src / "artifacts" / "analysis.md",
+            code_src / "README.md",
+        ]:
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8", errors="ignore")
+    for candidate in [
+        run_dir / "code_task" / "summary.md",
+        run_dir / "07-run" / "report.md",
+        run_dir / "08-report" / "report.md",
+    ]:
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8", errors="ignore")
+    return ""
+
+
 def build_claims(manifest: dict[str, Any], metrics: dict[str, float], project_results: dict[str, Any]) -> dict[str, Any]:
     existing = extract_existing_claims(project_results)
     if existing:
@@ -994,6 +1207,41 @@ def write_json(path: Path, data: Any) -> None:
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+
+
+def summarize_usage_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "request_count": len(rows),
+        "input_tokens": sum(int(row.get("input_tokens") or 0) for row in rows),
+        "output_tokens": sum(int(row.get("output_tokens") or 0) for row in rows),
+        "total_tokens": sum(int(row.get("total_tokens") or 0) for row in rows),
+        "estimated_cost_usd": sum(float(row.get("estimated_cost_usd") or 0.0) for row in rows),
+        "labels": [row.get("label") for row in rows if row.get("label")],
+    }
+
+
+def clip_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return text[:max_chars] + f"\n\n[... clipped {omitted} characters ...]"
+
+
+def clip_data(data: Any, max_chars: int) -> Any:
+    text = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+    if len(text) <= max_chars:
+        return data
+    return {
+        "clipped": True,
+        "max_chars": max_chars,
+        "preview": clip_text(text, max_chars),
+    }
 
 
 def scrub_private_keys(data: dict[str, Any]) -> dict[str, Any]:
