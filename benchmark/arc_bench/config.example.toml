@@ -1,0 +1,51 @@
+[arc]
+# Path to AutoResearchClaw/experiments/arc_bench on this machine.
+# Can also be supplied by --arc-root or ARC_BENCH_ROOT.
+arc_root = "AutoResearchClaw/experiments/arc_bench"
+
+[prepare]
+topic = "ML02"
+output_dir = "benchmark/arc_bench/prepared/ML02"
+simple_ar_output_root = "benchmark/arc_bench/runs/ML02"
+benchmark_command = "python generated_project/main.py --preset standard"
+timeout_sec = 1800
+repair_rounds = 5
+max_files = 48
+max_generated_lines = 6000
+budget_profile = "large"
+provider = "local"
+agent_mode = "model"
+allow_external_agent = false
+agent_model = ""
+
+[prepare_ml]
+# Batch-generate prepared packages for ML01-ML25.
+# Omit topics or leave it empty to discover all config/ml/manifests/ML*.yaml.
+topics = []
+prepared_root = "benchmark/arc_bench/prepared/ml"
+run_root = "benchmark/arc_bench/runs/ml"
+benchmark_command = "python generated_project/main.py --preset standard"
+timeout_sec = 1800
+repair_rounds = 5
+max_files = 48
+max_generated_lines = 6000
+budget_profile = "large"
+provider = "local"
+agent_mode = "model"
+allow_external_agent = false
+agent_model = ""
+
+[finalize]
+# prepared_dir = "benchmark/arc_bench/prepared/ML02"
+# run_dir = "benchmark/arc_bench/runs/ML02/<run-id>"
+# output_dir = "benchmark/arc_bench/submissions/ML02/<run-id>"
+# force = false
+
+[judge]
+# Optional wrapper around ARC-Bench's own judge command. The command is run
+# exactly as configured and may use {submission_dir} and {output_dir}
+# placeholders. Example:
+# judge_command = "python /path/to/judge.py --submission {submission_dir} --output {output_dir}"
+# submission_dir = "benchmark/arc_bench/submissions/ML02/<run-id>"
+# output_dir = "benchmark/arc_bench/submissions/ML02/<run-id>/judge"
+timeout_sec = 1800
