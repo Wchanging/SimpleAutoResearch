@@ -101,6 +101,9 @@ benchmark/arc_bench/batch_logs/<MLxx>/<timestamp>/
   finalize.log
 ```
 
+在 Linux / Ubuntu 终端中，批跑脚本会用伪终端保留 `simple-ar` 的 Rich 彩色输出。
+对应日志也会保留 ANSI 颜色转义码，适合回放和排查问题。
+
 只重跑未完成任务：
 
 ```bash

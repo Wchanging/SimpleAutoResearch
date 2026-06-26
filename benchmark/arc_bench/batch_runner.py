@@ -14,9 +14,12 @@ server runs can be resumed or failed topics can be retried.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
+import os
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -340,27 +343,12 @@ def _run_logged(command: list[str], cwd: Path, log_path: Path, timeout: int = 0)
     with log_path.open("w", encoding="utf-8") as log:
         log.write("$ " + " ".join(command) + "\n\n")
         log.flush()
+        env = _subprocess_env()
         try:
-            proc = subprocess.Popen(
-                command,
-                cwd=str(cwd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                print(line, end="")
-                log.write(line)
-            returncode = proc.wait(timeout=timeout if timeout > 0 else None)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            message = f"\nCommand timed out after {timeout}s.\n"
-            print(message, end="")
-            log.write(message)
-            returncode = 124
+            if _should_use_pty():
+                returncode = _run_logged_pty(command, cwd, log, env, timeout=timeout)
+            else:
+                returncode = _run_logged_pipe(command, cwd, log, env, timeout=timeout)
         except FileNotFoundError as exc:
             message = f"\nCommand failed to start: {exc}\n"
             print(message, end="")
@@ -368,6 +356,136 @@ def _run_logged(command: list[str], cwd: Path, log_path: Path, timeout: int = 0)
             returncode = 127
         log.write(f"\n[exit] {returncode}\n")
     return CommandResult(returncode=returncode, log_path=_rel(cwd, log_path), command=command)
+
+
+def _subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("FORCE_COLOR", "1")
+    env.setdefault("PY_COLORS", "1")
+    env.setdefault("CLICOLOR_FORCE", "1")
+    env.setdefault("TERM", "xterm-256color")
+    return env
+
+
+def _should_use_pty() -> bool:
+    return os.name != "nt" and sys.stdout.isatty()
+
+
+def _run_logged_pipe(
+    command: list[str],
+    cwd: Path,
+    log: Any,
+    env: dict[str, str],
+    *,
+    timeout: int = 0,
+) -> int:
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="")
+        log.write(line)
+    try:
+        return proc.wait(timeout=timeout if timeout > 0 else None)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        message = f"\nCommand timed out after {timeout}s.\n"
+        print(message, end="")
+        log.write(message)
+        return 124
+
+
+def _run_logged_pty(
+    command: list[str],
+    cwd: Path,
+    log: Any,
+    env: dict[str, str],
+    *,
+    timeout: int = 0,
+) -> int:
+    # On POSIX terminals this keeps Rich/Click/etc. color output enabled while
+    # still teeing the child process stream into a log file.
+    import pty
+    import select
+
+    master_fd: int | None = None
+    slave_fd: int | None = None
+    proc: subprocess.Popen[bytes] | None = None
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    timed_out = False
+    try:
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+        slave_fd = None
+
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                proc.kill()
+                timed_out = True
+                message = f"\nCommand timed out after {timeout}s.\n"
+                print(message, end="")
+                log.write(message)
+                break
+
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if master_fd in ready:
+                chunk = _read_pty_chunk(master_fd)
+                if chunk:
+                    text = chunk.decode("utf-8", errors="replace")
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                    log.write(text)
+                    log.flush()
+                elif proc.poll() is not None:
+                    break
+
+            if proc.poll() is not None:
+                while True:
+                    chunk = _read_pty_chunk(master_fd)
+                    if not chunk:
+                        break
+                    text = chunk.decode("utf-8", errors="replace")
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                    log.write(text)
+                    log.flush()
+                break
+
+        if timed_out:
+            proc.wait()
+            return 124
+        return proc.wait()
+    finally:
+        if slave_fd is not None:
+            os.close(slave_fd)
+        if master_fd is not None:
+            os.close(master_fd)
+
+
+def _read_pty_chunk(fd: int) -> bytes:
+    try:
+        return os.read(fd, 4096)
+    except OSError as exc:
+        if exc.errno == errno.EIO:
+            return b""
+        raise
 
 
 def _record_command(topic_state: TopicState, result: CommandResult) -> None:

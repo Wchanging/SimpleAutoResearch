@@ -153,6 +153,10 @@ benchmark/arc_bench/batch_state/ml_batch_state.json
 benchmark/arc_bench/batch_logs/<topic>/<timestamp>/
 ```
 
+On Linux/Ubuntu terminals, the batch runner uses a pseudo-terminal to preserve
+SimpleAutoResearch's Rich color output while teeing command output into logs.
+Those logs may therefore contain ANSI color escape codes.
+
 Retry every unfinished topic once:
 
 ```bash
