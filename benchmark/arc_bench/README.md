@@ -153,6 +153,12 @@ benchmark/arc_bench/batch_state/ml_batch_state.json
 benchmark/arc_bench/batch_logs/<topic>/<timestamp>/
 ```
 
+The batch runner does not treat a zero process exit code as success by itself.
+After `execute`, it reads the run `manifest.json` and only proceeds to
+`finalize` when the business status is `benchmark_passed`. If an older state
+file incorrectly marked a failed run as completed, `run` and `retry-unfinished`
+will re-check the manifest and treat it as unfinished.
+
 On Linux/Ubuntu terminals, the batch runner uses a pseudo-terminal to preserve
 SimpleAutoResearch's Rich color output while teeing command output into logs.
 Those logs may therefore contain ANSI color escape codes.

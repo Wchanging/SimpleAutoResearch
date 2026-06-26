@@ -52,6 +52,7 @@ TOPIC_SETS = {
     "higher-risk": SPECIALIZED_TOPICS,
     "all": QUICK_TOPICS + BREADTH_TOPICS + SPECIALIZED_TOPICS,
 }
+SUCCESSFUL_RUN_STATUSES = {"benchmark_passed"}
 
 
 @dataclass
@@ -165,8 +166,10 @@ def _run_command(args: argparse.Namespace) -> int:
     for topic in topics:
         current = _topic_state(state, topic)
         if current.status == "completed" and not args.force:
-            _print(f"[skip] {topic}: already completed at {current.output_dir}")
-            continue
+            if _completed_state_still_valid(ctx, current):
+                _print(f"[skip] {topic}: already completed at {current.output_dir}")
+                continue
+            _print(f"[stale] {topic}: previous completed state is not backed by a passed run; rerunning.")
         result = _run_topic(ctx, topic, analyze=args.analyze, analysis_model=args.analysis_model, previous_state=current)
         state[topic] = result
         _save_state(ctx.state_file, state)
@@ -181,7 +184,11 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
     ctx = _context_from_args(args)
     state = _load_state(ctx.state_file)
     candidate_topics = _resolve_topics(args, ctx.prepared_root)
-    topics = [topic for topic in candidate_topics if _topic_state(state, topic).status != "completed"]
+    topics = [
+        topic
+        for topic in candidate_topics
+        if _unfinished_or_stale_completed(ctx, _topic_state(state, topic))
+    ]
 
     if not topics:
         _print("No unfinished topics found.")
@@ -317,6 +324,9 @@ def _run_topic(
     _record_command(topic_state, execute_result)
     if execute_result.returncode != 0:
         return _fail(topic_state, "execute_failed", f"execute exited with {execute_result.returncode}")
+    run_ok, run_detail = _run_business_success(run_dir)
+    if not run_ok:
+        return _fail(topic_state, "execute_incomplete", run_detail)
 
     output_dir = ctx.submissions_root / topic / run_dir.name
     topic_state.output_dir = _rel(ctx.repo_root, output_dir)
@@ -559,6 +569,46 @@ def _repair_budget_exhausted(run_dir: Path, config_path: Path) -> bool:
         if used > 0 and used >= repair_rounds:
             return True
     return False
+
+
+def _completed_state_still_valid(ctx: RunnerContext, state: TopicState) -> bool:
+    if not state.run_dir or not state.output_dir:
+        return False
+    run_dir = _abs(ctx.repo_root, state.run_dir)
+    output_dir = _abs(ctx.repo_root, state.output_dir)
+    if not output_dir.exists():
+        return False
+    run_ok, _ = _run_business_success(run_dir)
+    return run_ok
+
+
+def _unfinished_or_stale_completed(ctx: RunnerContext, state: TopicState) -> bool:
+    if state.status != "completed":
+        return True
+    return not _completed_state_still_valid(ctx, state)
+
+
+def _run_business_success(run_dir: Path) -> tuple[bool, str]:
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return False, f"missing run manifest: {manifest_path}"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"could not read run manifest: {exc}"
+    status = str(manifest.get("status", "unknown"))
+    if status in SUCCESSFUL_RUN_STATUSES:
+        return True, f"manifest status {status}"
+    benchmark = manifest.get("benchmark", {})
+    if isinstance(benchmark, dict):
+        patched = benchmark.get("patched_execution")
+        if isinstance(patched, dict):
+            patched_status = patched.get("status", "unknown")
+            return False, f"manifest status {status}; patched benchmark status {patched_status}"
+        last_status = benchmark.get("last_status")
+        if last_status:
+            return False, f"manifest status {status}; benchmark last_status {last_status}"
+    return False, f"manifest status {status}; expected one of {sorted(SUCCESSFUL_RUN_STATUSES)}"
 
 
 def _configured_repair_rounds(config_path: Path) -> int:
