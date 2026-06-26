@@ -93,9 +93,10 @@ benchmark/arc_bench/batch_state/ml_batch_state.json
 ```
 
 批跑脚本不会只看命令退出码。`execute` 后会读取 run 的 `manifest.json`，
-只有业务状态达到 `benchmark_passed` 才会继续 `finalize` 并标记为 completed。
-如果旧 state 曾经把失败 run 误标成 completed，后续 `run` / `retry-unfinished`
-也会重新检查 manifest，并把它当成未完成任务继续跑。
+只有业务状态达到 `benchmark_passed` 才会继续 `finalize`。标记为 completed 前，
+还会检查 submission 和 `result_analysis/` 的关键文件是否存在；如果本次命令带
+`--analyze`，还会要求 LLM analysis 产物存在。旧 state 即使曾经把失败 run 误标成
+completed，后续 `run` / `retry-unfinished` 也会重新检查并把它当成未完成任务继续跑。
 
 每个任务的命令日志会写到：
 

@@ -166,10 +166,10 @@ def _run_command(args: argparse.Namespace) -> int:
     for topic in topics:
         current = _topic_state(state, topic)
         if current.status == "completed" and not args.force:
-            if _completed_state_still_valid(ctx, current):
+            if _completed_state_still_valid(ctx, current, require_analysis=args.analyze):
                 _print(f"[skip] {topic}: already completed at {current.output_dir}")
                 continue
-            _print(f"[stale] {topic}: previous completed state is not backed by a passed run; rerunning.")
+            _print(f"[stale] {topic}: previous completed state is missing passed run or finalized artifacts; rerunning.")
         result = _run_topic(ctx, topic, analyze=args.analyze, analysis_model=args.analysis_model, previous_state=current)
         state[topic] = result
         _save_state(ctx.state_file, state)
@@ -187,7 +187,7 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
     topics = [
         topic
         for topic in candidate_topics
-        if _unfinished_or_stale_completed(ctx, _topic_state(state, topic))
+        if _unfinished_or_stale_completed(ctx, _topic_state(state, topic), require_analysis=args.analyze)
     ]
 
     if not topics:
@@ -571,21 +571,49 @@ def _repair_budget_exhausted(run_dir: Path, config_path: Path) -> bool:
     return False
 
 
-def _completed_state_still_valid(ctx: RunnerContext, state: TopicState) -> bool:
+def _completed_state_still_valid(ctx: RunnerContext, state: TopicState, *, require_analysis: bool) -> bool:
     if not state.run_dir or not state.output_dir:
         return False
     run_dir = _abs(ctx.repo_root, state.run_dir)
     output_dir = _abs(ctx.repo_root, state.output_dir)
-    if not output_dir.exists():
-        return False
     run_ok, _ = _run_business_success(run_dir)
-    return run_ok
+    if not run_ok:
+        return False
+    return _finalized_output_complete(output_dir, require_analysis=require_analysis)
 
 
-def _unfinished_or_stale_completed(ctx: RunnerContext, state: TopicState) -> bool:
+def _unfinished_or_stale_completed(ctx: RunnerContext, state: TopicState, *, require_analysis: bool) -> bool:
     if state.status != "completed":
         return True
-    return not _completed_state_still_valid(ctx, state)
+    return not _completed_state_still_valid(ctx, state, require_analysis=require_analysis)
+
+
+def _finalized_output_complete(output_dir: Path, *, require_analysis: bool) -> bool:
+    required_files = [
+        output_dir / "arc_adapter_meta.json",
+        output_dir / "submission" / "README.md",
+        output_dir / "submission" / "claims.json",
+        output_dir / "submission" / "results" / "metrics.json",
+        output_dir / "result_analysis" / "metric_summary.json",
+        output_dir / "result_analysis" / "analysis_audit.json",
+        output_dir / "result_analysis" / "analysis_report.md",
+    ]
+    if any(not path.is_file() for path in required_files):
+        return False
+    if not (output_dir / "submission" / "code").exists():
+        return False
+    if require_analysis:
+        if not (output_dir / "result_analysis" / "analysis_response.json").is_file():
+            return False
+        meta_path = output_dir / "arc_adapter_meta.json"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        analysis = meta.get("analysis", {})
+        if not isinstance(analysis, dict) or analysis.get("llm_used") is not True:
+            return False
+    return True
 
 
 def _run_business_success(run_dir: Path) -> tuple[bool, str]:
