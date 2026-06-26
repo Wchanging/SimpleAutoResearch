@@ -83,6 +83,16 @@ Benchmark failure 不应只是终端里的一段 stderr。系统应把失败分�
 - 上一轮修复已经尝试了什么；
 - 哪些假设不能再重复。
 
+这条要求应作为 SimpleAutoResearch code-task / repair 的通用增强，而不是 ARC-Bench 专用逻辑。每轮修复后，系统都应形成一份轻量的 previous repair context，至少包含：
+
+- 本轮失败诊断：错误类型、关键 stderr、失败命令、失败阶段、最可能的根因；
+- 本轮修改摘要：修改了哪些文件、涉及哪些关键函数/接口、修复策略是什么；
+- 修复后证据：静态检查、运行命令、返回码、指标变化、schema/guard 变化；
+- 重复失败判断：如果错误信息相同或高度相似，需要明确记录“上一轮定位假设可能不成立”，避免下一轮继续改同一处；
+- 下一轮建议：建议优先查看的文件、需要验证的数据流/调用链、不要重复尝试的方向。
+
+这样 repair prompt 看到的不是孤立的最后一行 stderr，而是“刚刚改过哪里、为什么仍失败、哪些判断已经被证伪”。这能减少模型在多轮修复中反复猜同一个位置的问题，也能让 greenfield 与已有代码任务共享同一套调试记忆机制。
+
 ## 4. 目标架构
 
 ```text
@@ -347,8 +357,9 @@ Week 0.5 / Week 1 的实现边界：
 | --- | --- | --- | --- |
 | Day 16 | Post-run analysis hook | benchmark 成功后可选执行 result analysis | standalone code-task 可开启/关闭 |
 | Day 17 | Failure analysis hook | benchmark 失败时把分析写入 memory | repair prompt 能看到失败类型和已尝试方案 |
-| Day 18 | Generic repair context | runtime failure repair 使用完整上下文，不依赖固定文件名 | 自定义项目结构也能定位相关文件 |
-| Day 19 | Result guard refinement | 区分“能跑”“指标有效”“结论可信” | 不再把空结果当成功 |
+| Day 18 | Previous repair context | repair prompt 显式注入上一轮 diagnosis、changed files、attempted fix 和仍失败证据 | 同类错误重复出现时，模型不会从零猜测或反复改同一处 |
+| Day 19 | Generic repair context | runtime failure repair 使用完整上下文，不依赖固定文件名 | 自定义项目结构也能定位相关文件 |
+| Day 20 | Result guard refinement | 区分“能跑”“指标有效”“结论可信” | 不再把空结果当成功 |
 
 ### Week 5：ARC-Bench ML 实测
 
@@ -394,7 +405,7 @@ V2.7 完成时至少应满足：
 - ARC-Bench ML 任务可以批量 prepare、run、finalize、analyze；
 - submission 不再只有自动模板 summary，而是包含可回溯的 result claim；
 - result analysis 能区分指标缺失、运行失败、弱证据和真实支持；
-- code-task repair 能消费 benchmark failure，而不是只看最后一行 stderr；
+- code-task repair 能消费 benchmark failure、previous repair context 和指标证据，而不是只看最后一行 stderr；
 - benchmark-specific 逻辑不进入通用 generation/review/repair 代码；
 - `08-report` 能选择使用 result analysis，但 survey/report 不被 benchmark 格式污染；
 - 新 benchmark adapter 可以复用同一套 result analysis schema。
@@ -408,7 +419,7 @@ V2.7 完成时至少应满足：
 | LLM 解释过度 | 确定性 metric summary + reviewer audit + unsupported 降级 |
 | 配置继续膨胀 | adapter 自动推断默认路径和 metric；用户只覆盖必要项 |
 | benchmark 数据/路径不稳定 | benchmark root、task root、judge command 全部可配置 |
-| repair 继续补丁化 | repair context 使用 failure analysis、artifact map、代码检索和 memory，而非固定文件名 |
+| repair 继续补丁化 | repair context 使用 failure analysis、artifact map、代码检索、previous repair context 和 memory，而非固定文件名 |
 | 外部 agent 绕过验收 | external output 必须回到 SimpleAutoResearch 的 validation/run/analysis |
 
 ## 12. 最终判断
