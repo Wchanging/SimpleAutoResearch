@@ -121,6 +121,11 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --resume-existing
 ```
 
+注意：如果旧 run 是 `execute_failed`，并且 manifest 中记录的 repair 次数已经达到
+`code_task.toml` 里的 `[execute].repair_rounds`，批跑脚本会自动放弃 resume，改为新建
+fresh run。这样可以避免反复进入“repair 预算已耗尽，所以重新 execute 仍然不再 repair”
+的死循环。
+
 查看当前批跑状态：
 
 ```bash

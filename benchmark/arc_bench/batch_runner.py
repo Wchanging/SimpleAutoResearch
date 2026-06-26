@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import time
+import tomllib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -166,7 +167,7 @@ def _run_command(args: argparse.Namespace) -> int:
         if current.status == "completed" and not args.force:
             _print(f"[skip] {topic}: already completed at {current.output_dir}")
             continue
-        result = _run_topic(ctx, topic, analyze=args.analyze, analysis_model=args.analysis_model)
+        result = _run_topic(ctx, topic, analyze=args.analyze, analysis_model=args.analysis_model, previous_state=current)
         state[topic] = result
         _save_state(ctx.state_file, state)
         if result.status != "completed":
@@ -189,13 +190,25 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
     exit_code = 0
     for topic in topics:
         current = _topic_state(state, topic)
-        resume_run_dir = Path(current.run_dir) if args.resume_existing and current.run_dir else None
+        resume_run_dir = _abs(ctx.repo_root, current.run_dir) if args.resume_existing and current.run_dir else None
+        config_path = ctx.prepared_root / topic / "code_task.toml"
+        if (
+            resume_run_dir is not None
+            and current.status == "execute_failed"
+            and _repair_budget_exhausted(resume_run_dir, config_path)
+        ):
+            _print(
+                f"[fresh] {topic}: previous run appears to have exhausted its configured repair budget; "
+                "creating a fresh run instead of resuming it."
+            )
+            resume_run_dir = None
         result = _run_topic(
             ctx,
             topic,
             analyze=args.analyze,
             analysis_model=args.analysis_model,
             resume_run_dir=resume_run_dir,
+            previous_state=current,
         )
         state[topic] = result
         _save_state(ctx.state_file, state)
@@ -249,8 +262,14 @@ def _run_topic(
     analyze: bool,
     analysis_model: str | None,
     resume_run_dir: Path | None = None,
+    previous_state: TopicState | None = None,
 ) -> TopicState:
-    topic_state = TopicState(topic=topic, attempts=1, status="running", updated_at=_now())
+    topic_state = TopicState(
+        topic=topic,
+        attempts=(previous_state.attempts + 1 if previous_state is not None else 1),
+        status="running",
+        updated_at=_now(),
+    )
     config_path = ctx.prepared_root / topic / "code_task.toml"
     prepared_dir = ctx.prepared_root / topic
     topic_log_root = ctx.log_root / topic / _timestamp()
@@ -516,6 +535,44 @@ def _resolve_topics(args: argparse.Namespace, prepared_root: Path) -> list[str]:
     if missing:
         raise SystemExit(f"Missing prepared topic(s): {', '.join(missing)} under {prepared_root}")
     return unique_topics
+
+
+def _repair_budget_exhausted(run_dir: Path, config_path: Path) -> bool:
+    repair_rounds = _configured_repair_rounds(config_path)
+    if repair_rounds <= 0:
+        return False
+    manifest_path = run_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    repair = manifest.get("repair", {})
+    if not isinstance(repair, dict):
+        return False
+    for key in ("repair_count", "review_repair_count", "run_repair_count"):
+        try:
+            used = int(repair.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            used = 0
+        if used > 0 and used >= repair_rounds:
+            return True
+    return False
+
+
+def _configured_repair_rounds(config_path: Path) -> int:
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return 0
+    execute = config.get("execute", {})
+    if not isinstance(execute, dict):
+        return 0
+    try:
+        return max(0, int(execute.get("repair_rounds", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _load_state(path: Path) -> dict[str, TopicState]:

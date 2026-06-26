@@ -165,6 +165,12 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --analyze
 ```
 
+By default, unfinished topics receive a fresh run. If you pass
+`--resume-existing`, the runner reuses the previous `run_dir` only when that run
+has not exhausted the configured `[execute].repair_rounds` budget. For
+`execute_failed` runs with exhausted repair counters, the runner automatically
+falls back to a fresh run to avoid repeating a no-op repair loop.
+
 Each generated `code_task.toml` keeps `benchmark.metric_directions` scoped to
 the metrics declared by that topic manifest, plus `runtime_sec = "resource"`.
 Structural completeness signals such as dataset counts or hypothesis coverage
