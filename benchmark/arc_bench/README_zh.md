@@ -41,6 +41,69 @@ uv run simple-ar code-task init \
 
 这一步会在 `benchmark/arc_bench/runs/ml/ML02/` 下创建一个新的 run 目录。
 
+## 批量运行任务
+
+如果想按顺序自动完成 `init -> execute -> finalize`，并且某个任务失败后继续跑下一个，
+可以使用批跑脚本：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topic-set quick \
+  --analyze
+```
+
+`quick` 当前等价于：
+
+```text
+ML04 -> ML02 -> ML06 -> ML10 -> ML08
+```
+
+也可以显式指定任务：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML04 ML02 ML06 \
+  --analyze
+```
+
+批跑状态会写到：
+
+```text
+benchmark/arc_bench/batch_state/ml_batch_state.json
+```
+
+每个任务的命令日志会写到：
+
+```text
+benchmark/arc_bench/batch_logs/<MLxx>/<timestamp>/
+  init.log
+  execute.log
+  finalize.log
+```
+
+只重跑未完成任务：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze
+```
+
+默认会为未完成任务创建新的 run。如果想复用上一次失败的 `run_dir` 继续尝试：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze \
+  --resume-existing
+```
+
+查看当前批跑状态：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py status
+```
+
 ## 获取最新 Run 目录
 
 Linux / Ubuntu：
@@ -162,4 +225,3 @@ judge/
 
 `{submission_dir}` / `{submission}` 会替换成 submission 目录，
 `{output_dir}` / `{output}` 会替换成 judge 输出目录。
-

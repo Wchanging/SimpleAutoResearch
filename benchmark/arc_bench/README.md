@@ -106,6 +106,40 @@ Raw SimpleAutoResearch runs are configured under:
 benchmark/arc_bench/runs/ml/<topic>/
 ```
 
+## Batch Run ML Topics
+
+To automatically run `init -> execute -> finalize` for a topic set while
+continuing after individual topic failures:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topic-set quick \
+  --analyze
+```
+
+Explicit topics are also supported:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML04 ML02 ML06 \
+  --analyze
+```
+
+Batch state and logs are written to:
+
+```text
+benchmark/arc_bench/batch_state/ml_batch_state.json
+benchmark/arc_bench/batch_logs/<topic>/<timestamp>/
+```
+
+Retry every unfinished topic once:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze
+```
+
 Each generated `code_task.toml` keeps `benchmark.metric_directions` scoped to
 the metrics declared by that topic manifest, plus `runtime_sec = "resource"`.
 Structural completeness signals such as dataset counts or hypothesis coverage
