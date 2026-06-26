@@ -127,10 +127,23 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --resume-existing
 ```
 
-注意：如果旧 run 是 `execute_failed`，并且 manifest 中记录的 repair 次数已经达到
-`code_task.toml` 里的 `[execute].repair_rounds`，批跑脚本会自动放弃 resume，改为新建
-fresh run。这样可以避免反复进入“repair 预算已耗尽，所以重新 execute 仍然不再 repair”
-的死循环。
+注意：如果旧 run 的 manifest 记录显示 repair 次数已经达到 `code_task.toml` 里的
+`[execute].repair_rounds`，批跑脚本会自动放弃 resume，改为新建 fresh run。这样可以避免
+反复进入“repair 预算已耗尽，所以重新 execute 仍然不再 repair”的死循环。
+
+如果你希望保留旧 run 的代码修改、失败记录和 repair 记忆，并在原基础上继续修，
+可以显式延长本次 execute 的 repair 预算：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze \
+  --resume-existing \
+  --extend-repair-rounds 2
+```
+
+这不会修改 `code_task.toml`，只会在本次调用 `simple-ar code-task execute` 时临时传入
+`--repair-rounds <已用 repair 次数 + 2>`。适合“同一个错误连续出现，需要让模型知道旧代码状态后继续修”的情况。
 
 查看当前批跑状态：
 

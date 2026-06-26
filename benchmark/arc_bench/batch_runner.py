@@ -91,6 +91,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Reuse the previous run_dir for unfinished topics when available; otherwise create a fresh run.",
     )
+    retry_parser.add_argument(
+        "--extend-repair-rounds",
+        type=int,
+        default=0,
+        help=(
+            "When used with --resume-existing, temporarily raise code-task --repair-rounds "
+            "to used repair count plus this many extra rounds."
+        ),
+    )
     retry_parser.set_defaults(func=_retry_unfinished_command)
 
     status_parser = subparsers.add_parser("status", help="Print batch state summary.")
@@ -199,16 +208,24 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
         current = _topic_state(state, topic)
         resume_run_dir = _abs(ctx.repo_root, current.run_dir) if args.resume_existing and current.run_dir else None
         config_path = ctx.prepared_root / topic / "code_task.toml"
-        if (
-            resume_run_dir is not None
-            and current.status == "execute_failed"
-            and _repair_budget_exhausted(resume_run_dir, config_path)
-        ):
-            _print(
-                f"[fresh] {topic}: previous run appears to have exhausted its configured repair budget; "
-                "creating a fresh run instead of resuming it."
-            )
-            resume_run_dir = None
+        repair_rounds_override = None
+        if resume_run_dir is not None:
+            used_repairs = _repair_usage(resume_run_dir)
+            configured_repairs = _configured_repair_rounds(config_path)
+            if args.extend_repair_rounds > 0:
+                repair_rounds_override = max(configured_repairs, used_repairs + args.extend_repair_rounds)
+                _print(
+                    f"[resume] {topic}: extending repair budget for this execute call "
+                    f"to {repair_rounds_override} round(s) "
+                    f"(configured={configured_repairs}, used={used_repairs}, extra={args.extend_repair_rounds})."
+                )
+            elif _repair_budget_exhausted(resume_run_dir, config_path):
+                _print(
+                    f"[fresh] {topic}: previous run appears to have exhausted its configured repair budget; "
+                    "creating a fresh run instead of resuming it. Use --resume-existing "
+                    "--extend-repair-rounds N to continue repairing the same run."
+                )
+                resume_run_dir = None
         result = _run_topic(
             ctx,
             topic,
@@ -216,6 +233,7 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
             analysis_model=args.analysis_model,
             resume_run_dir=resume_run_dir,
             previous_state=current,
+            repair_rounds_override=repair_rounds_override,
         )
         state[topic] = result
         _save_state(ctx.state_file, state)
@@ -270,6 +288,7 @@ def _run_topic(
     analysis_model: str | None,
     resume_run_dir: Path | None = None,
     previous_state: TopicState | None = None,
+    repair_rounds_override: int | None = None,
 ) -> TopicState:
     topic_state = TopicState(
         topic=topic,
@@ -305,18 +324,21 @@ def _run_topic(
             return _fail(topic_state, "init_failed", f"Could not detect new run under {ctx.runs_root / topic}")
 
     topic_state.run_dir = _rel(ctx.repo_root, run_dir)
+    execute_cmd = [
+        "uv",
+        "run",
+        "simple-ar",
+        "code-task",
+        "execute",
+        _rel(ctx.repo_root, run_dir),
+        "--config",
+        _rel(ctx.repo_root, config_path),
+    ]
+    if repair_rounds_override is not None and repair_rounds_override > 0:
+        execute_cmd.extend(["--repair-rounds", str(repair_rounds_override)])
+    execute_cmd.append("--yes")
     execute_result = _run_logged(
-        [
-            "uv",
-            "run",
-            "simple-ar",
-            "code-task",
-            "execute",
-            _rel(ctx.repo_root, run_dir),
-            "--config",
-            _rel(ctx.repo_root, config_path),
-            "--yes",
-        ],
+        execute_cmd,
         ctx.repo_root,
         topic_log_root / "execute.log",
         timeout=ctx.execute_timeout,
@@ -551,24 +573,29 @@ def _repair_budget_exhausted(run_dir: Path, config_path: Path) -> bool:
     repair_rounds = _configured_repair_rounds(config_path)
     if repair_rounds <= 0:
         return False
+    used = _repair_usage(run_dir)
+    return used > 0 and used >= repair_rounds
+
+
+def _repair_usage(run_dir: Path) -> int:
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.is_file():
-        return False
+        return 0
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
+        return 0
     repair = manifest.get("repair", {})
     if not isinstance(repair, dict):
-        return False
+        return 0
+    used_counts: list[int] = []
     for key in ("repair_count", "review_repair_count", "run_repair_count"):
         try:
             used = int(repair.get(key, 0) or 0)
         except (TypeError, ValueError):
             used = 0
-        if used > 0 and used >= repair_rounds:
-            return True
-    return False
+        used_counts.append(max(0, used))
+    return max(used_counts, default=0)
 
 
 def _completed_state_still_valid(ctx: RunnerContext, state: TopicState, *, require_analysis: bool) -> bool:

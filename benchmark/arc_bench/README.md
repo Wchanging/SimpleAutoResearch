@@ -179,6 +179,20 @@ has not exhausted the configured `[execute].repair_rounds` budget. For
 `execute_failed` runs with exhausted repair counters, the runner automatically
 falls back to a fresh run to avoid repeating a no-op repair loop.
 
+To keep the previous run's code changes and repair memory while allowing more
+repair attempts, combine `--resume-existing` with `--extend-repair-rounds N`:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze \
+  --resume-existing \
+  --extend-repair-rounds 2
+```
+
+This does not edit `code_task.toml`; it temporarily invokes
+`simple-ar code-task execute` with `--repair-rounds <used repairs + N>`.
+
 Each generated `code_task.toml` keeps `benchmark.metric_directions` scoped to
 the metrics declared by that topic manifest, plus `runtime_sec = "resource"`.
 Structural completeness signals such as dataset counts or hypothesis coverage
