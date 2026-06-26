@@ -382,6 +382,7 @@ def maybe_compact_task_memory(
         compressed=_load_compacted_memory(paths.compressed_memory_json),
         findings=finding_rows[-6:],
         repairs=repair_rows[-6:],
+        edits=edit_rows[-6:],
         events=memory.events[-10:],
     )
     should_compact = (
@@ -441,6 +442,7 @@ def task_memory_context(run_dir: Path, *, max_events: int = 10, max_findings: in
     compressed = _load_compacted_memory(paths.compressed_memory_json)
     findings = _read_jsonl_safe(paths.review_findings_jsonl)[-max_findings:]
     repairs = _read_jsonl_safe(paths.repair_memory_jsonl)[-max_repairs:]
+    edits = _read_jsonl_safe(paths.edit_history_jsonl)[-max_repairs:]
     events = memory.events[-max_events:]
     return _render_task_memory_context(
         run_dir=root,
@@ -448,6 +450,7 @@ def task_memory_context(run_dir: Path, *, max_events: int = 10, max_findings: in
         compressed=compressed,
         findings=findings,
         repairs=repairs,
+        edits=edits,
         events=events,
     )
 
@@ -459,6 +462,7 @@ def _render_task_memory_context(
     compressed: CompactedTaskMemory | None,
     findings: list[dict[str, Any]],
     repairs: list[dict[str, Any]],
+    edits: list[dict[str, Any]],
     events: list[TaskMemoryEvent],
 ) -> str:
     lines = [
@@ -513,7 +517,91 @@ def _render_task_memory_context(
         )
     else:
         lines.append("- No repair attempts recorded.")
+    lines.extend(["", "## Previous Repair Context", ""])
+    lines.extend(_previous_repair_context_lines(repairs=repairs, edits=edits, events=events))
     return "\n".join(lines).strip() + "\n"
+
+
+def _previous_repair_context_lines(
+    *,
+    repairs: list[dict[str, Any]],
+    edits: list[dict[str, Any]],
+    events: list[TaskMemoryEvent],
+) -> list[str]:
+    """Render the continuity context repair prompts need before another attempt."""
+
+    if not repairs and not edits:
+        return ["- No previous repair context is available yet."]
+
+    lines = [
+        "- Before proposing another repair, verify whether the previous localization hypothesis was disproved by repeated failure evidence.",
+    ]
+    signatures = [_repair_signature(row) for row in repairs if _repair_signature(row)]
+    if len(signatures) >= 2 and _similar_repair_signal(signatures[-1], signatures[-2]):
+        lines.append(
+            "- Repeated failure signal detected: the latest two repair records look similar. Do not simply retry the same target or strategy without checking producer/consumer contracts and data flow."
+        )
+
+    latest_repairs = repairs[-3:]
+    if latest_repairs:
+        lines.append("- Recent repair attempts:")
+        for row in latest_repairs:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            changed = _string_list(metadata.get("changed_files"))
+            attempted = str(row.get("attempted_fix", "")).strip()
+            failure = str(row.get("failure_summary", "")).strip()
+            status = str(row.get("status", "noted") or "noted")
+            parts = [f"`{status}`"]
+            if failure:
+                parts.append(_clip(failure, 220))
+            if attempted:
+                parts.append(f"fix={_clip(attempted, 220)}")
+            if changed:
+                parts.append("changed=" + ", ".join(f"`{path}`" for path in changed[:8]))
+            lines.append("  - " + "; ".join(parts))
+
+    latest_edits = edits[-3:]
+    if latest_edits:
+        lines.append("- Recent applied edit history:")
+        for row in latest_edits:
+            changed = _string_list(row.get("changed_files"))
+            reason = str(row.get("reason", "")).strip()
+            detail = _clip(reason, 220) if reason else "applied edits"
+            if changed:
+                detail += "; changed=" + ", ".join(f"`{path}`" for path in changed[:8])
+            lines.append(f"  - {detail}")
+
+    failed_events = [
+        event for event in events
+        if str(event.status).lower() in {"failed", "blocked", "blocking", "error"}
+    ][-3:]
+    if failed_events:
+        lines.append("- Recent failed outcomes:")
+        for event in failed_events:
+            lines.append(f"  - `{event.event_type}` `{event.status}`: {_clip(event.summary, 220)}")
+    return lines
+
+
+def _repair_signature(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for key in ("stderr_signature", "failure_signature", "error_signature"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return str(row.get("failure_summary", "")).strip().lower()
+
+
+def _similar_repair_signal(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    left_terms = set(left.split())
+    right_terms = set(right.split())
+    if not left_terms or not right_terms:
+        return False
+    overlap = len(left_terms & right_terms)
+    return overlap >= 4 and overlap / max(1, min(len(left_terms), len(right_terms))) >= 0.6
 
 
 def _compressed_context_lines(compressed: CompactedTaskMemory) -> list[str]:

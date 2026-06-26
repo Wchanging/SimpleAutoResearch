@@ -44,6 +44,7 @@ from simple_ar.code_task.memory import (
     record_edit_history,
     record_repair_memory,
     record_review_finding,
+    task_memory_context,
 )
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
@@ -1127,13 +1128,20 @@ def _handle_failure(
     _emit(message_callback, "Analyzing latest failure.")
     analysis = analyze_code_task_failure(run_dir)
     _record(steps, "analyze-failure", "done", f"source {analysis.source}; status {analysis.status}")
+    analysis_text = read_text(analysis.analysis_path) if analysis.analysis_path.is_file() else ""
+    repair_index = _repair_count(load_code_task_manifest(run_dir))
     record_repair_memory(
         run_dir,
-        failure_summary=f"Failure analysis status {analysis.status} from {analysis.source}.",
+        failure_summary=_failure_summary_for_memory(analysis_text)
+        or f"Failure analysis status {analysis.status} from {analysis.source}.",
         status=analysis.status,
         artifacts=[_relative_to_run(run_dir, analysis.analysis_path)],
-        metadata={"source": analysis.source},
-        key=f"failure-analysis:{analysis.source}:{analysis.status}",
+        metadata={
+            "source": analysis.source,
+            "failure_signature": _failure_signature(analysis_text),
+            "repair_count": repair_index,
+        },
+        key=f"failure-analysis:{analysis.source}:{analysis.status}:{repair_index}:{_failure_signature(analysis_text)[:40]}",
     )
     if not allow_repair or repair_rounds <= _repair_count(load_code_task_manifest(run_dir)):
         return _result(
@@ -1463,6 +1471,8 @@ def _attempt_greenfield_run_repair(
     _record(steps, "analyze-failure", "done", f"source {analysis.source}; status {analysis.status}")
     _emit(message_callback, "Attempting bounded generated project run repair.")
     stderr_path = paths.run_artifact_dir / "patched" / "stderr.txt"
+    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else ""
+    previous_context = task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
     client = _greenfield_repair_client(
         paths.meta_dir,
         model=model,
@@ -1477,13 +1487,14 @@ def _attempt_greenfield_run_repair(
             "analysis": _relative_to_run(run_dir, analysis.analysis_path),
             "implicated_files": list(analysis.implicated_files),
         },
-        stderr_text=stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else "",
+        stderr_text=stderr_text,
         output_path=paths.meta_dir / "run_repair.json",
         code_artifacts=_read_optional_dict(paths.meta_dir / "code_artifacts.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
         result_schema=_greenfield_result_schema_from_manifest(load_code_task_manifest(run_dir)),
         contract=_greenfield_contract_for_review(paths),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
+        previous_repair_context=previous_context,
         client=client,
     )
     _record(steps, "repair", "done", f"run repair {repair.get('status', 'unknown')}")
@@ -1501,6 +1512,29 @@ def _attempt_greenfield_run_repair(
                 write_json(code_artifacts_path, code_artifacts)
     _update_greenfield_run_repair_manifest(run_dir, repair=repair)
     write_code_task_summary(run_dir)
+    changed_files = _greenfield_repair_changed_files(repair)
+    record_repair_memory(
+        run_dir,
+        failure_summary=_failure_summary_for_memory(stderr_text)
+        or f"Generated project benchmark failure from {analysis.source}.",
+        attempted_fix=_greenfield_repair_attempt_summary(repair),
+        status=str(repair.get("status", "unknown")),
+        artifacts=[
+            _relative_to_run(run_dir, analysis.analysis_path),
+            "code_task/meta/run_repair.json",
+        ],
+        metadata={
+            "changed_files": changed_files,
+            "stderr_signature": _failure_signature(stderr_text),
+            "repair_status": repair.get("status", "unknown"),
+            "run_repair_count": _greenfield_run_repair_count(load_code_task_manifest(run_dir)),
+        },
+        key=(
+            "greenfield-run-repair:"
+            f"{_greenfield_run_repair_count(load_code_task_manifest(run_dir))}:"
+            f"{_failure_signature(stderr_text)[:40]}"
+        ),
+    )
     if repair.get("status") != "patched":
         return False
     _memory_event(
@@ -1512,7 +1546,7 @@ def _attempt_greenfield_run_repair(
             _relative_to_run(run_dir, analysis.analysis_path),
             "code_task/meta/run_repair.json",
         ],
-        metadata={"changed_files": repair.get("changed_files", [])},
+        metadata={"changed_files": changed_files},
     )
     return True
 
@@ -1959,6 +1993,75 @@ def _code_task_kind(manifest: dict[str, object]) -> str:
     return "existing_project"
 
 
+def _failure_summary_for_memory(text: str) -> str:
+    signal = _failure_signature(text)
+    if signal:
+        return f"Failure signal: {signal}"
+    return ""
+
+
+def _failure_signature(text: str, *, max_chars: int = 240) -> str:
+    if not text:
+        return ""
+    candidates: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if (
+            "error" in lowered
+            or "failed" in lowered
+            or "traceback" in lowered
+            or "assert" in lowered
+            or "not found" in lowered
+            or "has no attribute" in lowered
+            or "unexpected keyword" in lowered
+        ):
+            candidates.append(stripped)
+    if not candidates:
+        candidates = [line.strip() for line in text.splitlines() if line.strip()]
+    return _clip_inline(candidates[-1] if candidates else "", max_chars=max_chars)
+
+
+def _greenfield_repair_changed_files(repair: dict[str, Any]) -> list[str]:
+    raw_changed = repair.get("changed_files")
+    changed = (
+        [str(path) for path in raw_changed if str(path).strip()]
+        if isinstance(raw_changed, list)
+        else []
+    )
+    regenerated = repair.get("regenerated_files")
+    if isinstance(regenerated, list):
+        for row in regenerated:
+            if isinstance(row, dict) and str(row.get("path", "")).strip():
+                changed.append(str(row["path"]))
+    return list(dict.fromkeys(changed))
+
+
+def _greenfield_repair_attempt_summary(repair: dict[str, Any]) -> str:
+    status = str(repair.get("status", "unknown"))
+    changed = _greenfield_repair_changed_files(repair)
+    notes = repair.get("notes")
+    note_text = "; ".join(str(item) for item in notes[:3]) if isinstance(notes, list) else ""
+    parts = [f"run repair status={status}"]
+    if changed:
+        parts.append("changed " + ", ".join(changed[:8]))
+    if note_text:
+        parts.append(_clip_inline(note_text, max_chars=260))
+    return "; ".join(parts)
+
+
+def _greenfield_run_repair_count(manifest: dict[str, object]) -> int:
+    repair = manifest.get("repair", {})
+    if not isinstance(repair, dict):
+        return 0
+    try:
+        return int(repair.get("run_repair_count", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _repair_count(manifest: dict[str, object]) -> int:
     repair = manifest.get("repair", {})
     if not isinstance(repair, dict):
@@ -1992,6 +2095,13 @@ def _first_error_line(text: str) -> str:
         if stripped and stripped != "Patch validation failed:":
             return stripped.removeprefix("- ").strip()
     return "patch validation failed"
+
+
+def _clip_inline(text: str, *, max_chars: int) -> str:
+    value = " ".join(str(text).split())
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars].rstrip() + "..."
 
 
 def _relative_to_run(run_dir: Path, path: Path) -> str:

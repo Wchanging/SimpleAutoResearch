@@ -650,6 +650,7 @@ def repair_generated_project_from_run_failure(
     result_schema: Mapping[str, Any] | None = None,
     contract: Mapping[str, Any] | None = None,
     dependency_advice: Mapping[str, Any] | None = None,
+    previous_repair_context: str = "",
     client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Apply narrow deterministic repairs after generated-project run failure.
@@ -715,6 +716,7 @@ def repair_generated_project_from_run_failure(
             result_schema=result_schema or {},
             contract=contract or {},
             dependency_advice=dependency_advice or {},
+            previous_repair_context=previous_repair_context,
             client=client,
             changed=changed,
             notes=summary["notes"],
@@ -752,6 +754,7 @@ def _regenerate_run_failed_files(
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
+    previous_repair_context: str,
     client: LLMClient,
     changed: list[str],
     notes: list[str],
@@ -776,6 +779,7 @@ def _regenerate_run_failed_files(
         result_schema=result_schema,
         contract=contract,
         dependency_advice=dependency_advice,
+        previous_repair_context=previous_repair_context,
         context=repair_context,
         client=client,
         unresolved=unresolved,
@@ -810,6 +814,7 @@ def _regenerate_run_failed_files(
                     stderr_text=stderr_text,
                     repair_plan=repair_plan,
                     repair_context=repair_context,
+                    previous_repair_context=previous_repair_context,
                     result_schema=result_schema,
                     contract=contract,
                     dependency_advice=dependency_advice,
@@ -851,6 +856,7 @@ def _plan_run_repair_targets(
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
+    previous_repair_context: str,
     context: Mapping[str, Any],
     client: LLMClient,
     unresolved: list[str],
@@ -865,6 +871,7 @@ def _plan_run_repair_targets(
                 result_schema=result_schema,
                 contract=contract,
                 dependency_advice=dependency_advice,
+                previous_repair_context=previous_repair_context,
             ),
             label="greenfield-run-repair-plan",
         )
@@ -990,6 +997,7 @@ def _run_repair_plan_prompt(
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
+    previous_repair_context: str,
 ) -> str:
     return (
         "Diagnose the runtime failure before editing files. Choose a small ordered list of existing Python files "
@@ -998,12 +1006,15 @@ def _run_repair_plan_prompt(
         "- Prefer producer/consumer contract fixes over entrypoint-only changes.\n"
         "- If the error mentions a missing dataset/source/field, inspect data loading, preprocessing, config, and orchestrator files.\n"
         "- If the error mentions an attribute/type mismatch, inspect the object producer, object consumer, and the call site.\n"
+        "- Use Previous repair context to avoid repeating the same failed localization or patch strategy.\n"
+        "- If the same error survived a prior repair, explicitly explain why the previous fix was insufficient before selecting target files.\n"
         "- Do not choose files only because they appear in validation warnings if benchmark stderr contains a clearer runtime failure.\n"
         "- Return JSON with fields: diagnosis, root_cause, target_files, repair_strategy, risks.\n"
         "- target_files must use only paths from candidate_files.\n\n"
         f"Benchmark stderr:\n{stderr_text[:6000]}\n\n"
         f"Failure analysis:\n{json.dumps(_compact_for_prompt(failure_analysis), indent=2, ensure_ascii=False)}\n\n"
         f"Candidate context:\n{json.dumps(_compact_for_prompt(context, limit=36000), indent=2, ensure_ascii=False)}\n\n"
+        f"Previous repair context:\n{previous_repair_context[:12000] or 'No previous repair context recorded.'}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"
         f"Dependency advice:\n{json.dumps(_compact_for_prompt(dependency_advice), indent=2, ensure_ascii=False)}\n"
@@ -1202,6 +1213,7 @@ def _run_file_repair_prompt(
     stderr_text: str,
     repair_plan: Mapping[str, Any],
     repair_context: Mapping[str, Any],
+    previous_repair_context: str,
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
@@ -1216,6 +1228,7 @@ def _run_file_repair_prompt(
         "- Do not fake metrics. Fix the runtime path so the benchmark can produce measured outputs.\n"
         "- Do not convert unresolved runtime errors into a successful all-zero run.\n"
         "- Do not use self-check, empty datasets, or placeholder records as substitutes for full benchmark mode.\n"
+        "- Use Previous repair context to avoid reapplying a patch that already failed to change the observed error.\n"
         "- If the experiment cannot produce condition-level evidence, the entrypoint must fail clearly instead of exiting 0.\n"
         "- Required metrics must remain parseable by main.py as `metric_name: number`.\n\n"
         f"Target path: {rel_path}\n\n"
@@ -1225,6 +1238,7 @@ def _run_file_repair_prompt(
         f"Failure analysis:\n{json.dumps(_compact_for_prompt(failure_analysis), indent=2, ensure_ascii=False)}\n\n"
         f"Runtime repair plan:\n{json.dumps(_compact_for_prompt(repair_plan), indent=2, ensure_ascii=False)}\n\n"
         f"Relevant project context for this repair:\n{json.dumps(_compact_for_prompt(repair_context, limit=24000), indent=2, ensure_ascii=False)}\n\n"
+        f"Previous repair context:\n{previous_repair_context[:12000] or 'No previous repair context recorded.'}\n\n"
         f"Actual dependency APIs:\n{json.dumps(dependency_context(project_dir, file_spec, max_source_chars=5000), indent=2, ensure_ascii=False)}\n\n"
         f"Existing project APIs:\n{json.dumps(_project_api_snapshot(project_dir), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
