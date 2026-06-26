@@ -58,6 +58,26 @@ uv run python benchmark/arc_bench/batch_runner.py run \
 ML04 -> ML02 -> ML06 -> ML10 -> ML08
 ```
 
+`INDEX.md` 里的三组顺序都可以直接用参数覆盖：
+
+```bash
+# 第一组：快速确认链路
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze
+
+# 第二组：扩展覆盖
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze
+# breadth 也可以写成 next
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set next --analyze
+
+# 第三组：更高风险 / 更专项的任务
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze
+# specialized 也可以写成 high-risk 或 higher-risk
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set high-risk --analyze
+
+# 三组全部按顺序跑
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze
+```
+
 也可以显式指定任务：
 
 ```bash

@@ -117,6 +117,27 @@ uv run python benchmark/arc_bench/batch_runner.py run \
   --analyze
 ```
 
+Available topic sets mirror `prepared/ml/INDEX.md`:
+
+```bash
+# Quick confidence pass
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze
+
+# Next breadth pass
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze
+# alias
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set next --analyze
+
+# Specialized / higher-risk pass
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze
+# aliases
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set high-risk --analyze
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set higher-risk --analyze
+
+# All groups in the recommended order
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze
+```
+
 Explicit topics are also supported:
 
 ```bash

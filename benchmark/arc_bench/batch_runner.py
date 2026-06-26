@@ -42,7 +42,10 @@ SPECIALIZED_TOPICS = [
 TOPIC_SETS = {
     "quick": QUICK_TOPICS,
     "breadth": BREADTH_TOPICS,
+    "next": BREADTH_TOPICS,
     "specialized": SPECIALIZED_TOPICS,
+    "high-risk": SPECIALIZED_TOPICS,
+    "higher-risk": SPECIALIZED_TOPICS,
     "all": QUICK_TOPICS + BREADTH_TOPICS + SPECIALIZED_TOPICS,
 }
 
@@ -127,7 +130,10 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         "--topic-set",
         choices=sorted(TOPIC_SETS),
         default="quick",
-        help="Named topic set to run when --topics is not provided.",
+        help=(
+            "Named topic set to run when --topics is not provided. "
+            "Use quick, breadth/next, specialized/high-risk, or all."
+        ),
     )
     parser.add_argument("--topics", nargs="+", help="Explicit topic list, e.g. --topics ML04 ML02.")
     parser.add_argument("--analyze", action="store_true", help="Run finalize with LLM result analysis.")

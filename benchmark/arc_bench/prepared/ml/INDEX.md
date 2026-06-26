@@ -11,6 +11,13 @@ difficulty ranking. The idea is to first cover the known good path, then add
 classical ML breadth, and finally move into more specialized or potentially
 resource-sensitive topics.
 
+Batch runner shortcuts:
+
+- `--topic-set quick`: Quick Confidence Pass.
+- `--topic-set breadth` or `--topic-set next`: Next Breadth Pass.
+- `--topic-set specialized`, `--topic-set high-risk`, or `--topic-set higher-risk`: Specialized / Higher-Risk Pass.
+- `--topic-set all`: all groups in the order above.
+
 ### Quick Confidence Pass
 
 Run these first when checking a new branch or server environment:
