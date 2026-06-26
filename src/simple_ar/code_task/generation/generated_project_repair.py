@@ -684,13 +684,17 @@ def repair_generated_project_from_run_failure(
     summary["backup_dir"] = backup_dir.as_posix()
 
     changed: list[str] = []
-    patched = _patch_did_you_mean_attribute(project_dir, stderr_text, changed)
-    if not patched:
+    patched = False
+    if _should_skip_quick_runtime_patches(previous_repair_context):
+        summary["notes"].append(
+            "Skipped deterministic quick patches because previous repair context shows repeated failure."
+        )
+    else:
         patched = _patch_missing_greenfield_preset(project_dir, stderr_text, changed)
-    if not patched:
-        patched = _patch_greenfield_run_experiment_call(project_dir, stderr_text, changed)
-    if not patched:
-        patched = _patch_unexpected_keyword_argument(project_dir, stderr_text, changed)
+        if not patched:
+            patched = _patch_greenfield_run_experiment_call(project_dir, stderr_text, changed)
+        if not patched:
+            patched = _patch_unexpected_keyword_argument(project_dir, stderr_text, changed)
     if patched:
         compile_errors = _compile_project(project_dir)
         if not compile_errors:
@@ -1195,6 +1199,16 @@ def _contains_any(value: str, needles: tuple[str, ...]) -> bool:
     return any(needle in value for needle in needles)
 
 
+def _should_skip_quick_runtime_patches(previous_repair_context: str) -> bool:
+    """Return true when deterministic patches are likely to repeat a failed guess."""
+
+    lowered = previous_repair_context.lower()
+    return (
+        "repeated failure signal detected" in lowered
+        or "do not simply retry the same target or strategy" in lowered
+    )
+
+
 def _normalize_generated_project_path(value: str) -> str:
     normalized = value.replace("\\", "/").strip()
     marker = "generated_project/"
@@ -1456,33 +1470,6 @@ def _patch_unexpected_keyword_argument(project_dir: Path, stderr_text: str, chan
         except OSError:
             continue
         patched = _patch_function_signature(text, function_name=function_name, keyword=keyword)
-        if patched == text:
-            continue
-        path.write_text(patched, encoding="utf-8")
-        changed.append(path.relative_to(project_dir).as_posix())
-        return True
-    return False
-
-
-def _patch_did_you_mean_attribute(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
-    """Apply Python's explicit missing-attribute suggestion to the caller."""
-
-    match = re.search(
-        r"has no attribute '([^']+)'\. Did you mean: '([^']+)'\?",
-        stderr_text,
-    )
-    if not match:
-        return False
-    missing, suggested = match.group(1), match.group(2)
-    if not missing or not suggested or missing == suggested:
-        return False
-    needle = f".{missing}"
-    replacement = f".{suggested}"
-    for path in sorted(project_dir.rglob("*.py")):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if needle not in text:
-            continue
-        patched = text.replace(needle, replacement)
         if patched == text:
             continue
         path.write_text(patched, encoding="utf-8")
