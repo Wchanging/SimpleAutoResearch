@@ -28,7 +28,10 @@ wheels/
 runs/
 artifacts/
 .researchclaw_cache/
-benchmark/
+benchmark/arc_bench/__pycache__/
+benchmark/arc_bench/runs/
+benchmark/arc_bench/submissions/
+benchmark/arc_bench/prepared/
 
 # Local planning notes
 MDfiles/
