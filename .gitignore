@@ -32,6 +32,8 @@ benchmark/arc_bench/__pycache__/
 benchmark/arc_bench/runs/
 benchmark/arc_bench/submissions/
 benchmark/arc_bench/prepared/
+benchmark/arc_bench/batch_logs/
+benchmark/arc_bench/batch_state/
 
 # Local planning notes
 MDfiles/

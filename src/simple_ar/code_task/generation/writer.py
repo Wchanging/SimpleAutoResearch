@@ -19,9 +19,12 @@ def write_generated_project(
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     memory: dict[str, Any],
+    dependency_advice: Mapping[str, Any] | None = None,
     client: LLMClient | None = None,
     max_generated_lines: int = 1200,
     files_per_batch: int = 4,
+    retry_attempts: int = 2,
+    allow_fallback: bool = False,
 ) -> dict[str, Any]:
     """Write a bounded generated project from a file plan."""
 
@@ -45,6 +48,10 @@ def write_generated_project(
             result_schema=result_schema,
             contract=contract,
             dependency_api=dependency_context(project_dir, file_spec),
+            dependency_advice=dependency_advice or {},
+            memory=memory,
+            retry_attempts=retry_attempts,
+            allow_fallback=allow_fallback,
             client=client,
         )
         line_count = max(1, len(content.splitlines()))
@@ -162,12 +169,16 @@ def _file_content(
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_api: Mapping[str, Any],
+    dependency_advice: Mapping[str, Any],
+    memory: Mapping[str, Any],
+    retry_attempts: int,
+    allow_fallback: bool,
     client: LLMClient | None,
 ) -> tuple[str, str, str]:
     path = _safe_path(str(file_spec.get("path", "")))
     if client is not None:
         feedback = ""
-        for attempt in range(2):
+        for attempt in range(max(2, int(retry_attempts or 2))):
             try:
                 response = client.ask_json(
                     GREENFIELD_FILE_SYSTEM,
@@ -177,6 +188,8 @@ def _file_content(
                         result_schema=result_schema,
                         contract=contract,
                         dependency_api=dependency_api,
+                        dependency_advice=dependency_advice,
+                        implementation_memory=memory,
                         retry_feedback=feedback,
                     ),
                     label=f"greenfield-file-{path}" if attempt == 0 else f"greenfield-file-retry-{path}",
@@ -195,6 +208,13 @@ def _file_content(
                 "The previous response was empty, fenced, or invalid for the requested file type. "
                 "Return a complete, concise file in the JSON content field and preserve exact dependency APIs."
             )
+        if not allow_fallback:
+            raise LLMError(
+                f"LLM file generation failed for `{path}` after {max(2, int(retry_attempts or 2))} attempt(s); "
+                "fallback is disabled for real greenfield runs."
+            )
+    elif not allow_fallback:
+        raise LLMError(f"LLM file generation requires an LLM client for `{path}` when fallback is disabled.")
     summary = str(file_spec.get("purpose", ""))[:420]
     return fallback_file_content(path, result_schema, contract), "fallback", f"{summary} [LLM file generation unavailable]"
 
@@ -206,6 +226,8 @@ def greenfield_file_prompt(
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_api: Mapping[str, Any] | None = None,
+    dependency_advice: Mapping[str, Any] | None = None,
+    implementation_memory: Mapping[str, Any] | None = None,
     retry_feedback: str = "",
 ) -> str:
     path = _safe_path(str(file_spec.get("path", "")))
@@ -219,6 +241,7 @@ def greenfield_file_prompt(
         "- If a planned dependency is optional or unavailable, provide a bounded fallback or fail with a clear message.\n"
         "- Do not access network, shell, credentials, user home directories, or external datasets.\n"
         "- The project entrypoint must print each required metric as `metric_name: number`.\n"
+        "- Required metrics must be computed from real project outputs. Do not fill missing required metrics with 0.0, empty records, or placeholder values.\n"
         "- Implement only this file's planned responsibility. Do not duplicate a full "
         "experiment pipeline in helper modules when another planned file owns orchestration.\n"
         "- Keep one authoritative `run_experiment` path for metric calculation; helper "
@@ -233,8 +256,15 @@ def greenfield_file_prompt(
         "- The dependency APIs below come from files already written to disk and are authoritative.\n"
         "- Import and call the exact exported names and signatures. Do not invent synonyms or alternate helper names.\n"
         "- If the planned file cannot work with an existing dependency API, adapt this file rather than assuming a missing API.\n\n"
+        "Project continuity contract:\n"
+        "- Use the implementation memory to preserve decisions, shared data schemas, and generated public APIs from earlier files.\n"
+        "- Treat explicit task requirements, deliverables, and metric contracts as hard requirements unless they conflict with safety/resource limits.\n"
+        "- If this file creates records consumed by another planned file, include stable field names and document them in code-level constants or dataclasses.\n"
+        "- If this file consumes records from another planned file, consume the existing producer schema instead of inventing a new one.\n\n"
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Actual dependency APIs:\n{json.dumps(dict(dependency_api or {}), indent=2, ensure_ascii=False)}\n\n"
+        f"Dependency advice:\n{json.dumps(_dependency_advice_for_prompt(dependency_advice or {}), indent=2, ensure_ascii=False)}\n\n"
+        f"Implementation memory:\n{json.dumps(_memory_for_prompt(implementation_memory or {}), indent=2, ensure_ascii=False)}\n\n"
         f"Architecture plan:\n{json.dumps(dict(architecture_plan), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Experiment contract:\n{json.dumps(dict(contract), indent=2, ensure_ascii=False)}\n"
@@ -246,6 +276,59 @@ GREENFIELD_FILE_SYSTEM = (
     "You are a cautious code implementer for bounded reproducible projects. "
     "Write runnable, maintainable Python files that satisfy the provided metric schema and architecture plan."
 )
+
+
+def _dependency_advice_for_prompt(advice: Mapping[str, Any], *, package_limit: int = 80) -> dict[str, Any]:
+    packages = advice.get("packages")
+    rows = [row for row in packages if isinstance(row, Mapping)] if isinstance(packages, list) else []
+    environment_packages = advice.get("environment_packages")
+    environment_rows = (
+        [row for row in environment_packages if isinstance(row, Mapping)]
+        if isinstance(environment_packages, list)
+        else []
+    )
+    return {
+        "schema_version": advice.get("schema_version", "code_task_dependency_advice.v1"),
+        "policy": advice.get("policy", "advice_only_no_auto_install"),
+        "selection_policy": advice.get("selection_policy", ""),
+        "environment_package_count": advice.get("environment_package_count", 0),
+        "installed_packages": advice.get("installed_packages", []),
+        "missing_required": advice.get("missing_required", []),
+        "missing_recommended": advice.get("missing_recommended", []),
+        "missing_optional": advice.get("missing_optional", []),
+        "risky_packages": advice.get("risky_packages", []),
+        "task_relevant_packages": rows[:package_limit],
+        "environment_packages_sample": environment_rows[:package_limit],
+        "notes": advice.get("notes", []),
+    }
+
+
+def _memory_for_prompt(memory: Mapping[str, Any], *, file_limit: int = 40) -> dict[str, Any]:
+    file_summaries = memory.get("file_summaries")
+    batches = memory.get("generated_batches")
+    repairs = memory.get("repair_history")
+    reviews = memory.get("review_findings")
+    return {
+        "schema_version": memory.get("schema_version", "implementation_memory.v1"),
+        "mode": memory.get("mode", ""),
+        "task": memory.get("task", {}),
+        "accepted_decisions": _string_list(memory.get("accepted_decisions"), limit=20),
+        "file_summaries": _mapping_list(file_summaries, limit=file_limit),
+        "generated_batches": _mapping_list(batches, limit=20),
+        "open_issues": _string_list(memory.get("open_issues"), limit=20),
+        "review_findings": _mapping_list(reviews, limit=20),
+        "repair_history": _mapping_list(repairs, limit=10),
+    }
+
+
+def _mapping_list(value: Any, *, limit: int) -> list[dict[str, Any]]:
+    rows = [dict(row) for row in value if isinstance(row, Mapping)] if isinstance(value, list) else []
+    return rows[-limit:]
+
+
+def _string_list(value: Any, *, limit: int) -> list[str]:
+    rows = [str(row) for row in value if str(row).strip()] if isinstance(value, list) else []
+    return rows[-limit:]
 
 
 def _safe_path(value: str) -> str:

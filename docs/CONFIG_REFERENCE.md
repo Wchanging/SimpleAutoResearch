@@ -616,8 +616,8 @@ package rather than parsing stdout directly.
 | `[execute].baseline_metrics_file` | JSON or metric-line file used with `baseline_policy = "provided"`. Accepted JSON shapes include `{"accuracy": 0.8}`, `{"metrics": {...}}`, and `{"metric_values": {...}}`. |
 | `[execute].apply_proposed_edits` | Lets execute apply an already reviewed proposal. Keep false for review-first workflows. |
 | `[execute].allow_large_edits` | Allows application of reviewed proposals that exceed the normal budget but fit the large budget. |
-| `[execute].allow_planning_fallback` | Allows deterministic offline work/patch plans after all LLM planning retries fail. Keep false for real LLM runs so malformed model output stops safely and can be retried. |
-| `[execute].llm_retry_attempts` | Number of LLM work-plan and patch-plan attempts before stopping or explicitly falling back. |
+| `[execute].allow_planning_fallback` | Allows deterministic offline work/patch plans and greenfield architecture/file fallbacks after all LLM retries fail. Keep false for real LLM runs so malformed model output stops safely and can be retried. |
+| `[execute].llm_retry_attempts` | Number of LLM work-plan, patch-plan, greenfield architecture, and greenfield file-generation attempts before stopping or explicitly falling back. |
 | `[execute].repair_rounds` | Number of bounded repair proposals after validation/benchmark failure. Repairs still require review. |
 | `[execute].max_files` | Max files included in LLM context for plan/proposal/repair steps. |
 | `[execute].max_source_chars_per_file` | Per-file source snippet budget for LLM context. |

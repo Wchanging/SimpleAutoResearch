@@ -25,6 +25,7 @@ from simple_ar.code_task.generation.architecture import (
     file_plan_from_architecture,
     render_architecture_markdown,
 )
+from simple_ar.code_task.generation.task_contract import build_greenfield_task_contract
 from simple_ar.code_task.generation.writer import write_generated_project
 from simple_ar.code_task.generation.implementation_memory import initial_implementation_memory
 from simple_ar.code_task.generation.review import review_generated_project
@@ -72,6 +73,8 @@ def generate_greenfield_code_task(
     implementation_agent_binary: str = "",
     implementation_agent_args: tuple[str, ...] = (),
     implementation_agent_timeout_sec: int = 600,
+    allow_planning_fallback: bool = False,
+    llm_retry_attempts: int = 1,
     message_callback: MessageCallback | None = None,
 ) -> GreenfieldCodeTaskResult:
     """Generate a greenfield project inside a code-task workspace.
@@ -94,13 +97,14 @@ def generate_greenfield_code_task(
 
     task_text = _read_task(paths.task_dir / "task.md", limit=max_source_chars_per_file * 2)
     resource_decision = _optional_json(paths.meta_dir / "resource_decision.json")
+    result_schema = _result_schema_from_manifest(manifest)
     contract = _contract_from_task(
         task_text,
         benchmark_command=_benchmark_command(manifest),
         max_files=max_files,
         max_generated_lines=max_generated_lines,
+        result_schema=result_schema,
     )
-    result_schema = _result_schema_from_manifest(manifest)
     resource_plan = _resource_plan(resource_decision, max_files=max_files, max_generated_lines=max_generated_lines)
     dependency_advice = build_dependency_advice(task_text)
     dependency_plan = _dependency_plan(task_text, dependency_advice=dependency_advice)
@@ -115,6 +119,7 @@ def generate_greenfield_code_task(
         paths.meta_dir,
         model=model,
         use_llm=use_llm,
+        allow_fallback=allow_planning_fallback,
         message_callback=message_callback,
     )
     _emit(message_callback, "Planning greenfield project architecture.")
@@ -124,6 +129,8 @@ def generate_greenfield_code_task(
         resource_plan=resource_plan,
         domain_profile=domain_profile,
         client=client,
+        allow_fallback=allow_planning_fallback or not use_llm,
+        retry_attempts=llm_retry_attempts,
     )
     implementation_plan_path = paths.meta_dir / "implementation_plan.json"
     architecture_plan_path = paths.meta_dir / "architecture_plan.json"
@@ -181,9 +188,12 @@ def generate_greenfield_code_task(
             result_schema=result_schema,
             contract=contract,
             memory=memory,
+            dependency_advice=dependency_advice,
             client=client,
             max_generated_lines=max_generated_lines,
             files_per_batch=4,
+            retry_attempts=llm_retry_attempts,
+            allow_fallback=allow_planning_fallback or not use_llm,
         )
     generated_files = tuple(
         f"generated_project/{row.get('path')}"
@@ -250,6 +260,7 @@ def _llm_client(
     *,
     model: str | None,
     use_llm: bool,
+    allow_fallback: bool,
     message_callback: MessageCallback | None,
 ) -> LLMClient | None:
     if not use_llm:
@@ -264,8 +275,13 @@ def _llm_client(
             ),
         )
     except LLMError as exc:
-        _emit(message_callback, f"LLM unavailable; using bounded fallback generation. {exc}")
-        return None
+        if allow_fallback:
+            _emit(message_callback, f"LLM unavailable; using bounded fallback generation. {exc}")
+            return None
+        raise LLMError(
+            "Greenfield code generation requires an available LLM client when fallback is disabled. "
+            "Set [execute].allow_planning_fallback = true only for demos/offline smoke tests."
+        ) from exc
 
 
 def _record_usage(
@@ -293,26 +309,15 @@ def _contract_from_task(
     benchmark_command: str,
     max_files: int,
     max_generated_lines: int,
+    result_schema: dict[str, Any],
 ) -> dict[str, Any]:
-    objective = _first_meaningful_line(task_text) or "Implement the requested greenfield project."
-    return {
-        "schema_version": "code_task_greenfield_contract.v1",
-        "contract_id": "code-task-greenfield",
-        "objective": objective,
-        "task": task_text,
-        "benchmark_command": benchmark_command,
-        "success_criteria": [
-            "Generated project lives under code_task/workspace/generated_project.",
-            f"The configured benchmark command exits with status 0 exactly as written: `{benchmark_command}`.",
-            "The entrypoint prints parseable metric lines when metrics are requested.",
-            "No network access or destructive filesystem behavior is required.",
-        ],
-        "generation_plan": {
-            "max_files": max_files,
-            "max_generated_lines": max_generated_lines,
-            "files_per_batch": 4,
-        },
-    }
+    return build_greenfield_task_contract(
+        task_text,
+        benchmark_command=benchmark_command,
+        max_files=max_files,
+        max_generated_lines=max_generated_lines,
+        result_schema=result_schema,
+    )
 
 
 def _result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -529,14 +534,6 @@ def _optional_json(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def _first_meaningful_line(text: str) -> str:
-    for line in text.splitlines():
-        stripped = line.strip().strip("#").strip()
-        if stripped:
-            return stripped[:240]
-    return ""
 
 
 def _code_task_kind(manifest: dict[str, Any]) -> str:

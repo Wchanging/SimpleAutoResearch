@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+import re
+from typing import Any, Mapping
+
+
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|\[[ xX]\])\s+(?P<text>.+?)\s*$")
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.+?)\s*$")
+
+
+def build_greenfield_task_contract(
+    task_text: str,
+    *,
+    benchmark_command: str,
+    max_files: int,
+    max_generated_lines: int,
+    result_schema: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a generic implementation contract from a code-task request.
+
+    The extractor is deliberately domain-neutral. Benchmark adapters and user
+    tasks should put task-specific requirements in ``task.md``; the code-task
+    generator then turns those explicit requirements into a durable contract
+    that every planning, writing, review, and repair prompt can see.
+    """
+
+    objective = _first_meaningful_line(task_text) or "Implement the requested greenfield project."
+    requirements = _extract_requirement_lines(task_text)
+    deliverables = _filter_by_keywords(requirements, _DELIVERABLE_KEYWORDS)
+    constraints = _filter_by_keywords(requirements, _CONSTRAINT_KEYWORDS)
+    evaluation_focus = _filter_by_keywords(requirements, _EVALUATION_KEYWORDS)
+    data_requirements = _filter_by_keywords(requirements, _DATA_KEYWORDS)
+    dependency_hints = _filter_by_keywords(requirements, _DEPENDENCY_KEYWORDS)
+    required_metrics = _required_metrics(result_schema)
+    success_criteria = [
+        "Generated project lives under code_task/workspace/generated_project.",
+        f"The configured benchmark command exits with status 0 exactly as written: `{benchmark_command}`.",
+        "The entrypoint prints parseable metric lines when metrics are requested.",
+        "No network access or destructive filesystem behavior is required.",
+    ]
+    for metric in required_metrics[:20]:
+        success_criteria.append(f"Required metric `{metric}` is produced from measured project outputs, not a default fill value.")
+    for item in deliverables[:12]:
+        success_criteria.append(f"Task deliverable is present and populated: {item}")
+    for item in evaluation_focus[:12]:
+        success_criteria.append(f"Evaluation requirement is addressed: {item}")
+    return {
+        "schema_version": "code_task_greenfield_contract.v2",
+        "contract_id": "code-task-greenfield",
+        "task_kind": "greenfield",
+        "objective": objective,
+        "task": task_text,
+        "benchmark_command": benchmark_command,
+        "success_criteria": _dedupe(success_criteria)[:40],
+        "explicit_requirements": requirements,
+        "deliverables": deliverables,
+        "constraints": constraints,
+        "evaluation_focus": evaluation_focus,
+        "data_requirements": data_requirements,
+        "dependency_hints": dependency_hints,
+        "metric_contract": {
+            "primary_metric": result_schema.get("primary_metric", "score"),
+            "required_metrics": required_metrics,
+            "metric_directions": result_schema.get("metric_directions", {}),
+            "default_fill_policy": "do_not_fill_missing_required_metrics_with_zero",
+        },
+        "generation_plan": {
+            "max_files": max_files,
+            "max_generated_lines": max_generated_lines,
+            "files_per_batch": 4,
+        },
+    }
+
+
+def _extract_requirement_lines(task_text: str, *, max_items: int = 80, max_chars: int = 260) -> list[str]:
+    items: list[str] = []
+    active_heading = ""
+    for raw in task_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        heading = _HEADING_RE.match(line)
+        if heading:
+            active_heading = _clean(heading.group("text"), max_chars=max_chars)
+            continue
+        bullet = _BULLET_RE.match(line)
+        if bullet:
+            item = _clean(bullet.group("text"), max_chars=max_chars)
+        elif _line_has_requirement_signal(line):
+            item = _clean(line, max_chars=max_chars)
+        else:
+            continue
+        if active_heading:
+            item = f"{active_heading}: {item}"
+        items.append(item)
+        if len(items) >= max_items:
+            break
+    if not items:
+        first = _first_meaningful_line(task_text)
+        if first:
+            items.append(_clean(first, max_chars=max_chars))
+    return _dedupe(items)
+
+
+def _line_has_requirement_signal(line: str) -> bool:
+    lowered = line.lower()
+    return any(keyword in lowered for keyword in _REQUIREMENT_SIGNAL_KEYWORDS)
+
+
+def _filter_by_keywords(items: list[str], keywords: tuple[str, ...], *, limit: int = 30) -> list[str]:
+    rows = [item for item in items if any(keyword in item.lower() for keyword in keywords)]
+    return rows[:limit]
+
+
+def _required_metrics(result_schema: Mapping[str, Any]) -> list[str]:
+    raw = result_schema.get("required_metrics")
+    metrics = [str(item).strip() for item in raw if str(item).strip()] if isinstance(raw, list) else []
+    primary = str(result_schema.get("primary_metric") or "").strip()
+    if primary:
+        metrics.insert(0, primary)
+    return _dedupe(metrics)
+
+
+def _first_meaningful_line(text: str) -> str:
+    for raw in text.splitlines():
+        line = raw.strip(" #\t")
+        if line:
+            return _clean(line, max_chars=220)
+    return ""
+
+
+def _clean(value: str, *, max_chars: int) -> str:
+    value = re.sub(r"\s+", " ", value).strip()
+    if len(value) <= max_chars:
+        return value
+    return value[: max(0, max_chars - 1)].rstrip() + "..."
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    rows: list[str] = []
+    for value in values:
+        key = value.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append(value.strip())
+    return rows
+
+
+_REQUIREMENT_SIGNAL_KEYWORDS = (
+    "must",
+    "should",
+    "need",
+    "required",
+    "requirement",
+    "deliver",
+    "output",
+    "write",
+    "produce",
+    "report",
+    "metric",
+    "evaluate",
+    "benchmark",
+    "dataset",
+    "condition",
+    "experiment",
+    "compare",
+    "artifact",
+    "constraint",
+    "timeout",
+    "seed",
+    "reproduc",
+)
+
+_DELIVERABLE_KEYWORDS = (
+    "readme",
+    "report",
+    "artifact",
+    "json",
+    "jsonl",
+    "csv",
+    "table",
+    "plot",
+    "figure",
+    "output",
+    "write",
+    "produce",
+    "deliver",
+)
+
+_CONSTRAINT_KEYWORDS = (
+    "must",
+    "must not",
+    "no network",
+    "without network",
+    "timeout",
+    "budget",
+    "resource",
+    "cpu",
+    "gpu",
+    "memory",
+    "deterministic",
+    "seed",
+    "reproduc",
+    "constraint",
+)
+
+_EVALUATION_KEYWORDS = (
+    "metric",
+    "accuracy",
+    "f1",
+    "auc",
+    "rmse",
+    "mae",
+    "loss",
+    "runtime",
+    "score",
+    "evaluate",
+    "benchmark",
+    "compare",
+    "condition",
+    "hypothesis",
+)
+
+_DATA_KEYWORDS = (
+    "dataset",
+    "data",
+    "source",
+    "split",
+    "train",
+    "test",
+    "validation",
+    "record",
+    "sample",
+    "condition",
+)
+
+_DEPENDENCY_KEYWORDS = (
+    "package",
+    "library",
+    "dependency",
+    "numpy",
+    "pandas",
+    "sklearn",
+    "scikit",
+    "torch",
+    "rich",
+    "pydantic",
+)

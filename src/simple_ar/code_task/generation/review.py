@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import py_compile
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
@@ -10,7 +11,7 @@ from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, 
 from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
 
 
-GREENFIELD_REVIEW_CONTRACT_VERSION = 3
+GREENFIELD_REVIEW_CONTRACT_VERSION = 4
 
 
 def review_generated_project(
@@ -141,6 +142,7 @@ def _deterministic_findings(
                 ),
             )
         )
+    findings.extend(_semantic_scaffold_findings(project_dir, contract=contract, result_schema=result_schema))
     findings.extend(_task_acceptance_findings(project_dir, contract=contract, dependency_advice=dependency_advice))
     return findings
 
@@ -171,7 +173,10 @@ def _llm_findings(
     prompt = review_prompt(
         instructions=(
             "Review this generated project for runtime, scope, result-schema, resource, and metric-export risks. "
-            "Use the resource plan, architecture plan, and implementation memory as context. Do not request broad rewrites."
+            "Use the resource plan, architecture plan, task contract, dependency advice, and implementation memory as context. "
+            "Verify that explicit task requirements and deliverables are implemented, not merely documented. "
+            "Flag placeholder datasets, default-filled required metrics, missing artifact writers, schema drift between files, "
+            "and cross-file API mismatches. Do not request broad rewrites."
         ),
         context={
             "result_schema": dict(result_schema),
@@ -196,6 +201,45 @@ def _llm_findings(
         message_callback=None,
         max_findings=12,
     )
+
+
+def _semantic_scaffold_findings(
+    project_dir: Path,
+    *,
+    contract: Mapping[str, Any],
+    result_schema: Mapping[str, Any],
+) -> list[ReviewFinding]:
+    findings: list[ReviewFinding] = []
+    if not _required_metrics(result_schema):
+        return findings
+    task_text = _task_text(contract)
+    for path, content in _project_text_files(project_dir):
+        rel = path.relative_to(project_dir).as_posix()
+        if _default_metric_fill_detected(content):
+            findings.append(
+                _finding(
+                    "blocking",
+                    "required_metric_default_fill",
+                    (
+                        f"`{rel}` appears to fill missing required metrics with `0.0` or another fixed default. "
+                        "Required metrics must come from measured project outputs or the run should fail clearly."
+                    ),
+                )
+            )
+        if _placeholder_execution_detected(content.lower(), task_text=task_text):
+            findings.append(
+                _finding(
+                    "blocking",
+                    "placeholder_execution_path",
+                    (
+                        f"`{rel}` appears to contain placeholder/stub execution logic for a task that expects measured outputs. "
+                        "Replace scaffolding with a real bounded implementation or fail clearly."
+                    ),
+                )
+            )
+        if len(findings) >= 8:
+            break
+    return findings
 
 
 def _task_acceptance_findings(
@@ -421,6 +465,50 @@ def _source_mentions(project_dir: Path, needle: str) -> bool:
         except OSError:
             continue
     return False
+
+
+def _project_text_files(project_dir: Path) -> list[tuple[Path, str]]:
+    rows: list[tuple[Path, str]] = []
+    for path in sorted(project_dir.rglob("*")):
+        if not path.is_file() or path.suffix not in {".py", ".json", ".toml", ".md", ".txt"}:
+            continue
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            rows.append((path, path.read_text(encoding="utf-8", errors="ignore")))
+        except OSError:
+            continue
+    return rows
+
+
+_DEFAULT_METRIC_FILL_PATTERNS = (
+    re.compile(r"(?i)(required|missing|absent).{0,80}(metric|metrics).{0,80}0\.0"),
+    re.compile(r"(?i)(metric|metrics|result|results|record|records)\[[^\]]+\]\s*=\s*0\.0"),
+    re.compile(r"(?i)\.setdefault\([^)]*,\s*0\.0\)"),
+    re.compile(r"(?i)(metric|metrics).{0,80}(default|fallback).{0,80}0\.0"),
+)
+
+
+def _default_metric_fill_detected(content: str) -> bool:
+    return any(pattern.search(content) for pattern in _DEFAULT_METRIC_FILL_PATTERNS)
+
+
+def _placeholder_execution_detected(lowered_content: str, *, task_text: str) -> bool:
+    if not any(keyword in task_text for keyword in ("metric", "evaluate", "experiment", "benchmark", "dataset", "result")):
+        return False
+    blocking_markers = (
+        "placeholder record",
+        "placeholder dataset",
+        "placeholder metrics",
+        "dummy record",
+        "dummy dataset",
+        "stub implementation",
+        "not implemented",
+        "todo: implement",
+        "return []  #",
+        "return {}  #",
+    )
+    return any(marker in lowered_content for marker in blocking_markers)
 
 
 def _explicit_installed_dependency_requirements(

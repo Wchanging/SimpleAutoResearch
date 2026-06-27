@@ -17,24 +17,42 @@ def build_architecture_plan(
     resource_plan: Mapping[str, Any],
     domain_profile: Mapping[str, Any],
     client: LLMClient | None = None,
+    allow_fallback: bool = False,
+    retry_attempts: int = 1,
 ) -> tuple[dict[str, Any], str]:
     """Build a bounded architecture/file plan for a greenfield experiment."""
 
+    retry_attempts = max(1, int(retry_attempts or 1))
+    last_error: LLMError | None = None
     if client is not None:
-        try:
-            raw = client.ask_json(
-                GREENFIELD_ARCHITECT_SYSTEM,
-                greenfield_architecture_prompt(
+        for attempt in range(1, retry_attempts + 1):
+            try:
+                prompt = greenfield_architecture_prompt(
                     contract=contract,
                     result_schema=result_schema,
                     resource_plan=resource_plan,
                     domain_profile=domain_profile,
-                ),
-                label="greenfield-architecture",
-            )
-            return normalize_architecture_plan(raw, contract=contract, resource_plan=resource_plan), "llm"
-        except LLMError:
-            pass
+                    retry_feedback=_retry_feedback(last_error, attempt),
+                )
+                raw = client.ask_json(
+                    GREENFIELD_ARCHITECT_SYSTEM,
+                    prompt,
+                    label="greenfield-architecture" if attempt == 1 else f"greenfield-architecture-retry-{attempt}",
+                )
+                return normalize_architecture_plan(raw, contract=contract, resource_plan=resource_plan), "llm"
+            except LLMError as exc:
+                last_error = exc
+    if client is not None and not allow_fallback:
+        raise LLMError(
+            "Greenfield architecture planning failed after "
+            f"{retry_attempts} attempt(s); fallback is disabled. "
+            "Set [execute].allow_planning_fallback = true only for demos/offline smoke tests."
+        ) from last_error
+    if client is None and not allow_fallback:
+        raise LLMError(
+            "Greenfield architecture planning requires an LLM client when fallback is disabled. "
+            "Set [llm].enabled = false or [execute].allow_planning_fallback = true for deterministic fallback."
+        )
     return fallback_architecture_plan(
         contract=contract,
         result_schema=result_schema,
@@ -173,6 +191,7 @@ def greenfield_architecture_prompt(
     result_schema: Mapping[str, Any],
     resource_plan: Mapping[str, Any],
     domain_profile: Mapping[str, Any],
+    retry_feedback: str = "",
 ) -> str:
     max_files = _positive_int(resource_plan.get("max_files"), 8)
     max_lines = _positive_int(resource_plan.get("max_generated_lines"), 1200)
@@ -218,6 +237,10 @@ def greenfield_architecture_prompt(
         "Do not require package installation during execution; provide fallbacks for optional packages when practical.\n"
         "- Design dependency interfaces before implementation. Every cross-file call must use an exact name "
         "declared in the dependency file's public_api; do not use vague prose as an interface contract.\n"
+        "- Convert explicit task requirements into concrete module responsibilities, data structures, and "
+        "artifact flows. Do not rely on later files to rediscover global requirements from prose.\n"
+        "- For multi-step or experimental tasks, define the shared record/result schema that runner, analysis, "
+        "reporting, and validation will use. This schema must come from the task contract, not from a benchmark-specific template.\n"
         "- Make `main.py` a thin CLI wrapper when possible; put reusable logic in "
         "purpose-specific modules and call them from the orchestrator.\n"
         "- Avoid heavyweight dependencies, network access, and GPU use unless explicitly allowed.\n\n"
@@ -225,6 +248,7 @@ def greenfield_architecture_prompt(
         f"Result schema JSON:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Resource plan JSON:\n{json.dumps(dict(resource_plan), indent=2, ensure_ascii=False)}\n\n"
         f"Domain profile JSON:\n{json.dumps(dict(domain_profile), indent=2, ensure_ascii=False)}\n"
+        + (f"\nRetry feedback:\n{retry_feedback}\n" if retry_feedback else "")
     )
 
 
@@ -517,6 +541,15 @@ def _safe_path(value: str) -> str:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         return ""
     return path.as_posix()
+
+
+def _retry_feedback(error: LLMError | None, attempt: int) -> str:
+    if error is None:
+        return ""
+    return (
+        f"The previous architecture attempt failed validation before attempt {attempt}: {error}. "
+        "Return one strict JSON object only, with a concrete task-specific file plan and no Markdown fences."
+    )
 
 
 def _ensure_public_api(files: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -593,8 +593,8 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[execute].baseline_metrics_file` | `baseline_policy = "provided"` 时使用的 JSON 或 `metric=0.82` 文本指标文件。JSON 支持 `{"accuracy": 0.8}`、`{"metrics": {...}}` 和 `{"metric_values": {...}}`。 |
 | `[execute].apply_proposed_edits` | 允许 execute 应用已经审核过的 proposal。review-first 流程建议保持 false。 |
 | `[execute].allow_large_edits` | 允许应用超过 normal 预算但落在 large 预算内的已审核 proposal。 |
-| `[execute].allow_planning_fallback` | LLM work-plan / patch-plan 重试后仍失败时，是否允许写入 deterministic fallback plan。真实 LLM run 建议保持 false，这样坏输出会安全停止并可重跑。 |
-| `[execute].llm_retry_attempts` | work-plan / patch-plan 的 LLM 尝试次数。 |
+| `[execute].allow_planning_fallback` | LLM work-plan / patch-plan / greenfield 架构规划 / greenfield 文件生成重试后仍失败时，是否允许 deterministic fallback。真实 LLM run 建议保持 false，这样坏输出会安全停止并可重跑。 |
+| `[execute].llm_retry_attempts` | work-plan、patch-plan、greenfield 架构规划和 greenfield 文件生成的 LLM 尝试次数；全部失败后才停止或显式 fallback。 |
 | `[execute].repair_rounds` | validation/benchmark 失败后最多生成几轮 bounded repair proposal；repair 仍需审核。 |
 | `[execute].max_files` | plan/proposal/repair 步骤纳入 LLM 上下文的最大文件数。 |
 | `[execute].max_source_chars_per_file` | LLM 上下文中单个文件的 source snippet 字符预算。 |

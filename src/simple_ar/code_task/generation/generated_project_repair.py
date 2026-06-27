@@ -310,6 +310,8 @@ def _review_file_repair_prompt(
         "- Keep paths and behavior local; no network, shell, credentials, or hidden downloads.\n"
         "- If task-relevant installed packages are available in dependency_advice, you may use them.\n"
         "- Preserve the exact public API requested by the file spec when practical.\n"
+        "- Fix the implementation path that caused the review finding; do not satisfy implementation findings by documentation-only changes.\n"
+        "- Do not fill missing required metrics with 0.0, empty records, or placeholder values. Fail clearly if a metric cannot be measured.\n"
         "- If this file writes run artifacts, write under `artifacts/` relative to the current working directory.\n"
         "- Required task artifacts include `artifacts/results.json` and `artifacts/report.md` whenever requested by the task.\n"
         "- The benchmark parser still needs metrics printed by main.py as `metric_name: number`.\n\n"
