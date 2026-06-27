@@ -26,6 +26,11 @@ This file records user-visible project changes in reverse chronological order. P
   schemas and concrete artifact flows before implementation, reducing schema
   drift between data, processing, runner, analysis, reporting, and validation
   files.
+- Architecture and per-file prompts now use a compact prompt-facing task
+  contract instead of serializing the full `task.md` on every request. The full
+  task remains in artifacts for auditability, while the model receives the
+  objective, bounded task excerpt, explicit requirements, deliverables,
+  constraints, dependency hints, and metric contract needed for implementation.
 - Code-task LLM planning now has stronger stage-level retry behavior for real
   runs. Greenfield architecture planning and per-file generation wait with
   bounded exponential backoff between stage attempts and print retry progress,

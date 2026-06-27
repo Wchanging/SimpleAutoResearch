@@ -98,6 +98,12 @@ uv run python benchmark/arc_bench/batch_runner.py run \
 `--score`，并且某个任务已经有有效 submission，它会直接补 `judge/`，不会重跑实验。
 如果服务器网络不稳定，可以加 `--llm-retry-attempts 5`，临时覆盖所有
 `code-task execute` 调用的阶段级 LLM 重试次数。
+如果错误集中出现在最开始的 “Planning greenfield project architecture”，通常说明首个
+planning 请求较大、provider 返回较慢或代理提前断开，可以先把单次 provider timeout 调高：
+
+```bash
+export SIMPLE_AR_LLM_TIMEOUT_SEC=300
+```
 
 ## 重跑与续修
 

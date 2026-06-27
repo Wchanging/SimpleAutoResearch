@@ -6,6 +6,7 @@ from pathlib import PurePosixPath
 from typing import Any, Callable, Mapping
 
 from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.code_task.generation.task_contract import contract_prompt_view
 
 
 GREENFIELD_TEMPLATE = "greenfield_project"
@@ -254,7 +255,7 @@ def greenfield_architecture_prompt(
         "- Make `main.py` a thin CLI wrapper when possible; put reusable logic in "
         "purpose-specific modules and call them from the orchestrator.\n"
         "- Avoid heavyweight dependencies, network access, and GPU use unless explicitly allowed.\n\n"
-        f"Experiment contract JSON:\n{json.dumps(dict(contract), indent=2, ensure_ascii=False)}\n\n"
+        f"Experiment contract JSON:\n{json.dumps(contract_prompt_view(contract), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema JSON:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Resource plan JSON:\n{json.dumps(dict(resource_plan), indent=2, ensure_ascii=False)}\n\n"
         f"Domain profile JSON:\n{json.dumps(dict(domain_profile), indent=2, ensure_ascii=False)}\n"

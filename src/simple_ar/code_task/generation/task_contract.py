@@ -72,6 +72,46 @@ def build_greenfield_task_contract(
     }
 
 
+def contract_prompt_view(
+    contract: Mapping[str, Any],
+    *,
+    max_task_chars: int = 2400,
+    max_requirements: int = 50,
+    max_success_criteria: int = 30,
+) -> dict[str, Any]:
+    """Return a compact prompt-facing view of a greenfield task contract.
+
+    The persisted contract keeps the full task text for auditability, but
+    planning and per-file generation should not repeatedly serialize a long
+    task document. This view keeps the hard contract fields and a bounded task
+    excerpt so large benchmark tasks do not turn the first architecture request
+    into a slow, fragile monolith.
+    """
+
+    task_text = str(contract.get("task") or "")
+    return {
+        "schema_version": contract.get("schema_version", "code_task_greenfield_contract.v2"),
+        "contract_id": contract.get("contract_id", ""),
+        "task_kind": contract.get("task_kind", ""),
+        "objective": contract.get("objective", ""),
+        "task_excerpt": _clean(task_text, max_chars=max_task_chars) if task_text else "",
+        "benchmark_command": contract.get("benchmark_command", ""),
+        "success_criteria": _string_list(contract.get("success_criteria"), limit=max_success_criteria),
+        "explicit_requirements": _string_list(contract.get("explicit_requirements"), limit=max_requirements),
+        "deliverables": _string_list(contract.get("deliverables"), limit=30),
+        "constraints": _string_list(contract.get("constraints"), limit=30),
+        "evaluation_focus": _string_list(contract.get("evaluation_focus"), limit=30),
+        "data_requirements": _string_list(contract.get("data_requirements"), limit=30),
+        "dependency_hints": _string_list(contract.get("dependency_hints"), limit=20),
+        "metric_contract": dict(contract.get("metric_contract", {}))
+        if isinstance(contract.get("metric_contract"), Mapping)
+        else {},
+        "generation_plan": dict(contract.get("generation_plan", {}))
+        if isinstance(contract.get("generation_plan"), Mapping)
+        else {},
+    }
+
+
 def _extract_requirement_lines(task_text: str, *, max_items: int = 80, max_chars: int = 260) -> list[str]:
     items: list[str] = []
     active_heading = ""
@@ -146,6 +186,11 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(key)
         rows.append(value.strip())
     return rows
+
+
+def _string_list(value: Any, *, limit: int) -> list[str]:
+    rows = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
+    return rows[:limit]
 
 
 _REQUIREMENT_SIGNAL_KEYWORDS = (

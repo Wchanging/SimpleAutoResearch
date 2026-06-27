@@ -11,6 +11,7 @@ from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.code_task.analysis.interfaces import dependency_context, order_file_specs, public_api
 from simple_ar.code_task.generation.implementation_memory import record_generated_file, record_generation_batch
 from simple_ar.code_task.generation.scaffold import fallback_file_content
+from simple_ar.code_task.generation.task_contract import contract_prompt_view
 
 
 def write_generated_project(
@@ -280,7 +281,7 @@ def greenfield_file_prompt(
         f"Implementation memory:\n{json.dumps(_memory_for_prompt(implementation_memory or {}), indent=2, ensure_ascii=False)}\n\n"
         f"Architecture plan:\n{json.dumps(dict(architecture_plan), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
-        f"Experiment contract:\n{json.dumps(dict(contract), indent=2, ensure_ascii=False)}\n"
+        f"Experiment contract:\n{json.dumps(contract_prompt_view(contract), indent=2, ensure_ascii=False)}\n"
         + (f"\nRetry feedback:\n{retry_feedback}\n" if retry_feedback else "")
     )
 
