@@ -1,205 +1,51 @@
-# ARC-Bench Adapter for SimpleAutoResearch
+# ARC-Bench Adapter
 
 Chinese version: [README_zh.md](README_zh.md)
 
-This directory is a local, ignored benchmark harness. It is intentionally kept
-outside `src/simple_ar/` so ARC-Bench experiments do not become part of the
-open-source package surface.
+This folder is a local benchmark harness for testing SimpleAutoResearch against
+AutoResearchClaw's ARC-Bench tasks. It stays outside `src/simple_ar/` on
+purpose: ARC-specific conversion, submission packaging, and scoring should not
+become part of the core package.
 
-The adapter is a hot-pluggable bridge:
+## What It Does
 
-1. Read an ARC-Bench topic manifest and rubric from a configurable ARC-Bench
-   location.
-2. Generate a SimpleAutoResearch greenfield `code-task` task and TOML config.
-3. After the SimpleAutoResearch run finishes, project its artifacts into an
-   ARC-Bench-style `submission/` layout.
-4. Optionally run ARC-Bench's own judge command and save raw stdout/stderr plus
-   a machine-readable judge result.
+The adapter supports the workflow we use for server-side benchmark testing:
 
-It does not add a `simple-ar` command and does not import project internals.
+```text
+ARC manifest/rubric
+  -> prepared SimpleAutoResearch code-task
+  -> code-task run
+  -> finalized ARC-style submission
+  -> ARC-compatible leaf-level score
+```
 
-## Layout
+Important folders:
 
 ```text
 benchmark/arc_bench/
-  adapter.py             # standalone CLI
-  config.example.toml    # local defaults; copy/edit as needed
-  prepared/              # generated task/config packages
-  runs/                  # raw SimpleAutoResearch benchmark runs
-  submissions/           # finalized ARC-style submissions
+  adapter.py              # prepare/finalize/score one topic
+  batch_runner.py         # run topic sets end-to-end
+  prepared/ml/            # generated ML task packages
+  runs/ml/                # raw SimpleAutoResearch runs
+  submissions/ml/         # finalized submissions + judge outputs
+  batch_state/            # resumable batch status
+  batch_logs/             # command logs
 ```
 
-The whole `benchmark/` tree is gitignored.
+`benchmark/` is gitignored. Only the adapter scripts and lightweight docs are
+tracked.
 
-## Requirements
+## One-Time Prepare
 
-The adapter uses the Python standard library plus `PyYAML` for ARC manifests.
-If your environment does not have it:
-
-```bash
-uv add pyyaml
-```
-
-or install it in the server environment you use for benchmark runs.
-
-## Prepare One Topic
-
-```bash
-uv run python benchmark/arc_bench/adapter.py prepare \
-  --arc-root AutoResearchClaw/experiments/arc_bench \
-  --topic ML02 \
-  --output-dir benchmark/arc_bench/prepared/ML02 \
-  --simple-ar-output-root benchmark/arc_bench/runs/ML02
-```
-
-This writes:
-
-```text
-benchmark/arc_bench/prepared/ML02/
-  task.md
-  code_task.toml
-  manifest.json
-  rubric.json
-  arc_meta.json
-  commands.md
-```
-
-Run the generated task like this. `code-task execute` needs the run manifest created
-by `code-task init`, so initialize first and pass the printed run directory into
-execute:
-
-```bash
-uv run simple-ar code-task init --config benchmark/arc_bench/prepared/ML02/code_task.toml
-uv run simple-ar code-task execute <RUN_DIR> \
-  --config benchmark/arc_bench/prepared/ML02/code_task.toml --yes
-```
-
-The adapter config writes raw runs under `simple_ar_output_root`, usually
-`benchmark/arc_bench/runs/<topic>/`.
-
-## Prepare All ML Topics
+If prepared packages are missing or your AutoResearchClaw checkout lives in a
+different path:
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py prepare-ml \
-  --arc-root AutoResearchClaw/experiments/arc_bench
+  --arc-root /path/to/AutoResearchClaw/experiments/arc_bench
 ```
 
-By default this discovers every `config/ml/manifests/ML*.yaml` topic and writes:
-
-```text
-benchmark/arc_bench/prepared/ml/
-  INDEX.md
-  ML01/
-    task.md
-    code_task.toml
-    manifest.json
-    rubric.json
-    arc_meta.json
-    commands.md
-  ...
-  ML25/
-```
-
-Raw SimpleAutoResearch runs are configured under:
-
-```text
-benchmark/arc_bench/runs/ml/<topic>/
-```
-
-## Batch Run ML Topics
-
-To automatically run `init -> execute -> finalize` for a topic set while
-continuing after individual topic failures:
-
-```bash
-uv run python benchmark/arc_bench/batch_runner.py run \
-  --topic-set quick \
-  --analyze
-```
-
-Available topic sets mirror `prepared/ml/INDEX.md`:
-
-```bash
-# Quick confidence pass
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze
-
-# Next breadth pass
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze
-# alias
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set next --analyze
-
-# Specialized / higher-risk pass
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze
-# aliases
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set high-risk --analyze
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set higher-risk --analyze
-
-# All groups in the recommended order
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze
-```
-
-Explicit topics are also supported:
-
-```bash
-uv run python benchmark/arc_bench/batch_runner.py run \
-  --topics ML04 ML02 ML06 \
-  --analyze
-```
-
-Batch state and logs are written to:
-
-```text
-benchmark/arc_bench/batch_state/ml_batch_state.json
-benchmark/arc_bench/batch_logs/<topic>/<timestamp>/
-```
-
-The batch runner does not treat a zero process exit code as success by itself.
-After `execute`, it reads the run `manifest.json` and only proceeds to
-`finalize` when the business status is `benchmark_passed`. A topic is considered
-completed only when the finalized submission and `result_analysis/` artifacts
-exist; with `--analyze`, the LLM analysis response must also exist. If an older
-state file incorrectly marked a failed or incomplete run as completed, `run` and
-`retry-unfinished` will re-check these artifacts and treat it as unfinished.
-
-On Linux/Ubuntu terminals, the batch runner uses a pseudo-terminal to preserve
-SimpleAutoResearch's Rich color output while teeing command output into logs.
-Those logs may therefore contain ANSI color escape codes.
-
-Retry every unfinished topic once:
-
-```bash
-uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
-  --topic-set quick \
-  --analyze
-```
-
-By default, unfinished topics receive a fresh run. If you pass
-`--resume-existing`, the runner reuses the previous `run_dir` only when that run
-has not exhausted the configured `[execute].repair_rounds` budget. For
-`execute_failed` runs with exhausted repair counters, the runner automatically
-falls back to a fresh run to avoid repeating a no-op repair loop.
-
-To keep the previous run's code changes and repair memory while allowing more
-repair attempts, combine `--resume-existing` with `--extend-repair-rounds N`:
-
-```bash
-uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
-  --topic-set quick \
-  --analyze \
-  --resume-existing \
-  --extend-repair-rounds 2
-```
-
-This does not edit `code_task.toml`; it temporarily invokes
-`simple-ar code-task execute` with `--repair-rounds <used repairs + N>`.
-
-Each generated `code_task.toml` keeps `benchmark.metric_directions` scoped to
-the metrics declared by that topic manifest, plus `runtime_sec = "resource"`.
-Structural completeness signals such as dataset counts or hypothesis coverage
-may still be produced by a submission, but they are not predeclared as required
-benchmark objectives for every topic.
-
-To generate only a subset:
+Prepare a subset:
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py prepare-ml \
@@ -207,136 +53,157 @@ uv run python benchmark/arc_bench/adapter.py prepare-ml \
   --topics ML02 ML04 ML10
 ```
 
-## Finalize A Run
+The recommended ML test order is maintained in:
 
-After SimpleAutoResearch finishes, convert the run into an ARC-style submission:
-
-```bash
-uv run python benchmark/arc_bench/adapter.py finalize \
-  --prepared-dir benchmark/arc_bench/prepared/ML02 \
-  --run-dir benchmark/arc_bench/runs/ML02/<run-id> \
-  --output-dir benchmark/arc_bench/submissions/ML02/<run-id>
+```text
+benchmark/arc_bench/prepared/ml/INDEX.md
 ```
 
-`finalize` will not overwrite a non-empty output directory by default. Use a new
-`--output-dir`, or pass `--force` only when you intentionally want to replace
-the previous submission package.
+## Recommended Batch Run
 
-`finalize` always writes a generic `result_analysis/` folder with deterministic
-metric and claim-audit artifacts. By default it does not spend LLM tokens and it
-keeps the submission README/claims close to the original run artifacts. If you
-want the adapter to call the configured LLM and regenerate the benchmark-facing
-README and claims from measured metrics, add `--analyze`:
+Run the quick confidence pass and continue even if individual topics fail:
 
 ```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topic-set quick \
+  --analyze \
+  --score
+```
+
+Topic sets:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze --score
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze --score
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze --score
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --score
+```
+
+Explicit topics:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML04 ML02 ML06 \
+  --analyze \
+  --score
+```
+
+The batch runner only finalizes runs whose business status is
+`benchmark_passed`. If `--score` is added later and a topic already has a valid
+finalized submission, it fills in `judge/` without rerunning the experiment.
+
+## Retry
+
+Fresh retry for unfinished topics:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze \
+  --score
+```
+
+Continue from the previous run and grant more repair attempts:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze \
+  --score \
+  --resume-existing \
+  --extend-repair-rounds 2
+```
+
+Without `--extend-repair-rounds`, exhausted repair budgets are treated as stale
+and the runner starts a fresh run.
+
+Check state:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py status
+```
+
+## Manual Single-Topic Flow
+
+Use this when debugging one topic.
+
+```bash
+uv run simple-ar code-task init \
+  --config benchmark/arc_bench/prepared/ml/ML02/code_task.toml
+
+RUN_DIR=$(ls -td benchmark/arc_bench/runs/ml/ML02/* | head -n 1)
+
+uv run simple-ar code-task execute "$RUN_DIR" \
+  --config benchmark/arc_bench/prepared/ml/ML02/code_task.toml \
+  --yes
+```
+
+Finalize:
+
+```bash
+OUT_DIR=benchmark/arc_bench/submissions/ml/ML02/$(basename "$RUN_DIR")
+
 uv run python benchmark/arc_bench/adapter.py finalize \
-  --prepared-dir benchmark/arc_bench/prepared/ML02 \
-  --run-dir benchmark/arc_bench/runs/ML02/<run-id> \
-  --output-dir benchmark/arc_bench/submissions/ML02/<run-id> \
+  --prepared-dir benchmark/arc_bench/prepared/ml/ML02 \
+  --run-dir "$RUN_DIR" \
+  --output-dir "$OUT_DIR" \
+  --force \
   --analyze
 ```
 
-Use `--analysis-model <model>` only when you want to override
-`SIMPLE_AR_MODEL`. The analysis artifacts are saved under:
+Score:
 
-```text
-result_analysis/
-  analysis_context.json
-  metric_summary.json
-  claims.json
-  analysis_report.md
-  analysis_audit.json
-  analysis_prompt.txt        # only when --analyze is used
-  analysis_raw_response.txt  # only when --analyze is used
-  analysis_response.json      # only when --analyze is used
-  llm_usage.jsonl             # only when --analyze is used
-  llm_usage_summary.json      # only when --analyze is used
+```bash
+uv run python benchmark/arc_bench/adapter.py score \
+  --prepared-dir benchmark/arc_bench/prepared/ml/ML02 \
+  --submission-dir "$OUT_DIR/submission" \
+  --output-dir "$OUT_DIR/judge"
 ```
 
-If the model does not return valid JSON, `finalize --analyze` stops and keeps
-`analysis_raw_response.txt` for diagnosis. This is intentional: invalid analysis
-should be inspected instead of silently replacing the submission with a weak
-fallback.
-
-The finalizer writes:
+## Outputs To Inspect
 
 ```text
-submission/
-  code/
-  results/metrics.json
-  README.md
-  claims.json
-  reproduce.sh
-stage-14/
-  experiment_summary.json
-arc_adapter_meta.json
+benchmark/arc_bench/submissions/ml/ML02/<run-id>/
+  submission/
+    code/
+    results/metrics.json
+    README.md
+    claims.json
+  result_analysis/
+    metric_summary.json
+    analysis_report.md
+    analysis_audit.json
+    analysis_prompt.txt          # when --analyze is used
+    analysis_raw_response.txt    # when --analyze fails
+  judge/
+    judge_result.json            # leaf_grades + scoring_summary
+    scorecard.md
+    score_round_code_prompt.txt
+    score_round_code_response.json
+    score_round_results_prompt.txt
+    score_round_results_response.json
 ```
 
-You can then run ARC-Bench's own judge against the finalized output, or copy
-the `submission/` package into ARC-Bench's expected `results/<framework>/<topic>`
-layout.
+`finalize --analyze` builds the benchmark-facing README/claims from measured
+results. `score` is the ARC-compatible two-round LLM judge:
 
-## Run An External Judge
+- Code Development leaves are graded from code.
+- Code Execution and Result Analysis leaves are graded from summary, metrics,
+  claims, and writeup.
+- `overall_strict` and `results_only` are deterministic weighted aggregates of
+  the model's leaf scores.
 
-The adapter does not vendor ARC-Bench's judge and does not assume where it lives.
-If you have a judge command available, run it through the explicit wrapper:
+If a scoring round returns invalid JSON, scoring fails. If a valid response
+omits one leaf, that leaf is recorded with warning and default score `0.5`,
+matching AutoResearchClaw's `judge.py` behavior.
+
+## External Judge
+
+Normally use the built-in `score`. If you specifically want to run an external
+ARC-Bench judge, the wrapper is still available:
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py judge \
-  --submission-dir benchmark/arc_bench/submissions/ML02/<run-id> \
+  --submission-dir benchmark/arc_bench/submissions/ml/ML02/<run-id>/submission \
   --judge-command "python /path/to/arc_judge.py --submission {submission_dir} --output {output_dir}"
 ```
-
-The wrapper saves:
-
-```text
-judge/
-  stdout.txt
-  stderr.txt
-  judge_result.json
-```
-
-Supported placeholders are `{submission_dir}`, `{submission}`, `{output_dir}`,
-and `{output}`. The command is intentionally configured outside
-SimpleAutoResearch because different ARC-Bench checkouts or server environments
-may use different judge entrypoints.
-
-## Config File
-
-All CLI flags can be provided through a TOML file:
-
-```bash
-uv run python benchmark/arc_bench/adapter.py prepare \
-  --config benchmark/arc_bench/config.example.toml \
-  --topic ML02
-```
-
-Important paths:
-
-- `arc_root`: path to `experiments/arc_bench`, wherever it lives on the target
-  machine.
-- `output_dir`: where prepared task/config packages are written.
-- `simple_ar_output_root`: where raw SimpleAutoResearch benchmark runs should
-  be written. The default is under `benchmark/arc_bench/runs/<topic>` so raw
-  runs stay separate from finalized `submissions/<topic>/<run-id>` packages.
-
-This keeps server paths flexible; `AutoResearchClaw/` does not need to live
-inside this repository.
-
-## Adapter Boundary
-
-This adapter is deliberately separate from `src/simple_ar/`.
-
-- Adapter responsibilities: read ARC manifests/rubrics, prepare SimpleAR
-  code-task packages, finalize submissions, and optionally invoke external ARC
-  judge commands.
-- SimpleAutoResearch responsibilities: generate or modify code, run validation
-  and benchmark commands, repair failures, record memory/review artifacts, and
-  produce generic run artifacts.
-- Shared future boundary: V2.7 may introduce a generic result-analysis layer
-  that this adapter can call, but ARC-specific rubric projection should remain
-  here unless it becomes useful for multiple benchmark suites.
-
-If a future benchmark needs a different submission shape, add a sibling adapter
-under `benchmark/<suite>/` instead of adding suite-specific branches to the core
-pipeline.

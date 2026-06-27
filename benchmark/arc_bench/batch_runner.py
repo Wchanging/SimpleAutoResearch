@@ -6,6 +6,7 @@ existing public commands instead of importing internal code-task modules:
 1. ``simple-ar code-task init``
 2. ``simple-ar code-task execute``
 3. ``benchmark/arc_bench/adapter.py finalize``
+4. optional ``benchmark/arc_bench/adapter.py score``
 
 Each topic receives its own log files and a JSON state record so interrupted
 server runs can be resumed or failed topics can be retried.
@@ -152,6 +153,8 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--topics", nargs="+", help="Explicit topic list, e.g. --topics ML04 ML02.")
     parser.add_argument("--analyze", action="store_true", help="Run finalize with LLM result analysis.")
     parser.add_argument("--analysis-model", help="Override SIMPLE_AR_MODEL for finalize --analyze.")
+    parser.add_argument("--score", action="store_true", help="Run the built-in LLM leaf-level scorer after finalize.")
+    parser.add_argument("--score-model", help="Override SIMPLE_AR_MODEL for adapter score.")
     parser.add_argument(
         "--execute-timeout",
         type=int,
@@ -164,6 +167,12 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         default=0,
         help="Optional timeout in seconds for finalize; 0 means no runner-level timeout.",
     )
+    parser.add_argument(
+        "--score-timeout",
+        type=int,
+        default=0,
+        help="Optional timeout in seconds for scoring; 0 means no runner-level timeout.",
+    )
 
 
 def _run_command(args: argparse.Namespace) -> int:
@@ -175,11 +184,32 @@ def _run_command(args: argparse.Namespace) -> int:
     for topic in topics:
         current = _topic_state(state, topic)
         if current.status == "completed" and not args.force:
-            if _completed_state_still_valid(ctx, current, require_analysis=args.analyze):
+            if _completed_state_still_valid(ctx, current, require_analysis=args.analyze, require_score=args.score):
                 _print(f"[skip] {topic}: already completed at {current.output_dir}")
                 continue
+            if args.score and _completed_state_still_valid(
+                ctx,
+                current,
+                require_analysis=args.analyze,
+                require_score=False,
+            ):
+                _print(f"[score] {topic}: finalized output exists; scoring without rerunning experiment.")
+                result = _score_existing_topic(ctx, topic, current, score_model=args.score_model)
+                state[topic] = result
+                _save_state(ctx.state_file, state)
+                if result.status != "completed":
+                    exit_code = 1
+                continue
             _print(f"[stale] {topic}: previous completed state is missing passed run or finalized artifacts; rerunning.")
-        result = _run_topic(ctx, topic, analyze=args.analyze, analysis_model=args.analysis_model, previous_state=current)
+        result = _run_topic(
+            ctx,
+            topic,
+            analyze=args.analyze,
+            analysis_model=args.analysis_model,
+            score=args.score,
+            score_model=args.score_model,
+            previous_state=current,
+        )
         state[topic] = result
         _save_state(ctx.state_file, state)
         if result.status != "completed":
@@ -196,7 +226,12 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
     topics = [
         topic
         for topic in candidate_topics
-        if _unfinished_or_stale_completed(ctx, _topic_state(state, topic), require_analysis=args.analyze)
+        if _unfinished_or_stale_completed(
+            ctx,
+            _topic_state(state, topic),
+            require_analysis=args.analyze,
+            require_score=args.score,
+        )
     ]
 
     if not topics:
@@ -206,6 +241,19 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
     exit_code = 0
     for topic in topics:
         current = _topic_state(state, topic)
+        if args.score and current.status == "completed" and _completed_state_still_valid(
+            ctx,
+            current,
+            require_analysis=args.analyze,
+            require_score=False,
+        ):
+            _print(f"[score] {topic}: finalized output exists; scoring without rerunning experiment.")
+            result = _score_existing_topic(ctx, topic, current, score_model=args.score_model)
+            state[topic] = result
+            _save_state(ctx.state_file, state)
+            if result.status != "completed":
+                exit_code = 1
+            continue
         resume_run_dir = _abs(ctx.repo_root, current.run_dir) if args.resume_existing and current.run_dir else None
         config_path = ctx.prepared_root / topic / "code_task.toml"
         repair_rounds_override = None
@@ -231,6 +279,8 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
             topic,
             analyze=args.analyze,
             analysis_model=args.analysis_model,
+            score=args.score,
+            score_model=args.score_model,
             resume_run_dir=resume_run_dir,
             previous_state=current,
             repair_rounds_override=repair_rounds_override,
@@ -264,6 +314,7 @@ class RunnerContext:
     log_root: Path
     execute_timeout: int = 0
     finalize_timeout: int = 0
+    score_timeout: int = 0
 
 
 def _context_from_args(args: argparse.Namespace) -> RunnerContext:
@@ -277,6 +328,7 @@ def _context_from_args(args: argparse.Namespace) -> RunnerContext:
         log_root=_abs(repo_root, args.log_root),
         execute_timeout=getattr(args, "execute_timeout", 0),
         finalize_timeout=getattr(args, "finalize_timeout", 0),
+        score_timeout=getattr(args, "score_timeout", 0),
     )
 
 
@@ -286,6 +338,8 @@ def _run_topic(
     *,
     analyze: bool,
     analysis_model: str | None,
+    score: bool,
+    score_model: str | None,
     resume_run_dir: Path | None = None,
     previous_state: TopicState | None = None,
     repair_rounds_override: int | None = None,
@@ -381,10 +435,89 @@ def _run_topic(
     if finalize_result.returncode != 0:
         return _fail(topic_state, "finalize_failed", f"finalize exited with {finalize_result.returncode}")
 
+    if score:
+        score_cmd = [
+            "uv",
+            "run",
+            "python",
+            "benchmark/arc_bench/adapter.py",
+            "score",
+            "--prepared-dir",
+            _rel(ctx.repo_root, prepared_dir),
+            "--submission-dir",
+            _rel(ctx.repo_root, output_dir / "submission"),
+            "--output-dir",
+            _rel(ctx.repo_root, output_dir / "judge"),
+        ]
+        if score_model:
+            score_cmd.extend(["--model", score_model])
+        score_result = _run_logged(
+            score_cmd,
+            ctx.repo_root,
+            topic_log_root / "score.log",
+            timeout=ctx.score_timeout,
+        )
+        _record_command(topic_state, score_result)
+        if score_result.returncode != 0:
+            return _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}")
+
     topic_state.status = "completed"
     topic_state.last_error = None
     topic_state.updated_at = _now()
     _print(f"[done] {topic}: {topic_state.output_dir}")
+    return topic_state
+
+
+def _score_existing_topic(
+    ctx: RunnerContext,
+    topic: str,
+    current: TopicState,
+    *,
+    score_model: str | None,
+) -> TopicState:
+    topic_state = TopicState(
+        topic=topic,
+        status="running",
+        attempts=current.attempts,
+        run_dir=current.run_dir,
+        output_dir=current.output_dir,
+        logs=list(current.logs),
+        commands=list(current.commands),
+        updated_at=_now(),
+    )
+    if not current.output_dir:
+        return _fail(topic_state, "score_failed", "completed state has no output_dir")
+    prepared_dir = ctx.prepared_root / topic
+    output_dir = _abs(ctx.repo_root, current.output_dir)
+    topic_log_root = ctx.log_root / topic / _timestamp()
+    score_cmd = [
+        "uv",
+        "run",
+        "python",
+        "benchmark/arc_bench/adapter.py",
+        "score",
+        "--prepared-dir",
+        _rel(ctx.repo_root, prepared_dir),
+        "--submission-dir",
+        _rel(ctx.repo_root, output_dir / "submission"),
+        "--output-dir",
+        _rel(ctx.repo_root, output_dir / "judge"),
+    ]
+    if score_model:
+        score_cmd.extend(["--model", score_model])
+    score_result = _run_logged(
+        score_cmd,
+        ctx.repo_root,
+        topic_log_root / "score.log",
+        timeout=ctx.score_timeout,
+    )
+    _record_command(topic_state, score_result)
+    if score_result.returncode != 0:
+        return _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}")
+    topic_state.status = "completed"
+    topic_state.last_error = None
+    topic_state.updated_at = _now()
+    _print(f"[done] {topic}: scored existing output at {topic_state.output_dir}")
     return topic_state
 
 
@@ -598,7 +731,13 @@ def _repair_usage(run_dir: Path) -> int:
     return max(used_counts, default=0)
 
 
-def _completed_state_still_valid(ctx: RunnerContext, state: TopicState, *, require_analysis: bool) -> bool:
+def _completed_state_still_valid(
+    ctx: RunnerContext,
+    state: TopicState,
+    *,
+    require_analysis: bool,
+    require_score: bool,
+) -> bool:
     if not state.run_dir or not state.output_dir:
         return False
     run_dir = _abs(ctx.repo_root, state.run_dir)
@@ -606,16 +745,27 @@ def _completed_state_still_valid(ctx: RunnerContext, state: TopicState, *, requi
     run_ok, _ = _run_business_success(run_dir)
     if not run_ok:
         return False
-    return _finalized_output_complete(output_dir, require_analysis=require_analysis)
+    return _finalized_output_complete(output_dir, require_analysis=require_analysis, require_score=require_score)
 
 
-def _unfinished_or_stale_completed(ctx: RunnerContext, state: TopicState, *, require_analysis: bool) -> bool:
+def _unfinished_or_stale_completed(
+    ctx: RunnerContext,
+    state: TopicState,
+    *,
+    require_analysis: bool,
+    require_score: bool,
+) -> bool:
     if state.status != "completed":
         return True
-    return not _completed_state_still_valid(ctx, state, require_analysis=require_analysis)
+    return not _completed_state_still_valid(
+        ctx,
+        state,
+        require_analysis=require_analysis,
+        require_score=require_score,
+    )
 
 
-def _finalized_output_complete(output_dir: Path, *, require_analysis: bool) -> bool:
+def _finalized_output_complete(output_dir: Path, *, require_analysis: bool, require_score: bool) -> bool:
     required_files = [
         output_dir / "arc_adapter_meta.json",
         output_dir / "submission" / "README.md",
@@ -639,6 +789,19 @@ def _finalized_output_complete(output_dir: Path, *, require_analysis: bool) -> b
             return False
         analysis = meta.get("analysis", {})
         if not isinstance(analysis, dict) or analysis.get("llm_used") is not True:
+            return False
+    if require_score:
+        for path in [
+            output_dir / "judge" / "judge_result.json",
+            output_dir / "judge" / "scorecard.md",
+        ]:
+            if not path.is_file():
+                return False
+        try:
+            judge = json.loads((output_dir / "judge" / "judge_result.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(judge.get("overall_score"), (int, float)):
             return False
     return True
 

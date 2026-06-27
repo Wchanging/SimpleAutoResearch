@@ -115,6 +115,15 @@ def main() -> int:
     judge.add_argument("--output-dir", type=Path)
     judge.add_argument("--timeout-sec", type=int)
 
+    score = sub.add_parser("score", help="Score a finalized submission against ARC rubric leaves with an LLM.")
+    score.add_argument("--prepared-dir", type=Path)
+    score.add_argument("--submission-dir", type=Path)
+    score.add_argument("--output-dir", type=Path)
+    score.add_argument("--model", help="Optional model override for scoring.")
+    score.add_argument("--max-code-chars", type=int)
+    score.add_argument("--max-result-chars", type=int)
+    score.add_argument("--max-writeup-chars", type=int)
+
     args = parser.parse_args()
     cfg = load_toml(args.config)
 
@@ -164,6 +173,9 @@ def main() -> int:
 
     if args.command == "judge":
         return run_judge_command(args, cfg)
+
+    if args.command == "score":
+        return run_score_command(args, cfg)
 
     raise SystemExit(f"unknown command: {args.command}")
 
@@ -662,6 +674,18 @@ def render_commands(options: PrepareOptions, config_path: Path) -> str:
             "and regenerate `submission/README.md` plus `submission/claims.json`",
             "from the measured metrics and project results.",
             "",
+            "## Score",
+            "",
+            "After finalization, use the built-in LLM scorer to create",
+            "`judge/judge_result.json` and `judge/scorecard.md`:",
+            "",
+            "```bash",
+            "uv run python benchmark/arc_bench/adapter.py score \\",
+            f"  --prepared-dir {path_for_shell(options.output_dir)} \\",
+            "  --submission-dir benchmark/arc_bench/submissions/<TOPIC>/<RUN_ID>/submission \\",
+            "  --output-dir benchmark/arc_bench/submissions/<TOPIC>/<RUN_ID>/judge",
+            "```",
+            "",
         ]
     )
 
@@ -808,6 +832,566 @@ def analyze_submission_results(
         "readme_markdown": result.readme_markdown,
         "claims": result.claims_payload,
         "analysis_audit": result.audit.model_dump(mode="json"),
+    }
+
+
+def run_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    prepared_raw = value_from(args, cfg, "score", "prepared_dir", "")
+    submission_raw = value_from(args, cfg, "score", "submission_dir", "")
+    output_raw = value_from(args, cfg, "score", "output_dir", "")
+    model = str(value_from(args, cfg, "score", "model", ""))
+    max_code_chars = int(value_from(args, cfg, "score", "max_code_chars", 30000))
+    max_result_chars = int(value_from(args, cfg, "score", "max_result_chars", 24000))
+    max_writeup_chars = int(value_from(args, cfg, "score", "max_writeup_chars", 16000))
+
+    if not prepared_raw:
+        raise SystemExit("--prepared-dir is required")
+    prepared_dir = Path(prepared_raw)
+    if not prepared_dir.is_dir():
+        raise SystemExit(f"prepared dir not found: {prepared_dir}")
+    if not submission_raw:
+        raise SystemExit("--submission-dir is required")
+    submission_dir = Path(submission_raw)
+    if not submission_dir.is_dir():
+        raise SystemExit(f"submission dir not found: {submission_dir}")
+    output_dir = Path(output_raw) if output_raw else submission_dir.parent / "judge"
+
+    manifest = read_json(prepared_dir / "manifest.json")
+    rubric = read_json(prepared_dir / "rubric.json")
+    result = score_submission_with_llm(
+        manifest=manifest,
+        rubric=rubric,
+        prepared_dir=prepared_dir,
+        submission_dir=submission_dir,
+        output_dir=output_dir,
+        model=model or None,
+        max_code_chars=max_code_chars,
+        max_result_chars=max_result_chars,
+        max_writeup_chars=max_writeup_chars,
+    )
+    print(f"ARC score overall={result['overall_score']:.3f}; wrote {output_dir / 'judge_result.json'}")
+    return 0
+
+
+def score_submission_with_llm(
+    *,
+    manifest: dict[str, Any],
+    rubric: dict[str, Any],
+    prepared_dir: Path,
+    submission_dir: Path,
+    output_dir: Path,
+    model: str | None,
+    max_code_chars: int,
+    max_result_chars: int,
+    max_writeup_chars: int,
+) -> dict[str, Any]:
+    leaves = list(iter_rubric_leaves(rubric))
+    if not leaves:
+        raise SystemExit("rubric has no leaf criteria")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = load_score_artifacts(
+        submission_dir,
+        max_code_chars=max_code_chars,
+        max_result_chars=max_result_chars,
+        max_writeup_chars=max_writeup_chars,
+    )
+
+    usage_rows: list[dict[str, Any]] = []
+    try:
+        from simple_ar.integrations.llm import LLMClient
+    except Exception as exc:  # pragma: no cover - environment issue
+        raise SystemExit("score requires SimpleAutoResearch's LLM integration to be importable.") from exc
+
+    def usage_callback(usage: Any) -> None:
+        row = usage.to_row() if hasattr(usage, "to_row") else dict(usage)
+        usage_rows.append(row)
+        append_jsonl(output_dir / "llm_usage.jsonl", row)
+
+    client = LLMClient.from_env(model=model, usage_callback=usage_callback)
+
+    manifest_context = build_manifest_context(manifest)
+    code_leaves = [leaf for leaf in leaves if is_code_development_leaf(leaf)]
+    result_leaves = [leaf for leaf in leaves if not is_code_development_leaf(leaf)]
+    all_warnings: list[str] = []
+    raw_responses: dict[str, Any] = {}
+    leaf_grades: list[dict[str, Any]] = []
+
+    if code_leaves:
+        prompt = build_code_round_prompt(manifest_context, code_leaves, artifacts)
+        write_text(output_dir / "score_round_code_prompt.txt", prompt)
+        raw_response, grades, warnings_ = run_score_round(
+            client,
+            prompt,
+            code_leaves,
+            label="arc-bench-score-code",
+            round_name="code",
+        )
+        write_json(output_dir / "score_round_code_response.json", raw_response)
+        raw_responses["code"] = raw_response
+        leaf_grades.extend(grades)
+        all_warnings.extend(warnings_)
+
+    if result_leaves:
+        prompt = build_results_round_prompt(manifest_context, result_leaves, artifacts)
+        write_text(output_dir / "score_round_results_prompt.txt", prompt)
+        raw_response, grades, warnings_ = run_score_round(
+            client,
+            prompt,
+            result_leaves,
+            label="arc-bench-score-results",
+            round_name="results",
+        )
+        write_json(output_dir / "score_round_results_response.json", raw_response)
+        raw_responses["results"] = raw_response
+        leaf_grades.extend(grades)
+        all_warnings.extend(warnings_)
+
+    leaf_grades = order_leaf_grades(leaf_grades, leaves)
+    category_scores = compute_category_scores(leaf_grades)
+    overall = compute_overall_score(leaf_grades)
+    results_only = compute_results_only_score(leaf_grades)
+    scoring_summary = build_scoring_summary(category_scores, overall, results_only)
+    result = {
+        "schema_version": "simple_ar_arc_judge_result.v1",
+        "backend": "llm",
+        "scoring_profile": "arc-compatible-two-round",
+        "prompt_version": "simple_ar_arc_score_v2",
+        "topic_id": manifest.get("id"),
+        "title": manifest.get("title"),
+        "prepared_dir": str(prepared_dir),
+        "submission_dir": str(submission_dir),
+        "artifact_paths": artifacts["paths"],
+        "leaf_grades": leaf_grades,
+        "category_scores": category_scores,
+        "scoring_summary": scoring_summary,
+        "overall_score": overall,
+        "overall_strict": overall,
+        "results_only": results_only,
+        "overall_reasoning": summarize_round_reasoning(raw_responses),
+        "warnings": all_warnings,
+        "limitations": extract_round_limitations(raw_responses),
+        "raw_rounds": raw_responses,
+        "model": client.model,
+        "scored_at": time.time(),
+    }
+    write_json(output_dir / "judge_result.json", result)
+    write_text(output_dir / "scorecard.md", render_scorecard(result))
+    if usage_rows:
+        write_json(output_dir / "llm_usage_summary.json", summarize_llm_usage_rows(usage_rows))
+    return result
+
+
+def load_score_artifacts(
+    submission_dir: Path,
+    *,
+    max_code_chars: int,
+    max_result_chars: int,
+    max_writeup_chars: int,
+) -> dict[str, Any]:
+    code_dir = submission_dir / "code"
+    results_dir = submission_dir / "results"
+    readme_path = submission_dir / "README.md"
+    claims_path = submission_dir / "claims.json"
+    parent = submission_dir.parent
+    summary_path = parent / "stage-14" / "experiment_summary.json"
+    metrics_path = results_dir / "metrics.json"
+
+    code_text, code_files = collect_code_text(code_dir, max_chars=max_code_chars)
+    metrics = read_json(metrics_path) if metrics_path.is_file() else {}
+    claims = read_json(claims_path) if claims_path.is_file() else {}
+    summary = read_json(summary_path) if summary_path.is_file() else {}
+    writeup = readme_path.read_text(encoding="utf-8", errors="ignore") if readme_path.is_file() else ""
+    return {
+        "paths": {
+            "code_dir": str(code_dir) if code_dir.is_dir() else "",
+            "metrics": str(metrics_path) if metrics_path.is_file() else "",
+            "claims": str(claims_path) if claims_path.is_file() else "",
+            "readme": str(readme_path) if readme_path.is_file() else "",
+            "experiment_summary": str(summary_path) if summary_path.is_file() else "",
+        },
+        "code_files": code_files,
+        "code_text": code_text,
+        "metrics": clip_data(metrics, max_result_chars),
+        "claims": clip_data(claims, max_result_chars),
+        "experiment_summary": clip_data(summary, max_result_chars),
+        "writeup": clip_text(writeup, max_writeup_chars),
+    }
+
+
+def collect_code_text(code_dir: Path, *, max_chars: int) -> tuple[str, list[str]]:
+    if not code_dir.is_dir():
+        return "(no submission/code directory found)", []
+    parts: list[str] = []
+    files: list[str] = []
+    used = 0
+    for path in sorted(code_dir.rglob("*.py")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(code_dir).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if not text.strip():
+            continue
+        header = f"\n# === {rel} ===\n"
+        remaining = max_chars - used - len(header)
+        if remaining <= 0:
+            break
+        numbered = add_line_numbers(text)
+        snippet = numbered if len(numbered) <= remaining else numbered[:remaining] + "\n# ... clipped ...\n"
+        parts.append(header + snippet)
+        files.append(rel)
+        used += len(header) + len(snippet)
+        if used >= max_chars:
+            break
+    return "\n".join(parts) if parts else "(no Python source files found)", files
+
+
+def add_line_numbers(text: str) -> str:
+    return "\n".join(f"{index:04d}: {line}" for index, line in enumerate(text.splitlines(), start=1))
+
+
+def build_manifest_context(manifest: dict[str, Any]) -> str:
+    design = manifest.get("experiment_design") or {}
+    lines = [
+        f"Topic: {manifest.get('id')} - {manifest.get('title', '')}",
+        f"Research question: {design.get('research_question') or manifest.get('synthesis') or ''}",
+        "Expected conditions:",
+    ]
+    for condition in design.get("conditions") or []:
+        if isinstance(condition, dict):
+            lines.append(f"- {condition.get('name', '?')}: {condition.get('description', '')}")
+    lines.append("Expected datasets:")
+    for dataset in design.get("datasets") or []:
+        if isinstance(dataset, dict):
+            lines.append(f"- {dataset.get('name', '?')}: {dataset.get('source', '')}")
+    lines.append("Expected metrics:")
+    for metric in design.get("metrics") or []:
+        if isinstance(metric, dict):
+            lines.append(f"- {metric.get('name', '?')} ({metric.get('direction', 'unknown')}): {metric.get('description', '')}")
+    lines.append("Hypotheses:")
+    for hypothesis in manifest.get("hypotheses") or []:
+        if isinstance(hypothesis, dict):
+            lines.append(f"- {hypothesis.get('id', '?')}: {hypothesis.get('statement', '')}")
+    return "\n".join(lines)
+
+
+def is_code_development_leaf(leaf: dict[str, Any]) -> bool:
+    return str(leaf.get("task_category") or "").lower().startswith("code dev")
+
+
+def score_system_prompt() -> str:
+    return (
+        "You are a strict scientific reviewer for ARC-Bench-style autonomous "
+        "research submissions. You grade rubric leaves with scores in [0.0, 1.0]. "
+        "Return valid JSON only in this schema: "
+        "{\"grades\":[{\"leaf_id\":\"<id>\",\"score\":<float 0-1>,"
+        "\"reasoning\":\"<specific evidence-grounded explanation>\"}],"
+        "\"overall_reasoning\":\"<short optional summary>\","
+        "\"limitations\":[\"<optional limitation>\"]}. "
+        "Scoring guide: 1.0 fully met with clear evidence; 0.7 mostly met with "
+        "minor gaps; 0.5 partially met or unclear; 0.3 attempted but substantially "
+        "incomplete; 0.0 absent, contradicted, fabricated, or not evidenced. "
+        "Apply strict criteria: verify implementation correctness from code, "
+        "ground numerical claims in captured JSON/metrics/writeup, require "
+        "verdict-data consistency, and penalize missing conditions/datasets/seeds "
+        "proportionally. Do not reward intent alone."
+    )
+
+
+def format_leaves_for_prompt(leaves: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for leaf in leaves:
+        lines.append(f"- id: {leaf.get('id')}")
+        lines.append(f"  category: {leaf.get('task_category', '')}")
+        lines.append(f"  fine_category: {leaf.get('finegrained_task_category', '')}")
+        lines.append(f"  weight: {leaf.get('weight', 1)}")
+        lines.append(f"  requirements: {leaf.get('requirements', '')}")
+    return "\n".join(lines)
+
+
+def build_code_round_prompt(manifest_context: str, leaves: list[dict[str, Any]], artifacts: dict[str, Any]) -> str:
+    return (
+        "## Topic Context\n"
+        f"{manifest_context}\n\n"
+        "## Rubric Leaves To Grade: Code Development\n"
+        f"{format_leaves_for_prompt(leaves)}\n\n"
+        "## Code Artifact Paths\n"
+        f"{json.dumps(artifacts['paths'], ensure_ascii=False, indent=2)}\n\n"
+        "## Code Files Included\n"
+        f"{json.dumps(artifacts['code_files'], ensure_ascii=False, indent=2)}\n\n"
+        "## Final Agent-Produced Code With Line Numbers\n"
+        "```python\n"
+        f"{artifacts['code_text']}\n"
+        "```\n\n"
+        "Grade only the Code Development leaves above. Read the code semantically: "
+        "check whether algorithms are genuinely implemented, not merely named. "
+        "Cite file paths and line numbers from the code block when giving credit or docking."
+    )
+
+
+def build_results_round_prompt(manifest_context: str, leaves: list[dict[str, Any]], artifacts: dict[str, Any]) -> str:
+    result_payload = {
+        "paths": artifacts["paths"],
+        "experiment_summary": artifacts["experiment_summary"],
+        "metrics": artifacts["metrics"],
+        "claims": artifacts["claims"],
+    }
+    return (
+        "## Topic Context\n"
+        f"{manifest_context}\n\n"
+        "## Rubric Leaves To Grade: Code Execution + Result Analysis\n"
+        f"{format_leaves_for_prompt(leaves)}\n\n"
+        "## Captured Execution Artifacts\n"
+        "```json\n"
+        f"{json.dumps(result_payload, ensure_ascii=False, indent=2, default=str)}\n"
+        "```\n\n"
+        "## Agent Writeup / README\n"
+        f"{artifacts['writeup']}\n\n"
+        "Grade only the Code Execution and Result Analysis leaves above. Verify "
+        "that metrics exist on disk, conditions/datasets/seeds are covered, and "
+        "hypothesis verdicts match measured numbers. Penalize fabricated or "
+        "unsupported writeup claims."
+    )
+
+
+def run_score_round(
+    client: Any,
+    prompt: str,
+    leaves: list[dict[str, Any]],
+    *,
+    label: str,
+    round_name: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+    try:
+        response = client.ask_json(score_system_prompt(), prompt, label=label)
+    except Exception as exc:
+        raise SystemExit(f"ARC {round_name} scoring failed before valid JSON was produced: {exc}") from exc
+    grades, warnings_ = normalize_round_grades(response, leaves, round_name=round_name)
+    return response, grades, warnings_
+
+
+def normalize_round_grades(
+    response: dict[str, Any],
+    leaves: list[dict[str, Any]],
+    *,
+    round_name: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    rows = response.get("grades")
+    if not isinstance(rows, list):
+        rows = response.get("leaf_grades")
+    if not isinstance(rows, list):
+        raise SystemExit(f"ARC {round_name} score response did not contain `grades`.")
+
+    leaves_by_id = {str(leaf.get("id")): leaf for leaf in leaves if leaf.get("id")}
+    rows_by_id: dict[str, dict[str, Any]] = {}
+    warnings_: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        leaf_id = str(row.get("leaf_id") or row.get("id") or "").strip()
+        if not leaf_id:
+            continue
+        if leaf_id not in leaves_by_id:
+            warnings_.append(f"{round_name}: ignored unknown leaf id {leaf_id}")
+            continue
+        rows_by_id[leaf_id] = row
+
+    grades: list[dict[str, Any]] = []
+    for leaf_id, leaf in leaves_by_id.items():
+        row = rows_by_id.get(leaf_id)
+        if row is None:
+            warnings_.append(f"{round_name}: missing grade for {leaf_id}; defaulted to 0.5 like ARC judge.py")
+            row = {
+                "score": 0.5,
+                "reasoning": "(ungraded; LLM did not return this leaf)",
+            }
+        score, score_warning = coerce_round_score(row.get("score"), leaf_id=leaf_id, round_name=round_name)
+        if score_warning:
+            warnings_.append(score_warning)
+        grades.append(
+            {
+                "id": leaf_id,
+                "category": str(leaf.get("task_category") or "Uncategorized"),
+                "fine_category": str(leaf.get("finegrained_task_category") or ""),
+                "weight": coerce_weight(leaf.get("weight")),
+                "score": score,
+                "reasoning": str(row.get("reasoning") or row.get("reason") or "").strip(),
+                "evidence": str(row.get("evidence") or "").strip(),
+                "requirements": str(leaf.get("requirements") or ""),
+                "source_round": round_name,
+            }
+        )
+    return grades, warnings_
+
+
+def coerce_round_score(value: Any, *, leaf_id: str, round_name: str) -> tuple[float, str]:
+    warning = ""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.5, f"{round_name}: invalid score for {leaf_id}; defaulted to 0.5"
+    if score < 0.0 or score > 1.0:
+        warning = f"{round_name}: score for {leaf_id} was clamped from {score} into [0, 1]"
+        score = max(0.0, min(1.0, score))
+    return round(score, 4), warning
+
+
+def order_leaf_grades(leaf_grades: list[dict[str, Any]], leaves: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {str(row.get("id")): row for row in leaf_grades}
+    ordered: list[dict[str, Any]] = []
+    for leaf in leaves:
+        leaf_id = str(leaf.get("id"))
+        if leaf_id in by_id:
+            ordered.append(by_id[leaf_id])
+    return ordered
+
+
+def coerce_weight(value: Any) -> float:
+    try:
+        weight = float(value)
+    except (TypeError, ValueError):
+        weight = 1.0
+    return weight if weight > 0 else 1.0
+
+
+def compute_overall_score(leaf_grades: list[dict[str, Any]]) -> float:
+    total_weight = sum(float(row.get("weight") or 0.0) for row in leaf_grades)
+    if total_weight <= 0:
+        return 0.0
+    weighted = sum(float(row["score"]) * float(row.get("weight") or 0.0) for row in leaf_grades)
+    return round(weighted / total_weight, 4)
+
+
+def compute_results_only_score(leaf_grades: list[dict[str, Any]]) -> float:
+    rows = [row for row in leaf_grades if not str(row.get("category") or "").lower().startswith("code dev")]
+    total_weight = sum(float(row.get("weight") or 0.0) for row in rows)
+    if total_weight <= 0:
+        return 0.0
+    weighted = sum(float(row["score"]) * float(row.get("weight") or 0.0) for row in rows)
+    return round(weighted / total_weight, 4)
+
+
+def compute_category_scores(leaf_grades: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for row in leaf_grades:
+        category = str(row.get("category") or "Uncategorized")
+        group = groups.setdefault(category, {"leaf_count": 0, "weight": 0.0, "weighted_sum": 0.0})
+        weight = float(row.get("weight") or 0.0)
+        group["leaf_count"] += 1
+        group["weight"] += weight
+        group["weighted_sum"] += weight * float(row.get("score") or 0.0)
+    for group in groups.values():
+        weight = float(group.get("weight") or 0.0)
+        group["score"] = round(float(group.pop("weighted_sum")) / weight, 4) if weight else 0.0
+        group["weight"] = round(weight, 4)
+    return groups
+
+
+def build_scoring_summary(
+    category_scores: dict[str, dict[str, Any]],
+    overall: float,
+    results_only: float,
+) -> dict[str, Any]:
+    return {
+        "category_normalized": {
+            category: row.get("score", 0.0)
+            for category, row in sorted(category_scores.items())
+        },
+        "category_weights": {
+            category: row.get("weight", 0.0)
+            for category, row in sorted(category_scores.items())
+        },
+        "overall_strict": overall,
+        "results_only": results_only,
+        "weighting_scheme": "leaf weighted average; ARC-Bench ML rubrics generally target CD:CE:RA = 25:25:50",
+        "timeout_zero_exec_applied": False,
+    }
+
+
+def summarize_round_reasoning(raw_responses: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for name in ("code", "results"):
+        response = raw_responses.get(name)
+        if isinstance(response, dict) and response.get("overall_reasoning"):
+            parts.append(f"{name}: {response['overall_reasoning']}")
+    return " ".join(parts)
+
+
+def extract_round_limitations(raw_responses: dict[str, Any]) -> list[str]:
+    limitations: list[str] = []
+    for response in raw_responses.values():
+        if isinstance(response, dict) and isinstance(response.get("limitations"), list):
+            limitations.extend(str(item) for item in response["limitations"] if item)
+    return sorted(set(limitations))
+
+
+def render_scorecard(result: dict[str, Any]) -> str:
+    lines = [
+        f"# ARC-Bench Scorecard: {result.get('topic_id')}",
+        "",
+        f"- Overall strict: `{float(result.get('overall_strict') or result.get('overall_score') or 0.0):.3f}`",
+        f"- Results only: `{float(result.get('results_only') or 0.0):.3f}`",
+        f"- Backend: `{result.get('backend')}`",
+        f"- Scoring profile: `{result.get('scoring_profile')}`",
+        f"- Model: `{result.get('model')}`",
+        "",
+        "## Category Scores",
+        "",
+        "| Category | Leaves | Weight | Score |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for category, row in sorted(result.get("category_scores", {}).items()):
+        lines.append(
+            f"| {category} | {row.get('leaf_count', 0)} | "
+            f"{float(row.get('weight') or 0.0):.1f} | {float(row.get('score') or 0.0):.3f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Leaf Grades",
+            "",
+            "| Leaf | Category | Weight | Score | Evidence |",
+            "| --- | --- | ---: | ---: | --- |",
+        ]
+    )
+    for row in result.get("leaf_grades", []):
+        evidence = escape_table_text(row.get("evidence") or row.get("reasoning") or "")
+        lines.append(
+            f"| `{row.get('id')}` | {row.get('category')} | {float(row.get('weight') or 0.0):.1f} | "
+            f"{float(row.get('score') or 0.0):.3f} | {evidence} |"
+        )
+    if result.get("overall_reasoning"):
+        lines.extend(["", "## Overall Reasoning", "", str(result["overall_reasoning"])])
+    if result.get("limitations"):
+        lines.extend(["", "## Limitations", ""])
+        lines.extend(f"- {item}" for item in result["limitations"])
+    if result.get("warnings"):
+        lines.extend(["", "## Judge Warnings", ""])
+        lines.extend(f"- {item}" for item in result["warnings"])
+    return "\n".join(lines).strip() + "\n"
+
+
+def escape_table_text(value: Any) -> str:
+    text = str(value or "").replace("\n", " ").replace("|", "\\|")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def summarize_llm_usage_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def token(row: dict[str, Any], *keys: str) -> int:
+        for key in keys:
+            if row.get(key) is not None:
+                return int(row.get(key) or 0)
+        return 0
+
+    return {
+        "request_count": len(rows),
+        "input_tokens": sum(token(row, "input_tokens", "prompt_tokens") for row in rows),
+        "output_tokens": sum(token(row, "output_tokens", "completion_tokens") for row in rows),
+        "total_tokens": sum(token(row, "total_tokens") for row in rows),
+        "estimated_cost_usd": sum(float(row.get("estimated_cost_usd") or 0.0) for row in rows),
+        "labels": [row.get("label") for row in rows if row.get("label")],
     }
 
 
