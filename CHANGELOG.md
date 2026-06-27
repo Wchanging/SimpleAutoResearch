@@ -4,7 +4,75 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-27
+
+### Changed
+
+- Greenfield code-task generation no longer silently mixes deterministic
+  scaffolds into real LLM runs. Architecture planning and file generation now
+  use bounded LLM retries, then stop by default if the model/client still fails.
+  Deterministic fallback is available only when LLM mode is disabled or
+  `[execute].allow_planning_fallback = true` is explicitly set.
+- Added a generic task-contract extractor for greenfield code tasks. It turns
+  explicit `task.md` requirements, deliverables, constraints, data requirements,
+  dependency hints, and metric expectations into a durable contract consumed by
+  architecture planning, per-file generation, implementation memory, review,
+  and repair prompts.
+- Per-file greenfield generation now receives dependency advice and compact
+  implementation memory, including prior generated file summaries and public
+  APIs. This gives each file writer global project continuity instead of
+  asking it to infer cross-file schemas from the current file alone.
+- Greenfield architecture prompts now explicitly ask for shared record/result
+  schemas and concrete artifact flows before implementation, reducing schema
+  drift between data, processing, runner, analysis, reporting, and validation
+  files.
+- Code-task LLM planning now has stronger stage-level retry behavior for real
+  runs. Greenfield architecture planning and per-file generation wait with
+  bounded exponential backoff between stage attempts and print retry progress,
+  while the lower-level LiteLLM provider retry still handles individual
+  connection, timeout, rate-limit, and 5xx failures.
+- The default code-task stage-level `llm_retry_attempts` is now 3. ARC-Bench
+  prepared configs default to 4 and the batch runner can override this at run
+  time with `--llm-retry-attempts N`, avoiding fragile mass failures during
+  transient server-side connection drops.
+
+### Fixed
+
+- Generated-project review now blocks common hollow-success patterns such as
+  filling missing required metrics with `0.0`, returning placeholder records,
+  or leaving stub execution paths in tasks that require measured outputs.
+- Review repair prompts now clarify that implementation findings must be fixed
+  in the code path itself, not hidden by documentation-only changes or default
+  metric values.
+
+## 2026-06-26
+
+### Changed
+
+- Code-task repair now preserves continuity across repeated execute runs. Recent
+  repair context is collected from task memory and prior repair artifacts, then
+  injected into runtime repair planning and file-level repair prompts so the
+  model can see what was already tried.
+- Runtime repair prompts now explicitly require the model to explain why a
+  previous fix was insufficient when the same failure survives a repair. This
+  discourages repeatedly patching the same file or applying the same failed
+  strategy.
+
+### Fixed
+
+- Generated-project runtime repair now skips repeated deterministic quick
+  patches when previous repair context shows the same failure signal survived,
+  allowing bounded LLM repair to inspect broader producer/consumer contracts
+  instead of looping on a narrow attribute or entrypoint guess.
+
 ## 2026-06-25
+
+### Added
+
+- Added a generic result-analysis layer under `src/simple_ar/result_analysis/`.
+  It normalizes run/submission result bundles, summarizes metrics and issues,
+  and can call the configured LLM to produce structured analysis artifacts for
+  downstream benchmark adapters or reporting surfaces.
 
 ### Changed
 

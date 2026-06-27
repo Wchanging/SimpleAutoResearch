@@ -396,7 +396,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--apply-proposed-edits` | flag | plan 批准后应用已审核的 `proposed_edits.json`。 |
 | `--allow-large-edits` | flag | 允许已审核、超过 normal 预算的较大 proposal。 |
 | `--allow-planning-fallback` | flag | LLM 规划重试失败后，允许写入 deterministic fallback work/patch plan。 |
-| `--llm-retry-attempts N` | int | work-plan / patch-plan 的 LLM 尝试次数。 |
+| `--llm-retry-attempts N` | int | work-plan、patch-plan、greenfield 架构/文件生成和 repair 的阶段级 LLM 尝试次数。 |
 | `--repair-rounds N` | int | 失败后的 bounded repair proposal 轮数。 |
 | `--max-files N` | int | LLM 步骤上下文文件预算。 |
 | `--max-source-chars-per-file N` | int | 单文件 source 上下文预算。 |

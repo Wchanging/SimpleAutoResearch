@@ -187,11 +187,12 @@ def execute_code_task(
         allow_large_edits: Allow proposals that exceed the normal edit budget
             but fit the large profile.
         allow_planning_fallback: Allow deterministic offline work/patch plans
-            after LLM planning attempts fail. By default, LLM planning failures
-            stop the run without writing fallback plans so the same execute
-            command can retry cleanly.
-        llm_retry_attempts: Number of attempts for LLM-backed work and patch
-            planning before stopping or explicitly falling back.
+            and greenfield fallbacks after LLM attempts fail. By default, LLM
+            failures stop the run without writing fallback plans so the same
+            execute command can retry cleanly.
+        llm_retry_attempts: Number of stage-level attempts for LLM-backed work
+            planning, patch planning, greenfield architecture/file generation,
+            and repair before stopping or explicitly falling back.
         repair_rounds: Maximum repair proposals execute may create after a
             validation or benchmark failure. Proposals are never auto-applied.
         budget_profile: Optional edit budget profile passed to edit proposal

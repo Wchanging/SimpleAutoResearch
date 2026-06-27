@@ -66,6 +66,15 @@ uv run python benchmark/arc_bench/batch_runner.py run \
   --score
 ```
 
+每次 `run` 都会在 `benchmark/arc_bench/batch_state/` 下创建独立状态文件，例如：
+
+```text
+benchmark/arc_bench/batch_state/20260627-153607-quick.json
+```
+
+`batch_state/latest_state.json` 会记录最近一次批跑使用的状态文件。这样不同批次不会互相覆盖，
+但默认重试和查看状态时仍然不用手动记路径。
+
 任务组：
 
 ```bash
@@ -87,6 +96,8 @@ uv run python benchmark/arc_bench/batch_runner.py run \
 批跑脚本不会只看命令退出码。`execute` 后会读取 run 的 `manifest.json`，
 只有业务状态达到 `benchmark_passed` 才会继续 `finalize`。如果后续补加
 `--score`，并且某个任务已经有有效 submission，它会直接补 `judge/`，不会重跑实验。
+如果服务器网络不稳定，可以加 `--llm-retry-attempts 5`，临时覆盖所有
+`code-task execute` 调用的阶段级 LLM 重试次数。
 
 ## 重跑与续修
 
@@ -94,6 +105,18 @@ uv run python benchmark/arc_bench/batch_runner.py run \
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze \
+  --score \
+  --llm-retry-attempts 5
+```
+
+默认情况下，`retry-unfinished` 会读取 `latest_state.json` 指向的最近批次。如果要重试某一次
+历史批次，可以显式传入对应 state：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --state-file benchmark/arc_bench/batch_state/20260627-153607-quick.json \
   --topic-set quick \
   --analyze \
   --score
@@ -118,6 +141,9 @@ fresh run，避免重复进入无效 repair 循环。
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py status
 ```
+
+`status` 默认也读取最近批次；需要查看历史批次时使用 `--state-file <path>`，或者显式传
+`--state-file latest`。
 
 ## 单任务手动流程
 

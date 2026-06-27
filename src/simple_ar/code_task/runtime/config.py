@@ -374,7 +374,7 @@ def load_code_task_execute_options(
             value=execute.allow_planning_fallback,
             default=False,
         ),
-        llm_retry_attempts=_positive_int(_config_int(execute.llm_retry_attempts), 1),
+        llm_retry_attempts=_positive_int(_config_int(execute.llm_retry_attempts), 3),
         repair_rounds=_non_negative_int(_config_int(execute.repair_rounds), 0),
         budget_profile=budget_profile,
         edit_budget_overrides=_edit_budget_overrides(budget, budget_profile),

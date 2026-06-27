@@ -361,7 +361,7 @@ allow_large_edits = false
 allow_planning_fallback = false
 
 # work-plan / patch-plan 的 LLM 重试次数；全部失败后才停止或显式 fallback。
-llm_retry_attempts = 2
+llm_retry_attempts = 3
 
 # 失败后最多生成多少轮 bounded repair proposal。
 repair_rounds = 1
@@ -785,7 +785,7 @@ baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
-llm_retry_attempts = 2
+llm_retry_attempts = 3
 max_files = 8
 max_source_chars_per_file = 4000
 max_generated_lines = 1600
@@ -900,7 +900,7 @@ baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
-llm_retry_attempts = 2
+llm_retry_attempts = 3
 
 [models.code_task]
 planner = "gpt-4o-mini"

@@ -480,7 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm-retry-attempts",
         type=int,
         default=None,
-        help="LLM work/patch planning attempts before failing or explicitly falling back.",
+        help="Stage-level LLM attempts for planning, greenfield architecture/file generation, and patch repair.",
     )
     code_task_execute.add_argument("--repair-rounds", type=int, default=0)
     code_task_execute.add_argument(

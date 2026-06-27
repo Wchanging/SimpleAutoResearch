@@ -375,7 +375,7 @@ allow_large_edits = false
 allow_planning_fallback = false
 
 # LLM work-plan and patch-plan attempts before stopping or explicitly falling back.
-llm_retry_attempts = 2
+llm_retry_attempts = 3
 
 # Number of bounded repair proposals after failure.
 repair_rounds = 1
@@ -617,7 +617,7 @@ package rather than parsing stdout directly.
 | `[execute].apply_proposed_edits` | Lets execute apply an already reviewed proposal. Keep false for review-first workflows. |
 | `[execute].allow_large_edits` | Allows application of reviewed proposals that exceed the normal budget but fit the large budget. |
 | `[execute].allow_planning_fallback` | Allows deterministic offline work/patch plans and greenfield architecture/file fallbacks after all LLM retries fail. Keep false for real LLM runs so malformed model output stops safely and can be retried. |
-| `[execute].llm_retry_attempts` | Number of LLM work-plan, patch-plan, greenfield architecture, and greenfield file-generation attempts before stopping or explicitly falling back. |
+| `[execute].llm_retry_attempts` | Number of stage-level LLM work-plan, patch-plan, greenfield architecture, and greenfield file-generation attempts before stopping or explicitly falling back. Each stage attempt still uses the provider-level retry/backoff configured by `SIMPLE_AR_LLM_RETRY_ATTEMPTS`. |
 | `[execute].repair_rounds` | Number of bounded repair proposals after validation/benchmark failure. Repairs still require review. |
 | `[execute].max_files` | Max files included in LLM context for plan/proposal/repair steps. |
 | `[execute].max_source_chars_per_file` | Per-file source snippet budget for LLM context. |
@@ -822,7 +822,7 @@ baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
-llm_retry_attempts = 2
+llm_retry_attempts = 3
 max_files = 8
 max_source_chars_per_file = 4000
 max_generated_lines = 1600
@@ -944,7 +944,7 @@ baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
-llm_retry_attempts = 2
+llm_retry_attempts = 3
 
 [models.code_task]
 planner = "gpt-4o-mini"

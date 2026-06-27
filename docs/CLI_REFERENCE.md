@@ -428,7 +428,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--apply-proposed-edits` | flag | Apply reviewed `proposed_edits.json` after plan approval. |
 | `--allow-large-edits` | flag | Allow a reviewed proposal that exceeds the normal edit budget. |
 | `--allow-planning-fallback` | flag | Allow deterministic offline work/patch plans after LLM planning retries fail. |
-| `--llm-retry-attempts N` | int | LLM work-plan and patch-plan attempts before stopping or explicitly falling back. |
+| `--llm-retry-attempts N` | int | Stage-level LLM attempts for work-plan, patch-plan, greenfield architecture/file generation, and repair before stopping or explicitly falling back. |
 | `--repair-rounds N` | int | Number of bounded repair proposals after failure. |
 | `--max-files N` | int | Context file budget for LLM steps. |
 | `--max-source-chars-per-file N` | int | Per-file source context budget. |

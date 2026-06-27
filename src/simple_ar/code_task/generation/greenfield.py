@@ -131,6 +131,7 @@ def generate_greenfield_code_task(
         client=client,
         allow_fallback=allow_planning_fallback or not use_llm,
         retry_attempts=llm_retry_attempts,
+        message_callback=message_callback,
     )
     implementation_plan_path = paths.meta_dir / "implementation_plan.json"
     architecture_plan_path = paths.meta_dir / "architecture_plan.json"
@@ -194,6 +195,7 @@ def generate_greenfield_code_task(
             files_per_batch=4,
             retry_attempts=llm_retry_attempts,
             allow_fallback=allow_planning_fallback or not use_llm,
+            message_callback=message_callback,
         )
     generated_files = tuple(
         f"generated_project/{row.get('path')}"

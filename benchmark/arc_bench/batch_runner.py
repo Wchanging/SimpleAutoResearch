@@ -54,6 +54,9 @@ TOPIC_SETS = {
     "all": QUICK_TOPICS + BREADTH_TOPICS + SPECIALIZED_TOPICS,
 }
 SUCCESSFUL_RUN_STATUSES = {"benchmark_passed"}
+DEFAULT_STATE_ROOT = Path("benchmark/arc_bench/batch_state")
+LATEST_STATE_POINTER = DEFAULT_STATE_ROOT / "latest_state.json"
+LEGACY_STATE_FILE = DEFAULT_STATE_ROOT / "ml_batch_state.json"
 
 
 @dataclass
@@ -129,8 +132,12 @@ def _add_path_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--state-file",
-        default="benchmark/arc_bench/batch_state/ml_batch_state.json",
-        help="JSON state file used for resume/retry bookkeeping.",
+        default=None,
+        help=(
+            "JSON state file used for resume/retry bookkeeping. "
+            "For 'run', omitting this creates a new timestamped state and marks it latest. "
+            "For 'retry-unfinished' and 'status', omitting this reads the latest state."
+        ),
     )
     parser.add_argument(
         "--log-root",
@@ -173,12 +180,22 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         default=0,
         help="Optional timeout in seconds for scoring; 0 means no runner-level timeout.",
     )
+    parser.add_argument(
+        "--llm-retry-attempts",
+        type=int,
+        default=0,
+        help="Override code-task --llm-retry-attempts for every execute call; 0 keeps each TOML default.",
+    )
 
 
 def _run_command(args: argparse.Namespace) -> int:
     ctx = _context_from_args(args)
-    state = _load_state(ctx.state_file)
     topics = _resolve_topics(args, ctx.prepared_root)
+    _remember_latest_state(ctx)
+    state = _load_state(ctx.state_file)
+    if not state:
+        _save_state(ctx.state_file, state)
+    _print(f"[state] {ctx.state_file}")
     exit_code = 0
 
     for topic in topics:
@@ -222,6 +239,7 @@ def _run_command(args: argparse.Namespace) -> int:
 def _retry_unfinished_command(args: argparse.Namespace) -> int:
     ctx = _context_from_args(args)
     state = _load_state(ctx.state_file)
+    _print(f"[state] {ctx.state_file}")
     candidate_topics = _resolve_topics(args, ctx.prepared_root)
     topics = [
         topic
@@ -298,8 +316,12 @@ def _status_command(args: argparse.Namespace) -> int:
     ctx = _context_from_args(args)
     state = _load_state(ctx.state_file)
     if not state:
-        _print(f"No state file found at {ctx.state_file}.")
+        if ctx.state_file.exists():
+            _print(f"State file has no topic entries: {ctx.state_file}.")
+        else:
+            _print(f"No state file found at {ctx.state_file}.")
         return 0
+    _print(f"[state] {ctx.state_file}")
     _print_summary(state, sorted(state))
     return 0
 
@@ -315,20 +337,23 @@ class RunnerContext:
     execute_timeout: int = 0
     finalize_timeout: int = 0
     score_timeout: int = 0
+    llm_retry_attempts: int = 0
 
 
 def _context_from_args(args: argparse.Namespace) -> RunnerContext:
     repo_root = Path(__file__).resolve().parents[2]
+    state_file = _resolve_state_file(repo_root, args)
     return RunnerContext(
         repo_root=repo_root,
         prepared_root=_abs(repo_root, args.prepared_root),
         runs_root=_abs(repo_root, args.runs_root),
         submissions_root=_abs(repo_root, args.submissions_root),
-        state_file=_abs(repo_root, args.state_file),
+        state_file=state_file,
         log_root=_abs(repo_root, args.log_root),
         execute_timeout=getattr(args, "execute_timeout", 0),
         finalize_timeout=getattr(args, "finalize_timeout", 0),
         score_timeout=getattr(args, "score_timeout", 0),
+        llm_retry_attempts=getattr(args, "llm_retry_attempts", 0),
     )
 
 
@@ -390,6 +415,8 @@ def _run_topic(
     ]
     if repair_rounds_override is not None and repair_rounds_override > 0:
         execute_cmd.extend(["--repair-rounds", str(repair_rounds_override)])
+    if ctx.llm_retry_attempts > 0:
+        execute_cmd.extend(["--llm-retry-attempts", str(ctx.llm_retry_attempts)])
     execute_cmd.append("--yes")
     execute_result = _run_logged(
         execute_cmd,
@@ -841,6 +868,72 @@ def _configured_repair_rounds(config_path: Path) -> int:
         return max(0, int(execute.get("repair_rounds", 0) or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _resolve_state_file(repo_root: Path, args: argparse.Namespace) -> Path:
+    raw_state_file = getattr(args, "state_file", None)
+    if raw_state_file:
+        if str(raw_state_file).strip().lower() == "latest":
+            return _latest_state_file(repo_root)
+        return _abs(repo_root, raw_state_file)
+
+    command = getattr(args, "command", "")
+    if command == "run":
+        return _new_batch_state_file(repo_root, args)
+    return _latest_state_file(repo_root)
+
+
+def _new_batch_state_file(repo_root: Path, args: argparse.Namespace) -> Path:
+    state_root = _abs(repo_root, DEFAULT_STATE_ROOT)
+    topic_label = _state_topic_label(args)
+    timestamp = _timestamp()
+    candidate = state_root / f"{timestamp}-{topic_label}.json"
+    suffix = 2
+    while candidate.exists():
+        candidate = state_root / f"{timestamp}-{topic_label}-{suffix}.json"
+        suffix += 1
+    return candidate
+
+
+def _state_topic_label(args: argparse.Namespace) -> str:
+    topics = getattr(args, "topics", None)
+    if topics:
+        label = "topics-" + "-".join(str(topic) for topic in topics[:4])
+        if len(topics) > 4:
+            label += f"-plus{len(topics) - 4}"
+    else:
+        label = str(getattr(args, "topic_set", "batch") or "batch")
+    return _safe_filename(label)
+
+
+def _safe_filename(value: str) -> str:
+    cleaned = "".join(char.lower() if char.isalnum() else "-" for char in value)
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned[:80] or "batch"
+
+
+def _latest_state_file(repo_root: Path) -> Path:
+    pointer_path = _abs(repo_root, LATEST_STATE_POINTER)
+    try:
+        data = json.loads(pointer_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        legacy_path = _abs(repo_root, LEGACY_STATE_FILE)
+        return legacy_path
+
+    state_file = data.get("state_file") if isinstance(data, dict) else None
+    if not isinstance(state_file, str) or not state_file.strip():
+        return _abs(repo_root, LEGACY_STATE_FILE)
+    return _abs(repo_root, state_file)
+
+
+def _remember_latest_state(ctx: RunnerContext) -> None:
+    pointer_path = _abs(ctx.repo_root, LATEST_STATE_POINTER)
+    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": _now(),
+        "state_file": _rel(ctx.repo_root, ctx.state_file),
+    }
+    pointer_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _load_state(path: Path) -> dict[str, TopicState]:

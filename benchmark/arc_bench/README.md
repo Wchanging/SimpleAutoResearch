@@ -70,6 +70,16 @@ uv run python benchmark/arc_bench/batch_runner.py run \
   --score
 ```
 
+Each `run` command creates a separate state file under
+`benchmark/arc_bench/batch_state/`, for example:
+
+```text
+benchmark/arc_bench/batch_state/20260627-153607-quick.json
+```
+
+`batch_state/latest_state.json` records the latest state file. This avoids
+mixing multiple benchmark batches while keeping retry commands short.
+
 Topic sets:
 
 ```bash
@@ -91,6 +101,8 @@ uv run python benchmark/arc_bench/batch_runner.py run \
 The batch runner only finalizes runs whose business status is
 `benchmark_passed`. If `--score` is added later and a topic already has a valid
 finalized submission, it fills in `judge/` without rerunning the experiment.
+For unstable server networks, add `--llm-retry-attempts 5` to override the
+prepared TOML retry budget for every `code-task execute` call.
 
 ## Retry
 
@@ -98,6 +110,18 @@ Fresh retry for unfinished topics:
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --topic-set quick \
+  --analyze \
+  --score \
+  --llm-retry-attempts 5
+```
+
+By default, `retry-unfinished` reads `latest_state.json`. To retry a specific
+older batch, pass its state file explicitly:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
+  --state-file benchmark/arc_bench/batch_state/20260627-153607-quick.json \
   --topic-set quick \
   --analyze \
   --score
@@ -122,6 +146,9 @@ Check state:
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py status
 ```
+
+`status` also reads the latest state by default. Use `--state-file <path>` or
+`--state-file latest` when you want to inspect a particular batch.
 
 ## Manual Single-Topic Flow
 

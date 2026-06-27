@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from simple_ar.integrations.llm import LLMClient, LLMError
 
@@ -19,6 +20,7 @@ def build_architecture_plan(
     client: LLMClient | None = None,
     allow_fallback: bool = False,
     retry_attempts: int = 1,
+    message_callback: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Build a bounded architecture/file plan for a greenfield experiment."""
 
@@ -42,6 +44,14 @@ def build_architecture_plan(
                 return normalize_architecture_plan(raw, contract=contract, resource_plan=resource_plan), "llm"
             except LLMError as exc:
                 last_error = exc
+                if attempt < retry_attempts:
+                    delay = _stage_retry_delay(attempt)
+                    _emit(
+                        message_callback,
+                        "Greenfield architecture planning failed "
+                        f"(attempt {attempt}/{retry_attempts}); retrying in {delay:.1f}s. {exc}",
+                    )
+                    time.sleep(delay)
     if client is not None and not allow_fallback:
         raise LLMError(
             "Greenfield architecture planning failed after "
@@ -550,6 +560,15 @@ def _retry_feedback(error: LLMError | None, attempt: int) -> str:
         f"The previous architecture attempt failed validation before attempt {attempt}: {error}. "
         "Return one strict JSON object only, with a concrete task-specific file plan and no Markdown fences."
     )
+
+
+def _stage_retry_delay(attempt: int) -> float:
+    return min(30.0, 2.0 * (2 ** max(0, attempt - 1)))
+
+
+def _emit(callback: Callable[[str], None] | None, message: str) -> None:
+    if callback is not None:
+        callback(message)
 
 
 def _ensure_public_api(files: list[dict[str, Any]]) -> list[dict[str, Any]]:

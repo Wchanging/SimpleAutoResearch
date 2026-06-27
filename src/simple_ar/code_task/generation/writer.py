@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from simple_ar.core.artifacts import write_text
 from simple_ar.integrations.llm import LLMClient, LLMError
@@ -25,6 +26,7 @@ def write_generated_project(
     files_per_batch: int = 4,
     retry_attempts: int = 2,
     allow_fallback: bool = False,
+    message_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Write a bounded generated project from a file plan."""
 
@@ -52,6 +54,7 @@ def write_generated_project(
             memory=memory,
             retry_attempts=retry_attempts,
             allow_fallback=allow_fallback,
+            message_callback=message_callback,
             client=client,
         )
         line_count = max(1, len(content.splitlines()))
@@ -173,12 +176,14 @@ def _file_content(
     memory: Mapping[str, Any],
     retry_attempts: int,
     allow_fallback: bool,
+    message_callback: Callable[[str], None] | None,
     client: LLMClient | None,
 ) -> tuple[str, str, str]:
     path = _safe_path(str(file_spec.get("path", "")))
     if client is not None:
         feedback = ""
-        for attempt in range(max(2, int(retry_attempts or 2))):
+        attempts = max(2, int(retry_attempts or 2))
+        for attempt in range(1, attempts + 1):
             try:
                 response = client.ask_json(
                     GREENFIELD_FILE_SYSTEM,
@@ -192,10 +197,18 @@ def _file_content(
                         implementation_memory=memory,
                         retry_feedback=feedback,
                     ),
-                    label=f"greenfield-file-{path}" if attempt == 0 else f"greenfield-file-retry-{path}",
+                    label=f"greenfield-file-{path}" if attempt == 1 else f"greenfield-file-retry-{path}",
                 )
             except LLMError as exc:
                 feedback = f"The previous request failed validation: {exc}. Return smaller, complete Python."
+                if attempt < attempts:
+                    delay = _stage_retry_delay(attempt)
+                    _emit(
+                        message_callback,
+                        f"File generation for `{path}` failed "
+                        f"(attempt {attempt}/{attempts}); retrying in {delay:.1f}s. {exc}",
+                    )
+                    time.sleep(delay)
                 continue
             content = str(response.get("content", "")).strip()
             summary = str(response.get("summary", "")).strip() or str(file_spec.get("purpose", ""))
@@ -210,7 +223,7 @@ def _file_content(
             )
         if not allow_fallback:
             raise LLMError(
-                f"LLM file generation failed for `{path}` after {max(2, int(retry_attempts or 2))} attempt(s); "
+                f"LLM file generation failed for `{path}` after {attempts} attempt(s); "
                 "fallback is disabled for real greenfield runs."
             )
     elif not allow_fallback:
@@ -356,6 +369,15 @@ def _is_valid_file_content(value: str, *, filename: str) -> bool:
         except json.JSONDecodeError:
             return False
     return bool(value.strip())
+
+
+def _stage_retry_delay(attempt: int) -> float:
+    return min(30.0, 2.0 * (2 ** max(0, attempt - 1)))
+
+
+def _emit(callback: Callable[[str], None] | None, message: str) -> None:
+    if callback is not None:
+        callback(message)
 
 
 def _repair_common_generation_error(path: str, value: str) -> str:

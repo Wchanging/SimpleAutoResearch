@@ -4,7 +4,38 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-27
+
+### Changed
+
+- Code-task 的 LLM 规划与生成现在有更强的阶段级重试能力。Greenfield 架构规划和逐文件生成会在阶段级失败后做有界指数退避，并在终端输出 retry 进度；底层 LiteLLM provider 仍负责单次请求内部的连接中断、超时、限流和 5xx 重试。
+- Code-task 默认阶段级 `llm_retry_attempts` 调整为 3。ARC-Bench prepared 配置默认写入 4，批跑器也可以通过 `--llm-retry-attempts N` 在运行时覆盖，避免服务器网络短暂断连时批量任务集体倒在 architecture planning。
+- Greenfield code-task 生成不再在真实 LLM run 中静默混入 deterministic scaffold。架构规划和逐文件生成都会先做有限 LLM 重试；如果模型或客户端仍失败，默认直接停止，只有关闭 LLM 或显式设置 `[execute].allow_planning_fallback = true` 时才允许 deterministic fallback。
+- 新增通用 greenfield task contract 抽取。系统会从 `task.md` 中提取显式要求、交付物、约束、数据要求、依赖提示和指标期望，并把这份契约贯穿到架构规划、逐文件生成、implementation memory、review 和 repair prompt。
+- 逐文件 greenfield 生成现在会收到 dependency advice 和紧凑 implementation memory，包括已生成文件摘要和 public API。这样每个文件 writer 都能看到全局项目连续性，而不是只靠当前文件 spec 猜跨文件 schema。
+- Greenfield architecture prompt 现在会明确要求先定义共享 record/result schema 和 artifact flow，再分配到各个模块，减少 data、processing、runner、analysis、reporting、validation 之间的 schema 漂移。
+
+### Fixed
+
+- Generated-project review 现在会阻断常见的“空心成功”模式，例如把缺失 required metrics 填成 `0.0`、返回 placeholder records，或在需要真实测量输出的任务里保留 stub execution path。
+- Review repair prompt 现在会明确要求修复实现路径本身，不能用只改文档、默认指标值或空记录来掩盖实现缺失。
+
+## 2026-06-26
+
+### Changed
+
+- Code-task repair 现在会在多次 `execute` / repair 之间保留连续性。系统会从 task memory 和已有 repair artifacts 收集最近 repair context，并注入 runtime repair planning 与逐文件 repair prompt，让模型知道之前已经尝试过什么。
+- Runtime repair prompt 现在会要求模型在同一个错误经历过上一轮修复后仍然存在时，先说明上一轮修复为什么不足，再选择目标文件和策略，减少反复修改同一处但没有解决根因的情况。
+
+### Fixed
+
+- Generated-project runtime repair 现在会在 previous repair context 显示同类失败信号反复出现时，跳过重复的 deterministic quick patch，让 bounded LLM repair 去检查更广的 producer/consumer 契约，而不是继续围绕单个属性或入口文件猜测。
+
 ## 2026-06-25
+
+### Added
+
+- 新增通用 result-analysis 层：`src/simple_ar/result_analysis/`。它可以规范化 run/submission result bundle，汇总指标和问题，并调用配置的 LLM 生成结构化分析产物，供后续 benchmark adapter 或报告入口复用。
 
 ### Changed
 

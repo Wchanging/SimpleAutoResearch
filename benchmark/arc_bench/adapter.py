@@ -41,6 +41,7 @@ class PrepareOptions:
     benchmark_command: str
     timeout_sec: int = 1800
     repair_rounds: int = 5
+    llm_retry_attempts: int = 4
     max_files: int = 48
     max_generated_lines: int = 6000
     budget_profile: str = "large"
@@ -66,6 +67,7 @@ def main() -> int:
     prepare.add_argument("--benchmark-command")
     prepare.add_argument("--timeout-sec", type=int)
     prepare.add_argument("--repair-rounds", type=int)
+    prepare.add_argument("--llm-retry-attempts", type=int)
     prepare.add_argument("--max-files", type=int)
     prepare.add_argument("--max-generated-lines", type=int)
     prepare.add_argument("--budget-profile")
@@ -83,6 +85,7 @@ def main() -> int:
     prepare_ml.add_argument("--benchmark-command")
     prepare_ml.add_argument("--timeout-sec", type=int)
     prepare_ml.add_argument("--repair-rounds", type=int)
+    prepare_ml.add_argument("--llm-retry-attempts", type=int)
     prepare_ml.add_argument("--max-files", type=int)
     prepare_ml.add_argument("--max-generated-lines", type=int)
     prepare_ml.add_argument("--budget-profile")
@@ -240,6 +243,7 @@ def build_prepare_options(args: argparse.Namespace, cfg: dict[str, Any]) -> Prep
         benchmark_command=benchmark_command,
         timeout_sec=int(value_from(args, cfg, "prepare", "timeout_sec", 1800)),
         repair_rounds=int(value_from(args, cfg, "prepare", "repair_rounds", 5)),
+        llm_retry_attempts=int(value_from(args, cfg, "prepare", "llm_retry_attempts", 4)),
         max_files=int(value_from(args, cfg, "prepare", "max_files", 48)),
         max_generated_lines=int(value_from(args, cfg, "prepare", "max_generated_lines", 6000)),
         budget_profile=str(value_from(args, cfg, "prepare", "budget_profile", "large")),
@@ -324,6 +328,9 @@ def build_batch_prepare_options(
         benchmark_command=benchmark_command,
         timeout_sec=int(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "timeout_sec", 1800)),
         repair_rounds=int(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "repair_rounds", 5)),
+        llm_retry_attempts=int(
+            multi_section_value(args, cfg, ("prepare_ml", "prepare"), "llm_retry_attempts", 4)
+        ),
         max_files=int(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "max_files", 48)),
         max_generated_lines=int(
             multi_section_value(args, cfg, ("prepare_ml", "prepare"), "max_generated_lines", 6000)
@@ -600,7 +607,7 @@ def render_code_task_toml(
             f"timeout_sec = {options.timeout_sec}",
             'stream_benchmark_output = "auto"',
             'baseline_policy = "none"',
-            "llm_retry_attempts = 2",
+            f"llm_retry_attempts = {max(1, options.llm_retry_attempts)}",
             f"repair_rounds = {options.repair_rounds}",
             f"max_files = {options.max_files}",
             "max_source_chars_per_file = 12000",
