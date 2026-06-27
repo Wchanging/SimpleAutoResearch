@@ -75,6 +75,7 @@ def generate_greenfield_code_task(
     implementation_agent_timeout_sec: int = 600,
     allow_planning_fallback: bool = False,
     llm_retry_attempts: int = 1,
+    planning_mode: str = "tool_agent",
     message_callback: MessageCallback | None = None,
 ) -> GreenfieldCodeTaskResult:
     """Generate a greenfield project inside a code-task workspace.
@@ -123,6 +124,7 @@ def generate_greenfield_code_task(
         message_callback=message_callback,
     )
     _emit(message_callback, "Planning greenfield project architecture.")
+    planning_dir = paths.meta_dir / "planning"
     architecture, architecture_mode = build_architecture_plan(
         contract=contract,
         result_schema=result_schema,
@@ -131,6 +133,8 @@ def generate_greenfield_code_task(
         client=client,
         allow_fallback=allow_planning_fallback or not use_llm,
         retry_attempts=llm_retry_attempts,
+        planning_mode=planning_mode,
+        planning_dir=planning_dir,
         message_callback=message_callback,
     )
     implementation_plan_path = paths.meta_dir / "implementation_plan.json"
@@ -146,6 +150,8 @@ def generate_greenfield_code_task(
             "agent_mode": implementation_agent_mode or "",
             "project_dir": "code_task/workspace/generated_project",
             "entrypoint": _benchmark_command(manifest),
+            "planning_mode": planning_mode,
+            "planning_dir": "code_task/meta/planning",
             "resource_plan": resource_plan,
             "dependency_plan": dependency_plan,
             "dependency_advice": "code_task/meta/dependency_advice.json",

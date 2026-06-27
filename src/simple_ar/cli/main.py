@@ -1263,6 +1263,7 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
     env_mode = args.env_mode or options.env_mode
     python_executable = args.python_executable or options.python_executable
     allow_planning_fallback = args.allow_planning_fallback or options.allow_planning_fallback
+    planning_mode = args.planning_mode or options.planning_mode
     llm_retry_attempts = args.llm_retry_attempts or options.llm_retry_attempts
     baseline_policy = args.baseline_policy or options.baseline_policy
     baseline_metrics_file = args.baseline_metrics_file or options.baseline_metrics_file
@@ -1308,6 +1309,7 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
                 or inline_allow_large_edits
             ),
             allow_planning_fallback=allow_planning_fallback,
+            planning_mode=planning_mode,
             llm_retry_attempts=llm_retry_attempts,
             repair_rounds=repair_rounds,
             budget_profile=options.budget_profile,

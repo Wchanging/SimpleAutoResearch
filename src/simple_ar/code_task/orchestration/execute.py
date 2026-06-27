@@ -133,6 +133,7 @@ def execute_code_task(
     apply_proposed_edits: bool = False,
     allow_large_edits: bool = False,
     allow_planning_fallback: bool = False,
+    planning_mode: str = "tool_agent",
     llm_retry_attempts: int = 1,
     repair_rounds: int = 0,
     budget_profile: str | None = None,
@@ -190,6 +191,10 @@ def execute_code_task(
             and greenfield fallbacks after LLM attempts fail. By default, LLM
             failures stop the run without writing fallback plans so the same
             execute command can retry cleanly.
+        planning_mode: Greenfield planning mode. ``tool_agent`` decomposes
+            planning into requirements/architecture/interfaces/file-plan tools
+            with bounded review revision; ``compact`` keeps the older single
+            architecture call for compatibility.
         llm_retry_attempts: Number of stage-level attempts for LLM-backed work
             planning, patch planning, greenfield architecture/file generation,
             and repair before stopping or explicitly falling back.
@@ -247,6 +252,7 @@ def execute_code_task(
             max_source_chars_per_file=max_source_chars_per_file,
             max_generated_lines=max_generated_lines,
             allow_planning_fallback=allow_planning_fallback,
+            planning_mode=planning_mode,
             llm_retry_attempts=llm_retry_attempts,
             repair_rounds=repair_rounds,
             implementation_provider=implementation_provider,
@@ -835,6 +841,7 @@ def _execute_greenfield_code_task(
     max_source_chars_per_file: int,
     max_generated_lines: int,
     allow_planning_fallback: bool,
+    planning_mode: str,
     llm_retry_attempts: int,
     repair_rounds: int,
     implementation_provider: str,
@@ -903,6 +910,7 @@ def _execute_greenfield_code_task(
                 max_generated_lines=max_generated_lines,
                 max_source_chars_per_file=max_source_chars_per_file,
                 allow_planning_fallback=allow_planning_fallback,
+                planning_mode=planning_mode,
                 llm_retry_attempts=llm_retry_attempts,
                 implementation_provider=implementation_provider,
                 implementation_agent_mode=implementation_agent_mode,

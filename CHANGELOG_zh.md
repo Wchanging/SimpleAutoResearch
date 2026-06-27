@@ -10,7 +10,9 @@
 
 - Code-task 的 LLM 规划与生成现在有更强的阶段级重试能力。Greenfield 架构规划和逐文件生成会在阶段级失败后做有界指数退避，并在终端输出 retry 进度；底层 LiteLLM provider 仍负责单次请求内部的连接中断、超时、限流和 5xx 重试。
 - Code-task 默认阶段级 `llm_retry_attempts` 调整为 3。ARC-Bench prepared 配置默认写入 4，批跑器也可以通过 `--llm-retry-attempts N` 在运行时覆盖，避免服务器网络短暂断连时批量任务集体倒在 architecture planning。
+- 新增 greenfield tool-agent 规划模式。默认架构规划会拆成 requirements、architecture、interfaces、file plan 和 planning review，并把中间产物写入 `code_task/meta/planning/`；只有调试旧路径时才需要设置 `[execute].planning_mode = "compact"` 或 `--planning-mode compact`。
 - Greenfield architecture 和逐文件生成 prompt 现在使用压缩后的 task contract 视图，不再每次把完整 `task.md` 原文塞进请求。完整任务文本仍保存在 artifact 中用于审计；模型侧只接收目标、有限 task excerpt、显式需求、交付物、约束、依赖提示和指标契约，降低大型任务首轮 planning 的 token 与等待时间。
+- Greenfield architecture planning 现在使用更小的单次输出预算和更严格的 architecture 专用 contract view，降低首个 planning 请求被慢 provider 或 HTTP proxy 截断的概率；后续逐文件生成仍可使用较大的正常输出预算。
 - Greenfield code-task 生成不再在真实 LLM run 中静默混入 deterministic scaffold。架构规划和逐文件生成都会先做有限 LLM 重试；如果模型或客户端仍失败，默认直接停止，只有关闭 LLM 或显式设置 `[execute].allow_planning_fallback = true` 时才允许 deterministic fallback。
 - 新增通用 greenfield task contract 抽取。系统会从 `task.md` 中提取显式要求、交付物、约束、数据要求、依赖提示和指标期望，并把这份契约贯穿到架构规划、逐文件生成、implementation memory、review 和 repair prompt。
 - 逐文件 greenfield 生成现在会收到 dependency advice 和紧凑 implementation memory，包括已生成文件摘要和 public API。这样每个文件 writer 都能看到全局项目连续性，而不是只靠当前文件 spec 猜跨文件 schema。

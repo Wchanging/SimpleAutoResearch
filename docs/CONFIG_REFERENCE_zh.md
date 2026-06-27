@@ -360,6 +360,11 @@ allow_large_edits = false
 # execute 会停止并允许你重跑同一条命令，而不是静默写入 deterministic fallback plan。
 allow_planning_fallback = false
 
+# Greenfield planning mode:
+# - tool_agent: requirements -> architecture -> interfaces -> file plan -> review
+# - compact: old single-call architecture planner
+planning_mode = "tool_agent"
+
 # work-plan / patch-plan 的 LLM 重试次数；全部失败后才停止或显式 fallback。
 llm_retry_attempts = 3
 
@@ -594,6 +599,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[execute].apply_proposed_edits` | 允许 execute 应用已经审核过的 proposal。review-first 流程建议保持 false。 |
 | `[execute].allow_large_edits` | 允许应用超过 normal 预算但落在 large 预算内的已审核 proposal。 |
 | `[execute].allow_planning_fallback` | LLM work-plan / patch-plan / greenfield 架构规划 / greenfield 文件生成重试后仍失败时，是否允许 deterministic fallback。真实 LLM run 建议保持 false，这样坏输出会安全停止并可重跑。 |
+| `[execute].planning_mode` | Greenfield 架构规划模式。`tool_agent` 会拆成 requirements、architecture、interfaces、file plan 和 reviewer-directed bounded revision；`compact` 保留旧的单次架构规划调用，主要用于兼容和调试。 |
 | `[execute].llm_retry_attempts` | work-plan、patch-plan、greenfield 架构规划和 greenfield 文件生成的 LLM 尝试次数；全部失败后才停止或显式 fallback。 |
 | `[execute].repair_rounds` | validation/benchmark 失败后最多生成几轮 bounded repair proposal；repair 仍需审核。 |
 | `[execute].max_files` | plan/proposal/repair 步骤纳入 LLM 上下文的最大文件数。 |
@@ -785,6 +791,7 @@ baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
+planning_mode = "tool_agent"
 llm_retry_attempts = 3
 max_files = 8
 max_source_chars_per_file = 4000

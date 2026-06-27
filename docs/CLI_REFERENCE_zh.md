@@ -387,6 +387,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--timeout N` | int | benchmark timeout。 |
 | `--baseline-policy MODE` | enum | 已有项目 baseline 策略：`auto`、`run`、`skip`、`provided` 或 `none`。昂贵 baseline 可用 `skip`/`none` 跳过，或用 `provided` 记录已有指标。 |
 | `--baseline-metrics-file PATH` | path | `--baseline-policy provided` 时读取的 JSON 或 `metric=0.82` 文本指标文件。 |
+| `--planning-mode MODE` | enum | Greenfield 规划模式：`tool_agent` 会拆分规划并做有限 review 修订；`compact` 使用旧的单次架构规划。 |
 | `--yes` | flag | 普通 execute 模式下自动批准 inline 审核门；与 `--interactive` 一起使用时，自动继续 primitive prompts。只有明确接受审核风险、想自动化跑通时才使用。 |
 | `--interactive` | flag | 调试模式：逐个 primitive step 确认，而不是连续运行到下一个审核门。 |
 | `--no-review-inline` | flag | 禁用 inline 审核提示，在审核门直接停止。 |
@@ -446,6 +447,11 @@ provider-specific CLI 参数。
 `code_task/meta/dependency_advice.json` 和 `.md`。JSON 会记录当前 Python 环境的
 完整 installed distributions snapshot；终端输出和模型上下文只使用紧凑的任务相关子集。
 这只是建议，不会自动安装依赖。
+
+Greenfield 默认使用 `tool_agent` planning，会把 requirements、architecture、
+interfaces、file plan 和 planning review 的中间产物写到
+`code_task/meta/planning/`。只有排查旧单次规划路径时才建议使用
+`--planning-mode compact`。
 
 如果 greenfield review 发现通用可修复的 blocking finding，有限 repair 轮次可以只重写
 受影响的 generated files，并在继续 review/validation 前同步

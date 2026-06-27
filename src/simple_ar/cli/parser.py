@@ -477,6 +477,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     code_task_execute.add_argument(
+        "--planning-mode",
+        choices=("tool_agent", "compact"),
+        default=None,
+        help="Greenfield planning mode: tool_agent decomposes planning; compact uses the older single architecture call.",
+    )
+    code_task_execute.add_argument(
         "--llm-retry-attempts",
         type=int,
         default=None,

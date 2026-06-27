@@ -419,6 +419,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--timeout N` | int | Benchmark timeout. |
 | `--baseline-policy MODE` | enum | Existing-project baseline handling: `auto`, `run`, `skip`, `provided`, or `none`. Use `skip`/`none` for expensive baselines, or `provided` with a metrics file. |
 | `--baseline-metrics-file PATH` | path | JSON or metric-line file used when `--baseline-policy provided`. |
+| `--planning-mode MODE` | enum | Greenfield planning mode: `tool_agent` decomposes planning with reviewer-directed bounded revision; `compact` uses the older single-call architecture planner. |
 | `--yes` | flag | Auto-approve inline review gates in normal execute mode; with `--interactive`, auto-continue primitive prompts. Use only after you are comfortable approving the reviewed plan/proposal. |
 | `--interactive` | flag | Debug mode: confirm each primitive step instead of running continuously to the next review gate. |
 | `--no-review-inline` | flag | Disable inline review prompts and stop at review gates instead. |
@@ -483,6 +484,11 @@ For greenfield tasks, `execute` also writes
 planning. The JSON contains a full scan of installed Python distributions; the
 terminal output and model context use the compact task-relevant subset. This is
 advice-only and never installs packages automatically.
+
+Greenfield planning defaults to `tool_agent`, which writes intermediate
+requirements, architecture, interface, file-plan, and planning-review artifacts
+under `code_task/meta/planning/`. Use `--planning-mode compact` only when
+debugging the older single-call planner.
 
 If greenfield review fails with generic recoverable findings, bounded repair
 rounds may regenerate only the affected generated files and resync

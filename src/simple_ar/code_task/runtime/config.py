@@ -106,6 +106,7 @@ class ExecuteSection(_ConfigModel):
     apply_proposed_edits: bool | None = None
     allow_large_edits: bool | None = None
     allow_planning_fallback: bool | None = None
+    planning_mode: str | None = None
     llm_retry_attempts: int | None = None
     repair_rounds: int | None = None
     budget_profile: str | None = None
@@ -234,6 +235,7 @@ class CodeTaskExecuteOptions:
     apply_proposed_edits: bool
     allow_large_edits: bool
     allow_planning_fallback: bool
+    planning_mode: str
     llm_retry_attempts: int
     repair_rounds: int
     budget_profile: str | None
@@ -374,6 +376,7 @@ def load_code_task_execute_options(
             value=execute.allow_planning_fallback,
             default=False,
         ),
+        planning_mode=_planning_mode(execute.planning_mode),
         llm_retry_attempts=_positive_int(_config_int(execute.llm_retry_attempts), 3),
         repair_rounds=_non_negative_int(_config_int(execute.repair_rounds), 0),
         budget_profile=budget_profile,
@@ -707,6 +710,26 @@ def _baseline_policy(value: str | None) -> str:
             "Unsupported [execute].baseline_policy. Expected one of: "
             "auto, none, provided, run, skip."
         ) from exc
+
+
+def _planning_mode(value: str | None) -> str:
+    text = (_config_string(value) or "tool_agent").lower().replace("-", "_")
+    aliases = {
+        "tool": "tool_agent",
+        "tools": "tool_agent",
+        "tool_agent": "tool_agent",
+        "agent_tools": "tool_agent",
+        "compact": "compact",
+        "single": "compact",
+        "single_call": "compact",
+        "legacy": "compact",
+    }
+    normalized = aliases.get(text)
+    if normalized is None:
+        raise CodeTaskConfigError(
+            "Unsupported [execute].planning_mode. Expected `tool_agent` or `compact`."
+        )
+    return normalized
 
 
 def _resolve_string_list(

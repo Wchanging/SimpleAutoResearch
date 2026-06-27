@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Callable, Mapping
 
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.code_task.generation.task_contract import contract_prompt_view
+from simple_ar.code_task.generation.planning_tools import build_tool_agent_architecture_plan
 
 
 GREENFIELD_TEMPLATE = "greenfield_project"
@@ -21,38 +23,68 @@ def build_architecture_plan(
     client: LLMClient | None = None,
     allow_fallback: bool = False,
     retry_attempts: int = 1,
+    planning_mode: str = "tool_agent",
+    planning_dir: Path | None = None,
+    planning_review_rounds: int = 2,
     message_callback: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Build a bounded architecture/file plan for a greenfield experiment."""
 
     retry_attempts = max(1, int(retry_attempts or 1))
     last_error: LLMError | None = None
+    mode = _normalize_planning_mode(planning_mode)
     if client is not None:
-        for attempt in range(1, retry_attempts + 1):
+        if mode == "tool_agent":
             try:
-                prompt = greenfield_architecture_prompt(
+                raw = build_tool_agent_architecture_plan(
                     contract=contract,
                     result_schema=result_schema,
                     resource_plan=resource_plan,
                     domain_profile=domain_profile,
-                    retry_feedback=_retry_feedback(last_error, attempt),
+                    client=client,
+                    retry_attempts=retry_attempts,
+                    review_rounds=planning_review_rounds,
+                    planning_dir=planning_dir,
+                    message_callback=message_callback,
                 )
-                raw = client.ask_json(
-                    GREENFIELD_ARCHITECT_SYSTEM,
-                    prompt,
-                    label="greenfield-architecture" if attempt == 1 else f"greenfield-architecture-retry-{attempt}",
-                )
-                return normalize_architecture_plan(raw, contract=contract, resource_plan=resource_plan), "llm"
             except LLMError as exc:
                 last_error = exc
-                if attempt < retry_attempts:
-                    delay = _stage_retry_delay(attempt)
-                    _emit(
-                        message_callback,
-                        "Greenfield architecture planning failed "
-                        f"(attempt {attempt}/{retry_attempts}); retrying in {delay:.1f}s. {exc}",
+                _emit(message_callback, f"Greenfield tool-agent planning failed. {exc}")
+            else:
+                return normalize_architecture_plan(raw, contract=contract, resource_plan=resource_plan), "tool_agent"
+        elif mode == "compact":
+            for attempt in range(1, retry_attempts + 1):
+                try:
+                    prompt = greenfield_architecture_prompt(
+                        contract=contract,
+                        result_schema=result_schema,
+                        resource_plan=resource_plan,
+                        domain_profile=domain_profile,
+                        retry_feedback=_retry_feedback(last_error, attempt),
                     )
-                    time.sleep(delay)
+                    raw = client.ask_json(
+                        GREENFIELD_ARCHITECT_SYSTEM,
+                        prompt,
+                        label="greenfield-architecture" if attempt == 1 else f"greenfield-architecture-retry-{attempt}",
+                        max_output_tokens=_architecture_output_tokens(resource_plan),
+                    )
+                    return normalize_architecture_plan(raw, contract=contract, resource_plan=resource_plan), "compact"
+                except LLMError as exc:
+                    last_error = exc
+                    if attempt < retry_attempts:
+                        delay = _stage_retry_delay(attempt)
+                        _emit(
+                            message_callback,
+                            "Greenfield architecture planning failed "
+                            f"(attempt {attempt}/{retry_attempts}); retrying in {delay:.1f}s. {exc}",
+                        )
+                        time.sleep(delay)
+                    else:
+                        _emit(
+                            message_callback,
+                            "Greenfield architecture planning failed "
+                            f"(attempt {attempt}/{retry_attempts}); no retries left. {exc}",
+                        )
     if client is not None and not allow_fallback:
         raise LLMError(
             "Greenfield architecture planning failed after "
@@ -70,6 +102,23 @@ def build_architecture_plan(
         resource_plan=resource_plan,
         domain_profile=domain_profile,
     ), "fallback"
+
+
+def _normalize_planning_mode(value: object) -> str:
+    text = str(value or "tool_agent").strip().lower().replace("-", "_")
+    aliases = {
+        "tools": "tool_agent",
+        "tool": "tool_agent",
+        "tool_agent": "tool_agent",
+        "agent_tools": "tool_agent",
+        "compact": "compact",
+        "single": "compact",
+        "single_call": "compact",
+        "legacy": "compact",
+    }
+    if text not in aliases:
+        raise ValueError("[execute].planning_mode must be `tool_agent` or `compact`")
+    return aliases[text]
 
 
 def normalize_architecture_plan(
@@ -255,7 +304,7 @@ def greenfield_architecture_prompt(
         "- Make `main.py` a thin CLI wrapper when possible; put reusable logic in "
         "purpose-specific modules and call them from the orchestrator.\n"
         "- Avoid heavyweight dependencies, network access, and GPU use unless explicitly allowed.\n\n"
-        f"Experiment contract JSON:\n{json.dumps(contract_prompt_view(contract), indent=2, ensure_ascii=False)}\n\n"
+        f"Experiment contract JSON:\n{json.dumps(_architecture_contract_view(contract), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema JSON:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Resource plan JSON:\n{json.dumps(dict(resource_plan), indent=2, ensure_ascii=False)}\n\n"
         f"Domain profile JSON:\n{json.dumps(dict(domain_profile), indent=2, ensure_ascii=False)}\n"
@@ -565,6 +614,24 @@ def _retry_feedback(error: LLMError | None, attempt: int) -> str:
 
 def _stage_retry_delay(attempt: int) -> float:
     return min(30.0, 2.0 * (2 ** max(0, attempt - 1)))
+
+
+def _architecture_output_tokens(resource_plan: Mapping[str, Any]) -> int:
+    max_files = _positive_int(resource_plan.get("max_files"), 8)
+    if max_files >= 24:
+        return 2200
+    if max_files >= 12:
+        return 1800
+    return 1400
+
+
+def _architecture_contract_view(contract: Mapping[str, Any]) -> dict[str, Any]:
+    return contract_prompt_view(
+        contract,
+        max_task_chars=1400,
+        max_requirements=32,
+        max_success_criteria=20,
+    )
 
 
 def _emit(callback: Callable[[str], None] | None, message: str) -> None:

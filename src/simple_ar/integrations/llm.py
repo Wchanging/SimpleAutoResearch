@@ -169,13 +169,22 @@ class LLMClient:
         )
         return cls(settings, usage_callback=usage_callback)
 
-    def ask(self, system: str, user: str, *, label: str = "") -> str:
+    def ask(
+        self,
+        system: str,
+        user: str,
+        *,
+        label: str = "",
+        max_output_tokens: int | None = None,
+    ) -> str:
         """Send one text request to the model.
 
         Args:
             system: System instruction.
             user: User prompt.
             label: Optional label used in usage records.
+            max_output_tokens: Optional per-request output cap. When omitted,
+                the client-wide ``SIMPLE_AR_MAX_OUTPUT_TOKENS`` setting is used.
 
         Returns:
             Model output with surrounding whitespace removed.
@@ -195,8 +204,9 @@ class LLMClient:
         if self._settings.base_url:
             request["api_base"] = self._settings.base_url
             request["base_url"] = self._settings.base_url
-        if self._settings.max_output_tokens is not None:
-            request["max_tokens"] = self._settings.max_output_tokens
+        output_cap = max_output_tokens if max_output_tokens is not None else self._settings.max_output_tokens
+        if output_cap is not None:
+            request["max_tokens"] = max(1, int(output_cap))
         response = self._completion_with_retry(request)
 
         output = _content_from_response(response).strip()
@@ -221,13 +231,22 @@ class LLMClient:
             raise LLMError(f"LLM request timed out after {attempted} attempt(s): {last_error}") from last_error
         raise LLMError(f"LLM request failed after {attempted} attempt(s): {last_error}") from last_error
 
-    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, Any]:
+    def ask_json(
+        self,
+        system: str,
+        user: str,
+        *,
+        label: str = "",
+        max_output_tokens: int | None = None,
+    ) -> dict[str, Any]:
         """Send one request and parse the response as a JSON object.
 
         Args:
             system: System instruction.
             user: User prompt. A JSON-only instruction is appended internally.
             label: Optional label used in usage records.
+            max_output_tokens: Optional per-request output cap. When omitted,
+                the client-wide ``SIMPLE_AR_MAX_OUTPUT_TOKENS`` setting is used.
 
         Returns:
             Parsed JSON object.
@@ -240,6 +259,7 @@ class LLMClient:
             user
             + "\n\nReturn valid JSON only. Do not include markdown or extra text.",
             label=label,
+            max_output_tokens=max_output_tokens,
         )
         parsed = parse_json_object(raw)
         if parsed is None:

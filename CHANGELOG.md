@@ -6,6 +6,15 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-06-27
 
+### Added
+
+- Added a tool-agent greenfield planning mode for code-task generation. The
+  default planner now decomposes architecture planning into requirements,
+  architecture, interface contracts, file plan, and a bounded planning-review
+  loop, with intermediate artifacts written under `code_task/meta/planning/`.
+  Use `[execute].planning_mode = "compact"` or `--planning-mode compact` only
+  when debugging the older single-call planner.
+
 ### Changed
 
 - Greenfield code-task generation no longer silently mixes deterministic
@@ -31,6 +40,10 @@ This file records user-visible project changes in reverse chronological order. P
   task remains in artifacts for auditability, while the model receives the
   objective, bounded task excerpt, explicit requirements, deliverables,
   constraints, dependency hints, and metric contract needed for implementation.
+- Greenfield architecture planning now uses a smaller per-request output budget
+  and a stricter architecture-specific contract view. This makes the first
+  planning call less likely to be cut off by slow providers or HTTP proxies,
+  while file generation can still use the normal larger output budget.
 - Code-task LLM planning now has stronger stage-level retry behavior for real
   runs. Greenfield architecture planning and per-file generation wait with
   bounded exponential backoff between stage attempts and print retry progress,
