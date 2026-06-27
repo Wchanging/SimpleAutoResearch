@@ -62,6 +62,9 @@ def generate_greenfield_code_task(
     run_dir: Path,
     *,
     model: str | None = None,
+    planner_model: str | None = None,
+    writer_model: str | None = None,
+    reviewer_model: str | None = None,
     use_llm: bool = True,
     max_files: int = 8,
     max_generated_lines: int = 1600,
@@ -116,9 +119,23 @@ def generate_greenfield_code_task(
     for message in dependency_advice_messages(dependency_advice):
         _emit(message_callback, message)
 
-    client = _llm_client(
+    planner_client = _llm_client(
         paths.meta_dir,
-        model=model,
+        model=planner_model or model,
+        use_llm=use_llm,
+        allow_fallback=allow_planning_fallback,
+        message_callback=message_callback,
+    )
+    writer_client = _llm_client(
+        paths.meta_dir,
+        model=writer_model or model,
+        use_llm=use_llm,
+        allow_fallback=allow_planning_fallback,
+        message_callback=message_callback,
+    )
+    reviewer_client = _llm_client(
+        paths.meta_dir,
+        model=reviewer_model or model,
         use_llm=use_llm,
         allow_fallback=allow_planning_fallback,
         message_callback=message_callback,
@@ -130,7 +147,7 @@ def generate_greenfield_code_task(
         result_schema=result_schema,
         resource_plan=resource_plan,
         domain_profile=domain_profile,
-        client=client,
+        client=planner_client,
         allow_fallback=allow_planning_fallback or not use_llm,
         retry_attempts=llm_retry_attempts,
         planning_mode=planning_mode,
@@ -152,6 +169,12 @@ def generate_greenfield_code_task(
             "entrypoint": _benchmark_command(manifest),
             "planning_mode": planning_mode,
             "planning_dir": "code_task/meta/planning",
+            "models": {
+                "default": model or "",
+                "planner": planner_model or "",
+                "writer": writer_model or "",
+                "reviewer": reviewer_model or "",
+            },
             "resource_plan": resource_plan,
             "dependency_plan": dependency_plan,
             "dependency_advice": "code_task/meta/dependency_advice.json",
@@ -180,7 +203,7 @@ def generate_greenfield_code_task(
             result_schema=result_schema,
             architecture=architecture,
             memory=memory,
-            client=client,
+            client=writer_client,
             timeout_sec=implementation_agent_timeout_sec,
             external_enabled=implementation_allow_external_agent,
             agent_model=implementation_agent_model,
@@ -196,7 +219,7 @@ def generate_greenfield_code_task(
             contract=contract,
             memory=memory,
             dependency_advice=dependency_advice,
-            client=client,
+            client=writer_client,
             max_generated_lines=max_generated_lines,
             files_per_batch=4,
             retry_attempts=llm_retry_attempts,
@@ -235,7 +258,7 @@ def generate_greenfield_code_task(
         dependency_advice=dependency_advice,
         implementation_memory=memory,
         architecture_plan=architecture,
-        client=client,
+        client=reviewer_client,
         meta_dir=paths.meta_dir,
     )
     review_report_path = paths.meta_dir / "review_report.json"

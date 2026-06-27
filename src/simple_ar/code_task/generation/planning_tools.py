@@ -235,16 +235,18 @@ def _stage_prompt(
     if stage == "requirements":
         return (
             "Tool: requirements_brief.\n"
-            "Extract the task into implementation-ready requirements. Return one strict JSON object with fields:\n"
+            "Extract the task into implementation-ready requirements. Return one compact strict JSON object.\n"
+            "Use exactly these keys; every list must contain at most 8 short strings, and every string must be <= 140 characters:\n"
             "- objective: string\n"
-            "- hard_requirements: array of concrete requirements that implementation must satisfy\n"
-            "- deliverables: array of expected files/artifacts/outputs\n"
-            "- constraints: array of runtime/resource/dependency constraints\n"
-            "- data_requirements: array of required inputs/datasets/source handling rules\n"
-            "- evaluation_targets: array of metrics/checks/output contracts\n"
-            "- dependency_strategy: array of packages that may help and fallback expectations\n"
-            "- open_questions: array of ambiguities that implementation should handle conservatively\n\n"
+            "- hard_requirements: string[]\n"
+            "- deliverables: string[]\n"
+            "- constraints: string[]\n"
+            "- data_requirements: string[]\n"
+            "- evaluation_targets: string[]\n"
+            "- dependency_strategy: string[]\n"
+            "- open_questions: string[]\n\n"
             "Rules:\n"
+            "- No nested objects. No Markdown. No long prose. Do not quote the task verbatim.\n"
             "- Do not invent benchmark-specific fields. Preserve fields explicitly requested by the task/result schema.\n"
             "- Convert prose requirements into testable implementation obligations.\n"
             "- Mention optional dependencies only if they are task-relevant and installed/available in the context.\n\n"
@@ -253,13 +255,14 @@ def _stage_prompt(
     if stage == "architecture":
         return (
             "Tool: architecture_outline.\n"
-            "Design the project architecture from the requirements brief. Return one strict JSON object with fields:\n"
+            "Design the project architecture from the requirements brief. Return one compact strict JSON object with fields:\n"
             "- architecture_summary: string\n"
-            "- modules: array of {name, responsibility, inputs, outputs, dependencies}\n"
-            "- data_flow: array of ordered flow steps\n"
-            "- test_strategy: array of validation/smoke/benchmark checks\n"
-            "- risks: array of realistic implementation risks and mitigations\n\n"
+            "- modules: at most 10 {name, responsibility, inputs, outputs, dependencies}; nested lists at most 6 strings\n"
+            "- data_flow: at most 8 ordered flow steps\n"
+            "- test_strategy: at most 8 validation/smoke/benchmark checks\n"
+            "- risks: at most 8 realistic implementation risks and mitigations\n\n"
             "Rules:\n"
+            "- No Markdown. Keep each string <= 160 characters.\n"
             "- Keep the design bounded by resource_plan.max_files and max_generated_lines.\n"
             "- Prefer one authoritative orchestrator plus small modules with clear ownership.\n"
             "- Make cross-module dependencies explicit; downstream file planning will use this directly.\n"
@@ -269,12 +272,13 @@ def _stage_prompt(
     if stage == "interfaces":
         return (
             "Tool: interface_contract.\n"
-            "Define cross-file interfaces before files are written. Return one strict JSON object with fields:\n"
-            "- shared_schemas: array of {name, fields, producer, consumers, notes}\n"
-            "- module_apis: array of {module, public_api, consumes, produces}\n"
-            "- cross_file_contracts: array of exact call/data-flow contracts\n"
-            "- stdout_contract: array of parseable stdout lines/metric formats if relevant\n\n"
+            "Define cross-file interfaces before files are written. Return one compact strict JSON object with fields:\n"
+            "- shared_schemas: at most 10 {name, fields, producer, consumers, notes}\n"
+            "- module_apis: at most 16 {module, public_api, consumes, produces}\n"
+            "- cross_file_contracts: at most 12 exact call/data-flow contracts\n"
+            "- stdout_contract: at most 8 parseable stdout lines/metric formats if relevant\n\n"
             "Rules:\n"
+            "- No Markdown. Keep each string <= 160 characters.\n"
             "- public_api entries must be exact function/class names or concise signatures.\n"
             "- Every planned consumer must use an API declared by the producer.\n"
             "- Include artifact/metric schemas that later files can share instead of guessing independently.\n\n"
@@ -284,10 +288,11 @@ def _stage_prompt(
     if stage == "file_plan":
         return (
             "Tool: file_plan.\n"
-            "Produce the final file plan. Return one strict JSON object with fields:\n"
+            "Produce the final file plan. Return one compact strict JSON object with fields:\n"
             "- objective: string\n"
             "- files: array of {path, purpose, dependencies, public_api, acceptance_criteria, entrypoint}\n\n"
             "Rules:\n"
+            "- No Markdown. Keep each purpose/criterion <= 160 characters.\n"
             "- Include main.py as the command-line entrypoint.\n"
             "- Keep paths relative, POSIX-style, and inside the generated project.\n"
             "- Keep file count within resource_plan.max_files.\n"
@@ -314,7 +319,7 @@ def _review_prompt(
         "Review this greenfield planning package before code generation. Return one strict JSON object with fields:\n"
         "- status: pass or needs_revision\n"
         "- summary: short summary\n"
-        "- findings: array of {target_stage, severity, issue, required_change}\n\n"
+        "- findings: at most 8 {target_stage, severity, issue, required_change}\n\n"
         "Review criteria:\n"
         "- The plan must satisfy explicit task/result-schema requirements without benchmark-specific hidden assumptions.\n"
         "- File dependencies and public APIs must be coherent enough that per-file code generation will not guess names.\n"
@@ -510,20 +515,18 @@ def _base_context(
 def _contract_view(contract: Mapping[str, Any]) -> dict[str, Any]:
     return contract_prompt_view(
         contract,
-        max_task_chars=2200,
-        max_requirements=48,
-        max_success_criteria=28,
+        max_task_chars=1200,
+        max_requirements=24,
+        max_success_criteria=16,
     )
 
 
 def _domain_profile_view(profile: Mapping[str, Any]) -> dict[str, Any]:
     data = dict(profile)
+    data.pop("task_excerpt", None)
     packages = data.get("available_task_relevant_packages")
     if isinstance(packages, list):
         data["available_task_relevant_packages"] = packages[:80]
-    excerpt = data.get("task_excerpt")
-    if isinstance(excerpt, str) and len(excerpt) > 1800:
-        data["task_excerpt"] = excerpt[:1800].rstrip()
     return data
 
 
@@ -641,11 +644,11 @@ PLANNING_REVIEW_SYSTEM = (
 def _stage_output_tokens(stage: str, resource_plan: Mapping[str, Any]) -> int:
     max_files = _positive_int(resource_plan.get("max_files"), 8)
     if stage == "requirements":
-        return 1100
+        return 1800
     if stage == "architecture":
-        return 1500 if max_files >= 12 else 1200
+        return 2000 if max_files >= 12 else 1600
     if stage == "interfaces":
-        return 1800 if max_files >= 12 else 1400
+        return 2200 if max_files >= 12 else 1800
     if max_files >= 24:
         return 2600
     if max_files >= 12:
@@ -668,7 +671,8 @@ def _retry_suffix(error: LLMError | None, attempt: int) -> str:
     return (
         "\nPrevious attempt failed before attempt "
         f"{attempt}: {error}\n"
-        "Return exactly one JSON object. Do not include Markdown fences, commentary, or trailing analysis.\n"
+        "The previous output was not parseable, possibly because it was too long. "
+        "Return a smaller single JSON object only: no Markdown, no commentary, no trailing analysis, no nested prose.\n"
     )
 
 

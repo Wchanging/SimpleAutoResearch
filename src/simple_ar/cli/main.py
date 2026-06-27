@@ -1286,6 +1286,8 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             dry_run=args.dry_run if dry_run_override is None else dry_run_override,
             model=model,
             planner_model=options.planner_model,
+            writer_model=options.writer_model,
+            reviewer_model=options.reviewer_model,
             editor_model=options.editor_model,
             repair_model=options.repair_model,
             use_llm=use_llm,

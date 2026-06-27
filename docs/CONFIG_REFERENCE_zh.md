@@ -382,6 +382,8 @@ default = "gpt-4o-mini"
 [models.code_task]
 # 可选分角色模型路由；空值会回退到 [models].default、[llm].model 或 SIMPLE_AR_MODEL。
 planner = "gpt-4o-mini"
+writer = "gpt-4o-mini"
+reviewer = "gpt-4o-mini"
 editor = "gpt-4o-mini"
 repair = "gpt-4o-mini"
 summarizer = "gpt-4o-mini"
@@ -911,6 +913,8 @@ llm_retry_attempts = 3
 
 [models.code_task]
 planner = "gpt-4o-mini"
+writer = "gpt-4o-mini"
+reviewer = "gpt-4o-mini"
 editor = "gpt-4o-mini"
 repair = "gpt-4o-mini"
 

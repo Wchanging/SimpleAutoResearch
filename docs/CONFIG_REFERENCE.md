@@ -396,6 +396,8 @@ default = "gpt-4o-mini"
 [models.code_task]
 # Optional per-role model routing. Empty/missing values fall back to [models].default, [llm].model, or SIMPLE_AR_MODEL.
 planner = "gpt-4o-mini"
+writer = "gpt-4o-mini"
+reviewer = "gpt-4o-mini"
 editor = "gpt-4o-mini"
 repair = "gpt-4o-mini"
 summarizer = "gpt-4o-mini"
@@ -457,7 +459,7 @@ max_proposal_chars = 42000
 | `[safety]` | code-task init/validation | Copy size and validation scan limits. |
 | `[execute]` | code-task execute | State-machine limits, runtime settings, repair rounds, output streaming. |
 | `[models]` | code-task execute | Default model routing. |
-| `[models.code_task]` | code-task execute | Planner/editor/repair/summarizer model routing. |
+| `[models.code_task]` | code-task execute | Planner/writer/reviewer/editor/repair/summarizer model routing. |
 | `[budget]` | code-task execute | Edit budget profile, batch cap, cost cap. |
 | `[budget.normal]`, `[budget.large]` | code-task execute | Per-profile edit proposal limits. |
 
@@ -628,7 +630,9 @@ package rather than parsing stdout directly.
 | `[execute].max_files` | Max files included in LLM context for plan/proposal/repair steps. |
 | `[execute].max_source_chars_per_file` | Per-file source snippet budget for LLM context. |
 | `[execute].max_generated_lines` | Greenfield generation line budget. If omitted, execute falls back to `[resource].max_generated_lines`, then to a conservative default. |
-| `[models.code_task].planner` | Model used for work-plan and patch-plan generation. |
+| `[models.code_task].planner` | Model used for work-plan, patch-plan, and greenfield architecture planning. |
+| `[models.code_task].writer` | Model used for greenfield file generation. Existing-project edit proposals use `editor`. |
+| `[models.code_task].reviewer` | Model used for code-task patch review and greenfield generated-project review. |
 | `[models.code_task].editor` | Model used for edit proposal generation. |
 | `[models.code_task].repair` | Model used for repair proposals after failures. |
 | `[budget].profile` | Active edit budget profile. `normal` is conservative; `large` is for reviewed multi-file changes. |
@@ -955,6 +959,8 @@ llm_retry_attempts = 3
 
 [models.code_task]
 planner = "gpt-4o-mini"
+writer = "gpt-4o-mini"
+reviewer = "gpt-4o-mini"
 editor = "gpt-4o-mini"
 repair = "gpt-4o-mini"
 

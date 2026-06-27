@@ -118,6 +118,8 @@ def execute_code_task(
     dry_run: bool = False,
     model: str | None = None,
     planner_model: str | None = None,
+    writer_model: str | None = None,
+    reviewer_model: str | None = None,
     editor_model: str | None = None,
     repair_model: str | None = None,
     use_llm: bool = True,
@@ -165,7 +167,11 @@ def execute_code_task(
         model: Optional fallback LLM model override for planning/edit/repair
             steps.
         planner_model: Optional model override for work-plan and patch-plan
-            steps.
+            steps, including greenfield architecture planning.
+        writer_model: Optional model override for greenfield file generation.
+            Existing-project edit proposals continue to use ``editor_model``.
+        reviewer_model: Optional model override for code-task and greenfield
+            review steps.
         editor_model: Optional model override for controlled edit proposals.
         repair_model: Optional model override for repair proposals.
         use_llm: Whether planning/edit/repair steps may call the LLM.
@@ -240,6 +246,10 @@ def execute_code_task(
             to_step=to_step,
             dry_run=dry_run,
             model=model,
+            planner_model=planner_model,
+            writer_model=writer_model,
+            reviewer_model=reviewer_model,
+            repair_model=repair_model,
             use_llm=use_llm,
             timeout_sec=timeout_sec,
             skip_validation=skip_validation,
@@ -650,7 +660,7 @@ def execute_code_task(
             review = review_code_task_changes(
                 root,
                 phase="post_apply",
-                model=model,
+                model=reviewer_model or model,
                 use_llm=use_llm,
                 max_source_chars_per_file=max_source_chars_per_file,
                 message_callback=message_callback,
@@ -796,7 +806,7 @@ def execute_code_task(
             review = review_code_task_changes(
                 root,
                 phase="post_run",
-                model=model,
+                model=reviewer_model or model,
                 use_llm=use_llm,
                 max_source_chars_per_file=max_source_chars_per_file,
                 message_callback=message_callback,
@@ -829,6 +839,10 @@ def _execute_greenfield_code_task(
     to_step: str,
     dry_run: bool,
     model: str | None,
+    planner_model: str | None,
+    writer_model: str | None,
+    reviewer_model: str | None,
+    repair_model: str | None,
     use_llm: bool,
     timeout_sec: int,
     skip_validation: bool,
@@ -905,6 +919,9 @@ def _execute_greenfield_code_task(
             result = generate_greenfield_code_task(
                 root,
                 model=model,
+                planner_model=planner_model or model,
+                writer_model=writer_model or model,
+                reviewer_model=reviewer_model or model,
                 use_llm=use_llm,
                 max_files=max_files,
                 max_generated_lines=max_generated_lines,
@@ -945,6 +962,8 @@ def _execute_greenfield_code_task(
                     paths,
                     steps,
                     model=model,
+                    reviewer_model=reviewer_model or model,
+                    repair_model=repair_model or model,
                     use_llm=use_llm,
                     repair_rounds=repair_rounds,
                     max_files=max_files,
@@ -988,6 +1007,8 @@ def _execute_greenfield_code_task(
                     paths,
                     steps,
                     model=model,
+                    reviewer_model=reviewer_model or model,
+                    repair_model=repair_model or model,
                     use_llm=use_llm,
                     repair_rounds=repair_rounds,
                     max_files=max_files,
@@ -1071,6 +1092,7 @@ def _execute_greenfield_code_task(
                 steps,
                 repair_rounds=repair_rounds,
                 model=model,
+                repair_model=repair_model or model,
                 use_llm=use_llm,
                 max_generated_lines=max_generated_lines,
                 message_callback=message_callback,
@@ -1417,6 +1439,8 @@ def _attempt_greenfield_review_repair(
     steps: list[ExecuteStepRecord],
     *,
     model: str | None,
+    reviewer_model: str | None,
+    repair_model: str | None,
     use_llm: bool,
     repair_rounds: int,
     max_files: int,
@@ -1428,10 +1452,11 @@ def _attempt_greenfield_review_repair(
         _record(steps, "repair", "skipped", "review repair budget exhausted or disabled")
         return False
     _emit(message_callback, "Generated project review failed; attempting bounded review repair.")
+    _ = reviewer_model
     repair = _repair_greenfield_review_failure(
         run_dir,
         paths,
-        model=model,
+        model=repair_model or model,
         use_llm=use_llm,
         message_callback=message_callback,
         max_files=max_files,
@@ -1474,6 +1499,7 @@ def _attempt_greenfield_run_repair(
     *,
     repair_rounds: int,
     model: str | None,
+    repair_model: str | None,
     use_llm: bool,
     max_generated_lines: int,
     message_callback: MessageCallback | None,
@@ -1490,7 +1516,7 @@ def _attempt_greenfield_run_repair(
     previous_context = task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
     client = _greenfield_repair_client(
         paths.meta_dir,
-        model=model,
+        model=repair_model or model,
         use_llm=use_llm,
         message_callback=message_callback,
     )

@@ -143,6 +143,8 @@ class LLMSection(_ConfigModel):
 class CodeTaskModelsSection(_ConfigModel):
     default: str | None = None
     planner: str | None = None
+    writer: str | None = None
+    reviewer: str | None = None
     editor: str | None = None
     repair: str | None = None
     summarizer: str | None = None
@@ -221,6 +223,8 @@ class CodeTaskExecuteOptions:
     to_step: str
     model: str | None
     planner_model: str | None
+    writer_model: str | None
+    reviewer_model: str | None
     editor_model: str | None
     repair_model: str | None
     summarizer_model: str | None
@@ -328,6 +332,8 @@ def load_code_task_execute_options(
             or _config_string(llm.model)
         ),
         planner_model=_config_string(code_task_models.planner),
+        writer_model=_config_string(code_task_models.writer),
+        reviewer_model=_config_string(code_task_models.reviewer),
         editor_model=_config_string(code_task_models.editor),
         repair_model=_config_string(code_task_models.repair),
         summarizer_model=_config_string(code_task_models.summarizer),

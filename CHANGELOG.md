@@ -17,6 +17,14 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Greenfield tool-agent planning now uses smaller stage prompts, less duplicated
+  task context, stricter compact-JSON instructions, and a more tolerant JSON
+  extractor. This reduces failures where the requirements stage hit the output
+  cap and returned no recoverable JSON.
+- Code-task model routing now covers greenfield planner/writer/reviewer roles
+  in addition to existing-project planner/editor/repair routing. Configure
+  `[models.code_task].planner`, `.writer`, `.reviewer`, `.editor`, and `.repair`
+  in TOML while keeping provider keys and base URLs in environment variables.
 - Greenfield code-task generation no longer silently mixes deterministic
   scaffolds into real LLM runs. Architecture planning and file generation now
   use bounded LLM retries, then stop by default if the model/client still fails.

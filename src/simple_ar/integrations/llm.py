@@ -412,6 +412,15 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             pass
 
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            value, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+
     candidates: list[str] = []
     depth = 0
     start = -1

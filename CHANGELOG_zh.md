@@ -8,6 +8,9 @@
 
 ### Changed
 
+- Greenfield tool-agent planning 现在会使用更小的阶段 prompt、更少的重复 task 上下文、更严格的紧凑 JSON 指令，以及更宽容的 JSON 提取器，降低 requirements 阶段输出被截断后无法解析的概率。
+- Code-task 模型路由现在覆盖 greenfield planner/writer/reviewer 三个角色，同时保留已有代码项目的 planner/editor/repair 路由；可在 TOML 的 `[models.code_task]` 中配置 `planner`、`writer`、`reviewer`、`editor` 和 `repair`，`.env` 继续主要放 provider URL/key/default。
+
 - Code-task 的 LLM 规划与生成现在有更强的阶段级重试能力。Greenfield 架构规划和逐文件生成会在阶段级失败后做有界指数退避，并在终端输出 retry 进度；底层 LiteLLM provider 仍负责单次请求内部的连接中断、超时、限流和 5xx 重试。
 - Code-task 默认阶段级 `llm_retry_attempts` 调整为 3。ARC-Bench prepared 配置默认写入 4，批跑器也可以通过 `--llm-retry-attempts N` 在运行时覆盖，避免服务器网络短暂断连时批量任务集体倒在 architecture planning。
 - 新增 greenfield tool-agent 规划模式。默认架构规划会拆成 requirements、architecture、interfaces、file plan 和 planning review，并把中间产物写入 `code_task/meta/planning/`；只有调试旧路径时才需要设置 `[execute].planning_mode = "compact"` 或 `--planning-mode compact`。
