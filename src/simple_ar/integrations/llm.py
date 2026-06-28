@@ -806,7 +806,9 @@ def _call_openai_sdk(api_mode: str, request: dict[str, Any]) -> object:
 
     payload = dict(request)
     api_key = str(payload.pop("api_key", "") or "")
-    base_url = payload.pop("base_url", None) or payload.pop("api_base", None)
+    base_url = payload.pop("base_url", None)
+    api_base = payload.pop("api_base", None)
+    base_url = base_url or api_base
     timeout = payload.pop("timeout", None) if "timeout" in payload else None
     client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
     if base_url:
