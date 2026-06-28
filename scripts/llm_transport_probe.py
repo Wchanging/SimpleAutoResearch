@@ -98,7 +98,8 @@ def _parse_args() -> argparse.Namespace:
         default="litellm-responses,litellm-chat,simple-responses,simple-chat,openai-responses,openai-chat",
         help=(
             "Comma-separated modes: litellm-responses,litellm-chat,"
-            "simple-responses,simple-chat,openai-responses,openai-chat."
+            "simple-responses,simple-chat,openai-responses,openai-chat,"
+            "litellm-responses-stream,litellm-chat-stream,openai-responses-stream,openai-chat-stream."
         ),
     )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Prompt text.")
@@ -123,6 +124,10 @@ def _selected_modes(raw: str) -> list[str]:
         "simple-chat",
         "openai-responses",
         "openai-chat",
+        "litellm-responses-stream",
+        "litellm-chat-stream",
+        "openai-responses-stream",
+        "openai-chat-stream",
     }
     modes = [item.strip() for item in raw.split(",") if item.strip()]
     unknown = [mode for mode in modes if mode not in allowed]
@@ -194,6 +199,7 @@ def _build_runners(
             timeout=timeout,
             max_output_tokens=max_output_tokens,
             prompt=prompt,
+            stream=False,
         ),
         "litellm-chat": lambda prompt: _litellm_chat_call(
             api_key=api_key,
@@ -202,6 +208,25 @@ def _build_runners(
             timeout=timeout,
             max_output_tokens=max_output_tokens,
             prompt=prompt,
+            stream=False,
+        ),
+        "litellm-responses-stream": lambda prompt: _litellm_responses_call(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout=timeout,
+            max_output_tokens=max_output_tokens,
+            prompt=prompt,
+            stream=True,
+        ),
+        "litellm-chat-stream": lambda prompt: _litellm_chat_call(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout=timeout,
+            max_output_tokens=max_output_tokens,
+            prompt=prompt,
+            stream=True,
         ),
         "simple-responses": lambda prompt: _simple_ar_call(
             api_key=api_key,
@@ -228,6 +253,7 @@ def _build_runners(
             timeout=timeout,
             max_output_tokens=max_output_tokens,
             prompt=prompt,
+            stream=False,
         ),
         "openai-chat": lambda prompt: _openai_chat_call(
             api_key=api_key,
@@ -236,6 +262,25 @@ def _build_runners(
             timeout=timeout,
             max_output_tokens=max_output_tokens,
             prompt=prompt,
+            stream=False,
+        ),
+        "openai-responses-stream": lambda prompt: _openai_responses_call(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout=timeout,
+            max_output_tokens=max_output_tokens,
+            prompt=prompt,
+            stream=True,
+        ),
+        "openai-chat-stream": lambda prompt: _openai_chat_call(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout=timeout,
+            max_output_tokens=max_output_tokens,
+            prompt=prompt,
+            stream=True,
         ),
     }
 
@@ -277,6 +322,7 @@ def _litellm_responses_call(
     timeout: float,
     max_output_tokens: int,
     prompt: str,
+    stream: bool,
 ) -> str:
     import litellm
 
@@ -287,12 +333,13 @@ def _litellm_responses_call(
         "api_key": api_key,
         "timeout": timeout,
         "max_output_tokens": max_output_tokens,
+        "stream": stream,
     }
     if base_url:
         request["api_base"] = base_url
         request["base_url"] = base_url
     response = litellm.responses(**request)
-    return _extract_response_text(response)
+    return _extract_stream_text(response) if stream else _extract_response_text(response)
 
 
 def _litellm_chat_call(
@@ -303,6 +350,7 @@ def _litellm_chat_call(
     timeout: float,
     max_output_tokens: int,
     prompt: str,
+    stream: bool,
 ) -> str:
     import litellm
 
@@ -315,12 +363,13 @@ def _litellm_chat_call(
         "api_key": api_key,
         "timeout": timeout,
         "max_tokens": max_output_tokens,
+        "stream": stream,
     }
     if base_url:
         request["api_base"] = base_url
         request["base_url"] = base_url
     response = litellm.completion(**request)
-    return _extract_response_text(response)
+    return _extract_stream_text(response) if stream else _extract_response_text(response)
 
 
 def _openai_responses_call(
@@ -331,6 +380,7 @@ def _openai_responses_call(
     timeout: float,
     max_output_tokens: int,
     prompt: str,
+    stream: bool,
 ) -> str:
     from openai import OpenAI
 
@@ -340,8 +390,9 @@ def _openai_responses_call(
         instructions=_system_prompt(),
         input=[{"role": "user", "content": prompt}],
         max_output_tokens=max_output_tokens,
+        stream=stream,
     )
-    return str(getattr(response, "output_text", "") or "")
+    return _extract_stream_text(response) if stream else str(getattr(response, "output_text", "") or "")
 
 
 def _openai_chat_call(
@@ -352,6 +403,7 @@ def _openai_chat_call(
     timeout: float,
     max_output_tokens: int,
     prompt: str,
+    stream: bool,
 ) -> str:
     from openai import OpenAI
 
@@ -363,7 +415,10 @@ def _openai_chat_call(
             {"role": "user", "content": prompt},
         ],
         max_tokens=max_output_tokens,
+        stream=stream,
     )
+    if stream:
+        return _extract_stream_text(response)
     choice = response.choices[0] if response.choices else None
     message = getattr(choice, "message", None)
     return str(getattr(message, "content", "") or "")
@@ -393,6 +448,45 @@ def _extract_response_text(response: object) -> str:
                         parts.append(str(text))
         if parts:
             return "\n".join(parts)
+    return ""
+
+
+def _extract_stream_text(stream: object) -> str:
+    parts: list[str] = []
+    for chunk in stream:  # type: ignore[operator]
+        text = _stream_chunk_text(chunk)
+        if text:
+            parts.append(text)
+    return "".join(parts)
+
+
+def _stream_chunk_text(chunk: object) -> str:
+    event_type = str(_get_value(chunk, "type") or "")
+    if event_type.endswith(".delta") or event_type in {"response.output_text.delta", "output_text.delta"}:
+        delta = _get_value(chunk, "delta")
+        if delta is not None:
+            return str(delta)
+
+    choices = _get_value(chunk, "choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0]
+        delta_obj = _get_value(choice, "delta")
+        delta_text = _get_value(delta_obj, "content") if delta_obj is not None else None
+        if delta_text is not None:
+            return str(delta_text)
+        text = _get_value(choice, "text")
+        if text is not None:
+            return str(text)
+
+    content = _get_value(chunk, "content")
+    if isinstance(content, list):
+        return "".join(_message_content_text(item) for item in content)
+    if content is not None and not isinstance(content, (dict, list)):
+        return str(content)
+
+    output_text = _get_value(chunk, "output_text")
+    if output_text is not None:
+        return str(output_text)
     return ""
 
 
