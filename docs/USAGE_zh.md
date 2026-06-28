@@ -51,7 +51,7 @@ Copy-Item .env.example .env
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
-SIMPLE_AR_LLM_API=chat
+SIMPLE_AR_LLM_API=responses
 SIMPLE_AR_LLM_TIMEOUT_SEC=120
 SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
@@ -67,7 +67,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `OPENAI_API_KEY` 是 LLM 模式必需项。
 - `OPENAI_BASE_URL` 可以指向 OpenAI，也可以指向第三方 OpenAI 兼容 `/v1` 接口。
 - `SIMPLE_AR_MODEL` 是没有传入 `--model` 时的默认模型。
-- `SIMPLE_AR_LLM_API` 控制 LiteLLM 使用哪种 API 形态。`chat` 会发送 Chat Completions 风格的 `messages`；`responses` 会发送 Responses API 风格的 `instructions` 和 `input`。
+- `SIMPLE_AR_LLM_API` 控制 LiteLLM 使用哪种 API 形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`；`chat` 会发送 Chat Completions 风格的 `messages`。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 限制单次 provider 请求等待时间；较大的 coding prompt 如果确实需要更久，可以适当调高。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 限制模型输出长度，避免较长 coding prompt 生成过大的结果。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时和 5xx 响应。
@@ -685,6 +685,11 @@ skipped，然后 workflow 从下一个需要处理的位置继续。只有在调
 patched benchmark 完成后还会写入 `code_task/meta/review_report_post_run.json`。
 阻塞性发现会同步记录到 `code_task/memory/`，后续 repair prompt 可以直接利用这些
 最新失败证据。
+结构化 review 还会写入 `code_task/meta/review_index*.json` 和
+`code_task/meta/review_clusters*.json`：前者是完整项目索引，后者是分层审查时实际给
+reviewer 的语义文件组。Greenfield planning 额外写入
+`code_task/meta/planning/agent_steps.jsonl`，用于排查 requirements / architecture /
+interfaces / file-plan / planning-review 哪一步失败或反复回修。
 
 对于 greenfield run，同一套 review gate 会在验证前检查生成项目。如果 review 发现
 通用可修复问题，例如核心文件仍是 fallback、缺少 artifact writer、缺少本地 API 等，

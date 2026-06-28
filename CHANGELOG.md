@@ -4,6 +4,49 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-28
+
+### Changed
+
+- `SIMPLE_AR_LLM_API` now defaults to `responses`, while `chat` remains
+  available for providers that require Chat Completions-style `messages`.
+- Greenfield planning now stops when bounded planning review still reports
+  high or critical blockers, instead of continuing into code generation with a
+  known-bad architecture or file plan.
+- Greenfield file generation now receives a compact per-file planning context
+  instead of the full architecture JSON, reducing oversized writer prompts and
+  making dependency/consumer contracts easier for the model to follow.
+- Generated-project review now uses a generic layered review flow. It first
+  builds a full ReviewIndex, then reviews bounded clusters such as
+  entrypoint/orchestration, data flow, core logic, metric artifacts, and
+  config/docs. The review writes `code_task/meta/review_index.json` and
+  `code_task/meta/review_clusters.json`, avoiding full-code prompt stuffing and
+  fixed filename sampling.
+- Existing-project code-task review now uses the same ReviewIndex / cluster
+  context while preserving patch diff, edit scope, validation report, and
+  benchmark run-record evidence.
+- Greenfield tool-agent planning now writes
+  `code_task/meta/planning/agent_steps.jsonl` with stage, attempt, prompt hash,
+  output summary, and failure status for each planning sub-agent.
+- Generated-project review/run repair prompts now include compact ReviewIndex
+  context, and review-repair target selection reads finding evidence and
+  recommendations instead of relying only on a few categories or fixed
+  filenames.
+
+### Fixed
+
+- Greenfield file generation now refuses to silently truncate a project when
+  the generated files would exceed the configured line budget.
+- Greenfield code-task summaries are refreshed after validation and benchmark
+  reruns, avoiding stale `review_failed` summaries after later stages pass.
+- LLM review remains non-blocking by default for older call sites, while
+  generated-project layered review can preserve concrete blocking findings so
+  missing deliverables, schema drift, and result-trust issues are not silently
+  downgraded.
+- ReviewIndex skips `.git`, `.venv`, `node_modules`, cache, and build
+  directories by default so worktree/copy workspaces do not pollute review
+  context with dependency or build artifacts.
+
 ## 2026-06-27
 
 ### Added
@@ -23,10 +66,9 @@ This file records user-visible project changes in reverse chronological order. P
   (`off`) for broad third-party provider compatibility; use `auto` or
   `json_object` only with providers that support the parameter.
 - LLM requests can now choose the LiteLLM API surface through
-  `SIMPLE_AR_LLM_API`. The default `chat` keeps the existing
-  Chat Completions-style `messages` request; `responses` uses Responses
-  API-style `instructions` and `input` for providers that behave better on that
-  endpoint.
+  `SIMPLE_AR_LLM_API`. `responses` uses Responses API-style `instructions` and
+  `input`; `chat` keeps Chat Completions-style `messages` for providers that
+  require that surface.
 - Greenfield tool-agent planning now uses smaller stage prompts, less duplicated
   task context, stricter compact-JSON instructions, and a more tolerant JSON
   extractor. This reduces failures where the requirements stage hit the output

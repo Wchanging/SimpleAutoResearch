@@ -956,6 +956,7 @@ def _execute_greenfield_code_task(
                 ],
                 metadata={"generated_files": list(result.generated_files)},
             )
+            _record_review_report_findings(root, result.review_report_path)
             if result.review_status == "failed":
                 if not _attempt_greenfield_review_repair(
                     root,
@@ -1054,6 +1055,7 @@ def _execute_greenfield_code_task(
                 "validation_failed",
                 "Review code_task/meta/validation_report.json before running.",
             )
+        write_code_task_summary(root)
     if _stop_after("validate", to_step):
         return _result(paths, steps, "stop_point", "Stopped after validate as requested.")
 
@@ -1113,6 +1115,7 @@ def _execute_greenfield_code_task(
                     "validation_failed",
                     "Review code_task/meta/validation_report.json after generated project repair.",
                 )
+            write_code_task_summary(root)
             _emit(message_callback, "Run repair patched generated project; rerunning benchmark.")
             result = run_code_task_benchmark(
                 root,
@@ -1137,9 +1140,12 @@ def _execute_greenfield_code_task(
                 ],
                 metadata={"metrics": result.metrics},
             )
+        write_code_task_summary(root)
     if _stop_after("run", to_step):
+        write_code_task_summary(root)
         return _result(paths, steps, "completed", "Review code_task/summary.md and generated_project/.")
 
+    write_code_task_summary(root)
     return _result(paths, steps, "completed", "Review code_task/summary.md.")
 
 
@@ -1682,6 +1688,7 @@ def _rerun_greenfield_review(
         use_llm=False,
     )
     write_json(paths.meta_dir / "review_report.json", review)
+    _record_review_report_findings(run_dir, paths.meta_dir / "review_report.json")
     manifest = load_code_task_manifest(run_dir)
     implementation = manifest_section(manifest, "implementation")
     implementation["review_status"] = review.get("status", "unknown")
@@ -1691,6 +1698,33 @@ def _rerun_greenfield_review(
     save_code_task_manifest(run_dir, manifest)
     write_code_task_summary(run_dir)
     return review
+
+
+def _record_review_report_findings(run_dir: Path, report_path: Path) -> None:
+    if not report_path.is_file():
+        return
+    report = read_json(report_path)
+    if not isinstance(report, dict):
+        return
+    findings = report.get("findings")
+    if not isinstance(findings, list):
+        return
+    for row in findings:
+        if not isinstance(row, dict):
+            continue
+        record_review_finding(
+            run_dir,
+            {
+                "key": row.get("key")
+                or f"greenfield:{row.get('category', '')}:{str(row.get('summary', ''))[:48]}",
+                "severity": row.get("severity", "info"),
+                "category": row.get("category", "general"),
+                "summary": row.get("summary", ""),
+                "evidence": row.get("evidence", []),
+                "recommendation": row.get("recommendation", ""),
+                "source": row.get("source", "greenfield-reviewer"),
+            },
+        )
 
 
 def _greenfield_run_repair_available(run_dir: Path, repair_rounds: int) -> bool:

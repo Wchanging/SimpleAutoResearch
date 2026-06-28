@@ -86,7 +86,7 @@ Edit `.env` for LLM-backed stages:
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
-SIMPLE_AR_LLM_API=chat
+SIMPLE_AR_LLM_API=responses
 SIMPLE_AR_LLM_TIMEOUT_SEC=120
 SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
@@ -105,8 +105,9 @@ and 5xx responses use bounded exponential backoff controlled by the retry
 settings above. JSON-producing calls use prompt-only parsing by default for
 provider compatibility. Set `SIMPLE_AR_JSON_RESPONSE_FORMAT=auto` or
 `json_object` only when your provider supports native JSON response formatting.
-`SIMPLE_AR_LLM_API=chat` uses Chat Completions-style `messages`; set it to
-`responses` only when your provider expects Responses API-style `input`.
+`SIMPLE_AR_LLM_API=responses` uses Responses API-style `instructions` and
+`input`; set it to `chat` when your provider expects Chat Completions-style
+`messages`.
 
 ## Quickstart
 

@@ -55,7 +55,7 @@ Supported settings:
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
-SIMPLE_AR_LLM_API=chat
+SIMPLE_AR_LLM_API=responses
 SIMPLE_AR_LLM_TIMEOUT_SEC=120
 SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
@@ -71,9 +71,9 @@ Notes:
 - `OPENAI_API_KEY` is required for LLM mode.
 - `OPENAI_BASE_URL` can point to OpenAI or a third-party OpenAI-compatible `/v1` endpoint.
 - `SIMPLE_AR_MODEL` is the default model when `--model` is not supplied.
-- `SIMPLE_AR_LLM_API` controls the LiteLLM API surface. `chat` sends
-  Chat Completions-style `messages`; `responses` sends Responses API-style
-  `instructions` plus `input`.
+- `SIMPLE_AR_LLM_API` controls the LiteLLM API surface. `responses` sends
+  Responses API-style `instructions` plus `input`; `chat` sends Chat
+  Completions-style `messages`.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` bounds each provider request; increase it only
   when deliberately running large prompts.
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` limits the model response size for long coding
@@ -914,6 +914,13 @@ before static validation. After the patched benchmark runs, it writes
 `code_task/meta/review_report_post_run.json`. Blocking findings are also
 recorded under `code_task/memory/` so repair prompts can reuse the latest
 review evidence.
+Structured review also writes `code_task/meta/review_index*.json` and
+`code_task/meta/review_clusters*.json`: the former is the full project index,
+and the latter records the semantic file clusters actually shown to reviewers.
+Greenfield planning additionally writes
+`code_task/meta/planning/agent_steps.jsonl` to make requirements,
+architecture, interfaces, file-plan, and planning-review failures easier to
+trace.
 
 For greenfield runs, the same review gate checks generated files before
 validation. If the review detects generic recoverable issues such as fallback

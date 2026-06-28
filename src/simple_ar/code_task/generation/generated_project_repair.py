@@ -29,6 +29,7 @@ from simple_ar.agent_backends import (
 )
 from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import dependency_context, public_api
+from simple_ar.code_task.review_pipeline import build_review_index, compact_review_index
 from simple_ar.integrations.llm import LLMClient
 
 
@@ -259,7 +260,8 @@ def _review_repair_target_paths(
                 targets.append(path)
     findings = _review_findings(review_report)
     categories = {str(item.get("category", "")).strip() for item in findings}
-    summaries = " ".join(str(item.get("summary", "")) for item in findings).lower()
+    summaries = _review_signal_text(findings)
+    targets.extend(_paths_from_review_findings(findings))
     if "missing_artifact_writer" in categories:
         targets.extend(
             _rank_repair_candidates(
@@ -270,7 +272,36 @@ def _review_repair_target_paths(
         )
     if "missing_local_api" in categories:
         targets.extend(_paths_from_review_summaries(summaries))
+    if not targets:
+        targets.extend(
+            _rank_repair_candidates(
+                _generated_python_paths(code_artifacts),
+                signal_text=summaries,
+                preferred_roles=("orchestrator", "entrypoint", "data", "preprocess", "config", "core", "artifact"),
+            )[:5]
+        )
     return list(dict.fromkeys(path for path in targets if path))
+
+
+def _review_signal_text(findings: list[Mapping[str, Any]]) -> str:
+    parts: list[str] = []
+    for item in findings:
+        parts.extend(
+            [
+                str(item.get("summary", "")),
+                str(item.get("recommendation", "")),
+                str(item.get("category", "")),
+                " ".join(str(row) for row in item.get("evidence", []) if isinstance(row, str))
+                if isinstance(item.get("evidence"), list)
+                else "",
+            ]
+        )
+    return " ".join(parts).lower()
+
+
+def _paths_from_review_findings(findings: list[Mapping[str, Any]]) -> list[str]:
+    text = _review_signal_text(findings)
+    return _paths_from_review_summaries(text)
 
 
 def _paths_from_review_summaries(text: str) -> list[str]:
@@ -319,6 +350,7 @@ def _review_file_repair_prompt(
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Actual dependency APIs:\n{json.dumps(dependency_context(project_dir, file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Existing project APIs:\n{json.dumps(_project_api_snapshot(project_dir), indent=2, ensure_ascii=False)}\n\n"
+        f"Project review index:\n{json.dumps(_generated_review_index(project_dir, result_schema=result_schema, contract=contract), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"
         f"Dependency advice:\n{json.dumps(_compact_for_prompt(dependency_advice), indent=2, ensure_ascii=False)}\n\n"
@@ -778,6 +810,8 @@ def _regenerate_run_failed_files(
         stderr_text=stderr_text,
         code_artifacts=code_artifacts,
         heuristic_targets=heuristic_targets,
+        result_schema=result_schema,
+        contract=contract,
     )
     repair_plan = _plan_run_repair_targets(
         failure_analysis=failure_analysis,
@@ -915,6 +949,8 @@ def _run_repair_context(
     stderr_text: str,
     code_artifacts: Mapping[str, Any],
     heuristic_targets: list[str],
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
 ) -> dict[str, Any]:
     all_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
     signal_text = " ".join(
@@ -933,6 +969,7 @@ def _run_repair_context(
     return {
         "schema_version": "code_task_runtime_repair_context.v1",
         "heuristic_targets": heuristic_targets,
+        "review_index": _generated_review_index(project_dir, result_schema=result_schema, contract=contract),
         "candidate_files": [
             _candidate_file_context(project_dir, path)
             for path in candidate_paths
@@ -940,6 +977,21 @@ def _run_repair_context(
         ],
         "project_api": _project_api_snapshot(project_dir),
     }
+
+
+def _generated_review_index(
+    project_dir: Path,
+    *,
+    result_schema: Mapping[str, Any],
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        return compact_review_index(
+            build_review_index(project_dir, result_schema=result_schema, contract=contract),
+            max_files=80,
+        )
+    except Exception:
+        return {"schema_version": "code_task_review_index.v1", "files": []}
 
 
 def _candidate_file_context(project_dir: Path, rel_path: str) -> dict[str, Any]:

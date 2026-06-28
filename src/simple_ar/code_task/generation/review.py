@@ -5,10 +5,17 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
+from simple_ar.core.artifacts import write_json
 from simple_ar.integrations.llm import LLMClient
 from simple_ar.reviewing.schema import ReviewFinding
 from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
 from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
+from simple_ar.code_task.review_pipeline import (
+    build_review_clusters,
+    build_review_index,
+    compact_review_index,
+    snippets_for_cluster,
+)
 
 
 GREENFIELD_REVIEW_CONTRACT_VERSION = 4
@@ -39,6 +46,25 @@ def review_generated_project(
         contract=contract or {},
         dependency_advice=dependency_advice or {},
     )
+    review_index = build_review_index(
+        project_dir,
+        result_schema=result_schema,
+        contract=contract or {},
+    )
+    review_clusters = build_review_clusters(
+        review_index,
+        deterministic_findings=deterministic,
+    )
+    if meta_dir is not None:
+        write_json(meta_dir / "review_index.json", review_index)
+        write_json(
+            meta_dir / "review_clusters.json",
+            {
+                "schema_version": "code_task_review_clusters.v1",
+                "cluster_count": len(review_clusters),
+                "clusters": review_clusters,
+            },
+        )
     llm_findings = _llm_findings(
         project_dir=project_dir,
         result_schema=result_schema,
@@ -50,6 +76,9 @@ def review_generated_project(
         client=client,
         meta_dir=meta_dir,
         use_llm=use_llm,
+        deterministic_findings=deterministic,
+        review_index=review_index,
+        review_clusters=review_clusters,
     )
     total_lines = sum(_int(row.get("line_count"), 0) for row in generated)
     return build_review_artifact(
@@ -64,6 +93,10 @@ def review_generated_project(
             "generated_file_count": len(generated),
             "generated_line_count": total_lines,
             "review_contract_version": GREENFIELD_REVIEW_CONTRACT_VERSION,
+            "review_mode": "layered",
+            "review_index": "code_task/meta/review_index.json" if meta_dir is not None else "",
+            "review_clusters": "code_task/meta/review_clusters.json" if meta_dir is not None else "",
+            "review_cluster_count": len(review_clusters),
         },
     )
 
@@ -159,48 +192,65 @@ def _llm_findings(
     client: LLMClient | None,
     meta_dir: Path | None,
     use_llm: bool,
+    deterministic_findings: list[ReviewFinding],
+    review_index: Mapping[str, Any],
+    review_clusters: list[Mapping[str, Any]],
 ) -> list[ReviewFinding]:
     if client is None or meta_dir is None:
         return []
-    snippets = []
-    for path in _review_paths(project_dir)[:8]:
-        try:
-            rel = path.relative_to(project_dir).as_posix()
-            text = _review_snippet(path)
-        except OSError:
+    compact_index = compact_review_index(review_index)
+    api_contract = project_api_contract(project_dir)
+    all_findings: list[ReviewFinding] = []
+    for cluster in review_clusters:
+        snippets = snippets_for_cluster(project_dir, cluster)
+        if not snippets:
             continue
-        snippets.append(f"### {rel}\n```python\n{text}\n```")
-    prompt = review_prompt(
-        instructions=(
-            "Review this generated project for runtime, scope, result-schema, resource, and metric-export risks. "
-            "Use the resource plan, architecture plan, task contract, dependency advice, and implementation memory as context. "
-            "Verify that explicit task requirements and deliverables are implemented, not merely documented. "
-            "Flag placeholder datasets, default-filled required metrics, missing artifact writers, schema drift between files, "
-            "and cross-file API mismatches. Do not request broad rewrites."
-        ),
-        context={
-            "result_schema": dict(result_schema),
-            "resource_plan": dict(resource_plan),
-            "task_contract": _compact_mapping(contract),
-            "dependency_advice": _compact_mapping(dependency_advice),
-            "architecture_plan": _compact_mapping(architecture_plan),
-            "implementation_memory": _compact_mapping(implementation_memory),
-            "actual_project_api": project_api_contract(project_dir),
-        },
-        snippets=snippets,
-    )
-    return run_llm_review(
-        meta_dir=meta_dir,
-        prompt=prompt,
-        label="greenfield-code-review",
-        source="greenfield.llm-reviewer",
-        default_category="generated_project",
-        default_evidence=["code_task/meta/review_report.json", "code_task/meta/code_artifacts.json"],
-        use_llm=use_llm,
-        client=client,
-        message_callback=None,
-        max_findings=12,
-    )
+        cluster_id = str(cluster.get("cluster_id") or "cluster")
+        prompt = review_prompt(
+            instructions=(
+                "Review this generated project cluster for runtime, scope, result-schema, resource, and metric-export risks. "
+                "Use the full review index to understand the project shape, then focus on the current cluster snippets. "
+                "Verify explicit task requirements and deliverables are implemented, not merely documented. "
+                "Flag placeholder datasets, default-filled required metrics, missing artifact writers, schema drift between files, "
+                "and cross-file API mismatches. Treat `blocking` as reserved for concrete evidence that validation, execution, "
+                "or result claims should not proceed. Do not request broad rewrites."
+            ),
+            context={
+                "result_schema": dict(result_schema),
+                "resource_plan": dict(resource_plan),
+                "task_contract": _compact_mapping(contract),
+                "dependency_advice": _compact_mapping(dependency_advice),
+                "architecture_plan": _compact_mapping(architecture_plan),
+                "implementation_memory": _compact_mapping(implementation_memory),
+                "review_index": compact_index,
+                "review_cluster": dict(cluster),
+                "deterministic_findings": [
+                    finding.model_dump(mode="json") for finding in deterministic_findings[:18]
+                ],
+                "actual_project_api": api_contract,
+            },
+            snippets=snippets,
+        )
+        all_findings.extend(
+            run_llm_review(
+                meta_dir=meta_dir,
+                prompt=prompt,
+                label=f"greenfield-code-review-{cluster_id}",
+                source=f"greenfield.llm-reviewer.{cluster_id}",
+                default_category="generated_project",
+                default_evidence=[
+                    "code_task/meta/review_report.json",
+                    "code_task/meta/code_artifacts.json",
+                    "code_task/meta/review_index.json",
+                ],
+                use_llm=use_llm,
+                client=client,
+                message_callback=None,
+                max_findings=6,
+                allow_blocking=True,
+            )
+        )
+    return all_findings[:24]
 
 
 def _semantic_scaffold_findings(
@@ -378,49 +428,6 @@ def _metric_name_visible(project_dir: Path, metric: str) -> bool:
         except OSError:
             continue
     return False
-
-
-def _review_snippet(path: Path, *, limit: int = 5000) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    if len(text) <= limit:
-        return text
-    half = max(1000, limit // 2)
-    return text[:half].rstrip() + "\n\n# ... middle omitted for reviewer prompt ...\n\n" + text[-half:].lstrip()
-
-
-def _review_paths(project_dir: Path) -> list[Path]:
-    """Prioritize orchestration and dependency-boundary files for review."""
-
-    paths = sorted(project_dir.rglob("*.py"))
-    return sorted(
-        paths,
-        key=lambda path: (
-            _review_path_priority(path.relative_to(project_dir).as_posix()),
-            path.relative_to(project_dir).as_posix(),
-        ),
-    )
-
-
-def _review_path_priority(path: str) -> int:
-    lowered = path.lower()
-    name = PurePosixPath(path).name.lower()
-    stem = PurePosixPath(path).stem.lower()
-    if name in {"main.py", "__main__.py", "cli.py", "app.py"} or stem in {"main", "cli", "app"}:
-        return 0
-    if _contains_any(lowered, ("runner", "run_", "execute", "executor", "orchestr", "workflow", "pipeline", "experiment", "train", "eval")):
-        return 1
-    if _contains_any(lowered, ("input", "data", "dataset", "loader", "source", "ingest", "feature", "label")):
-        return 2
-    if _contains_any(lowered, ("process", "preprocess", "transform", "prepare", "clean", "split")):
-        return 3
-    if _contains_any(lowered, ("core", "model", "algorithm", "logic", "method", "estimator", "classif", "regress")):
-        return 4
-    if _contains_any(lowered, ("analysis", "metric", "score", "report", "artifact", "output", "result", "summary", "writer")):
-        return 5
-    return 100
 
 
 def _contains_any(value: str, needles: tuple[str, ...]) -> bool:

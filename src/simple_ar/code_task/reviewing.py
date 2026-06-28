@@ -32,6 +32,7 @@ def run_llm_review(
     client: LLMClient | None = None,
     message_callback: MessageCallback | None = None,
     max_findings: int = 16,
+    allow_blocking: bool = False,
 ) -> list[ReviewFinding]:
     """Run the shared LLM reviewer and normalize its findings."""
 
@@ -58,6 +59,8 @@ def run_llm_review(
         default_evidence=default_evidence,
         max_findings=max_findings,
     )
+    if allow_blocking:
+        return findings
     return _downgrade_llm_blockers(findings)
 
 

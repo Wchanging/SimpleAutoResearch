@@ -11,6 +11,12 @@ from simple_ar.code_task.editing.scope import (
 )
 from simple_ar.code_task.memory import record_review_finding, task_memory_context
 from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
+from simple_ar.code_task.review_pipeline import (
+    build_review_clusters,
+    build_review_index,
+    compact_review_index,
+    snippets_for_cluster,
+)
 from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest
 from simple_ar.core.artifacts import read_json, read_text, write_json
 from simple_ar.reviewing.schema import ReviewFinding
@@ -49,23 +55,38 @@ def review_code_task_changes(
     manifest = load_code_task_manifest(root)
     changed_files = _changed_files(manifest, paths)
     deterministic = _deterministic_findings(root, manifest, changed_files)
-    llm_findings = run_llm_review(
-        meta_dir=paths.meta_dir,
-        prompt=_review_prompt(
-            root,
-            manifest=manifest,
-            phase=phase,
-            changed_files=changed_files,
-            max_source_chars_per_file=max_source_chars_per_file,
-        ),
-        label=f"code-task-review-{phase}",
-        source="code-task.llm-reviewer",
-        default_category="llm_review",
-        default_evidence=["code_task/patch.diff"],
+    review_index = build_review_index(
+        paths.workspace_dir,
+        result_schema=_result_schema_from_manifest(manifest),
+        contract=_contract_from_run(paths),
+    )
+    review_clusters = build_review_clusters(
+        review_index,
+        deterministic_findings=deterministic,
+        max_clusters=4,
+        max_files_per_cluster=5,
+    )
+    write_json(_review_index_path(paths.meta_dir, phase), review_index)
+    write_json(
+        _review_clusters_path(paths.meta_dir, phase),
+        {
+            "schema_version": "code_task_review_clusters.v1",
+            "phase": phase,
+            "cluster_count": len(review_clusters),
+            "clusters": review_clusters,
+        },
+    )
+    llm_findings = _layered_llm_findings(
+        run_dir=root,
+        manifest=manifest,
+        phase=phase,
+        changed_files=changed_files,
+        review_index=review_index,
+        review_clusters=review_clusters,
         model=model,
         use_llm=use_llm,
+        max_source_chars_per_file=max_source_chars_per_file,
         message_callback=message_callback,
-        max_findings=16,
     )
 
     report = build_review_artifact(
@@ -76,6 +97,10 @@ def review_code_task_changes(
             "phase": phase,
             "changed_files": changed_files,
             "patch_diff": "code_task/patch.diff" if (paths.task_dir / "patch.diff").is_file() else "",
+            "review_mode": "layered",
+            "review_index": _relative_meta_path(phase, "review_index"),
+            "review_clusters": _relative_meta_path(phase, "review_clusters"),
+            "review_cluster_count": len(review_clusters),
         },
     )
     report_path = paths.meta_dir / ("review_report.json" if phase == "post_apply" else f"review_report_{phase}.json")
@@ -197,32 +222,90 @@ def _deterministic_findings(root: Path, manifest: dict[str, Any], changed_files:
     return findings
 
 
+def _layered_llm_findings(
+    *,
+    run_dir: Path,
+    manifest: dict[str, Any],
+    phase: str,
+    changed_files: list[str],
+    review_index: dict[str, Any],
+    review_clusters: list[dict[str, Any]],
+    model: str | None,
+    use_llm: bool,
+    max_source_chars_per_file: int,
+    message_callback: MessageCallback | None,
+) -> list[ReviewFinding]:
+    paths = code_task_paths(run_dir)
+    compact_index = compact_review_index(review_index)
+    interface_mismatches = find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files)
+    interface_paths = _dedupe(
+        [*changed_files, *(str(row.get("target_path", "")) for row in interface_mismatches)]
+    )[:20]
+    findings: list[ReviewFinding] = []
+    for cluster in review_clusters:
+        snippets = snippets_for_cluster(
+            paths.workspace_dir,
+            cluster,
+            chars_per_file=max_source_chars_per_file,
+        )
+        if not snippets:
+            continue
+        cluster_id = str(cluster.get("cluster_id") or "cluster")
+        prompt = _review_prompt(
+            run_dir,
+            manifest=manifest,
+            phase=phase,
+            changed_files=changed_files,
+            review_index=compact_index,
+            review_cluster=cluster,
+            interface_paths=interface_paths,
+            interface_mismatches=interface_mismatches,
+            snippets=snippets,
+        )
+        findings.extend(
+            run_llm_review(
+                meta_dir=paths.meta_dir,
+                prompt=prompt,
+                label=f"code-task-review-{phase}-{cluster_id}",
+                source=f"code-task.llm-reviewer.{cluster_id}",
+                default_category="llm_review",
+                default_evidence=["code_task/patch.diff", _relative_meta_path(phase, "review_index")],
+                model=model,
+                use_llm=use_llm,
+                message_callback=message_callback,
+                max_findings=5,
+                allow_blocking=False,
+            )
+        )
+    return findings[:16]
+
+
 def _review_prompt(
     run_dir: Path,
     *,
     manifest: dict[str, Any],
     phase: str,
     changed_files: list[str],
-    max_source_chars_per_file: int,
+    review_index: dict[str, Any],
+    review_cluster: dict[str, Any],
+    interface_paths: list[str],
+    interface_mismatches: list[dict[str, Any]],
+    snippets: list[str],
 ) -> str:
     paths = code_task_paths(run_dir)
-    interface_mismatches = find_local_api_mismatches(paths.workspace_dir, relevant_paths=changed_files)
-    interface_paths = _dedupe(
-        [*changed_files, *(str(row.get("target_path", "")) for row in interface_mismatches)]
-    )[:20]
-    snippets = "\n\n".join(
-        f"### {path}\n```text\n{_source_snippet(paths.workspace_dir / path, max_source_chars_per_file)}\n```"
-        for path in changed_files[:8]
-    )
     return review_prompt(
         instructions=(
             "Review the applied patch for scope, interface compatibility, logic, tests, benchmark integrity, "
-            "and repair risk."
+            "and repair risk. Use the full review index to understand project shape, but focus findings on "
+            "the current review cluster and the supplied patch evidence. Do not request broad rewrites."
         ),
         context={
             "phase": phase,
             "task": _read_optional_text(paths.task_dir / "task.md"),
             "task_memory": task_memory_context(run_dir),
+            "changed_files": changed_files,
+            "review_index": review_index,
+            "review_cluster": review_cluster,
             "manifest_patch": manifest.get("patch", {}),
             "validation_report": _read_optional_json(paths.meta_dir / "validation_report.json"),
             "patched_run_record": _run_record(manifest, "patched"),
@@ -233,8 +316,47 @@ def _review_prompt(
             ),
             "local_api_mismatches": interface_mismatches,
         },
-        snippets=[snippets] if snippets else [],
+        snippets=snippets,
     )
+
+
+def _review_index_path(meta_dir: Path, phase: str) -> Path:
+    suffix = "" if phase == "post_apply" else f"_{phase}"
+    return meta_dir / f"review_index{suffix}.json"
+
+
+def _review_clusters_path(meta_dir: Path, phase: str) -> Path:
+    suffix = "" if phase == "post_apply" else f"_{phase}"
+    return meta_dir / f"review_clusters{suffix}.json"
+
+
+def _relative_meta_path(phase: str, kind: str) -> str:
+    suffix = "" if phase == "post_apply" else f"_{phase}"
+    return f"code_task/meta/{kind}{suffix}.json"
+
+
+def _result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    benchmark = manifest.get("benchmark")
+    benchmark = benchmark if isinstance(benchmark, dict) else {}
+    primary = str(benchmark.get("primary_metric") or "score").strip() or "score"
+    directions = benchmark.get("metric_directions")
+    directions = directions if isinstance(directions, dict) else {}
+    required = [primary]
+    required.extend(str(key) for key in directions if str(key).strip() and str(key) not in required)
+    return {
+        "primary_metric": primary,
+        "required_metrics": required,
+        "metric_directions": {str(key): str(value) for key, value in directions.items()},
+    }
+
+
+def _contract_from_run(paths: Any) -> dict[str, Any]:
+    task_text = _read_optional_text(paths.task_dir / "task.md")
+    return {
+        "objective": task_text[:2000],
+        "task": task_text[:4000],
+        "success_criteria": [],
+    }
 
 
 def _changed_files(manifest: dict[str, Any], paths: Any) -> list[str]:
@@ -279,14 +401,6 @@ def _read_optional_text(path: Path) -> str:
         return read_text(path)
     except OSError:
         return ""
-
-
-def _source_snippet(path: Path, limit: int) -> str:
-    text = _read_optional_text(path)
-    if len(text) <= limit:
-        return text
-    half = max(800, limit // 2)
-    return text[:half].rstrip() + "\n\n# ... middle omitted ...\n\n" + text[-half:].lstrip()
 
 
 def _dedupe(values: Any) -> list[str]:

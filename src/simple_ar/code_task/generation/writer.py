@@ -60,7 +60,10 @@ def write_generated_project(
         )
         line_count = max(1, len(content.splitlines()))
         if total_lines + line_count > max_generated_lines and generated:
-            break
+            raise LLMError(
+                f"Generated file `{rel_path}` would exceed max_generated_lines "
+                f"({total_lines + line_count}>{max_generated_lines}); refusing to write a partial project."
+            )
         target = project_dir / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         write_text(target, content)
@@ -279,7 +282,7 @@ def greenfield_file_prompt(
         f"Actual dependency APIs:\n{json.dumps(dict(dependency_api or {}), indent=2, ensure_ascii=False)}\n\n"
         f"Dependency advice:\n{json.dumps(_dependency_advice_for_prompt(dependency_advice or {}), indent=2, ensure_ascii=False)}\n\n"
         f"Implementation memory:\n{json.dumps(_memory_for_prompt(implementation_memory or {}), indent=2, ensure_ascii=False)}\n\n"
-        f"Architecture plan:\n{json.dumps(dict(architecture_plan), indent=2, ensure_ascii=False)}\n\n"
+        f"Project planning context:\n{json.dumps(_architecture_for_file_prompt(architecture_plan, file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
         f"Experiment contract:\n{json.dumps(contract_prompt_view(contract), indent=2, ensure_ascii=False)}\n"
         + (f"\nRetry feedback:\n{retry_feedback}\n" if retry_feedback else "")
@@ -292,7 +295,62 @@ GREENFIELD_FILE_SYSTEM = (
 )
 
 
-def _dependency_advice_for_prompt(advice: Mapping[str, Any], *, package_limit: int = 80) -> dict[str, Any]:
+def _architecture_for_file_prompt(
+    architecture_plan: Mapping[str, Any],
+    file_spec: Mapping[str, Any],
+    *,
+    file_limit: int = 32,
+    context_limit: int = 12,
+) -> dict[str, Any]:
+    """Return the compact planning slice needed to write one file."""
+
+    current_path = _safe_path(str(file_spec.get("path", "")))
+    files = architecture_plan.get("files")
+    rows = [dict(row) for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
+    by_path = {_safe_path(str(row.get("path", ""))): row for row in rows}
+    dependencies = [
+        by_path[path]
+        for path in (_safe_path(item) for item in _string_list(file_spec.get("dependencies"), limit=context_limit))
+        if path in by_path
+    ]
+    consumers = [
+        row
+        for row in rows
+        if current_path
+        and current_path in {_safe_path(item) for item in _string_list(row.get("dependencies"), limit=64)}
+    ][:context_limit]
+    return {
+        "schema_version": architecture_plan.get("schema_version", "greenfield_architecture.v1"),
+        "objective": architecture_plan.get("objective", ""),
+        "architecture_summary": architecture_plan.get("architecture_summary", ""),
+        "current_file": dict(file_spec),
+        "dependency_files": _compact_file_specs(dependencies, limit=context_limit),
+        "consumer_files": _compact_file_specs(consumers, limit=context_limit),
+        "project_file_outline": _compact_file_specs(rows, limit=file_limit),
+        "interfaces": _string_list(architecture_plan.get("interfaces"), limit=16),
+        "data_flow": _string_list(architecture_plan.get("data_flow"), limit=12),
+        "test_strategy": _string_list(architecture_plan.get("test_strategy"), limit=10),
+        "risks": _string_list(architecture_plan.get("risks"), limit=8),
+        "planning": architecture_plan.get("planning", {}),
+    }
+
+
+def _compact_file_specs(files: list[Mapping[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for row in files[:limit]:
+        result.append(
+            {
+                "path": _safe_path(str(row.get("path", ""))),
+                "purpose": str(row.get("purpose", ""))[:240],
+                "dependencies": _string_list(row.get("dependencies"), limit=12),
+                "public_api": _string_list(row.get("public_api"), limit=12),
+                "entrypoint": bool(row.get("entrypoint")),
+            }
+        )
+    return [row for row in result if row["path"]]
+
+
+def _dependency_advice_for_prompt(advice: Mapping[str, Any], *, package_limit: int = 40) -> dict[str, Any]:
     packages = advice.get("packages")
     rows = [row for row in packages if isinstance(row, Mapping)] if isinstance(packages, list) else []
     environment_packages = advice.get("environment_packages")

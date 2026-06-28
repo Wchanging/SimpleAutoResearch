@@ -40,10 +40,10 @@ class LLMSettings:
             failures. Includes the first request.
         retry_base_delay_sec: Initial exponential-backoff delay.
         retry_max_delay_sec: Maximum delay between provider retries.
-        api_mode: Provider API surface used by LiteLLM. ``chat`` uses
+        api_mode: Provider API surface used by LiteLLM. ``responses`` uses
+            ``litellm.responses`` with Responses API-style ``instructions`` and
+            ``input``. ``chat`` uses
             ``litellm.completion`` with Chat Completions-style ``messages``.
-            ``responses`` uses ``litellm.responses`` with Responses API-style
-            ``instructions`` and ``input``.
         json_response_format: JSON response-format mode for ``ask_json``.
             ``off`` keeps prompt-only JSON parsing for broad provider
             compatibility. ``auto`` tries provider-native JSON mode and retries
@@ -61,7 +61,7 @@ class LLMSettings:
     retry_attempts: int = 3
     retry_base_delay_sec: float = 1.0
     retry_max_delay_sec: float = 12.0
-    api_mode: str = "chat"
+    api_mode: str = "responses"
     json_response_format: str = "off"
 
 
@@ -655,9 +655,9 @@ def _json_response_format_mode(env_name: str) -> str:
 
 
 def _llm_api_mode(env_name: str) -> str:
-    value = os.environ.get(env_name, "chat").strip().lower().replace("-", "_")
+    value = os.environ.get(env_name, "responses").strip().lower().replace("-", "_")
     aliases = {
-        "": "chat",
+        "": "responses",
         "chat": "chat",
         "completion": "chat",
         "completions": "chat",
@@ -668,7 +668,7 @@ def _llm_api_mode(env_name: str) -> str:
         "response": "responses",
         "input": "responses",
     }
-    return aliases.get(value, "chat")
+    return aliases.get(value, "responses")
 
 
 def _json_response_format_request(mode: str) -> dict[str, Any] | None:

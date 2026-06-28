@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
 
 from simple_ar.code_task.generation.task_contract import contract_prompt_view
-from simple_ar.core.artifacts import write_json
+from simple_ar.core.artifacts import append_jsonl, write_json
 from simple_ar.integrations.llm import LLMClient, LLMError
 
 
@@ -99,6 +100,18 @@ def build_tool_agent_architecture_plan(
         review=review,
         revision_count=revision_count,
     )
+    blockers = _planning_blockers(plan, review)
+    if blockers:
+        if planning_dir is not None:
+            write_json(
+                planning_dir / "blocking_issues.json",
+                {
+                    "schema_version": "greenfield_planning_blockers.v1",
+                    "blockers": blockers,
+                    "review": dict(review),
+                },
+            )
+        raise LLMError("Greenfield planning did not converge: " + "; ".join(blockers[:4]))
     if planning_dir is not None:
         write_json(planning_dir / "state.json", state)
         write_json(planning_dir / "final_plan.json", plan)
@@ -122,25 +135,49 @@ def _run_stage(
 ) -> dict[str, Any]:
     label = f"greenfield-plan-{stage}" if attempt_index == 1 else f"greenfield-plan-{stage}-r{attempt_index}"
     _emit(message_callback, f"Planning tool `{stage}`.")
-    raw = _ask_stage_json(
-        client,
-        system=_stage_system(stage),
-        prompt=_stage_prompt(
-            stage,
-            contract=contract,
-            result_schema=result_schema,
-            resource_plan=resource_plan,
-            domain_profile=domain_profile,
-            state=state,
-            feedback=feedback,
-        ),
-        label=label,
-        max_output_tokens=_stage_output_tokens(stage, resource_plan),
-        retry_attempts=retry_attempts,
-        message_callback=message_callback,
+    prompt = _stage_prompt(
+        stage,
+        contract=contract,
+        result_schema=result_schema,
+        resource_plan=resource_plan,
+        domain_profile=domain_profile,
+        state=state,
+        feedback=feedback,
     )
+    try:
+        raw = _ask_stage_json(
+            client,
+            system=_stage_system(stage),
+            prompt=prompt,
+            label=label,
+            max_output_tokens=_stage_output_tokens(stage, resource_plan),
+            retry_attempts=retry_attempts,
+            message_callback=message_callback,
+        )
+    except LLMError as exc:
+        _record_agent_step(
+            planning_dir,
+            stage=stage,
+            attempt_index=attempt_index,
+            label=label,
+            status="failed",
+            prompt=prompt,
+            output={"error": str(exc)},
+            feedback=feedback,
+        )
+        raise
     normalized = _normalize_stage_result(stage, raw)
     _write_stage_artifact(planning_dir, stage, attempt_index, normalized)
+    _record_agent_step(
+        planning_dir,
+        stage=stage,
+        attempt_index=attempt_index,
+        label=label,
+        status="passed",
+        prompt=prompt,
+        output=normalized,
+        feedback=feedback,
+    )
     return normalized
 
 
@@ -158,23 +195,48 @@ def _run_review(
     message_callback: MessageCallback | None,
 ) -> dict[str, Any]:
     _emit(message_callback, "Reviewing greenfield planning artifacts.")
-    raw = _ask_stage_json(
-        client,
-        system=PLANNING_REVIEW_SYSTEM,
-        prompt=_review_prompt(
-            contract=contract,
-            result_schema=result_schema,
-            resource_plan=resource_plan,
-            domain_profile=domain_profile,
-            state=state,
-        ),
-        label="greenfield-plan-review" if attempt_index == 1 else f"greenfield-plan-review-r{attempt_index}",
-        max_output_tokens=1200,
-        retry_attempts=retry_attempts,
-        message_callback=message_callback,
+    prompt = _review_prompt(
+        contract=contract,
+        result_schema=result_schema,
+        resource_plan=resource_plan,
+        domain_profile=domain_profile,
+        state=state,
     )
+    label = "greenfield-plan-review" if attempt_index == 1 else f"greenfield-plan-review-r{attempt_index}"
+    try:
+        raw = _ask_stage_json(
+            client,
+            system=PLANNING_REVIEW_SYSTEM,
+            prompt=prompt,
+            label=label,
+            max_output_tokens=1200,
+            retry_attempts=retry_attempts,
+            message_callback=message_callback,
+        )
+    except LLMError as exc:
+        _record_agent_step(
+            planning_dir,
+            stage="review",
+            attempt_index=attempt_index,
+            label=label,
+            status="failed",
+            prompt=prompt,
+            output={"error": str(exc)},
+            feedback=[],
+        )
+        raise
     review = _normalize_review(raw)
     _write_stage_artifact(planning_dir, "review", attempt_index, review)
+    _record_agent_step(
+        planning_dir,
+        stage="review",
+        attempt_index=attempt_index,
+        label=label,
+        status=str(review.get("status") or "unknown"),
+        prompt=prompt,
+        output=review,
+        feedback=[],
+    )
     return review
 
 
@@ -344,8 +406,16 @@ def _assemble_architecture_plan(
     architecture = state.get("architecture") if isinstance(state.get("architecture"), Mapping) else {}
     interfaces = state.get("interfaces") if isinstance(state.get("interfaces"), Mapping) else {}
     file_plan = state.get("file_plan") if isinstance(state.get("file_plan"), Mapping) else {}
-    files = _normalize_files(file_plan.get("files"), max_files=_positive_int(resource_plan.get("max_files"), 8))
+    max_files = _positive_int(resource_plan.get("max_files"), 8)
+    files = _normalize_files(file_plan.get("files"), max_files=max_files)
+    files, recovery_notes = _recover_degenerate_file_plan(
+        files,
+        architecture=architecture,
+        interfaces=interfaces,
+        max_files=max_files,
+    )
     risks = _list(architecture.get("risks"))[:8]
+    risks.extend(recovery_notes)
     findings = review.get("findings") if isinstance(review.get("findings"), list) else []
     if findings:
         risks.extend(_finding_to_risk(row) for row in findings if isinstance(row, Mapping))
@@ -366,6 +436,7 @@ def _assemble_architecture_plan(
             "revision_count": revision_count,
             "review_summary": _text(review.get("summary")),
         },
+        "planning_status": _text(review.get("status")) or "unknown",
         "result_schema": dict(result_schema),
     }
 
@@ -404,6 +475,165 @@ def _normalize_stage_result(stage: str, value: Mapping[str, Any]) -> dict[str, A
             "files": _normalize_files(value.get("files"), max_files=64),
         }
     return dict(value)
+
+
+def _planning_blockers(plan: Mapping[str, Any], review: Mapping[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    findings = review.get("findings")
+    rows = findings if isinstance(findings, list) else []
+    severe = [
+        _text(row.get("issue") or row.get("required_change"))
+        for row in rows
+        if isinstance(row, Mapping) and _text(row.get("severity")) in {"high", "critical"}
+    ]
+    if severe:
+        blockers.append("planning review still has high/critical findings: " + "; ".join(severe[:3]))
+    files = plan.get("files")
+    file_rows = [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
+    if not any(row.get("path") == "main.py" for row in file_rows):
+        blockers.append("file plan has no main.py entrypoint")
+    if len(file_rows) <= 1 and plan.get("architecture_summary"):
+        blockers.append("file plan collapsed to one file; cross-file implementation context would be unreliable")
+    return blockers
+
+
+def _recover_degenerate_file_plan(
+    files: list[dict[str, Any]],
+    *,
+    architecture: Mapping[str, Any],
+    interfaces: Mapping[str, Any],
+    max_files: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Recover a usable file plan from architecture when the file-planner collapses.
+
+    This is intentionally generic: it only uses the architecture modules and
+    interface contracts that were already produced for the task. It does not
+    know anything about ARC-Bench or ML topics.
+    """
+
+    non_entry = [row for row in files if row.get("path") != "main.py"]
+    modules = architecture.get("modules")
+    module_rows = [row for row in modules if isinstance(row, Mapping)] if isinstance(modules, list) else []
+    if len(non_entry) >= 2 or len(module_rows) < 2 or max_files < 4:
+        return files, []
+
+    module_paths: dict[str, str] = {}
+    recovered: list[dict[str, Any]] = [
+        {
+            "path": "main.py",
+            "purpose": "Thin command-line entrypoint that calls the generated project orchestrator.",
+            "dependencies": ["generated_project/main.py"],
+            "public_api": ["main(argv=None)"],
+            "acceptance_criteria": ["Runs with `python main.py` and prints parseable metrics."],
+            "entrypoint": True,
+        },
+        {
+            "path": "generated_project/__init__.py",
+            "purpose": "Package marker for generated project modules.",
+            "dependencies": [],
+            "public_api": [],
+            "acceptance_criteria": ["Allows generated_project package imports."],
+            "entrypoint": False,
+        },
+        {
+            "path": "generated_project/main.py",
+            "purpose": "Project orchestrator that wires data, computation, metrics, and reporting modules.",
+            "dependencies": [],
+            "public_api": ["main(argv=None)", "run_experiment(config=None)"],
+            "acceptance_criteria": ["Runs the full project workflow and returns/prints required metrics."],
+            "entrypoint": False,
+        },
+    ]
+
+    for module in module_rows:
+        name = _text(module.get("name"))
+        path = _module_path(name)
+        if not path or path in {row["path"] for row in recovered}:
+            continue
+        module_paths[_module_key(name)] = path
+        recovered.append(
+            {
+                "path": path,
+                "purpose": _text(module.get("responsibility"))[:500] or f"Implement {name} responsibility.",
+                "dependencies": [],
+                "public_api": _module_public_api(name, interfaces),
+                "acceptance_criteria": _module_acceptance(module),
+                "entrypoint": False,
+            }
+        )
+        if len(recovered) >= max_files:
+            break
+
+    known = {row["path"] for row in recovered}
+    for row in recovered:
+        if row["path"] == "generated_project/main.py":
+            excluded = {row["path"], "generated_project/__init__.py"}
+            row["dependencies"] = sorted(
+                item
+                for item in known
+                if item.startswith("generated_project/") and item not in excluded
+            )
+            continue
+        source_module = _module_key(Path(row["path"]).stem)
+        module = next((item for item in module_rows if _module_key(item.get("name")) == source_module), None)
+        raw_deps = module.get("dependencies") if isinstance(module, Mapping) else []
+        deps = raw_deps if isinstance(raw_deps, list) else []
+        row["dependencies"] = [
+            module_paths[_module_key(dep)]
+            for dep in deps
+            if _module_key(dep) in module_paths and module_paths[_module_key(dep)] in known
+        ]
+
+    return _prune_dependencies(recovered[:max(1, max_files)]), [
+        "File plan was recovered from architecture modules because the original file plan collapsed to a single entrypoint."
+    ]
+
+
+def _module_path(name: str) -> str:
+    slug = _slug(name)
+    if not slug or slug in {"main", "init", "__init__"}:
+        return ""
+    return f"generated_project/{slug}.py"
+
+
+def _module_key(value: object) -> str:
+    return _slug(_text(value)).replace("_", "")
+
+
+def _slug(value: str) -> str:
+    text = value.strip().lower()
+    chars: list[str] = []
+    previous_sep = False
+    for char in text:
+        if char.isalnum():
+            chars.append(char)
+            previous_sep = False
+        elif not previous_sep:
+            chars.append("_")
+            previous_sep = True
+    return "".join(chars).strip("_")[:64]
+
+
+def _module_public_api(name: str, interfaces: Mapping[str, Any]) -> list[str]:
+    rows = interfaces.get("module_apis")
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        if _module_key(row.get("module") or row.get("name")) != _module_key(name):
+            continue
+        api = row.get("public_api")
+        result = _list(api)[:12]
+        if result:
+            return result
+    slug = _slug(name)
+    return [f"build_{slug}(...)" if slug else "run(...)"]
+
+
+def _module_acceptance(module: Mapping[str, Any]) -> list[str]:
+    outputs = _list(module.get("outputs"))[:4]
+    if outputs:
+        return [f"Produces {item} for downstream modules." for item in outputs]
+    return ["Implements its planned responsibility with deterministic, importable Python."]
 
 
 def _normalize_review(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -663,6 +893,68 @@ def _write_stage_artifact(planning_dir: Path | None, stage: str, attempt_index: 
     stage_dir.mkdir(parents=True, exist_ok=True)
     write_json(stage_dir / f"attempt-{attempt_index:03d}.json", dict(value))
     write_json(stage_dir / "latest.json", dict(value))
+
+
+def _record_agent_step(
+    planning_dir: Path | None,
+    *,
+    stage: str,
+    attempt_index: int,
+    label: str,
+    status: str,
+    prompt: str,
+    output: Mapping[str, Any],
+    feedback: list[str],
+) -> None:
+    if planning_dir is None:
+        return
+    planning_dir.mkdir(parents=True, exist_ok=True)
+    append_jsonl(
+        planning_dir / "agent_steps.jsonl",
+        {
+            "schema_version": "code_task_agent_step.v1",
+            "stage": stage,
+            "attempt_index": attempt_index,
+            "label": label,
+            "status": status,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "prompt_chars": len(prompt),
+            "feedback": feedback[-8:],
+            "output_keys": sorted(str(key) for key in output.keys()),
+            "output_summary": _agent_step_output_summary(stage, output),
+        },
+    )
+
+
+def _agent_step_output_summary(stage: str, output: Mapping[str, Any]) -> dict[str, Any]:
+    if stage == "requirements":
+        return {
+            "hard_requirement_count": len(_list(output.get("hard_requirements"))),
+            "deliverable_count": len(_list(output.get("deliverables"))),
+            "evaluation_target_count": len(_list(output.get("evaluation_targets"))),
+        }
+    if stage == "architecture":
+        modules = output.get("modules")
+        return {
+            "module_count": len(modules) if isinstance(modules, list) else 0,
+            "risk_count": len(_list(output.get("risks"))),
+        }
+    if stage == "interfaces":
+        return {
+            "shared_schema_count": len(output.get("shared_schemas")) if isinstance(output.get("shared_schemas"), list) else 0,
+            "module_api_count": len(output.get("module_apis")) if isinstance(output.get("module_apis"), list) else 0,
+            "contract_count": len(_list(output.get("cross_file_contracts"))),
+        }
+    if stage == "file_plan":
+        files = output.get("files")
+        return {"file_count": len(files) if isinstance(files, list) else 0}
+    if stage == "review":
+        findings = output.get("findings")
+        return {
+            "review_status": output.get("status", "unknown"),
+            "finding_count": len(findings) if isinstance(findings, list) else 0,
+        }
+    return {}
 
 
 def _retry_suffix(error: LLMError | None, attempt: int) -> str:

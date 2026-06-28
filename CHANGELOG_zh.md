@@ -4,12 +4,31 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-28
+
+### Changed
+
+- `SIMPLE_AR_LLM_API` 现在默认使用 `responses`；如果第三方 provider 只适配 Chat Completions 风格的 `messages`，仍可显式设置为 `chat`。
+- Greenfield planning 在有界 planning review 后如果仍存在 high / critical 阻断项，会停止并写出 blocking artifact，不再带着已知坏规划继续进入代码生成。
+- Greenfield 逐文件生成现在接收紧凑的当前文件 planning context，而不是完整 architecture JSON，降低大任务 writer prompt 过重和跨文件契约漂移的概率。
+- Generated-project review 现在改为通用分层审查：先建立完整 ReviewIndex，再按入口编排、数据流、核心逻辑、指标产物、配置文档等 cluster 调用 LLM reviewer。审查产物会额外写出 `code_task/meta/review_index.json` 和 `code_task/meta/review_clusters.json`，避免一次塞入全部代码或依赖固定文件名抽样。
+- Existing-project code-task review 也切换到同一套 ReviewIndex / cluster 上下文，同时保留 patch diff、edit scope、validation report 和 benchmark run record 等代码修改场景证据。
+- Greenfield tool-agent planning 现在会写出 `code_task/meta/planning/agent_steps.jsonl`，记录每个规划子步骤的 stage、attempt、prompt hash、输出摘要和失败状态，便于定位 planning/review 反复不过的问题。
+- Generated-project review/run repair prompt 现在会注入紧凑 ReviewIndex；review repair 的目标选择会读取 finding 的 evidence 和 recommendation，不再只依赖少量 category 或固定文件名。
+
+### Fixed
+
+- Greenfield 文件生成如果超过配置的代码行预算，现在会明确失败，而不是静默截断后留下半成品项目。
+- Greenfield code-task 在 validation 和 benchmark rerun 后会刷新 summary，避免后续阶段已经通过但 `summary.md` 仍停留在 `review_failed` 的旧状态。
+- LLM review 默认仍保持非阻断兼容旧调用；generated-project 的分层 review 会在证据明确时保留 blocking finding，让缺失交付物、schema 漂移和运行可信度问题不会被悄悄降成 warning。
+- ReviewIndex 默认跳过 `.git`、`.venv`、`node_modules`、缓存和构建目录，避免 worktree/copy 模式下把无关依赖或构建产物塞进审查上下文。
+
 ## 2026-06-27
 
 ### Changed
 
 - JSON 型 LLM 调用现在支持可选的 provider 原生 `response_format={"type":"json_object"}`，通过 `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制。默认仍为 `off`，只使用 prompt 和本地 JSON 解析以保证第三方兼容性；仅在 provider 明确支持时建议设置为 `auto` 或 `json_object`。
-- LLM 请求现在可通过 `SIMPLE_AR_LLM_API` 选择 LiteLLM API 形态。默认 `chat` 保持原有 Chat Completions 风格的 `messages` 请求；`responses` 会使用 Responses API 风格的 `instructions` 和 `input`，方便测试更适配该端点的 provider。
+- LLM 请求现在可通过 `SIMPLE_AR_LLM_API` 选择 LiteLLM API 形态。`responses` 会使用 Responses API 风格的 `instructions` 和 `input`；`chat` 保留 Chat Completions 风格的 `messages` 请求，供需要该形态的 provider 使用。
 - Greenfield tool-agent planning 现在会使用更小的阶段 prompt、更少的重复 task 上下文、更严格的紧凑 JSON 指令，以及更宽容的 JSON 提取器，降低 requirements 阶段输出被截断后无法解析的概率。
 - Code-task 模型路由现在覆盖 greenfield planner/writer/reviewer 三个角色，同时保留已有代码项目的 planner/editor/repair 路由；可在 TOML 的 `[models.code_task]` 中配置 `planner`、`writer`、`reviewer`、`editor` 和 `repair`，`.env` 继续主要放 provider URL/key/default。
 
