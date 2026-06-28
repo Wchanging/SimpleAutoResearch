@@ -67,7 +67,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `OPENAI_API_KEY` 是 LLM 模式必需项。
 - `OPENAI_BASE_URL` 可以指向 OpenAI，也可以指向第三方 OpenAI 兼容 `/v1` 接口。
 - `SIMPLE_AR_MODEL` 是没有传入 `--model` 时的默认模型。
-- `SIMPLE_AR_LLM_API` 控制 LiteLLM 使用哪种 API 形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`；`chat` 会发送 Chat Completions 风格的 `messages`。
+- `SIMPLE_AR_LLM_API` 控制 LiteLLM 使用哪种 API 形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`，遇到临时传输中断时会自动退到 Chat Completions 风格的 `messages`；`chat` 会直接发送 Chat Completions 风格的 `messages`。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 限制单次 provider 请求等待时间；较大的 coding prompt 如果确实需要更久，可以适当调高。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 限制模型输出长度，避免较长 coding prompt 生成过大的结果。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时和 5xx 响应。

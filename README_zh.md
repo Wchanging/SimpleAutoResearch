@@ -70,7 +70,7 @@ SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
 
-如果使用第三方 OpenAI 兼容接口，把 `OPENAI_BASE_URL` 指向对应服务的 `/v1` 地址即可。价格字段是可选项；不填写时，SimpleAutoResearch 仍会记录 token 数量，但费用估算会显示为 `null`。连接中断、限流、超时和 5xx 这类临时 provider 错误会按上面的 retry 设置做有限指数退避重试。JSON 输出请求默认只靠 prompt 和本地解析，兼容性更好；只有 provider 明确支持原生 JSON response formatting 时，才建议把 `SIMPLE_AR_JSON_RESPONSE_FORMAT` 改成 `auto` 或 `json_object`。`SIMPLE_AR_LLM_API=responses` 使用 Responses API 风格的 `instructions` 和 `input`；如果 provider 更适配 Chat Completions 风格的 `messages`，可改成 `chat`。
+如果使用第三方 OpenAI 兼容接口，把 `OPENAI_BASE_URL` 指向对应服务的 `/v1` 地址即可。价格字段是可选项；不填写时，SimpleAutoResearch 仍会记录 token 数量，但费用估算会显示为 `null`。连接中断、限流、超时和 5xx 这类临时 provider 错误会按上面的 retry 设置做有限指数退避重试。JSON 输出请求默认只靠 prompt 和本地解析，兼容性更好；只有 provider 明确支持原生 JSON response formatting 时，才建议把 `SIMPLE_AR_JSON_RESPONSE_FORMAT` 改成 `auto` 或 `json_object`。`SIMPLE_AR_LLM_API=responses` 使用 Responses API 风格的 `instructions` 和 `input`；遇到兼容网关的临时传输中断时，会自动退到 Chat Completions 风格的 `messages` 再试。如果 provider 应该始终走 Chat Completions，可改成 `chat`。
 
 ## 快速开始
 

@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- LLM 客户端现在会在 `responses` API 发生 `server disconnected`、remote protocol、5xx 等临时传输错误时，自动把同一请求转换为 Chat Completions 风格的 `messages` 再试，避免第三方兼容网关已完成上游生成但 LiteLLM 未收到响应时直接中断 planning / review / analysis。
 - Greenfield planning 现在会把运行命令中的 `generated_project/...` 识别为项目根目录前缀，并在 file plan 内归一化为根目录相对路径，避免生成 nested `generated_project/generated_project` 或被 planning reviewer 反复判定为双入口冲突。
 - Planning reviewer 的 high / critical finding 不再天然等同于 hard blocker；系统会先做确定性结构复核，只有缺失入口、重复路径、单文件坍缩、危险路径等会阻断，其余问题保留为 planning risk 进入后续代码生成、分层 review 和 run repair。
 - Greenfield 文件生成如果超过配置的代码行预算，现在会明确失败，而不是静默截断后留下半成品项目。

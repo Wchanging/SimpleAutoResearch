@@ -44,6 +44,10 @@ class LLMSettings:
             ``litellm.responses`` with Responses API-style ``instructions`` and
             ``input``. ``chat`` uses
             ``litellm.completion`` with Chat Completions-style ``messages``.
+            ``responses`` falls back to ``chat`` for transient transport
+            failures because some OpenAI-compatible gateways record successful
+            upstream completions while disconnecting the LiteLLM client before
+            it receives the response.
         json_response_format: JSON response-format mode for ``ask_json``.
             ``off`` keeps prompt-only JSON parsing for broad provider
             compatibility. ``auto`` tries provider-native JSON mode and retries
@@ -230,7 +234,7 @@ class LLMClient:
         return output
 
     def _build_request(self, system: str, user: str) -> dict[str, Any]:
-        if self._settings.api_mode == "responses":
+        if self._settings.api_mode in {"responses", "auto"}:
             return {
                 "model": self._provider_model,
                 "instructions": system,
@@ -252,21 +256,33 @@ class LLMClient:
         """Call LiteLLM with bounded exponential backoff for transient errors."""
         attempts = max(1, int(self._settings.retry_attempts or 1))
         last_error: Exception | None = None
-        attempted = 0
-        for attempt in range(1, attempts + 1):
-            attempted = attempt
-            try:
-                if self._settings.api_mode == "responses":
-                    return litellm.responses(**request)
-                return litellm.completion(**request)
-            except Exception as exc:
-                last_error = exc
-                if attempt >= attempts or not _is_transient_llm_error(exc):
-                    break
-                time.sleep(_retry_delay(self._settings, attempt))
+        mode_attempts: list[tuple[str, int, Exception]] = []
+        for api_mode in _api_attempt_order(self._settings.api_mode):
+            mode_request = _request_for_api_mode(request, api_mode)
+            attempted = 0
+            for attempt in range(1, attempts + 1):
+                attempted = attempt
+                try:
+                    return _call_litellm(api_mode, mode_request)
+                except Exception as exc:
+                    last_error = exc
+                    if attempt >= attempts or not _is_transient_llm_error(exc):
+                        break
+                    if api_mode == "responses" and _is_response_transport_disconnect(exc):
+                        break
+                    time.sleep(_retry_delay(self._settings, attempt))
+            if last_error is None:
+                continue
+            mode_attempts.append((api_mode, attempted, last_error))
+            if not _is_transient_llm_error(last_error):
+                break
         if last_error is not None and _is_timeout_error(last_error):
-            raise LLMError(f"LLM request timed out after {attempted} attempt(s): {last_error}") from last_error
-        raise LLMError(f"LLM request failed after {attempted} attempt(s): {last_error}") from last_error
+            raise LLMError(
+                f"LLM request timed out after {_attempt_summary(mode_attempts)} attempt(s): {last_error}"
+            ) from last_error
+        raise LLMError(
+            f"LLM request failed after {_attempt_summary(mode_attempts)} attempt(s): {last_error}"
+        ) from last_error
 
     def ask_json(
         self,
@@ -658,6 +674,10 @@ def _llm_api_mode(env_name: str) -> str:
     value = os.environ.get(env_name, "responses").strip().lower().replace("-", "_")
     aliases = {
         "": "responses",
+        "auto": "auto",
+        "compat": "auto",
+        "responses_then_chat": "auto",
+        "response_then_chat": "auto",
         "chat": "chat",
         "completion": "chat",
         "completions": "chat",
@@ -669,6 +689,141 @@ def _llm_api_mode(env_name: str) -> str:
         "input": "responses",
     }
     return aliases.get(value, "responses")
+
+
+def _api_attempt_order(api_mode: str) -> list[str]:
+    mode = (api_mode or "responses").strip().lower().replace("-", "_")
+    if mode == "chat":
+        return ["chat"]
+    if mode == "auto":
+        return ["responses", "chat"]
+    if mode == "responses":
+        return ["responses", "chat"]
+    return ["responses", "chat"]
+
+
+def _call_litellm(api_mode: str, request: dict[str, Any]) -> object:
+    if api_mode == "responses":
+        return litellm.responses(**request)
+    if api_mode == "chat":
+        return litellm.completion(**request)
+    raise ValueError(f"Unsupported LLM API mode: {api_mode}")
+
+
+def _request_for_api_mode(request: dict[str, Any], api_mode: str) -> dict[str, Any]:
+    if api_mode == "responses":
+        return _as_responses_request(request)
+    if api_mode == "chat":
+        return _as_chat_request(request)
+    raise ValueError(f"Unsupported LLM API mode: {api_mode}")
+
+
+def _as_responses_request(request: dict[str, Any]) -> dict[str, Any]:
+    if "instructions" in request and "input" in request:
+        return dict(request)
+    messages = request.get("messages")
+    system = ""
+    user_parts: list[str] = []
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "")
+            content = _message_content_text(message.get("content"))
+            if role == "system":
+                system = content
+            else:
+                user_parts.append(content)
+    converted: dict[str, Any] = {
+        "model": request.get("model"),
+        "instructions": system,
+        "input": [{"role": "user", "content": "\n\n".join(part for part in user_parts if part)}],
+        "api_key": request.get("api_key"),
+        "timeout": request.get("timeout"),
+    }
+    _copy_optional_request_fields(request, converted, ("api_base", "base_url"))
+    if "max_tokens" in request:
+        converted["max_output_tokens"] = request["max_tokens"]
+    if "response_format" in request:
+        converted["text"] = {"format": request["response_format"]}
+    return _drop_none_values(converted)
+
+
+def _as_chat_request(request: dict[str, Any]) -> dict[str, Any]:
+    if "messages" in request:
+        return dict(request)
+    system = str(request.get("instructions") or "")
+    user = _responses_input_text(request.get("input"))
+    converted: dict[str, Any] = {
+        "model": request.get("model"),
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "api_key": request.get("api_key"),
+        "timeout": request.get("timeout"),
+    }
+    _copy_optional_request_fields(request, converted, ("api_base", "base_url"))
+    if "max_output_tokens" in request:
+        converted["max_tokens"] = request["max_output_tokens"]
+    text_config = request.get("text")
+    if isinstance(text_config, dict) and isinstance(text_config.get("format"), dict):
+        converted["response_format"] = text_config["format"]
+    return _drop_none_values(converted)
+
+
+def _responses_input_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                parts.append(_message_content_text(item.get("content")))
+            else:
+                parts.append(str(item))
+        return "\n\n".join(part for part in parts if part)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _message_content_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text is None:
+                    text = item.get("content")
+                if text is not None:
+                    parts.append(str(text))
+            elif item is not None:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _copy_optional_request_fields(
+    source: dict[str, Any], target: dict[str, Any], names: Sequence[str]
+) -> None:
+    for name in names:
+        if name in source:
+            target[name] = source[name]
+
+
+def _drop_none_values(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if item is not None}
+
+
+def _attempt_summary(mode_attempts: Sequence[tuple[str, int, Exception]]) -> str:
+    if not mode_attempts:
+        return "0"
+    return ", ".join(f"{mode}={attempts}" for mode, attempts, _ in mode_attempts)
 
 
 def _json_response_format_request(mode: str) -> dict[str, Any] | None:
@@ -727,6 +882,19 @@ def _is_transient_llm_error(exc: Exception) -> bool:
     if any(marker in message or marker in name for marker in permanent_markers):
         return False
     return any(marker in message or marker in name for marker in transient_markers)
+
+
+def _is_response_transport_disconnect(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    markers = (
+        "server disconnected",
+        "remote protocol",
+        "remoteprotocolerror",
+        "connection reset",
+        "connection aborted",
+    )
+    return any(marker in message or marker in name for marker in markers)
 
 
 def _is_timeout_error(exc: Exception) -> bool:

@@ -83,6 +83,7 @@ class LLMParsingTests(unittest.TestCase):
         client = LLMClient(
             LLMSettings(
                 api_key="test-key",
+                api_mode="chat",
                 retry_attempts=3,
                 retry_base_delay_sec=0.25,
                 retry_max_delay_sec=2.0,
@@ -100,8 +101,42 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(completion.call_count, 2)
         sleep.assert_called_once_with(0.25)
 
+    def test_responses_transport_error_falls_back_to_chat(self) -> None:
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                api_mode="responses",
+                retry_attempts=2,
+                retry_base_delay_sec=0.25,
+                retry_max_delay_sec=2.0,
+            )
+        )
+        response = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch(
+            "simple_ar.integrations.llm.litellm.responses",
+            side_effect=RuntimeError("Server disconnected without sending a response."),
+        ) as responses, patch(
+            "simple_ar.integrations.llm.litellm.completion",
+            return_value=response,
+        ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+            output = client.ask("system", "user", label="compat-test")
+
+        self.assertEqual(output, "ok")
+        self.assertEqual(responses.call_count, 1)
+        self.assertEqual(completion.call_count, 1)
+        completion_request = completion.call_args.kwargs
+        self.assertEqual(
+            completion_request["messages"],
+            [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "user"},
+            ],
+        )
+        sleep.assert_not_called()
+
     def test_ask_does_not_retry_permanent_auth_error(self) -> None:
-        client = LLMClient(LLMSettings(api_key="test-key", retry_attempts=3))
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=3))
 
         with patch(
             "simple_ar.integrations.llm.litellm.completion",

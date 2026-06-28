@@ -106,8 +106,9 @@ settings above. JSON-producing calls use prompt-only parsing by default for
 provider compatibility. Set `SIMPLE_AR_JSON_RESPONSE_FORMAT=auto` or
 `json_object` only when your provider supports native JSON response formatting.
 `SIMPLE_AR_LLM_API=responses` uses Responses API-style `instructions` and
-`input`; set it to `chat` when your provider expects Chat Completions-style
-`messages`.
+`input`; transient transport failures on compatible gateways automatically
+fall back to Chat Completions-style `messages`. Set it to `chat` when your
+provider should always use Chat Completions directly.
 
 ## Quickstart
 

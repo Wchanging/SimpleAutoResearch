@@ -72,8 +72,9 @@ Notes:
 - `OPENAI_BASE_URL` can point to OpenAI or a third-party OpenAI-compatible `/v1` endpoint.
 - `SIMPLE_AR_MODEL` is the default model when `--model` is not supplied.
 - `SIMPLE_AR_LLM_API` controls the LiteLLM API surface. `responses` sends
-  Responses API-style `instructions` plus `input`; `chat` sends Chat
-  Completions-style `messages`.
+  Responses API-style `instructions` plus `input` and automatically falls back
+  to Chat Completions-style `messages` for transient transport disconnects;
+  `chat` sends Chat Completions-style `messages` directly.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` bounds each provider request; increase it only
   when deliberately running large prompts.
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` limits the model response size for long coding
