@@ -214,8 +214,10 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     scorecard.md
     score_round_code_prompt.txt
     score_round_code_response.json
+    score_round_code_response_attempt_*.json
     score_round_results_prompt.txt
     score_round_results_response.json
+    score_round_results_response_attempt_*.json
 ```
 
 `finalize --analyze` builds the benchmark-facing README/claims from measured
@@ -227,9 +229,12 @@ results. `score` is the ARC-compatible two-round LLM judge:
 - `overall_strict` and `results_only` are deterministic weighted aggregates of
   the model's leaf scores.
 
-If a scoring round returns invalid JSON, scoring fails. If a valid response
-omits one leaf, that leaf is recorded with warning and default score `0.5`,
-matching AutoResearchClaw's `judge.py` behavior.
+If a scoring round returns valid JSON with the wrong top-level schema, the
+adapter retries once with a stricter `grades` contract and saves each raw
+attempt. If the retry still cannot produce a recoverable `grades` array,
+scoring fails. If a valid response omits one leaf, that leaf is recorded with
+warning and default score `0.5`, matching AutoResearchClaw's `judge.py`
+behavior.
 
 ## External Judge
 

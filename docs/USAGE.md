@@ -55,11 +55,13 @@ Supported settings:
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
+SIMPLE_AR_LLM_API=chat
 SIMPLE_AR_LLM_TIMEOUT_SEC=120
 SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
 SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
+SIMPLE_AR_JSON_RESPONSE_FORMAT=off
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -69,6 +71,9 @@ Notes:
 - `OPENAI_API_KEY` is required for LLM mode.
 - `OPENAI_BASE_URL` can point to OpenAI or a third-party OpenAI-compatible `/v1` endpoint.
 - `SIMPLE_AR_MODEL` is the default model when `--model` is not supplied.
+- `SIMPLE_AR_LLM_API` controls the LiteLLM API surface. `chat` sends
+  Chat Completions-style `messages`; `responses` sends Responses API-style
+  `instructions` plus `input`.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` bounds each provider request; increase it only
   when deliberately running large prompts.
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` limits the model response size for long coding
@@ -76,6 +81,10 @@ Notes:
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` and the retry delay settings control bounded
   exponential backoff for transient provider errors such as connection resets,
   rate limits, timeouts, and 5xx responses.
+- `SIMPLE_AR_JSON_RESPONSE_FORMAT` controls provider-native JSON mode for
+  structured calls. The default `off` uses prompt-only parsing for broad
+  provider compatibility. `auto` tries `response_format={"type":"json_object"}`
+  and falls back if the provider rejects it; `json_object` always sends it.
 - Price fields are optional and only affect cost estimates in usage summaries.
 
 ## Research Pipeline (Topic To Report)

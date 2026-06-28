@@ -208,8 +208,10 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     scorecard.md
     score_round_code_prompt.txt
     score_round_code_response.json
+    score_round_code_response_attempt_*.json
     score_round_results_prompt.txt
     score_round_results_response.json
+    score_round_results_response_attempt_*.json
 ```
 
 `finalize --analyze` 负责根据实测结果生成 benchmark-facing README 和 claims。
@@ -219,8 +221,10 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
 - Code Execution / Result Analysis leaf 从 summary、metrics、claims、writeup 评分。
 - `overall_strict` 和 `results_only` 由 leaf 分数按权重确定性汇总。
 
-如果某轮评分没有返回合法 JSON，会直接失败；如果合法响应遗漏单个 leaf，会记录 warning，
-并按 AutoResearchClaw `judge.py` 的行为给该 leaf 默认 `0.5`。
+如果某轮评分返回了合法 JSON 但顶层 schema 不对，adapter 会带着更严格的 `grades`
+契约重试一次，并保存每次 raw response。若重试后仍不能恢复 `grades` 数组，评分才会失败。
+如果合法响应遗漏单个 leaf，会记录 warning，并按 AutoResearchClaw `judge.py` 的行为给该
+leaf 默认 `0.5`。
 
 ## 外部 Judge
 

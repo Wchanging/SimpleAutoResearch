@@ -8,6 +8,8 @@
 
 ### Changed
 
+- JSON 型 LLM 调用现在支持可选的 provider 原生 `response_format={"type":"json_object"}`，通过 `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制。默认仍为 `off`，只使用 prompt 和本地 JSON 解析以保证第三方兼容性；仅在 provider 明确支持时建议设置为 `auto` 或 `json_object`。
+- LLM 请求现在可通过 `SIMPLE_AR_LLM_API` 选择 LiteLLM API 形态。默认 `chat` 保持原有 Chat Completions 风格的 `messages` 请求；`responses` 会使用 Responses API 风格的 `instructions` 和 `input`，方便测试更适配该端点的 provider。
 - Greenfield tool-agent planning 现在会使用更小的阶段 prompt、更少的重复 task 上下文、更严格的紧凑 JSON 指令，以及更宽容的 JSON 提取器，降低 requirements 阶段输出被截断后无法解析的概率。
 - Code-task 模型路由现在覆盖 greenfield planner/writer/reviewer 三个角色，同时保留已有代码项目的 planner/editor/repair 路由；可在 TOML 的 `[models.code_task]` 中配置 `planner`、`writer`、`reviewer`、`editor` 和 `repair`，`.env` 继续主要放 provider URL/key/default。
 

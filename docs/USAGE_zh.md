@@ -51,11 +51,13 @@ Copy-Item .env.example .env
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
+SIMPLE_AR_LLM_API=chat
 SIMPLE_AR_LLM_TIMEOUT_SEC=120
 SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
 SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
+SIMPLE_AR_JSON_RESPONSE_FORMAT=off
 SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
@@ -65,9 +67,11 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `OPENAI_API_KEY` 是 LLM 模式必需项。
 - `OPENAI_BASE_URL` 可以指向 OpenAI，也可以指向第三方 OpenAI 兼容 `/v1` 接口。
 - `SIMPLE_AR_MODEL` 是没有传入 `--model` 时的默认模型。
+- `SIMPLE_AR_LLM_API` 控制 LiteLLM 使用哪种 API 形态。`chat` 会发送 Chat Completions 风格的 `messages`；`responses` 会发送 Responses API 风格的 `instructions` 和 `input`。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 限制单次 provider 请求等待时间；较大的 coding prompt 如果确实需要更久，可以适当调高。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 限制模型输出长度，避免较长 coding prompt 生成过大的结果。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时和 5xx 响应。
+- `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `off` 表示只靠 prompt 和本地解析，兼容性最好；`auto` 会尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；`json_object` 表示强制发送。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
 
 ## Research Pipeline：从主题到报告

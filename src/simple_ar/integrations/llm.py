@@ -40,6 +40,15 @@ class LLMSettings:
             failures. Includes the first request.
         retry_base_delay_sec: Initial exponential-backoff delay.
         retry_max_delay_sec: Maximum delay between provider retries.
+        api_mode: Provider API surface used by LiteLLM. ``chat`` uses
+            ``litellm.completion`` with Chat Completions-style ``messages``.
+            ``responses`` uses ``litellm.responses`` with Responses API-style
+            ``instructions`` and ``input``.
+        json_response_format: JSON response-format mode for ``ask_json``.
+            ``off`` keeps prompt-only JSON parsing for broad provider
+            compatibility. ``auto`` tries provider-native JSON mode and retries
+            without it only when the provider rejects the parameter.
+            ``json_object`` always sends the parameter.
     """
 
     model: str = "gpt-4o-mini"
@@ -52,6 +61,8 @@ class LLMSettings:
     retry_attempts: int = 3
     retry_base_delay_sec: float = 1.0
     retry_max_delay_sec: float = 12.0
+    api_mode: str = "chat"
+    json_response_format: str = "off"
 
 
 @dataclass(frozen=True)
@@ -166,6 +177,8 @@ class LLMClient:
             retry_attempts=_positive_int("SIMPLE_AR_LLM_RETRY_ATTEMPTS", default=3),
             retry_base_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC", default=1.0),
             retry_max_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC", default=12.0),
+            api_mode=_llm_api_mode("SIMPLE_AR_LLM_API"),
+            json_response_format=_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"),
         )
         return cls(settings, usage_callback=usage_callback)
 
@@ -176,6 +189,7 @@ class LLMClient:
         *,
         label: str = "",
         max_output_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         """Send one text request to the model.
 
@@ -185,6 +199,8 @@ class LLMClient:
             label: Optional label used in usage records.
             max_output_tokens: Optional per-request output cap. When omitted,
                 the client-wide ``SIMPLE_AR_MAX_OUTPUT_TOKENS`` setting is used.
+            response_format: Optional provider-native structured-output hint
+                forwarded to LiteLLM/OpenAI-compatible providers.
 
         Returns:
             Model output with surrounding whitespace removed.
@@ -192,7 +208,37 @@ class LLMClient:
         Raises:
             LLMError: If LiteLLM cannot complete the request.
         """
-        request: dict[str, Any] = {
+        request = self._build_request(system, user)
+        if self._settings.base_url:
+            request["api_base"] = self._settings.base_url
+            request["base_url"] = self._settings.base_url
+        output_cap = max_output_tokens if max_output_tokens is not None else self._settings.max_output_tokens
+        if output_cap is not None:
+            if self._settings.api_mode == "responses":
+                request["max_output_tokens"] = max(1, int(output_cap))
+            else:
+                request["max_tokens"] = max(1, int(output_cap))
+        if response_format is not None:
+            if self._settings.api_mode == "responses":
+                request["text"] = {"format": response_format}
+            else:
+                request["response_format"] = response_format
+        response = self._request_with_retry(request)
+
+        output = _content_from_response(response).strip()
+        self._record_usage(response, system, user, output, label=label)
+        return output
+
+    def _build_request(self, system: str, user: str) -> dict[str, Any]:
+        if self._settings.api_mode == "responses":
+            return {
+                "model": self._provider_model,
+                "instructions": system,
+                "input": [{"role": "user", "content": user}],
+                "api_key": self._settings.api_key,
+                "timeout": self._settings.request_timeout_sec,
+            }
+        return {
             "model": self._provider_model,
             "messages": [
                 {"role": "system", "content": system},
@@ -201,19 +247,8 @@ class LLMClient:
             "api_key": self._settings.api_key,
             "timeout": self._settings.request_timeout_sec,
         }
-        if self._settings.base_url:
-            request["api_base"] = self._settings.base_url
-            request["base_url"] = self._settings.base_url
-        output_cap = max_output_tokens if max_output_tokens is not None else self._settings.max_output_tokens
-        if output_cap is not None:
-            request["max_tokens"] = max(1, int(output_cap))
-        response = self._completion_with_retry(request)
 
-        output = _content_from_response(response).strip()
-        self._record_usage(response, system, user, output, label=label)
-        return output
-
-    def _completion_with_retry(self, request: dict[str, Any]) -> object:
+    def _request_with_retry(self, request: dict[str, Any]) -> object:
         """Call LiteLLM with bounded exponential backoff for transient errors."""
         attempts = max(1, int(self._settings.retry_attempts or 1))
         last_error: Exception | None = None
@@ -221,6 +256,8 @@ class LLMClient:
         for attempt in range(1, attempts + 1):
             attempted = attempt
             try:
+                if self._settings.api_mode == "responses":
+                    return litellm.responses(**request)
                 return litellm.completion(**request)
             except Exception as exc:
                 last_error = exc
@@ -254,13 +291,26 @@ class LLMClient:
         Raises:
             LLMError: If the request fails or no JSON object can be parsed.
         """
-        raw = self.ask(
-            system,
-            user
-            + "\n\nReturn valid JSON only. Do not include markdown or extra text.",
-            label=label,
-            max_output_tokens=max_output_tokens,
-        )
+        json_user = user + "\n\nReturn valid JSON only. Do not include markdown or extra text."
+        response_format = _json_response_format_request(self._settings.json_response_format)
+        try:
+            raw = self.ask(
+                system,
+                json_user,
+                label=label,
+                max_output_tokens=max_output_tokens,
+                response_format=response_format,
+            )
+        except LLMError as exc:
+            if self._settings.json_response_format == "auto" and _is_response_format_error(exc):
+                raw = self.ask(
+                    system,
+                    json_user,
+                    label=f"{label}-no-response-format" if label else "",
+                    max_output_tokens=max_output_tokens,
+                )
+            else:
+                raise
         parsed = parse_json_object(raw)
         if parsed is None:
             raise LLMError("LLM response did not contain a JSON object")
@@ -494,7 +544,26 @@ def _content_from_response(response: object) -> str:
         text = _get_value(first, "text")
         if text is not None:
             return str(text)
-    return str(_get_value(response, "output_text") or "")
+    output_text = _get_value(response, "output_text")
+    if output_text is not None:
+        return str(output_text)
+    output = _get_value(response, "output")
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            content = _get_value(item, "content")
+            if isinstance(content, list):
+                for chunk in content:
+                    text = _get_value(chunk, "text")
+                    if text is None:
+                        text = _get_value(chunk, "content")
+                    if text is not None:
+                        parts.append(str(text))
+            elif content is not None:
+                parts.append(str(content))
+        if parts:
+            return "\n".join(parts)
+    return ""
 
 
 def _int_value(obj: object, name: str) -> int | None:
@@ -563,6 +632,49 @@ def _positive_int(env_name: str, *, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _json_response_format_mode(env_name: str) -> str:
+    value = os.environ.get(env_name, "off").strip().lower().replace("-", "_")
+    aliases = {
+        "": "off",
+        "auto": "auto",
+        "1": "json_object",
+        "true": "json_object",
+        "yes": "json_object",
+        "on": "json_object",
+        "json": "json_object",
+        "json_object": "json_object",
+        "response_format": "json_object",
+        "0": "off",
+        "false": "off",
+        "no": "off",
+        "none": "off",
+        "disabled": "off",
+        "off": "off",
+    }
+    return aliases.get(value, "off")
+
+
+def _llm_api_mode(env_name: str) -> str:
+    value = os.environ.get(env_name, "chat").strip().lower().replace("-", "_")
+    aliases = {
+        "": "chat",
+        "chat": "chat",
+        "completion": "chat",
+        "completions": "chat",
+        "chat_completion": "chat",
+        "chat_completions": "chat",
+        "messages": "chat",
+        "responses": "responses",
+        "response": "responses",
+        "input": "responses",
+    }
+    return aliases.get(value, "chat")
+
+
+def _json_response_format_request(mode: str) -> dict[str, Any] | None:
+    return {"type": "json_object"} if mode in {"auto", "json_object"} else None
+
+
 def _retry_delay(settings: LLMSettings, attempt: int) -> float:
     base = settings.retry_base_delay_sec if settings.retry_base_delay_sec > 0 else 1.0
     maximum = settings.retry_max_delay_sec if settings.retry_max_delay_sec > 0 else base
@@ -621,3 +733,28 @@ def _is_timeout_error(exc: Exception) -> bool:
     name = type(exc).__name__.lower()
     message = str(exc).lower()
     return "timeout" in name or "timed out" in message or "timeout" in message
+
+
+def _is_response_format_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    markers = (
+        "response_format",
+        "response format",
+        "json_object",
+        "json object",
+        "structured output",
+        "structured outputs",
+    )
+    rejection_markers = (
+        "unsupported",
+        "not supported",
+        "unrecognized",
+        "unknown parameter",
+        "extra inputs are not permitted",
+        "invalid request",
+        "badrequest",
+        "400",
+    )
+    return any(marker in message for marker in markers) and any(
+        marker in message for marker in rejection_markers
+    )

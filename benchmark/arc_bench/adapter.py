@@ -933,8 +933,8 @@ def score_submission_with_llm(
             code_leaves,
             label="arc-bench-score-code",
             round_name="code",
+            raw_response_path=output_dir / "score_round_code_response.json",
         )
-        write_json(output_dir / "score_round_code_response.json", raw_response)
         raw_responses["code"] = raw_response
         leaf_grades.extend(grades)
         all_warnings.extend(warnings_)
@@ -948,8 +948,8 @@ def score_submission_with_llm(
             result_leaves,
             label="arc-bench-score-results",
             round_name="results",
+            raw_response_path=output_dir / "score_round_results_response.json",
         )
-        write_json(output_dir / "score_round_results_response.json", raw_response)
         raw_responses["results"] = raw_response
         leaf_grades.extend(grades)
         all_warnings.extend(warnings_)
@@ -1093,7 +1093,9 @@ def score_system_prompt() -> str:
     return (
         "You are a strict scientific reviewer for ARC-Bench-style autonomous "
         "research submissions. You grade rubric leaves with scores in [0.0, 1.0]. "
-        "Return valid JSON only in this schema: "
+        "Return valid JSON only. The top-level object MUST contain a `grades` array "
+        "and MUST NOT wrap grades under category names, prose sections, markdown, or "
+        "any alternate object. Use this schema exactly: "
         "{\"grades\":[{\"leaf_id\":\"<id>\",\"score\":<float 0-1>,"
         "\"reasoning\":\"<specific evidence-grounded explanation>\"}],"
         "\"overall_reasoning\":\"<short optional summary>\","
@@ -1119,6 +1121,17 @@ def format_leaves_for_prompt(leaves: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def score_output_instruction(leaves: list[dict[str, Any]]) -> str:
+    leaf_ids = [str(leaf.get("id")) for leaf in leaves if leaf.get("id")]
+    return (
+        "## Required JSON Output\n"
+        "Return exactly one JSON object. No markdown fences. No prose before or after JSON.\n"
+        "The top-level key `grades` is required. It must be an array with exactly one row for each leaf id below.\n"
+        f"Required leaf ids: {json.dumps(leaf_ids, ensure_ascii=False)}\n"
+        "Each row must contain: leaf_id, score, reasoning. If evidence is unclear, still return the leaf with score 0.5 and explain why.\n"
+    )
+
+
 def build_code_round_prompt(manifest_context: str, leaves: list[dict[str, Any]], artifacts: dict[str, Any]) -> str:
     return (
         "## Topic Context\n"
@@ -1135,7 +1148,8 @@ def build_code_round_prompt(manifest_context: str, leaves: list[dict[str, Any]],
         "```\n\n"
         "Grade only the Code Development leaves above. Read the code semantically: "
         "check whether algorithms are genuinely implemented, not merely named. "
-        "Cite file paths and line numbers from the code block when giving credit or docking."
+        "Cite file paths and line numbers from the code block when giving credit or docking.\n\n"
+        f"{score_output_instruction(leaves)}"
     )
 
 
@@ -1160,7 +1174,8 @@ def build_results_round_prompt(manifest_context: str, leaves: list[dict[str, Any
         "Grade only the Code Execution and Result Analysis leaves above. Verify "
         "that metrics exist on disk, conditions/datasets/seeds are covered, and "
         "hypothesis verdicts match measured numbers. Penalize fabricated or "
-        "unsupported writeup claims."
+        "unsupported writeup claims.\n\n"
+        f"{score_output_instruction(leaves)}"
     )
 
 
@@ -1171,13 +1186,49 @@ def run_score_round(
     *,
     label: str,
     round_name: str,
+    raw_response_path: Path,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
-    try:
-        response = client.ask_json(score_system_prompt(), prompt, label=label)
-    except Exception as exc:
-        raise SystemExit(f"ARC {round_name} scoring failed before valid JSON was produced: {exc}") from exc
-    grades, warnings_ = normalize_round_grades(response, leaves, round_name=round_name)
-    return response, grades, warnings_
+    warnings_: list[str] = []
+    last_response: dict[str, Any] | None = None
+    last_error = ""
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        attempt_label = label if attempt == 1 else f"{label}-schema-retry-{attempt}"
+        attempt_prompt = prompt if attempt == 1 else score_schema_retry_prompt(prompt, leaves, last_error=last_error)
+        try:
+            response = client.ask_json(score_system_prompt(), attempt_prompt, label=attempt_label)
+        except Exception as exc:
+            raise SystemExit(f"ARC {round_name} scoring failed before valid JSON was produced: {exc}") from exc
+        last_response = response
+        write_json(raw_response_path, response)
+        write_json(
+            raw_response_path.with_name(f"{raw_response_path.stem}_attempt_{attempt}{raw_response_path.suffix}"),
+            response,
+        )
+        try:
+            grades, round_warnings = normalize_round_grades(response, leaves, round_name=round_name)
+        except ValueError as exc:
+            last_error = str(exc)
+            warnings_.append(f"{round_name}: score response schema attempt {attempt} failed: {last_error}")
+            continue
+        warnings_.extend(round_warnings)
+        if attempt > 1:
+            warnings_.append(f"{round_name}: recovered score schema after {attempt} attempts")
+        return response, grades, warnings_
+    raise SystemExit(
+        f"ARC {round_name} score response did not contain `grades` after {max_attempts} attempt(s). "
+        f"Raw response saved to {raw_response_path}."
+    )
+
+
+def score_schema_retry_prompt(prompt: str, leaves: list[dict[str, Any]], *, last_error: str) -> str:
+    return (
+        f"{prompt}\n\n"
+        "## Previous Scoring Response Was Rejected\n"
+        f"{last_error}\n"
+        "Return a smaller JSON object now. The top-level object must contain `grades`; do not use any other top-level grade key.\n"
+        f"{score_output_instruction(leaves)}"
+    )
 
 
 def normalize_round_grades(
@@ -1190,7 +1241,9 @@ def normalize_round_grades(
     if not isinstance(rows, list):
         rows = response.get("leaf_grades")
     if not isinstance(rows, list):
-        raise SystemExit(f"ARC {round_name} score response did not contain `grades`.")
+        rows = find_nested_grade_rows(response)
+    if not isinstance(rows, list):
+        raise ValueError(f"missing top-level grades array; response keys={sorted(str(key) for key in response.keys())}")
 
     leaves_by_id = {str(leaf.get("id")): leaf for leaf in leaves if leaf.get("id")}
     rows_by_id: dict[str, dict[str, Any]] = {}
@@ -1198,7 +1251,7 @@ def normalize_round_grades(
     for row in rows:
         if not isinstance(row, dict):
             continue
-        leaf_id = str(row.get("leaf_id") or row.get("id") or "").strip()
+        leaf_id = str(row.get("leaf_id") or row.get("id") or row.get("criterion_id") or "").strip()
         if not leaf_id:
             continue
         if leaf_id not in leaves_by_id:
@@ -1215,7 +1268,11 @@ def normalize_round_grades(
                 "score": 0.5,
                 "reasoning": "(ungraded; LLM did not return this leaf)",
             }
-        score, score_warning = coerce_round_score(row.get("score"), leaf_id=leaf_id, round_name=round_name)
+        score, score_warning = coerce_round_score(
+            row.get("score", row.get("grade")),
+            leaf_id=leaf_id,
+            round_name=round_name,
+        )
         if score_warning:
             warnings_.append(score_warning)
         grades.append(
@@ -1232,6 +1289,44 @@ def normalize_round_grades(
             }
         )
     return grades, warnings_
+
+
+def find_nested_grade_rows(response: dict[str, Any]) -> list[Any] | None:
+    """Recover common wrapper mistakes without weakening grading criteria."""
+    candidate_keys = (
+        "grades",
+        "leaf_grades",
+        "scores",
+        "rubric_grades",
+        "grade_rows",
+        "evaluations",
+    )
+    for key in candidate_keys:
+        value = response.get(key)
+        if isinstance(value, list) and looks_like_grade_rows(value):
+            return value
+    for value in response.values():
+        if isinstance(value, dict):
+            for key in candidate_keys:
+                nested = value.get(key)
+                if isinstance(nested, list) and looks_like_grade_rows(nested):
+                    return nested
+        if isinstance(value, list) and looks_like_grade_rows(value):
+            return value
+    return None
+
+
+def looks_like_grade_rows(rows: list[Any]) -> bool:
+    if not rows:
+        return False
+    dict_rows = [row for row in rows if isinstance(row, dict)]
+    if not dict_rows:
+        return False
+    return any(
+        ("score" in row or "grade" in row)
+        and ("leaf_id" in row or "id" in row or "criterion_id" in row)
+        for row in dict_rows
+    )
 
 
 def coerce_round_score(value: Any, *, leaf_id: str, round_name: str) -> tuple[float, str]:

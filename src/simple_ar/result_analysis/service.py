@@ -133,7 +133,7 @@ def existing_claims(context: AnalysisContext) -> list[AnalysisClaim]:
                 verdict=normalize_verdict(row.get("verdict")),
                 evidence=normalize_evidence(row.get("evidence")),
                 metric_refs=normalize_metric_refs(row.get("metric_refs")),
-                limitations=[str(item) for item in row.get("limitations", []) if item],
+                limitations=normalize_string_list(row.get("limitations")),
                 confidence=normalize_confidence(row.get("confidence")),
             )
         )
@@ -276,9 +276,9 @@ def normalize_llm_result(
         llm_used=True,
         missing_required_metrics=list(metric_summary.get("missing_required_metrics") or []),
         weak_metric_signals=list(metric_summary.get("weak_metric_signals") or []),
-        unsupported_claims=[str(item) for item in audit_data.get("unsupported_claims", []) if item],
-        limitations=[str(item) for item in audit_data.get("limitations", []) if item],
-        notes=[str(item) for item in audit_data.get("notes", []) if item],
+        unsupported_claims=normalize_string_list(audit_data.get("unsupported_claims")),
+        limitations=normalize_string_list(audit_data.get("limitations")),
+        notes=normalize_string_list(audit_data.get("notes")),
     )
     readme = render_analyzed_markdown(response.get("summary"), context, metric_summary, claims, rubric_coverage, audit)
     return AnalysisResult(
@@ -313,7 +313,7 @@ def parse_claims(value: Any, *, fallback: list[AnalysisClaim]) -> list[AnalysisC
                 verdict=normalize_verdict(row.get("verdict")),
                 evidence=normalize_evidence(row.get("evidence")),
                 metric_refs=normalize_metric_refs(row.get("metric_refs")),
-                limitations=[str(item) for item in row.get("limitations", []) if item],
+                limitations=normalize_string_list(row.get("limitations")),
                 confidence=normalize_confidence(row.get("confidence")),
             )
         )
@@ -545,7 +545,7 @@ def parse_rubric_coverage(value: Any, *, fallback: list[dict[str, Any]]) -> list
                 "weight": weight,
                 "verdict": normalize_verdict(row.get("verdict")),
                 "evidence": str(row.get("evidence") or ""),
-                "limitations": [str(item) for item in row.get("limitations", []) if item],
+                "limitations": normalize_string_list(row.get("limitations")),
             }
         )
         seen.add(category)
@@ -638,6 +638,32 @@ def normalize_confidence(value: Any) -> str:
     return "low"
 
 
+def normalize_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        return [json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)]
+    if isinstance(value, (list, tuple, set)):
+        rows: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, dict):
+                text = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+            else:
+                text = str(item).strip()
+            if text:
+                rows.append(text)
+        return rows
+    text = str(value).strip()
+    return [text] if text else []
+
+
 def normalize_evidence(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [item if isinstance(item, dict) else {"text": str(item)} for item in value]
@@ -649,6 +675,11 @@ def normalize_evidence(value: Any) -> list[dict[str, Any]]:
 
 
 def normalize_metric_refs(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        value = [value]
     if not isinstance(value, list):
         return []
     refs: list[str] = []

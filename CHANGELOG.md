@@ -17,6 +17,16 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- JSON-producing LLM calls now support optional provider-native
+  `response_format={"type":"json_object"}` through
+  `SIMPLE_AR_JSON_RESPONSE_FORMAT`. The default remains prompt-only JSON parsing
+  (`off`) for broad third-party provider compatibility; use `auto` or
+  `json_object` only with providers that support the parameter.
+- LLM requests can now choose the LiteLLM API surface through
+  `SIMPLE_AR_LLM_API`. The default `chat` keeps the existing
+  Chat Completions-style `messages` request; `responses` uses Responses
+  API-style `instructions` and `input` for providers that behave better on that
+  endpoint.
 - Greenfield tool-agent planning now uses smaller stage prompts, less duplicated
   task context, stricter compact-JSON instructions, and a more tolerant JSON
   extractor. This reduces failures where the requirements stage hit the output
