@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import Any, Callable, Mapping
 
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.code_task.generation.task_contract import contract_prompt_view
 from simple_ar.code_task.generation.planning_tools import build_tool_agent_architecture_plan
+from simple_ar.code_task.generation.file_specs import (
+    dedupe_file_rows,
+    entrypoint_first,
+    normalize_dependency_paths,
+    normalize_plan_path,
+)
 
 
 GREENFIELD_TEMPLATE = "greenfield_project"
@@ -130,9 +135,15 @@ def normalize_architecture_plan(
     max_files = _positive_int(resource_plan.get("max_files"), 8)
     raw_files = value.get("files")
     files = [_normalize_file(row) for row in raw_files if isinstance(row, Mapping)] if isinstance(raw_files, list) else []
-    files = [row for row in files if row][:max_files]
+    files = dedupe_file_rows(
+        [row for row in files if row],
+        dependency_limit=12,
+        public_api_limit=30,
+        acceptance_limit=12,
+    )[:max_files]
     if not any(row.get("path") == "main.py" for row in files):
         files.insert(0, _main_file_spec())
+    files = entrypoint_first(files)
     if not files:
         files = fallback_architecture_plan(
             contract=contract,
@@ -287,7 +298,9 @@ def greenfield_architecture_prompt(
         "public_api must list exact exported class/function names and concise signatures used by dependent files.\n\n"
         "Hard rules:\n"
         "- Keep paths relative, POSIX-style, and inside the generated project.\n"
-        "- Include `main.py` as the command-line entrypoint.\n"
+        "- Keep paths relative to the generated project root. If the run command names a directory such as "
+        "`generated_project/main.py`, treat that directory as the generated project root and use `main.py` in the plan.\n"
+        "- Include `main.py` as the command-line entrypoint relative to that root.\n"
         "- Keep file count within resource_plan.max_files.\n"
         f"{size_guidance}"
         "- The entrypoint must print all required metrics as `metric_name: number`.\n"
@@ -580,27 +593,17 @@ def _main_file_spec() -> dict[str, Any]:
 
 
 def _normalize_file(row: Mapping[str, Any]) -> dict[str, Any]:
-    path = _safe_path(_text(row.get("path")))
+    path = normalize_plan_path(row.get("path"))
     if not path:
         return {}
     return {
         "path": path,
         "purpose": _text(row.get("purpose"))[:500] or "Generated project file.",
-        "dependencies": _list(row.get("dependencies"))[:12],
+        "dependencies": normalize_dependency_paths(row.get("dependencies"), limit=12),
         "public_api": _list(row.get("public_api"))[:30] or _default_public_api(path),
         "acceptance_criteria": _list(row.get("acceptance_criteria"))[:12],
         "entrypoint": bool(row.get("entrypoint")),
     }
-
-
-def _safe_path(value: str) -> str:
-    value = value.replace("\\", "/").strip().lstrip("/")
-    if not value or value.startswith("../") or "/../" in value or value == "..":
-        return ""
-    path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        return ""
-    return path.as_posix()
 
 
 def _retry_feedback(error: LLMError | None, attempt: int) -> str:

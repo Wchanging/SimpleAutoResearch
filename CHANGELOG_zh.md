@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Greenfield planning 现在会把运行命令中的 `generated_project/...` 识别为项目根目录前缀，并在 file plan 内归一化为根目录相对路径，避免生成 nested `generated_project/generated_project` 或被 planning reviewer 反复判定为双入口冲突。
+- Planning reviewer 的 high / critical finding 不再天然等同于 hard blocker；系统会先做确定性结构复核，只有缺失入口、重复路径、单文件坍缩、危险路径等会阻断，其余问题保留为 planning risk 进入后续代码生成、分层 review 和 run repair。
 - Greenfield 文件生成如果超过配置的代码行预算，现在会明确失败，而不是静默截断后留下半成品项目。
 - Greenfield code-task 在 validation 和 benchmark rerun 后会刷新 summary，避免后续阶段已经通过但 `summary.md` 仍停留在 `review_failed` 的旧状态。
 - LLM review 默认仍保持非阻断兼容旧调用；generated-project 的分层 review 会在证据明确时保留 blocking finding，让缺失交付物、schema 漂移和运行可信度问题不会被悄悄降成 warning。

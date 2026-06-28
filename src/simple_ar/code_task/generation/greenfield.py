@@ -102,9 +102,10 @@ def generate_greenfield_code_task(
     task_text = _read_task(paths.task_dir / "task.md", limit=max_source_chars_per_file * 2)
     resource_decision = _optional_json(paths.meta_dir / "resource_decision.json")
     result_schema = _result_schema_from_manifest(manifest)
+    benchmark_command = _benchmark_command(manifest)
     contract = _contract_from_task(
         task_text,
-        benchmark_command=_benchmark_command(manifest),
+        benchmark_command=benchmark_command,
         max_files=max_files,
         max_generated_lines=max_generated_lines,
         result_schema=result_schema,
@@ -112,7 +113,7 @@ def generate_greenfield_code_task(
     resource_plan = _resource_plan(resource_decision, max_files=max_files, max_generated_lines=max_generated_lines)
     dependency_advice = build_dependency_advice(task_text)
     dependency_plan = _dependency_plan(task_text, dependency_advice=dependency_advice)
-    domain_profile = _domain_profile(task_text, dependency_advice=dependency_advice)
+    domain_profile = _domain_profile(task_text, dependency_advice=dependency_advice, benchmark_command=benchmark_command)
     dependency_advice_path = paths.meta_dir / "dependency_advice.json"
     write_json(dependency_advice_path, dependency_advice)
     write_text(paths.meta_dir / "dependency_advice.md", render_dependency_advice_markdown(dependency_advice))
@@ -166,7 +167,7 @@ def generate_greenfield_code_task(
             "provider": _normalize_provider(implementation_provider),
             "agent_mode": implementation_agent_mode or "",
             "project_dir": "code_task/workspace/generated_project",
-            "entrypoint": _benchmark_command(manifest),
+            "entrypoint": benchmark_command,
             "planning_mode": planning_mode,
             "planning_dir": "code_task/meta/planning",
             "models": {
@@ -242,7 +243,7 @@ def generate_greenfield_code_task(
             "provider": provider,
             "agent_mode": implementation_agent_mode or ("handoff" if agent_result else "model"),
             "project_dir": "code_task/workspace/generated_project",
-            "entrypoint": _benchmark_command(manifest),
+            "entrypoint": benchmark_command,
             "agent_result": agent_result,
         },
     )
@@ -423,7 +424,7 @@ def _mentioned_packages(task_text: str) -> list[str]:
     return [name for name in candidates if name in text]
 
 
-def _domain_profile(task_text: str, *, dependency_advice: dict[str, Any]) -> dict[str, Any]:
+def _domain_profile(task_text: str, *, dependency_advice: dict[str, Any], benchmark_command: str) -> dict[str, Any]:
     relevant_packages = []
     for row in dependency_advice.get("packages", []):
         if not isinstance(row, dict) or row.get("status") != "installed":
@@ -440,7 +441,12 @@ def _domain_profile(task_text: str, *, dependency_advice: dict[str, Any]) -> dic
     return {
         "schema_version": "code_task_greenfield_domain_profile.v1",
         "task_excerpt": task_text[:2000],
-        "expected_entrypoints": ["python generated_project/main.py"],
+        "expected_entrypoints": [benchmark_command or "python generated_project/main.py"],
+        "generated_project_root": "generated_project",
+        "file_plan_path_rule": (
+            "Architecture/file-plan paths are relative to the generated project root. "
+            "`generated_project/main.py` in a run command corresponds to `main.py` in the file plan."
+        ),
         "environment_package_count": dependency_advice.get("environment_package_count", 0),
         "available_task_relevant_packages": relevant_packages[:60],
     }

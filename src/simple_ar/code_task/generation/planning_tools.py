@@ -3,9 +3,15 @@ from __future__ import annotations
 import json
 import hashlib
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from simple_ar.code_task.generation.file_specs import (
+    dedupe_file_rows,
+    entrypoint_first,
+    normalize_dependency_paths,
+    normalize_plan_path,
+)
 from simple_ar.code_task.generation.task_contract import contract_prompt_view
 from simple_ar.core.artifacts import append_jsonl, write_json
 from simple_ar.integrations.llm import LLMClient, LLMError
@@ -355,8 +361,10 @@ def _stage_prompt(
             "- files: array of {path, purpose, dependencies, public_api, acceptance_criteria, entrypoint}\n\n"
             "Rules:\n"
             "- No Markdown. Keep each purpose/criterion <= 160 characters.\n"
-            "- Include main.py as the command-line entrypoint.\n"
-            "- Keep paths relative, POSIX-style, and inside the generated project.\n"
+            "- Keep paths relative to the generated project root, POSIX-style, and inside that root.\n"
+            "- Include `main.py` as the command-line entrypoint relative to that root.\n"
+            "- If the run command names a directory such as `generated_project/main.py`, treat that directory "
+            "as the generated project root; do not duplicate it inside file paths.\n"
             "- Keep file count within resource_plan.max_files.\n"
             "- Each file's dependencies must refer only to paths in this file plan.\n"
             "- Each dependency must be justified by a declared public_api or shared schema.\n"
@@ -386,6 +394,10 @@ def _review_prompt(
         "- The plan must satisfy explicit task/result-schema requirements without benchmark-specific hidden assumptions.\n"
         "- File dependencies and public APIs must be coherent enough that per-file code generation will not guess names.\n"
         "- Required outputs, metrics, artifacts, and resource constraints must be carried into file acceptance criteria.\n"
+        "- File paths are relative to the generated project root. Do not mark a plan invalid just because the "
+        "external run command includes that root directory prefix.\n"
+        "- Use needs_revision only for concrete defects that make code generation incoherent. Advisory quality "
+        "improvements should be low/medium findings with status pass.\n"
         "- If a finding affects an upstream concept, set target_stage to the earliest stage that should be regenerated.\n"
         "- Use severity critical only when code generation should not proceed without revision.\n\n"
         f"{_base_context(contract=contract, result_schema=result_schema, resource_plan=resource_plan, domain_profile=domain_profile)}\n"
@@ -479,22 +491,57 @@ def _normalize_stage_result(stage: str, value: Mapping[str, Any]) -> dict[str, A
 
 def _planning_blockers(plan: Mapping[str, Any], review: Mapping[str, Any]) -> list[str]:
     blockers: list[str] = []
-    findings = review.get("findings")
-    rows = findings if isinstance(findings, list) else []
-    severe = [
-        _text(row.get("issue") or row.get("required_change"))
-        for row in rows
-        if isinstance(row, Mapping) and _text(row.get("severity")) in {"high", "critical"}
-    ]
-    if severe:
-        blockers.append("planning review still has high/critical findings: " + "; ".join(severe[:3]))
     files = plan.get("files")
     file_rows = [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
-    if not any(row.get("path") == "main.py" for row in file_rows):
+    paths = [normalize_plan_path(row.get("path")) for row in file_rows]
+    if not any(row.get("entrypoint") or row.get("path") == "main.py" for row in file_rows):
         blockers.append("file plan has no main.py entrypoint")
+    duplicates = sorted({path for path in paths if path and paths.count(path) > 1})
+    if duplicates:
+        blockers.append("file plan has duplicate path(s): " + ", ".join(duplicates[:5]))
     if len(file_rows) <= 1 and plan.get("architecture_summary"):
         blockers.append("file plan collapsed to one file; cross-file implementation context would be unreliable")
+    structural_findings = _review_structural_blockers(plan, review)
+    if structural_findings:
+        blockers.append("planning review found unresolved structural blocker(s): " + "; ".join(structural_findings[:3]))
     return blockers
+
+
+def _review_structural_blockers(plan: Mapping[str, Any], review: Mapping[str, Any]) -> list[str]:
+    """Return only reviewer findings that match deterministic structural gaps.
+
+    The LLM reviewer is useful for surfacing risks, but it should not be the
+    sole hard gate. Findings about result quality, schema detail, or artifact
+    richness are preserved as planning risks and checked again during code
+    review/run repair. This function only turns a finding into a blocker when
+    the assembled plan objectively lacks the structure required to generate
+    code coherently.
+    """
+
+    findings = review.get("findings")
+    rows = findings if isinstance(findings, list) else []
+    files = plan.get("files")
+    file_rows = [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
+    path_set = {normalize_plan_path(row.get("path")) for row in file_rows}
+    path_set.discard("")
+    entrypoint_present = any(row.get("entrypoint") or row.get("path") == "main.py" for row in file_rows)
+    blockers: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or _normalize_severity(row.get("severity")) != "critical":
+            continue
+        text = " ".join([_text(row.get("issue")), _text(row.get("required_change"))]).lower()
+        if any(token in text for token in ("path traversal", "outside", "absolute path", "unsafe path")):
+            blockers.append(_text(row.get("issue"))[:500])
+            continue
+        if "entrypoint" in text and not entrypoint_present:
+            blockers.append(_text(row.get("issue"))[:500])
+            continue
+        if ("missing file" in text or "omits required" in text) and len(path_set) <= 1:
+            blockers.append(_text(row.get("issue"))[:500])
+            continue
+        if ("duplicate" in text or "two entrypoint" in text or "both `main.py`" in text) and len(path_set) != len(file_rows):
+            blockers.append(_text(row.get("issue"))[:500])
+    return [item for item in blockers if item]
 
 
 def _recover_degenerate_file_plan(
@@ -522,24 +569,24 @@ def _recover_degenerate_file_plan(
         {
             "path": "main.py",
             "purpose": "Thin command-line entrypoint that calls the generated project orchestrator.",
-            "dependencies": ["generated_project/main.py"],
+            "dependencies": ["generated_experiment/runner.py"],
             "public_api": ["main(argv=None)"],
             "acceptance_criteria": ["Runs with `python main.py` and prints parseable metrics."],
             "entrypoint": True,
         },
         {
-            "path": "generated_project/__init__.py",
+            "path": "generated_experiment/__init__.py",
             "purpose": "Package marker for generated project modules.",
             "dependencies": [],
             "public_api": [],
-            "acceptance_criteria": ["Allows generated_project package imports."],
+            "acceptance_criteria": ["Allows generated_experiment package imports."],
             "entrypoint": False,
         },
         {
-            "path": "generated_project/main.py",
+            "path": "generated_experiment/runner.py",
             "purpose": "Project orchestrator that wires data, computation, metrics, and reporting modules.",
             "dependencies": [],
-            "public_api": ["main(argv=None)", "run_experiment(config=None)"],
+            "public_api": ["run_experiment(config=None) -> dict[str, float]"],
             "acceptance_criteria": ["Runs the full project workflow and returns/prints required metrics."],
             "entrypoint": False,
         },
@@ -566,12 +613,12 @@ def _recover_degenerate_file_plan(
 
     known = {row["path"] for row in recovered}
     for row in recovered:
-        if row["path"] == "generated_project/main.py":
-            excluded = {row["path"], "generated_project/__init__.py"}
+        if row["path"] == "generated_experiment/runner.py":
+            excluded = {row["path"], "generated_experiment/__init__.py"}
             row["dependencies"] = sorted(
                 item
                 for item in known
-                if item.startswith("generated_project/") and item not in excluded
+                if item.startswith("generated_experiment/") and item not in excluded
             )
             continue
         source_module = _module_key(Path(row["path"]).stem)
@@ -593,7 +640,7 @@ def _module_path(name: str) -> str:
     slug = _slug(name)
     if not slug or slug in {"main", "init", "__init__"}:
         return ""
-    return f"generated_project/{slug}.py"
+    return f"generated_experiment/{slug}.py"
 
 
 def _module_key(value: object) -> str:
@@ -655,7 +702,7 @@ def _normalize_review(value: Mapping[str, Any]) -> dict[str, Any]:
                 "required_change": _text(row.get("required_change"))[:800],
             }
         )
-    if status == "pass" and findings:
+    if status == "pass" and any(row.get("severity") in {"high", "critical"} for row in findings):
         status = "needs_revision"
     return {
         "status": status,
@@ -699,19 +746,20 @@ def _normalize_files(value: object, *, max_files: int) -> list[dict[str, Any]]:
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        path = _safe_path(_text(row.get("path")))
+        path = normalize_plan_path(row.get("path"))
         if not path:
             continue
         files.append(
             {
                 "path": path,
                 "purpose": _text(row.get("purpose"))[:500] or "Generated project file.",
-                "dependencies": _list(row.get("dependencies"))[:16],
+                "dependencies": normalize_dependency_paths(row.get("dependencies"), limit=16),
                 "public_api": _list(row.get("public_api"))[:40],
                 "acceptance_criteria": _list(row.get("acceptance_criteria"))[:16],
                 "entrypoint": bool(row.get("entrypoint")) or path == "main.py",
             }
         )
+    files = dedupe_file_rows(files, dependency_limit=16, public_api_limit=40, acceptance_limit=16)
     if not any(row["path"] == "main.py" for row in files):
         files.insert(
             0,
@@ -724,6 +772,7 @@ def _normalize_files(value: object, *, max_files: int) -> list[dict[str, Any]]:
                 "entrypoint": True,
             },
         )
+    files = entrypoint_first(files)
     return _prune_dependencies(files[: max(1, max_files)])
 
 
@@ -807,7 +856,14 @@ def _review_target_stage(review: Mapping[str, Any]) -> str:
 
 
 def _review_passed(review: Mapping[str, Any]) -> bool:
-    return _text(review.get("status")).lower() == "pass"
+    if _text(review.get("status")).lower() == "pass":
+        return True
+    findings = review.get("findings")
+    rows = findings if isinstance(findings, list) else []
+    return not any(
+        isinstance(row, Mapping) and _normalize_severity(row.get("severity")) in {"high", "critical"}
+        for row in rows
+    )
 
 
 def _finding_to_risk(row: Mapping[str, Any]) -> str:
@@ -977,16 +1033,6 @@ def _prune_dependencies(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in files:
         row["dependencies"] = [dep for dep in row.get("dependencies", []) if dep in known]
     return files
-
-
-def _safe_path(value: str) -> str:
-    value = value.replace("\\", "/").strip().lstrip("/")
-    if not value or value.startswith("../") or "/../" in value or value == "..":
-        return ""
-    path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        return ""
-    return path.as_posix()
 
 
 def _json_block(value: object) -> str:
