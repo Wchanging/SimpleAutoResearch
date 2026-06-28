@@ -103,6 +103,7 @@ planning 请求较大、provider 返回较慢或代理提前断开，可以先�
 
 ```bash
 export SIMPLE_AR_LLM_TIMEOUT_SEC=300
+export SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 ```
 
 ## 重跑与续修

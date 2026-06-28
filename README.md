@@ -87,8 +87,8 @@ OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_API=responses
-SIMPLE_AR_LLM_TIMEOUT_SEC=120
-SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
+SIMPLE_AR_LLM_TIMEOUT_SEC=
+SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
 SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
@@ -105,6 +105,10 @@ and 5xx responses use bounded exponential backoff controlled by the retry
 settings above. JSON-producing calls use prompt-only parsing by default for
 provider compatibility. Set `SIMPLE_AR_JSON_RESPONSE_FORMAT=auto` or
 `json_object` only when your provider supports native JSON response formatting.
+Leave `SIMPLE_AR_LLM_TIMEOUT_SEC` and `SIMPLE_AR_MAX_OUTPUT_TOKENS` empty
+or set them to `0`/`off`/`none` to omit client-side timeout and provider
+output-limit parameters. Set positive values only when you intentionally want
+to bound request time or output size.
 `SIMPLE_AR_LLM_API=responses` uses Responses API-style `instructions` and
 `input`; transient transport failures on compatible gateways automatically
 fall back to Chat Completions-style `messages`. Set it to `chat` when your

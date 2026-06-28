@@ -56,8 +56,8 @@ OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_API=responses
-SIMPLE_AR_LLM_TIMEOUT_SEC=120
-SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
+SIMPLE_AR_LLM_TIMEOUT_SEC=
+SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
 SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
@@ -75,10 +75,12 @@ Notes:
   Responses API-style `instructions` plus `input` and automatically falls back
   to Chat Completions-style `messages` for transient transport disconnects;
   `chat` sends Chat Completions-style `messages` directly.
-- `SIMPLE_AR_LLM_TIMEOUT_SEC` bounds each provider request; increase it only
-  when deliberately running large prompts.
-- `SIMPLE_AR_MAX_OUTPUT_TOKENS` limits the model response size for long coding
-  prompts.
+- `SIMPLE_AR_LLM_TIMEOUT_SEC` is optional. Leave it empty, or set it to
+  `0`/`off`/`none`, to omit a client-side timeout; set a positive value only
+  when you deliberately want to bound request time.
+- `SIMPLE_AR_MAX_OUTPUT_TOKENS` is optional. Leave it empty, or set it to
+  `0`/`off`/`none`, to omit provider output-limit parameters; set a positive
+  value only when you deliberately want to bound response size.
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` and the retry delay settings control bounded
   exponential backoff for transient provider errors such as connection resets,
   rate limits, timeouts, and 5xx responses.

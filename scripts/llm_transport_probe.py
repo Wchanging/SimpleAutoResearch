@@ -59,12 +59,14 @@ def main() -> int:
     console.print(f"Modes: [bold]{', '.join(modes)}[/bold]")
 
     rows: list[ProbeResult] = []
+    timeout = _optional_positive_float_value(args.timeout)
+    max_output_tokens = _optional_positive_int_value(args.max_output_tokens)
     runners = _build_runners(
         api_key=api_key,
         base_url=base_url,
         model=model,
-        timeout=args.timeout,
-        max_output_tokens=args.max_output_tokens,
+        timeout=timeout,
+        max_output_tokens=max_output_tokens,
     )
     for attempt in range(1, args.repeat + 1):
         for mode in modes:
@@ -90,8 +92,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default="", help="OpenAI-compatible /v1 base URL.")
     parser.add_argument("--api-key", default="", help="API key. Defaults to OPENAI_API_KEY.")
     parser.add_argument("--repeat", type=int, default=3, help="Number of requests per mode.")
-    parser.add_argument("--timeout", type=float, default=120.0, help="Per-request timeout seconds.")
-    parser.add_argument("--max-output-tokens", type=int, default=512, help="Output token cap.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="Per-request timeout seconds. Use 0 to omit a client-side timeout.",
+    )
+    parser.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=0,
+        help="Output token cap. Use 0 to omit provider output-limit parameters.",
+    )
     parser.add_argument("--sleep-sec", type=float, default=0.0, help="Sleep between requests.")
     parser.add_argument(
         "--modes",
@@ -188,8 +200,8 @@ def _build_runners(
     api_key: str,
     base_url: str,
     model: str,
-    timeout: float,
-    max_output_tokens: int,
+    timeout: float | None,
+    max_output_tokens: int | None,
 ) -> dict[str, Callable[[str], str]]:
     return {
         "litellm-responses": lambda prompt: _litellm_responses_call(
@@ -291,8 +303,8 @@ def _simple_ar_call(
     base_url: str,
     model: str,
     api_mode: str,
-    timeout: float,
-    max_output_tokens: int,
+    timeout: float | None,
+    max_output_tokens: int | None,
     prompt: str,
 ) -> str:
     client = LLMClient(
@@ -319,8 +331,8 @@ def _litellm_responses_call(
     api_key: str,
     base_url: str,
     model: str,
-    timeout: float,
-    max_output_tokens: int,
+    timeout: float | None,
+    max_output_tokens: int | None,
     prompt: str,
     stream: bool,
 ) -> str:
@@ -331,10 +343,12 @@ def _litellm_responses_call(
         "instructions": _system_prompt(),
         "input": [{"role": "user", "content": prompt}],
         "api_key": api_key,
-        "timeout": timeout,
-        "max_output_tokens": max_output_tokens,
         "stream": stream,
     }
+    if timeout is not None:
+        request["timeout"] = timeout
+    if max_output_tokens is not None:
+        request["max_output_tokens"] = max_output_tokens
     if base_url:
         request["api_base"] = base_url
         request["base_url"] = base_url
@@ -347,8 +361,8 @@ def _litellm_chat_call(
     api_key: str,
     base_url: str,
     model: str,
-    timeout: float,
-    max_output_tokens: int,
+    timeout: float | None,
+    max_output_tokens: int | None,
     prompt: str,
     stream: bool,
 ) -> str:
@@ -361,10 +375,12 @@ def _litellm_chat_call(
             {"role": "user", "content": prompt},
         ],
         "api_key": api_key,
-        "timeout": timeout,
-        "max_tokens": max_output_tokens,
         "stream": stream,
     }
+    if timeout is not None:
+        request["timeout"] = timeout
+    if max_output_tokens is not None:
+        request[_chat_token_limit_param(model)] = max_output_tokens
     if base_url:
         request["api_base"] = base_url
         request["base_url"] = base_url
@@ -377,21 +393,23 @@ def _openai_responses_call(
     api_key: str,
     base_url: str,
     model: str,
-    timeout: float,
-    max_output_tokens: int,
+    timeout: float | None,
+    max_output_tokens: int | None,
     prompt: str,
     stream: bool,
 ) -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout)
-    response = client.responses.create(
-        model=model,
-        instructions=_system_prompt(),
-        input=[{"role": "user", "content": prompt}],
-        max_output_tokens=max_output_tokens,
-        stream=stream,
-    )
+    request = {
+        "model": model,
+        "instructions": _system_prompt(),
+        "input": [{"role": "user", "content": prompt}],
+        "stream": stream,
+    }
+    if max_output_tokens is not None:
+        request["max_output_tokens"] = max_output_tokens
+    response = client.responses.create(**request)
     return _extract_stream_text(response) if stream else str(getattr(response, "output_text", "") or "")
 
 
@@ -400,23 +418,25 @@ def _openai_chat_call(
     api_key: str,
     base_url: str,
     model: str,
-    timeout: float,
-    max_output_tokens: int,
+    timeout: float | None,
+    max_output_tokens: int | None,
     prompt: str,
     stream: bool,
 ) -> str:
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    request = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": _system_prompt()},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=max_output_tokens,
-        stream=stream,
-    )
+        "stream": stream,
+    }
+    if max_output_tokens is not None:
+        request[_chat_token_limit_param(model)] = max_output_tokens
+    response = client.chat.completions.create(**request)
     if stream:
         return _extract_stream_text(response)
     choice = response.choices[0] if response.choices else None
@@ -500,6 +520,21 @@ def _get_value(obj: object, name: str) -> object | None:
 
 def _system_prompt() -> str:
     return "You are a transport probe. Return concise plain text or JSON only."
+
+
+def _optional_positive_float_value(value: float) -> float | None:
+    return value if value > 0 else None
+
+
+def _optional_positive_int_value(value: int) -> int | None:
+    return value if value > 0 else None
+
+
+def _chat_token_limit_param(model: str) -> str:
+    model_name = model.lower().removeprefix("openai/")
+    if model_name.startswith(("gpt-5", "gpt-4.1", "o1", "o3", "o4", "codex")):
+        return "max_completion_tokens"
+    return "max_tokens"
 
 
 def _run_one(

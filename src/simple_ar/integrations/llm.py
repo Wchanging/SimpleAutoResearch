@@ -34,8 +34,11 @@ class LLMSettings:
             estimates.
         output_price_per_million: Optional output-token price used for local
             cost estimates.
-        request_timeout_sec: Per-request provider timeout in seconds.
+        request_timeout_sec: Optional per-request provider timeout in
+            seconds. ``None`` means do not pass a client-side timeout.
         max_output_tokens: Optional maximum output-token budget per request.
+            ``None`` disables provider output-limit parameters, including
+            per-call caps supplied by individual pipeline steps.
         retry_attempts: Total provider attempts for transient transport/server
             failures. Includes the first request.
         retry_base_delay_sec: Initial exponential-backoff delay.
@@ -53,6 +56,10 @@ class LLMSettings:
             compatibility. ``auto`` tries provider-native JSON mode and retries
             without it only when the provider rejects the parameter.
             ``json_object`` always sends the parameter.
+        chat_token_limit_param: Chat Completions output-limit parameter.
+            ``auto`` uses ``max_completion_tokens`` for newer reasoning-style
+            models such as GPT-5/o-series/Codex and ``max_tokens`` otherwise.
+            Override only when a provider gateway requires a specific name.
     """
 
     model: str = "gpt-4o-mini"
@@ -60,13 +67,14 @@ class LLMSettings:
     base_url: str = ""
     input_price_per_million: float | None = None
     output_price_per_million: float | None = None
-    request_timeout_sec: float = 120.0
-    max_output_tokens: int | None = 4096
+    request_timeout_sec: float | None = None
+    max_output_tokens: int | None = None
     retry_attempts: int = 3
     retry_base_delay_sec: float = 1.0
     retry_max_delay_sec: float = 12.0
     api_mode: str = "responses"
     json_response_format: str = "off"
+    chat_token_limit_param: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -176,13 +184,14 @@ class LLMClient:
             base_url=os.environ.get("OPENAI_BASE_URL", ""),
             input_price_per_million=_optional_float("SIMPLE_AR_INPUT_PRICE_PER_1M"),
             output_price_per_million=_optional_float("SIMPLE_AR_OUTPUT_PRICE_PER_1M"),
-            request_timeout_sec=_positive_float("SIMPLE_AR_LLM_TIMEOUT_SEC", default=120.0),
-            max_output_tokens=_optional_positive_int("SIMPLE_AR_MAX_OUTPUT_TOKENS", default=4096),
+            request_timeout_sec=_optional_positive_float("SIMPLE_AR_LLM_TIMEOUT_SEC", default=None),
+            max_output_tokens=_optional_positive_int("SIMPLE_AR_MAX_OUTPUT_TOKENS", default=None),
             retry_attempts=_positive_int("SIMPLE_AR_LLM_RETRY_ATTEMPTS", default=3),
             retry_base_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC", default=1.0),
             retry_max_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC", default=12.0),
             api_mode=_llm_api_mode("SIMPLE_AR_LLM_API"),
             json_response_format=_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"),
+            chat_token_limit_param=_chat_token_limit_param_mode("SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM"),
         )
         return cls(settings, usage_callback=usage_callback)
 
@@ -216,12 +225,11 @@ class LLMClient:
         if self._settings.base_url:
             request["api_base"] = self._settings.base_url
             request["base_url"] = self._settings.base_url
-        output_cap = max_output_tokens if max_output_tokens is not None else self._settings.max_output_tokens
+        output_cap = None
+        if self._settings.max_output_tokens is not None:
+            output_cap = max_output_tokens if max_output_tokens is not None else self._settings.max_output_tokens
         if output_cap is not None:
-            if self._settings.api_mode == "responses":
-                request["max_output_tokens"] = max(1, int(output_cap))
-            else:
-                request["max_tokens"] = max(1, int(output_cap))
+            request["max_output_tokens"] = max(1, int(output_cap))
         if response_format is not None:
             if self._settings.api_mode == "responses":
                 request["text"] = {"format": response_format}
@@ -235,22 +243,26 @@ class LLMClient:
 
     def _build_request(self, system: str, user: str) -> dict[str, Any]:
         if self._settings.api_mode in {"responses", "auto"}:
-            return {
+            request = {
                 "model": self._provider_model,
                 "instructions": system,
                 "input": [{"role": "user", "content": user}],
                 "api_key": self._settings.api_key,
-                "timeout": self._settings.request_timeout_sec,
             }
-        return {
+            if self._settings.request_timeout_sec is not None:
+                request["timeout"] = self._settings.request_timeout_sec
+            return request
+        request = {
             "model": self._provider_model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             "api_key": self._settings.api_key,
-            "timeout": self._settings.request_timeout_sec,
         }
+        if self._settings.request_timeout_sec is not None:
+            request["timeout"] = self._settings.request_timeout_sec
+        return request
 
     def _request_with_retry(self, request: dict[str, Any]) -> object:
         """Call LiteLLM with bounded exponential backoff for transient errors."""
@@ -258,7 +270,11 @@ class LLMClient:
         last_error: Exception | None = None
         mode_attempts: list[tuple[str, int, Exception]] = []
         for api_mode in _api_attempt_order(self._settings.api_mode):
-            mode_request = _request_for_api_mode(request, api_mode)
+            mode_request = _request_for_api_mode(
+                request,
+                api_mode,
+                chat_token_limit_param=self._settings.chat_token_limit_param,
+            )
             attempted = 0
             for attempt in range(1, attempts + 1):
                 attempted = attempt
@@ -626,15 +642,30 @@ def _positive_float(env_name: str, *, default: float) -> float:
     return parsed if parsed > 0 else default
 
 
-def _optional_positive_int(env_name: str, *, default: int | None) -> int | None:
-    value = os.environ.get(env_name, "").strip()
+def _optional_positive_float(env_name: str, *, default: float | None) -> float | None:
+    value = os.environ.get(env_name, "").strip().lower()
     if not value:
         return default
+    if value in {"0", "false", "no", "none", "off", "disabled", "unlimited"}:
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else None
+
+
+def _optional_positive_int(env_name: str, *, default: int | None) -> int | None:
+    value = os.environ.get(env_name, "").strip().lower()
+    if not value:
+        return default
+    if value in {"0", "false", "no", "none", "off", "disabled", "unlimited"}:
+        return None
     try:
         parsed = int(value)
     except ValueError:
         return default
-    return parsed if parsed > 0 else default
+    return parsed if parsed > 0 else None
 
 
 def _positive_int(env_name: str, *, default: int) -> int:
@@ -691,6 +722,32 @@ def _llm_api_mode(env_name: str) -> str:
     return aliases.get(value, "responses")
 
 
+def _chat_token_limit_param_mode(env_name: str) -> str:
+    value = os.environ.get(env_name, "auto").strip().lower().replace("-", "_")
+    aliases = {
+        "": "auto",
+        "auto": "auto",
+        "max_tokens": "max_tokens",
+        "tokens": "max_tokens",
+        "legacy": "max_tokens",
+        "max_completion_tokens": "max_completion_tokens",
+        "completion_tokens": "max_completion_tokens",
+        "reasoning": "max_completion_tokens",
+    }
+    return aliases.get(value, "auto")
+
+
+def _chat_token_limit_param(mode: str, model: str) -> str:
+    normalized = (mode or "auto").strip().lower().replace("-", "_")
+    if normalized in {"max_tokens", "max_completion_tokens"}:
+        return normalized
+    model_name = model.lower().removeprefix("openai/")
+    reasoning_prefixes = ("gpt-5", "gpt-4.1", "o1", "o3", "o4", "codex")
+    if model_name.startswith(reasoning_prefixes):
+        return "max_completion_tokens"
+    return "max_tokens"
+
+
 def _api_attempt_order(api_mode: str) -> list[str]:
     mode = (api_mode or "responses").strip().lower().replace("-", "_")
     if mode == "chat":
@@ -710,65 +767,80 @@ def _call_litellm(api_mode: str, request: dict[str, Any]) -> object:
     raise ValueError(f"Unsupported LLM API mode: {api_mode}")
 
 
-def _request_for_api_mode(request: dict[str, Any], api_mode: str) -> dict[str, Any]:
+def _request_for_api_mode(
+    request: dict[str, Any],
+    api_mode: str,
+    *,
+    chat_token_limit_param: str = "auto",
+) -> dict[str, Any]:
     if api_mode == "responses":
         return _as_responses_request(request)
     if api_mode == "chat":
-        return _as_chat_request(request)
+        return _as_chat_request(request, chat_token_limit_param=chat_token_limit_param)
     raise ValueError(f"Unsupported LLM API mode: {api_mode}")
 
 
 def _as_responses_request(request: dict[str, Any]) -> dict[str, Any]:
     if "instructions" in request and "input" in request:
-        return dict(request)
-    messages = request.get("messages")
-    system = ""
-    user_parts: list[str] = []
-    if isinstance(messages, list):
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            role = str(message.get("role") or "")
-            content = _message_content_text(message.get("content"))
-            if role == "system":
-                system = content
-            else:
-                user_parts.append(content)
-    converted: dict[str, Any] = {
-        "model": request.get("model"),
-        "instructions": system,
-        "input": [{"role": "user", "content": "\n\n".join(part for part in user_parts if part)}],
-        "api_key": request.get("api_key"),
-        "timeout": request.get("timeout"),
-    }
-    _copy_optional_request_fields(request, converted, ("api_base", "base_url"))
-    if "max_tokens" in request:
-        converted["max_output_tokens"] = request["max_tokens"]
-    if "response_format" in request:
-        converted["text"] = {"format": request["response_format"]}
+        converted = dict(request)
+    else:
+        messages = request.get("messages")
+        system = ""
+        user_parts: list[str] = []
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "")
+                content = _message_content_text(message.get("content"))
+                if role == "system":
+                    system = content
+                else:
+                    user_parts.append(content)
+        converted = {
+            "model": request.get("model"),
+            "instructions": system,
+            "input": [{"role": "user", "content": "\n\n".join(part for part in user_parts if part)}],
+            "api_key": request.get("api_key"),
+            "timeout": request.get("timeout"),
+        }
+        _copy_optional_request_fields(request, converted, ("api_base", "base_url"))
+        if "response_format" in request:
+            converted["text"] = {"format": request["response_format"]}
+    if "max_output_tokens" not in converted:
+        if "max_completion_tokens" in converted:
+            converted["max_output_tokens"] = converted["max_completion_tokens"]
+        elif "max_tokens" in converted:
+            converted["max_output_tokens"] = converted["max_tokens"]
+    converted.pop("max_completion_tokens", None)
+    converted.pop("max_tokens", None)
     return _drop_none_values(converted)
 
 
-def _as_chat_request(request: dict[str, Any]) -> dict[str, Any]:
+def _as_chat_request(request: dict[str, Any], *, chat_token_limit_param: str = "auto") -> dict[str, Any]:
     if "messages" in request:
-        return dict(request)
-    system = str(request.get("instructions") or "")
-    user = _responses_input_text(request.get("input"))
-    converted: dict[str, Any] = {
-        "model": request.get("model"),
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "api_key": request.get("api_key"),
-        "timeout": request.get("timeout"),
-    }
-    _copy_optional_request_fields(request, converted, ("api_base", "base_url"))
-    if "max_output_tokens" in request:
-        converted["max_tokens"] = request["max_output_tokens"]
-    text_config = request.get("text")
-    if isinstance(text_config, dict) and isinstance(text_config.get("format"), dict):
-        converted["response_format"] = text_config["format"]
+        converted = dict(request)
+    else:
+        system = str(request.get("instructions") or "")
+        user = _responses_input_text(request.get("input"))
+        converted = {
+            "model": request.get("model"),
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "api_key": request.get("api_key"),
+            "timeout": request.get("timeout"),
+        }
+        _copy_optional_request_fields(request, converted, ("api_base", "base_url"))
+        text_config = request.get("text")
+        if isinstance(text_config, dict) and isinstance(text_config.get("format"), dict):
+            converted["response_format"] = text_config["format"]
+    output_cap = converted.pop("max_output_tokens", None)
+    if output_cap is not None:
+        converted.pop("max_tokens", None)
+        converted.pop("max_completion_tokens", None)
+        converted[_chat_token_limit_param(chat_token_limit_param, str(converted.get("model") or ""))] = output_cap
     return _drop_none_values(converted)
 
 

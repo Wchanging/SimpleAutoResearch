@@ -103,12 +103,13 @@ The batch runner only finalizes runs whose business status is
 finalized submission, it fills in `judge/` without rerunning the experiment.
 For unstable server networks, add `--llm-retry-attempts 5` to override the
 prepared TOML retry budget for every `code-task execute` call.
-If the provider disconnects during the first "Planning greenfield project
-architecture" request, also raise the per-request provider timeout before
-running the batch:
+LLM calls omit client-side timeout and provider output-limit parameters by
+default. If you need to reintroduce hard bounds for cost control or an
+enterprise gateway policy, set positive values before running the batch:
 
 ```bash
 export SIMPLE_AR_LLM_TIMEOUT_SEC=300
+export SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 ```
 
 ## Retry

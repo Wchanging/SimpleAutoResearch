@@ -135,6 +135,50 @@ class LLMParsingTests(unittest.TestCase):
         )
         sleep.assert_not_called()
 
+    def test_default_env_omits_timeout_and_output_cap(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "test-key",
+                "SIMPLE_AR_MODEL": "gpt-5.1",
+                "SIMPLE_AR_LLM_API": "chat",
+            },
+            clear=True,
+        ):
+            client = LLMClient.from_env()
+
+        self.assertIsNone(client._settings.request_timeout_sec)
+        self.assertIsNone(client._settings.max_output_tokens)
+
+        response = {"choices": [{"message": {"content": "ok"}}]}
+        with patch("simple_ar.integrations.llm.litellm.completion", return_value=response) as completion:
+            output = client.ask("system", "user", max_output_tokens=999, label="uncapped-test")
+
+        self.assertEqual(output, "ok")
+        request = completion.call_args.kwargs
+        self.assertNotIn("timeout", request)
+        self.assertNotIn("max_tokens", request)
+        self.assertNotIn("max_completion_tokens", request)
+
+    def test_chat_cap_uses_completion_token_param_for_newer_models(self) -> None:
+        client = LLMClient(
+            LLMSettings(
+                model="gpt-5.1",
+                api_key="test-key",
+                api_mode="chat",
+                max_output_tokens=1000,
+            )
+        )
+        response = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch("simple_ar.integrations.llm.litellm.completion", return_value=response) as completion:
+            output = client.ask("system", "user", max_output_tokens=80, label="cap-test")
+
+        self.assertEqual(output, "ok")
+        request = completion.call_args.kwargs
+        self.assertEqual(request["max_completion_tokens"], 80)
+        self.assertNotIn("max_tokens", request)
+
     def test_ask_does_not_retry_permanent_auth_error(self) -> None:
         client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=3))
 
