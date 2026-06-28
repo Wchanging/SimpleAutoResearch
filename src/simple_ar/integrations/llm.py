@@ -43,14 +43,15 @@ class LLMSettings:
             failures. Includes the first request.
         retry_base_delay_sec: Initial exponential-backoff delay.
         retry_max_delay_sec: Maximum delay between provider retries.
-        api_mode: Provider API surface used by LiteLLM. ``responses`` uses
-            ``litellm.responses`` with Responses API-style ``instructions`` and
-            ``input``. ``chat`` uses
-            ``litellm.completion`` with Chat Completions-style ``messages``.
+        transport_backend: Provider client backend. ``openai`` uses the OpenAI
+            Python SDK directly; ``litellm`` keeps the old compatibility path.
+        api_mode: Provider API surface. ``responses`` uses Responses API-style
+            ``instructions`` and ``input``. ``chat`` uses Chat Completions-style
+            ``messages``.
             ``responses`` falls back to ``chat`` for transient transport
             failures because some OpenAI-compatible gateways record successful
-            upstream completions while disconnecting the LiteLLM client before
-            it receives the response.
+            upstream completions while disconnecting the client before it
+            receives the response.
         json_response_format: JSON response-format mode for ``ask_json``.
             ``off`` keeps prompt-only JSON parsing for broad provider
             compatibility. ``auto`` tries provider-native JSON mode and retries
@@ -72,6 +73,7 @@ class LLMSettings:
     retry_attempts: int = 3
     retry_base_delay_sec: float = 1.0
     retry_max_delay_sec: float = 12.0
+    transport_backend: str = "openai"
     api_mode: str = "responses"
     json_response_format: str = "off"
     chat_token_limit_param: str = "auto"
@@ -129,7 +131,7 @@ class LLMRequest:
 
 
 class LLMClient:
-    """Small LiteLLM-backed wrapper used by the pipeline stages.
+    """Small OpenAI-compatible wrapper used by the pipeline stages.
 
     The wrapper keeps provider access explicit: one request in, one response
     out. Batch helpers only add bounded concurrency and preserve result order.
@@ -154,11 +156,13 @@ class LLMClient:
         if not settings.api_key:
             raise LLMError("OPENAI_API_KEY is not configured")
         self.model = settings.model
-        self._provider_model = _provider_model(settings)
+        self._openai_model = settings.model.strip()
+        self._provider_model = _litellm_model(settings)
         self._settings = settings
         self._usage_callback = usage_callback
         self._usage_lock = threading.Lock()
-        litellm.suppress_debug_info = True
+        if self._settings.transport_backend == "litellm":
+            litellm.suppress_debug_info = True
 
     @classmethod
     def from_env(
@@ -189,6 +193,7 @@ class LLMClient:
             retry_attempts=_positive_int("SIMPLE_AR_LLM_RETRY_ATTEMPTS", default=3),
             retry_base_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC", default=1.0),
             retry_max_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC", default=12.0),
+            transport_backend=_llm_transport_backend("SIMPLE_AR_LLM_BACKEND"),
             api_mode=_llm_api_mode("SIMPLE_AR_LLM_API"),
             json_response_format=_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"),
             chat_token_limit_param=_chat_token_limit_param_mode("SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM"),
@@ -231,7 +236,7 @@ class LLMClient:
         if output_cap is not None:
             request["max_output_tokens"] = max(1, int(output_cap))
         if response_format is not None:
-            if self._settings.api_mode == "responses":
+            if self._settings.api_mode in {"responses", "auto"}:
                 request["text"] = {"format": response_format}
             else:
                 request["response_format"] = response_format
@@ -244,7 +249,7 @@ class LLMClient:
     def _build_request(self, system: str, user: str) -> dict[str, Any]:
         if self._settings.api_mode in {"responses", "auto"}:
             request = {
-                "model": self._provider_model,
+                "model": self._model_for_backend(),
                 "instructions": system,
                 "input": [{"role": "user", "content": user}],
                 "api_key": self._settings.api_key,
@@ -253,7 +258,7 @@ class LLMClient:
                 request["timeout"] = self._settings.request_timeout_sec
             return request
         request = {
-            "model": self._provider_model,
+            "model": self._model_for_backend(),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -264,8 +269,13 @@ class LLMClient:
             request["timeout"] = self._settings.request_timeout_sec
         return request
 
+    def _model_for_backend(self) -> str:
+        if self._settings.transport_backend == "litellm":
+            return self._provider_model
+        return self._openai_model
+
     def _request_with_retry(self, request: dict[str, Any]) -> object:
-        """Call LiteLLM with bounded exponential backoff for transient errors."""
+        """Call the provider with bounded exponential backoff for transient errors."""
         attempts = max(1, int(self._settings.retry_attempts or 1))
         last_error: Exception | None = None
         mode_attempts: list[tuple[str, int, Exception]] = []
@@ -279,7 +289,7 @@ class LLMClient:
             for attempt in range(1, attempts + 1):
                 attempted = attempt
                 try:
-                    return _call_litellm(api_mode, mode_request)
+                    return _call_provider(self._settings.transport_backend, api_mode, mode_request)
                 except Exception as exc:
                     last_error = exc
                     if attempt >= attempts or not _is_transient_llm_error(exc):
@@ -613,7 +623,7 @@ def _get_value(obj: object, name: str) -> object | None:
     return getattr(obj, name, None)
 
 
-def _provider_model(settings: LLMSettings) -> str:
+def _litellm_model(settings: LLMSettings) -> str:
     """Return the LiteLLM model string for default or custom OpenAI endpoints."""
     model = settings.model.strip()
     if settings.base_url and "/" not in model:
@@ -722,6 +732,22 @@ def _llm_api_mode(env_name: str) -> str:
     return aliases.get(value, "responses")
 
 
+def _llm_transport_backend(env_name: str) -> str:
+    value = os.environ.get(env_name, "openai").strip().lower().replace("-", "_")
+    aliases = {
+        "": "openai",
+        "openai": "openai",
+        "sdk": "openai",
+        "openai_sdk": "openai",
+        "direct": "openai",
+        "native": "openai",
+        "litellm": "litellm",
+        "lite_llm": "litellm",
+        "compat": "litellm",
+    }
+    return aliases.get(value, "openai")
+
+
 def _chat_token_limit_param_mode(env_name: str) -> str:
     value = os.environ.get(env_name, "auto").strip().lower().replace("-", "_")
     aliases = {
@@ -759,11 +785,38 @@ def _api_attempt_order(api_mode: str) -> list[str]:
     return ["responses", "chat"]
 
 
+def _call_provider(backend: str, api_mode: str, request: dict[str, Any]) -> object:
+    if backend == "litellm":
+        return _call_litellm(api_mode, request)
+    if backend == "openai":
+        return _call_openai_sdk(api_mode, request)
+    raise ValueError(f"Unsupported LLM transport backend: {backend}")
+
+
 def _call_litellm(api_mode: str, request: dict[str, Any]) -> object:
     if api_mode == "responses":
         return litellm.responses(**request)
     if api_mode == "chat":
         return litellm.completion(**request)
+    raise ValueError(f"Unsupported LLM API mode: {api_mode}")
+
+
+def _call_openai_sdk(api_mode: str, request: dict[str, Any]) -> object:
+    from openai import OpenAI
+
+    payload = dict(request)
+    api_key = str(payload.pop("api_key", "") or "")
+    base_url = payload.pop("base_url", None) or payload.pop("api_base", None)
+    timeout = payload.pop("timeout", None) if "timeout" in payload else None
+    client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
+    if base_url:
+        client_kwargs["base_url"] = str(base_url)
+    client = OpenAI(**client_kwargs)
+    payload = _drop_none_values(payload)
+    if api_mode == "responses":
+        return client.responses.create(**payload)
+    if api_mode == "chat":
+        return client.chat.completions.create(**payload)
     raise ValueError(f"Unsupported LLM API mode: {api_mode}")
 
 

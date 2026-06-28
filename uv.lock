@@ -1596,6 +1596,7 @@ source = { editable = "." }
 dependencies = [
     { name = "arxiv" },
     { name = "litellm" },
+    { name = "openai" },
     { name = "pyalex" },
     { name = "pydantic" },
     { name = "pypdf" },
@@ -1609,6 +1610,7 @@ dependencies = [
 requires-dist = [
     { name = "arxiv", specifier = ">=3.0.0" },
     { name = "litellm", specifier = ">=1.86.2" },
+    { name = "openai", specifier = ">=2.34.0" },
     { name = "pyalex", specifier = ">=0.21" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pypdf", specifier = ">=6.12.2" },

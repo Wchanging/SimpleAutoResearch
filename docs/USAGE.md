@@ -55,6 +55,7 @@ Supported settings:
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
+SIMPLE_AR_LLM_BACKEND=openai
 SIMPLE_AR_LLM_API=responses
 SIMPLE_AR_LLM_TIMEOUT_SEC=
 SIMPLE_AR_MAX_OUTPUT_TOKENS=
@@ -71,10 +72,13 @@ Notes:
 - `OPENAI_API_KEY` is required for LLM mode.
 - `OPENAI_BASE_URL` can point to OpenAI or a third-party OpenAI-compatible `/v1` endpoint.
 - `SIMPLE_AR_MODEL` is the default model when `--model` is not supplied.
-- `SIMPLE_AR_LLM_API` controls the LiteLLM API surface. `responses` sends
-  Responses API-style `instructions` plus `input` and automatically falls back
-  to Chat Completions-style `messages` for transient transport disconnects;
-  `chat` sends Chat Completions-style `messages` directly.
+- `SIMPLE_AR_LLM_BACKEND` controls the transport implementation. The default
+  `openai` uses the OpenAI Python SDK directly; `litellm` keeps the older
+  LiteLLM compatibility layer.
+- `SIMPLE_AR_LLM_API` controls the request shape. `responses` sends Responses
+  API-style `instructions` plus `input` and automatically falls back to Chat
+  Completions-style `messages` for transient transport disconnects; `chat`
+  sends Chat Completions-style `messages` directly.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` is optional. Leave it empty, or set it to
   `0`/`off`/`none`, to omit a client-side timeout; set a positive value only
   when you deliberately want to bound request time.

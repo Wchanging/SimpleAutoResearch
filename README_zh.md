@@ -59,6 +59,7 @@ Copy-Item .env.example .env
 OPENAI_API_KEY=your_api_key
 OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
+SIMPLE_AR_LLM_BACKEND=openai
 SIMPLE_AR_LLM_API=responses
 SIMPLE_AR_LLM_TIMEOUT_SEC=
 SIMPLE_AR_MAX_OUTPUT_TOKENS=

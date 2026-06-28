@@ -67,23 +67,26 @@ class LLMParsingTests(unittest.TestCase):
                 "SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC": "9",
             },
             clear=True,
-        ), patch("simple_ar.integrations.llm.litellm.completion") as completion:
+        ), patch("simple_ar.integrations.llm._call_openai_sdk") as openai_call:
             client = LLMClient.from_env()
 
         self.assertEqual(client.model, "test-model")
+        self.assertEqual(client._settings.transport_backend, "openai")
+        self.assertEqual(client._openai_model, "test-model")
         self.assertEqual(client._provider_model, "openai/test-model")
         self.assertEqual(client._settings.request_timeout_sec, 42.5)
         self.assertEqual(client._settings.max_output_tokens, 1234)
         self.assertEqual(client._settings.retry_attempts, 5)
         self.assertEqual(client._settings.retry_base_delay_sec, 0.5)
         self.assertEqual(client._settings.retry_max_delay_sec, 9)
-        completion.assert_not_called()
+        openai_call.assert_not_called()
 
     def test_ask_retries_transient_connection_error(self) -> None:
         client = LLMClient(
             LLMSettings(
                 api_key="test-key",
                 api_mode="chat",
+                transport_backend="litellm",
                 retry_attempts=3,
                 retry_base_delay_sec=0.25,
                 retry_max_delay_sec=2.0,
@@ -106,6 +109,7 @@ class LLMParsingTests(unittest.TestCase):
             LLMSettings(
                 api_key="test-key",
                 api_mode="responses",
+                transport_backend="litellm",
                 retry_attempts=2,
                 retry_base_delay_sec=0.25,
                 retry_max_delay_sec=2.0,
@@ -151,11 +155,12 @@ class LLMParsingTests(unittest.TestCase):
         self.assertIsNone(client._settings.max_output_tokens)
 
         response = {"choices": [{"message": {"content": "ok"}}]}
-        with patch("simple_ar.integrations.llm.litellm.completion", return_value=response) as completion:
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response) as openai_call:
             output = client.ask("system", "user", max_output_tokens=999, label="uncapped-test")
 
         self.assertEqual(output, "ok")
-        request = completion.call_args.kwargs
+        api_mode, request = openai_call.call_args.args
+        self.assertEqual(api_mode, "chat")
         self.assertNotIn("timeout", request)
         self.assertNotIn("max_tokens", request)
         self.assertNotIn("max_completion_tokens", request)
@@ -171,11 +176,12 @@ class LLMParsingTests(unittest.TestCase):
         )
         response = {"choices": [{"message": {"content": "ok"}}]}
 
-        with patch("simple_ar.integrations.llm.litellm.completion", return_value=response) as completion:
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response) as openai_call:
             output = client.ask("system", "user", max_output_tokens=80, label="cap-test")
 
         self.assertEqual(output, "ok")
-        request = completion.call_args.kwargs
+        api_mode, request = openai_call.call_args.args
+        self.assertEqual(api_mode, "chat")
         self.assertEqual(request["max_completion_tokens"], 80)
         self.assertNotIn("max_tokens", request)
 
@@ -183,13 +189,13 @@ class LLMParsingTests(unittest.TestCase):
         client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=3))
 
         with patch(
-            "simple_ar.integrations.llm.litellm.completion",
+            "simple_ar.integrations.llm._call_openai_sdk",
             side_effect=RuntimeError("Authentication failed: invalid API key."),
-        ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+        ) as openai_call, patch("simple_ar.integrations.llm.time.sleep") as sleep:
             with self.assertRaises(LLMError):
                 client.ask("system", "user", label="auth-test")
 
-        self.assertEqual(completion.call_count, 1)
+        self.assertEqual(openai_call.call_count, 1)
         sleep.assert_not_called()
 
     def test_estimate_tokens_is_deterministic_and_nonzero_for_text(self) -> None:
