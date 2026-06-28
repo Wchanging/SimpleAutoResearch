@@ -202,6 +202,7 @@ def _file_content(
                         retry_feedback=feedback,
                     ),
                     label=f"greenfield-file-{path}" if attempt == 1 else f"greenfield-file-retry-{path}",
+                    max_output_tokens=_file_output_tokens(path, file_spec),
                 )
             except LLMError as exc:
                 feedback = f"The previous request failed validation: {exc}. Return smaller, complete Python."
@@ -265,6 +266,9 @@ def greenfield_file_prompt(
         "modules should expose data/model/metric functions used by that path.\n"
         "- Keep this single file complete, cohesive, and proportional to its planned responsibility. "
         "Simple helpers should stay small; core modules may be longer when the task genuinely requires it.\n"
+        "- Keep Python files concise enough for reliable transport: target <= 120 lines for normal modules "
+        "and <= 160 lines only for the main orchestrator or core runner. Prefer more small planned files "
+        "over one large file.\n"
         "- Prefer deterministic, testable logic over broad simulations, noisy logs, or unstructured frameworks.\n"
         "- Do not leave placeholders, unfinished functions, unterminated literals, or truncated JSON/Python/Markdown.\n"
         "- For Markdown files, write useful user-facing documentation, not an empty placeholder.\n"
@@ -373,6 +377,26 @@ def _dependency_advice_for_prompt(advice: Mapping[str, Any], *, package_limit: i
         "environment_packages_sample": environment_rows[:package_limit],
         "notes": advice.get("notes", []),
     }
+
+
+def _file_output_tokens(path: str, file_spec: Mapping[str, Any]) -> int:
+    """Bound one file-generation response to avoid provider long-output stalls."""
+
+    suffix = Path(path).suffix.lower()
+    role_text = " ".join(
+        [
+            path,
+            str(file_spec.get("purpose", "")),
+            " ".join(str(item) for item in _string_list(file_spec.get("acceptance_criteria"), limit=8)),
+        ]
+    ).lower()
+    if suffix in {".md", ".txt", ".json", ".toml", ".yaml", ".yml"}:
+        return 900
+    if path == "main.py":
+        return 1400
+    if any(token in role_text for token in ("runner", "orchestrator", "experiment", "pipeline", "core")):
+        return 1900
+    return 1500
 
 
 def _memory_for_prompt(memory: Mapping[str, Any], *, file_limit: int = 40) -> dict[str, Any]:

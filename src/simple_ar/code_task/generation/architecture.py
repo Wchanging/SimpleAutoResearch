@@ -622,10 +622,10 @@ def _stage_retry_delay(attempt: int) -> float:
 def _architecture_output_tokens(resource_plan: Mapping[str, Any]) -> int:
     max_files = _positive_int(resource_plan.get("max_files"), 8)
     if max_files >= 24:
-        return 2200
+        return 1500
     if max_files >= 12:
-        return 1800
-    return 1400
+        return 1300
+    return 1100
 
 
 def _architecture_contract_view(contract: Mapping[str, Any]) -> dict[str, Any]:

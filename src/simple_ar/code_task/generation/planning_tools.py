@@ -215,7 +215,7 @@ def _run_review(
             system=PLANNING_REVIEW_SYSTEM,
             prompt=prompt,
             label=label,
-            max_output_tokens=1200,
+            max_output_tokens=900,
             retry_attempts=retry_attempts,
             message_callback=message_callback,
         )
@@ -304,7 +304,7 @@ def _stage_prompt(
         return (
             "Tool: requirements_brief.\n"
             "Extract the task into implementation-ready requirements. Return one compact strict JSON object.\n"
-            "Use exactly these keys; every list must contain at most 8 short strings, and every string must be <= 140 characters:\n"
+            "Use exactly these keys; every list must contain at most 6 short strings, and every string must be <= 120 characters:\n"
             "- objective: string\n"
             "- hard_requirements: string[]\n"
             "- deliverables: string[]\n"
@@ -325,10 +325,10 @@ def _stage_prompt(
             "Tool: architecture_outline.\n"
             "Design the project architecture from the requirements brief. Return one compact strict JSON object with fields:\n"
             "- architecture_summary: string\n"
-            "- modules: at most 10 {name, responsibility, inputs, outputs, dependencies}; nested lists at most 6 strings\n"
-            "- data_flow: at most 8 ordered flow steps\n"
-            "- test_strategy: at most 8 validation/smoke/benchmark checks\n"
-            "- risks: at most 8 realistic implementation risks and mitigations\n\n"
+            "- modules: at most 8 {name, responsibility, inputs, outputs, dependencies}; nested lists at most 5 strings\n"
+            "- data_flow: at most 6 ordered flow steps\n"
+            "- test_strategy: at most 6 validation/smoke/benchmark checks\n"
+            "- risks: at most 6 realistic implementation risks and mitigations\n\n"
             "Rules:\n"
             "- No Markdown. Keep each string <= 160 characters.\n"
             "- Keep the design bounded by resource_plan.max_files and max_generated_lines.\n"
@@ -341,10 +341,10 @@ def _stage_prompt(
         return (
             "Tool: interface_contract.\n"
             "Define cross-file interfaces before files are written. Return one compact strict JSON object with fields:\n"
-            "- shared_schemas: at most 10 {name, fields, producer, consumers, notes}\n"
-            "- module_apis: at most 16 {module, public_api, consumes, produces}\n"
-            "- cross_file_contracts: at most 12 exact call/data-flow contracts\n"
-            "- stdout_contract: at most 8 parseable stdout lines/metric formats if relevant\n\n"
+            "- shared_schemas: at most 8 {name, fields, producer, consumers, notes}\n"
+            "- module_apis: at most 12 {module, public_api, consumes, produces}\n"
+            "- cross_file_contracts: at most 10 exact call/data-flow contracts\n"
+            "- stdout_contract: at most 6 parseable stdout lines/metric formats if relevant\n\n"
             "Rules:\n"
             "- No Markdown. Keep each string <= 160 characters.\n"
             "- public_api entries must be exact function/class names or concise signatures.\n"
@@ -930,16 +930,16 @@ PLANNING_REVIEW_SYSTEM = (
 def _stage_output_tokens(stage: str, resource_plan: Mapping[str, Any]) -> int:
     max_files = _positive_int(resource_plan.get("max_files"), 8)
     if stage == "requirements":
-        return 1800
+        return 900
     if stage == "architecture":
-        return 2000 if max_files >= 12 else 1600
+        return 1100 if max_files >= 12 else 950
     if stage == "interfaces":
-        return 2200 if max_files >= 12 else 1800
+        return 1200 if max_files >= 12 else 1000
     if max_files >= 24:
-        return 2600
+        return 1600
     if max_files >= 12:
-        return 2200
-    return 1600
+        return 1400
+    return 1200
 
 
 def _write_stage_artifact(planning_dir: Path | None, stage: str, attempt_index: int, value: Mapping[str, Any]) -> None:

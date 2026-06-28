@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Greenfield planning 与逐文件 writer 的单次输出预算进一步收紧：planning 子步骤改为更短的结构化 JSON，writer 会按文件类型/职责限制 `max_output_tokens` 并要求普通 Python 模块保持较小文件粒度，降低第三方 provider 在长结构化输出或长代码输出时首字节超时的概率。
 - 新增 `scripts/llm_transport_probe.py`，可用同一 prompt 对比 LiteLLM Responses、LiteLLM Chat、SimpleAutoResearch 包装层以及 OpenAI SDK direct 调用，并支持 `arc-planning` / `code-json` 压力预设、streaming 对照和 JSON 校验，定位第三方 provider 的 responses/chat 接收链路稳定性问题。
 - `SIMPLE_AR_LLM_API` 现在默认使用 `responses`；如果第三方 provider 只适配 Chat Completions 风格的 `messages`，仍可显式设置为 `chat`。
 - Greenfield planning 在有界 planning review 后如果仍存在 high / critical 阻断项，会停止并写出 blocking artifact，不再带着已知坏规划继续进入代码生成。
