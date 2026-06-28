@@ -45,7 +45,7 @@ def main() -> int:
         console.print("[red]OPENAI_API_KEY is required.[/red]")
         return 2
 
-    prompt = _load_prompt(args.prompt_file) if args.prompt_file else _sized_prompt(args.prompt, args.prompt_repeat)
+    prompt = _build_prompt(args)
     modes = _selected_modes(args.modes)
     output_path = Path(args.output).resolve() if args.output else None
     if output_path is not None:
@@ -69,7 +69,7 @@ def main() -> int:
     for attempt in range(1, args.repeat + 1):
         for mode in modes:
             runner = runners[mode]
-            result = _run_one(mode, attempt, runner, prompt)
+            result = _run_one(mode, attempt, runner, prompt, expect_json=args.expect_json)
             rows.append(result)
             _append_jsonl(output_path, result)
             _print_result_line(console, result)
@@ -104,6 +104,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Prompt text.")
     parser.add_argument("--prompt-repeat", type=int, default=1, help="Repeat prompt to simulate larger inputs.")
     parser.add_argument("--prompt-file", default="", help="Optional UTF-8 prompt file.")
+    parser.add_argument(
+        "--preset",
+        choices=("compact", "arc-planning", "code-json"),
+        default="compact",
+        help="Built-in workload prompt. Ignored when --prompt-file or a custom --prompt is supplied.",
+    )
+    parser.add_argument("--expect-json", action="store_true", help="Fail a call that returns non-JSON text.")
     parser.add_argument("--output", default="runs/llm_transport_probe/probe.jsonl", help="JSONL output path.")
     return parser.parse_args()
 
@@ -128,9 +135,47 @@ def _load_prompt(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def _build_prompt(args: argparse.Namespace) -> str:
+    if args.prompt_file:
+        return _load_prompt(args.prompt_file)
+    prompt = args.prompt
+    if prompt == DEFAULT_PROMPT:
+        prompt = _preset_prompt(args.preset)
+    return _sized_prompt(prompt, args.prompt_repeat)
+
+
 def _sized_prompt(prompt: str, repeat: int) -> str:
     repeat = max(1, repeat)
     return "\n\n".join(prompt for _ in range(repeat))
+
+
+def _preset_prompt(name: str) -> str:
+    if name == "arc-planning":
+        return (
+            "Return valid JSON only. Do not include Markdown. Build a realistic greenfield "
+            "experiment architecture plan for a medium machine-learning benchmark. The JSON "
+            "object must contain keys: objective, assumptions, shared_schemas, files, "
+            "execution_plan, validation_plan, risks. Include exactly 12 files. Each file must "
+            "be an object with path, purpose, dependencies, public_api, acceptance_criteria, "
+            "and entrypoint. Use paths relative to the generated project root, with main.py "
+            "as the only entrypoint. Define shared schemas for DatasetSpec, ConditionRecord, "
+            "MetricSummary, and ArtifactPaths. Make dependencies internally consistent: every "
+            "cross-file call must refer to a public_api entry declared by the dependency file. "
+            "The experiment must compare multiple preprocessing or modeling conditions, write "
+            "artifacts/results.json and artifacts/report.md, include deterministic seeds, and "
+            "validate that result records are non-empty. The response should be detailed enough "
+            "to guide one-file-at-a-time code generation."
+        )
+    if name == "code-json":
+        return (
+            "Return valid JSON only. Do not include Markdown. Generate one Python module as a "
+            "JSON object with keys path, role, imports, public_api, content, and self_checks. "
+            "The content value must be a complete Python source file of roughly 180 to 260 "
+            "lines implementing dataset loading, condition expansion, metric computation, "
+            "artifact writing, and CLI-friendly error messages. Avoid placeholders and keep "
+            "function names consistent with public_api."
+        )
+    return DEFAULT_PROMPT
 
 
 def _build_runners(
@@ -363,7 +408,14 @@ def _system_prompt() -> str:
     return "You are a transport probe. Return concise plain text or JSON only."
 
 
-def _run_one(mode: str, attempt: int, runner: Callable[[str], str], prompt: str) -> ProbeResult:
+def _run_one(
+    mode: str,
+    attempt: int,
+    runner: Callable[[str], str],
+    prompt: str,
+    *,
+    expect_json: bool,
+) -> ProbeResult:
     start = time.perf_counter()
     try:
         output = runner(prompt)
@@ -378,15 +430,41 @@ def _run_one(mode: str, attempt: int, runner: Callable[[str], str], prompt: str)
             error=_compact_error(exc),
             preview="",
         )
+    output = output.strip()
+    if expect_json:
+        try:
+            parsed = json.loads(output)
+        except json.JSONDecodeError as exc:
+            return ProbeResult(
+                mode=mode,
+                attempt=attempt,
+                ok=False,
+                elapsed_sec=round(time.perf_counter() - start, 3),
+                output_chars=len(output),
+                error_type="InvalidJSON",
+                error=_compact_error(exc),
+                preview=output.replace("\n", " ")[:180],
+            )
+        if not isinstance(parsed, dict):
+            return ProbeResult(
+                mode=mode,
+                attempt=attempt,
+                ok=False,
+                elapsed_sec=round(time.perf_counter() - start, 3),
+                output_chars=len(output),
+                error_type="NonObjectJSON",
+                error="Response parsed as JSON but was not an object.",
+                preview=output.replace("\n", " ")[:180],
+            )
     return ProbeResult(
         mode=mode,
         attempt=attempt,
-        ok=bool(output.strip()),
+        ok=bool(output),
         elapsed_sec=round(time.perf_counter() - start, 3),
         output_chars=len(output),
-        error_type="" if output.strip() else "EmptyOutput",
-        error="" if output.strip() else "The call returned an empty response body.",
-        preview=output.strip().replace("\n", " ")[:180],
+        error_type="" if output else "EmptyOutput",
+        error="" if output else "The call returned an empty response body.",
+        preview=output.replace("\n", " ")[:180],
     )
 
 
