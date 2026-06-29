@@ -189,6 +189,77 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(coverage["Result Analysis"]["leaf_count"], 1)
         self.assertIn("| Code Development | 2 |", result.readme_markdown)
 
+    def test_extracts_aggregate_rows_and_dict_hypothesis_verdicts(self) -> None:
+        context = AnalysisContext(
+            task_id="T7",
+            hypotheses=[
+                {"id": "H1", "statement": "Bagging should beat boosting on high-noise data."},
+            ],
+            expected_metrics=[{"name": "rmse", "direction": "minimize"}],
+            metrics={"rmse": 2.0},
+            project_results={
+                "aggregates": [
+                    {
+                        "dataset": "friedman_high_noise",
+                        "condition": "bagging",
+                        "rmse_mean": 2.0,
+                        "rmse_std": 0.1,
+                        "n_seeds": 5,
+                    },
+                    {
+                        "dataset": "friedman_high_noise",
+                        "condition": "boosting",
+                        "rmse_mean": 2.5,
+                        "rmse_std": 0.2,
+                        "n_seeds": 5,
+                    },
+                ],
+                "hypothesis_verdicts": {
+                    "H1": {
+                        "supported": True,
+                        "evidence": "Bagging has lower RMSE than boosting.",
+                    }
+                },
+            },
+        )
+
+        result = run_result_analysis(context)
+
+        rows = result.metric_summary["result_tables"]["primary_metric_rows"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["evidence_id"], "rmse:friedman_high_noise:bagging")
+        self.assertEqual(result.claims[0].claim_id, "H1")
+        self.assertEqual(result.claims[0].verdict, "supported")
+        self.assertIn("Bagging should beat boosting", result.claims[0].claim)
+
+    def test_extracts_summary_mean_std_rows(self) -> None:
+        context = AnalysisContext(
+            task_id="T8",
+            expected_metrics=[{"name": "balanced_accuracy", "direction": "maximize"}],
+            metrics={"balanced_accuracy": 0.8},
+            project_results={
+                "summaries": [
+                    {
+                        "dataset": "d1",
+                        "condition": "smote",
+                        "mean": {"balanced_accuracy": 0.8, "f1": 0.7},
+                        "std": {"balanced_accuracy": 0.05, "f1": 0.04},
+                        "n_seeds": 5,
+                    }
+                ]
+            },
+        )
+
+        result = run_result_analysis(context)
+
+        rows = result.metric_summary["result_tables"]["primary_metric_rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["dataset"], "d1")
+        self.assertEqual(rows[0]["condition"], "smote")
+        self.assertEqual(rows[0]["mean"], 0.8)
+        self.assertEqual(rows[0]["std"], 0.05)
+        self.assertEqual(rows[0]["count"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()

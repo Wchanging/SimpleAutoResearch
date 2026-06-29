@@ -733,7 +733,7 @@ def finalize_submission(
         code_dst.mkdir(parents=True, exist_ok=True)
         write_text(code_dst / "MISSING_CODE.txt", "No generated_project directory was found.\n")
 
-    project_results = load_project_results(code_src) if code_src else {}
+    project_results = load_project_results(run_dir, code_src)
     metrics = merge_metrics(numeric_metrics(project_results), load_simple_ar_metrics(run_dir))
     experiment_summary = build_experiment_summary(manifest, rubric, metrics, project_results, run_dir)
     readme = build_submission_readme(manifest, run_dir, code_src)
@@ -1519,7 +1519,7 @@ def build_analysis_context(
         "expected_metrics": design.get("metrics", []),
         "metric_directions": metric_directions_from_manifest(design.get("metrics") or []),
         "metrics": metrics,
-        "project_results": clip_data(project_results, max_chars=24000),
+        "project_results": project_results,
         "existing_writeup": clip_text(extract_project_writeup(run_dir, code_src) or fallback_readme, 16000),
         "run_dir": str(run_dir),
         "benchmark": "arc-bench",
@@ -1645,14 +1645,15 @@ def load_simple_ar_metrics(run_dir: Path) -> dict[str, float]:
     return {}
 
 
-def load_project_results(code_src: Path) -> dict[str, Any]:
-    candidates = [
-        code_src / "artifacts" / "results.json",
-        code_src / "artifacts" / "metrics.json",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return read_json(path)
+def load_project_results(run_dir: Path, code_src: Path | None) -> dict[str, Any]:
+    for root in result_artifact_roots(run_dir, code_src):
+        for name in ("results.json", "metrics.json"):
+            path = root / name
+            if path.is_file():
+                data = read_json(path)
+                if isinstance(data, dict):
+                    data.setdefault("_artifact_source", str(path))
+                    return data
     return {}
 
 
@@ -1688,12 +1689,7 @@ def build_experiment_summary(
 
 
 def build_submission_readme(manifest: dict[str, Any], run_dir: Path, code_src: Path | None) -> str:
-    report = ""
-    if code_src:
-        for candidate in [code_src / "artifacts" / "report.md", code_src / "README.md"]:
-            if candidate.is_file():
-                report = candidate.read_text(encoding="utf-8", errors="ignore")
-                break
+    report = extract_project_writeup(run_dir, code_src)
     if not report:
         summary = run_dir / "code_task" / "summary.md"
         if summary.is_file():
@@ -1713,14 +1709,15 @@ def build_submission_readme(manifest: dict[str, Any], run_dir: Path, code_src: P
 
 
 def extract_project_writeup(run_dir: Path, code_src: Path | None) -> str:
-    if code_src:
-        for candidate in [
-            code_src / "artifacts" / "report.md",
-            code_src / "artifacts" / "analysis.md",
-            code_src / "README.md",
-        ]:
+    for root in result_artifact_roots(run_dir, code_src):
+        for name in ("report.md", "analysis.md", "README.md"):
+            candidate = root / name
             if candidate.is_file():
                 return candidate.read_text(encoding="utf-8", errors="ignore")
+    if code_src:
+        candidate = code_src / "README.md"
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8", errors="ignore")
     for candidate in [
         run_dir / "code_task" / "summary.md",
         run_dir / "07-run" / "report.md",
@@ -1729,6 +1726,37 @@ def extract_project_writeup(run_dir: Path, code_src: Path | None) -> str:
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8", errors="ignore")
     return ""
+
+
+def result_artifact_roots(run_dir: Path, code_src: Path | None) -> list[Path]:
+    candidates: list[Path] = []
+    if code_src:
+        candidates.extend(
+            [
+                code_src / "artifacts",
+                code_src.parent / "artifacts",
+                code_src.parent / "submission" / "results",
+            ]
+        )
+    candidates.extend(
+        [
+            run_dir / "code_task" / "workspace" / "artifacts",
+            run_dir / "code_task" / "workspace" / "submission" / "results",
+            run_dir / "06-code" / "generated_project" / "artifacts",
+            run_dir / "06-code" / "artifacts",
+            run_dir / "07-run",
+        ]
+    )
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.is_dir():
+            unique.append(path)
+    return unique
 
 
 def build_claims(manifest: dict[str, Any], metrics: dict[str, float], project_results: dict[str, Any]) -> dict[str, Any]:
@@ -1823,7 +1851,7 @@ def arc_direction_to_simple(value: Any) -> str:
 def numeric_metrics(data: Any) -> dict[str, float]:
     source = data
     if isinstance(data, dict):
-        for key in ("metric_values", "metrics"):
+        for key in ("metric_values", "metrics", "metric_bundle"):
             if isinstance(data.get(key), dict):
                 source = data[key]
                 break
@@ -1831,6 +1859,8 @@ def numeric_metrics(data: Any) -> dict[str, float]:
         return {}
     out: dict[str, float] = {}
     for key, value in source.items():
+        if str(key) in {"schema_version"}:
+            continue
         if isinstance(value, bool):
             continue
         if isinstance(value, (int, float)):

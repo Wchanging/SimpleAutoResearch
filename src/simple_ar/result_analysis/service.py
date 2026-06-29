@@ -117,20 +117,38 @@ def existing_claims(context: AnalysisContext) -> list[AnalysisClaim]:
         if isinstance(value, list) and value:
             rows = value
             break
+        if isinstance(value, dict) and value:
+            rows = [
+                {"claim_id": claim_id, "hypothesis_id": claim_id, **row}
+                if isinstance(row, dict)
+                else {"claim_id": claim_id, "hypothesis_id": claim_id, "claim": str(row)}
+                for claim_id, row in value.items()
+            ]
+            break
     if not isinstance(rows, list):
         return []
+    statements = hypothesis_statement_map(context.hypotheses)
     claims: list[AnalysisClaim] = []
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             continue
-        claim_text = str(row.get("claim") or row.get("statement") or row.get("summary") or "").strip()
+        claim_id = str(row.get("claim_id") or row.get("hypothesis_id") or row.get("hypothesis") or f"claim-{index}")
+        claim_text = str(
+            row.get("claim")
+            or row.get("statement")
+            or row.get("summary")
+            or statements.get(claim_id)
+            or row.get("evidence")
+            or ""
+        ).strip()
         if not claim_text:
             continue
+        verdict = row_verdict(row)
         claims.append(
             AnalysisClaim(
-                claim_id=str(row.get("claim_id") or row.get("hypothesis_id") or f"claim-{index}"),
+                claim_id=claim_id,
                 claim=claim_text,
-                verdict=normalize_verdict(row.get("verdict")),
+                verdict=verdict,
                 evidence=normalize_evidence(row.get("evidence")),
                 metric_refs=normalize_metric_refs(row.get("metric_refs")),
                 limitations=normalize_string_list(row.get("limitations")),
@@ -138,6 +156,24 @@ def existing_claims(context: AnalysisContext) -> list[AnalysisClaim]:
             )
         )
     return claims
+
+
+def hypothesis_statement_map(hypotheses: list[dict[str, Any]]) -> dict[str, str]:
+    statements: dict[str, str] = {}
+    for index, row in enumerate(hypotheses, start=1):
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("id") or row.get("hypothesis_id") or f"hypothesis-{index}")
+        text = str(row.get("statement") or row.get("claim") or "").strip()
+        if key and text:
+            statements[key] = text
+    return statements
+
+
+def row_verdict(row: dict[str, Any]) -> str:
+    if isinstance(row.get("supported"), bool):
+        return "supported" if row["supported"] else "unsupported"
+    return normalize_verdict(row.get("verdict") or row.get("status"))
 
 
 def hypothesis_placeholder_claims(context: AnalysisContext, metric_summary: dict[str, Any]) -> list[AnalysisClaim]:
@@ -238,8 +274,10 @@ def build_prompt(
     metric_summary: dict[str, Any],
     fallback: AnalysisResult,
 ) -> str:
+    context_payload = context.model_dump(mode="json")
+    context_payload["project_results"] = compact_project_results_for_prompt(context.project_results, metric_summary)
     payload = {
-        "context": context.model_dump(mode="json"),
+        "context": context_payload,
         "metric_summary": metric_summary,
         "deterministic_claims": [claim.model_dump(mode="json") for claim in fallback.claims],
         "deterministic_limitations": fallback.audit.limitations,
@@ -310,7 +348,7 @@ def parse_claims(value: Any, *, fallback: list[AnalysisClaim]) -> list[AnalysisC
             AnalysisClaim(
                 claim_id=str(row.get("claim_id") or row.get("hypothesis_id") or f"claim-{index}"),
                 claim=claim,
-                verdict=normalize_verdict(row.get("verdict")),
+                verdict=row_verdict(row),
                 evidence=normalize_evidence(row.get("evidence")),
                 metric_refs=normalize_metric_refs(row.get("metric_refs")),
                 limitations=normalize_string_list(row.get("limitations")),
@@ -556,37 +594,17 @@ def parse_rubric_coverage(value: Any, *, fallback: list[dict[str, Any]]) -> list
 
 
 def build_result_tables(context: AnalysisContext) -> dict[str, Any]:
-    per_cell = find_per_cell_records(context.project_results)
+    table_rows = extract_result_table_rows(context.project_results)
     primary_metric = ""
     expected = context.expected_metrics or []
     if expected and isinstance(expected[0], dict):
         primary_metric = str(expected[0].get("name") or "")
     primary_metric = primary_metric or "rmse"
-    primary_rows: list[dict[str, Any]] = []
-    all_rows: list[dict[str, Any]] = []
-    for record in per_cell:
-        dataset = str(record.get("dataset_name") or record.get("dataset") or "")
-        condition = str(record.get("condition_name") or record.get("condition") or record.get("model") or "")
-        for key, value in record.items():
-            if not isinstance(value, dict) or "mean" not in value:
-                continue
-            evidence_id = f"{key}:{dataset}:{condition}".replace(" ", "_")
-            row = {
-                "evidence_id": evidence_id,
-                "dataset": dataset,
-                "condition": condition,
-                "metric": str(key),
-                "mean": value.get("mean"),
-                "std": value.get("std"),
-                "count": value.get("count"),
-            }
-            all_rows.append(row)
-            if key == primary_metric:
-                primary_rows.append(row)
+    primary_rows = [row for row in table_rows if row.get("metric") == primary_metric]
     return {
         "primary_metric": primary_metric,
         "primary_metric_rows": primary_rows,
-        "all_metric_rows": all_rows[:240],
+        "all_metric_rows": table_rows[:240],
     }
 
 
@@ -599,6 +617,212 @@ def find_per_cell_records(data: Any) -> list[dict[str, Any]]:
     if isinstance(data.get("per_cell"), list):
         return [row for row in data["per_cell"] if isinstance(row, dict)]
     return []
+
+
+def extract_result_table_rows(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for record in aggregate_records(data):
+        rows.extend(normalized_metric_rows(record))
+    if rows:
+        return dedupe_table_rows(rows)
+    rows.extend(aggregate_raw_records(raw_records(data)))
+    if rows:
+        return dedupe_table_rows(rows)
+    return []
+
+
+def aggregate_records(data: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    summary = data.get("summary")
+    if isinstance(summary, dict) and isinstance(summary.get("per_cell"), list):
+        records.extend(row for row in summary["per_cell"] if isinstance(row, dict))
+    for key in ("per_cell", "cells", "aggregates", "summaries", "condition_aggregates"):
+        value = data.get(key)
+        if isinstance(value, list):
+            records.extend(row for row in value if isinstance(row, dict))
+    return records
+
+
+def raw_records(data: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for key in ("rows", "runs", "splits", "seed_evidence"):
+        value = data.get(key)
+        if isinstance(value, list):
+            records.extend(row for row in value if isinstance(row, dict))
+    return records
+
+
+def normalized_metric_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
+    dataset = record_dataset(record)
+    condition = record_condition(record)
+    if not dataset or not condition:
+        return []
+    count = first_present(record, "count", "n", "n_seeds", "seed_count", "n_splits", "split_count")
+    rows: list[dict[str, Any]] = []
+
+    for key, value in record.items():
+        if isinstance(value, dict) and "mean" in value:
+            rows.append(table_row(dataset, condition, key, value.get("mean"), value.get("std"), value.get("count", count)))
+
+    mean_map = record.get("mean")
+    std_map = record.get("std")
+    if isinstance(mean_map, dict):
+        for metric, mean in mean_map.items():
+            std = std_map.get(metric) if isinstance(std_map, dict) else None
+            rows.append(table_row(dataset, condition, str(metric), mean, std, count))
+
+    for key, value in record.items():
+        if key.endswith("_mean") and is_number(value):
+            metric = key[: -len("_mean")]
+            std = record.get(f"{metric}_std")
+            rows.append(table_row(dataset, condition, metric, value, std, count))
+        elif key.startswith("mean_") and is_number(value):
+            metric = key[len("mean_") :]
+            std = record.get(f"std_{metric}")
+            rows.append(table_row(dataset, condition, metric, value, std, count))
+
+    return rows
+
+
+def aggregate_raw_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, str, str], list[float]] = {}
+    for record in records:
+        dataset = record_dataset(record)
+        condition = record_condition(record)
+        if not dataset or not condition:
+            continue
+        metric_values = raw_metric_values(record)
+        for metric, value in metric_values.items():
+            if is_number(value):
+                buckets.setdefault((dataset, condition, metric), []).append(float(value))
+    rows: list[dict[str, Any]] = []
+    for (dataset, condition, metric), values in buckets.items():
+        if not values:
+            continue
+        mean = sum(values) / len(values)
+        std = sample_std(values)
+        rows.append(table_row(dataset, condition, metric, mean, std, len(values)))
+    return rows
+
+
+def raw_metric_values(record: dict[str, Any]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    nested = record.get("metrics")
+    if isinstance(nested, dict):
+        values.update(nested)
+    for key, value in record.items():
+        if key in RAW_NON_METRIC_KEYS or key.endswith("_id") or key.endswith("_name"):
+            continue
+        if isinstance(value, (dict, list, tuple, set)):
+            continue
+        if is_number(value):
+            values[key] = value
+    return values
+
+
+RAW_NON_METRIC_KEYS = {
+    "seed",
+    "split_seed",
+    "split_idx",
+    "fold",
+    "count",
+    "n",
+    "n_train",
+    "n_test",
+    "n_features",
+    "n_classes",
+    "fallback_used",
+    "is_modal_selection",
+}
+
+
+def record_dataset(record: dict[str, Any]) -> str:
+    return str(
+        record.get("dataset_name")
+        or record.get("dataset")
+        or record.get("dataset_id")
+        or record.get("data")
+        or ""
+    ).strip()
+
+
+def record_condition(record: dict[str, Any]) -> str:
+    return str(
+        record.get("condition_name")
+        or record.get("condition")
+        or record.get("condition_id")
+        or record.get("strategy_name")
+        or record.get("model")
+        or record.get("model_name")
+        or record.get("schedule")
+        or record.get("method")
+        or ""
+    ).strip()
+
+
+def table_row(dataset: str, condition: str, metric: str, mean: Any, std: Any, count: Any) -> dict[str, Any]:
+    evidence_id = f"{metric}:{dataset}:{condition}".replace(" ", "_")
+    return {
+        "evidence_id": evidence_id,
+        "dataset": dataset,
+        "condition": condition,
+        "metric": metric,
+        "mean": mean,
+        "std": std,
+        "count": count,
+    }
+
+
+def dedupe_table_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        key = (str(row.get("dataset")), str(row.get("condition")), str(row.get("metric")))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def first_present(record: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if record.get(key) is not None:
+            return record[key]
+    return None
+
+
+def is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def sample_std(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return variance ** 0.5
+
+
+def compact_project_results_for_prompt(data: Any, metric_summary: dict[str, Any]) -> Any:
+    if not isinstance(data, dict):
+        return data
+    compact: dict[str, Any] = {
+        "available_keys": sorted(str(key) for key in data.keys()),
+        "result_tables": metric_summary.get("result_tables", {}),
+    }
+    for key in ("claims", "hypothesis_verdicts", "verdicts", "hypotheses", "metrics", "metric_bundle", "limitations"):
+        value = data.get(key)
+        if value is not None:
+            compact[key] = value
+    if isinstance(data.get("summary"), dict):
+        compact["summary"] = data["summary"]
+    source = data.get("_artifact_source")
+    if source:
+        compact["_artifact_source"] = source
+    return compact
 
 
 def deterministic_limitations(metric_summary: dict[str, Any]) -> list[str]:
@@ -614,11 +838,11 @@ def deterministic_limitations(metric_summary: dict[str, Any]) -> list[str]:
 
 def normalize_verdict(value: Any) -> str:
     text = str(value or "").strip().lower().replace("-", "_")
-    if text in {"supported", "pass", "passed"}:
+    if text in {"supported", "support", "supports", "pass", "passed"}:
         return "supported"
     if text in {"partial", "partially_supported", "partially supported"}:
         return "partially_supported"
-    if text in {"unsupported", "failed", "fail", "refuted", "contradicted", "false"}:
+    if text in {"unsupported", "failed", "fail", "refute", "refuted", "contradicted", "false"}:
         return "unsupported"
     return "not_evaluated"
 
