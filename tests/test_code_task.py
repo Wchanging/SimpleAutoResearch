@@ -38,6 +38,7 @@ from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
     repair_generated_project_from_run_failure,
 )
+from simple_ar.code_task.generation.review import review_generated_project
 from simple_ar.code_task.orchestration.execute import _apply_greenfield_review_repair_metadata
 from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
@@ -760,6 +761,193 @@ primary_metric = "accuracy"
                     "greenfield-run-repair-src/pipeline.py",
                 ],
             )
+
+    def test_greenfield_run_repair_includes_attribute_consumers(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.labels: list[str] = []
+
+            def ask_json(self, _system: str, _prompt: str, *, label: str = "") -> dict[str, str]:
+                self.labels.append(label)
+                if label == "greenfield-run-repair-plan":
+                    return {
+                        "diagnosis": "The producer changed metrics to dicts but the plan missed one report consumer.",
+                        "root_cause": "Metric contract mismatch across producer and consumer files.",
+                        "target_files": [
+                            {"path": "src/aggregator.py"},
+                            {"path": "src/runner.py"},
+                            {"path": "app.py"},
+                        ],
+                        "repair_strategy": "Repair all files that directly consume the missing metric symbol.",
+                        "risks": [],
+                    }
+                path = label.removeprefix("greenfield-run-repair-")
+                return {
+                    "content": (
+                        "from __future__ import annotations\n\n"
+                        f"REPAIRED_PATH = {path!r}\n"
+                    ),
+                    "summary": f"Repaired {path}.",
+                }
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            files = {
+                "app.py": "from __future__ import annotations\n",
+                "src/aggregator.py": "from __future__ import annotations\nmean = {'balanced_accuracy': 1.0}\n",
+                "src/runner.py": "from __future__ import annotations\n",
+                "src/report.py": (
+                    "from __future__ import annotations\n\n"
+                    "def render(summary):\n"
+                    "    return summary.mean.balanced_accuracy\n"
+                ),
+            }
+            for rel_path, content in files.items():
+                target = project_dir / rel_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                write_text(target, content)
+
+            fake = FakeClient()
+            repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair", "implicated_files": []},
+                stderr_text="ERROR: 'dict' object has no attribute 'balanced_accuracy'",
+                output_path=root / "run_repair_attribute_consumer.json",
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "app.py", "mode": "llm"},
+                        {"path": "src/aggregator.py", "mode": "llm"},
+                        {"path": "src/runner.py", "mode": "llm"},
+                        {"path": "src/report.py", "mode": "llm"},
+                    ]
+                },
+                client=fake,
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            file_labels = [label for label in fake.labels if label != "greenfield-run-repair-plan"]
+            self.assertIn("greenfield-run-repair-src/report.py", file_labels)
+            self.assertIn("src/report.py", repair["changed_files"])
+
+    def test_greenfield_review_flags_stdlib_shadow_and_nested_artifact_path(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            project_dir.mkdir(parents=True)
+            write_text(project_dir / "main.py", "from __future__ import annotations\n")
+            write_text(project_dir / "types.py", "from __future__ import annotations\n\nclass Row: pass\n")
+            write_text(
+                project_dir / "writer.py",
+                (
+                    "from __future__ import annotations\n"
+                    "from pathlib import Path\n\n"
+                    "CANONICAL_RESULTS = Path('artifacts/results.json')\n\n"
+                    "def write_artifacts(results_dir):\n"
+                    "    base = Path(results_dir)\n"
+                    "    (base / CANONICAL_RESULTS).parent.mkdir(parents=True, exist_ok=True)\n"
+                    "    (base / CANONICAL_RESULTS).write_text('{}')\n"
+                ),
+            )
+
+            report = review_generated_project(
+                project_dir=project_dir,
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "main.py", "mode": "llm"},
+                        {"path": "types.py", "mode": "llm"},
+                        {"path": "writer.py", "mode": "llm"},
+                    ]
+                },
+                result_schema={"required_metrics": ["accuracy"]},
+                resource_plan={"max_files": 10, "max_generated_lines": 500},
+                contract={"objective": "Write artifacts/results.json with measured accuracy."},
+                use_llm=False,
+            )
+
+            categories = {finding["category"] for finding in report["findings"]}
+            self.assertIn("stdlib_module_shadow", categories)
+            self.assertIn("nested_artifact_path_risk", categories)
+
+    def test_greenfield_run_repair_renames_stdlib_shadow_module(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            project_dir.mkdir(parents=True)
+            write_text(project_dir / "types.py", "from __future__ import annotations\n\nclass ConditionSpec: pass\n")
+            write_text(project_dir / "config.py", "from types import ConditionSpec\n\nVALUE = ConditionSpec()\n")
+            write_text(project_dir / "main.py", "from config import VALUE\nprint(VALUE)\n")
+
+            repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair"},
+                stderr_text=f"ImportError: cannot import name 'ConditionSpec' from 'types' ({project_dir / 'types.py'})",
+                output_path=root / "stdlib_shadow_repair.json",
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            self.assertFalse((project_dir / "types.py").exists())
+            self.assertTrue((project_dir / "types_schema.py").exists())
+            self.assertIn("from types_schema import ConditionSpec", read_text(project_dir / "config.py"))
+
+    def test_greenfield_run_repair_renames_stdlib_shadow_even_after_repeated_failure(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            project_dir.mkdir(parents=True)
+            write_text(project_dir / "types.py", "from __future__ import annotations\n\nclass ConditionSpec: pass\n")
+            write_text(project_dir / "config.py", "from types import ConditionSpec\n\nVALUE = ConditionSpec()\n")
+            write_text(project_dir / "main.py", "from config import VALUE\nprint(VALUE)\n")
+
+            repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair"},
+                stderr_text=f"ImportError: cannot import name 'ConditionSpec' from 'types' ({project_dir / 'types.py'})",
+                output_path=root / "stdlib_shadow_repair_repeated.json",
+                previous_repair_context="repeated failure signal detected; do not simply retry the same target or strategy",
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            self.assertFalse((project_dir / "types.py").exists())
+            self.assertTrue((project_dir / "types_schema.py").exists())
+            self.assertIn("from types_schema import ConditionSpec", read_text(project_dir / "config.py"))
+
+    def test_greenfield_run_repair_fixes_nested_artifact_results_path(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            project_dir.mkdir(parents=True)
+            writer = project_dir / "artifacts_writer.py"
+            write_text(
+                writer,
+                (
+                    "from __future__ import annotations\n"
+                    "from pathlib import Path\n\n"
+                    "CANONICAL_RESULTS = Path(\"artifacts/results.json\")\n\n"
+                    "def write_artifacts(results_dir):\n"
+                    "    base = Path(results_dir)\n"
+                    "    (base / CANONICAL_RESULTS).parent.mkdir(parents=True, exist_ok=True)\n"
+                    "    (base / CANONICAL_RESULTS).write_text('{}')\n"
+                ),
+            )
+
+            repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair"},
+                stderr_text="ERROR: artifacts/results.json was not written",
+                output_path=root / "nested_artifact_repair.json",
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            self.assertIn("artifacts_writer.py", repair["changed_files"])
+            content = read_text(writer)
+            self.assertIn('CANONICAL_RESULTS = Path("results.json")', content)
+            self.assertNotIn('Path("artifacts/results.json")', content)
 
     def test_greenfield_execute_can_use_fake_agent_backend(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

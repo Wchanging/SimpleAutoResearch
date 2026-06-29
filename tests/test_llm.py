@@ -9,6 +9,7 @@ from simple_ar.integrations.llm import (
     LLMError,
     LLMRequest,
     LLMSettings,
+    _call_openai_sdk,
     estimate_tokens,
     parse_json_object,
 )
@@ -197,6 +198,48 @@ class LLMParsingTests(unittest.TestCase):
 
         self.assertEqual(openai_call.call_count, 1)
         sleep.assert_not_called()
+
+    def test_openai_sdk_backend_disables_hidden_retries(self) -> None:
+        with patch("openai.OpenAI") as openai_cls:
+            openai_cls.return_value.chat.completions.create.return_value = {
+                "choices": [{"message": {"content": "ok"}}]
+            }
+
+            _call_openai_sdk(
+                "chat",
+                {
+                    "model": "gpt-5.1",
+                    "api_key": "test-key",
+                    "base_url": "https://example.test/v1",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        openai_cls.assert_called_once()
+        client_kwargs = openai_cls.call_args.kwargs
+        self.assertEqual(client_kwargs["max_retries"], 0)
+        self.assertEqual(client_kwargs["base_url"], "https://example.test/v1")
+        self.assertNotIn("timeout", client_kwargs)
+
+    def test_openai_sdk_backend_passes_explicit_timeout_only(self) -> None:
+        with patch("openai.OpenAI") as openai_cls:
+            openai_cls.return_value.chat.completions.create.return_value = {
+                "choices": [{"message": {"content": "ok"}}]
+            }
+
+            _call_openai_sdk(
+                "chat",
+                {
+                    "model": "gpt-5.1",
+                    "api_key": "test-key",
+                    "timeout": 123,
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        openai_cls.assert_called_once()
+        client_kwargs = openai_cls.call_args.kwargs
+        self.assertEqual(client_kwargs["timeout"], 123)
 
     def test_estimate_tokens_is_deterministic_and_nonzero_for_text(self) -> None:
         self.assertEqual(estimate_tokens(""), 0)

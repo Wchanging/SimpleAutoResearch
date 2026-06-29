@@ -14,6 +14,7 @@ import json
 import shutil
 import py_compile
 import re
+import sys
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Mapping
@@ -31,6 +32,22 @@ from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import dependency_context, public_api
 from simple_ar.code_task.review_pipeline import build_review_index, compact_review_index
 from simple_ar.integrations.llm import LLMClient
+
+_RUN_REPAIR_MAX_FILES = 8
+_STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
+    "types",
+    "typing",
+    "dataclasses",
+    "pathlib",
+    "json",
+    "random",
+    "statistics",
+    "collections",
+    "enum",
+    "copy",
+    "re",
+    "sys",
+}
 
 
 def repair_generated_project_from_review(
@@ -729,6 +746,10 @@ def repair_generated_project_from_run_failure(
             patched = _patch_greenfield_run_experiment_call(project_dir, stderr_text, changed)
         if not patched:
             patched = _patch_unexpected_keyword_argument(project_dir, stderr_text, changed)
+    if not patched:
+        patched = _patch_stdlib_shadow_module(project_dir, stderr_text, changed)
+    if not patched:
+        patched = _patch_nested_artifact_results_path(project_dir, stderr_text, changed)
     if patched:
         compile_errors = _compile_project(project_dir)
         if not compile_errors:
@@ -836,7 +857,7 @@ def _regenerate_run_failed_files(
         notes.append(f"Run repair diagnosis: {diagnosis[:500]}")
     file_specs = _architecture_file_specs(architecture_plan)
     regenerated: list[dict[str, Any]] = []
-    for rel_path in target_paths[:5]:
+    for rel_path in target_paths[:_RUN_REPAIR_MAX_FILES]:
         target = project_dir / rel_path
         if not target.is_file() or target.suffix != ".py":
             continue
@@ -1122,12 +1143,13 @@ def _run_repair_target_paths(
             )
         )
     elif "has no attribute" in lowered or "attributeerror" in lowered:
+        candidates.extend(_attribute_contract_matches(project_dir, known_paths, lowered))
         candidates.extend(
             _rank_repair_candidates(
                 known_paths,
                 signal_text=lowered,
-                preferred_roles=("data", "preprocess", "core", "orchestrator", "entrypoint"),
-            )[:5]
+                preferred_roles=("artifact", "core", "orchestrator", "entrypoint", "data", "preprocess", "config"),
+            )[:8]
         )
     implicated = failure_analysis.get("implicated_files")
     if isinstance(implicated, list):
@@ -1175,6 +1197,56 @@ def _fallback_run_repair_targets(
         signal_text="",
         preferred_roles=("orchestrator", "entrypoint", "data", "preprocess", "config", "core", "artifact"),
     )
+
+
+def _attribute_contract_matches(project_dir: Path, paths: list[str], signal_text: str) -> list[str]:
+    """Return files that directly consume or produce the missing attribute.
+
+    AttributeError messages often identify the contract symbol but not the
+    traceback location because generated entrypoints catch exceptions and print
+    a compact ``ERROR: ...`` line. In that case repairing only the producer can
+    leave downstream consumers with stale ``obj.field`` access after another
+    file has converted the contract to a mapping. Exact symbol matches keep this
+    generic without naming benchmark-specific files.
+    """
+
+    symbols = _attribute_error_symbols(signal_text)
+    if not symbols:
+        return []
+    rows: list[tuple[int, int, str]] = []
+    for path in paths:
+        target = project_dir / path
+        if not target.is_file() or target.suffix != ".py":
+            continue
+        try:
+            source = target.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        lowered = source.lower()
+        score = 0
+        for symbol in symbols:
+            symbol_l = symbol.lower()
+            if f".{symbol_l}" in lowered:
+                score += 6
+            if f'["{symbol_l}"]' in lowered or f"['{symbol_l}']" in lowered:
+                score += 4
+            if symbol_l in lowered:
+                score += 1
+        if score:
+            role_bias = 0 if "artifact" in _path_roles(path) else 1
+            rows.append((-score, role_bias, path))
+    return [path for _, _, path in sorted(rows)]
+
+
+def _attribute_error_symbols(signal_text: str) -> list[str]:
+    symbols: list[str] = []
+    patterns = (
+        r"has no attribute ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
+        r"attributeerror:[^'\"]*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
+    )
+    for pattern in patterns:
+        symbols.extend(match.lower() for match in re.findall(pattern, signal_text, flags=re.IGNORECASE))
+    return list(dict.fromkeys(symbols))
 
 
 def _generated_python_paths(
@@ -1261,6 +1333,119 @@ def _should_skip_quick_runtime_patches(previous_repair_context: str) -> bool:
         "repeated failure signal detected" in lowered
         or "do not simply retry the same target or strategy" in lowered
     )
+
+
+def _patch_stdlib_shadow_module(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
+    module = _shadowed_stdlib_module(project_dir, stderr_text)
+    if not module:
+        return False
+    source = project_dir / f"{module}.py"
+    if not source.is_file():
+        return False
+    replacement = _replacement_module_name(project_dir, module)
+    destination = project_dir / f"{replacement}.py"
+    source.rename(destination)
+    _rewrite_local_module_imports(project_dir, old=module, new=replacement)
+    changed.append(f"{module}.py -> {replacement}.py")
+    for path in sorted(project_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(project_dir).as_posix()
+        if rel not in changed and rel != f"{replacement}.py":
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if replacement in content:
+                changed.append(rel)
+    if f"{replacement}.py" not in changed:
+        changed.append(f"{replacement}.py")
+    return True
+
+
+def _shadowed_stdlib_module(project_dir: Path, stderr_text: str) -> str:
+    lowered = stderr_text.lower()
+    for path in sorted(project_dir.glob("*.py")):
+        module = path.stem
+        if module not in _STDLIB_SHADOW_MODULES:
+            continue
+        path_text = path.as_posix().lower()
+        if (
+            f"module '{module}'" in lowered
+            or f"from '{module}'" in lowered
+            or f"import name" in lowered and f"{module}.py" in lowered
+            or path_text in lowered.replace("\\", "/")
+        ):
+            return module
+    return ""
+
+
+def _replacement_module_name(project_dir: Path, module: str) -> str:
+    candidates = [f"{module}_schema", f"project_{module}", f"local_{module}"]
+    for candidate in candidates:
+        if not (project_dir / f"{candidate}.py").exists():
+            return candidate
+    index = 2
+    while (project_dir / f"{module}_schema_{index}.py").exists():
+        index += 1
+    return f"{module}_schema_{index}"
+
+
+def _rewrite_local_module_imports(project_dir: Path, *, old: str, new: str) -> None:
+    from_pattern = re.compile(rf"(^|\n)([ \t]*)from[ \t]+{re.escape(old)}[ \t]+import[ \t]+")
+    import_pattern = re.compile(rf"(^|\n)([ \t]*)import[ \t]+{re.escape(old)}([ \t]*(?:#.*)?(?:\n|$))")
+    dynamic_patterns = (
+        (f'"{old}"', f'"{new}"'),
+        (f"'{old}'", f"'{new}'"),
+    )
+    for path in sorted(project_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        updated = from_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}from {new} import ", content)
+        updated = import_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}import {new} as {old}{m.group(3)}", updated)
+        if path.name in {"main.py", "__main__.py"}:
+            for before, after in dynamic_patterns:
+                updated = updated.replace(before, after)
+        if updated != content:
+            path.write_text(updated, encoding="utf-8")
+
+
+def _patch_nested_artifact_results_path(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
+    lowered = stderr_text.lower()
+    if "artifacts/results.json" not in lowered or "not written" not in lowered:
+        return False
+    patched = False
+    for path in sorted(project_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "artifacts/results.json" not in content and "artifacts') / 'results.json" not in content:
+            continue
+        if "Path(results_dir)" not in content and "base /" not in content:
+            continue
+        updated = content
+        replacements = {
+            'Path("artifacts/results.json")': 'Path("results.json")',
+            "Path('artifacts/results.json')": "Path('results.json')",
+            'Path("artifacts") / "results.json"': 'Path("results.json")',
+            "Path('artifacts') / 'results.json'": "Path('results.json')",
+        }
+        for before, after in replacements.items():
+            updated = updated.replace(before, after)
+        if updated != content:
+            path.write_text(updated, encoding="utf-8")
+            rel = path.relative_to(project_dir).as_posix()
+            if rel not in changed:
+                changed.append(rel)
+            patched = True
+    return patched
 
 
 def _normalize_generated_project_path(value: str) -> str:

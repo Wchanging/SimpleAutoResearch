@@ -400,7 +400,12 @@ def _openai_responses_call(
 ) -> str:
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout)
+    client_kwargs: dict[str, Any] = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
+    client = OpenAI(**client_kwargs)
     request = {
         "model": model,
         "instructions": _system_prompt(),
@@ -425,7 +430,12 @@ def _openai_chat_call(
 ) -> str:
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout)
+    client_kwargs: dict[str, Any] = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
+    client = OpenAI(**client_kwargs)
     request = {
         "model": model,
         "messages": [

@@ -810,7 +810,15 @@ def _call_openai_sdk(api_mode: str, request: dict[str, Any]) -> object:
     api_base = payload.pop("api_base", None)
     base_url = base_url or api_base
     timeout = payload.pop("timeout", None) if "timeout" in payload else None
-    client_kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key,
+        # Keep retry accounting in SimpleAutoResearch. The OpenAI SDK defaults
+        # to hidden internal retries, which can duplicate long planning calls
+        # while the CLI only reports a single outer attempt.
+        "max_retries": 0,
+    }
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
     if base_url:
         client_kwargs["base_url"] = str(base_url)
     client = OpenAI(**client_kwargs)

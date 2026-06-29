@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import py_compile
 import re
+import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
@@ -19,6 +20,20 @@ from simple_ar.code_task.review_pipeline import (
 
 
 GREENFIELD_REVIEW_CONTRACT_VERSION = 4
+_STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
+    "types",
+    "typing",
+    "dataclasses",
+    "pathlib",
+    "json",
+    "random",
+    "statistics",
+    "collections",
+    "enum",
+    "copy",
+    "re",
+    "sys",
+}
 
 
 def review_generated_project(
@@ -149,6 +164,18 @@ def _deterministic_findings(
             findings.append(_finding("blocking", "missing_file", f"Planned file was not written: {path}"))
             continue
         if path.endswith(".py"):
+            shadow = _stdlib_shadow_name(path)
+            if shadow:
+                findings.append(
+                    _finding(
+                        "blocking",
+                        "stdlib_module_shadow",
+                        (
+                            f"`{path}` shadows Python standard-library module `{shadow}`. "
+                            "Rename the generated module and update local imports before execution."
+                        ),
+                    )
+                )
             try:
                 py_compile.compile(str(target), doraise=True)
             except py_compile.PyCompileError as exc:
@@ -287,6 +314,18 @@ def _semantic_scaffold_findings(
                     ),
                 )
             )
+        if _nested_artifact_path_risk(content):
+            findings.append(
+                _finding(
+                    "blocking",
+                    "nested_artifact_path_risk",
+                    (
+                        f"`{rel}` appears to join a caller-provided artifact directory with "
+                        "`artifacts/results.json`, which can write `artifacts/artifacts/results.json` "
+                        "instead of the required `artifacts/results.json`."
+                    ),
+                )
+            )
         if len(findings) >= 8:
             break
     return findings
@@ -390,6 +429,20 @@ def _generated_file_rows(code_artifacts: Mapping[str, Any]) -> list[Mapping[str,
     if not isinstance(files, list):
         return []
     return [row for row in files if isinstance(row, Mapping) and _is_reviewable_generated_path(str(row.get("path", "")))]
+
+
+def _stdlib_shadow_name(path: str) -> str:
+    posix = PurePosixPath(path)
+    if len(posix.parts) != 1 or posix.suffix != ".py":
+        return ""
+    stem = posix.stem
+    return stem if stem in _STDLIB_SHADOW_MODULES and stem not in {"main", "__main__"} else ""
+
+
+def _nested_artifact_path_risk(content: str) -> bool:
+    if "artifacts/results.json" not in content and 'Path("artifacts") / "results.json"' not in content:
+        return False
+    return "Path(results_dir)" in content or "base /" in content
 
 
 def _is_reviewable_generated_path(value: str) -> bool:
