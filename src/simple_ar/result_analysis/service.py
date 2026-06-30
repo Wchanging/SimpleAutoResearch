@@ -69,18 +69,14 @@ def request_json_with_diagnostics(
     label: str,
     output_dir: Path | None,
 ) -> dict[str, Any]:
-    if output_dir is not None:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        write_text(output_dir / "analysis_prompt.txt", user)
-
     raw = client.ask(system, user + "\n\nReturn valid JSON only. Do not include markdown or extra text.", label=label)
-    if output_dir is not None:
-        write_text(output_dir / "analysis_raw_response.txt", raw)
-
     parsed = parse_json_object(raw)
     if parsed is None:
         hint = ""
         if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            write_text(output_dir / "analysis_prompt.txt", user)
+            write_text(output_dir / "analysis_raw_response.txt", raw)
             hint = f" Raw response saved to {output_dir / 'analysis_raw_response.txt'}."
         raise ValueError("LLM result-analysis response did not contain a valid JSON object." + hint)
     return parsed

@@ -4,6 +4,39 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-06-30
+
+### Changed
+
+- Code-task now has a shared AgentStep audit layer for greenfield planning and
+  per-file generation. Structured LLM substeps record stage, attempt, prompt
+  hash, output summary, and failure status without saving full prompts by
+  default.
+- Greenfield planning-review findings are normalized into structured patch
+  requests under `code_task/meta/planning/review_patch_requests.json`, so
+  bounded revisions rerun from the earliest affected planning stage instead of
+  blindly regenerating every stage.
+- Greenfield review repair now reuses code-task memory and previous repair
+  context, and writes repair status, changed files, and review-finding
+  summaries back into repair memory.
+- Code-task summaries now include continuation guidance with the current
+  blocker, evidence-chain gaps, attempted repairs, recent review findings, and
+  the suggested next repair entrypoint.
+- Code-task generation now uses shared normalization helpers for paths, text,
+  lists, and mappings across writer, planning, review, and repair code.
+- Result-analysis and ARC scoring no longer save full prompt text on successful
+  paths; prompt/raw-response diagnostic files are written only when parsing or
+  scoring fails. Code-task subprocesses also disable `.pyc` writes to reduce
+  cache-only filesystem noise.
+
+### Fixed
+
+- Generated-project review no longer treats defensive text such as "do not use
+  placeholder values" as an executable placeholder path, while still blocking
+  real dummy/stub outputs.
+- Generated-project review now checks planned public APIs against exported
+  public APIs and warns about generic producer/consumer contract drift.
+
 ## 2026-06-28
 
 ### Changed

@@ -24,7 +24,7 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
 - **研究到代码实验**：可以把 code task 嵌入 8 阶段流程，生成 repo map、context pack、work plan、patch 证据、benchmark 指标和报告证据。
 - **Tool 与外部 Agent 边界**：可以导出真实只读 tool schema，通过 MCP stdio 暴露 run-local tools，并可选把受控 greenfield generation/repair handoff 给 Codex 等外部 CLI agent；外部返回文件仍必须经过 SimpleAutoResearch 的 review 和 run guard。
 - **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
-- **成熟库基础设施**：pipeline/code-task TOML 配置通过 Pydantic 校验，LLM 调用通过 LiteLLM，OpenAlex 访问通过 pyalex，终端进度输出开始走 Rich，为后续更清晰的 human-in-the-loop 审核打基础。
+- **成熟库基础设施**：pipeline/code-task TOML 配置通过 Pydantic 校验，LLM 调用默认使用 OpenAI Python SDK，并保留 LiteLLM 兼容层；OpenAlex 访问通过 pyalex，终端进度输出开始走 Rich，为后续更清晰的 human-in-the-loop 审核打基础。
 
 ## 安装与配置
 
@@ -71,7 +71,7 @@ SIMPLE_AR_INPUT_PRICE_PER_1M=
 SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 ```
 
-如果使用第三方 OpenAI 兼容接口，把 `OPENAI_BASE_URL` 指向对应服务的 `/v1` 地址即可。价格字段是可选项；不填写时，SimpleAutoResearch 仍会记录 token 数量，但费用估算会显示为 `null`。连接中断、限流、超时和 5xx 这类临时 provider 错误会按上面的 retry 设置做有限指数退避重试。JSON 输出请求默认只靠 prompt 和本地解析，兼容性更好；只有 provider 明确支持原生 JSON response formatting 时，才建议把 `SIMPLE_AR_JSON_RESPONSE_FORMAT` 改成 `auto` 或 `json_object`。`SIMPLE_AR_LLM_API=responses` 使用 Responses API 风格的 `instructions` 和 `input`；遇到兼容网关的临时传输中断时，会自动退到 Chat Completions 风格的 `messages` 再试。如果 provider 应该始终走 Chat Completions，可改成 `chat`。
+如果使用第三方 OpenAI 兼容接口，把 `OPENAI_BASE_URL` 指向对应服务的 `/v1` 地址即可。价格字段是可选项；不填写时，SimpleAutoResearch 仍会记录 token 数量，但费用估算会显示为 `null`。连接中断、限流、超时和 5xx 这类临时 provider 错误会按上面的 retry 设置做有限指数退避重试。JSON 输出请求默认只靠 prompt 和本地解析，兼容性更好；只有 provider 明确支持原生 JSON response formatting 时，才建议把 `SIMPLE_AR_JSON_RESPONSE_FORMAT` 改成 `auto` 或 `json_object`。`SIMPLE_AR_LLM_BACKEND=openai` 默认使用 OpenAI Python SDK 直连；只有需要旧 LiteLLM 兼容层时才改成 `litellm`。`SIMPLE_AR_LLM_TIMEOUT_SEC` 和 `SIMPLE_AR_MAX_OUTPUT_TOKENS` 可以留空，或设为 `0` / `off` / `none`，表示不向 provider 传客户端超时或输出上限；只有你确实想限制请求时间或输出长度时才设置正数。`SIMPLE_AR_LLM_API=responses` 使用 Responses API 风格的 `instructions` 和 `input`；遇到兼容网关的临时传输中断时，会自动退到 Chat Completions 风格的 `messages` 再试。如果 provider 应该始终走 Chat Completions，可改成 `chat`。
 
 ## 快速开始
 

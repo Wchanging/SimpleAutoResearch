@@ -49,9 +49,10 @@ experimentation, and gradual extension.
 - **Reviewable artifacts**: each run writes inspectable files under `runs/`
   instead of hiding decisions inside process memory.
 - **Mature library foundation**: pipeline/code-task TOML configs are validated
-  through Pydantic, LLM calls go through LiteLLM, OpenAlex access goes through
-  pyalex, and terminal progress uses Rich as a first step toward cleaner
-  human-in-the-loop review.
+  through Pydantic, LLM calls use the OpenAI Python SDK by default with a
+  LiteLLM compatibility option, OpenAlex access goes through pyalex, and
+  terminal progress uses Rich as a first step toward cleaner human-in-the-loop
+  review.
 
 ## Install And Configure
 

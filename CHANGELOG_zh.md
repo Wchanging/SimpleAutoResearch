@@ -12,9 +12,10 @@
 - Greenfield planning reviewer 的 finding 现在会规范化为 structured patch request，并写入 `code_task/meta/planning/review_patch_requests.json`；后续规划修订仍从最早受影响 stage 重跑，而不是无差别重跑整段规划。
 - Greenfield review repair 现在复用 code-task memory / previous repair context，并把 review repair 的状态、改动文件和 review finding 摘要写回 repair memory，减少同一问题在 review repair 与 run repair 间断裂。
 - Code-task summary 新增 Continuation Guidance，显式展示当前 blocker、证据链缺口、已尝试修复、最近 review finding 与下一次继续 repair 的建议入口；memory artifact 路径会按 standalone code-task 或 8 阶段嵌入模式动态计算。
-- Code-task generation ?????? helper ?????????????????mapping ?????????????? writer / planning / review / repair ??????????????
-- Generated-project runtime compatibility patch ??? repair ?????????????preset/config ???entrypoint ? runner API ???unexpected keyword ?????????????????????????? strict benchmark ????????????
-- Benchmark adapter ?????? manifest contract?ARC-Bench adapter ? prepare/finalize metadata ?????? suite/operation/status/input/output/metadata ?????????? benchmark adapter ???????????? benchmark ?????? `src/simple_ar`?
+- Code-task generation 层新增通用路径、文本、列表和映射规范化 helper，减少 writer / planning / review / repair 之间重复实现同类清洗逻辑。
+- Generated-project runtime compatibility patch 与 repair 逻辑更加通用，优先修复 preset/config、entrypoint、runner API 和 unexpected keyword 等接口契约问题，再进入严格 benchmark 执行。
+- Benchmark adapter 抽出 manifest contract，ARC-Bench adapter 的 prepare/finalize metadata 统一包含 suite、operation、status、input、output 和 metadata，为后续接入其他 benchmark 预留轻量接口，同时不把 benchmark 专用逻辑写入 `src/simple_ar`。
+- Result-analysis 与 ARC scoring 成功路径不再保存完整 prompt 文本；只有 JSON 解析或 scoring 失败时才写出 prompt/raw response 诊断文件。Code-task 子进程默认关闭 `.pyc` 写入，减少 `__pycache__` 这类无审计价值的小文件。
 - Code-task greenfield contract 新增通用 `evidence_plan`，会从任务说明中提取显式假设、比较、数据集/条件、必需指标、必需 artifact 和 claim policy，并贯穿 planning、逐文件生成、review 与 repair prompt，避免大型任务在代码生成后只剩聚合指标而丢失支撑结论的证据链。
 - Greenfield planning / writer prompt 现在会把证据要求作为硬契约处理：需要下游指标或报告使用的 features、labels、predictions、condition、seed、per-dataset rows 等字段必须显式传递，不能在中途只保留最终 summary。
 - Generated-project runtime repair prompt 现在要求先构建 failing metric/field 到 producer、consumer、aggregate/report 的 dependency trace，再选择目标文件；同类错误重复出现时，需要解释上轮定位或补丁为何无效，减少反复修改同一处但没有解决根因的循环。

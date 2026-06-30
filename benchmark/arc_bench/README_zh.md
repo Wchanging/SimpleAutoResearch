@@ -98,8 +98,8 @@ uv run python benchmark/arc_bench/batch_runner.py run \
 `--score`，并且某个任务已经有有效 submission，它会直接补 `judge/`，不会重跑实验。
 如果服务器网络不稳定，可以加 `--llm-retry-attempts 5`，临时覆盖所有
 `code-task execute` 调用的阶段级 LLM 重试次数。
-如果错误集中出现在最开始的 “Planning greenfield project architecture”，通常说明首个
-planning 请求较大、provider 返回较慢或代理提前断开，可以先把单次 provider timeout 调高：
+默认情况下，LLM 调用不会向 provider 传客户端超时和输出上限。如果你需要为了费用控制
+或企业网关策略重新加硬限制，可以在批跑前设置正数：
 
 ```bash
 export SIMPLE_AR_LLM_TIMEOUT_SEC=300
@@ -202,17 +202,18 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     metric_summary.json
     analysis_report.md
     analysis_audit.json
-    analysis_prompt.txt          # 使用 --analyze 时生成
-    analysis_raw_response.txt    # analyze 失败时用于诊断
+    analysis_response.json       # --analyze 成功时的结构化 LLM 响应
+    analysis_prompt.txt          # 仅在 analyze JSON 解析失败时用于诊断
+    analysis_raw_response.txt    # 仅在 analyze JSON 解析失败时用于诊断
   judge/
     judge_result.json            # leaf_grades + scoring_summary
     scorecard.md
-    score_round_code_prompt.txt
     score_round_code_response.json
-    score_round_code_response_attempt_*.json
-    score_round_results_prompt.txt
+    score_round_code_prompt.txt              # 仅在 scoring 失败时生成
+    score_round_code_response_attempt_*.json # 仅记录 schema retry 响应
     score_round_results_response.json
-    score_round_results_response_attempt_*.json
+    score_round_results_prompt.txt              # 仅在 scoring 失败时生成
+    score_round_results_response_attempt_*.json # 仅记录 schema retry 响应
 ```
 
 `finalize --analyze` 负责根据实测结果生成 benchmark-facing README 和 claims。

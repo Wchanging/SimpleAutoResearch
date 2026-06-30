@@ -954,7 +954,6 @@ def score_submission_with_llm(
 
     if code_leaves:
         prompt = build_code_round_prompt(manifest_context, code_leaves, artifacts)
-        write_text(output_dir / "score_round_code_prompt.txt", prompt)
         raw_response, grades, warnings_ = run_score_round(
             client,
             prompt,
@@ -962,6 +961,7 @@ def score_submission_with_llm(
             label="arc-bench-score-code",
             round_name="code",
             raw_response_path=output_dir / "score_round_code_response.json",
+            prompt_debug_path=output_dir / "score_round_code_prompt.txt",
         )
         raw_responses["code"] = raw_response
         leaf_grades.extend(grades)
@@ -969,7 +969,6 @@ def score_submission_with_llm(
 
     if result_leaves:
         prompt = build_results_round_prompt(manifest_context, result_leaves, artifacts)
-        write_text(output_dir / "score_round_results_prompt.txt", prompt)
         raw_response, grades, warnings_ = run_score_round(
             client,
             prompt,
@@ -977,6 +976,7 @@ def score_submission_with_llm(
             label="arc-bench-score-results",
             round_name="results",
             raw_response_path=output_dir / "score_round_results_response.json",
+            prompt_debug_path=output_dir / "score_round_results_prompt.txt",
         )
         raw_responses["results"] = raw_response
         leaf_grades.extend(grades)
@@ -1215,6 +1215,7 @@ def run_score_round(
     label: str,
     round_name: str,
     raw_response_path: Path,
+    prompt_debug_path: Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     warnings_: list[str] = []
     last_response: dict[str, Any] | None = None
@@ -1226,13 +1227,16 @@ def run_score_round(
         try:
             response = client.ask_json(score_system_prompt(), attempt_prompt, label=attempt_label)
         except Exception as exc:
+            if prompt_debug_path is not None:
+                write_text(prompt_debug_path, prompt)
             raise SystemExit(f"ARC {round_name} scoring failed before valid JSON was produced: {exc}") from exc
         last_response = response
         write_json(raw_response_path, response)
-        write_json(
-            raw_response_path.with_name(f"{raw_response_path.stem}_attempt_{attempt}{raw_response_path.suffix}"),
-            response,
-        )
+        if attempt > 1:
+            write_json(
+                raw_response_path.with_name(f"{raw_response_path.stem}_attempt_{attempt}{raw_response_path.suffix}"),
+                response,
+            )
         try:
             grades, round_warnings = normalize_round_grades(response, leaves, round_name=round_name)
         except ValueError as exc:
@@ -1243,6 +1247,8 @@ def run_score_round(
         if attempt > 1:
             warnings_.append(f"{round_name}: recovered score schema after {attempt} attempts")
         return response, grades, warnings_
+    if prompt_debug_path is not None:
+        write_text(prompt_debug_path, prompt)
     raise SystemExit(
         f"ARC {round_name} score response did not contain `grades` after {max_attempts} attempt(s). "
         f"Raw response saved to {raw_response_path}."

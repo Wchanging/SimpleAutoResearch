@@ -97,7 +97,6 @@ def write_agent_step_artifact(
     stage_dir = artifact_dir / stage
     stage_dir.mkdir(parents=True, exist_ok=True)
     write_json(stage_dir / f"attempt-{attempt_index:03d}.json", dict(value))
-    write_json(stage_dir / "latest.json", dict(value))
 
 
 def record_agent_step(

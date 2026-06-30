@@ -809,6 +809,7 @@ def _safe_env(workspace_dir: Path) -> dict[str, str]:
         python_paths.append(existing)
     env["PYTHONPATH"] = os.pathsep.join(python_paths)
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env["SIMPLE_AR_CODE_TASK"] = "1"
     return env

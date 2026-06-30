@@ -208,17 +208,18 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     metric_summary.json
     analysis_report.md
     analysis_audit.json
-    analysis_prompt.txt          # when --analyze is used
-    analysis_raw_response.txt    # when --analyze fails
+    analysis_response.json       # parsed LLM response when --analyze succeeds
+    analysis_prompt.txt          # only when --analyze fails JSON parsing
+    analysis_raw_response.txt    # only when --analyze fails JSON parsing
   judge/
     judge_result.json            # leaf_grades + scoring_summary
     scorecard.md
-    score_round_code_prompt.txt
     score_round_code_response.json
-    score_round_code_response_attempt_*.json
-    score_round_results_prompt.txt
+    score_round_code_prompt.txt              # only when scoring fails
+    score_round_code_response_attempt_*.json # schema retry attempts only
     score_round_results_response.json
-    score_round_results_response_attempt_*.json
+    score_round_results_prompt.txt              # only when scoring fails
+    score_round_results_response_attempt_*.json # schema retry attempts only
 ```
 
 `finalize --analyze` builds the benchmark-facing README/claims from measured
@@ -231,8 +232,8 @@ results. `score` is the ARC-compatible two-round LLM judge:
   the model's leaf scores.
 
 If a scoring round returns valid JSON with the wrong top-level schema, the
-adapter retries once with a stricter `grades` contract and saves each raw
-attempt. If the retry still cannot produce a recoverable `grades` array,
+adapter retries once with a stricter `grades` contract and saves retry raw
+responses. If the retry still cannot produce a recoverable `grades` array,
 scoring fails. If a valid response omits one leaf, that leaf is recorded with
 warning and default score `0.5`, matching AutoResearchClaw's `judge.py`
 behavior.
