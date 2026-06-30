@@ -30,6 +30,8 @@ from simple_ar.agent_backends import (
 )
 from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import dependency_context, public_api
+from simple_ar.code_task.generation.common import contains_any, safe_relative_path
+from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.review_pipeline import build_review_index, compact_review_index
 from simple_ar.integrations.llm import LLMClient
 
@@ -60,6 +62,7 @@ def repair_generated_project_from_review(
     result_schema: Mapping[str, Any] | None = None,
     contract: Mapping[str, Any] | None = None,
     dependency_advice: Mapping[str, Any] | None = None,
+    previous_repair_context: str = "",
     client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Apply narrow deterministic repairs after generated-project review failure.
@@ -135,6 +138,7 @@ def repair_generated_project_from_review(
             result_schema=result_schema or {},
             contract=contract or {},
             dependency_advice=dependency_advice or {},
+            previous_repair_context=previous_repair_context,
             client=client,
             changed=changed,
             notes=summary["notes"],
@@ -167,6 +171,7 @@ def _regenerate_review_failed_files(
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
+    previous_repair_context: str,
     client: LLMClient,
     changed: list[str],
     notes: list[str],
@@ -194,6 +199,7 @@ def _regenerate_review_failed_files(
                     contract=contract,
                     dependency_advice=dependency_advice,
                     review_report=review_report,
+                    previous_repair_context=previous_repair_context,
                 ),
                 label=f"greenfield-review-repair-{rel_path}",
             )
@@ -270,7 +276,7 @@ def _review_repair_target_paths(
         for row in generated:
             if not isinstance(row, Mapping):
                 continue
-            path = _safe_relative_path(str(row.get("path", "")))
+            path = safe_relative_path(str(row.get("path", "")))
             if not path or not path.endswith(".py") or path.endswith("/__init__.py"):
                 continue
             if row.get("mode") == "fallback":
@@ -324,7 +330,7 @@ def _paths_from_review_findings(findings: list[Mapping[str, Any]]) -> list[str]:
 def _paths_from_review_summaries(text: str) -> list[str]:
     paths: list[str] = []
     for match in re.finditer(r"(?<![\w./-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.py", text):
-        path = _safe_relative_path(match.group(0))
+        path = safe_relative_path(match.group(0))
         if path:
             paths.append(path)
     return list(dict.fromkeys(paths))
@@ -336,7 +342,7 @@ def _architecture_file_specs(architecture_plan: Mapping[str, Any]) -> dict[str, 
     return {
         path: row
         for row in rows
-        if (path := _safe_relative_path(str(row.get("path", ""))))
+        if (path := safe_relative_path(str(row.get("path", ""))))
     }
 
 
@@ -349,6 +355,7 @@ def _review_file_repair_prompt(
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
     review_report: Mapping[str, Any],
+    previous_repair_context: str = "",
 ) -> str:
     return (
         "Repair exactly one generated project file. The surrounding project already exists on disk; "
@@ -372,6 +379,7 @@ def _review_file_repair_prompt(
         f"Task contract:\n{json.dumps(_compact_for_prompt(contract), indent=2, ensure_ascii=False)}\n\n"
         f"Dependency advice:\n{json.dumps(_compact_for_prompt(dependency_advice), indent=2, ensure_ascii=False)}\n\n"
         f"Review report:\n{json.dumps(_compact_for_prompt(review_report), indent=2, ensure_ascii=False)}\n"
+        f"\nPrevious repair context:\n{previous_repair_context[:12000] or 'No previous repair context recorded.'}\n"
     )
 
 
@@ -741,11 +749,11 @@ def repair_generated_project_from_run_failure(
             "Skipped deterministic quick patches because previous repair context shows repeated failure."
         )
     else:
-        patched = _patch_missing_greenfield_preset(project_dir, stderr_text, changed)
-        if not patched:
-            patched = _patch_greenfield_run_experiment_call(project_dir, stderr_text, changed)
-        if not patched:
-            patched = _patch_unexpected_keyword_argument(project_dir, stderr_text, changed)
+        compat_patch = apply_generated_project_compatibility_patch(project_dir=project_dir, stderr_text=stderr_text)
+        patched = compat_patch.applied
+        if compat_patch.applied:
+            changed.extend(path for path in compat_patch.changed_files if path not in changed)
+            summary["notes"].append(compat_patch.note)
     if not patched:
         patched = _patch_stdlib_shadow_module(project_dir, stderr_text, changed)
     if not patched:
@@ -955,7 +963,7 @@ def _repair_plan_targets(
     selected: list[str] = []
     for row in rows:
         raw_path = row.get("path") if isinstance(row, Mapping) else row
-        path = _safe_relative_path(str(raw_path or ""))
+        path = safe_relative_path(str(raw_path or ""))
         if not path or not path.endswith(".py"):
             continue
         if (project_dir / path).is_file():
@@ -1085,10 +1093,13 @@ def _run_repair_plan_prompt(
         "- Prefer producer/consumer contract fixes over entrypoint-only changes.\n"
         "- If the error mentions a missing dataset/source/field, inspect data loading, preprocessing, config, and orchestrator files.\n"
         "- If the error mentions an attribute/type mismatch, inspect the object producer, object consumer, and the call site.\n"
+        "- Build a dependency trace from failing metric/field -> aggregate/report consumer -> record object -> producer function -> call site before choosing files.\n"
+        "- If a required metric is missing or invalid, inspect whether the raw evidence required for that metric was lost earlier in the data flow.\n"
         "- Use Previous repair context to avoid repeating the same failed localization or patch strategy.\n"
         "- If the same error survived a prior repair, explicitly explain why the previous fix was insufficient before selecting target files.\n"
         "- Do not choose files only because they appear in validation warnings if benchmark stderr contains a clearer runtime failure.\n"
-        "- Return JSON with fields: diagnosis, root_cause, target_files, repair_strategy, risks.\n"
+        "- Return JSON with fields: diagnosis, root_cause, dependency_trace, target_files, repair_strategy, risks.\n"
+        "- dependency_trace should be a short ordered list of producer/consumer/aggregate facts, not prose filler.\n"
         "- target_files must use only paths from candidate_files.\n\n"
         f"Benchmark stderr:\n{stderr_text[:6000]}\n\n"
         f"Failure analysis:\n{json.dumps(_compact_for_prompt(failure_analysis), indent=2, ensure_ascii=False)}\n\n"
@@ -1169,7 +1180,7 @@ def _run_repair_target_paths(
         candidates.extend(_fallback_run_repair_targets(code_artifacts, project_dir=project_dir))
     normalized = []
     for path in candidates:
-        rel = _safe_relative_path(path)
+        rel = safe_relative_path(path)
         if not rel or not rel.endswith(".py"):
             continue
         target = project_dir / rel
@@ -1260,7 +1271,7 @@ def _generated_python_paths(
         path
         for row in rows
         if isinstance(row.get("path", ""), str)
-        if (path := _safe_relative_path(str(row.get("path", "")))) and path.endswith(".py")
+        if (path := safe_relative_path(str(row.get("path", "")))) and path.endswith(".py")
     ]
     if project_dir is not None and project_dir.is_dir():
         paths.extend(
@@ -1287,7 +1298,7 @@ def _rank_repair_candidates(
         depth = path.count("/")
         return role_score, signal_bonus, depth, path
 
-    ranked = sorted((_safe_relative_path(path) for path in paths), key=score)
+    ranked = sorted((safe_relative_path(path) for path in paths), key=score)
     return [path for path in ranked if path]
 
 
@@ -1298,17 +1309,17 @@ def _path_roles(path: str) -> set[str]:
     roles: set[str] = set()
     if name in {"main.py", "__main__.py", "cli.py", "app.py"} or stem in {"main", "cli", "app"}:
         roles.add("entrypoint")
-    if _contains_any(full, ("runner", "run_", "execute", "executor", "orchestr", "workflow", "pipeline", "experiment", "train", "eval")):
+    if contains_any(full, ("runner", "run_", "execute", "executor", "orchestr", "workflow", "pipeline", "experiment", "train", "eval")):
         roles.add("orchestrator")
-    if _contains_any(full, ("input", "data", "dataset", "loader", "source", "ingest", "feature", "label")):
+    if contains_any(full, ("input", "data", "dataset", "loader", "source", "ingest", "feature", "label")):
         roles.add("data")
-    if _contains_any(full, ("process", "preprocess", "transform", "prepare", "clean", "split")):
+    if contains_any(full, ("process", "preprocess", "transform", "prepare", "clean", "split")):
         roles.add("preprocess")
-    if _contains_any(full, ("config", "setting", "option", "param", "schema")):
+    if contains_any(full, ("config", "setting", "option", "param", "schema")):
         roles.add("config")
-    if _contains_any(full, ("core", "model", "algorithm", "logic", "method", "estimator", "classif", "regress")):
+    if contains_any(full, ("core", "model", "algorithm", "logic", "method", "estimator", "classif", "regress")):
         roles.add("core")
-    if _contains_any(full, ("analysis", "metric", "score", "report", "artifact", "output", "result", "summary", "writer")):
+    if contains_any(full, ("analysis", "metric", "score", "report", "artifact", "output", "result", "summary", "writer")):
         roles.add("artifact")
     return roles or {"support"}
 
@@ -1319,10 +1330,6 @@ def _path_matches_signal(path: str, signal_text: str) -> bool:
     parts = {part.lower() for part in PurePosixPath(path).parts}
     parts.add(PurePosixPath(path).stem.lower())
     return any(part and part in signal_text for part in parts)
-
-
-def _contains_any(value: str, needles: tuple[str, ...]) -> bool:
-    return any(needle in value for needle in needles)
 
 
 def _should_skip_quick_runtime_patches(previous_repair_context: str) -> bool:
@@ -1482,6 +1489,9 @@ def _run_file_repair_prompt(
         "- Do not convert unresolved runtime errors into a successful all-zero run.\n"
         "- Do not use self-check, empty datasets, or placeholder records as substitutes for full benchmark mode.\n"
         "- Use Previous repair context to avoid reapplying a patch that already failed to change the observed error.\n"
+        "- If the same error survived a previous patch, explain in code comments only where useful and fix the producer/consumer contract, not just the visible traceback line.\n"
+        "- Before changing this file's API, check Existing project APIs and update consumers/producers through the repair plan; avoid creating a new unmatched interface.\n"
+        "- If this file writes metrics or reports, preserve raw evidence needed by the task evidence_plan before aggregating.\n"
         "- If the experiment cannot produce condition-level evidence, the entrypoint must fail clearly instead of exiting 0.\n"
         "- Required metrics must remain parseable by main.py as `metric_name: number`.\n\n"
         f"Target path: {rel_path}\n\n"
@@ -1660,7 +1670,7 @@ def _overlay_generated_files(src_dir: Path, project_dir: Path) -> list[str]:
     for src in sorted(src_dir.rglob("*")):
         if not src.is_file():
             continue
-        rel = _safe_relative_path(src.relative_to(src_dir).as_posix())
+        rel = safe_relative_path(src.relative_to(src_dir).as_posix())
         if not rel:
             continue
         dst = project_dir / rel
@@ -1668,14 +1678,6 @@ def _overlay_generated_files(src_dir: Path, project_dir: Path) -> list[str]:
         shutil.copy2(src, dst)
         changed.append(rel)
     return changed
-
-
-def _safe_relative_path(value: str) -> str:
-    value = value.replace("\\", "/").strip().lstrip("/")
-    path = PurePosixPath(value)
-    if not value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        return ""
-    return path.as_posix()
 
 
 def _compile_error(path: Path) -> str:
@@ -1693,148 +1695,6 @@ def _compile_project(project_dir: Path) -> list[str]:
         if error:
             errors.append(f"{path.relative_to(project_dir).as_posix()}: {error}")
     return errors
-
-
-def _patch_unexpected_keyword_argument(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
-    match = re.search(
-        r"TypeError:\s+([A-Za-z_][A-Za-z0-9_]*)\(\) got an unexpected keyword argument '([^']+)'",
-        stderr_text,
-    )
-    if not match:
-        return False
-    function_name, keyword = match.group(1), match.group(2)
-    for path in sorted(project_dir.rglob("*.py")):
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        patched = _patch_function_signature(text, function_name=function_name, keyword=keyword)
-        if patched == text:
-            continue
-        path.write_text(patched, encoding="utf-8")
-        changed.append(path.relative_to(project_dir).as_posix())
-        return True
-    return False
-
-
-def _patch_missing_greenfield_preset(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
-    """Add a minimal runnable preset when generated config and CLI disagree."""
-
-    matches = [
-        item.strip()
-        for item in re.findall(r"Unknown preset '([^']+)'", stderr_text)
-        if item.strip() and "{" not in item and "}" not in item
-    ]
-    if not matches:
-        return False
-    preset_name = matches[-1]
-    if not preset_name:
-        return False
-    config_path = project_dir / "config.json"
-    if not config_path.is_file():
-        return False
-    try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(payload, dict):
-        return False
-    presets = payload.get("presets")
-    if not isinstance(presets, dict):
-        presets = {}
-        payload["presets"] = presets
-    placeholders = [key for key in presets if isinstance(key, str) and "{" in key and "}" in key]
-    for key in placeholders:
-        if preset_name not in presets and isinstance(presets.get(key), dict):
-            presets[preset_name] = presets[key]
-        del presets[key]
-    if preset_name in presets:
-        config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        changed.append("config.json")
-        return True
-    base = payload.get("base")
-    if not isinstance(base, dict):
-        base = {}
-        payload["base"] = base
-    presets[preset_name] = _default_greenfield_preset(base=base, requested=preset_name)
-    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    changed.append("config.json")
-    return True
-
-
-def _patch_greenfield_run_experiment_call(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
-    """Patch the common main.py -> runner.run_experiment API mismatch."""
-
-    should_try = (
-        "run_experiment" in stderr_text
-        and (
-            "unexpected keyword argument" in stderr_text
-            or "unhashable type: 'dict'" in stderr_text
-        )
-    )
-    if not should_try:
-        return False
-    main_path = project_dir / "main.py"
-    if not main_path.is_file():
-        return False
-    text = main_path.read_text(encoding="utf-8")
-    replacements = {
-        "run_experiment(effective_config, mode=args.mode)": "run_experiment(preset=args.preset, data_source=args.data_source)",
-        "run_experiment(effective_config)": "run_experiment(preset=args.preset, data_source=args.data_source)",
-    }
-    patched = text
-    for old, new in replacements.items():
-        patched = patched.replace(old, new)
-    if patched == text:
-        patched = re.sub(
-            r"run_experiment\(\s*effective_config\s*,\s*mode\s*=\s*args\.mode\s*\)",
-            "run_experiment(preset=args.preset, data_source=args.data_source)",
-            patched,
-        )
-    if patched == text:
-        return False
-    main_path.write_text(patched, encoding="utf-8")
-    changed.append("main.py")
-    return True
-
-
-def _default_greenfield_preset(*, base: Mapping[str, Any], requested: str) -> dict[str, Any]:
-    """Return a conservative generic preset when config and CLI disagree."""
-
-    preset: dict[str, Any] = {
-        "conditions": base.get("conditions", ["baseline", "candidate"]),
-        "random_seed": int(base.get("random_seed", 13) or 13),
-        "max_items": int(base.get("max_items", base.get("max_samples", 240)) or 240),
-        "test_fraction": float(base.get("test_fraction", base.get("test_size", 0.2)) or 0.2),
-        "validation_fraction": float(base.get("validation_fraction", base.get("validation_size", 0.2)) or 0.2),
-        "notes": f"Auto-added by SimpleAutoResearch run repair for benchmark preset '{requested}'.",
-    }
-    if requested == "smoke":
-        preset["max_items"] = min(int(preset["max_items"]), 240)
-    return preset
-
-
-def _patch_function_signature(text: str, *, function_name: str, keyword: str) -> str:
-    pattern = re.compile(
-        rf"^(def\s+{re.escape(function_name)}\()([^)]*)(\)\s*(?:->\s*[^:]+)?\s*:)",
-        re.MULTILINE,
-    )
-
-    def _replace(match: re.Match[str]) -> str:
-        params = match.group(2).strip()
-        if keyword in {part.split("=", 1)[0].split(":", 1)[0].strip().lstrip("*") for part in params.split(",")}:
-            return match.group(0)
-        if "**" in params:
-            return match.group(0)
-        if not params:
-            new_params = f"{keyword}=None"
-        elif params.endswith(","):
-            new_params = f"{params} {keyword}=None"
-        else:
-            new_params = f"{params}, {keyword}=None"
-        return f"{match.group(1)}{new_params}{match.group(3)}"
-
-    return pattern.sub(_replace, text, count=1)
 
 
 def _repair_common_python_generation_error(path: str, value: str) -> str:

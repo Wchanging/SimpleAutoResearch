@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from simple_ar.core.artifacts import write_json
 from simple_ar.integrations.llm import LLMClient
 from simple_ar.reviewing.schema import ReviewFinding
+from simple_ar.code_task.generation.common import safe_relative_path
 from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
 from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
 from simple_ar.code_task.review_pipeline import (
@@ -19,7 +20,7 @@ from simple_ar.code_task.review_pipeline import (
 )
 
 
-GREENFIELD_REVIEW_CONTRACT_VERSION = 4
+GREENFIELD_REVIEW_CONTRACT_VERSION = 5
 _STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
     "types",
     "typing",
@@ -60,6 +61,7 @@ def review_generated_project(
         resource_plan=resource_plan,
         contract=contract or {},
         dependency_advice=dependency_advice or {},
+        architecture_plan=architecture_plan or {},
     )
     review_index = build_review_index(
         project_dir,
@@ -131,6 +133,7 @@ def _deterministic_findings(
     resource_plan: Mapping[str, Any],
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
+    architecture_plan: Mapping[str, Any],
 ) -> list[ReviewFinding]:
     findings: list[ReviewFinding] = []
     max_files = _int(resource_plan.get("max_files"), 12)
@@ -155,7 +158,7 @@ def _deterministic_findings(
                     )
                 )
     for row in generated:
-        path = _safe_path(str(row.get("path", "")))
+        path = safe_relative_path(str(row.get("path", "")))
         if not path:
             findings.append(_finding("blocking", "unsafe_path", f"Unsafe generated path: {row.get('path', '')}"))
             continue
@@ -202,6 +205,7 @@ def _deterministic_findings(
                 ),
             )
         )
+    findings.extend(_interface_contract_findings(project_dir, architecture_plan=architecture_plan))
     findings.extend(_semantic_scaffold_findings(project_dir, contract=contract, result_schema=result_schema))
     findings.extend(_task_acceptance_findings(project_dir, contract=contract, dependency_advice=dependency_advice))
     return findings
@@ -483,15 +487,66 @@ def _metric_name_visible(project_dir: Path, metric: str) -> bool:
     return False
 
 
-def _contains_any(value: str, needles: tuple[str, ...]) -> bool:
-    return any(needle in value for needle in needles)
+def _interface_contract_findings(project_dir: Path, *, architecture_plan: Mapping[str, Any]) -> list[ReviewFinding]:
+    """Check that planned public APIs exist in generated Python files.
+
+    This is a deliberately small deterministic guard. It does not try to prove
+    semantic correctness, but it catches a common greenfield failure mode where
+    per-file generation invents names that differ from the plan consumed by
+    downstream files. Missing APIs are warnings unless an actual local import
+    mismatch already proves a runtime break; the goal is to surface contract
+    drift without over-blocking exploratory projects.
+    """
+
+    files = architecture_plan.get("files")
+    if not isinstance(files, list):
+        return []
+    actual = project_api_contract(project_dir)
+    findings: list[ReviewFinding] = []
+    for row in files:
+        if not isinstance(row, Mapping):
+            continue
+        rel = safe_relative_path(str(row.get("path", "")))
+        if not rel.endswith(".py"):
+            continue
+        expected = _api_names(row.get("public_api"))
+        if not expected:
+            continue
+        actual_names = {_api_name_from_signature(item) for item in actual.get(rel, [])}
+        actual_names.discard("")
+        missing = sorted(name for name in expected if name not in actual_names)
+        if missing and (project_dir / rel).is_file():
+            findings.append(
+                _finding(
+                    "warning",
+                    "planned_api_not_exported",
+                    (
+                        f"`{rel}` does not export planned API name(s): {', '.join(missing[:8])}. "
+                        "If another file consumes these names, align the producer/consumer contract before execution."
+                    ),
+                )
+            )
+        if len(findings) >= 8:
+            break
+    return findings
 
 
-def _safe_path(value: str) -> str:
-    path = PurePosixPath(value.replace("\\", "/").strip().lstrip("/"))
-    if not value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        return ""
-    return path.as_posix()
+def _api_names(value: Any) -> set[str]:
+    rows = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
+    names = {_api_name_from_signature(item) for item in rows}
+    return {name for name in names if name}
+
+
+def _api_name_from_signature(value: str) -> str:
+    text = value.strip()
+    for prefix in ("def ", "async def "):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+            break
+    if text.startswith("class "):
+        text = text[len("class ") :]
+    match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text)
+    return match.group(1) if match else ""
 
 
 def _task_text(contract: Mapping[str, Any]) -> str:
@@ -568,7 +623,44 @@ def _placeholder_execution_detected(lowered_content: str, *, task_text: str) -> 
         "return []  #",
         "return {}  #",
     )
-    return any(marker in lowered_content for marker in blocking_markers)
+    for line in lowered_content.splitlines():
+        if _placeholder_line_is_defensive(line):
+            continue
+        if any(marker in line for marker in blocking_markers):
+            return True
+    return False
+
+
+def _placeholder_line_is_defensive(line: str) -> bool:
+    """Return true for policy/error text that forbids placeholder execution.
+
+    Generated projects often include explicit guards such as "refusing to emit
+    placeholder metrics". Those are desirable, not evidence that the benchmark
+    path is a stub. Keep this line-based so a genuine stub elsewhere in the
+    same file is still caught.
+    """
+
+    if "placeholder" not in line and "dummy" not in line:
+        return False
+    defensive_markers = (
+        "no placeholder",
+        "not placeholder",
+        "without placeholder",
+        "avoid placeholder",
+        "prevent placeholder",
+        "reject placeholder",
+        "refuse placeholder",
+        "refusing to",
+        "do not use placeholder",
+        "must not use placeholder",
+        "should not use placeholder",
+        "not a placeholder",
+        "no dummy",
+        "not dummy",
+        "without dummy",
+        "avoid dummy",
+    )
+    return any(marker in line for marker in defensive_markers)
 
 
 def _explicit_installed_dependency_requirements(

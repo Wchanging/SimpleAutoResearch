@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.code_task.generation.common import scalar_list, text as clean_text
 from simple_ar.code_task.generation.task_contract import contract_prompt_view
 from simple_ar.code_task.generation.planning_tools import build_tool_agent_architecture_plan
 from simple_ar.code_task.generation.file_specs import (
@@ -154,13 +155,13 @@ def normalize_architecture_plan(
     return {
         "schema_version": "greenfield_architecture.v1",
         "mode": "greenfield_project",
-        "objective": _text(value.get("objective")) or _text(contract.get("objective")),
-        "architecture_summary": _text(value.get("architecture_summary"))
+        "objective": clean_text(value.get("objective")) or clean_text(contract.get("objective")),
+        "architecture_summary": clean_text(value.get("architecture_summary"))
         or "Small, reviewable experiment project with a single command-line entrypoint.",
-        "data_flow": _list(value.get("data_flow"))[:8],
-        "interfaces": _list(value.get("interfaces"))[:8],
-        "test_strategy": _list(value.get("test_strategy"))[:8],
-        "risks": _list(value.get("risks"))[:8],
+        "data_flow": scalar_list(value.get("data_flow"))[:8],
+        "interfaces": scalar_list(value.get("interfaces"))[:8],
+        "test_strategy": scalar_list(value.get("test_strategy"))[:8],
+        "risks": scalar_list(value.get("risks"))[:8],
         "files": files,
     }
 
@@ -177,7 +178,7 @@ def fallback_architecture_plan(
     required_metrics = [str(item) for item in required if str(item).strip()] if isinstance(required, list) else []
     if primary_metric and primary_metric not in required_metrics:
         required_metrics.insert(0, primary_metric)
-    objective = _text(contract.get("objective")) or "Run a bounded local experiment."
+    objective = clean_text(contract.get("objective")) or "Run a bounded local experiment."
     expected_entrypoints = domain_profile.get("expected_entrypoints")
     entrypoint_hint = ""
     if isinstance(expected_entrypoints, list) and expected_entrypoints:
@@ -236,7 +237,7 @@ def render_architecture_markdown(plan: Mapping[str, Any]) -> str:
         ("Test Strategy", "test_strategy"),
         ("Risks", "risks"),
     ):
-        items = _list(plan.get(key))
+        items = scalar_list(plan.get(key))
         if items:
             lines.extend(["", f"## {heading}", ""])
             lines.extend(f"- {item}" for item in items)
@@ -244,7 +245,7 @@ def render_architecture_markdown(plan: Mapping[str, Any]) -> str:
     for row in plan.get("files", []):
         if isinstance(row, Mapping):
             lines.append(f"- `{row.get('path', '')}`: {row.get('purpose', '')}")
-            for api in _list(row.get("public_api")):
+            for api in scalar_list(row.get("public_api")):
                 lines.append(f"  - API: `{api}`")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -342,9 +343,9 @@ def _fallback_files(
     metric_note = ", ".join(required_metrics) if required_metrics else "configured metrics"
     task_text = " ".join(
         [
-            _text((contract or {}).get("objective")),
-            _text((contract or {}).get("task")),
-            _text((domain_profile or {}).get("task_excerpt")),
+            clean_text((contract or {}).get("objective")),
+            clean_text((contract or {}).get("task")),
+            clean_text((domain_profile or {}).get("task_excerpt")),
         ]
     ).lower()
     if max_files >= 8:
@@ -598,10 +599,10 @@ def _normalize_file(row: Mapping[str, Any]) -> dict[str, Any]:
         return {}
     return {
         "path": path,
-        "purpose": _text(row.get("purpose"))[:500] or "Generated project file.",
+        "purpose": clean_text(row.get("purpose"))[:500] or "Generated project file.",
         "dependencies": normalize_dependency_paths(row.get("dependencies"), limit=12),
-        "public_api": _list(row.get("public_api"))[:30] or _default_public_api(path),
-        "acceptance_criteria": _list(row.get("acceptance_criteria"))[:12],
+        "public_api": scalar_list(row.get("public_api"))[:30] or _default_public_api(path),
+        "acceptance_criteria": scalar_list(row.get("acceptance_criteria"))[:12],
         "entrypoint": bool(row.get("entrypoint")),
     }
 
@@ -697,11 +698,3 @@ def _positive_int(value: object, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-def _text(value: object) -> str:
-    return str(value).strip() if value is not None else ""
-
-
-def _list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]

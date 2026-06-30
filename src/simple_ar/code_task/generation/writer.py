@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import shutil
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from simple_ar.core.artifacts import write_text
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.code_task.analysis.interfaces import dependency_context, order_file_specs, public_api
+from simple_ar.code_task.generation.agent_step import run_json_agent_step
+from simple_ar.code_task.generation.common import mapping_list, safe_relative_path, string_list
 from simple_ar.code_task.generation.implementation_memory import record_generated_file, record_generation_batch
 from simple_ar.code_task.generation.scaffold import fallback_file_content
 from simple_ar.code_task.generation.task_contract import contract_prompt_view
@@ -27,6 +29,7 @@ def write_generated_project(
     files_per_batch: int = 4,
     retry_attempts: int = 2,
     allow_fallback: bool = False,
+    agent_step_dir: Path | None = None,
     message_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Write a bounded generated project from a file plan."""
@@ -42,7 +45,7 @@ def write_generated_project(
     batch_id = "batch-001"
 
     for index, file_spec in enumerate(files, start=1):
-        rel_path = _safe_path(str(file_spec.get("path", "")))
+        rel_path = safe_relative_path(str(file_spec.get("path", "")))
         if not rel_path:
             continue
         content, mode, summary = _file_content(
@@ -55,6 +58,7 @@ def write_generated_project(
             memory=memory,
             retry_attempts=retry_attempts,
             allow_fallback=allow_fallback,
+            agent_step_dir=agent_step_dir,
             message_callback=message_callback,
             client=client,
         )
@@ -180,29 +184,39 @@ def _file_content(
     memory: Mapping[str, Any],
     retry_attempts: int,
     allow_fallback: bool,
+    agent_step_dir: Path | None,
     message_callback: Callable[[str], None] | None,
     client: LLMClient | None,
 ) -> tuple[str, str, str]:
-    path = _safe_path(str(file_spec.get("path", "")))
+    path = safe_relative_path(str(file_spec.get("path", "")))
     if client is not None:
         feedback = ""
         attempts = max(2, int(retry_attempts or 2))
         for attempt in range(1, attempts + 1):
             try:
-                response = client.ask_json(
-                    GREENFIELD_FILE_SYSTEM,
-                    greenfield_file_prompt(
-                        file_spec=file_spec,
-                        architecture_plan=architecture_plan,
-                        result_schema=result_schema,
-                        contract=contract,
-                        dependency_api=dependency_api,
-                        dependency_advice=dependency_advice,
-                        implementation_memory=memory,
-                        retry_feedback=feedback,
-                    ),
+                prompt = greenfield_file_prompt(
+                    file_spec=file_spec,
+                    architecture_plan=architecture_plan,
+                    result_schema=result_schema,
+                    contract=contract,
+                    dependency_api=dependency_api,
+                    dependency_advice=dependency_advice,
+                    implementation_memory=memory,
+                    retry_feedback=feedback,
+                )
+                response = run_json_agent_step(
+                    client=client,
+                    system=GREENFIELD_FILE_SYSTEM,
+                    prompt=prompt,
                     label=f"greenfield-file-{path}" if attempt == 1 else f"greenfield-file-retry-{path}",
+                    stage=f"file-{path.replace('/', '_')}",
+                    attempt_index=attempt,
+                    retry_attempts=1,
                     max_output_tokens=_file_output_tokens(path, file_spec),
+                    artifact_dir=agent_step_dir,
+                    feedback=[feedback] if feedback else [],
+                    output_summary_callback=_file_output_summary,
+                    message_callback=message_callback,
                 )
             except LLMError as exc:
                 feedback = f"The previous request failed validation: {exc}. Return smaller, complete Python."
@@ -248,7 +262,7 @@ def greenfield_file_prompt(
     implementation_memory: Mapping[str, Any] | None = None,
     retry_feedback: str = "",
 ) -> str:
-    path = _safe_path(str(file_spec.get("path", "")))
+    path = safe_relative_path(str(file_spec.get("path", "")))
     file_kind = "Python" if path.endswith(".py") else ("JSON" if path.endswith(".json") else "text/Markdown")
     return (
         f"Generate exactly one {file_kind} file for this bounded Python project. "
@@ -280,8 +294,12 @@ def greenfield_file_prompt(
         "Project continuity contract:\n"
         "- Use the implementation memory to preserve decisions, shared data schemas, and generated public APIs from earlier files.\n"
         "- Treat explicit task requirements, deliverables, and metric contracts as hard requirements unless they conflict with safety/resource limits.\n"
+        "- Treat the task evidence_plan as authoritative: hypotheses, comparisons, required datasets/conditions, and artifacts must remain traceable through records and reports.\n"
         "- If this file creates records consumed by another planned file, include stable field names and document them in code-level constants or dataclasses.\n"
         "- If this file consumes records from another planned file, consume the existing producer schema instead of inventing a new one.\n\n"
+        "Metric and evidence data-flow contract:\n"
+        "- If a downstream metric needs features, labels, predictions, losses, condition names, seeds, or per-dataset rows, pass those fields explicitly instead of reconstructing them from summaries.\n"
+        "- Aggregation code must preserve enough cell-level evidence to justify every required comparison; do not collapse records before analysis/reporting modules have consumed them.\n\n"
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Actual dependency APIs:\n{json.dumps(dict(dependency_api or {}), indent=2, ensure_ascii=False)}\n\n"
         f"Dependency advice:\n{json.dumps(_dependency_advice_for_prompt(dependency_advice or {}), indent=2, ensure_ascii=False)}\n\n"
@@ -308,20 +326,20 @@ def _architecture_for_file_prompt(
 ) -> dict[str, Any]:
     """Return the compact planning slice needed to write one file."""
 
-    current_path = _safe_path(str(file_spec.get("path", "")))
+    current_path = safe_relative_path(str(file_spec.get("path", "")))
     files = architecture_plan.get("files")
     rows = [dict(row) for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
-    by_path = {_safe_path(str(row.get("path", ""))): row for row in rows}
+    by_path = {safe_relative_path(str(row.get("path", ""))): row for row in rows}
     dependencies = [
         by_path[path]
-        for path in (_safe_path(item) for item in _string_list(file_spec.get("dependencies"), limit=context_limit))
+        for path in (safe_relative_path(item) for item in string_list(file_spec.get("dependencies"), limit=context_limit))
         if path in by_path
     ]
     consumers = [
         row
         for row in rows
         if current_path
-        and current_path in {_safe_path(item) for item in _string_list(row.get("dependencies"), limit=64)}
+        and current_path in {safe_relative_path(item) for item in string_list(row.get("dependencies"), limit=64)}
     ][:context_limit]
     return {
         "schema_version": architecture_plan.get("schema_version", "greenfield_architecture.v1"),
@@ -331,10 +349,10 @@ def _architecture_for_file_prompt(
         "dependency_files": _compact_file_specs(dependencies, limit=context_limit),
         "consumer_files": _compact_file_specs(consumers, limit=context_limit),
         "project_file_outline": _compact_file_specs(rows, limit=file_limit),
-        "interfaces": _string_list(architecture_plan.get("interfaces"), limit=16),
-        "data_flow": _string_list(architecture_plan.get("data_flow"), limit=12),
-        "test_strategy": _string_list(architecture_plan.get("test_strategy"), limit=10),
-        "risks": _string_list(architecture_plan.get("risks"), limit=8),
+        "interfaces": string_list(architecture_plan.get("interfaces"), limit=16),
+        "data_flow": string_list(architecture_plan.get("data_flow"), limit=12),
+        "test_strategy": string_list(architecture_plan.get("test_strategy"), limit=10),
+        "risks": string_list(architecture_plan.get("risks"), limit=8),
         "planning": architecture_plan.get("planning", {}),
     }
 
@@ -344,10 +362,10 @@ def _compact_file_specs(files: list[Mapping[str, Any]], *, limit: int) -> list[d
     for row in files[:limit]:
         result.append(
             {
-                "path": _safe_path(str(row.get("path", ""))),
+                "path": safe_relative_path(str(row.get("path", ""))),
                 "purpose": str(row.get("purpose", ""))[:240],
-                "dependencies": _string_list(row.get("dependencies"), limit=12),
-                "public_api": _string_list(row.get("public_api"), limit=12),
+                "dependencies": string_list(row.get("dependencies"), limit=12),
+                "public_api": string_list(row.get("public_api"), limit=12),
                 "entrypoint": bool(row.get("entrypoint")),
             }
         )
@@ -387,7 +405,7 @@ def _file_output_tokens(path: str, file_spec: Mapping[str, Any]) -> int:
         [
             path,
             str(file_spec.get("purpose", "")),
-            " ".join(str(item) for item in _string_list(file_spec.get("acceptance_criteria"), limit=8)),
+            " ".join(str(item) for item in string_list(file_spec.get("acceptance_criteria"), limit=8)),
         ]
     ).lower()
     if suffix in {".md", ".txt", ".json", ".toml", ".yaml", ".yml"}:
@@ -408,31 +426,13 @@ def _memory_for_prompt(memory: Mapping[str, Any], *, file_limit: int = 40) -> di
         "schema_version": memory.get("schema_version", "implementation_memory.v1"),
         "mode": memory.get("mode", ""),
         "task": memory.get("task", {}),
-        "accepted_decisions": _string_list(memory.get("accepted_decisions"), limit=20),
-        "file_summaries": _mapping_list(file_summaries, limit=file_limit),
-        "generated_batches": _mapping_list(batches, limit=20),
-        "open_issues": _string_list(memory.get("open_issues"), limit=20),
-        "review_findings": _mapping_list(reviews, limit=20),
-        "repair_history": _mapping_list(repairs, limit=10),
+        "accepted_decisions": string_list(memory.get("accepted_decisions"), limit=20, tail=True),
+        "file_summaries": mapping_list(file_summaries, limit=file_limit, tail=True),
+        "generated_batches": mapping_list(batches, limit=20, tail=True),
+        "open_issues": string_list(memory.get("open_issues"), limit=20, tail=True),
+        "review_findings": mapping_list(reviews, limit=20, tail=True),
+        "repair_history": mapping_list(repairs, limit=10, tail=True),
     }
-
-
-def _mapping_list(value: Any, *, limit: int) -> list[dict[str, Any]]:
-    rows = [dict(row) for row in value if isinstance(row, Mapping)] if isinstance(value, list) else []
-    return rows[-limit:]
-
-
-def _string_list(value: Any, *, limit: int) -> list[str]:
-    rows = [str(row) for row in value if str(row).strip()] if isinstance(value, list) else []
-    return rows[-limit:]
-
-
-def _safe_path(value: str) -> str:
-    value = value.replace("\\", "/").strip().lstrip("/")
-    path = PurePosixPath(value)
-    if not value or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        return ""
-    return path.as_posix()
 
 
 def _looks_like_markdown_fence(value: str) -> bool:
@@ -452,6 +452,17 @@ def _is_valid_file_content(value: str, *, filename: str) -> bool:
         except json.JSONDecodeError:
             return False
     return bool(value.strip())
+
+
+def _file_output_summary(stage: str, output: Mapping[str, Any]) -> dict[str, Any]:
+    content = str(output.get("content") or "")
+    summary = str(output.get("summary") or "")
+    return {
+        "stage": stage,
+        "has_content": bool(content.strip()),
+        "content_chars": len(content),
+        "summary_chars": len(summary),
+    }
 
 
 def _stage_retry_delay(attempt: int) -> float:

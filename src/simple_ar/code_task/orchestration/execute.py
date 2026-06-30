@@ -1614,6 +1614,7 @@ def _repair_greenfield_review_failure(
     repair_path = paths.meta_dir / "review_repair.json"
     manifest = load_code_task_manifest(run_dir)
     code_artifacts = _read_optional_dict(paths.meta_dir / "code_artifacts.json")
+    previous_context = task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
     client = _greenfield_repair_client(
         paths.meta_dir,
         model=model,
@@ -1629,6 +1630,7 @@ def _repair_greenfield_review_failure(
         result_schema=_greenfield_result_schema_from_manifest(manifest),
         contract=_greenfield_contract_for_review(paths),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
+        previous_repair_context=previous_context,
         client=client,
     )
     manifest = load_code_task_manifest(run_dir)
@@ -1661,6 +1663,20 @@ def _repair_greenfield_review_failure(
                     max_generated_lines=max_generated_lines,
                 )
                 write_json(code_artifacts_path, code_artifacts)
+    changed_files = _greenfield_repair_changed_files(repair)
+    record_repair_memory(
+        run_dir,
+        failure_summary=_review_report_summary_for_memory(review),
+        attempted_fix=_greenfield_repair_attempt_summary(repair),
+        status=str(repair.get("status", "unknown")),
+        artifacts=["code_task/meta/review_report.json", "code_task/meta/review_repair.json"],
+        metadata={
+            "changed_files": changed_files,
+            "review_repair_count": repair_section.get("review_repair_count", 0),
+            "repair_status": repair.get("status", "unknown"),
+        },
+        key=f"greenfield-review-repair:{repair_section.get('review_repair_count', 0)}:{_review_signature(review)[:40]}",
+    )
     write_code_task_summary(run_dir)
     return repair
 
@@ -2099,6 +2115,28 @@ def _failure_signature(text: str, *, max_chars: int = 240) -> str:
     return _clip_inline(candidates[-1] if candidates else "", max_chars=max_chars)
 
 
+def _review_report_summary_for_memory(review: dict[str, Any]) -> str:
+    findings = review.get("findings")
+    rows = findings if isinstance(findings, list) else []
+    summaries: list[str] = []
+    for row in rows[:4]:
+        if not isinstance(row, dict):
+            continue
+        severity = str(row.get("severity", "info"))
+        category = str(row.get("category", "general"))
+        summary = str(row.get("summary") or row.get("issue") or row.get("recommendation") or "").strip()
+        if summary:
+            summaries.append(f"{severity}/{category}: {summary}")
+    if summaries:
+        return "Review finding: " + " | ".join(_clip_inline(item, max_chars=180) for item in summaries)
+    status = str(review.get("status") or "unknown")
+    return f"Generated project review status {status}."
+
+
+def _review_signature(review: dict[str, Any], *, max_chars: int = 240) -> str:
+    return _failure_signature(_review_report_summary_for_memory(review), max_chars=max_chars)
+
+
 def _greenfield_repair_changed_files(repair: dict[str, Any]) -> list[str]:
     raw_changed = repair.get("changed_files")
     changed = (
@@ -2119,7 +2157,7 @@ def _greenfield_repair_attempt_summary(repair: dict[str, Any]) -> str:
     changed = _greenfield_repair_changed_files(repair)
     notes = repair.get("notes")
     note_text = "; ".join(str(item) for item in notes[:3]) if isinstance(notes, list) else ""
-    parts = [f"run repair status={status}"]
+    parts = [f"repair status={status}"]
     if changed:
         parts.append("changed " + ", ".join(changed[:8]))
     if note_text:

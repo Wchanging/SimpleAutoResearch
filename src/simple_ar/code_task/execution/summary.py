@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from simple_ar.core.artifacts import read_json, read_text, write_text
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_text
 from simple_ar.code_task.editing.scope import is_protected_edit_path
+from simple_ar.code_task.memory import code_task_memory_paths
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     load_code_task_manifest,
@@ -38,6 +39,7 @@ def write_code_task_summary(run_dir: Path) -> Path:
     patched_metrics = _read_run_json(paths.run_artifact_dir, "patched", "metrics.json")
     comparison = _read_optional_json(paths.run_artifact_dir / "comparison.json")
     failure = _read_latest_failure(paths.run_artifact_dir, manifest)
+    memory_snapshot = _read_memory_snapshot(run_dir)
 
     write_text(
         summary_path,
@@ -54,6 +56,7 @@ def write_code_task_summary(run_dir: Path) -> Path:
             patched_metrics=patched_metrics,
             comparison=comparison,
             failure=failure,
+            memory_snapshot=memory_snapshot,
         ),
     )
     _update_manifest(run_dir, manifest)
@@ -74,6 +77,7 @@ def _render_summary(
     patched_metrics: dict[str, Any],
     comparison: dict[str, Any],
     failure: str,
+    memory_snapshot: dict[str, Any],
 ) -> str:
     changed_files = _changed_files(manifest)
     repair = manifest.get("repair", {})
@@ -94,6 +98,19 @@ def _render_summary(
             comparison=comparison,
             failure=failure,
             changed_files=changed_files,
+        ),
+        "",
+        "## Continuation Guidance",
+        "",
+        _continuation_guidance(
+            manifest=manifest,
+            environment=environment,
+            validation=validation,
+            baseline_execution=baseline_execution,
+            patched_execution=patched_execution,
+            comparison=comparison,
+            failure=failure,
+            memory_snapshot=memory_snapshot,
         ),
         "",
         "## Task",
@@ -158,6 +175,12 @@ def _render_summary(
         artifact_lines.insert(-1, "- Comparison: `code_task/run/comparison.json`")
     if isinstance(repair, dict) and repair.get("latest_proposed_edits"):
         artifact_lines.insert(-1, f"- Repair proposal: `{repair.get('latest_proposed_edits')}`")
+    memory_refs = memory_snapshot.get("artifact_refs")
+    if isinstance(memory_refs, dict) and memory_snapshot.get("task_memory"):
+        if memory_refs.get("task_memory_markdown"):
+            artifact_lines.insert(-1, f"- Task memory: `{memory_refs.get('task_memory_markdown')}`")
+        if memory_refs.get("repair_memory"):
+            artifact_lines.insert(-1, f"- Repair memory: `{memory_refs.get('repair_memory')}`")
     lines.extend(["", "## Artifacts", "", *artifact_lines, ""])
     return "\n".join(lines)
 
@@ -205,6 +228,119 @@ def _result_overview(
         if isinstance(reasons, list) and reasons:
             lines.append("- Evidence: " + "; ".join(str(item) for item in reasons[:3]))
     return "\n".join(lines)
+
+
+def _continuation_guidance(
+    *,
+    manifest: dict[str, Any],
+    environment: dict[str, Any],
+    validation: dict[str, Any],
+    baseline_execution: dict[str, Any],
+    patched_execution: dict[str, Any],
+    comparison: dict[str, Any],
+    failure: str,
+    memory_snapshot: dict[str, Any],
+) -> str:
+    lines = [
+        f"- Blocker: {_current_blocker(manifest, validation, patched_execution, comparison, failure)}",
+        f"- Continue from: {_next_step(manifest, environment, validation, baseline_execution, patched_execution, comparison, failure)}",
+    ]
+    evidence_gap = _evidence_chain_gap(validation, patched_execution, comparison, failure, memory_snapshot)
+    if evidence_gap:
+        lines.append(f"- Evidence-chain gap: {evidence_gap}")
+    repair_line = _attempted_repairs(memory_snapshot, manifest)
+    if repair_line:
+        lines.append(f"- Attempted repairs: {repair_line}")
+    findings = memory_snapshot.get("review_findings")
+    if isinstance(findings, list) and findings:
+        lines.append("- Recent review findings:")
+        for row in findings[-3:]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "  - "
+                f"`{row.get('severity', 'info')}` "
+                f"{_clip(str(row.get('summary', '')), max_chars=240)}"
+            )
+    repairs = memory_snapshot.get("repair_memory")
+    if isinstance(repairs, list) and repairs:
+        latest = repairs[-1] if isinstance(repairs[-1], dict) else {}
+        if latest:
+            lines.append(
+                "- Latest repair memory: "
+                f"`{latest.get('status', 'noted')}` "
+                f"{_clip(str(latest.get('failure_summary', '')), max_chars=240)}"
+            )
+    return "\n".join(lines)
+
+
+def _current_blocker(
+    manifest: dict[str, Any],
+    validation: dict[str, Any],
+    patched_execution: dict[str, Any],
+    comparison: dict[str, Any],
+    failure: str,
+) -> str:
+    status = str(manifest.get("status", "unknown"))
+    if validation.get("status") == "failed":
+        return "`validation_failed`; static validation must pass before trusting execution."
+    if patched_execution and str(patched_execution.get("status")) != "passed":
+        return f"`benchmark_{patched_execution.get('status', 'unknown')}`; benchmark run is not passing."
+    if failure:
+        return "`failure_analysis_present`; failure analysis still needs a resolved run."
+    if comparison and str(comparison.get("verdict", "")) in {"regressed", "mixed", "inconclusive"}:
+        return f"`comparison_{comparison.get('verdict', 'inconclusive')}`; metric evidence needs review."
+    if status in {"review_failed", "validation_failed", "benchmark_failed", "repair_review_required"}:
+        return f"`{status}`."
+    return "`none_detected`; review the artifacts before using the result."
+
+
+def _evidence_chain_gap(
+    validation: dict[str, Any],
+    patched_execution: dict[str, Any],
+    comparison: dict[str, Any],
+    failure: str,
+    memory_snapshot: dict[str, Any],
+) -> str:
+    if validation.get("status") == "failed":
+        return "Validation failed, so benchmark/result evidence is not yet trustworthy."
+    if patched_execution and str(patched_execution.get("status")) != "passed":
+        if failure:
+            return "Benchmark failed after execution; repair should use failure analysis plus recent repair memory."
+        return "Benchmark failed but no failure analysis is recorded yet."
+    if not patched_execution:
+        return "No patched/generated benchmark execution has been recorded."
+    if not comparison and not _memory_has_generated_run(memory_snapshot):
+        return "Execution exists, but no comparison or generated-run memory has been recorded."
+    return ""
+
+
+def _attempted_repairs(memory_snapshot: dict[str, Any], manifest: dict[str, Any]) -> str:
+    repair = manifest.get("repair")
+    counts: list[str] = []
+    if isinstance(repair, dict):
+        for key, label in (
+            ("repair_count", "existing-project"),
+            ("review_repair_count", "review"),
+            ("run_repair_count", "run"),
+        ):
+            if repair.get(key) is not None:
+                counts.append(f"{label}={repair.get(key)}")
+    rows = memory_snapshot.get("repair_memory")
+    row_count = len(rows) if isinstance(rows, list) else 0
+    if row_count:
+        counts.append(f"memory_records={row_count}")
+    return ", ".join(counts)
+
+
+def _memory_has_generated_run(memory_snapshot: dict[str, Any]) -> bool:
+    events = memory_snapshot.get("events")
+    if not isinstance(events, list):
+        return False
+    return any(
+        isinstance(row, dict) and str(row.get("event_type", "")).startswith("generated_run")
+        for row in events
+    )
 
 
 def _outcome_text(
@@ -638,6 +774,44 @@ def _read_optional_json(path: Path) -> dict[str, Any]:
         return {}
     value = read_json(path)
     return value if isinstance(value, dict) else {}
+
+
+def _read_memory_snapshot(run_dir: Path) -> dict[str, Any]:
+    paths = code_task_memory_paths(run_dir)
+    task_memory = _read_optional_json(paths.task_memory_json)
+    events = task_memory.get("events") if isinstance(task_memory.get("events"), list) else []
+    return {
+        "task_memory": task_memory,
+        "events": [row for row in events if isinstance(row, dict)][-8:],
+        "review_findings": _read_jsonl_safe(paths.review_findings_jsonl)[-5:],
+        "repair_memory": _read_jsonl_safe(paths.repair_memory_jsonl)[-5:],
+        "artifact_refs": {
+            "task_memory_markdown": _artifact_ref(run_dir, paths.task_memory_md),
+            "repair_memory": _artifact_ref(run_dir, paths.repair_memory_jsonl),
+        },
+    }
+
+
+def _read_jsonl_safe(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        return [row for row in read_jsonl(path) if isinstance(row, dict)]
+    except Exception:
+        return []
+
+
+def _artifact_ref(run_dir: Path, path: Path) -> str:
+    root = Path(run_dir)
+    target = Path(path)
+    try:
+        return target.relative_to(root).as_posix()
+    except ValueError:
+        pass
+    try:
+        return "../" + target.relative_to(root.parent).as_posix()
+    except ValueError:
+        return str(target)
 
 
 def _read_run_json(run_dir: Path, label: str, filename: str) -> dict[str, Any]:

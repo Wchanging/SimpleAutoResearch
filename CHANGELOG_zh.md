@@ -4,6 +4,26 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-06-30
+
+### Changed
+
+- Code-task 新增通用 AgentStep 审计层，当前已接入 greenfield planning 与 per-file writer：每个结构化 LLM 子步骤都会记录 stage、attempt、prompt hash、输出摘要和失败状态，便于定位 planning / writing 卡死、JSON 解析失败或重复重试问题。
+- Greenfield planning reviewer 的 finding 现在会规范化为 structured patch request，并写入 `code_task/meta/planning/review_patch_requests.json`；后续规划修订仍从最早受影响 stage 重跑，而不是无差别重跑整段规划。
+- Greenfield review repair 现在复用 code-task memory / previous repair context，并把 review repair 的状态、改动文件和 review finding 摘要写回 repair memory，减少同一问题在 review repair 与 run repair 间断裂。
+- Code-task summary 新增 Continuation Guidance，显式展示当前 blocker、证据链缺口、已尝试修复、最近 review finding 与下一次继续 repair 的建议入口；memory artifact 路径会按 standalone code-task 或 8 阶段嵌入模式动态计算。
+- Code-task generation ?????? helper ?????????????????mapping ?????????????? writer / planning / review / repair ??????????????
+- Generated-project runtime compatibility patch ??? repair ?????????????preset/config ???entrypoint ? runner API ???unexpected keyword ?????????????????????????? strict benchmark ????????????
+- Benchmark adapter ?????? manifest contract?ARC-Bench adapter ? prepare/finalize metadata ?????? suite/operation/status/input/output/metadata ?????????? benchmark adapter ???????????? benchmark ?????? `src/simple_ar`?
+- Code-task greenfield contract 新增通用 `evidence_plan`，会从任务说明中提取显式假设、比较、数据集/条件、必需指标、必需 artifact 和 claim policy，并贯穿 planning、逐文件生成、review 与 repair prompt，避免大型任务在代码生成后只剩聚合指标而丢失支撑结论的证据链。
+- Greenfield planning / writer prompt 现在会把证据要求作为硬契约处理：需要下游指标或报告使用的 features、labels、predictions、condition、seed、per-dataset rows 等字段必须显式传递，不能在中途只保留最终 summary。
+- Generated-project runtime repair prompt 现在要求先构建 failing metric/field 到 producer、consumer、aggregate/report 的 dependency trace，再选择目标文件；同类错误重复出现时，需要解释上轮定位或补丁为何无效，减少反复修改同一处但没有解决根因的循环。
+
+### Fixed
+
+- 修复 generated-project review 对 placeholder/dummy 文本的误判。现在“refusing to emit placeholder metrics”“do not use placeholder values”这类防御性说明不会被当成 placeholder 执行路径，但真实的 dummy/stub/placeholder record 仍会被阻断。
+- Generated-project review 增加计划 API 与实际导出 API 的通用契约漂移检查。当 architecture plan 中声明的 public API 没有在对应文件中导出时，会生成 warning，帮助定位 per-file generation 造成的 producer/consumer 命名漂移。
+
 ## 2026-06-28
 
 ### Changed

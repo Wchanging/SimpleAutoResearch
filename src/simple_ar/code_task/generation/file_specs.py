@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Any, Mapping
 
+from simple_ar.code_task.generation.common import scalar_list, text
+
 
 def normalize_plan_path(value: object) -> str:
     """Return a safe path relative to the generated project root."""
@@ -18,7 +20,7 @@ def normalize_plan_path(value: object) -> str:
 
 
 def normalize_dependency_paths(value: object, *, limit: int) -> list[str]:
-    return [path for path in (normalize_plan_path(item) for item in _list(value)[:limit]) if path]
+    return [path for path in (normalize_plan_path(item) for item in scalar_list(value)[:limit]) if path]
 
 
 def dedupe_file_rows(
@@ -69,20 +71,20 @@ def _merge_file_rows(
     secondary = left if primary is right else right
     return {
         "path": str(primary.get("path", "")),
-        "purpose": _text(primary.get("purpose")) or _text(secondary.get("purpose")),
+        "purpose": text(primary.get("purpose")) or text(secondary.get("purpose")),
         "dependencies": _merge_unique(
-            _list(primary.get("dependencies")),
-            _list(secondary.get("dependencies")),
+            scalar_list(primary.get("dependencies")),
+            scalar_list(secondary.get("dependencies")),
             limit=dependency_limit,
         ),
         "public_api": _merge_unique(
-            _list(primary.get("public_api")),
-            _list(secondary.get("public_api")),
+            scalar_list(primary.get("public_api")),
+            scalar_list(secondary.get("public_api")),
             limit=public_api_limit,
         ),
         "acceptance_criteria": _merge_unique(
-            _list(primary.get("acceptance_criteria")),
-            _list(secondary.get("acceptance_criteria")),
+            scalar_list(primary.get("acceptance_criteria")),
+            scalar_list(secondary.get("acceptance_criteria")),
             limit=acceptance_limit,
         ),
         "entrypoint": bool(primary.get("entrypoint")) or bool(secondary.get("entrypoint")),
@@ -91,10 +93,10 @@ def _merge_file_rows(
 
 def _file_row_score(row: Mapping[str, Any]) -> int:
     return (
-        len(_text(row.get("purpose")))
-        + 30 * len(_list(row.get("acceptance_criteria")))
-        + 20 * len(_list(row.get("public_api")))
-        + 10 * len(_list(row.get("dependencies")))
+        len(text(row.get("purpose")))
+        + 30 * len(scalar_list(row.get("acceptance_criteria")))
+        + 20 * len(scalar_list(row.get("public_api")))
+        + 10 * len(scalar_list(row.get("dependencies")))
     )
 
 
@@ -120,14 +122,3 @@ def _strip_generated_root_prefix(value: str) -> str:
             return text[len(prefix) :]
     return text
 
-
-def _text(value: object) -> str:
-    return str(value).strip() if value is not None else ""
-
-
-def _list(value: object) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    return []

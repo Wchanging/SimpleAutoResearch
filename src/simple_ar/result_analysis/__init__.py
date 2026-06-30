@@ -7,7 +7,7 @@ from .schema import (
     AnalysisMetric,
     AnalysisResult,
 )
-from .service import run_result_analysis
+from .service import record_result_analysis_memory, run_result_analysis
 
 __all__ = [
     "AnalysisAudit",
@@ -15,5 +15,6 @@ __all__ = [
     "AnalysisContext",
     "AnalysisMetric",
     "AnalysisResult",
+    "record_result_analysis_memory",
     "run_result_analysis",
 ]

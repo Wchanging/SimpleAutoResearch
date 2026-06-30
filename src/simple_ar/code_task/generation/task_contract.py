@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
+from simple_ar.code_task.generation.common import string_list
+
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|\[[ xX]\])\s+(?P<text>.+?)\s*$")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.+?)\s*$")
@@ -32,6 +34,11 @@ def build_greenfield_task_contract(
     data_requirements = _filter_by_keywords(requirements, _DATA_KEYWORDS)
     dependency_hints = _filter_by_keywords(requirements, _DEPENDENCY_KEYWORDS)
     required_metrics = _required_metrics(result_schema)
+    evidence_plan = _build_evidence_plan(
+        requirements=requirements,
+        required_metrics=required_metrics,
+        result_schema=result_schema,
+    )
     success_criteria = [
         "Generated project lives under code_task/workspace/generated_project.",
         f"The configured benchmark command exits with status 0 exactly as written: `{benchmark_command}`.",
@@ -44,6 +51,8 @@ def build_greenfield_task_contract(
         success_criteria.append(f"Task deliverable is present and populated: {item}")
     for item in evaluation_focus[:12]:
         success_criteria.append(f"Evaluation requirement is addressed: {item}")
+    for item in evidence_plan.get("hypotheses", [])[:12]:
+        success_criteria.append(f"Hypothesis evidence is captured and reported: {item}")
     return {
         "schema_version": "code_task_greenfield_contract.v2",
         "contract_id": "code-task-greenfield",
@@ -58,6 +67,7 @@ def build_greenfield_task_contract(
         "evaluation_focus": evaluation_focus,
         "data_requirements": data_requirements,
         "dependency_hints": dependency_hints,
+        "evidence_plan": evidence_plan,
         "metric_contract": {
             "primary_metric": result_schema.get("primary_metric", "score"),
             "required_metrics": required_metrics,
@@ -96,13 +106,16 @@ def contract_prompt_view(
         "objective": contract.get("objective", ""),
         "task_excerpt": _clean(task_text, max_chars=max_task_chars) if task_text else "",
         "benchmark_command": contract.get("benchmark_command", ""),
-        "success_criteria": _string_list(contract.get("success_criteria"), limit=max_success_criteria),
-        "explicit_requirements": _string_list(contract.get("explicit_requirements"), limit=max_requirements),
-        "deliverables": _string_list(contract.get("deliverables"), limit=30),
-        "constraints": _string_list(contract.get("constraints"), limit=30),
-        "evaluation_focus": _string_list(contract.get("evaluation_focus"), limit=30),
-        "data_requirements": _string_list(contract.get("data_requirements"), limit=30),
-        "dependency_hints": _string_list(contract.get("dependency_hints"), limit=20),
+        "success_criteria": string_list(contract.get("success_criteria"), limit=max_success_criteria),
+        "explicit_requirements": string_list(contract.get("explicit_requirements"), limit=max_requirements),
+        "deliverables": string_list(contract.get("deliverables"), limit=30),
+        "constraints": string_list(contract.get("constraints"), limit=30),
+        "evaluation_focus": string_list(contract.get("evaluation_focus"), limit=30),
+        "data_requirements": string_list(contract.get("data_requirements"), limit=30),
+        "dependency_hints": string_list(contract.get("dependency_hints"), limit=20),
+        "evidence_plan": dict(contract.get("evidence_plan", {}))
+        if isinstance(contract.get("evidence_plan"), Mapping)
+        else {},
         "metric_contract": dict(contract.get("metric_contract", {}))
         if isinstance(contract.get("metric_contract"), Mapping)
         else {},
@@ -161,6 +174,46 @@ def _required_metrics(result_schema: Mapping[str, Any]) -> list[str]:
     return _dedupe(metrics)
 
 
+def _build_evidence_plan(
+    *,
+    requirements: list[str],
+    required_metrics: list[str],
+    result_schema: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Extract a lightweight evidence matrix from explicit task text.
+
+    The plan is intentionally domain-neutral. It does not try to understand a
+    benchmark's hidden scoring code; it preserves user/adapter-written
+    hypotheses, dataset/condition requirements, and artifact obligations so
+    planning, writing, review, repair, and result analysis can all reason from
+    the same contract.
+    """
+
+    hypotheses = _filter_by_keywords(requirements, _HYPOTHESIS_KEYWORDS, limit=20)
+    conditions = _filter_by_keywords(requirements, _CONDITION_KEYWORDS, limit=30)
+    datasets = _filter_by_keywords(requirements, _DATA_KEYWORDS, limit=30)
+    artifacts = _filter_by_keywords(requirements, _ARTIFACT_KEYWORDS, limit=30)
+    comparisons = _filter_by_keywords(requirements, _COMPARISON_KEYWORDS, limit=30)
+    return {
+        "schema_version": "code_task_evidence_plan.v1",
+        "hypotheses": hypotheses,
+        "required_conditions": conditions,
+        "required_datasets": datasets,
+        "required_metrics": list(required_metrics),
+        "required_artifacts": artifacts,
+        "required_comparisons": comparisons,
+        "record_granularity": [
+            "Prefer per-dataset/per-condition/per-seed records when the task asks for repeated experiments.",
+            "Aggregate tables should preserve enough cell-level evidence to justify every hypothesis verdict.",
+        ],
+        "claim_policy": [
+            "Supported claims must cite measured metrics or explicit run artifacts.",
+            "Unsupported or inconclusive hypotheses should be stated directly instead of hidden.",
+        ],
+        "primary_metric": result_schema.get("primary_metric", ""),
+    }
+
+
 def _first_meaningful_line(text: str) -> str:
     for raw in text.splitlines():
         line = raw.strip(" #\t")
@@ -186,11 +239,6 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(key)
         rows.append(value.strip())
     return rows
-
-
-def _string_list(value: Any, *, limit: int) -> list[str]:
-    rows = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
-    return rows[:limit]
 
 
 _REQUIREMENT_SIGNAL_KEYWORDS = (
@@ -266,6 +314,62 @@ _EVALUATION_KEYWORDS = (
     "compare",
     "condition",
     "hypothesis",
+)
+
+_HYPOTHESIS_KEYWORDS = (
+    "hypothesis",
+    "hypotheses",
+    "h1",
+    "h2",
+    "h3",
+    "claim",
+    "verdict",
+    "supported",
+    "refuted",
+    "inconclusive",
+)
+
+_CONDITION_KEYWORDS = (
+    "condition",
+    "conditions",
+    "baseline",
+    "method",
+    "model",
+    "algorithm",
+    "variant",
+    "treatment",
+    "control",
+    "ablation",
+)
+
+_ARTIFACT_KEYWORDS = (
+    "artifact",
+    "artifacts",
+    "results.json",
+    "metrics.json",
+    "report.md",
+    "readme",
+    "jsonl",
+    "csv",
+    "table",
+    "claims",
+)
+
+_COMPARISON_KEYWORDS = (
+    "compare",
+    "comparison",
+    "versus",
+    "vs",
+    "against",
+    "higher than",
+    "lower than",
+    "at least",
+    "greater than",
+    "less than",
+    "best",
+    "winner",
+    "difference",
+    "delta",
 )
 
 _DATA_KEYWORDS = (

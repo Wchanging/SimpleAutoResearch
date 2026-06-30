@@ -489,6 +489,82 @@ def write_analysis_artifacts(output_dir: Path, context: AnalysisContext, result:
         write_json(output_dir / "analysis_response.json", result.raw_llm_response)
 
 
+def record_result_analysis_memory(
+    run_dir: Path,
+    result: AnalysisResult,
+    *,
+    output_dir: Path | None = None,
+) -> None:
+    """Optionally write result-analysis signals back to code-task memory.
+
+    This helper keeps result-analysis independent from code-task orchestration:
+    callers opt in only when they know ``run_dir`` is a code-task run. It records
+    weak or missing evidence as repair memory so a later repair attempt can see
+    why the result writeup or metric evidence was judged insufficient.
+    """
+
+    audit = result.audit
+    weak = list(audit.weak_metric_signals)
+    missing = list(audit.missing_required_metrics)
+    unsupported = list(audit.unsupported_claims)
+    downgraded = list(audit.downgraded_claims)
+    if not (weak or missing or unsupported or downgraded):
+        return
+    try:
+        from simple_ar.code_task.memory import record_code_task_memory_event, record_repair_memory
+    except Exception:
+        return
+    artifacts = _analysis_memory_artifacts(output_dir)
+    summary_parts: list[str] = []
+    if weak:
+        summary_parts.append("weak=" + "; ".join(weak[:4]))
+    if missing:
+        summary_parts.append("missing_metrics=" + ", ".join(missing[:8]))
+    if unsupported:
+        summary_parts.append("unsupported_claims=" + ", ".join(unsupported[:8]))
+    if downgraded:
+        summary_parts.append("downgraded_claims=" + ", ".join(downgraded[:8]))
+    summary = "Result-analysis weak evidence: " + " | ".join(summary_parts)
+    record_code_task_memory_event(
+        run_dir,
+        event_type="result_analysis",
+        summary=summary,
+        status="weak_evidence",
+        artifacts=artifacts,
+        metadata={
+            "weak_metric_signals": weak,
+            "missing_required_metrics": missing,
+            "unsupported_claims": unsupported,
+            "downgraded_claims": downgraded,
+        },
+        key="result-analysis:weak-evidence:" + str(output_dir or ""),
+    )
+    record_repair_memory(
+        run_dir,
+        failure_summary=summary,
+        attempted_fix="Inspect result-analysis evidence gaps before the next repair or report-generation attempt.",
+        status="weak_evidence",
+        artifacts=artifacts,
+        metadata={
+            "weak_metric_signals": weak,
+            "missing_required_metrics": missing,
+            "unsupported_claims": unsupported,
+            "downgraded_claims": downgraded,
+        },
+        key="result-analysis-repair-memory:" + str(output_dir or ""),
+    )
+
+
+def _analysis_memory_artifacts(output_dir: Path | None) -> list[str]:
+    if output_dir is None:
+        return []
+    return [
+        (output_dir / "analysis_report.md").as_posix(),
+        (output_dir / "analysis_audit.json").as_posix(),
+        (output_dir / "metric_summary.json").as_posix(),
+    ]
+
+
 def claims_payload(
     context: AnalysisContext,
     metric_summary: dict[str, Any],

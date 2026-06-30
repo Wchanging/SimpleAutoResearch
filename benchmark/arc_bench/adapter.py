@@ -22,6 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from benchmark.adapter_contract import build_adapter_manifest
+except ModuleNotFoundError:  # pragma: no cover - direct script execution path safety
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from benchmark.adapter_contract import build_adapter_manifest
+
 
 PREFIX_TO_DOMAIN = {
     "ML": "ml",
@@ -463,18 +469,27 @@ def write_prepared_package(options: PrepareOptions, manifest: dict[str, Any], ru
     write_json(out / "rubric.json", scrub_private_keys(rubric))
     write_json(
         meta_path,
-        {
-            "schema_version": "simple_ar_arc_adapter.v1",
-            "written_at": time.time(),
-            "arc_root": str(options.arc_root),
-            "topic": manifest.get("id"),
-            "manifest_path": manifest.get("_manifest_path"),
-            "rubric_path": rubric.get("_rubric_path"),
-            "task_file": str(task_path),
-            "code_task_config": str(config_path),
-            "simple_ar_output_root": str(options.simple_ar_output_root),
-            "benchmark_command": options.benchmark_command,
-        },
+        build_adapter_manifest(
+            suite="arc_bench",
+            operation="prepare",
+            status="prepared",
+            inputs={
+                "arc_root": options.arc_root,
+                "manifest_path": manifest.get("_manifest_path"),
+                "rubric_path": rubric.get("_rubric_path"),
+            },
+            outputs={
+                "prepared_dir": out,
+                "task_file": task_path,
+                "code_task_config": config_path,
+                "simple_ar_output_root": options.simple_ar_output_root,
+            },
+            metadata={
+                "topic": manifest.get("id"),
+                "benchmark_command": options.benchmark_command,
+                "adapter_schema_version": "simple_ar_arc_adapter.v1",
+            },
+        ),
     )
     write_text(out / "commands.md", render_commands(options, config_path))
     print(f"Prepared ARC-Bench topic {manifest.get('id')} at {out}")
@@ -764,16 +779,28 @@ def finalize_submission(
     write_text(submission / "reproduce.sh", build_reproduce_script(run_dir))
     write_json(
         output_dir / "arc_adapter_meta.json",
-        {
-            "schema_version": "simple_ar_arc_submission.v1",
-            "written_at": time.time(),
-            "prepared_dir": str(prepared_dir),
-            "run_dir": str(run_dir),
-            "code_source": str(code_src) if code_src else "",
-            "metric_count": len(metrics),
-            "topic_id": manifest.get("id"),
-            "analysis": analysis_audit,
-        },
+        build_adapter_manifest(
+            suite="arc_bench",
+            operation="finalize",
+            status="finalized",
+            inputs={
+                "prepared_dir": prepared_dir,
+                "run_dir": run_dir,
+                "code_source": code_src or "",
+            },
+            outputs={
+                "output_dir": output_dir,
+                "submission_dir": submission,
+                "code_dir": code_dst,
+                "results_dir": results_dst,
+            },
+            metadata={
+                "topic_id": manifest.get("id"),
+                "metric_count": len(metrics),
+                "analysis": analysis_audit,
+                "adapter_schema_version": "simple_ar_arc_submission.v1",
+            },
+        ),
     )
     print(f"Finalized ARC-style submission at {output_dir}")
 
@@ -804,7 +831,7 @@ def analyze_submission_results(
         fallback_claims=fallback_claims,
     )
     try:
-        from simple_ar.result_analysis import run_result_analysis
+        from simple_ar.result_analysis import record_result_analysis_memory, run_result_analysis
     except Exception as exc:  # pragma: no cover - environment issue
         raise SystemExit(
             "result analysis requires SimpleAutoResearch's result-analysis integration to be importable."
@@ -833,6 +860,7 @@ def analyze_submission_results(
         use_llm=use_llm,
         label="arc-bench-result-analysis",
     )
+    record_result_analysis_memory(run_dir, result, output_dir=output_dir)
     if usage_rows:
         write_json(output_dir / "llm_usage_summary.json", summarize_usage_rows(usage_rows))
     print(f"Result-analysis artifacts written to {output_dir}")

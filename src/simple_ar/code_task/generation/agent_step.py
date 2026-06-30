@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+import hashlib
+import time
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+from simple_ar.core.artifacts import append_jsonl, write_json
+from simple_ar.integrations.llm import LLMClient, LLMError
+
+
+MessageCallback = Callable[[str], None]
+OutputSummaryCallback = Callable[[str, Mapping[str, Any]], dict[str, Any]]
+
+
+def run_json_agent_step(
+    *,
+    client: LLMClient,
+    system: str,
+    prompt: str,
+    label: str,
+    stage: str,
+    attempt_index: int,
+    retry_attempts: int,
+    max_output_tokens: int,
+    artifact_dir: Path | None = None,
+    feedback: list[str] | None = None,
+    output_summary_callback: OutputSummaryCallback | None = None,
+    message_callback: MessageCallback | None = None,
+) -> dict[str, Any]:
+    """Run one structured LLM agent step with retry and audit artifacts."""
+
+    retry_attempts = max(1, int(retry_attempts or 1))
+    feedback_rows = list(feedback or [])
+    last_error: LLMError | None = None
+    for attempt in range(1, retry_attempts + 1):
+        call_label = label if attempt == 1 else f"{label}-retry-{attempt}"
+        try:
+            result = client.ask_json(
+                system,
+                prompt + retry_suffix(last_error, attempt),
+                label=call_label,
+                max_output_tokens=max_output_tokens,
+            )
+            output = result if isinstance(result, dict) else {}
+            record_agent_step(
+                artifact_dir,
+                stage=stage,
+                attempt_index=attempt_index,
+                retry_index=attempt,
+                label=call_label,
+                status="passed",
+                prompt=prompt,
+                output=output,
+                feedback=feedback_rows,
+                output_summary_callback=output_summary_callback,
+            )
+            return output
+        except LLMError as exc:
+            last_error = exc
+            record_agent_step(
+                artifact_dir,
+                stage=stage,
+                attempt_index=attempt_index,
+                retry_index=attempt,
+                label=call_label,
+                status="failed",
+                prompt=prompt,
+                output={"error": str(exc)},
+                feedback=feedback_rows,
+                output_summary_callback=output_summary_callback,
+            )
+            if attempt >= retry_attempts:
+                _emit(
+                    message_callback,
+                    f"Agent step `{label}` failed after {attempt}/{retry_attempts} attempt(s). {exc}",
+                )
+                raise
+            delay = retry_delay(attempt)
+            _emit(
+                message_callback,
+                f"Agent step `{label}` failed ({attempt}/{retry_attempts}); retrying in {delay:.1f}s. {exc}",
+            )
+            time.sleep(delay)
+    raise LLMError(f"Agent step `{label}` failed without a captured error.")
+
+
+def write_agent_step_artifact(
+    artifact_dir: Path | None,
+    *,
+    stage: str,
+    attempt_index: int,
+    value: Mapping[str, Any],
+) -> None:
+    if artifact_dir is None:
+        return
+    stage_dir = artifact_dir / stage
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    write_json(stage_dir / f"attempt-{attempt_index:03d}.json", dict(value))
+    write_json(stage_dir / "latest.json", dict(value))
+
+
+def record_agent_step(
+    artifact_dir: Path | None,
+    *,
+    stage: str,
+    attempt_index: int,
+    retry_index: int,
+    label: str,
+    status: str,
+    prompt: str,
+    output: Mapping[str, Any],
+    feedback: list[str],
+    output_summary_callback: OutputSummaryCallback | None = None,
+) -> None:
+    if artifact_dir is None:
+        return
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    append_jsonl(
+        artifact_dir / "agent_steps.jsonl",
+        {
+            "schema_version": "code_task_agent_step.v2",
+            "stage": stage,
+            "attempt_index": attempt_index,
+            "retry_index": retry_index,
+            "label": label,
+            "status": status,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "prompt_chars": len(prompt),
+            "feedback": feedback[-8:],
+            "output_keys": sorted(str(key) for key in output.keys()),
+            "output_summary": output_summary_callback(stage, output) if output_summary_callback else {},
+        },
+    )
+
+
+def retry_suffix(error: LLMError | None, attempt: int) -> str:
+    if error is None:
+        return ""
+    return (
+        "\nPrevious attempt failed before attempt "
+        f"{attempt}: {error}\n"
+        "The previous output was not parseable or the transport failed. "
+        "Return a smaller single JSON object only: no Markdown, no commentary, no trailing analysis.\n"
+    )
+
+
+def retry_delay(attempt: int) -> float:
+    return min(30.0, 2.0 * (2 ** max(0, attempt - 1)))
+
+
+def _emit(callback: MessageCallback | None, message: str) -> None:
+    if callback is not None:
+        callback(message)

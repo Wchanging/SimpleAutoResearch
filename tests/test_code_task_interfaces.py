@@ -10,12 +10,36 @@ from simple_ar.code_task.analysis.interfaces import (
     order_file_specs,
     snippet_api_contract,
 )
+from simple_ar.code_task.generation.common import safe_relative_path, string_list
+from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.generation.review import review_generated_project
 from simple_ar.code_task import initialize_code_task, review_code_task_changes
 from simple_ar.core.artifacts import read_json, write_json, write_text
 
 
 class CodeTaskInterfaceTests(unittest.TestCase):
+    def test_generation_common_helpers_normalize_paths_and_lists(self) -> None:
+        self.assertEqual(safe_relative_path("pkg\\runner.py"), "pkg/runner.py")
+        self.assertEqual(safe_relative_path("../escape.py"), "")
+        self.assertEqual(safe_relative_path("/absolute.py"), "absolute.py")
+        self.assertEqual(string_list([" a ", "", 3], limit=2), ["a", "3"])
+
+    def test_generated_project_compat_patch_isolated_from_repair_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_json(project / "config.json", {"base": {"max_items": 20}, "presets": {}})
+
+            result = apply_generated_project_compatibility_patch(
+                project_dir=project,
+                stderr_text="ERROR: Unknown preset 'standard'",
+            )
+            payload = read_json(project / "config.json")
+
+            self.assertTrue(result.applied)
+            self.assertEqual(result.patch_id, "missing_greenfield_preset")
+            self.assertIn("standard", payload["presets"])
+            self.assertEqual(result.changed_files, ("config.json",))
+
     def test_file_specs_are_ordered_dependencies_first(self) -> None:
         files = [
             {"path": "main.py", "dependencies": ["pkg/runner.py"]},
@@ -96,6 +120,59 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             self.assertEqual(mismatches[0]["missing_symbol"], "load_text_classification_dataset")
             self.assertEqual(review["status"], "failed")
             self.assertTrue(any(row["category"] == "missing_local_api" for row in review["findings"]))
+
+    def test_review_warns_when_planned_public_api_is_not_exported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(project / "main.py", "def main():\n    print('score: 1.0')\n")
+            write_text(project / "pkg" / "__init__.py", "")
+            write_text(project / "pkg" / "data.py", "def load_rows():\n    return []\n")
+
+            review = review_generated_project(
+                project_dir=project,
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "main.py", "mode": "llm", "line_count": 2},
+                        {"path": "pkg/__init__.py", "mode": "llm", "line_count": 1},
+                        {"path": "pkg/data.py", "mode": "llm", "line_count": 2},
+                    ]
+                },
+                architecture_plan={
+                    "files": [
+                        {"path": "main.py", "public_api": ["main(argv=None)"]},
+                        {"path": "pkg/data.py", "public_api": ["load_dataset(config)"]},
+                    ]
+                },
+                result_schema={"primary_metric": "score", "required_metrics": ["score"]},
+                resource_plan={"max_files": 8, "max_generated_lines": 200},
+                use_llm=False,
+            )
+
+            self.assertTrue(any(row["category"] == "planned_api_not_exported" for row in review["findings"]))
+            self.assertTrue(all(row["severity"] != "blocking" for row in review["findings"] if row["category"] == "planned_api_not_exported"))
+
+    def test_review_does_not_block_defensive_placeholder_policy_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(
+                project / "main.py",
+                (
+                    "def main():\n"
+                    "    # Refusing to emit placeholder metrics keeps failed benchmark paths honest.\n"
+                    "    print('accuracy: 0.91')\n"
+                ),
+            )
+
+            review = review_generated_project(
+                project_dir=project,
+                code_artifacts={"generated_files": [{"path": "main.py", "mode": "llm", "line_count": 3}]},
+                result_schema={"primary_metric": "accuracy", "required_metrics": ["accuracy"]},
+                resource_plan={"max_files": 4, "max_generated_lines": 200},
+                contract={"objective": "Run an experiment and evaluate metrics without placeholder values."},
+                use_llm=False,
+            )
+
+            self.assertFalse(any(row["category"] == "placeholder_execution_path" for row in review["findings"]))
 
     def test_review_blocks_mixed_llm_and_core_fallback_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

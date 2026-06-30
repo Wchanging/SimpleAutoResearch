@@ -8,6 +8,7 @@ from pathlib import Path
 
 from simple_ar.code_task import execute_code_task, initialize_code_task
 from simple_ar.code_task.generation.architecture import fallback_architecture_plan
+from simple_ar.code_task.generation.task_contract import build_greenfield_task_contract
 from simple_ar.experiment.contracts import build_experiment_design_package
 from simple_ar.experiment.execution.backend import LocalExecutionBackend, RunRequest
 from simple_ar.experiment.execution.diagnosis import diagnose_experiment_run, render_diagnosis_markdown
@@ -254,6 +255,28 @@ class ExperimentExecutionTests(unittest.TestCase):
                 any("macro_f1" in item for item in package.contract.constraints),
                 package.contract.constraints,
             )
+
+    def test_greenfield_task_contract_extracts_evidence_plan(self) -> None:
+        contract = build_greenfield_task_contract(
+            (
+                "# Task\n\n"
+                "- Hypothesis H1: robust preprocessing improves accuracy on noisy datasets.\n"
+                "- Compare standard scaling against no scaling and robust scaling.\n"
+                "- Produce artifacts/results.json and artifacts/report.md with per-dataset rows.\n"
+                "- Evaluate macro_f1 and accuracy across multiple conditions.\n"
+            ),
+            benchmark_command="python main.py",
+            max_files=8,
+            max_generated_lines=1200,
+            result_schema={"primary_metric": "accuracy", "required_metrics": ["accuracy", "macro_f1"]},
+        )
+
+        evidence = contract["evidence_plan"]
+        self.assertIn("accuracy", evidence["required_metrics"])
+        self.assertTrue(evidence["hypotheses"])
+        self.assertTrue(evidence["required_comparisons"])
+        self.assertTrue(any("artifacts/results.json" in item for item in evidence["required_artifacts"]))
+        self.assertTrue(any("Hypothesis evidence" in item for item in contract["success_criteria"]))
 
     def test_medium_greenfield_fallback_architecture_has_real_module_boundaries(self) -> None:
         plan = fallback_architecture_plan(

@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 import json
-import hashlib
-import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from simple_ar.code_task.generation.agent_step import run_json_agent_step, write_agent_step_artifact
 from simple_ar.code_task.generation.file_specs import (
     dedupe_file_rows,
     entrypoint_first,
     normalize_dependency_paths,
     normalize_plan_path,
 )
+from simple_ar.code_task.generation.common import scalar_list, text as clean_text
 from simple_ar.code_task.generation.task_contract import contract_prompt_view
-from simple_ar.core.artifacts import append_jsonl, write_json
+from simple_ar.core.artifacts import write_json
 from simple_ar.integrations.llm import LLMClient, LLMError
 
 
@@ -53,6 +53,7 @@ def build_tool_agent_architecture_plan(
     rerun_from = "requirements"
     review: dict[str, Any] = {}
     revision_count = 0
+    patch_request_history: list[dict[str, Any]] = []
 
     for round_index in range(review_rounds + 1):
         for stage in _stages_from(rerun_from):
@@ -82,6 +83,9 @@ def build_tool_agent_architecture_plan(
             planning_dir=planning_dir,
             message_callback=message_callback,
         )
+        patch_requests = _planning_patch_requests(review, round_index=round_index + 1)
+        patch_request_history.extend(patch_requests)
+        _write_patch_requests(planning_dir, latest=patch_requests, history=patch_request_history)
         if _review_passed(review):
             break
         if round_index >= review_rounds:
@@ -150,40 +154,22 @@ def _run_stage(
         state=state,
         feedback=feedback,
     )
-    try:
-        raw = _ask_stage_json(
-            client,
-            system=_stage_system(stage),
-            prompt=prompt,
-            label=label,
-            max_output_tokens=_stage_output_tokens(stage, resource_plan),
-            retry_attempts=retry_attempts,
-            message_callback=message_callback,
-        )
-    except LLMError as exc:
-        _record_agent_step(
-            planning_dir,
-            stage=stage,
-            attempt_index=attempt_index,
-            label=label,
-            status="failed",
-            prompt=prompt,
-            output={"error": str(exc)},
-            feedback=feedback,
-        )
-        raise
-    normalized = _normalize_stage_result(stage, raw)
-    _write_stage_artifact(planning_dir, stage, attempt_index, normalized)
-    _record_agent_step(
-        planning_dir,
+    raw = run_json_agent_step(
+        client=client,
+        system=_stage_system(stage),
+        prompt=prompt,
+        label=label,
         stage=stage,
         attempt_index=attempt_index,
-        label=label,
-        status="passed",
-        prompt=prompt,
-        output=normalized,
+        retry_attempts=retry_attempts,
+        max_output_tokens=_stage_output_tokens(stage, resource_plan),
+        artifact_dir=planning_dir,
         feedback=feedback,
+        output_summary_callback=_agent_step_output_summary,
+        message_callback=message_callback,
     )
+    normalized = _normalize_stage_result(stage, raw)
+    write_agent_step_artifact(planning_dir, stage=stage, attempt_index=attempt_index, value=normalized)
     return normalized
 
 
@@ -209,78 +195,23 @@ def _run_review(
         state=state,
     )
     label = "greenfield-plan-review" if attempt_index == 1 else f"greenfield-plan-review-r{attempt_index}"
-    try:
-        raw = _ask_stage_json(
-            client,
-            system=PLANNING_REVIEW_SYSTEM,
-            prompt=prompt,
-            label=label,
-            max_output_tokens=900,
-            retry_attempts=retry_attempts,
-            message_callback=message_callback,
-        )
-    except LLMError as exc:
-        _record_agent_step(
-            planning_dir,
-            stage="review",
-            attempt_index=attempt_index,
-            label=label,
-            status="failed",
-            prompt=prompt,
-            output={"error": str(exc)},
-            feedback=[],
-        )
-        raise
-    review = _normalize_review(raw)
-    _write_stage_artifact(planning_dir, "review", attempt_index, review)
-    _record_agent_step(
-        planning_dir,
+    raw = run_json_agent_step(
+        client=client,
+        system=PLANNING_REVIEW_SYSTEM,
+        prompt=prompt,
+        label=label,
         stage="review",
         attempt_index=attempt_index,
-        label=label,
-        status=str(review.get("status") or "unknown"),
-        prompt=prompt,
-        output=review,
+        retry_attempts=retry_attempts,
+        max_output_tokens=900,
+        artifact_dir=planning_dir,
         feedback=[],
+        output_summary_callback=_agent_step_output_summary,
+        message_callback=message_callback,
     )
+    review = _normalize_review(raw)
+    write_agent_step_artifact(planning_dir, stage="review", attempt_index=attempt_index, value=review)
     return review
-
-
-def _ask_stage_json(
-    client: LLMClient,
-    *,
-    system: str,
-    prompt: str,
-    label: str,
-    max_output_tokens: int,
-    retry_attempts: int,
-    message_callback: MessageCallback | None,
-) -> dict[str, Any]:
-    last_error: LLMError | None = None
-    for attempt in range(1, retry_attempts + 1):
-        try:
-            result = client.ask_json(
-                system,
-                prompt + _retry_suffix(last_error, attempt),
-                label=label if attempt == 1 else f"{label}-retry-{attempt}",
-                max_output_tokens=max_output_tokens,
-            )
-            return result if isinstance(result, dict) else {}
-        except LLMError as exc:
-            last_error = exc
-            if attempt >= retry_attempts:
-                _emit(
-                    message_callback,
-                    f"Planning tool `{label}` failed after {attempt}/{retry_attempts} attempt(s). {exc}",
-                )
-                raise
-            delay = _stage_retry_delay(attempt)
-            _emit(
-                message_callback,
-                f"Planning tool `{label}` failed ({attempt}/{retry_attempts}); retrying in {delay:.1f}s. {exc}",
-            )
-            time.sleep(delay)
-    raise LLMError(f"Planning tool `{label}` failed without a captured error.")
 
 
 def _stage_prompt(
@@ -318,6 +249,7 @@ def _stage_prompt(
             "- Do not invent benchmark-specific fields. Preserve fields explicitly requested by the task/result schema.\n"
             "- Convert prose requirements into testable implementation obligations.\n"
             "- Mention optional dependencies only if they are task-relevant and installed/available in the context.\n\n"
+            "- Preserve every explicit hypothesis/comparison/artifact from evidence_plan as an implementation obligation.\n\n"
             f"{base}{feedback_block}"
         )
     if stage == "architecture":
@@ -349,7 +281,8 @@ def _stage_prompt(
             "- No Markdown. Keep each string <= 160 characters.\n"
             "- public_api entries must be exact function/class names or concise signatures.\n"
             "- Every planned consumer must use an API declared by the producer.\n"
-            "- Include artifact/metric schemas that later files can share instead of guessing independently.\n\n"
+            "- Include artifact/metric schemas that later files can share instead of guessing independently.\n"
+            "- For each required metric or hypothesis comparison, preserve the producer fields needed by downstream aggregation and reporting.\n\n"
             f"{base}\nRequirements brief JSON:\n{_json_block(state.get('requirements'))}\n"
             f"Architecture outline JSON:\n{_json_block(state.get('architecture'))}\n{feedback_block}"
         )
@@ -369,6 +302,7 @@ def _stage_prompt(
             "- Each file's dependencies must refer only to paths in this file plan.\n"
             "- Each dependency must be justified by a declared public_api or shared schema.\n"
             "- Acceptance criteria should be checkable and tied to task/result schema requirements.\n"
+            "- At least one file must own evidence preservation/reporting when evidence_plan contains hypotheses, comparisons, or required artifacts.\n"
             "- Do not add task-irrelevant boilerplate just to increase size.\n\n"
             f"{base}\nRequirements brief JSON:\n{_json_block(state.get('requirements'))}\n"
             f"Architecture outline JSON:\n{_json_block(state.get('architecture'))}\n"
@@ -426,7 +360,7 @@ def _assemble_architecture_plan(
         interfaces=interfaces,
         max_files=max_files,
     )
-    risks = _list(architecture.get("risks"))[:8]
+    risks = scalar_list(architecture.get("risks"))[:8]
     risks.extend(recovery_notes)
     findings = review.get("findings") if isinstance(review.get("findings"), list) else []
     if findings:
@@ -434,21 +368,24 @@ def _assemble_architecture_plan(
     return {
         "schema_version": "greenfield_architecture.v1",
         "mode": "greenfield_project",
-        "objective": _text(file_plan.get("objective")) or _text(requirements.get("objective")) or _text(contract.get("objective")),
-        "architecture_summary": _text(architecture.get("architecture_summary"))
+        "objective": clean_text(file_plan.get("objective")) or clean_text(requirements.get("objective")) or clean_text(contract.get("objective")),
+        "architecture_summary": clean_text(architecture.get("architecture_summary"))
         or "Bounded generated project with explicit interfaces and a command-line entrypoint.",
-        "data_flow": _list(architecture.get("data_flow"))[:8],
+        "data_flow": scalar_list(architecture.get("data_flow"))[:8],
         "interfaces": _render_interfaces(interfaces)[:10],
-        "test_strategy": _list(architecture.get("test_strategy"))[:8],
+        "test_strategy": scalar_list(architecture.get("test_strategy"))[:8],
         "risks": [item for item in risks if item][:10],
         "files": files,
         "planning": {
             "mode": "tool_agent",
-            "review_status": _text(review.get("status")) or "unknown",
+            "review_status": clean_text(review.get("status")) or "unknown",
             "revision_count": revision_count,
-            "review_summary": _text(review.get("summary")),
+            "review_summary": clean_text(review.get("summary")),
+            "patch_request_count": len(review.get("patch_requests", []))
+            if isinstance(review.get("patch_requests"), list)
+            else 0,
         },
-        "planning_status": _text(review.get("status")) or "unknown",
+        "planning_status": clean_text(review.get("status")) or "unknown",
         "result_schema": dict(result_schema),
     }
 
@@ -456,34 +393,34 @@ def _assemble_architecture_plan(
 def _normalize_stage_result(stage: str, value: Mapping[str, Any]) -> dict[str, Any]:
     if stage == "requirements":
         return {
-            "objective": _text(value.get("objective")),
-            "hard_requirements": _list(value.get("hard_requirements"))[:50],
-            "deliverables": _list(value.get("deliverables"))[:30],
-            "constraints": _list(value.get("constraints"))[:30],
-            "data_requirements": _list(value.get("data_requirements"))[:30],
-            "evaluation_targets": _list(value.get("evaluation_targets"))[:30],
-            "dependency_strategy": _list(value.get("dependency_strategy"))[:20],
-            "open_questions": _list(value.get("open_questions"))[:20],
+            "objective": clean_text(value.get("objective")),
+            "hard_requirements": scalar_list(value.get("hard_requirements"))[:50],
+            "deliverables": scalar_list(value.get("deliverables"))[:30],
+            "constraints": scalar_list(value.get("constraints"))[:30],
+            "data_requirements": scalar_list(value.get("data_requirements"))[:30],
+            "evaluation_targets": scalar_list(value.get("evaluation_targets"))[:30],
+            "dependency_strategy": scalar_list(value.get("dependency_strategy"))[:20],
+            "open_questions": scalar_list(value.get("open_questions"))[:20],
         }
     if stage == "architecture":
         modules = value.get("modules")
         return {
-            "architecture_summary": _text(value.get("architecture_summary")),
+            "architecture_summary": clean_text(value.get("architecture_summary")),
             "modules": _normalize_modules(modules),
-            "data_flow": _list(value.get("data_flow"))[:20],
-            "test_strategy": _list(value.get("test_strategy"))[:20],
-            "risks": _list(value.get("risks"))[:20],
+            "data_flow": scalar_list(value.get("data_flow"))[:20],
+            "test_strategy": scalar_list(value.get("test_strategy"))[:20],
+            "risks": scalar_list(value.get("risks"))[:20],
         }
     if stage == "interfaces":
         return {
             "shared_schemas": _normalize_named_rows(value.get("shared_schemas"), max_rows=24),
             "module_apis": _normalize_named_rows(value.get("module_apis"), max_rows=32),
-            "cross_file_contracts": _list(value.get("cross_file_contracts"))[:40],
-            "stdout_contract": _list(value.get("stdout_contract"))[:20],
+            "cross_file_contracts": scalar_list(value.get("cross_file_contracts"))[:40],
+            "stdout_contract": scalar_list(value.get("stdout_contract"))[:20],
         }
     if stage == "file_plan":
         return {
-            "objective": _text(value.get("objective")),
+            "objective": clean_text(value.get("objective")),
             "files": _normalize_files(value.get("files"), max_files=64),
         }
     return dict(value)
@@ -529,18 +466,18 @@ def _review_structural_blockers(plan: Mapping[str, Any], review: Mapping[str, An
     for row in rows:
         if not isinstance(row, Mapping) or _normalize_severity(row.get("severity")) != "critical":
             continue
-        text = " ".join([_text(row.get("issue")), _text(row.get("required_change"))]).lower()
+        text = " ".join([clean_text(row.get("issue")), clean_text(row.get("required_change"))]).lower()
         if any(token in text for token in ("path traversal", "outside", "absolute path", "unsafe path")):
-            blockers.append(_text(row.get("issue"))[:500])
+            blockers.append(clean_text(row.get("issue"))[:500])
             continue
         if "entrypoint" in text and not entrypoint_present:
-            blockers.append(_text(row.get("issue"))[:500])
+            blockers.append(clean_text(row.get("issue"))[:500])
             continue
         if ("missing file" in text or "omits required" in text) and len(path_set) <= 1:
-            blockers.append(_text(row.get("issue"))[:500])
+            blockers.append(clean_text(row.get("issue"))[:500])
             continue
         if ("duplicate" in text or "two entrypoint" in text or "both `main.py`" in text) and len(path_set) != len(file_rows):
-            blockers.append(_text(row.get("issue"))[:500])
+            blockers.append(clean_text(row.get("issue"))[:500])
     return [item for item in blockers if item]
 
 
@@ -555,7 +492,7 @@ def _recover_degenerate_file_plan(
 
     This is intentionally generic: it only uses the architecture modules and
     interface contracts that were already produced for the task. It does not
-    know anything about ARC-Bench or ML topics.
+    know anything about external benchmark topics.
     """
 
     non_entry = [row for row in files if row.get("path") != "main.py"]
@@ -593,7 +530,7 @@ def _recover_degenerate_file_plan(
     ]
 
     for module in module_rows:
-        name = _text(module.get("name"))
+        name = clean_text(module.get("name"))
         path = _module_path(name)
         if not path or path in {row["path"] for row in recovered}:
             continue
@@ -601,7 +538,7 @@ def _recover_degenerate_file_plan(
         recovered.append(
             {
                 "path": path,
-                "purpose": _text(module.get("responsibility"))[:500] or f"Implement {name} responsibility.",
+                "purpose": clean_text(module.get("responsibility"))[:500] or f"Implement {name} responsibility.",
                 "dependencies": [],
                 "public_api": _module_public_api(name, interfaces),
                 "acceptance_criteria": _module_acceptance(module),
@@ -644,7 +581,7 @@ def _module_path(name: str) -> str:
 
 
 def _module_key(value: object) -> str:
-    return _slug(_text(value)).replace("_", "")
+    return _slug(clean_text(value)).replace("_", "")
 
 
 def _slug(value: str) -> str:
@@ -669,7 +606,7 @@ def _module_public_api(name: str, interfaces: Mapping[str, Any]) -> list[str]:
         if _module_key(row.get("module") or row.get("name")) != _module_key(name):
             continue
         api = row.get("public_api")
-        result = _list(api)[:12]
+        result = scalar_list(api)[:12]
         if result:
             return result
     slug = _slug(name)
@@ -677,14 +614,14 @@ def _module_public_api(name: str, interfaces: Mapping[str, Any]) -> list[str]:
 
 
 def _module_acceptance(module: Mapping[str, Any]) -> list[str]:
-    outputs = _list(module.get("outputs"))[:4]
+    outputs = scalar_list(module.get("outputs"))[:4]
     if outputs:
         return [f"Produces {item} for downstream modules." for item in outputs]
     return ["Implements its planned responsibility with deterministic, importable Python."]
 
 
 def _normalize_review(value: Mapping[str, Any]) -> dict[str, Any]:
-    status = _text(value.get("status")).lower().replace("-", "_")
+    status = clean_text(value.get("status")).lower().replace("-", "_")
     if status not in {"pass", "needs_revision"}:
         status = "needs_revision"
     findings: list[dict[str, str]] = []
@@ -698,16 +635,18 @@ def _normalize_review(value: Mapping[str, Any]) -> dict[str, Any]:
             {
                 "target_stage": target,
                 "severity": _normalize_severity(row.get("severity")),
-                "issue": _text(row.get("issue"))[:800],
-                "required_change": _text(row.get("required_change"))[:800],
+                "issue": clean_text(row.get("issue"))[:800],
+                "required_change": clean_text(row.get("required_change"))[:800],
             }
         )
     if status == "pass" and any(row.get("severity") in {"high", "critical"} for row in findings):
         status = "needs_revision"
+    patch_requests = _review_findings_to_patch_requests(findings)
     return {
         "status": status,
-        "summary": _text(value.get("summary"))[:1200],
+        "summary": clean_text(value.get("summary"))[:1200],
         "findings": findings,
+        "patch_requests": patch_requests,
     }
 
 
@@ -719,11 +658,11 @@ def _normalize_modules(value: object) -> list[dict[str, Any]]:
             continue
         result.append(
             {
-                "name": _text(row.get("name"))[:120],
-                "responsibility": _text(row.get("responsibility"))[:500],
-                "inputs": _list(row.get("inputs"))[:12],
-                "outputs": _list(row.get("outputs"))[:12],
-                "dependencies": _list(row.get("dependencies"))[:12],
+                "name": clean_text(row.get("name"))[:120],
+                "responsibility": clean_text(row.get("responsibility"))[:500],
+                "inputs": scalar_list(row.get("inputs"))[:12],
+                "outputs": scalar_list(row.get("outputs"))[:12],
+                "dependencies": scalar_list(row.get("dependencies"))[:12],
             }
         )
     return result
@@ -735,8 +674,8 @@ def _normalize_named_rows(value: object, *, max_rows: int) -> list[dict[str, Any
     for row in rows[:max_rows]:
         if isinstance(row, Mapping):
             result.append({str(key): _coerce_jsonable(val) for key, val in row.items() if str(key).strip()})
-        elif _text(row):
-            result.append({"description": _text(row)})
+        elif clean_text(row):
+            result.append({"description": clean_text(row)})
     return result
 
 
@@ -752,10 +691,10 @@ def _normalize_files(value: object, *, max_files: int) -> list[dict[str, Any]]:
         files.append(
             {
                 "path": path,
-                "purpose": _text(row.get("purpose"))[:500] or "Generated project file.",
+                "purpose": clean_text(row.get("purpose"))[:500] or "Generated project file.",
                 "dependencies": normalize_dependency_paths(row.get("dependencies"), limit=16),
-                "public_api": _list(row.get("public_api"))[:40],
-                "acceptance_criteria": _list(row.get("acceptance_criteria"))[:16],
+                "public_api": scalar_list(row.get("public_api"))[:40],
+                "acceptance_criteria": scalar_list(row.get("acceptance_criteria"))[:16],
                 "entrypoint": bool(row.get("entrypoint")) or path == "main.py",
             }
         )
@@ -813,50 +752,122 @@ def _render_interfaces(value: Mapping[str, Any]) -> list[str]:
     lines: list[str] = []
     for row in value.get("shared_schemas", []) if isinstance(value.get("shared_schemas"), list) else []:
         if isinstance(row, Mapping):
-            name = _text(row.get("name") or row.get("description"))
+            name = clean_text(row.get("name") or row.get("description"))
             fields = row.get("fields")
-            field_text = ", ".join(str(item) for item in fields[:10]) if isinstance(fields, list) else _text(fields)
+            field_text = ", ".join(str(item) for item in fields[:10]) if isinstance(fields, list) else clean_text(fields)
             lines.append(f"Schema {name}: {field_text}".strip())
     for row in value.get("module_apis", []) if isinstance(value.get("module_apis"), list) else []:
         if isinstance(row, Mapping):
-            module = _text(row.get("module") or row.get("name"))
+            module = clean_text(row.get("module") or row.get("name"))
             api = row.get("public_api")
-            api_text = ", ".join(str(item) for item in api[:12]) if isinstance(api, list) else _text(api)
+            api_text = ", ".join(str(item) for item in api[:12]) if isinstance(api, list) else clean_text(api)
             lines.append(f"{module}: {api_text}".strip())
-    lines.extend(_list(value.get("cross_file_contracts"))[:20])
-    lines.extend(_list(value.get("stdout_contract"))[:10])
+    lines.extend(scalar_list(value.get("cross_file_contracts"))[:20])
+    lines.extend(scalar_list(value.get("stdout_contract"))[:10])
     return [line for line in lines if line]
 
 
 def _merge_review_feedback(feedback: dict[str, list[str]], review: Mapping[str, Any]) -> None:
-    findings = review.get("findings")
-    if not isinstance(findings, list):
+    requests = _planning_patch_requests(review)
+    if not requests:
         return
-    for row in findings:
-        if not isinstance(row, Mapping):
-            continue
+    for row in requests:
         target = _normalize_target_stage(row.get("target_stage"))
-        message = _text(row.get("required_change")) or _text(row.get("issue"))
+        message = clean_text(row.get("required_change")) or clean_text(row.get("issue"))
         if message:
             feedback.setdefault(target, []).append(message)
 
 
 def _review_target_stage(review: Mapping[str, Any]) -> str:
-    findings = review.get("findings")
-    rows = findings if isinstance(findings, list) else []
+    rows = _planning_patch_requests(review)
     ranks = {stage: index for index, stage in enumerate(PLANNING_STAGES)}
     best = "file_plan"
     for row in rows:
-        if not isinstance(row, Mapping):
-            continue
         target = _normalize_target_stage(row.get("target_stage"))
         if ranks[target] < ranks[best]:
             best = target
     return best
 
 
+def _planning_patch_requests(review: Mapping[str, Any], *, round_index: int | None = None) -> list[dict[str, Any]]:
+    requests = review.get("patch_requests")
+    rows = requests if isinstance(requests, list) else []
+    normalized: list[dict[str, Any]] = []
+    for index, row in enumerate(rows[:12], start=1):
+        if not isinstance(row, Mapping):
+            continue
+        target = _normalize_target_stage(row.get("target_stage"))
+        issue = clean_text(row.get("issue"))[:800]
+        change = clean_text(row.get("required_change"))[:800]
+        if not issue and not change:
+            continue
+        item: dict[str, Any] = {
+            "id": clean_text(row.get("id")) or f"{target}-{index}",
+            "target_stage": target,
+            "severity": _normalize_severity(row.get("severity")),
+            "issue": issue,
+            "required_change": change or issue,
+        }
+        if round_index is not None:
+            item["round"] = round_index
+        normalized.append(item)
+    if normalized:
+        return normalized
+    findings = review.get("findings")
+    finding_rows = findings if isinstance(findings, list) else []
+    return _review_findings_to_patch_requests(finding_rows, round_index=round_index)
+
+
+def _review_findings_to_patch_requests(
+    findings: list[Mapping[str, Any]] | list[dict[str, str]],
+    *,
+    round_index: int | None = None,
+) -> list[dict[str, Any]]:
+    requests: list[dict[str, Any]] = []
+    for index, row in enumerate(findings[:12], start=1):
+        if not isinstance(row, Mapping):
+            continue
+        severity = _normalize_severity(row.get("severity"))
+        issue = clean_text(row.get("issue"))[:800]
+        change = clean_text(row.get("required_change"))[:800]
+        if severity in {"low", "medium"} and not change:
+            continue
+        if not issue and not change:
+            continue
+        target = _normalize_target_stage(row.get("target_stage"))
+        item: dict[str, Any] = {
+            "id": f"{target}-{index}",
+            "target_stage": target,
+            "severity": severity,
+            "issue": issue,
+            "required_change": change or issue,
+        }
+        if round_index is not None:
+            item["round"] = round_index
+        requests.append(item)
+    return requests
+
+
+def _write_patch_requests(
+    planning_dir: Path | None,
+    *,
+    latest: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+) -> None:
+    if planning_dir is None:
+        return
+    write_json(
+        planning_dir / "review_patch_requests.json",
+        {
+            "schema_version": "greenfield_planning_patch_requests.v1",
+            "latest": latest,
+            "history": history[-40:],
+        },
+    )
+
+
 def _review_passed(review: Mapping[str, Any]) -> bool:
-    if _text(review.get("status")).lower() == "pass":
+    if clean_text(review.get("status")).lower() == "pass":
         return True
     findings = review.get("findings")
     rows = findings if isinstance(findings, list) else []
@@ -867,9 +878,9 @@ def _review_passed(review: Mapping[str, Any]) -> bool:
 
 
 def _finding_to_risk(row: Mapping[str, Any]) -> str:
-    issue = _text(row.get("issue"))
-    change = _text(row.get("required_change"))
-    severity = _text(row.get("severity"))
+    issue = clean_text(row.get("issue"))
+    change = clean_text(row.get("required_change"))
+    severity = clean_text(row.get("severity"))
     parts = [f"Planning review {severity} finding".strip()]
     if issue:
         parts.append(issue)
@@ -891,7 +902,7 @@ def _stages_from(stage: str) -> tuple[str, ...]:
 
 
 def _normalize_target_stage(value: object) -> str:
-    text = _text(value).lower().replace("-", "_").replace(" ", "_")
+    text = clean_text(value).lower().replace("-", "_").replace(" ", "_")
     aliases = {
         "requirement": "requirements",
         "requirements_brief": "requirements",
@@ -907,7 +918,7 @@ def _normalize_target_stage(value: object) -> str:
 
 
 def _normalize_severity(value: object) -> str:
-    text = _text(value).lower()
+    text = clean_text(value).lower()
     return text if text in {"low", "medium", "high", "critical"} else "medium"
 
 
@@ -942,64 +953,24 @@ def _stage_output_tokens(stage: str, resource_plan: Mapping[str, Any]) -> int:
     return 1200
 
 
-def _write_stage_artifact(planning_dir: Path | None, stage: str, attempt_index: int, value: Mapping[str, Any]) -> None:
-    if planning_dir is None:
-        return
-    stage_dir = planning_dir / stage
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    write_json(stage_dir / f"attempt-{attempt_index:03d}.json", dict(value))
-    write_json(stage_dir / "latest.json", dict(value))
-
-
-def _record_agent_step(
-    planning_dir: Path | None,
-    *,
-    stage: str,
-    attempt_index: int,
-    label: str,
-    status: str,
-    prompt: str,
-    output: Mapping[str, Any],
-    feedback: list[str],
-) -> None:
-    if planning_dir is None:
-        return
-    planning_dir.mkdir(parents=True, exist_ok=True)
-    append_jsonl(
-        planning_dir / "agent_steps.jsonl",
-        {
-            "schema_version": "code_task_agent_step.v1",
-            "stage": stage,
-            "attempt_index": attempt_index,
-            "label": label,
-            "status": status,
-            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            "prompt_chars": len(prompt),
-            "feedback": feedback[-8:],
-            "output_keys": sorted(str(key) for key in output.keys()),
-            "output_summary": _agent_step_output_summary(stage, output),
-        },
-    )
-
-
 def _agent_step_output_summary(stage: str, output: Mapping[str, Any]) -> dict[str, Any]:
     if stage == "requirements":
         return {
-            "hard_requirement_count": len(_list(output.get("hard_requirements"))),
-            "deliverable_count": len(_list(output.get("deliverables"))),
-            "evaluation_target_count": len(_list(output.get("evaluation_targets"))),
+            "hard_requirement_count": len(scalar_list(output.get("hard_requirements"))),
+            "deliverable_count": len(scalar_list(output.get("deliverables"))),
+            "evaluation_target_count": len(scalar_list(output.get("evaluation_targets"))),
         }
     if stage == "architecture":
         modules = output.get("modules")
         return {
             "module_count": len(modules) if isinstance(modules, list) else 0,
-            "risk_count": len(_list(output.get("risks"))),
+            "risk_count": len(scalar_list(output.get("risks"))),
         }
     if stage == "interfaces":
         return {
             "shared_schema_count": len(output.get("shared_schemas")) if isinstance(output.get("shared_schemas"), list) else 0,
             "module_api_count": len(output.get("module_apis")) if isinstance(output.get("module_apis"), list) else 0,
-            "contract_count": len(_list(output.get("cross_file_contracts"))),
+            "contract_count": len(scalar_list(output.get("cross_file_contracts"))),
         }
     if stage == "file_plan":
         files = output.get("files")
@@ -1011,21 +982,6 @@ def _agent_step_output_summary(stage: str, output: Mapping[str, Any]) -> dict[st
             "finding_count": len(findings) if isinstance(findings, list) else 0,
         }
     return {}
-
-
-def _retry_suffix(error: LLMError | None, attempt: int) -> str:
-    if error is None:
-        return ""
-    return (
-        "\nPrevious attempt failed before attempt "
-        f"{attempt}: {error}\n"
-        "The previous output was not parseable, possibly because it was too long. "
-        "Return a smaller single JSON object only: no Markdown, no commentary, no trailing analysis, no nested prose.\n"
-    )
-
-
-def _stage_retry_delay(attempt: int) -> float:
-    return min(30.0, 2.0 * (2 ** max(0, attempt - 1)))
 
 
 def _prune_dependencies(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1055,18 +1011,6 @@ def _positive_int(value: object, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
-
-
-def _text(value: object) -> str:
-    return str(value).strip() if value is not None else ""
-
-
-def _list(value: object) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    return []
 
 
 def _emit(callback: MessageCallback | None, message: str) -> None:

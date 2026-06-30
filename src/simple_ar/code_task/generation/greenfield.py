@@ -225,6 +225,7 @@ def generate_greenfield_code_task(
             files_per_batch=4,
             retry_attempts=llm_retry_attempts,
             allow_fallback=allow_planning_fallback or not use_llm,
+            agent_step_dir=paths.meta_dir / "generation_steps",
             message_callback=message_callback,
         )
     generated_files = tuple(

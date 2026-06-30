@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from benchmark.adapter_contract import build_adapter_manifest
+
 
 def load_adapter_module():
     root = Path(__file__).resolve().parents[1]
@@ -21,6 +23,21 @@ def load_adapter_module():
 
 
 class ArcBenchAdapterTests(unittest.TestCase):
+    def test_adapter_manifest_normalizes_paths_without_core_coupling(self) -> None:
+        manifest = build_adapter_manifest(
+            suite="demo",
+            operation="prepare",
+            status="prepared",
+            inputs={"root": Path("bench/root")},
+            outputs={"files": [Path("out/task.md")]},
+            metadata={"topic": "T01"},
+        )
+
+        self.assertEqual(manifest["schema_version"], "simple_ar_benchmark_adapter.v1")
+        self.assertEqual(manifest["suite"], "demo")
+        self.assertEqual(manifest["inputs"]["root"], "bench/root")
+        self.assertEqual(manifest["outputs"]["files"], ["out/task.md"])
+
     def test_loads_workspace_artifacts_next_to_generated_project(self) -> None:
         adapter = load_adapter_module()
         with tempfile.TemporaryDirectory() as tmp:
