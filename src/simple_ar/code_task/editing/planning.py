@@ -409,7 +409,7 @@ def _plan_user_prompt(
         "`validation` list of strings, `risks` list of strings, `rollback` list "
         "of strings, `open_questions` list of strings, and "
         "`requires_approval_before_patch` boolean.\n\n"
-        "Rules adapted from AutoResearchClaw-style code planning:\n"
+        "Code-planning rules:\n"
         "- Analyze first; do not write or apply code.\n"
         "- Prefer modifying existing code over generating unrelated new modules.\n"
         "- Mention only workspace-relative paths from the index in "

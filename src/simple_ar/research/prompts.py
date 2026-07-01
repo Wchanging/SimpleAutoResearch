@@ -554,7 +554,7 @@ def report_user_prompt(
         "The value must be a polished Markdown research report, not a run log. "
         "Use this structure exactly:\n"
         f"{structure}"
-        "Writing style rules adapted from AutoResearchClaw:\n"
+        "Research-report writing style rules:\n"
         "- Write flowing academic paragraphs. Avoid bullet lists except compact "
         "tables when needed.\n"
         "- The paper should read like a short workshop paper, not a technical "
