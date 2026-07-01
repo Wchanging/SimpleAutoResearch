@@ -695,8 +695,9 @@ interfaces / file-plan / planning-review 哪一步失败或反复回修。
 
 对于 greenfield run，同一套 review gate 会在验证前检查生成项目。如果 review 发现
 通用可修复问题，例如核心文件仍是 fallback、缺少 artifact writer、缺少本地 API 等，
-`execute` 可以用有限轮次的 LLM repair 只重写受影响文件，重新同步
-`code_task/meta/code_artifacts.json`，再跑一次 review。若问题仍然阻塞，run 会停住并
+`execute` 可以用有限轮次的 LLM repair 优先生成结构化局部修复 action，例如唯一
+old/new 文本替换或函数级替换；只有文件职责整体错误时才回退到整文件替换。修复会记录
+edit application、重新同步 `code_task/meta/code_artifacts.json`，再跑一次 review。若问题仍然阻塞，run 会停住并
 保留当前生成产物和 review 报告，方便人工接管。
 
 3. 在 patch-plan 审核面板出现时，阅读 `code_task/work_plan.md` 和

@@ -513,7 +513,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[evaluation].required_metrics` / `.success_criteria` | 必需指标检查和成功条件说明，会被 `07-run/guard_report.json` 和最终报告使用。 |
 | `[generation].enabled` | 启用 greenfield 项目生成路径；已有项目 code-task 运行保持 false。 |
 | `[generation].max_batches` / `.files_per_batch` / `.review_required` | 后续项目生成路径的计划提示；已有项目 patch run 只记录用于审计。 |
-| `[generation].allow_fallback_scaffold` | 默认 false。false 时，生成代码失败会保留产物供检查，而不是静默替换成 deterministic scaffold。review repair 仍可在修复预算内只重写具体有问题的 generated files。 |
+| `[generation].allow_fallback_scaffold` | 默认 false。false 时，生成代码失败会保留产物供检查，而不是静默替换成 deterministic scaffold。review repair 会优先做结构化局部 action；只有文件级结构错误时才回退到整文件替换。 |
 
 `05-design` 会把这些字段落成 `experiment_plan.json`、`experiment_contract.json`、
 `result_schema.json`、`resource_plan.json`、`dependency_plan.json`、

@@ -19,6 +19,7 @@
 - Code-task greenfield contract 新增通用 `evidence_plan`，会从任务说明中提取显式假设、比较、数据集/条件、必需指标、必需 artifact 和 claim policy，并贯穿 planning、逐文件生成、review 与 repair prompt，避免大型任务在代码生成后只剩聚合指标而丢失支撑结论的证据链。
 - Greenfield planning / writer prompt 现在会把证据要求作为硬契约处理：需要下游指标或报告使用的 features、labels、predictions、condition、seed、per-dataset rows 等字段必须显式传递，不能在中途只保留最终 summary。
 - Generated-project runtime repair prompt 现在要求先构建 failing metric/field 到 producer、consumer、aggregate/report 的 dependency trace，再选择目标文件；同类错误重复出现时，需要解释上轮定位或补丁为何无效，减少反复修改同一处但没有解决根因的循环。
+- Generated-project review/run repair 新增通用结构化 edit action 执行层。LLM repair 现在优先返回 `replace_block`、`rewrite_function` 等可审计局部 action，并由代码侧做唯一匹配、AST 函数边界、public API diff 和编译校验；只有文件级结构错误或局部 action 不可用时才回退到整文件替换。
 
 ### Fixed
 

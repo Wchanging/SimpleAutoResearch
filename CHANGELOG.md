@@ -24,6 +24,11 @@ This file records user-visible project changes in reverse chronological order. P
   the suggested next repair entrypoint.
 - Code-task generation now uses shared normalization helpers for paths, text,
   lists, and mappings across writer, planning, review, and repair code.
+- Generated-project review/run repair now has a shared structured edit-action
+  application layer. LLM repair prefers auditable local actions such as
+  `replace_block` and `rewrite_function`; the code side enforces unique matches,
+  AST function boundaries, public API diffs, and compile checks before falling
+  back to whole-file replacement.
 - Result-analysis and ARC scoring no longer save full prompt text on successful
   paths; prompt/raw-response diagnostic files are written only when parsing or
   scoring fails. Code-task subprocesses also disable `.pyc` writes to reduce

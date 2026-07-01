@@ -932,8 +932,11 @@ trace.
 For greenfield runs, the same review gate checks generated files before
 validation. If the review detects generic recoverable issues such as fallback
 core files, missing artifact writers, or missing local APIs, `execute` can use a
-bounded LLM repair round to regenerate only the affected files, resync
-`code_task/meta/code_artifacts.json`, and rerun review. If the problem is still
+bounded LLM repair round that first asks for structured local repair actions
+such as unique old/new replacements or function-level rewrites. Whole-file
+replacement remains available for structural file-level failures, but it is no
+longer the default repair shape. The repair records an edit application, resyncs
+`code_task/meta/code_artifacts.json`, and reruns review. If the problem is still
 blocking, the run stops with the reviewed artifacts intact for inspection.
 
 3. At the patch-plan review panel, read `code_task/work_plan.md` and

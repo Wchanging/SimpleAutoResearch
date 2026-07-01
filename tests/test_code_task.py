@@ -33,6 +33,7 @@ from simple_ar.code_task import (
     validate_code_task,
 )
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
+from simple_ar.code_task.editing.actions import apply_repair_actions
 from simple_ar.code_task.generation.dependencies import DEPENDENCY_CATALOG, build_dependency_advice
 from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
@@ -52,6 +53,36 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CodeTaskTests(unittest.TestCase):
+    def test_repair_action_rewrite_function_preserves_method_indentation(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            module = root / "worker.py"
+            write_text(
+                module,
+                (
+                    "class Worker:\n"
+                    "    def run(self):\n"
+                    "        return 1\n"
+                ),
+            )
+
+            result = apply_repair_actions(
+                root,
+                [
+                    {
+                        "action": "rewrite_function",
+                        "path": "worker.py",
+                        "function_name": "run",
+                        "new_source": "def run(self):\n    return 2\n",
+                        "rationale": "Fix method body.",
+                    }
+                ],
+            )
+
+            self.assertEqual(result["status"], "patched")
+            self.assertIn("    def run(self):\n        return 2", read_text(module))
+
     def test_dependency_advice_scans_environment_beyond_static_hints(self) -> None:
         base = build_dependency_advice("Use pydantic if available for schema validation.")
         self.assertEqual(base["selection_policy"], "dynamic_environment_scan_plus_semantic_hints")
@@ -830,6 +861,74 @@ primary_metric = "accuracy"
             file_labels = [label for label in fake.labels if label != "greenfield-run-repair-plan"]
             self.assertIn("greenfield-run-repair-src/report.py", file_labels)
             self.assertIn("src/report.py", repair["changed_files"])
+
+    def test_greenfield_run_repair_prefers_structured_local_actions(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.labels: list[str] = []
+
+            def ask_json(self, _system: str, _prompt: str, *, label: str = "") -> dict[str, object]:
+                self.labels.append(label)
+                if label == "greenfield-run-repair-plan":
+                    return {
+                        "failure_kind": "runtime",
+                        "diagnosis": "The report consumer uses attribute access on a dict.",
+                        "root_cause": "Producer returns a mapping while consumer expects an object.",
+                        "observed_error": "'dict' object has no attribute 'balanced_accuracy'",
+                        "repeated_failure": False,
+                        "repair_scope": "block",
+                        "why_not_smaller_scope": "The failing expression is one local line.",
+                        "why_not_larger_scope": "The producer API is otherwise coherent.",
+                        "target_files": [{"path": "src/report.py"}],
+                        "dependency_trace": ["metrics dict -> report consumer"],
+                        "repair_strategy": "Use mapping access in the consumer.",
+                        "risks": [],
+                    }
+                return {
+                    "summary": "Replace one consumer expression with mapping access.",
+                    "actions": [
+                        {
+                            "action": "replace_block",
+                            "path": "src/report.py",
+                            "old_string": "return summary.mean.balanced_accuracy\n",
+                            "new_string": "return summary['mean']['balanced_accuracy']\n",
+                            "rationale": "The summary object is a dict.",
+                        }
+                    ],
+                }
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            report = project_dir / "src" / "report.py"
+            report.parent.mkdir(parents=True)
+            write_text(
+                report,
+                (
+                    "from __future__ import annotations\n\n"
+                    "def render(summary):\n"
+                    "    return summary.mean.balanced_accuracy\n"
+                ),
+            )
+
+            repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair", "implicated_files": []},
+                stderr_text="ERROR: 'dict' object has no attribute 'balanced_accuracy'",
+                output_path=root / "run_repair_actions.json",
+                code_artifacts={"generated_files": [{"path": "src/report.py", "mode": "llm"}]},
+                client=FakeClient(),
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            self.assertEqual(repair["changed_files"], ["src/report.py"])
+            content = read_text(report)
+            self.assertIn("summary['mean']['balanced_accuracy']", content)
+            self.assertNotIn("summary.mean.balanced_accuracy", content)
+            edit_application = repair["regenerated_files"][0]["edit_application"]
+            self.assertEqual(edit_application["status"], "patched")
+            self.assertEqual(edit_application["applied_actions"][0]["action"], "replace_block")
 
     def test_greenfield_review_flags_stdlib_shadow_and_nested_artifact_path(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

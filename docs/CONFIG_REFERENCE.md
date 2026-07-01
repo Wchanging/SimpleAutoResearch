@@ -527,7 +527,7 @@ needed, so existing embedded `code_task_project` runs keep working.
 | `[evaluation].required_metrics` / `.success_criteria` | Required metric checks and success notes used by `07-run/guard_report.json` and the final report. |
 | `[generation].enabled` | Enables the greenfield project-generation path. Leave false for existing-project code-task runs. |
 | `[generation].max_batches` / `.files_per_batch` / `.review_required` | Project-generation planning and review budget recorded into `05-design/experiment_contract.json` and consumed by `06-code`. |
-| `[generation].allow_fallback_scaffold` | Defaults to false. When false, failed generated code stays available for inspection instead of being silently replaced by a deterministic scaffold. Review repair may still regenerate specific faulty generated files within the configured repair budget. |
+| `[generation].allow_fallback_scaffold` | Defaults to false. When false, failed generated code stays available for inspection instead of being silently replaced by a deterministic scaffold. Review repair now prefers structured local actions and falls back to whole-file replacement only for file-level structural failures. |
 
 During `05-design`, these fields materialize as `experiment_plan.json`,
 `experiment_contract.json`, `result_schema.json`, `resource_plan.json`,

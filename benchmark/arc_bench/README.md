@@ -59,6 +59,22 @@ The recommended ML test order is maintained in:
 benchmark/arc_bench/prepared/ml/INDEX.md
 ```
 
+## Optional ML Dependencies
+
+Before running the breadth or full ML topic sets, install the common scientific
+Python packages so the code-task planner can see useful local libraries instead
+of reinventing basic ML utilities:
+
+```bash
+uv pip install numpy scipy scikit-learn pandas matplotlib statsmodels networkx imbalanced-learn umap-learn scikit-optimize cma seaborn pytest
+```
+
+Quick environment check:
+
+```bash
+uv run python -c "import numpy, scipy, sklearn, pandas, matplotlib, statsmodels, networkx, imblearn, umap, skopt, cma; print('arc deps ok')"
+```
+
 ## Recommended Batch Run
 
 Run the quick confidence pass and continue even if individual topics fail:

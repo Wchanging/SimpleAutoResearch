@@ -453,8 +453,9 @@ interfaces、file plan 和 planning review 的中间产物写到
 `code_task/meta/planning/`。只有排查旧单次规划路径时才建议使用
 `--planning-mode compact`。
 
-如果 greenfield review 发现通用可修复的 blocking finding，有限 repair 轮次可以只重写
-受影响的 generated files，并在继续 review/validation 前同步
+如果 greenfield review 发现通用可修复的 blocking finding，有限 repair 轮次会优先
+生成结构化局部 action，例如唯一 old/new 替换或函数级替换；只有文件级结构错误时才
+回退到整文件替换。修复会在继续 review/validation 前同步
 `code_task/meta/code_artifacts.json`。如果 finding 仍然阻塞，执行会停住并保留生成文件和
 review 报告。
 

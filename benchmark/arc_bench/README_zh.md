@@ -55,6 +55,20 @@ uv run python benchmark/arc_bench/adapter.py prepare-ml \
 benchmark/arc_bench/prepared/ml/INDEX.md
 ```
 
+## 可选 ML 依赖
+
+在运行 breadth 或 all 这类覆盖面更广的 ML 任务组之前，建议先安装常用科学计算库。这样 code-task 在环境探测和规划时能看到可用库，减少不必要的重复造轮子：
+
+```bash
+uv pip install numpy scipy scikit-learn pandas matplotlib statsmodels networkx imbalanced-learn umap-learn scikit-optimize cma seaborn pytest
+```
+
+快速检查：
+
+```bash
+uv run python -c "import numpy, scipy, sklearn, pandas, matplotlib, statsmodels, networkx, imblearn, umap, skopt, cma; print('arc deps ok')"
+```
+
 ## 推荐批量运行
 
 快速链路测试，单个任务失败后继续后续任务：

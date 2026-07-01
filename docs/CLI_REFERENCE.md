@@ -491,10 +491,11 @@ under `code_task/meta/planning/`. Use `--planning-mode compact` only when
 debugging the older single-call planner.
 
 If greenfield review fails with generic recoverable findings, bounded repair
-rounds may regenerate only the affected generated files and resync
-`code_task/meta/code_artifacts.json` before review/validation continues. If the
-finding is still blocking, execution stops with the generated files and review
-report preserved.
+rounds first ask for structured local actions such as unique old/new replacements
+or function-level rewrites. Whole-file replacement is kept for structural
+file-level failures. Repairs resync `code_task/meta/code_artifacts.json` before
+review/validation continues. If the finding is still blocking, execution stops
+with the generated files and review report preserved.
 
 #### `simple-ar code-task decide-plan`
 

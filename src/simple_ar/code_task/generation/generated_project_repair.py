@@ -3,11 +3,11 @@ from __future__ import annotations
 """Repair helpers for generated-project code-task outputs.
 
 This module is intentionally separate from ``simple_ar.code_task.execution.repair``:
-that module proposes patch edits for existing-project code-task runs, while this
-module repairs a whole generated project after result-schema or run-guard failure.
-8-stage experiment runs call these helpers as an adapter because their
-``06-code/generated_project`` is projected from the unified greenfield code-task
-workspace.
+that module proposes human-reviewed patch edits for existing-project code-task
+runs, while this module performs bounded automatic repair inside an already
+generated project workspace. The edit application is shared and deterministic:
+structured actions are preferred, and whole-file replacement is kept as a
+fallback for structural failures.
 """
 
 import json
@@ -30,6 +30,7 @@ from simple_ar.agent_backends import (
 )
 from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import dependency_context, public_api
+from simple_ar.code_task.editing.actions import apply_repair_actions
 from simple_ar.code_task.generation.common import contains_any, safe_relative_path
 from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.review_pipeline import build_review_index, compact_review_index
@@ -190,7 +191,7 @@ def _regenerate_review_failed_files(
         previous = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
         try:
             response = client.ask_json(
-                "You repair generated Python project files. Return only JSON with string fields `content` and `summary`.",
+                "You repair generated Python project files. Return only JSON with `summary` and either `actions` or fallback `content`.",
                 _review_file_repair_prompt(
                     rel_path=rel_path,
                     file_spec=spec,
@@ -206,32 +207,121 @@ def _regenerate_review_failed_files(
         except Exception as exc:
             unresolved.append(f"{rel_path}: LLM review repair failed: {exc}")
             continue
-        content = str(response.get("content", "")).strip()
-        if not content:
-            unresolved.append(f"{rel_path}: LLM review repair returned empty content.")
-            continue
-        content = _strip_markdown_fence(content.rstrip() + "\n")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        error = _compile_error(target) if target.suffix == ".py" else ""
-        if error:
-            target.write_text(previous, encoding="utf-8")
-            unresolved.append(f"{rel_path}: repaired file failed to compile: {error}")
-            continue
-        if rel_path not in changed:
-            changed.append(rel_path)
-        summary = str(response.get("summary") or "Regenerated after review failure.")[:500]
-        notes.append(f"Regenerated {rel_path} with LLM review repair.")
-        regenerated.append(
-            {
-                "path": rel_path,
-                "mode": "llm_review_repair",
-                "line_count": max(1, len(content.splitlines())),
-                "summary": summary,
-                "public_api": public_api(target) if target.suffix == ".py" else [],
-            }
+        applied = _apply_llm_file_repair_response(
+            project_dir=project_dir,
+            rel_path=rel_path,
+            response=response,
+            previous_content=previous,
+            previous_exists=target.is_file(),
+            changed=changed,
+            notes=notes,
+            unresolved=unresolved,
+            mode_prefix="llm_review_repair",
+            fallback_summary="Regenerated after review failure.",
         )
+        if applied is not None:
+            regenerated.append(applied)
     return regenerated
+
+
+def _apply_llm_file_repair_response(
+    *,
+    project_dir: Path,
+    rel_path: str,
+    response: Mapping[str, Any],
+    previous_content: str,
+    previous_exists: bool,
+    changed: list[str],
+    notes: list[str],
+    unresolved: list[str],
+    mode_prefix: str,
+    fallback_summary: str,
+) -> dict[str, Any] | None:
+    target = project_dir / rel_path
+    action_result: dict[str, Any] | None = None
+    action_rejection = ""
+    actions = response.get("actions")
+    if isinstance(actions, list) and actions:
+        action_result = apply_repair_actions(project_dir, actions, allowed_paths={rel_path})
+        if action_result.get("status") == "patched":
+            error = _compile_error(target) if target.suffix == ".py" and target.is_file() else ""
+            if error:
+                _restore_repair_target(target, previous_content, previous_exists)
+                unresolved.append(f"{rel_path}: action repair failed to compile: {error}")
+            else:
+                if rel_path not in changed:
+                    changed.append(rel_path)
+                notes.append(f"Applied structured actions to {rel_path}.")
+                return {
+                    "path": rel_path,
+                    "mode": f"{mode_prefix}_actions",
+                    "line_count": _file_line_count(target),
+                    "summary": str(response.get("summary") or fallback_summary)[:500],
+                    "public_api": public_api(target) if target.suffix == ".py" and target.is_file() else [],
+                    "edit_application": action_result,
+                }
+        elif action_result.get("rejected_actions"):
+            action_rejection = (
+                f"{rel_path}: structured repair actions were rejected: "
+                f"{json.dumps(action_result.get('rejected_actions'), ensure_ascii=False)[:1000]}"
+            )
+
+    content = str(response.get("content", "")).strip()
+    if not content:
+        if action_rejection:
+            unresolved.append(action_rejection)
+        if action_result is None:
+            unresolved.append(f"{rel_path}: LLM repair returned neither actions nor content.")
+        return None
+    content = _strip_markdown_fence(content.rstrip() + "\n")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    error = _compile_error(target) if target.suffix == ".py" else ""
+    if error:
+        _restore_repair_target(target, previous_content, previous_exists)
+        unresolved.append(f"{rel_path}: repaired file failed to compile: {error}")
+        return None
+    if rel_path not in changed:
+        changed.append(rel_path)
+    notes.append(f"Regenerated {rel_path} with LLM file repair.")
+    return {
+        "path": rel_path,
+        "mode": mode_prefix,
+        "line_count": max(1, len(content.splitlines())),
+        "summary": str(response.get("summary") or fallback_summary)[:500],
+        "public_api": public_api(target) if target.suffix == ".py" else [],
+        "edit_application": {
+            "schema_version": "code_task_repair_edit_application.v1",
+            "status": "patched",
+            "changed_files": [rel_path],
+            "applied_actions": [
+                {
+                    "action": "rewrite_file",
+                    "path": rel_path,
+                    "public_api_changed": True,
+                    "rationale": str(response.get("summary") or fallback_summary)[:500],
+                }
+            ],
+            "rejected_actions": action_result.get("rejected_actions", []) if action_result else [],
+        },
+    }
+
+
+def _restore_repair_target(target: Path, previous_content: str, previous_exists: bool) -> None:
+    if previous_exists:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(previous_content, encoding="utf-8")
+    elif target.exists():
+        target.unlink()
+
+
+def _file_line_count(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    try:
+        return max(1, len(path.read_text(encoding="utf-8", errors="replace").splitlines()))
+    except OSError:
+        return 0
 
 
 def _repair_fallback_support_modules(
@@ -360,8 +450,15 @@ def _review_file_repair_prompt(
     return (
         "Repair exactly one generated project file. The surrounding project already exists on disk; "
         "your file must integrate with the actual dependency APIs and must not install packages.\n\n"
+        "Preferred output:\n"
+        "- Return `actions` as a list of structured repair actions whenever possible.\n"
+        "- Prefer `replace_block` with unique `old_string`/`new_string` for local fixes.\n"
+        "- Use `rewrite_function` with `function_name` and `new_source` for one-function logic repairs.\n"
+        "- Use `rewrite_file` or top-level `content` only when the file-level contract is structurally wrong.\n"
+        "- If you choose a broad rewrite, explain why a smaller repair is insufficient in `summary`.\n\n"
         "Hard rules:\n"
-        "- Return a complete file in JSON field `content`; do not use markdown fences.\n"
+        "- Return JSON only; do not use markdown fences.\n"
+        "- Every action must include `action`, `path`, `rationale`, and the required action fields.\n"
         "- Keep paths and behavior local; no network, shell, credentials, or hidden downloads.\n"
         "- If task-relevant installed packages are available in dependency_advice, you may use them.\n"
         "- Preserve the exact public API requested by the file spec when practical.\n"
@@ -873,7 +970,7 @@ def _regenerate_run_failed_files(
         spec = file_specs.get(rel_path, {"path": rel_path, "purpose": "Repair generated runtime failure.", "dependencies": []})
         try:
             response = client.ask_json(
-                "You repair one file in a generated Python experiment project after a benchmark runtime failure. Return only JSON with string fields `content` and `summary`.",
+                "You repair one file in a generated Python experiment project after a benchmark runtime failure. Return only JSON with `summary` and either `actions` or fallback `content`.",
                 _run_file_repair_prompt(
                     rel_path=rel_path,
                     current_content=previous,
@@ -893,28 +990,20 @@ def _regenerate_run_failed_files(
         except Exception as exc:
             unresolved.append(f"{rel_path}: LLM run repair failed: {exc}")
             continue
-        content = _strip_markdown_fence(str(response.get("content", "")).strip().rstrip() + "\n")
-        if not content.strip():
-            unresolved.append(f"{rel_path}: LLM run repair returned empty content.")
-            continue
-        target.write_text(content, encoding="utf-8")
-        error = _compile_error(target)
-        if error:
-            target.write_text(previous, encoding="utf-8")
-            unresolved.append(f"{rel_path}: repaired file failed to compile: {error}")
-            continue
-        if rel_path not in changed:
-            changed.append(rel_path)
-        notes.append(f"Regenerated {rel_path} with LLM run repair.")
-        regenerated.append(
-            {
-                "path": rel_path,
-                "mode": "llm_run_repair",
-                "line_count": max(1, len(content.splitlines())),
-                "summary": str(response.get("summary") or "Regenerated after benchmark runtime failure.")[:500],
-                "public_api": public_api(target),
-            }
+        applied = _apply_llm_file_repair_response(
+            project_dir=project_dir,
+            rel_path=rel_path,
+            response=response,
+            previous_content=previous,
+            previous_exists=True,
+            changed=changed,
+            notes=notes,
+            unresolved=unresolved,
+            mode_prefix="llm_run_repair",
+            fallback_summary="Regenerated after benchmark runtime failure.",
         )
+        if applied is not None:
+            regenerated.append(applied)
     return regenerated
 
 
@@ -1098,7 +1187,8 @@ def _run_repair_plan_prompt(
         "- Use Previous repair context to avoid repeating the same failed localization or patch strategy.\n"
         "- If the same error survived a prior repair, explicitly explain why the previous fix was insufficient before selecting target files.\n"
         "- Do not choose files only because they appear in validation warnings if benchmark stderr contains a clearer runtime failure.\n"
-        "- Return JSON with fields: diagnosis, root_cause, dependency_trace, target_files, repair_strategy, risks.\n"
+        "- Return JSON with fields: failure_kind, diagnosis, root_cause, observed_error, repeated_failure, previous_attempt_summary, affected_files, producer_files, consumer_files, evidence_gaps, repair_scope, why_not_smaller_scope, why_not_larger_scope, dependency_trace, target_files, repair_strategy, risks.\n"
+        "- repair_scope must be one of: block, function, file, multi_file, regenerate_plan.\n"
         "- dependency_trace should be a short ordered list of producer/consumer/aggregate facts, not prose filler.\n"
         "- target_files must use only paths from candidate_files.\n\n"
         f"Benchmark stderr:\n{stderr_text[:6000]}\n\n"
@@ -1481,8 +1571,15 @@ def _run_file_repair_prompt(
     return (
         "Repair exactly one generated project file after a benchmark runtime failure. "
         "The full project already exists on disk, and this file must integrate with the existing public APIs.\n\n"
+        "Preferred output:\n"
+        "- Return `actions` when a local repair is enough.\n"
+        "- Use `replace_block` with unique `old_string`/`new_string` for call-site, field, import, or return-shape fixes.\n"
+        "- Use `rewrite_function` with `function_name` and `new_source` for one-function repairs.\n"
+        "- Use `rewrite_file` or top-level `content` only when the file's whole responsibility or public API must change.\n"
+        "- If changing a public API, make the repair plan include producer and consumer files; otherwise preserve it.\n\n"
         "Hard rules:\n"
-        "- Return a complete replacement file in JSON field `content`; do not use markdown fences.\n"
+        "- Return JSON only; do not use markdown fences.\n"
+        "- Every action must include `action`, `path`, `rationale`, and the required action fields.\n"
         "- Preserve the file's public API unless the failure proves that API is wrong.\n"
         "- Keep behavior local and deterministic; no network, shell, credentials, or hidden downloads.\n"
         "- Do not fake metrics. Fix the runtime path so the benchmark can produce measured outputs.\n"
