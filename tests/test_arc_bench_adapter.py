@@ -61,6 +61,43 @@ class ArcBenchAdapterTests(unittest.TestCase):
             self.assertIn("Real Report", writeup)
             self.assertNotIn("Project Readme", writeup)
 
+    def test_strict_disagreement_adjudication_overrides_reviewer_average(self) -> None:
+        adapter = load_adapter_module()
+        leaves = [
+            {"id": "leaf-a", "task_category": "Code Development", "weight": 1.0, "requirements": "A"},
+            {"id": "leaf-b", "task_category": "Result Analysis", "weight": 1.0, "requirements": "B"},
+        ]
+        reviewers = [
+            {
+                "leaf_grades": [
+                    {"id": "leaf-a", "score": 1.0, "reasoning": "A strong"},
+                    {"id": "leaf-b", "score": 0.8, "reasoning": "B ok"},
+                ]
+            },
+            {
+                "leaf_grades": [
+                    {"id": "leaf-a", "score": 0.4, "reasoning": "A weak"},
+                    {"id": "leaf-b", "score": 0.6, "reasoning": "B ok-ish"},
+                ]
+            },
+        ]
+        disagreements = adapter.find_strict_disagreements(reviewers, leaves, threshold=0.2)
+        combined = adapter.combine_strict_reviewer_grades(
+            reviewers=reviewers,
+            adjudication={
+                "leaf_grades": [
+                    {"id": "leaf-a", "score": 0.7, "reasoning": "Adjudicated", "category": "Code Development"}
+                ]
+            },
+            leaves=leaves,
+        )
+
+        self.assertEqual([row["leaf_id"] for row in disagreements], ["leaf-a"])
+        self.assertEqual(combined[0]["score"], 0.7)
+        self.assertEqual(combined[0]["source_round"], "strict_adjudication")
+        self.assertAlmostEqual(combined[1]["score"], 0.7)
+        self.assertEqual(combined[1]["source_round"], "strict_reviewer_average")
+
 
 if __name__ == "__main__":
     unittest.main()

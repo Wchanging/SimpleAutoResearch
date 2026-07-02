@@ -15,6 +15,8 @@
 - Code-task generation 层新增通用路径、文本、列表和映射规范化 helper，减少 writer / planning / review / repair 之间重复实现同类清洗逻辑。
 - Generated-project runtime compatibility patch 与 repair 逻辑更加通用，优先修复 preset/config、entrypoint、runner API 和 unexpected keyword 等接口契约问题，再进入严格 benchmark 执行。
 - Benchmark adapter 抽出 manifest contract，ARC-Bench adapter 的 prepare/finalize metadata 统一包含 suite、operation、status、input、output 和 metadata，为后续接入其他 benchmark 预留轻量接口，同时不把 benchmark 专用逻辑写入 `src/simple_ar`。
+- ARC-Bench scoring 新增 `proxy`、`arc-auto`、`strict` 三档 profile。`strict` 会构建紧凑 evidence bundle，运行独立 reviewer，并对 per-leaf 分歧执行复审，scorecard 中明确 analysis source、CD/CE/RA、reviewer disagreement 和 final aggregate，避免把日常 proxy 分数误当作论文 strict judge 分数。
+- Result-analysis 的指标表提取从固定 key 扩展为 shape-based discovery，可从嵌套 `aggregate_rows`、condition aggregates 或 `{metric, mean, std}` 这类通用结构中发现实验结果，减少不同项目 result schema 带来的空表问题。
 - Result-analysis 与 ARC scoring 成功路径不再保存完整 prompt 文本；只有 JSON 解析或 scoring 失败时才写出 prompt/raw response 诊断文件。Code-task 子进程默认关闭 `.pyc` 写入，减少 `__pycache__` 这类无审计价值的小文件。
 - Code-task greenfield contract 新增通用 `evidence_plan`，会从任务说明中提取显式假设、比较、数据集/条件、必需指标、必需 artifact 和 claim policy，并贯穿 planning、逐文件生成、review 与 repair prompt，避免大型任务在代码生成后只剩聚合指标而丢失支撑结论的证据链。
 - Greenfield planning / writer prompt 现在会把证据要求作为硬契约处理：需要下游指标或报告使用的 features、labels、predictions、condition、seed、per-dataset rows 等字段必须显式传递，不能在中途只保留最终 summary。

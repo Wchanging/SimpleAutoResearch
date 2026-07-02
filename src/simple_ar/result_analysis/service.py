@@ -710,11 +710,59 @@ def aggregate_records(data: dict[str, Any]) -> list[dict[str, Any]]:
     summary = data.get("summary")
     if isinstance(summary, dict) and isinstance(summary.get("per_cell"), list):
         records.extend(row for row in summary["per_cell"] if isinstance(row, dict))
-    for key in ("per_cell", "cells", "aggregates", "summaries", "condition_aggregates"):
+    for key in (
+        "per_cell",
+        "cells",
+        "aggregates",
+        "aggregate_rows",
+        "summaries",
+        "condition_aggregates",
+    ):
         value = data.get(key)
         if isinstance(value, list):
             records.extend(row for row in value if isinstance(row, dict))
+    records.extend(discover_aggregate_records(data))
     return records
+
+
+def discover_aggregate_records(value: Any, *, depth: int = 0, max_depth: int = 4) -> list[dict[str, Any]]:
+    if depth > max_depth:
+        return []
+    records: list[dict[str, Any]] = []
+    if isinstance(value, list):
+        for row in value:
+            if isinstance(row, dict) and looks_like_aggregate_record(row):
+                records.append(row)
+            elif isinstance(row, (dict, list)):
+                records.extend(discover_aggregate_records(row, depth=depth + 1, max_depth=max_depth))
+        return records
+    if not isinstance(value, dict):
+        return records
+    if looks_like_aggregate_record(value):
+        records.append(value)
+    for key, child in value.items():
+        if key in {"split_rows", "rows", "runs", "splits", "seed_evidence"}:
+            continue
+        if isinstance(child, (dict, list)):
+            records.extend(discover_aggregate_records(child, depth=depth + 1, max_depth=max_depth))
+    return records
+
+
+def looks_like_aggregate_record(record: dict[str, Any]) -> bool:
+    if not record_dataset(record) or not record_condition(record):
+        return False
+    if isinstance(record.get("mean"), dict):
+        return True
+    if record.get("metric") and is_number(record.get("mean")):
+        return True
+    for key, value in record.items():
+        if isinstance(value, dict) and "mean" in value:
+            return True
+        if key.endswith("_mean") and is_number(value):
+            return True
+        if key.startswith("mean_") and is_number(value):
+            return True
+    return False
 
 
 def raw_records(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -744,6 +792,10 @@ def normalized_metric_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
         for metric, mean in mean_map.items():
             std = std_map.get(metric) if isinstance(std_map, dict) else None
             rows.append(table_row(dataset, condition, str(metric), mean, std, count))
+
+    scalar_metric = record.get("metric")
+    if scalar_metric and is_number(record.get("mean")):
+        rows.append(table_row(dataset, condition, str(scalar_metric), record.get("mean"), record.get("std"), count))
 
     for key, value in record.items():
         if key.endswith("_mean") and is_number(value):

@@ -130,6 +130,21 @@ def main() -> int:
     score.add_argument("--submission-dir", type=Path)
     score.add_argument("--output-dir", type=Path)
     score.add_argument("--model", help="Optional model override for scoring.")
+    score.add_argument(
+        "--score-profile",
+        choices=("proxy", "arc-auto", "strict"),
+        help="Scoring profile. proxy is the lightweight internal scorer; strict runs two reviewers and adjudication.",
+    )
+    score.add_argument(
+        "--strict-reviewers",
+        type=int,
+        help="Number of independent reviewers for --score-profile strict. Use 1 only for low-cost previews.",
+    )
+    score.add_argument(
+        "--disagreement-threshold",
+        type=float,
+        help="Per-leaf strict reviewer disagreement threshold that triggers adjudication.",
+    )
     score.add_argument("--max-code-chars", type=int)
     score.add_argument("--max-result-chars", type=int)
     score.add_argument("--max-writeup-chars", type=int)
@@ -798,6 +813,8 @@ def finalize_submission(
                 "topic_id": manifest.get("id"),
                 "metric_count": len(metrics),
                 "analysis": analysis_audit,
+                "adapter_generated_analysis": bool(analyze),
+                "analysis_source": "adapter-generated" if analyze else "agent-original",
                 "adapter_schema_version": "simple_ar_arc_submission.v1",
             },
         ),
@@ -879,6 +896,9 @@ def run_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     max_code_chars = int(value_from(args, cfg, "score", "max_code_chars", 30000))
     max_result_chars = int(value_from(args, cfg, "score", "max_result_chars", 24000))
     max_writeup_chars = int(value_from(args, cfg, "score", "max_writeup_chars", 16000))
+    score_profile = str(value_from(args, cfg, "score", "score_profile", "proxy") or "proxy").strip().lower()
+    strict_reviewers = int(value_from(args, cfg, "score", "strict_reviewers", 2))
+    disagreement_threshold = float(value_from(args, cfg, "score", "disagreement_threshold", 0.20))
 
     if not prepared_raw:
         raise SystemExit("--prepared-dir is required")
@@ -901,6 +921,9 @@ def run_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
         submission_dir=submission_dir,
         output_dir=output_dir,
         model=model or None,
+        score_profile=score_profile,
+        strict_reviewers=strict_reviewers,
+        disagreement_threshold=disagreement_threshold,
         max_code_chars=max_code_chars,
         max_result_chars=max_result_chars,
         max_writeup_chars=max_writeup_chars,
@@ -917,6 +940,9 @@ def score_submission_with_llm(
     submission_dir: Path,
     output_dir: Path,
     model: str | None,
+    score_profile: str = "proxy",
+    strict_reviewers: int = 2,
+    disagreement_threshold: float = 0.20,
     max_code_chars: int,
     max_result_chars: int,
     max_writeup_chars: int,
@@ -925,12 +951,22 @@ def score_submission_with_llm(
     if not leaves:
         raise SystemExit("rubric has no leaf criteria")
     output_dir.mkdir(parents=True, exist_ok=True)
+    score_profile = normalize_score_profile(score_profile)
     artifacts = load_score_artifacts(
         submission_dir,
         max_code_chars=max_code_chars,
         max_result_chars=max_result_chars,
         max_writeup_chars=max_writeup_chars,
     )
+    artifacts["evidence_bundle"] = build_submission_evidence_bundle(
+        manifest=manifest,
+        rubric=rubric,
+        prepared_dir=prepared_dir,
+        submission_dir=submission_dir,
+        artifacts=artifacts,
+        score_profile=score_profile,
+    )
+    write_json(output_dir / "evidence_bundle.json", artifacts["evidence_bundle"])
 
     usage_rows: list[dict[str, Any]] = []
     try:
@@ -944,6 +980,23 @@ def score_submission_with_llm(
         append_jsonl(output_dir / "llm_usage.jsonl", row)
 
     client = LLMClient.from_env(model=model, usage_callback=usage_callback)
+
+    if score_profile == "strict":
+        result = score_submission_strict(
+            client=client,
+            manifest=manifest,
+            rubric=rubric,
+            prepared_dir=prepared_dir,
+            submission_dir=submission_dir,
+            output_dir=output_dir,
+            artifacts=artifacts,
+            leaves=leaves,
+            reviewer_count=strict_reviewers,
+            disagreement_threshold=disagreement_threshold,
+        )
+        if usage_rows:
+            write_json(output_dir / "llm_usage_summary.json", summarize_llm_usage_rows(usage_rows))
+        return result
 
     manifest_context = build_manifest_context(manifest)
     code_leaves = [leaf for leaf in leaves if is_code_development_leaf(leaf)]
@@ -990,13 +1043,16 @@ def score_submission_with_llm(
     result = {
         "schema_version": "simple_ar_arc_judge_result.v1",
         "backend": "llm",
-        "scoring_profile": "arc-compatible-two-round",
+        "scoring_profile": score_profile,
+        "profile_notes": profile_notes(score_profile),
         "prompt_version": "simple_ar_arc_score_v2",
         "topic_id": manifest.get("id"),
         "title": manifest.get("title"),
         "prepared_dir": str(prepared_dir),
         "submission_dir": str(submission_dir),
         "artifact_paths": artifacts["paths"],
+        "evidence_bundle_path": str(output_dir / "evidence_bundle.json"),
+        "analysis_source": artifacts["evidence_bundle"].get("analysis_source"),
         "leaf_grades": leaf_grades,
         "category_scores": category_scores,
         "scoring_summary": scoring_summary,
@@ -1015,6 +1071,504 @@ def score_submission_with_llm(
     if usage_rows:
         write_json(output_dir / "llm_usage_summary.json", summarize_llm_usage_rows(usage_rows))
     return result
+
+
+def normalize_score_profile(value: str) -> str:
+    profile = (value or "proxy").strip().lower()
+    aliases = {
+        "quick": "proxy",
+        "fast": "proxy",
+        "arc": "arc-auto",
+        "arc_compatible": "arc-auto",
+        "arc-compatible": "arc-auto",
+    }
+    profile = aliases.get(profile, profile)
+    if profile not in {"proxy", "arc-auto", "strict"}:
+        raise SystemExit(f"unknown score profile: {value!r}; expected proxy, arc-auto, or strict")
+    return profile
+
+
+def profile_notes(profile: str) -> list[str]:
+    if profile == "strict":
+        return [
+            "Strict profile uses independent reviewers and disagreement adjudication.",
+            "Use this profile for paper-facing comparisons; it is slower and more expensive than proxy.",
+        ]
+    if profile == "arc-auto":
+        return [
+            "ARC-auto profile approximates ARC-Bench's automatic two-round LLM judge.",
+            "It is useful for regression testing but is not a substitute for strict two-reviewer evaluation.",
+        ]
+    return [
+        "Proxy profile is a lightweight internal two-round scorer for development regression.",
+        "Do not compare proxy scores directly with paper-reported ARC-Bench strict scores.",
+    ]
+
+
+def build_submission_evidence_bundle(
+    *,
+    manifest: dict[str, Any],
+    rubric: dict[str, Any],
+    prepared_dir: Path,
+    submission_dir: Path,
+    artifacts: dict[str, Any],
+    score_profile: str,
+) -> dict[str, Any]:
+    parent = submission_dir.parent
+    meta_path = parent / "arc_adapter_meta.json"
+    meta = read_json(meta_path) if meta_path.is_file() else {}
+    analysis_source = infer_analysis_source(submission_dir, parent, meta)
+    return {
+        "schema_version": "simple_ar_submission_evidence_bundle.v1",
+        "benchmark_id": "arc_bench",
+        "topic_id": manifest.get("id"),
+        "title": manifest.get("title"),
+        "score_profile": score_profile,
+        "prepared_dir": str(prepared_dir),
+        "submission_dir": str(submission_dir),
+        "rubric_leaf_count": len(list(iter_rubric_leaves(rubric))),
+        "rubric_categories": summarize_rubric_categories(rubric),
+        "manifest_context": build_manifest_context(manifest),
+        "artifact_paths": artifacts.get("paths", {}),
+        "code_files": artifacts.get("code_files", []),
+        "metrics_digest": artifacts.get("metrics", {}),
+        "claims_digest": compact_claims_for_bundle(artifacts.get("claims")),
+        "experiment_summary_digest": compact_experiment_summary_for_bundle(artifacts.get("experiment_summary")),
+        "writeup_number_claims": extract_number_claims(str(artifacts.get("writeup") or "")),
+        "analysis_source": analysis_source,
+        "adapter_generated_analysis": analysis_source == "adapter-generated",
+        "adapter_notes": profile_notes(score_profile),
+        "arc_adapter_meta": clip_data(meta, 6000),
+    }
+
+
+def infer_analysis_source(submission_dir: Path, parent: Path, meta: dict[str, Any]) -> str:
+    metadata = meta.get("metadata") if isinstance(meta, dict) else {}
+    if isinstance(metadata, dict):
+        if metadata.get("adapter_generated_analysis") is True:
+            return "adapter-generated"
+        if metadata.get("analysis_source"):
+            return str(metadata["analysis_source"])
+    readme = submission_dir / "README.md"
+    analysis_report = parent / "result_analysis" / "analysis_report.md"
+    if readme.is_file() and analysis_report.is_file():
+        try:
+            if readme.read_text(encoding="utf-8", errors="ignore").strip() == analysis_report.read_text(
+                encoding="utf-8", errors="ignore"
+            ).strip():
+                return "adapter-generated"
+        except OSError:
+            pass
+    return "agent-original"
+
+
+def summarize_rubric_categories(rubric: dict[str, Any]) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for leaf in iter_rubric_leaves(rubric):
+        category = str(leaf.get("task_category") or "Uncategorized")
+        group = groups.setdefault(category, {"category": category, "leaf_count": 0, "weight": 0.0})
+        group["leaf_count"] += 1
+        group["weight"] += coerce_weight(leaf.get("weight"))
+    return list(groups.values())
+
+
+def compact_claims_for_bundle(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return clip_data(value, 8000)
+    keys = ("summary_metrics", "hypothesis_verdicts", "claims", "rubric_coverage", "metric_summary")
+    return {key: clip_data(value.get(key), 8000) for key in keys if key in value}
+
+
+def compact_experiment_summary_for_bundle(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return clip_data(value, 8000)
+    keys = (
+        "topic_id",
+        "title",
+        "expected_conditions",
+        "expected_datasets",
+        "expected_metrics",
+        "hypotheses",
+        "metric_values",
+        "project_results",
+    )
+    return {key: clip_data(value.get(key), 12000) for key in keys if key in value}
+
+
+def extract_number_claims(text: str, *, limit: int = 24) -> list[str]:
+    rows: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or not re.search(r"\d", stripped):
+            continue
+        if len(stripped) > 260:
+            stripped = stripped[:257] + "..."
+        rows.append(stripped)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def score_submission_strict(
+    *,
+    client: Any,
+    manifest: dict[str, Any],
+    rubric: dict[str, Any],
+    prepared_dir: Path,
+    submission_dir: Path,
+    output_dir: Path,
+    artifacts: dict[str, Any],
+    leaves: list[dict[str, Any]],
+    reviewer_count: int,
+    disagreement_threshold: float,
+) -> dict[str, Any]:
+    reviewer_count = max(1, min(int(reviewer_count or 2), 3))
+    disagreement_threshold = max(0.0, float(disagreement_threshold))
+    reviewers: list[dict[str, Any]] = []
+    all_warnings: list[str] = []
+    for index in range(reviewer_count):
+        reviewer_id = chr(ord("A") + index)
+        reviewer = run_strict_reviewer(
+            client=client,
+            manifest=manifest,
+            leaves=leaves,
+            artifacts=artifacts,
+            output_dir=output_dir,
+            reviewer_id=reviewer_id,
+        )
+        reviewers.append(reviewer)
+        all_warnings.extend(str(item) for item in reviewer.get("warnings", []))
+        write_json(output_dir / f"reviewer_{reviewer_id.lower()}.json", reviewer)
+
+    disagreements = find_strict_disagreements(reviewers, leaves, threshold=disagreement_threshold)
+    write_json(output_dir / "disagreements.json", {"threshold": disagreement_threshold, "items": disagreements})
+    adjudication: dict[str, Any] = {"leaf_grades": [], "raw_round": {}, "warnings": []}
+    if disagreements:
+        adjudication = run_strict_adjudication(
+            client=client,
+            manifest=manifest,
+            leaves=leaves,
+            artifacts=artifacts,
+            disagreements=disagreements,
+            output_dir=output_dir,
+        )
+        all_warnings.extend(str(item) for item in adjudication.get("warnings", []))
+    else:
+        write_json(output_dir / "adjudication.json", adjudication)
+
+    leaf_grades = combine_strict_reviewer_grades(
+        reviewers=reviewers,
+        adjudication=adjudication,
+        leaves=leaves,
+    )
+    category_scores = compute_category_scores(leaf_grades)
+    overall = compute_overall_score(leaf_grades)
+    results_only = compute_results_only_score(leaf_grades)
+    scoring_summary = build_scoring_summary(category_scores, overall, results_only)
+    scoring_summary.update(
+        {
+            "reviewer_count": reviewer_count,
+            "disagreement_threshold": disagreement_threshold,
+            "disagreement_count": len(disagreements),
+            "disagreement_rate": round(len(disagreements) / len(leaves), 4) if leaves else 0.0,
+            "adjudicated_leaf_count": len(adjudication.get("leaf_grades") or []),
+            "strict_profile": True,
+        }
+    )
+    result = {
+        "schema_version": "simple_ar_arc_judge_result.v1",
+        "backend": "llm",
+        "scoring_profile": "strict",
+        "profile_notes": profile_notes("strict"),
+        "prompt_version": "simple_ar_arc_strict_score_v1",
+        "topic_id": manifest.get("id"),
+        "title": manifest.get("title"),
+        "prepared_dir": str(prepared_dir),
+        "submission_dir": str(submission_dir),
+        "artifact_paths": artifacts["paths"],
+        "evidence_bundle_path": str(output_dir / "evidence_bundle.json"),
+        "analysis_source": artifacts["evidence_bundle"].get("analysis_source"),
+        "leaf_grades": leaf_grades,
+        "category_scores": category_scores,
+        "scoring_summary": scoring_summary,
+        "overall_score": overall,
+        "overall_strict": overall,
+        "results_only": results_only,
+        "overall_reasoning": summarize_strict_reasoning(reviewers, adjudication),
+        "warnings": sorted(set(all_warnings)),
+        "limitations": sorted(set(extract_strict_limitations(reviewers, adjudication))),
+        "reviewers": summarize_reviewer_results(reviewers),
+        "disagreements": disagreements,
+        "adjudication": adjudication,
+        "model": client.model,
+        "scored_at": time.time(),
+    }
+    write_json(output_dir / "judge_result.json", result)
+    write_text(output_dir / "scorecard.md", render_scorecard(result))
+    return result
+
+
+def run_strict_reviewer(
+    *,
+    client: Any,
+    manifest: dict[str, Any],
+    leaves: list[dict[str, Any]],
+    artifacts: dict[str, Any],
+    output_dir: Path,
+    reviewer_id: str,
+) -> dict[str, Any]:
+    manifest_context = build_manifest_context(manifest)
+    code_leaves = [leaf for leaf in leaves if is_code_development_leaf(leaf)]
+    result_leaves = [leaf for leaf in leaves if not is_code_development_leaf(leaf)]
+    leaf_grades: list[dict[str, Any]] = []
+    raw_rounds: dict[str, Any] = {}
+    warnings_: list[str] = []
+    system = strict_score_system_prompt(reviewer_id)
+    if code_leaves:
+        prompt = strict_prompt_addendum(build_code_round_prompt(manifest_context, code_leaves, artifacts), artifacts)
+        raw, grades, round_warnings = run_score_round(
+            client,
+            prompt,
+            code_leaves,
+            label=f"arc-bench-strict-reviewer-{reviewer_id.lower()}-code",
+            round_name=f"reviewer_{reviewer_id.lower()}_code",
+            raw_response_path=output_dir / f"reviewer_{reviewer_id.lower()}_code_response.json",
+            prompt_debug_path=output_dir / f"reviewer_{reviewer_id.lower()}_code_prompt.txt",
+            system_prompt_text=system,
+        )
+        raw_rounds["code"] = raw
+        leaf_grades.extend(grades)
+        warnings_.extend(round_warnings)
+    if result_leaves:
+        prompt = strict_prompt_addendum(build_results_round_prompt(manifest_context, result_leaves, artifacts), artifacts)
+        raw, grades, round_warnings = run_score_round(
+            client,
+            prompt,
+            result_leaves,
+            label=f"arc-bench-strict-reviewer-{reviewer_id.lower()}-results",
+            round_name=f"reviewer_{reviewer_id.lower()}_results",
+            raw_response_path=output_dir / f"reviewer_{reviewer_id.lower()}_results_response.json",
+            prompt_debug_path=output_dir / f"reviewer_{reviewer_id.lower()}_results_prompt.txt",
+            system_prompt_text=system,
+        )
+        raw_rounds["results"] = raw
+        leaf_grades.extend(grades)
+        warnings_.extend(round_warnings)
+    leaf_grades = order_leaf_grades(leaf_grades, leaves)
+    category_scores = compute_category_scores(leaf_grades)
+    overall = compute_overall_score(leaf_grades)
+    return {
+        "reviewer_id": reviewer_id,
+        "leaf_grades": leaf_grades,
+        "category_scores": category_scores,
+        "overall_score": overall,
+        "results_only": compute_results_only_score(leaf_grades),
+        "raw_rounds": raw_rounds,
+        "warnings": warnings_,
+        "limitations": extract_round_limitations(raw_rounds),
+        "overall_reasoning": summarize_round_reasoning(raw_rounds),
+    }
+
+
+def strict_score_system_prompt(reviewer_id: str) -> str:
+    return (
+        score_system_prompt()
+        + f" You are strict reviewer {reviewer_id}. Work independently. "
+        "For each leaf, quote concrete evidence using file path + line number, JSON key path, metric name, or numeric value. "
+        "Do not give high scores for fluent prose alone. Code Development requires real executable implementation, not labels. "
+        "Code Execution requires completed runs, persisted artifacts, and coverage over required conditions/datasets/seeds/metrics. "
+        "Result Analysis receives double weight conceptually: verify that each conclusion is traceable to measured numbers and that limitations are honest. "
+        "If adapter-generated analysis is being scored, state whether the score relies on adapter-facing artifacts rather than original agent writeup."
+    )
+
+
+def strict_prompt_addendum(prompt: str, artifacts: dict[str, Any]) -> str:
+    bundle = artifacts.get("evidence_bundle") or {}
+    return (
+        f"{prompt}\n\n"
+        "## Strict Evidence Bundle Summary\n"
+        f"{json.dumps(clip_data(bundle, 18000), ensure_ascii=False, indent=2, default=str)}\n\n"
+        "Strict checks:\n"
+        "- Evidence must be artifact-grounded, not inferred from task text alone.\n"
+        "- Scores above 0.7 require direct implementation or numeric evidence.\n"
+        "- Missing leaf evidence should be scored 0.5 or lower even if the writeup sounds plausible.\n"
+    )
+
+
+def find_strict_disagreements(
+    reviewers: list[dict[str, Any]],
+    leaves: list[dict[str, Any]],
+    *,
+    threshold: float,
+) -> list[dict[str, Any]]:
+    if len(reviewers) < 2:
+        return []
+    by_reviewer = [
+        {str(row.get("id")): row for row in reviewer.get("leaf_grades", [])}
+        for reviewer in reviewers
+    ]
+    items: list[dict[str, Any]] = []
+    for leaf in leaves:
+        leaf_id = str(leaf.get("id"))
+        scores = [
+            float(rows[leaf_id].get("score") or 0.0)
+            for rows in by_reviewer
+            if leaf_id in rows
+        ]
+        if len(scores) < 2:
+            continue
+        delta = max(scores) - min(scores)
+        if delta > threshold + 1e-9:
+            items.append(
+                {
+                    "leaf_id": leaf_id,
+                    "delta": round(delta, 4),
+                    "scores": scores,
+                    "reviewer_rows": [rows.get(leaf_id, {}) for rows in by_reviewer],
+                    "requirements": str(leaf.get("requirements") or ""),
+                }
+            )
+    return items
+
+
+def run_strict_adjudication(
+    *,
+    client: Any,
+    manifest: dict[str, Any],
+    leaves: list[dict[str, Any]],
+    artifacts: dict[str, Any],
+    disagreements: list[dict[str, Any]],
+    output_dir: Path,
+) -> dict[str, Any]:
+    disputed_ids = {str(item.get("leaf_id")) for item in disagreements}
+    disputed_leaves = [leaf for leaf in leaves if str(leaf.get("id")) in disputed_ids]
+    prompt = (
+        "## Topic Context\n"
+        f"{build_manifest_context(manifest)}\n\n"
+        "## Disputed Leaves\n"
+        f"{format_leaves_for_prompt(disputed_leaves)}\n\n"
+        "## Reviewer Disagreements\n"
+        f"{json.dumps(disagreements, ensure_ascii=False, indent=2, default=str)}\n\n"
+        "## Evidence Bundle\n"
+        f"{json.dumps(clip_data(artifacts.get('evidence_bundle') or {}, 22000), ensure_ascii=False, indent=2, default=str)}\n\n"
+        "Adjudicate only the disputed leaves. Prefer the score best supported by concrete artifacts; do not split the difference by default.\n\n"
+        f"{score_output_instruction(disputed_leaves)}"
+    )
+    raw, grades, warnings_ = run_score_round(
+        client,
+        prompt,
+        disputed_leaves,
+        label="arc-bench-strict-adjudication",
+        round_name="adjudication",
+        raw_response_path=output_dir / "adjudication_response.json",
+        prompt_debug_path=output_dir / "adjudication_prompt.txt",
+        system_prompt_text=strict_adjudicator_system_prompt(),
+    )
+    result = {
+        "leaf_grades": grades,
+        "raw_round": raw,
+        "warnings": warnings_,
+        "overall_reasoning": raw.get("overall_reasoning") if isinstance(raw, dict) else "",
+        "limitations": raw.get("limitations", []) if isinstance(raw, dict) else [],
+    }
+    write_json(output_dir / "adjudication.json", result)
+    return result
+
+
+def strict_adjudicator_system_prompt() -> str:
+    return (
+        score_system_prompt()
+        + " You are the strict adjudicator. Resolve only disputed rubric leaves. "
+        "Use reviewer reasoning as hypotheses, then decide from artifact evidence. "
+        "Return concrete scores and cite the strongest evidence or absence of evidence."
+    )
+
+
+def combine_strict_reviewer_grades(
+    *,
+    reviewers: list[dict[str, Any]],
+    adjudication: dict[str, Any],
+    leaves: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    reviewer_maps = [
+        {str(row.get("id")): row for row in reviewer.get("leaf_grades", [])}
+        for reviewer in reviewers
+    ]
+    adjudicated = {str(row.get("id")): row for row in adjudication.get("leaf_grades", []) if row.get("id")}
+    combined: list[dict[str, Any]] = []
+    for leaf in leaves:
+        leaf_id = str(leaf.get("id"))
+        rows = [mapping[leaf_id] for mapping in reviewer_maps if leaf_id in mapping]
+        if leaf_id in adjudicated:
+            row = dict(adjudicated[leaf_id])
+            row["source_round"] = "strict_adjudication"
+            row["reviewer_scores"] = [round(float(item.get("score") or 0.0), 4) for item in rows]
+        elif rows:
+            avg = sum(float(row.get("score") or 0.0) for row in rows) / len(rows)
+            base = dict(rows[0])
+            base["score"] = round(avg, 4)
+            base["source_round"] = "strict_reviewer_average"
+            base["reviewer_scores"] = [round(float(item.get("score") or 0.0), 4) for item in rows]
+            base["reasoning"] = combine_reasoning(rows)
+            row = base
+        else:
+            row = {
+                "id": leaf_id,
+                "category": str(leaf.get("task_category") or "Uncategorized"),
+                "fine_category": str(leaf.get("finegrained_task_category") or ""),
+                "weight": coerce_weight(leaf.get("weight")),
+                "score": 0.5,
+                "reasoning": "No reviewer returned this leaf; defaulted to 0.5.",
+                "requirements": str(leaf.get("requirements") or ""),
+                "source_round": "strict_missing_default",
+            }
+        row.setdefault("category", str(leaf.get("task_category") or "Uncategorized"))
+        row.setdefault("fine_category", str(leaf.get("finegrained_task_category") or ""))
+        row.setdefault("weight", coerce_weight(leaf.get("weight")))
+        row.setdefault("requirements", str(leaf.get("requirements") or ""))
+        combined.append(row)
+    return combined
+
+
+def combine_reasoning(rows: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        reasoning = str(row.get("reasoning") or row.get("evidence") or "").strip()
+        if reasoning:
+            parts.append(f"Reviewer {index}: {reasoning}")
+    return " | ".join(parts)[:1600]
+
+
+def summarize_strict_reasoning(reviewers: list[dict[str, Any]], adjudication: dict[str, Any]) -> str:
+    parts = [
+        f"Reviewer {row.get('reviewer_id')}: overall={float(row.get('overall_score') or 0.0):.3f}"
+        for row in reviewers
+    ]
+    adjudicated = adjudication.get("leaf_grades") or []
+    if adjudicated:
+        parts.append(f"Adjudicated {len(adjudicated)} disputed leaf/leaves.")
+    return "; ".join(parts)
+
+
+def summarize_reviewer_results(reviewers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "reviewer_id": row.get("reviewer_id"),
+            "overall_score": row.get("overall_score"),
+            "results_only": row.get("results_only"),
+            "category_scores": row.get("category_scores"),
+            "warning_count": len(row.get("warnings") or []),
+        }
+        for row in reviewers
+    ]
+
+
+def extract_strict_limitations(reviewers: list[dict[str, Any]], adjudication: dict[str, Any]) -> list[str]:
+    limitations: list[str] = []
+    for row in reviewers:
+        limitations.extend(str(item) for item in row.get("limitations", []) if item)
+    limitations.extend(str(item) for item in adjudication.get("limitations", []) if item)
+    return limitations
 
 
 def load_score_artifacts(
@@ -1216,6 +1770,7 @@ def run_score_round(
     round_name: str,
     raw_response_path: Path,
     prompt_debug_path: Path | None = None,
+    system_prompt_text: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
     warnings_: list[str] = []
     last_response: dict[str, Any] | None = None
@@ -1225,7 +1780,7 @@ def run_score_round(
         attempt_label = label if attempt == 1 else f"{label}-schema-retry-{attempt}"
         attempt_prompt = prompt if attempt == 1 else score_schema_retry_prompt(prompt, leaves, last_error=last_error)
         try:
-            response = client.ask_json(score_system_prompt(), attempt_prompt, label=attempt_label)
+            response = client.ask_json(system_prompt_text or score_system_prompt(), attempt_prompt, label=attempt_label)
         except Exception as exc:
             if prompt_debug_path is not None:
                 write_text(prompt_debug_path, prompt)
@@ -1465,6 +2020,7 @@ def extract_round_limitations(raw_responses: dict[str, Any]) -> list[str]:
 
 
 def render_scorecard(result: dict[str, Any]) -> str:
+    summary = result.get("scoring_summary") if isinstance(result.get("scoring_summary"), dict) else {}
     lines = [
         f"# ARC-Bench Scorecard: {result.get('topic_id')}",
         "",
@@ -1473,12 +2029,26 @@ def render_scorecard(result: dict[str, Any]) -> str:
         f"- Backend: `{result.get('backend')}`",
         f"- Scoring profile: `{result.get('scoring_profile')}`",
         f"- Model: `{result.get('model')}`",
-        "",
-        "## Category Scores",
-        "",
-        "| Category | Leaves | Weight | Score |",
-        "| --- | ---: | ---: | ---: |",
     ]
+    if result.get("analysis_source"):
+        lines.append(f"- Analysis source: `{result.get('analysis_source')}`")
+    if result.get("scoring_profile") == "strict":
+        lines.extend(
+            [
+                f"- Reviewers: `{summary.get('reviewer_count', 0)}`",
+                f"- Disagreement rate: `{float(summary.get('disagreement_rate') or 0.0):.3f}`",
+                f"- Adjudicated leaves: `{summary.get('adjudicated_leaf_count', 0)}`",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Category Scores",
+            "",
+            "| Category | Leaves | Weight | Score |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
     for category, row in sorted(result.get("category_scores", {}).items()):
         lines.append(
             f"| {category} | {row.get('leaf_count', 0)} | "
@@ -1495,10 +2065,28 @@ def render_scorecard(result: dict[str, Any]) -> str:
     )
     for row in result.get("leaf_grades", []):
         evidence = escape_table_text(row.get("evidence") or row.get("reasoning") or "")
+        reviewer_scores = row.get("reviewer_scores")
+        if isinstance(reviewer_scores, list) and reviewer_scores:
+            evidence = escape_table_text(f"reviewer_scores={reviewer_scores}; {evidence}")
         lines.append(
             f"| `{row.get('id')}` | {row.get('category')} | {float(row.get('weight') or 0.0):.1f} | "
             f"{float(row.get('score') or 0.0):.3f} | {evidence} |"
         )
+    if result.get("reviewers"):
+        lines.extend(["", "## Strict Reviewers", ""])
+        for row in result.get("reviewers", []):
+            lines.append(
+                f"- Reviewer {row.get('reviewer_id')}: overall "
+                f"`{float(row.get('overall_score') or 0.0):.3f}`, results-only "
+                f"`{float(row.get('results_only') or 0.0):.3f}`"
+            )
+    if result.get("disagreements"):
+        lines.extend(["", "## Disagreements", ""])
+        for item in result.get("disagreements", []):
+            lines.append(
+                f"- `{item.get('leaf_id')}` delta `{float(item.get('delta') or 0.0):.3f}` "
+                f"scores `{item.get('scores')}`"
+            )
     if result.get("overall_reasoning"):
         lines.extend(["", "## Overall Reasoning", "", str(result["overall_reasoning"])])
     if result.get("limitations"):

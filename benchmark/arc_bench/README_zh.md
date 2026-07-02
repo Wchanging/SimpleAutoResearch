@@ -80,6 +80,17 @@ uv run python benchmark/arc_bench/batch_runner.py run \
   --score
 ```
 
+上面的命令使用默认 `proxy` 评分，适合快速开发回归。如果要做论文实验或对齐
+AutoResearchClaw strict evaluation protocol，建议显式使用 strict profile：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topic-set quick \
+  --analyze \
+  --score \
+  --score-profile strict
+```
+
 每次 `run` 都会在 `benchmark/arc_bench/batch_state/` 下创建独立状态文件，例如：
 
 ```text
@@ -98,18 +109,30 @@ uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --
 uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --score
 ```
 
+正式评分版本：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze --score --score-profile strict
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze --score --score-profile strict
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze --score --score-profile strict
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --score --score-profile strict
+```
+
 显式指定任务：
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py run \
   --topics ML04 ML02 ML06 \
   --analyze \
-  --score
+  --score \
+  --score-profile strict
 ```
 
 批跑脚本不会只看命令退出码。`execute` 后会读取 run 的 `manifest.json`，
 只有业务状态达到 `benchmark_passed` 才会继续 `finalize`。如果后续补加
 `--score`，并且某个任务已经有有效 submission，它会直接补 `judge/`，不会重跑实验。
+不同 score profile 的 judge 不会互相当作已完成产物；后续补加 `--score-profile strict`
+时，会单独生成/刷新 strict judge。
 如果服务器网络不稳定，可以加 `--llm-retry-attempts 5`，临时覆盖所有
 `code-task execute` 调用的阶段级 LLM 重试次数。
 默认情况下，LLM 调用不会向 provider 传客户端超时和输出上限。如果你需要为了费用控制
@@ -129,6 +152,7 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --topic-set quick \
   --analyze \
   --score \
+  --score-profile strict \
   --llm-retry-attempts 5
 ```
 
@@ -140,7 +164,8 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --state-file benchmark/arc_bench/batch_state/20260627-153607-quick.json \
   --topic-set quick \
   --analyze \
-  --score
+  --score \
+  --score-profile strict
 ```
 
 复用上一次失败 run，并额外给 repair 预算：
@@ -150,6 +175,7 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --topic-set quick \
   --analyze \
   --score \
+  --score-profile strict \
   --resume-existing \
   --extend-repair-rounds 2
 ```
@@ -203,6 +229,18 @@ uv run python benchmark/arc_bench/adapter.py score \
   --output-dir "$OUT_DIR/judge"
 ```
 
+如果要做论文或正式对比，使用 strict profile：
+
+```bash
+uv run python benchmark/arc_bench/adapter.py score \
+  --prepared-dir benchmark/arc_bench/prepared/ml/ML02 \
+  --submission-dir "$OUT_DIR/submission" \
+  --output-dir "$OUT_DIR/judge_strict" \
+  --score-profile strict \
+  --strict-reviewers 2 \
+  --disagreement-threshold 0.20
+```
+
 ## 重点查看文件
 
 ```text
@@ -220,6 +258,7 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     analysis_prompt.txt          # 仅在 analyze JSON 解析失败时用于诊断
     analysis_raw_response.txt    # 仅在 analyze JSON 解析失败时用于诊断
   judge/
+    evidence_bundle.json         # scorer 使用的紧凑 benchmark 证据包
     judge_result.json            # leaf_grades + scoring_summary
     scorecard.md
     score_round_code_response.json
@@ -228,19 +267,22 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     score_round_results_response.json
     score_round_results_prompt.txt              # 仅在 scoring 失败时生成
     score_round_results_response_attempt_*.json # 仅记录 schema retry 响应
+    strict_reviewer_*.json       # 仅 strict profile 生成
+    strict_disagreements.json    # 仅 strict profile 生成
+    strict_adjudication.json     # 仅 strict profile 且存在分歧时生成
 ```
 
 `finalize --analyze` 负责根据实测结果生成 benchmark-facing README 和 claims。
-`score` 是 ARC-compatible two-round LLM judge：
+`score` 现在有三档 profile：
 
-- Code Development leaf 从代码评分。
-- Code Execution / Result Analysis leaf 从 summary、metrics、claims、writeup 评分。
-- `overall_strict` 和 `results_only` 由 leaf 分数按权重确定性汇总。
+- `proxy`：默认轻量 two-round LLM scorer，用于开发回归、quick/breadth 烟测和趋势判断；不要直接当作 AutoResearchClaw strict 分数汇报。
+- `arc-auto`：尽量贴近 `scripts/judge.py` 的自动 two-round judge 行为，保留可恢复的缺 leaf 处理。
+- `strict`：运行独立 reviewer、对超过阈值的 per-leaf 分歧复审，记录 analysis source，并输出 CD/CE/RA 与 overall 汇总；正式论文对比优先使用这一档。
 
 如果某轮评分返回了合法 JSON 但顶层 schema 不对，adapter 会带着更严格的 `grades`
 契约重试一次，并保存每次 raw response。若重试后仍不能恢复 `grades` 数组，评分才会失败。
 如果合法响应遗漏单个 leaf，会记录 warning，并按 AutoResearchClaw `judge.py` 的行为给该
-leaf 默认 `0.5`。
+leaf 默认 `0.5`；这一缺省只用于非 strict 的自动评分 profile。
 
 ## 外部 Judge
 

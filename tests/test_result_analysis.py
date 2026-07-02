@@ -260,6 +260,74 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(rows[0]["std"], 0.05)
         self.assertEqual(rows[0]["count"], 5)
 
+    def test_extracts_generated_project_aggregate_rows(self) -> None:
+        context = AnalysisContext(
+            task_id="T9",
+            expected_metrics=[{"name": "test_accuracy", "direction": "maximize"}],
+            metrics={"test_accuracy": 0.9},
+            project_results={
+                "aggregate_rows": [
+                    {
+                        "dataset": "wine",
+                        "condition": "standard_scaler_knn",
+                        "n_splits": 5,
+                        "test_accuracy_mean": 0.94,
+                        "accuracy_std": 0.02,
+                        "macro_f1_mean": 0.93,
+                        "macro_f1_std": 0.03,
+                    },
+                    {
+                        "dataset": "wine",
+                        "condition": "minmax_scaler_knn",
+                        "n_splits": 5,
+                        "test_accuracy_mean": 0.96,
+                        "accuracy_std": 0.01,
+                        "macro_f1_mean": 0.95,
+                        "macro_f1_std": 0.02,
+                    },
+                ],
+            },
+        )
+
+        result = run_result_analysis(context)
+
+        rows = result.metric_summary["result_tables"]["primary_metric_rows"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["evidence_id"], "test_accuracy:wine:standard_scaler_knn")
+        self.assertEqual(rows[0]["count"], 5)
+        self.assertIn("| wine | standard_scaler_knn | test_accuracy | 0.94", result.readme_markdown)
+
+    def test_discovers_nested_aggregate_records_by_shape(self) -> None:
+        context = AnalysisContext(
+            task_id="T10",
+            expected_metrics=[{"name": "score", "direction": "maximize"}],
+            metrics={"score": 0.77},
+            project_results={
+                "experiment_output": {
+                    "tables": {
+                        "by_condition": [
+                            {
+                                "dataset": "d1",
+                                "condition": "method_a",
+                                "metric": "score",
+                                "mean": 0.77,
+                                "std": 0.03,
+                                "n": 4,
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+        result = run_result_analysis(context)
+
+        rows = result.metric_summary["result_tables"]["primary_metric_rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["evidence_id"], "score:d1:method_a")
+        self.assertEqual(rows[0]["mean"], 0.77)
+        self.assertEqual(rows[0]["std"], 0.03)
+
 
 if __name__ == "__main__":
     unittest.main()
