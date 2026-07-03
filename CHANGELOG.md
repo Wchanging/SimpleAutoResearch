@@ -21,6 +21,13 @@ This file records user-visible project changes in reverse chronological order. P
   number grounding, verdict-data consistency, coverage penalties, unfinished
   run handling, and false-positive method detection while retaining
   SimpleAutoResearch's own evidence-bundle file selection.
+- ARC-Bench `retry-unfinished` now refreshes stale completed topics by rerunning
+  only finalize/score as needed; it no longer re-enters code-task execution for
+  completed runs merely because a newer analysis or score profile is requested.
+- ARC-Bench completed-state detection now reads analysis metadata from both the
+  legacy top-level `analysis` field and the newer adapter-contract
+  `metadata.analysis` field, avoiding unnecessary reruns after successful strict
+  analyzed batches.
 - Result-analysis now normalizes a wider range of experiment outputs into
   condition-level evidence tables, including raw `cells`, `cell_records`,
   `condition_summaries`, and method/training-size records. This improves

@@ -308,6 +308,23 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
             if result.status != "completed":
                 exit_code = 1
             continue
+        if current.status == "completed":
+            _print(f"[refresh] {topic}: completed run exists; refreshing finalize/score without rerunning execute.")
+            result = _refresh_completed_topic(
+                ctx,
+                topic,
+                current,
+                analyze=args.analyze,
+                analysis_model=args.analysis_model,
+                score=args.score,
+                score_model=args.score_model,
+                score_profile=args.score_profile,
+            )
+            state[topic] = result
+            _save_state(ctx.state_file, state)
+            if result.status != "completed":
+                exit_code = 1
+            continue
         resume_run_dir = _abs(ctx.repo_root, current.run_dir) if args.resume_existing and current.run_dir else None
         config_path = ctx.prepared_root / topic / "code_task.toml"
         repair_rounds_override = None
@@ -633,6 +650,155 @@ def _score_existing_topic(
     topic_state.updated_at = _now()
     topic_state = _finalize_topic_state(ctx, topic_state, started_monotonic=started_monotonic)
     _print(f"[done] {topic}: scored existing output at {topic_state.output_dir}")
+    return topic_state
+
+
+def _refresh_completed_topic(
+    ctx: RunnerContext,
+    topic: str,
+    current: TopicState,
+    *,
+    analyze: bool,
+    analysis_model: str | None,
+    score: bool,
+    score_model: str | None,
+    score_profile: str,
+) -> TopicState:
+    started_monotonic = time.monotonic()
+    started_at = _now()
+    topic_state = TopicState(
+        topic=topic,
+        status="running",
+        attempts=current.attempts,
+        run_dir=current.run_dir,
+        output_dir=current.output_dir,
+        started_at=started_at,
+        logs=list(current.logs),
+        commands=list(current.commands),
+        command_results=list(current.command_results),
+        updated_at=_now(),
+    )
+    if not current.run_dir:
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "refresh_failed", "completed state has no run_dir"),
+            started_monotonic=started_monotonic,
+        )
+
+    prepared_dir = ctx.prepared_root / topic
+    run_dir = _abs(ctx.repo_root, current.run_dir)
+    run_ok, run_detail = _run_business_success(run_dir)
+    if not run_ok:
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "execute_incomplete", run_detail),
+            started_monotonic=started_monotonic,
+        )
+
+    output_dir = _abs(ctx.repo_root, current.output_dir) if current.output_dir else ctx.submissions_root / topic / run_dir.name
+    topic_state.output_dir = _rel(ctx.repo_root, output_dir)
+    topic_log_root = ctx.log_root / topic / _timestamp()
+
+    finalize_complete = _finalized_output_complete(
+        output_dir,
+        require_analysis=analyze,
+        require_score=False,
+        score_profile=score_profile,
+    )
+    if finalize_complete:
+        _print(f"[refresh] {topic}: finalized output already satisfies analysis={analyze}; skipping finalize.")
+    else:
+        finalize_cmd = [
+            "uv",
+            "run",
+            "python",
+            "benchmark/arc_bench/adapter.py",
+            "finalize",
+            "--prepared-dir",
+            _rel(ctx.repo_root, prepared_dir),
+            "--run-dir",
+            _rel(ctx.repo_root, run_dir),
+            "--output-dir",
+            _rel(ctx.repo_root, output_dir),
+            "--force",
+        ]
+        if analyze:
+            finalize_cmd.append("--analyze")
+        if analysis_model:
+            finalize_cmd.extend(["--analysis-model", analysis_model])
+        finalize_result = _run_logged(
+            finalize_cmd,
+            ctx.repo_root,
+            topic_log_root / "finalize.log",
+            timeout=ctx.finalize_timeout,
+        )
+        _record_command(topic_state, finalize_result)
+        if finalize_result.returncode != 0:
+            return _finalize_topic_state(
+                ctx,
+                _fail(topic_state, "finalize_failed", f"finalize exited with {finalize_result.returncode}"),
+                started_monotonic=started_monotonic,
+            )
+
+    if score:
+        score_complete = _finalized_output_complete(
+            output_dir,
+            require_analysis=analyze,
+            require_score=True,
+            score_profile=score_profile,
+        )
+        if score_complete:
+            _print(f"[refresh] {topic}: {score_profile} judge already exists; skipping score.")
+        else:
+            score_cmd = [
+                "uv",
+                "run",
+                "python",
+                "benchmark/arc_bench/adapter.py",
+                "score",
+                "--prepared-dir",
+                _rel(ctx.repo_root, prepared_dir),
+                "--submission-dir",
+                _rel(ctx.repo_root, output_dir / "submission"),
+                "--output-dir",
+                _rel(ctx.repo_root, output_dir / "judge"),
+                "--score-profile",
+                score_profile,
+            ]
+            if score_model:
+                score_cmd.extend(["--model", score_model])
+            score_result = _run_logged(
+                score_cmd,
+                ctx.repo_root,
+                topic_log_root / "score.log",
+                timeout=ctx.score_timeout,
+            )
+            _record_command(topic_state, score_result)
+            if score_result.returncode != 0:
+                return _finalize_topic_state(
+                    ctx,
+                    _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}"),
+                    started_monotonic=started_monotonic,
+                )
+
+    if not _completed_state_still_valid(
+        ctx,
+        topic_state,
+        require_analysis=analyze,
+        require_score=score,
+        score_profile=score_profile,
+    ):
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "refresh_incomplete", "refreshed completed run still lacks required artifacts"),
+            started_monotonic=started_monotonic,
+        )
+
+    topic_state.status = "completed"
+    topic_state.last_error = None
+    topic_state.updated_at = _now()
+    topic_state = _finalize_topic_state(ctx, topic_state, started_monotonic=started_monotonic)
+    _print(f"[done] {topic}: refreshed existing output at {topic_state.output_dir}")
     return topic_state
 
 
@@ -1152,7 +1318,10 @@ def _finalized_output_complete(
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return False
-        analysis = meta.get("analysis", {})
+        analysis = meta.get("analysis")
+        if not isinstance(analysis, dict):
+            metadata = meta.get("metadata")
+            analysis = metadata.get("analysis") if isinstance(metadata, dict) else None
         if not isinstance(analysis, dict) or analysis.get("llm_used") is not True:
             return False
     if require_score:
