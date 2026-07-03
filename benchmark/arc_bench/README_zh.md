@@ -128,6 +128,15 @@ uv run python benchmark/arc_bench/batch_runner.py run \
   --score-profile strict
 ```
 
+每个任务结束或失败后，都会写出一份轻量运行/API 统计：
+
+```text
+benchmark/arc_bench/runs/ml/ML04/<run-id>/arc_task_stats.json
+benchmark/arc_bench/submissions/ml/ML04/<run-id>/arc_task_stats.json
+```
+
+其中包含总耗时、每条命令的耗时、日志路径、退出码，以及 code-task、result-analysis、score 三部分汇总后的 LLM 请求次数、输入/输出/总 token 和估算费用。批跑 state 中也会保存紧凑摘要，因此 `batch_runner.py status` 可以直接显示耗时和 token 总量。
+
 批跑脚本不会只看命令退出码。`execute` 后会读取 run 的 `manifest.json`，
 只有业务状态达到 `benchmark_passed` 才会继续 `finalize`。如果后续补加
 `--score`，并且某个任务已经有有效 submission，它会直接补 `judge/`，不会重跑实验。

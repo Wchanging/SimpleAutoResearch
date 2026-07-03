@@ -136,6 +136,19 @@ uv run python benchmark/arc_bench/batch_runner.py run \
   --score-profile strict
 ```
 
+Each topic writes a compact runtime/API summary after it finishes or fails:
+
+```text
+benchmark/arc_bench/runs/ml/ML04/<run-id>/arc_task_stats.json
+benchmark/arc_bench/submissions/ml/ML04/<run-id>/arc_task_stats.json
+```
+
+The stats file records wall-clock duration, per-command duration, command logs,
+return codes, and aggregated LLM request/token/cost information from code-task,
+result analysis, and scoring. The batch state also stores a compact summary, so
+`batch_runner.py status` can show duration and token totals without opening the
+artifact.
+
 The batch runner only finalizes runs whose business status is
 `benchmark_passed`. If `--score` is added later and a topic already has a valid
 finalized submission, it fills in `judge/` without rerunning the experiment. A

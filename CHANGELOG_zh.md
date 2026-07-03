@@ -8,6 +8,8 @@
 
 ### Changed
 
+- ARC-Bench 批跑现在会为每个 topic 写出 `arc_task_stats.json`，同时放在 run 目录和 finalized submission 目录下；其中包含总耗时、各命令耗时、退出码、日志路径，以及 code-task、result-analysis、score 汇总后的 LLM 请求数、token 和估算费用。
+
 - Result-analysis 现在会匹配常见的项目级/单元格级指标别名，例如把 `test_accuracy` 对齐到条件表中的 `accuracy`，避免全局主指标名和 per-cell 指标名不同导致 Primary Metric Table 为空。
 - Greenfield review-repair prompt 现在会明确列出每种结构化编辑 action 的必填字段；code-task summary 也会区分“原始 repair 部分失败”和“后续 review 已恢复通过”，减少状态误读。
 

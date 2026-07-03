@@ -8,6 +8,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- ARC-Bench batch runs now write per-topic runtime/API accounting artifacts
+  (`arc_task_stats.json`) under both the run directory and finalized submission
+  directory. The stats include wall-clock duration, per-command duration,
+  return codes, log paths, and aggregated LLM request/token/cost information.
 - ARC-Bench scoring now selects code evidence by entrypoint, local import graph,
   and task-term relevance instead of raw filename order. Strict Code Development
   reviews are less likely to miss core implementation files such as models,

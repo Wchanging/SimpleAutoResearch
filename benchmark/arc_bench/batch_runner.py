@@ -64,6 +64,9 @@ class CommandResult:
     returncode: int
     log_path: str
     command: list[str]
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_sec: float = 0.0
 
 
 @dataclass
@@ -74,9 +77,14 @@ class TopicState:
     run_dir: str | None = None
     output_dir: str | None = None
     last_error: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_sec: float | None = None
     updated_at: str | None = None
     logs: list[str] = field(default_factory=list)
     commands: list[list[str]] = field(default_factory=list)
+    command_results: list[dict[str, Any]] = field(default_factory=list)
+    stats: dict[str, Any] = field(default_factory=dict)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -399,10 +407,13 @@ def _run_topic(
     previous_state: TopicState | None = None,
     repair_rounds_override: int | None = None,
 ) -> TopicState:
+    started_monotonic = time.monotonic()
+    started_at = _now()
     topic_state = TopicState(
         topic=topic,
         attempts=(previous_state.attempts + 1 if previous_state is not None else 1),
         status="running",
+        started_at=started_at,
         updated_at=_now(),
     )
     config_path = ctx.prepared_root / topic / "code_task.toml"
@@ -411,7 +422,11 @@ def _run_topic(
     topic_log_root.mkdir(parents=True, exist_ok=True)
 
     if not config_path.exists():
-        return _fail(topic_state, "missing_config", f"Missing config: {config_path}")
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "missing_config", f"Missing config: {config_path}"),
+            started_monotonic=started_monotonic,
+        )
 
     _print(f"\n===== START {topic} =====")
 
@@ -427,10 +442,18 @@ def _run_topic(
         )
         _record_command(topic_state, init_result)
         if init_result.returncode != 0:
-            return _fail(topic_state, "init_failed", f"init exited with {init_result.returncode}")
+            return _finalize_topic_state(
+                ctx,
+                _fail(topic_state, "init_failed", f"init exited with {init_result.returncode}"),
+                started_monotonic=started_monotonic,
+            )
         run_dir = _detect_new_run_dir(ctx.runs_root / topic, before)
         if run_dir is None:
-            return _fail(topic_state, "init_failed", f"Could not detect new run under {ctx.runs_root / topic}")
+            return _finalize_topic_state(
+                ctx,
+                _fail(topic_state, "init_failed", f"Could not detect new run under {ctx.runs_root / topic}"),
+                started_monotonic=started_monotonic,
+            )
 
     topic_state.run_dir = _rel(ctx.repo_root, run_dir)
     execute_cmd = [
@@ -456,10 +479,18 @@ def _run_topic(
     )
     _record_command(topic_state, execute_result)
     if execute_result.returncode != 0:
-        return _fail(topic_state, "execute_failed", f"execute exited with {execute_result.returncode}")
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "execute_failed", f"execute exited with {execute_result.returncode}"),
+            started_monotonic=started_monotonic,
+        )
     run_ok, run_detail = _run_business_success(run_dir)
     if not run_ok:
-        return _fail(topic_state, "execute_incomplete", run_detail)
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "execute_incomplete", run_detail),
+            started_monotonic=started_monotonic,
+        )
 
     output_dir = ctx.submissions_root / topic / run_dir.name
     topic_state.output_dir = _rel(ctx.repo_root, output_dir)
@@ -490,7 +521,11 @@ def _run_topic(
     )
     _record_command(topic_state, finalize_result)
     if finalize_result.returncode != 0:
-        return _fail(topic_state, "finalize_failed", f"finalize exited with {finalize_result.returncode}")
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "finalize_failed", f"finalize exited with {finalize_result.returncode}"),
+            started_monotonic=started_monotonic,
+        )
 
     if score:
         score_cmd = [
@@ -518,11 +553,16 @@ def _run_topic(
         )
         _record_command(topic_state, score_result)
         if score_result.returncode != 0:
-            return _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}")
+            return _finalize_topic_state(
+                ctx,
+                _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}"),
+                started_monotonic=started_monotonic,
+            )
 
     topic_state.status = "completed"
     topic_state.last_error = None
     topic_state.updated_at = _now()
+    topic_state = _finalize_topic_state(ctx, topic_state, started_monotonic=started_monotonic)
     _print(f"[done] {topic}: {topic_state.output_dir}")
     return topic_state
 
@@ -535,18 +575,26 @@ def _score_existing_topic(
     score_model: str | None,
     score_profile: str,
 ) -> TopicState:
+    started_monotonic = time.monotonic()
+    started_at = _now()
     topic_state = TopicState(
         topic=topic,
         status="running",
         attempts=current.attempts,
         run_dir=current.run_dir,
         output_dir=current.output_dir,
+        started_at=started_at,
         logs=list(current.logs),
         commands=list(current.commands),
+        command_results=list(current.command_results),
         updated_at=_now(),
     )
     if not current.output_dir:
-        return _fail(topic_state, "score_failed", "completed state has no output_dir")
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "score_failed", "completed state has no output_dir"),
+            started_monotonic=started_monotonic,
+        )
     prepared_dir = ctx.prepared_root / topic
     output_dir = _abs(ctx.repo_root, current.output_dir)
     topic_log_root = ctx.log_root / topic / _timestamp()
@@ -575,10 +623,15 @@ def _score_existing_topic(
     )
     _record_command(topic_state, score_result)
     if score_result.returncode != 0:
-        return _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}")
+        return _finalize_topic_state(
+            ctx,
+            _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}"),
+            started_monotonic=started_monotonic,
+        )
     topic_state.status = "completed"
     topic_state.last_error = None
     topic_state.updated_at = _now()
+    topic_state = _finalize_topic_state(ctx, topic_state, started_monotonic=started_monotonic)
     _print(f"[done] {topic}: scored existing output at {topic_state.output_dir}")
     return topic_state
 
@@ -586,8 +639,12 @@ def _score_existing_topic(
 def _run_logged(command: list[str], cwd: Path, log_path: Path, timeout: int = 0) -> CommandResult:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     _print("$ " + " ".join(command))
+    started_at = _now()
+    started = time.monotonic()
+    returncode = 127
     with log_path.open("w", encoding="utf-8") as log:
         log.write("$ " + " ".join(command) + "\n\n")
+        log.write(f"[started] {started_at}\n\n")
         log.flush()
         env = _subprocess_env()
         try:
@@ -600,8 +657,19 @@ def _run_logged(command: list[str], cwd: Path, log_path: Path, timeout: int = 0)
             print(message, end="")
             log.write(message)
             returncode = 127
-        log.write(f"\n[exit] {returncode}\n")
-    return CommandResult(returncode=returncode, log_path=_rel(cwd, log_path), command=command)
+        ended_at = _now()
+        duration_sec = round(time.monotonic() - started, 3)
+        log.write(f"\n[ended] {ended_at}\n")
+        log.write(f"[duration_sec] {duration_sec}\n")
+        log.write(f"[exit] {returncode}\n")
+    return CommandResult(
+        returncode=returncode,
+        log_path=_rel(cwd, log_path),
+        command=command,
+        started_at=started_at,
+        ended_at=ended_at,
+        duration_sec=duration_sec,
+    )
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -737,6 +805,7 @@ def _read_pty_chunk(fd: int) -> bytes:
 def _record_command(topic_state: TopicState, result: CommandResult) -> None:
     topic_state.logs.append(result.log_path)
     topic_state.commands.append(result.command)
+    topic_state.command_results.append(asdict(result))
     topic_state.updated_at = _now()
 
 
@@ -746,6 +815,226 @@ def _fail(topic_state: TopicState, status: str, message: str) -> TopicState:
     topic_state.updated_at = _now()
     _print(f"[fail] {topic_state.topic}: {status} - {message}")
     return topic_state
+
+
+def _finalize_topic_state(ctx: RunnerContext, topic_state: TopicState, *, started_monotonic: float) -> TopicState:
+    topic_state.ended_at = _now()
+    topic_state.duration_sec = round(time.monotonic() - started_monotonic, 3)
+    stats = _build_topic_stats(ctx, topic_state)
+    topic_state.stats = _compact_topic_stats_for_state(stats)
+    written = _write_topic_stats(ctx, topic_state, stats)
+    if written:
+        topic_state.stats["artifact_paths"] = written
+        _print(f"[stats] {topic_state.topic}: wrote {', '.join(written)}")
+    return topic_state
+
+
+def _build_topic_stats(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
+    command_results = [row for row in topic_state.command_results if isinstance(row, dict)]
+    command_duration_sec = round(
+        sum(float(row.get("duration_sec") or 0.0) for row in command_results),
+        3,
+    )
+    run_dir = _abs(ctx.repo_root, topic_state.run_dir) if topic_state.run_dir else None
+    output_dir = _abs(ctx.repo_root, topic_state.output_dir) if topic_state.output_dir else None
+    usage = _collect_topic_llm_usage(ctx, run_dir=run_dir, output_dir=output_dir)
+    return {
+        "schema_version": "simple_ar_arc_task_stats.v1",
+        "topic": topic_state.topic,
+        "status": topic_state.status,
+        "attempts": topic_state.attempts,
+        "started_at": topic_state.started_at,
+        "ended_at": topic_state.ended_at,
+        "duration_sec": topic_state.duration_sec,
+        "command_duration_sec": command_duration_sec,
+        "run_dir": topic_state.run_dir,
+        "output_dir": topic_state.output_dir,
+        "last_error": topic_state.last_error,
+        "commands": command_results,
+        "llm_usage": usage,
+    }
+
+
+def _compact_topic_stats_for_state(stats: dict[str, Any]) -> dict[str, Any]:
+    usage = stats.get("llm_usage") if isinstance(stats.get("llm_usage"), dict) else {}
+    totals = usage.get("totals") if isinstance(usage, dict) else {}
+    return {
+        "duration_sec": stats.get("duration_sec"),
+        "command_duration_sec": stats.get("command_duration_sec"),
+        "llm_request_count": totals.get("request_count") if isinstance(totals, dict) else 0,
+        "llm_input_tokens": totals.get("input_tokens") if isinstance(totals, dict) else 0,
+        "llm_output_tokens": totals.get("output_tokens") if isinstance(totals, dict) else 0,
+        "llm_total_tokens": totals.get("total_tokens") if isinstance(totals, dict) else 0,
+        "estimated_cost_usd": totals.get("estimated_cost_usd") if isinstance(totals, dict) else 0.0,
+    }
+
+
+def _write_topic_stats(ctx: RunnerContext, topic_state: TopicState, stats: dict[str, Any]) -> list[str]:
+    written: list[str] = []
+    if topic_state.run_dir:
+        run_dir = _abs(ctx.repo_root, topic_state.run_dir)
+        if run_dir.exists():
+            path = run_dir / "arc_task_stats.json"
+            path.write_text(json.dumps(stats, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            written.append(_rel(ctx.repo_root, path))
+    if topic_state.output_dir:
+        output_dir = _abs(ctx.repo_root, topic_state.output_dir)
+        if output_dir.exists():
+            path = output_dir / "arc_task_stats.json"
+            path.write_text(json.dumps(stats, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            written.append(_rel(ctx.repo_root, path))
+    return written
+
+
+def _collect_topic_llm_usage(
+    ctx: RunnerContext,
+    *,
+    run_dir: Path | None,
+    output_dir: Path | None,
+) -> dict[str, Any]:
+    sources: list[dict[str, Any]] = []
+    if run_dir is not None:
+        sources.append(
+            _usage_source(
+                ctx,
+                stage="code_task",
+                summary_path=run_dir / "code_task" / "meta" / "llm_usage_summary.json",
+                jsonl_path=run_dir / "code_task" / "meta" / "llm_usage.jsonl",
+            )
+        )
+    if output_dir is not None:
+        sources.append(
+            _usage_source(
+                ctx,
+                stage="result_analysis",
+                summary_path=output_dir / "result_analysis" / "llm_usage_summary.json",
+                jsonl_path=output_dir / "result_analysis" / "llm_usage.jsonl",
+            )
+        )
+        sources.append(
+            _usage_source(
+                ctx,
+                stage="score",
+                summary_path=output_dir / "judge" / "llm_usage_summary.json",
+                jsonl_path=output_dir / "judge" / "llm_usage.jsonl",
+            )
+        )
+    sources = [row for row in sources if row.get("found")]
+    totals = _merge_usage_totals([row.get("summary", {}) for row in sources if isinstance(row.get("summary"), dict)])
+    return {
+        "totals": totals,
+        "sources": sources,
+    }
+
+
+def _usage_source(ctx: RunnerContext, *, stage: str, summary_path: Path, jsonl_path: Path) -> dict[str, Any]:
+    summary = _read_usage_summary(summary_path)
+    source_path = summary_path
+    source_kind = "summary"
+    if not summary:
+        rows = _read_usage_jsonl(jsonl_path)
+        if rows:
+            summary = _summarize_usage_rows(rows)
+            source_path = jsonl_path
+            source_kind = "jsonl"
+    return {
+        "stage": stage,
+        "found": bool(summary),
+        "source_kind": source_kind if summary else "",
+        "path": _rel(ctx.repo_root, source_path) if summary else "",
+        "summary": summary,
+    }
+
+
+def _read_usage_summary(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return _normalize_usage_summary(data if isinstance(data, dict) else {})
+
+
+def _read_usage_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            value = json.loads(line)
+            if isinstance(value, dict):
+                rows.append(value)
+    except (OSError, json.JSONDecodeError):
+        return rows
+    return rows
+
+
+def _summarize_usage_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    labels = [str(row.get("label")) for row in rows if row.get("label")]
+    return {
+        "request_count": len(rows),
+        "input_tokens": sum(_usage_int(row, "input_tokens", "prompt_tokens") for row in rows),
+        "output_tokens": sum(_usage_int(row, "output_tokens", "completion_tokens") for row in rows),
+        "total_tokens": sum(_usage_int(row, "total_tokens") for row in rows),
+        "estimated_cost_usd": round(sum(_usage_float(row, "estimated_cost_usd") for row in rows), 6),
+        "labels": labels,
+    }
+
+
+def _normalize_usage_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    labels = summary.get("labels")
+    if not isinstance(labels, list):
+        labels = []
+    return {
+        "request_count": _usage_int(summary, "request_count", "requests"),
+        "input_tokens": _usage_int(summary, "input_tokens", "prompt_tokens"),
+        "output_tokens": _usage_int(summary, "output_tokens", "completion_tokens"),
+        "total_tokens": _usage_int(summary, "total_tokens"),
+        "estimated_cost_usd": _usage_float(summary, "estimated_cost_usd"),
+        "labels": [str(label) for label in labels if label],
+    }
+
+
+def _merge_usage_totals(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    labels: list[str] = []
+    for summary in summaries:
+        raw_labels = summary.get("labels")
+        if isinstance(raw_labels, list):
+            labels.extend(str(label) for label in raw_labels if label)
+    return {
+        "request_count": sum(_usage_int(row, "request_count") for row in summaries),
+        "input_tokens": sum(_usage_int(row, "input_tokens") for row in summaries),
+        "output_tokens": sum(_usage_int(row, "output_tokens") for row in summaries),
+        "total_tokens": sum(_usage_int(row, "total_tokens") for row in summaries),
+        "estimated_cost_usd": round(sum(_usage_float(row, "estimated_cost_usd") for row in summaries), 6),
+        "labels": labels,
+    }
+
+
+def _usage_int(row: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        if key not in row or row.get(key) is None:
+            continue
+        try:
+            return int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _usage_float(row: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        if key not in row or row.get(key) is None:
+            continue
+        try:
+            return float(row.get(key) or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
 
 
 def _resolve_topics(args: argparse.Namespace, prepared_root: Path) -> list[str]:
@@ -1036,7 +1325,19 @@ def _print_summary(state: dict[str, TopicState], topics: Iterable[str]) -> None:
     for topic in topics:
         row = _topic_state(state, topic)
         detail = row.output_dir or row.run_dir or row.last_error or ""
-        _print(f"{topic:>4}  {row.status:<16} {detail}")
+        stats = row.stats if isinstance(row.stats, dict) else {}
+        duration = stats.get("duration_sec")
+        total_tokens = stats.get("llm_total_tokens")
+        cost = stats.get("estimated_cost_usd")
+        suffix_parts: list[str] = []
+        if isinstance(duration, (int, float)):
+            suffix_parts.append(f"{duration:.1f}s")
+        if isinstance(total_tokens, int) and total_tokens:
+            suffix_parts.append(f"{total_tokens} tokens")
+        if isinstance(cost, (int, float)) and cost:
+            suffix_parts.append(f"${cost:.4f}")
+        suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+        _print(f"{topic:>4}  {row.status:<16} {detail}{suffix}")
 
 
 def _abs(repo_root: Path, value: str | Path) -> Path:
