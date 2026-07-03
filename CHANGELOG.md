@@ -16,6 +16,11 @@ This file records user-visible project changes in reverse chronological order. P
   and task-term relevance instead of raw filename order. Strict Code Development
   reviews are less likely to miss core implementation files such as models,
   data generation, runners, or evaluators when artifact/config files are large.
+- ARC-Bench strict scoring prompts now align more closely with the
+  AutoResearchClaw manual strict-audit contract for implementation correctness,
+  number grounding, verdict-data consistency, coverage penalties, unfinished
+  run handling, and false-positive method detection while retaining
+  SimpleAutoResearch's own evidence-bundle file selection.
 - Result-analysis now normalizes a wider range of experiment outputs into
   condition-level evidence tables, including raw `cells`, `cell_records`,
   `condition_summaries`, and method/training-size records. This improves

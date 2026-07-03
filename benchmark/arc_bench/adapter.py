@@ -1286,7 +1286,7 @@ def score_submission_strict(
         "backend": "llm",
         "scoring_profile": "strict",
         "profile_notes": profile_notes("strict"),
-        "prompt_version": "simple_ar_arc_strict_score_v1",
+        "prompt_version": "simple_ar_arc_strict_score_v2",
         "topic_id": manifest.get("id"),
         "title": manifest.get("title"),
         "prepared_dir": str(prepared_dir),
@@ -1384,7 +1384,8 @@ def strict_score_system_prompt(reviewer_id: str) -> str:
         "Do not give high scores for fluent prose alone. Code Development requires real executable implementation, not labels. "
         "Code Execution requires completed runs, persisted artifacts, and coverage over required conditions/datasets/seeds/metrics. "
         "Result Analysis receives double weight conceptually: verify that each conclusion is traceable to measured numbers and that limitations are honest. "
-        "If adapter-generated analysis is being scored, state whether the score relies on adapter-facing artifacts rather than original agent writeup."
+        "If adapter-generated analysis is being scored, state whether the score relies on adapter-facing artifacts rather than original agent writeup. "
+        "Apply the strict audit contract: implementation correctness, number grounding, verdict-data consistency, coverage, and unfinished-run penalties."
     )
 
 
@@ -1392,6 +1393,13 @@ def strict_prompt_addendum(prompt: str, artifacts: dict[str, Any]) -> str:
     bundle = artifacts.get("evidence_bundle") or {}
     return (
         f"{prompt}\n\n"
+        "## ARC-Style Strict Audit Contract\n"
+        "- Implementation correctness: verify the algorithmic behavior from code, not just function names, labels, comments, or README claims.\n"
+        "- Number grounding: every credited numerical claim must trace to captured JSON, metrics, logs, tables, or code-produced artifacts.\n"
+        "- Verdict-data consistency: a supported/refuted/inconclusive hypothesis verdict must agree with the measured evidence.\n"
+        "- Coverage: missing required conditions, datasets, seeds, metrics, or persisted outputs should reduce the relevant execution/result leaves proportionally.\n"
+        "- Unfinished science loop: if execution did not complete or no final writeup/claims were produced, Code Execution should be very low and Result Analysis cannot receive high credit.\n"
+        "- Common false-positive patterns to watch for: methods that are named but not implemented, baselines that share identical code paths, stochastic/seed requirements that produce only one effective run, and writeups with invented or untraceable numbers.\n\n"
         "## Strict Evidence Bundle Summary\n"
         f"{json.dumps(clip_data(bundle, 18000), ensure_ascii=False, indent=2, default=str)}\n\n"
         "Strict checks:\n"
@@ -1881,10 +1889,16 @@ def score_system_prompt() -> str:
         "Scoring guide: 1.0 fully met with clear evidence; 0.7 mostly met with "
         "minor gaps; 0.5 partially met or unclear; 0.3 attempted but substantially "
         "incomplete; 0.0 absent, contradicted, fabricated, or not evidenced. "
-        "Apply strict criteria: verify implementation correctness from code, "
-        "ground numerical claims in captured JSON/metrics/writeup, require "
-        "verdict-data consistency, and penalize missing conditions/datasets/seeds "
-        "proportionally. Do not reward intent alone."
+        "Apply ARC-style strict criteria uniformly. Implementation correctness: "
+        "verify that the code actually implements the requested method or baseline, "
+        "not merely a similarly named placeholder. Number grounding: every numerical "
+        "claim you credit must be traceable to captured JSON, metrics, logs, tables, "
+        "or other persisted artifacts. Verdict-data consistency: hypothesis verdicts "
+        "must agree with the measured evidence. Coverage: missing conditions, "
+        "datasets, seeds, metrics, or persisted outputs must reduce the relevant "
+        "score proportionally. Unfinished runs or missing final analysis cannot "
+        "receive high Code Execution or Result Analysis credit. Do not reward intent, "
+        "fluent prose, or task restatement alone."
     )
 
 
@@ -1906,7 +1920,7 @@ def score_output_instruction(leaves: list[dict[str, Any]]) -> str:
         "Return exactly one JSON object. No markdown fences. No prose before or after JSON.\n"
         "The top-level key `grades` is required. It must be an array with exactly one row for each leaf id below.\n"
         f"Required leaf ids: {json.dumps(leaf_ids, ensure_ascii=False)}\n"
-        "Each row must contain: leaf_id, score, reasoning. If evidence is unclear, still return the leaf with score 0.5 and explain why.\n"
+        "Each row must contain: leaf_id, score, reasoning. Reasoning should cite concrete evidence or missing evidence using file path, line number, JSON key, metric name, or numeric value when available. If evidence is unclear, still return the leaf with score 0.5 or lower and explain why.\n"
     )
 
 
@@ -1930,7 +1944,9 @@ def build_code_round_prompt(manifest_context: str, leaves: list[dict[str, Any]],
         "```\n\n"
         "Grade only the Code Development leaves above. Read the code semantically: "
         "check whether algorithms are genuinely implemented, not merely named. "
-        "Cite file paths and line numbers from the code block when giving credit or docking.\n\n"
+        "Cite file paths and line numbers from the code block when giving credit or docking. "
+        "Dock code that routes all conditions through the same baseline, silently ignores requested datasets/seeds/metrics, "
+        "or implements a simplified proxy while claiming the full method.\n\n"
         f"{score_output_instruction(leaves)}"
     )
 
@@ -1956,7 +1972,9 @@ def build_results_round_prompt(manifest_context: str, leaves: list[dict[str, Any
         "Grade only the Code Execution and Result Analysis leaves above. Verify "
         "that metrics exist on disk, conditions/datasets/seeds are covered, and "
         "hypothesis verdicts match measured numbers. Penalize fabricated or "
-        "unsupported writeup claims.\n\n"
+        "unsupported writeup claims. Strong Result Analysis requires explicit "
+        "per-hypothesis verdicts, traceable numeric evidence, and honest limitations; "
+        "a generic summary of overall metrics is not enough.\n\n"
         f"{score_output_instruction(leaves)}"
     )
 

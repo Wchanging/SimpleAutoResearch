@@ -14,6 +14,7 @@
 - Greenfield review-repair prompt 现在会明确列出每种结构化编辑 action 的必填字段；code-task summary 也会区分“原始 repair 部分失败”和“后续 review 已恢复通过”，减少状态误读。
 
 - ARC-Bench strict scoring 的代码证据选择改为优先入口文件、本地 import graph 和任务关键词相关文件，避免大体积 artifact/config 文件按字母序吃光上下文后漏掉 models、data generation、runner、evaluation 等核心实现。
+- ARC-Bench strict scoring prompt 进一步对齐 AutoResearchClaw manual strict-audit 的通用评分契约：实现正确性、数字可追溯、结论与数据一致、覆盖度扣分、未完成运行处理和假方法识别；文件检索与证据选择仍保留 SimpleAutoResearch 自己的 evidence bundle 机制。
 - Result-analysis 现在可以把更多实验输出结构归一为 condition-level evidence table，包括 `cells`、`cell_records`、`condition_summaries` 以及 method/training-size 组合记录，减少“实验已运行但报告/claims 没有可评分表格”的情况。
 - Code-task failure analysis 在没有 traceback 文件路径时会根据错误 token 反查源码，给 missing attribute、missing field、unexpected keyword 等问题提供更具体的候选文件，帮助后续 repair 少走重复猜测。
 
