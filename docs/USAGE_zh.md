@@ -402,7 +402,7 @@ literature provider、重新构建本地检索加速索引，并且不再保留�
   - `experiment_contract.json` / `.md`：V2.5 可执行契约，记录 task kind、目标、implementation mode、源码项目、benchmark command、风险、约束，以及结果/资源/依赖引用。
   - `result_schema.json`：主指标、必需指标、方向和成功条件，供 run guard 和后续 report 使用。
   - `resource_plan.json`：在生成或修改代码前明确 runtime、文件数、生成行数、内存、GPU 和输出流预算。
-  - `dependency_plan.json`：依赖安装策略、预期入口和 setup-hook notes。它只记录策略，不自动安装依赖。
+  - `dependency_plan.json`：依赖安装策略、实际预期入口、profile 候选入口和 setup-hook notes。它只记录策略，不自动安装依赖；候选入口只是规划提示，不代表这些文件都必须生成。
   - `domain_profile.json`：generic、已有代码、ML 或 code-agent evaluation 任务的规划默认值。
   - `contract_validation.json`：进入 code 前的契约检查；如果它报告失败，`06-code` 会停止。
 - `05-design/evidence/`

@@ -14,6 +14,7 @@ from simple_ar.experiment.execution.diagnosis import (
 from simple_ar.experiment.execution.guards import evaluate_result_guard
 from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_guard,
+    repair_generated_project_from_run_failure,
     repair_generated_project_with_agent_backend,
 )
 from simple_ar.experiment.execution.results import (
@@ -70,17 +71,19 @@ def _repair_generated_project(
     provider = str(ctx.config.get("implementation_provider") or "local").strip().lower().replace("-", "_")
     current_metrics = canonical.get("metrics", {}) if isinstance(canonical.get("metrics"), dict) else {}
     project_dir = ctx.run_dir / "06-code" / "generated_project"
+    result_schema = design_json(ctx, "result_schema.json")
+    output_path = ctx.artifact_path("repair_summary.json")
     if provider != "local" and is_external_agent_provider(provider):
         ctx.emit("stage_message", f"Using `{provider}` repair backend through agent handoff.")
         return repair_generated_project_with_agent_backend(
             run_dir=ctx.run_dir,
             project_dir=project_dir,
             provider=provider,
-            result_schema=design_json(ctx, "result_schema.json"),
+            result_schema=result_schema,
             guard_report=guard,
             diagnosis_report=diagnosis,
             current_metrics=current_metrics,
-            output_path=ctx.artifact_path("repair_summary.json"),
+            output_path=output_path,
             client=_llm_client(ctx),
             timeout_sec=int(ctx.config.get("implementation_agent_timeout_sec") or experiment_timeout(ctx)),
             external_enabled=ctx.config.get("implementation_allow_external_agent") is True,
@@ -89,14 +92,105 @@ def _repair_generated_project(
             agent_binary=str(ctx.config.get("implementation_agent_binary") or ""),
             agent_args=tuple(str(item) for item in (ctx.config.get("implementation_agent_args") or [])),
         )
+    client = _llm_client(ctx)
+    if client is not None:
+        ctx.emit("stage_message", "Using LLM-backed generated-project run repair.")
+        summary = repair_generated_project_from_run_failure(
+            project_dir=project_dir,
+            failure_analysis=_run_failure_payload(ctx, guard, diagnosis, canonical),
+            stderr_text=_read_run_artifact_text(ctx, "stderr.txt"),
+            output_path=output_path,
+            code_artifacts=_first_optional_json(
+                ctx.run_dir / "06-code" / "code_artifacts.json",
+                ctx.run_dir / "06-code" / "code_task_run" / "code_task" / "meta" / "code_artifacts.json",
+            ),
+            architecture_plan=_first_optional_json(
+                ctx.run_dir / "06-code" / "architecture_plan.json",
+                ctx.run_dir / "06-code" / "code_task_run" / "code_task" / "meta" / "architecture_plan.json",
+            ),
+            result_schema=result_schema,
+            contract=design_json(ctx, "experiment_contract.json"),
+            dependency_advice=_first_optional_json(
+                ctx.run_dir / "06-code" / "dependency_advice.json",
+                ctx.run_dir / "06-code" / "code_task_run" / "code_task" / "meta" / "dependency_advice.json",
+            ),
+            previous_repair_context="",
+            client=client,
+        )
+        if summary.get("status") == "patched" or ctx.config.get("generation_allow_fallback_scaffold") is not True:
+            return summary
+        ctx.emit("stage_message", "LLM run repair did not patch; deterministic fallback scaffold is explicitly allowed.")
+    elif ctx.config.get("generation_allow_fallback_scaffold") is not True:
+        return _write_skipped_repair(
+            output_path,
+            reason=(
+                "No LLM client was available for generated-project run repair, "
+                "and generation_allow_fallback_scaffold is false."
+            ),
+        )
     return repair_generated_project_from_guard(
         project_dir=project_dir,
-        result_schema=design_json(ctx, "result_schema.json"),
+        result_schema=result_schema,
         guard_report=guard,
         diagnosis_report=diagnosis,
         current_metrics=current_metrics,
-        output_path=ctx.artifact_path("repair_summary.json"),
+        output_path=output_path,
     )
+
+
+def _run_failure_payload(
+    ctx: Context,
+    guard: dict[str, Any],
+    diagnosis: dict[str, Any],
+    canonical: dict[str, Any],
+) -> dict[str, Any]:
+    completion = diagnosis.get("completion") if isinstance(diagnosis.get("completion"), dict) else {}
+    deficiencies = diagnosis.get("deficiencies") if isinstance(diagnosis.get("deficiencies"), list) else []
+    issues = guard.get("issues") if isinstance(guard.get("issues"), list) else []
+    return {
+        "schema_version": "experiment_run_failure.v1",
+        "status": diagnosis.get("status") or guard.get("status") or canonical.get("status") or "failed",
+        "summary": diagnosis.get("summary", ""),
+        "guard_status": guard.get("status", "unknown"),
+        "issues": issues[:20],
+        "deficiencies": deficiencies[:20],
+        "metrics": canonical.get("metrics", {}),
+        "required_metrics": completion.get("required_metrics", []),
+        "observed_metrics": completion.get("observed_metrics", []),
+        "missing_metrics": completion.get("missing_metrics", []),
+        "stdout_tail": _read_run_artifact_text(ctx, "stdout.txt")[-4000:],
+        "stderr_tail": _read_run_artifact_text(ctx, "stderr.txt")[-4000:],
+    }
+
+
+def _read_run_artifact_text(ctx: Context, name: str) -> str:
+    path = ctx.artifact_path(name)
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _first_optional_json(*paths: Path) -> dict[str, Any]:
+    for path in paths:
+        data = load_optional_json(path)
+        if data:
+            return data
+    return {}
+
+
+def _write_skipped_repair(output_path: Path, *, reason: str) -> dict[str, Any]:
+    summary = {
+        "schema_version": "experiment_repair.v1",
+        "status": "skipped",
+        "strategy": "llm_run_repair",
+        "notes": [reason],
+        "changed_files": [],
+    }
+    write_json(output_path, summary)
+    return summary
 
 
 def _write_run_outputs(
@@ -227,9 +321,6 @@ def _should_attempt_greenfield_repair(
     except (TypeError, ValueError):
         attempts = 1
     if attempts < 1:
-        return False
-    repair = diagnosis.get("repair")
-    if isinstance(repair, dict) and repair.get("local_repair_supported") is False:
         return False
     return (ctx.run_dir / "06-code" / "generated_project").is_dir()
 

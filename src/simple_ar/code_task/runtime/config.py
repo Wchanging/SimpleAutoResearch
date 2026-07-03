@@ -107,6 +107,7 @@ class ExecuteSection(_ConfigModel):
     allow_large_edits: bool | None = None
     allow_planning_fallback: bool | None = None
     planning_mode: str | None = None
+    planning_review_rounds: int | None = None
     llm_retry_attempts: int | None = None
     repair_rounds: int | None = None
     budget_profile: str | None = None
@@ -240,6 +241,7 @@ class CodeTaskExecuteOptions:
     allow_large_edits: bool
     allow_planning_fallback: bool
     planning_mode: str
+    planning_review_rounds: int
     llm_retry_attempts: int
     repair_rounds: int
     budget_profile: str | None
@@ -383,6 +385,10 @@ def load_code_task_execute_options(
             default=False,
         ),
         planning_mode=_planning_mode(execute.planning_mode),
+        planning_review_rounds=_non_negative_int(
+            _config_int(execute.planning_review_rounds),
+            2,
+        ),
         llm_retry_attempts=_positive_int(_config_int(execute.llm_retry_attempts), 3),
         repair_rounds=_non_negative_int(_config_int(execute.repair_rounds), 0),
         budget_profile=budget_profile,

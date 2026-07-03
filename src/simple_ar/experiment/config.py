@@ -80,6 +80,7 @@ class GenerationSettings:
     max_batches: int = 3
     files_per_batch: int = 4
     review_required: bool = True
+    planning_review_rounds: int = 2
     allow_fallback_scaffold: bool = False
 
 
@@ -207,6 +208,7 @@ def unified_task_config_from_runtime(config: Mapping[str, Any]) -> UnifiedTaskCo
         max_batches=_int(config.get("generation_max_batches"), 3),
         files_per_batch=_int(config.get("generation_files_per_batch"), 4),
         review_required=_bool(config.get("generation_review_required"), True),
+        planning_review_rounds=_int(config.get("generation_planning_review_rounds"), 2),
         allow_fallback_scaffold=_bool(config.get("generation_allow_fallback_scaffold"), False),
     )
     models = ModelRoleSettings(
@@ -295,6 +297,7 @@ def _from_nested(data: Mapping[str, Any]) -> UnifiedTaskConfig:
             max_batches=_int(generation.get("max_batches"), 3),
             files_per_batch=_int(generation.get("files_per_batch"), 4),
             review_required=_bool(generation.get("review_required"), True),
+            planning_review_rounds=_int(generation.get("planning_review_rounds"), 2),
             allow_fallback_scaffold=_bool(generation.get("allow_fallback_scaffold"), False),
         ),
         models=ModelRoleSettings(

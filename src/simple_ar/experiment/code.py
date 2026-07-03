@@ -108,6 +108,7 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
         max_files=int(resource_plan.get("max_files") or ctx.config.get("execute_max_files") or 8),
         max_source_chars_per_file=int(ctx.config.get("execute_max_source_chars_per_file") or 4000),
         max_generated_lines=int(resource_plan.get("max_generated_lines") or 1600),
+        planning_review_rounds=int(ctx.config.get("generation_planning_review_rounds") or 2),
         repair_rounds=int(ctx.config.get("implementation_max_repair_attempts", 1) or 1),
         implementation_provider=str(ctx.config.get("implementation_provider") or "local"),
         implementation_agent_mode=str(ctx.config.get("implementation_agent_mode") or ""),

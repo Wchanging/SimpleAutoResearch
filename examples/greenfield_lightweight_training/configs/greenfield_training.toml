@@ -117,6 +117,7 @@ enabled = true
 max_batches = 3
 files_per_batch = 4
 review_required = true
+planning_review_rounds = 1
 # Keep LLM-generated code for inspection if deterministic review fails.
 # Set true only when you explicitly prefer a weak scaffold over stopping.
 allow_fallback_scaffold = false

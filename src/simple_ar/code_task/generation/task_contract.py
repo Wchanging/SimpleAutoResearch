@@ -33,7 +33,7 @@ def build_greenfield_task_contract(
     evaluation_focus = _filter_by_keywords(requirements, _EVALUATION_KEYWORDS)
     data_requirements = _filter_by_keywords(requirements, _DATA_KEYWORDS)
     dependency_hints = _filter_by_keywords(requirements, _DEPENDENCY_KEYWORDS)
-    required_metrics = _required_metrics(result_schema)
+    required_metrics = _dedupe(_required_metrics(result_schema) + _required_metrics_from_requirements(requirements))
     evidence_plan = _build_evidence_plan(
         requirements=requirements,
         required_metrics=required_metrics,
@@ -125,29 +125,46 @@ def contract_prompt_view(
     }
 
 
-def _extract_requirement_lines(task_text: str, *, max_items: int = 80, max_chars: int = 260) -> list[str]:
+def _extract_requirement_lines(task_text: str, *, max_items: int = 80, max_chars: int = 320) -> list[str]:
     items: list[str] = []
     active_heading = ""
+    pending: str | None = None
+
+    def flush_pending() -> None:
+        nonlocal pending
+        if pending:
+            items.append(_clean(pending, max_chars=max_chars))
+            pending = None
+
     for raw in task_text.splitlines():
         line = raw.strip()
         if not line:
+            flush_pending()
             continue
         heading = _HEADING_RE.match(line)
         if heading:
+            flush_pending()
             active_heading = _clean(heading.group("text"), max_chars=max_chars)
             continue
         bullet = _BULLET_RE.match(line)
         if bullet:
+            flush_pending()
             item = _clean(bullet.group("text"), max_chars=max_chars)
         elif _line_has_requirement_signal(line):
+            flush_pending()
             item = _clean(line, max_chars=max_chars)
+        elif pending and raw[:1].isspace():
+            pending = f"{pending} {line}"
+            continue
         else:
+            flush_pending()
             continue
         if active_heading:
             item = f"{active_heading}: {item}"
-        items.append(item)
+        pending = item
         if len(items) >= max_items:
             break
+    flush_pending()
     if not items:
         first = _first_meaningful_line(task_text)
         if first:
@@ -172,6 +189,40 @@ def _required_metrics(result_schema: Mapping[str, Any]) -> list[str]:
     if primary:
         metrics.insert(0, primary)
     return _dedupe(metrics)
+
+
+def _required_metrics_from_requirements(requirements: list[str], *, limit: int = 40) -> list[str]:
+    metrics: list[str] = []
+    in_metric_section = False
+    for item in requirements:
+        heading, _, body = item.partition(":")
+        heading_l = heading.lower()
+        if "required metric" in heading_l or "metric" in heading_l:
+            in_metric_section = True
+        elif heading_l and not any(token in heading_l for token in ("metric", "evaluation")):
+            in_metric_section = False
+        if not in_metric_section and "metric" not in item.lower():
+            continue
+        for match in re.findall(r"`([^`]+)`", item):
+            name = _metric_name(match)
+            if name:
+                metrics.append(name)
+        if in_metric_section:
+            name = _metric_name(body or item)
+            if name:
+                metrics.append(name)
+        if len(metrics) >= limit:
+            break
+    return _dedupe(metrics)[:limit]
+
+
+def _metric_name(value: str) -> str:
+    text = value.strip().strip("`")
+    if not text:
+        return ""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{1,80}", text):
+        return ""
+    return text
 
 
 def _build_evidence_plan(

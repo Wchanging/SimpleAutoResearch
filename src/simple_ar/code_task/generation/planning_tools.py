@@ -828,10 +828,10 @@ def _review_findings_to_patch_requests(
         if not isinstance(row, Mapping):
             continue
         severity = _normalize_severity(row.get("severity"))
+        if severity not in {"high", "critical"}:
+            continue
         issue = clean_text(row.get("issue"))[:800]
         change = clean_text(row.get("required_change"))[:800]
-        if severity in {"low", "medium"} and not change:
-            continue
         if not issue and not change:
             continue
         target = _normalize_target_stage(row.get("target_stage"))

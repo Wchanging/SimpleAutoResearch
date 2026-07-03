@@ -505,8 +505,10 @@ Key files, grouped by directory:
     success criteria used by run guards and later reports.
   - `resource_plan.json`: runtime, file-count, generated-line, memory, GPU, and
     streaming budget before code is generated or patched.
-  - `dependency_plan.json`: dependency-install policy, expected entrypoints,
-    and setup-hook notes. It records policy; it does not install packages.
+  - `dependency_plan.json`: dependency-install policy, concrete expected
+    entrypoints, profile candidate entrypoints, and setup-hook notes. It records
+    policy; it does not install packages. Candidate entrypoints are advisory and
+    should not be treated as files that must all be generated.
   - `domain_profile.json`: planning defaults for generic, existing-code, ML,
     or code-agent evaluation tasks.
   - `contract_validation.json`: pre-code validation status; `06-code` stops

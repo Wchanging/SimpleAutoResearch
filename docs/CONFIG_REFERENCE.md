@@ -229,6 +229,7 @@ enabled = false                # set true for greenfield project generation
 max_batches = 2
 files_per_batch = 3
 review_required = true
+planning_review_rounds = 2
 allow_fallback_scaffold = false # if true, failed LLM code can be replaced by a safe scaffold
 
 [report]
@@ -379,6 +380,9 @@ allow_planning_fallback = false
 # - compact: older single architecture planning call
 planning_mode = "tool_agent"
 
+# Maximum reviewer-directed greenfield planning revision rounds.
+planning_review_rounds = 2
+
 # LLM work-plan and patch-plan attempts before stopping or explicitly falling back.
 llm_retry_attempts = 3
 
@@ -527,7 +531,8 @@ needed, so existing embedded `code_task_project` runs keep working.
 | `[evaluation].required_metrics` / `.success_criteria` | Required metric checks and success notes used by `07-run/guard_report.json` and the final report. |
 | `[generation].enabled` | Enables the greenfield project-generation path. Leave false for existing-project code-task runs. |
 | `[generation].max_batches` / `.files_per_batch` / `.review_required` | Project-generation planning and review budget recorded into `05-design/experiment_contract.json` and consumed by `06-code`. |
-| `[generation].allow_fallback_scaffold` | Defaults to false. When false, failed generated code stays available for inspection instead of being silently replaced by a deterministic scaffold. Review repair now prefers structured local actions and falls back to whole-file replacement only for file-level structural failures. |
+| `[generation].planning_review_rounds` | Maximum reviewer-directed greenfield planning revision rounds for 8-stage pipeline runs. Default `2`; lightweight examples can set `1` to reduce planning cost. |
+| `[generation].allow_fallback_scaffold` | Defaults to false. When false, failed generated code stays available for inspection instead of being silently replaced by a deterministic scaffold. LLM-backed run repair may still try to fix runtime failures, but the 8-stage deterministic metric-synthesis fallback is disabled unless this is true; enable only for offline smoke tests or demos. |
 
 During `05-design`, these fields materialize as `experiment_plan.json`,
 `experiment_contract.json`, `result_schema.json`, `resource_plan.json`,
@@ -537,6 +542,10 @@ For greenfield code-task execution, dependency advice is written under
 installed Python packages, while the planner receives a compact task-relevant
 subset plus semantic dependency hints. This is advisory and does not override
 `[execution].allow_dependency_install = false`.
+`dependency_plan.expected_entrypoints` records only the concrete configured run
+entrypoint(s). Domain-profile defaults are written separately as
+`candidate_entrypoints` so planners and reviewers do not mistake every common
+profile entrypoint for a required generated file.
 `06-code` refuses to continue when `contract_validation.json` reports a failed
 pre-code contract.
 During `07-run`, `results.json` is the canonical experiment result and includes
@@ -625,6 +634,7 @@ package rather than parsing stdout directly.
 | `[execute].allow_large_edits` | Allows application of reviewed proposals that exceed the normal budget but fit the large budget. |
 | `[execute].allow_planning_fallback` | Allows deterministic offline work/patch plans and greenfield architecture/file fallbacks after all LLM retries fail. Keep false for real LLM runs so malformed model output stops safely and can be retried. |
 | `[execute].planning_mode` | Greenfield architecture planning mode. `tool_agent` decomposes planning into requirements, architecture, interfaces, file plan, and reviewer-directed bounded revision; `compact` keeps the older single-call planner for compatibility/debugging. |
+| `[execute].planning_review_rounds` | Maximum reviewer-directed greenfield planning revision rounds for standalone code-task runs. Default `2`; lower to `1` for lightweight smoke examples, raise only when plan convergence matters more than token/time cost. |
 | `[execute].llm_retry_attempts` | Number of stage-level LLM work-plan, patch-plan, greenfield architecture, and greenfield file-generation attempts before stopping or explicitly falling back. Each stage attempt still uses the provider-level retry/backoff configured by `SIMPLE_AR_LLM_RETRY_ATTEMPTS`. |
 | `[execute].repair_rounds` | Number of bounded repair proposals after validation/benchmark failure. Repairs still require review. |
 | `[execute].max_files` | Max files included in LLM context for plan/proposal/repair steps. |
@@ -833,6 +843,7 @@ apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
 planning_mode = "tool_agent"
+planning_review_rounds = 2
 llm_retry_attempts = 3
 max_files = 8
 max_source_chars_per_file = 4000
@@ -955,6 +966,7 @@ baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
+planning_review_rounds = 2
 llm_retry_attempts = 3
 
 [models.code_task]

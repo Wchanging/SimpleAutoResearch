@@ -79,6 +79,7 @@ def generate_greenfield_code_task(
     allow_planning_fallback: bool = False,
     llm_retry_attempts: int = 1,
     planning_mode: str = "tool_agent",
+    planning_review_rounds: int = 2,
     message_callback: MessageCallback | None = None,
 ) -> GreenfieldCodeTaskResult:
     """Generate a greenfield project inside a code-task workspace.
@@ -110,7 +111,13 @@ def generate_greenfield_code_task(
         max_generated_lines=max_generated_lines,
         result_schema=result_schema,
     )
-    resource_plan = _resource_plan(resource_decision, max_files=max_files, max_generated_lines=max_generated_lines)
+    result_schema = _result_schema_with_contract_metrics(result_schema, contract)
+    resource_plan = _resource_plan(
+        resource_decision,
+        task_text=task_text,
+        max_files=max_files,
+        max_generated_lines=max_generated_lines,
+    )
     dependency_advice = build_dependency_advice(task_text)
     dependency_plan = _dependency_plan(task_text, dependency_advice=dependency_advice)
     domain_profile = _domain_profile(task_text, dependency_advice=dependency_advice, benchmark_command=benchmark_command)
@@ -152,6 +159,7 @@ def generate_greenfield_code_task(
         allow_fallback=allow_planning_fallback or not use_llm,
         retry_attempts=llm_retry_attempts,
         planning_mode=planning_mode,
+        planning_review_rounds=planning_review_rounds,
         planning_dir=planning_dir,
         message_callback=message_callback,
     )
@@ -169,6 +177,7 @@ def generate_greenfield_code_task(
             "project_dir": "code_task/workspace/generated_project",
             "entrypoint": benchmark_command,
             "planning_mode": planning_mode,
+            "planning_review_rounds": planning_review_rounds,
             "planning_dir": "code_task/meta/planning",
             "models": {
                 "default": model or "",
@@ -368,21 +377,63 @@ def _result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _result_schema_with_contract_metrics(
+    result_schema: dict[str, Any],
+    contract: dict[str, Any],
+) -> dict[str, Any]:
+    metric_contract = contract.get("metric_contract")
+    required = list(result_schema.get("required_metrics", [])) if isinstance(result_schema.get("required_metrics"), list) else []
+    if isinstance(metric_contract, dict) and isinstance(metric_contract.get("required_metrics"), list):
+        required.extend(str(item) for item in metric_contract["required_metrics"] if str(item).strip())
+    merged = dict(result_schema)
+    merged["required_metrics"] = list(dict.fromkeys(required))
+    directions = merged.get("metric_directions")
+    if not isinstance(directions, dict):
+        directions = {}
+    merged["metric_directions"] = dict(directions)
+    return merged
+
+
 def _resource_plan(
     resource_decision: dict[str, Any],
     *,
+    task_text: str,
     max_files: int,
     max_generated_lines: int,
 ) -> dict[str, Any]:
     profile = str(resource_decision.get("profile") or "local_cpu")
+    task_cpu_only = _task_disallows_gpu(task_text)
+    allow_gpu = bool(resource_decision.get("allow_gpu")) and not task_cpu_only
+    if task_cpu_only:
+        profile = "local_cpu"
     return {
         "schema_version": "code_task_greenfield_resource_plan.v1",
         "profile": profile,
-        "allow_gpu": bool(resource_decision.get("allow_gpu")),
+        "allow_gpu": allow_gpu,
         "max_files": max_files,
         "max_generated_lines": max_generated_lines,
         "decision": resource_decision,
+        "constraint_overrides": [
+            "Task text explicitly requires CPU-only execution; GPU preference from environment probe was disabled."
+        ]
+        if task_cpu_only
+        else [],
     }
+
+
+def _task_disallows_gpu(task_text: str) -> bool:
+    text = " ".join(str(task_text or "").lower().replace("-", " ").split())
+    return any(
+        phrase in text
+        for phrase in (
+            "cpu only",
+            "cpu-only",
+            "no gpu",
+            "without gpu",
+            "do not use gpu",
+            "gpu disabled",
+        )
+    )
 
 
 def _dependency_plan(task_text: str, *, dependency_advice: dict[str, Any]) -> dict[str, Any]:

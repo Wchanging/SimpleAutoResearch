@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from simple_ar.code_task.generation.common import string_list
+from simple_ar.code_task.generation.task_contract import contract_prompt_view
 
 
 def initial_implementation_memory(
@@ -12,20 +13,28 @@ def initial_implementation_memory(
     architecture_plan: Mapping[str, Any],
     mode: str,
 ) -> dict[str, Any]:
+    task_view = contract_prompt_view(
+        contract,
+        max_task_chars=900,
+        max_requirements=18,
+        max_success_criteria=12,
+    )
     return {
         "schema_version": "implementation_memory.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "mode": mode,
         "task": {
-            "contract_id": contract.get("contract_id", ""),
-            "task_kind": contract.get("task_kind", ""),
-            "objective": contract.get("objective", ""),
-            "explicit_requirements": string_list(contract.get("explicit_requirements"), limit=30),
-            "deliverables": string_list(contract.get("deliverables"), limit=20),
-            "constraints": string_list(contract.get("constraints"), limit=20),
-            "evaluation_focus": string_list(contract.get("evaluation_focus"), limit=20),
-            "evidence_plan": dict(contract.get("evidence_plan", {})) if isinstance(contract.get("evidence_plan"), Mapping) else {},
-            "metric_contract": dict(contract.get("metric_contract", {})) if isinstance(contract.get("metric_contract"), Mapping) else {},
+            "contract_id": task_view.get("contract_id", ""),
+            "task_kind": task_view.get("task_kind", ""),
+            "objective": task_view.get("objective", ""),
+            "explicit_requirements": string_list(task_view.get("explicit_requirements"), limit=18),
+            "deliverables": string_list(task_view.get("deliverables"), limit=10),
+            "constraints": string_list(task_view.get("constraints"), limit=10),
+            "evaluation_focus": string_list(task_view.get("evaluation_focus"), limit=12),
+            "evidence_plan": _compact_evidence_plan(task_view.get("evidence_plan")),
+            "metric_contract": dict(task_view.get("metric_contract", {}))
+            if isinstance(task_view.get("metric_contract"), Mapping)
+            else {},
         },
         "accepted_decisions": [
             architecture_plan.get("architecture_summary", ""),
@@ -37,6 +46,20 @@ def initial_implementation_memory(
         "open_issues": [],
         "review_findings": [],
         "repair_history": [],
+    }
+
+
+def _compact_evidence_plan(value: object) -> dict[str, Any]:
+    plan = value if isinstance(value, Mapping) else {}
+    return {
+        "schema_version": plan.get("schema_version", "code_task_evidence_plan.v1"),
+        "hypotheses": string_list(plan.get("hypotheses"), limit=8),
+        "required_conditions": string_list(plan.get("required_conditions"), limit=10),
+        "required_datasets": string_list(plan.get("required_datasets"), limit=8),
+        "required_metrics": string_list(plan.get("required_metrics"), limit=30),
+        "required_artifacts": string_list(plan.get("required_artifacts"), limit=8),
+        "required_comparisons": string_list(plan.get("required_comparisons"), limit=8),
+        "primary_metric": plan.get("primary_metric", ""),
     }
 
 

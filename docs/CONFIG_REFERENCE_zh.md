@@ -220,6 +220,7 @@ enabled = false                # greenfield 项目生成时设为 true；已有�
 max_batches = 2
 files_per_batch = 3
 review_required = true
+planning_review_rounds = 2
 allow_fallback_scaffold = false # true 时，失败的 LLM 代码可被安全 scaffold 替换
 
 [report]
@@ -364,6 +365,9 @@ allow_planning_fallback = false
 # - tool_agent: requirements -> architecture -> interfaces -> file plan -> review
 # - compact: old single-call architecture planner
 planning_mode = "tool_agent"
+
+# Greenfield planning reviewer 可触发的最大回修轮数。
+planning_review_rounds = 2
 
 # work-plan / patch-plan 的 LLM 重试次数；全部失败后才停止或显式 fallback。
 llm_retry_attempts = 3
@@ -513,14 +517,17 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[evaluation].required_metrics` / `.success_criteria` | 必需指标检查和成功条件说明，会被 `07-run/guard_report.json` 和最终报告使用。 |
 | `[generation].enabled` | 启用 greenfield 项目生成路径；已有项目 code-task 运行保持 false。 |
 | `[generation].max_batches` / `.files_per_batch` / `.review_required` | 后续项目生成路径的计划提示；已有项目 patch run 只记录用于审计。 |
-| `[generation].allow_fallback_scaffold` | 默认 false。false 时，生成代码失败会保留产物供检查，而不是静默替换成 deterministic scaffold。review repair 会优先做结构化局部 action；只有文件级结构错误时才回退到整文件替换。 |
+| `[generation].planning_review_rounds` | 8 阶段 pipeline 中 greenfield planning reviewer 可触发的最大回修轮数。默认 `2`；轻量 example 可设为 `1` 来降低规划成本。 |
+| `[generation].allow_fallback_scaffold` | 默认 false。false 时，生成代码失败会保留产物供检查，而不是静默替换成 deterministic scaffold。LLM run repair 仍可尝试修复运行时错误，但 8 阶段 run 里“失败后合成 required metrics”的 deterministic fallback 只有该项为 true 时才允许；只建议离线 smoke test 或 demo 显式打开。 |
 
 `05-design` 会把这些字段落成 `experiment_plan.json`、`experiment_contract.json`、
 `result_schema.json`、`resource_plan.json`、`dependency_plan.json`、
 `domain_profile.json` 和 `contract_validation.json`。greenfield code-task 执行会额外在
 `code_task/meta/dependency_advice.json` / `.md` 写入依赖建议：JSON 记录当前 Python
 环境的完整 installed-package 扫描结果，planner 只接收紧凑的任务相关子集和语义依赖提示。
-这只是建议，不会覆盖 `[execution].allow_dependency_install = false` 的默认边界。如果
+这只是建议，不会覆盖 `[execution].allow_dependency_install = false` 的默认边界。
+`dependency_plan.expected_entrypoints` 只记录实际配置的执行入口；profile 默认入口会写入
+`candidate_entrypoints`，避免 planner/reviewer 把所有常见入口都误判为必须生成的文件。
 `contract_validation.json` 报告失败，`06-code` 会拒绝继续进入代码阶段。
 `07-run/results.json` 是实验结果的 canonical 入口，会集中记录指标、执行 provenance、comparison/verdict，以及 `resource_plan.json`、`code_review.json`、`guard_report.json` 和 `diagnosis.json` 的紧凑证据信号。`diagnosis.json` 会把 guard/code-review/runtime 问题整理成可读诊断和修复建议；报告阶段应引用这组 canonical 结果，而不是直接从 stdout 猜测实验结论。
 
@@ -602,6 +609,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[execute].allow_large_edits` | 允许应用超过 normal 预算但落在 large 预算内的已审核 proposal。 |
 | `[execute].allow_planning_fallback` | LLM work-plan / patch-plan / greenfield 架构规划 / greenfield 文件生成重试后仍失败时，是否允许 deterministic fallback。真实 LLM run 建议保持 false，这样坏输出会安全停止并可重跑。 |
 | `[execute].planning_mode` | Greenfield 架构规划模式。`tool_agent` 会拆成 requirements、architecture、interfaces、file plan 和 reviewer-directed bounded revision；`compact` 保留旧的单次架构规划调用，主要用于兼容和调试。 |
+| `[execute].planning_review_rounds` | standalone code-task 中 greenfield planning reviewer 可触发的最大回修轮数。默认 `2`；轻量 smoke example 可设为 `1`，大型服务器任务可按需调大。 |
 | `[execute].llm_retry_attempts` | work-plan、patch-plan、greenfield 架构规划和 greenfield 文件生成的 LLM 尝试次数；全部失败后才停止或显式 fallback。 |
 | `[execute].repair_rounds` | validation/benchmark 失败后最多生成几轮 bounded repair proposal；repair 仍需审核。 |
 | `[execute].max_files` | plan/proposal/repair 步骤纳入 LLM 上下文的最大文件数。 |
@@ -794,6 +802,7 @@ apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
 planning_mode = "tool_agent"
+planning_review_rounds = 2
 llm_retry_attempts = 3
 max_files = 8
 max_source_chars_per_file = 4000
@@ -909,6 +918,7 @@ baseline_policy = "auto"
 apply_proposed_edits = false
 allow_large_edits = false
 allow_planning_fallback = false
+planning_review_rounds = 2
 llm_retry_attempts = 3
 
 [models.code_task]

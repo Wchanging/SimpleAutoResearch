@@ -46,6 +46,7 @@ class DependencyPlan:
     install_allowed: bool
     setup_hook: str = ""
     expected_entrypoints: list[str] = field(default_factory=list)
+    candidate_entrypoints: list[str] = field(default_factory=list)
     required_packages: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     schema_version: str = "2.5"
@@ -288,6 +289,7 @@ def _build_generation_plan(runtime: UnifiedTaskConfig) -> dict[str, Any]:
         "max_batches": runtime.generation.max_batches,
         "files_per_batch": runtime.generation.files_per_batch,
         "review_required": runtime.generation.review_required,
+        "planning_review_rounds": runtime.generation.planning_review_rounds,
     }
 
 
@@ -301,10 +303,31 @@ def _build_dependency_plan(runtime: UnifiedTaskConfig, domain_profile: DomainPro
     return DependencyPlan(
         install_allowed=runtime.execution.allow_dependency_install,
         setup_hook=runtime.workspace.setup_hook,
-        expected_entrypoints=list(domain_profile.expected_entrypoints),
+        expected_entrypoints=_resolved_expected_entrypoints(runtime, domain_profile),
+        candidate_entrypoints=list(domain_profile.expected_entrypoints),
         required_packages=[],
         notes=notes,
     )
+
+
+def _resolved_expected_entrypoints(runtime: UnifiedTaskConfig, domain_profile: DomainProfile) -> list[str]:
+    """Return entrypoints that are actual run obligations, not profile candidates.
+
+    Domain profiles describe common entrypoint shapes for a task family.  Treating
+    every candidate as required made downstream greenfield planning overfit to
+    names such as ``train.py`` and ``benchmark.py`` even when the configured run
+    command only expected one entrypoint.  The dependency plan keeps candidates
+    separately and exposes only the concrete execution command here.
+    """
+
+    command = _short_text(runtime.execution.command, 240).strip()
+    if command:
+        return [command]
+    if runtime.task.kind in {"greenfield", "benchmark_solution"}:
+        return ["python main.py"]
+    if domain_profile.expected_entrypoints:
+        return [domain_profile.expected_entrypoints[0]]
+    return []
 
 
 def _resolve_objective(runtime: UnifiedTaskConfig, topic: str, hypothesis: str) -> str:

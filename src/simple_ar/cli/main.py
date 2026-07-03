@@ -1312,6 +1312,7 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             ),
             allow_planning_fallback=allow_planning_fallback,
             planning_mode=planning_mode,
+            planning_review_rounds=options.planning_review_rounds,
             llm_retry_attempts=llm_retry_attempts,
             repair_rounds=repair_rounds,
             budget_profile=options.budget_profile,

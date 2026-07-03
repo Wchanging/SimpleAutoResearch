@@ -306,7 +306,7 @@ def greenfield_file_prompt(
         f"Implementation memory:\n{json.dumps(_memory_for_prompt(implementation_memory or {}), indent=2, ensure_ascii=False)}\n\n"
         f"Project planning context:\n{json.dumps(_architecture_for_file_prompt(architecture_plan, file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Result schema:\n{json.dumps(dict(result_schema), indent=2, ensure_ascii=False)}\n\n"
-        f"Experiment contract:\n{json.dumps(contract_prompt_view(contract), indent=2, ensure_ascii=False)}\n"
+        f"Experiment contract:\n{json.dumps(_contract_for_file_prompt(contract), indent=2, ensure_ascii=False)}\n"
         + (f"\nRetry feedback:\n{retry_feedback}\n" if retry_feedback else "")
     )
 
@@ -417,7 +417,16 @@ def _file_output_tokens(path: str, file_spec: Mapping[str, Any]) -> int:
     return 1500
 
 
-def _memory_for_prompt(memory: Mapping[str, Any], *, file_limit: int = 40) -> dict[str, Any]:
+def _contract_for_file_prompt(contract: Mapping[str, Any]) -> dict[str, Any]:
+    return contract_prompt_view(
+        contract,
+        max_task_chars=900,
+        max_requirements=24,
+        max_success_criteria=14,
+    )
+
+
+def _memory_for_prompt(memory: Mapping[str, Any], *, file_limit: int = 12) -> dict[str, Any]:
     file_summaries = memory.get("file_summaries")
     batches = memory.get("generated_batches")
     repairs = memory.get("repair_history")
@@ -425,13 +434,37 @@ def _memory_for_prompt(memory: Mapping[str, Any], *, file_limit: int = 40) -> di
     return {
         "schema_version": memory.get("schema_version", "implementation_memory.v1"),
         "mode": memory.get("mode", ""),
-        "task": memory.get("task", {}),
-        "accepted_decisions": string_list(memory.get("accepted_decisions"), limit=20, tail=True),
+        "task": _compact_memory_task(memory.get("task")),
+        "accepted_decisions": string_list(memory.get("accepted_decisions"), limit=8, tail=True),
         "file_summaries": mapping_list(file_summaries, limit=file_limit, tail=True),
-        "generated_batches": mapping_list(batches, limit=20, tail=True),
-        "open_issues": string_list(memory.get("open_issues"), limit=20, tail=True),
-        "review_findings": mapping_list(reviews, limit=20, tail=True),
-        "repair_history": mapping_list(repairs, limit=10, tail=True),
+        "generated_batches": mapping_list(batches, limit=8, tail=True),
+        "open_issues": string_list(memory.get("open_issues"), limit=8, tail=True),
+        "review_findings": mapping_list(reviews, limit=8, tail=True),
+        "repair_history": mapping_list(repairs, limit=6, tail=True),
+    }
+
+
+def _compact_memory_task(value: object) -> dict[str, Any]:
+    task = value if isinstance(value, Mapping) else {}
+    metric_contract = task.get("metric_contract") if isinstance(task.get("metric_contract"), Mapping) else {}
+    evidence_plan = task.get("evidence_plan") if isinstance(task.get("evidence_plan"), Mapping) else {}
+    return {
+        "objective": str(task.get("objective") or "")[:300],
+        "explicit_requirements": string_list(task.get("explicit_requirements"), limit=12),
+        "constraints": string_list(task.get("constraints"), limit=8),
+        "evaluation_focus": string_list(task.get("evaluation_focus"), limit=10),
+        "metric_contract": {
+            "primary_metric": metric_contract.get("primary_metric", ""),
+            "required_metrics": string_list(metric_contract.get("required_metrics"), limit=30),
+            "default_fill_policy": metric_contract.get("default_fill_policy", ""),
+        },
+        "evidence_plan": {
+            "required_conditions": string_list(evidence_plan.get("required_conditions"), limit=10),
+            "required_datasets": string_list(evidence_plan.get("required_datasets"), limit=8),
+            "required_metrics": string_list(evidence_plan.get("required_metrics"), limit=30),
+            "required_artifacts": string_list(evidence_plan.get("required_artifacts"), limit=8),
+            "required_comparisons": string_list(evidence_plan.get("required_comparisons"), limit=8),
+        },
     }
 
 
