@@ -97,6 +97,12 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
     traceback_block = _traceback_block(stderr)
     runtime_implicated = _implicated_files(traceback_block or stderr, paths.workspace_dir)
     validation_implicated = _validation_issue_files(validation, paths.workspace_dir)
+    signal_matched_files = _source_signal_files(
+        paths.workspace_dir,
+        "\n".join([stderr, stdout, "\n".join(_signal_lines(stdout, stderr))]),
+    )
+    if not runtime_implicated and signal_matched_files:
+        runtime_implicated = signal_matched_files
     implicated_files = _dedupe(
         runtime_implicated + ([] if (stderr or traceback_block) else validation_implicated)
     )
@@ -115,6 +121,7 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         traceback_block=traceback_block,
         signal_lines=signal_lines,
         implicated_files=implicated_files,
+        signal_matched_files=signal_matched_files,
         changed_files=changed_files,
         status=status,
     )
@@ -127,6 +134,7 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         status=status,
         source=str(artifacts["source"]),
         implicated_files=implicated_files,
+        signal_matched_files=signal_matched_files,
     )
     write_code_task_summary(run_dir)
     return FailureAnalysisResult(
@@ -146,6 +154,7 @@ def _render_failure_analysis(
     traceback_block: str,
     signal_lines: list[str],
     implicated_files: list[str],
+    signal_matched_files: list[str],
     changed_files: list[str],
     status: str,
 ) -> str:
@@ -171,6 +180,11 @@ def _render_failure_analysis(
         "## Implicated Files",
         "",
         _bullet_list([f"`{path}`" for path in implicated_files]) or "- None found in traceback.",
+        "",
+        "## Signal-Matched Files",
+        "",
+        _bullet_list([f"`{path}`" for path in signal_matched_files])
+        or "- No source files matched extracted error tokens.",
         "",
         "## Recently Changed Files",
         "",
@@ -364,6 +378,74 @@ def _validation_signal_lines(validation: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _source_signal_files(workspace_dir: Path, signal_text: str) -> list[str]:
+    terms = _failure_terms(signal_text)
+    if not terms or not workspace_dir.is_dir():
+        return []
+    ranked: list[tuple[int, str]] = []
+    workspace = workspace_dir.resolve()
+    for path in workspace.rglob("*.py"):
+        if not path.is_file():
+            continue
+        try:
+            rel = path.resolve().relative_to(workspace).as_posix()
+            source = path.read_text(encoding="utf-8", errors="ignore").lower()
+        except (OSError, ValueError):
+            continue
+        score = 0
+        for term in terms:
+            if term in source:
+                score += 1
+                if re.search(rf"\b{re.escape(term)}\b", source):
+                    score += 1
+        if score:
+            ranked.append((score, rel))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [rel for _, rel in ranked[:8]]
+
+
+def _failure_terms(text: str) -> list[str]:
+    lowered = text.lower()
+    terms: list[str] = []
+    for pattern in (
+        r"has no attribute ['\"]([^'\"]+)['\"]",
+        r"name ['\"]([^'\"]+)['\"] is not defined",
+        r"no module named ['\"]([^'\"]+)['\"]",
+        r"unexpected keyword argument ['\"]([^'\"]+)['\"]",
+        r"keyerror:\s*['\"]([^'\"]+)['\"]",
+    ):
+        terms.extend(match.group(1).lower() for match in re.finditer(pattern, lowered))
+    for quoted in re.findall(r"'([^']{3,80})'|\"([^\"]{3,80})\"", text):
+        value = next((part for part in quoted if part), "")
+        if value:
+            terms.append(value.lower())
+    for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", text):
+        terms.append(token.lower())
+    stop = {
+        "attributeerror",
+        "benchmark",
+        "cannot",
+        "error",
+        "experiment",
+        "failed",
+        "failure",
+        "file",
+        "float",
+        "line",
+        "module",
+        "object",
+        "python",
+        "return",
+        "status",
+        "traceback",
+        "typeerror",
+        "valueerror",
+        "with",
+    }
+    filtered = [term for term in terms if term not in stop and len(term) >= 3]
+    return list(dict.fromkeys(filtered))[:24]
+
+
 def _dedupe(items: list[str]) -> list[str]:
     deduped: list[str] = []
     for item in items:
@@ -409,6 +491,7 @@ def _update_manifest_after_failure_analysis(
     status: str,
     source: str,
     implicated_files: list[str],
+    signal_matched_files: list[str],
 ) -> None:
     layout = manifest_section(manifest, "layout")
     benchmark = manifest.get("benchmark", {})
@@ -426,6 +509,7 @@ def _update_manifest_after_failure_analysis(
             "analysis": analysis_rel,
             "run_label": latest_label if source != "validation" else "",
             "implicated_files": implicated_files,
+            "signal_matched_files": signal_matched_files,
         }
     )
     manifest["layout"] = layout

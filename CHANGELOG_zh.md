@@ -4,6 +4,17 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-07-03
+
+### Changed
+
+- Result-analysis 现在会匹配常见的项目级/单元格级指标别名，例如把 `test_accuracy` 对齐到条件表中的 `accuracy`，避免全局主指标名和 per-cell 指标名不同导致 Primary Metric Table 为空。
+- Greenfield review-repair prompt 现在会明确列出每种结构化编辑 action 的必填字段；code-task summary 也会区分“原始 repair 部分失败”和“后续 review 已恢复通过”，减少状态误读。
+
+- ARC-Bench strict scoring 的代码证据选择改为优先入口文件、本地 import graph 和任务关键词相关文件，避免大体积 artifact/config 文件按字母序吃光上下文后漏掉 models、data generation、runner、evaluation 等核心实现。
+- Result-analysis 现在可以把更多实验输出结构归一为 condition-level evidence table，包括 `cells`、`cell_records`、`condition_summaries` 以及 method/training-size 组合记录，减少“实验已运行但报告/claims 没有可评分表格”的情况。
+- Code-task failure analysis 在没有 traceback 文件路径时会根据错误 token 反查源码，给 missing attribute、missing field、unexpected keyword 等问题提供更具体的候选文件，帮助后续 repair 少走重复猜测。
+
 ## 2026-06-30
 
 ### Changed
@@ -22,6 +33,11 @@
 - Greenfield planning / writer prompt 现在会把证据要求作为硬契约处理：需要下游指标或报告使用的 features、labels、predictions、condition、seed、per-dataset rows 等字段必须显式传递，不能在中途只保留最终 summary。
 - Generated-project runtime repair prompt 现在要求先构建 failing metric/field 到 producer、consumer、aggregate/report 的 dependency trace，再选择目标文件；同类错误重复出现时，需要解释上轮定位或补丁为何无效，减少反复修改同一处但没有解决根因的循环。
 - Generated-project review/run repair 新增通用结构化 edit action 执行层。LLM repair 现在优先返回 `replace_block`、`rewrite_function` 等可审计局部 action，并由代码侧做唯一匹配、AST 函数边界、public API diff 和编译校验；只有文件级结构错误或局部 action 不可用时才回退到整文件替换。
+
+- 8 阶段 greenfield 设计产物中的 `dependency_plan.expected_entrypoints` 现在只记录实际配置的执行入口；
+  domain profile 的常见入口会单独写入 `candidate_entrypoints`。这避免了 `train.py`、
+  `benchmark.py` 等 profile 候选项被下游 planning reviewer 误判为必须生成的文件，
+  从而减少轻中型 greenfield 任务在规划阶段反复返工和额外 token 消耗。
 
 ### Fixed
 
@@ -64,9 +80,12 @@
 - Code-task 的 LLM 规划与生成现在有更强的阶段级重试能力。Greenfield 架构规划和逐文件生成会在阶段级失败后做有界指数退避，并在终端输出 retry 进度；底层 LiteLLM provider 仍负责单次请求内部的连接中断、超时、限流和 5xx 重试。
 - Code-task 默认阶段级 `llm_retry_attempts` 调整为 3。ARC-Bench prepared 配置默认写入 4，批跑器也可以通过 `--llm-retry-attempts N` 在运行时覆盖，避免服务器网络短暂断连时批量任务集体倒在 architecture planning。
 - 新增 greenfield tool-agent 规划模式。默认架构规划会拆成 requirements、architecture、interfaces、file plan 和 planning review，并把中间产物写入 `code_task/meta/planning/`；只有调试旧路径时才需要设置 `[execute].planning_mode = "compact"` 或 `--planning-mode compact`。
+- Greenfield planning review 默认保持 2 轮，并新增 standalone code-task 的 `[execute].planning_review_rounds` 与 8 阶段 pipeline 的 `[generation].planning_review_rounds` 配置项。低/中风险规划意见不再触发重跑；轻量示例可显式设为 1 轮降低成本，ARC-Bench / 大型任务则保留默认的额外收敛机会。
 - Greenfield architecture 和逐文件生成 prompt 现在使用压缩后的 task contract 视图，不再每次把完整 `task.md` 原文塞进请求。完整任务文本仍保存在 artifact 中用于审计；模型侧只接收目标、有限 task excerpt、显式需求、交付物、约束、依赖提示和指标契约，降低大型任务首轮 planning 的 token 与等待时间。
 - Greenfield architecture planning 现在使用更小的单次输出预算和更严格的 architecture 专用 contract view，降低首个 planning 请求被慢 provider 或 HTTP proxy 截断的概率；后续逐文件生成仍可使用较大的正常输出预算。
 - Greenfield code-task 生成不再在真实 LLM run 中静默混入 deterministic scaffold。架构规划和逐文件生成都会先做有限 LLM 重试；如果模型或客户端仍失败，默认直接停止，只有关闭 LLM 或显式设置 `[execute].allow_planning_fallback = true` 时才允许 deterministic fallback。
+- Greenfield task contract 抽取现在会合并 Markdown 多行 bullet，并把 `task.md` 的 Required Metrics 合并进 result schema；CPU-only / no-GPU 这类任务约束也会覆盖环境探测到的 GPU 建议，避免 planning 因压缩摘要丢失硬性要求。
+- 8 阶段 greenfield run 失败后会优先复用通用 generated-project run repair，根据 stderr、guard、diagnosis、code artifacts 和 architecture plan 进行 LLM 运行时修复；deterministic `schema_metric_fallback` 只在 `[generation].allow_fallback_scaffold = true` 时作为 demo/offline 兜底启用，避免把半成品误判为有效实验结果。
 - 新增通用 greenfield task contract 抽取。系统会从 `task.md` 中提取显式要求、交付物、约束、数据要求、依赖提示和指标期望，并把这份契约贯穿到架构规划、逐文件生成、implementation memory、review 和 repair prompt。
 - 逐文件 greenfield 生成现在会收到 dependency advice 和紧凑 implementation memory，包括已生成文件摘要和 public API。这样每个文件 writer 都能看到全局项目连续性，而不是只靠当前文件 spec 猜跨文件 schema。
 - Greenfield architecture prompt 现在会明确要求先定义共享 record/result schema 和 artifact flow，再分配到各个模块，减少 data、processing、runner、analysis、reporting、validation 之间的 schema 漂移。

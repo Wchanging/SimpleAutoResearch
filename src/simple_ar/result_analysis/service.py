@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -38,6 +39,12 @@ def run_result_analysis(
     metric_summary = build_metric_summary(ctx)
     metric_summary["result_tables"] = build_result_tables(ctx)
     metric_summary["rubric_categories"] = build_rubric_categories(ctx)
+    metric_summary["weak_metric_signals"] = sorted(
+        dict.fromkeys(
+            list(metric_summary.get("weak_metric_signals") or [])
+            + evidence_chain_warnings(ctx, metric_summary["result_tables"])
+        )
+    )
     result = deterministic_result(ctx, metric_summary)
     raw_response: dict[str, Any] | None = None
 
@@ -671,13 +678,82 @@ def build_result_tables(context: AnalysisContext) -> dict[str, Any]:
     expected = context.expected_metrics or []
     if expected and isinstance(expected[0], dict):
         primary_metric = str(expected[0].get("name") or "")
-    primary_metric = primary_metric or "rmse"
-    primary_rows = [row for row in table_rows if row.get("metric") == primary_metric]
+    primary_metric = primary_metric or infer_primary_metric(context)
+    primary_rows = [row for row in table_rows if metric_names_match(str(row.get("metric") or ""), primary_metric)]
     return {
         "primary_metric": primary_metric,
         "primary_metric_rows": primary_rows,
         "all_metric_rows": table_rows[:240],
     }
+
+
+def infer_primary_metric(context: AnalysisContext) -> str:
+    for name, direction in context.metric_directions.items():
+        if direction not in {"resource", "ignore"} and not is_auxiliary_metric_name(str(name)):
+            return str(name)
+    for name in context.metrics:
+        text = str(name)
+        if not is_auxiliary_metric_name(text):
+            return text
+    return next(iter(context.metrics), "")
+
+
+def metric_names_match(observed: str, expected: str) -> bool:
+    if not observed or not expected:
+        return False
+    return bool(metric_name_aliases(observed) & metric_name_aliases(expected))
+
+
+def metric_name_aliases(name: str) -> set[str]:
+    normalized = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    aliases = {normalized} if normalized else set()
+    if not normalized:
+        return aliases
+
+    prefixes = (
+        "test",
+        "heldout",
+        "held_out",
+        "validation",
+        "val",
+        "mean",
+        "avg",
+        "average",
+        "overall",
+        "final",
+    )
+    for prefix in prefixes:
+        marker = prefix + "_"
+        if normalized.startswith(marker) and len(normalized) > len(marker):
+            aliases.add(normalized[len(marker) :])
+
+    suffixes = ("_mean", "_score")
+    for suffix in suffixes:
+        if normalized.endswith(suffix) and len(normalized) > len(suffix):
+            aliases.add(normalized[: -len(suffix)])
+
+    # Keep semantically specific names such as balanced_accuracy distinct, but
+    # let common project-level labels match per-cell metric records.
+    if normalized in {"test_accuracy", "heldout_accuracy", "held_out_accuracy", "mean_accuracy", "avg_accuracy"}:
+        aliases.add("accuracy")
+    if normalized in {"test_rmse", "mean_rmse", "avg_rmse", "overall_rmse"}:
+        aliases.add("rmse")
+    if normalized in {"test_mae", "mean_mae", "avg_mae", "overall_mae"}:
+        aliases.add("mae")
+    return aliases
+
+
+def evidence_chain_warnings(context: AnalysisContext, result_tables: dict[str, Any]) -> list[str]:
+    rows = result_tables.get("all_metric_rows") if isinstance(result_tables, dict) else None
+    if isinstance(rows, list) and rows:
+        return []
+    warnings: list[str] = []
+    if context.metrics:
+        warnings.append("no condition-level result table extracted")
+    raw_count = len(discover_raw_records(context.project_results))
+    if raw_count:
+        warnings.append(f"raw condition records were present but not normalized into result tables: {raw_count}")
+    return warnings
 
 
 def find_per_cell_records(data: Any) -> list[dict[str, Any]]:
@@ -766,12 +842,65 @@ def looks_like_aggregate_record(record: dict[str, Any]) -> bool:
 
 
 def raw_records(data: dict[str, Any]) -> list[dict[str, Any]]:
+    for keys in (
+        ("cells", "cell_records", "records", "per_cell"),
+        ("rows", "runs", "splits", "seed_evidence"),
+        ("condition_summaries", "summaries"),
+    ):
+        records: list[dict[str, Any]] = []
+        for key in keys:
+            value = data.get(key)
+            if isinstance(value, list):
+                records.extend(row for row in value if isinstance(row, dict))
+        if records:
+            return dedupe_records(records)
+    return dedupe_records(discover_raw_records(data))
+
+
+def dedupe_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in records:
+        try:
+            key = json.dumps(record, sort_keys=True, ensure_ascii=False, default=str)
+        except TypeError:
+            key = repr(sorted(record.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(record)
+    return deduped
+
+
+def discover_raw_records(value: Any, *, depth: int = 0, max_depth: int = 4) -> list[dict[str, Any]]:
+    if depth > max_depth:
+        return []
     records: list[dict[str, Any]] = []
-    for key in ("rows", "runs", "splits", "seed_evidence"):
-        value = data.get(key)
-        if isinstance(value, list):
-            records.extend(row for row in value if isinstance(row, dict))
+    if isinstance(value, list):
+        dict_rows = [row for row in value if isinstance(row, dict)]
+        if dict_rows and sum(1 for row in dict_rows if looks_like_raw_result_record(row)) >= max(1, len(dict_rows) // 2):
+            return dict_rows
+        for row in value:
+            if isinstance(row, (dict, list)):
+                records.extend(discover_raw_records(row, depth=depth + 1, max_depth=max_depth))
+        return records
+    if not isinstance(value, dict):
+        return []
+    for child in value.values():
+        if isinstance(child, (dict, list)):
+            records.extend(discover_raw_records(child, depth=depth + 1, max_depth=max_depth))
     return records
+
+
+def looks_like_raw_result_record(record: dict[str, Any]) -> bool:
+    if not record_condition(record):
+        return False
+    numeric_keys = [
+        key
+        for key, value in record.items()
+        if is_number(value) and key not in RAW_NON_METRIC_KEYS and not key.endswith("_id")
+    ]
+    return bool(numeric_keys)
 
 
 def normalized_metric_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -857,33 +986,81 @@ RAW_NON_METRIC_KEYS = {
     "n_test",
     "n_features",
     "n_classes",
+    "n_samples",
+    "dataset_num_classes",
+    "dataset_split_seed",
     "fallback_used",
     "is_modal_selection",
 }
 
 
+def is_auxiliary_metric_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(
+        token in lowered
+        for token in (
+            "runtime",
+            "time",
+            "wall_clock",
+            "memory",
+            "seed_count",
+            "metric_count",
+            "dataset_count",
+            "condition_count",
+            "row_count",
+            "n_samples",
+        )
+    )
+
+
 def record_dataset(record: dict[str, Any]) -> str:
-    return str(
+    value = (
         record.get("dataset_name")
         or record.get("dataset")
         or record.get("dataset_id")
+        or record.get("family")
+        or record.get("regime")
+        or record.get("source")
         or record.get("data")
         or ""
-    ).strip()
+    )
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("id") or value.get("dataset_id") or ""
+    text = str(value).strip()
+    if text:
+        return text
+    for key in ("n_train", "train_size", "sample_size", "horizon", "step"):
+        if record.get(key) is not None:
+            return f"{key}={record[key]}"
+    return "all"
 
 
 def record_condition(record: dict[str, Any]) -> str:
-    return str(
+    value = (
         record.get("condition_name")
-        or record.get("condition")
         or record.get("condition_id")
         or record.get("strategy_name")
         or record.get("model")
         or record.get("model_name")
-        or record.get("schedule")
         or record.get("method")
+        or record.get("algorithm")
+        or record.get("condition")
+        or record.get("schedule")
         or ""
-    ).strip()
+    )
+    if isinstance(value, dict):
+        value = (
+            value.get("condition_id")
+            or value.get("name")
+            or value.get("id")
+            or value.get("method")
+            or value.get("model")
+            or ""
+        )
+    text = str(value).strip()
+    if not text and record.get("n_train") is not None and record.get("method") is not None:
+        text = f"{record.get('method')}:n_train={record.get('n_train')}"
+    return text
 
 
 def table_row(dataset: str, condition: str, metric: str, mean: Any, std: Any, count: Any) -> dict[str, Any]:

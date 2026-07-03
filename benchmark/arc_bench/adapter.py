@@ -10,6 +10,7 @@ ARC-Bench-style submission layout.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -954,6 +955,8 @@ def score_submission_with_llm(
     score_profile = normalize_score_profile(score_profile)
     artifacts = load_score_artifacts(
         submission_dir,
+        manifest=manifest,
+        rubric=rubric,
         max_code_chars=max_code_chars,
         max_result_chars=max_result_chars,
         max_writeup_chars=max_writeup_chars,
@@ -1131,6 +1134,9 @@ def build_submission_evidence_bundle(
         "manifest_context": build_manifest_context(manifest),
         "artifact_paths": artifacts.get("paths", {}),
         "code_files": artifacts.get("code_files", []),
+        "all_code_files": artifacts.get("all_code_files", []),
+        "code_selection_notes": artifacts.get("code_selection_notes", []),
+        "code_evidence_excerpt": clip_text(str(artifacts.get("code_text") or ""), 12000),
         "metrics_digest": artifacts.get("metrics", {}),
         "claims_digest": compact_claims_for_bundle(artifacts.get("claims")),
         "experiment_summary_digest": compact_experiment_summary_for_bundle(artifacts.get("experiment_summary")),
@@ -1574,6 +1580,8 @@ def extract_strict_limitations(reviewers: list[dict[str, Any]], adjudication: di
 def load_score_artifacts(
     submission_dir: Path,
     *,
+    manifest: dict[str, Any],
+    rubric: dict[str, Any],
     max_code_chars: int,
     max_result_chars: int,
     max_writeup_chars: int,
@@ -1586,7 +1594,12 @@ def load_score_artifacts(
     summary_path = parent / "stage-14" / "experiment_summary.json"
     metrics_path = results_dir / "metrics.json"
 
-    code_text, code_files = collect_code_text(code_dir, max_chars=max_code_chars)
+    focus_terms = score_focus_terms(manifest, rubric)
+    code_text, code_files, all_code_files, code_selection_notes = collect_code_text(
+        code_dir,
+        max_chars=max_code_chars,
+        focus_terms=focus_terms,
+    )
     metrics = read_json(metrics_path) if metrics_path.is_file() else {}
     claims = read_json(claims_path) if claims_path.is_file() else {}
     summary = read_json(summary_path) if summary_path.is_file() else {}
@@ -1600,6 +1613,8 @@ def load_score_artifacts(
             "experiment_summary": str(summary_path) if summary_path.is_file() else "",
         },
         "code_files": code_files,
+        "all_code_files": all_code_files,
+        "code_selection_notes": code_selection_notes,
         "code_text": code_text,
         "metrics": clip_data(metrics, max_result_chars),
         "claims": clip_data(claims, max_result_chars),
@@ -1608,12 +1623,94 @@ def load_score_artifacts(
     }
 
 
-def collect_code_text(code_dir: Path, *, max_chars: int) -> tuple[str, list[str]]:
+def collect_code_text(
+    code_dir: Path,
+    *,
+    max_chars: int,
+    focus_terms: set[str] | None = None,
+) -> tuple[str, list[str], list[str], list[str]]:
     if not code_dir.is_dir():
-        return "(no submission/code directory found)", []
+        return "(no submission/code directory found)", [], [], ["submission/code directory was not found"]
+    focus_terms = focus_terms or set()
+    file_infos = collect_code_file_infos(code_dir, focus_terms=focus_terms)
+    all_files = [info["rel"] for info in file_infos]
+    if not file_infos:
+        return "(no Python source files found)", [], [], ["no Python source files found"]
+    ordered = order_code_files_for_review(file_infos)
     parts: list[str] = []
-    files: list[str] = []
+    included: list[str] = []
+    notes: list[str] = []
     used = 0
+    per_file_limit = max(3500, min(10000, max_chars // 4 if max_chars > 0 else 3500))
+    for info in ordered:
+        rel = str(info["rel"])
+        text = str(info["text"])
+        header = f"\n# === {rel} ===\n"
+        remaining = max_chars - used - len(header)
+        if remaining <= 0:
+            break
+        numbered = add_line_numbers(text)
+        file_budget = min(remaining, per_file_limit)
+        snippet = numbered if len(numbered) <= file_budget else numbered[:file_budget] + "\n# ... clipped ...\n"
+        parts.append(header + snippet)
+        included.append(rel)
+        used += len(header) + len(snippet)
+        if len(numbered) > file_budget:
+            notes.append(f"{rel} clipped to {file_budget} chars for code-review evidence.")
+        if used >= max_chars:
+            break
+    omitted = [rel for rel in all_files if rel not in set(included)]
+    if omitted:
+        notes.append(f"Omitted {len(omitted)} Python file(s) after evidence budget: {', '.join(omitted[:12])}.")
+    notes.insert(
+        0,
+        "Code evidence is selected by entrypoint/import graph and task-term relevance, not raw filename order.",
+    )
+    return "\n".join(parts) if parts else "(no Python source files found)", included, all_files, notes
+
+
+def score_focus_terms(manifest: dict[str, Any], rubric: dict[str, Any]) -> set[str]:
+    text_parts = [
+        json.dumps(manifest, ensure_ascii=False, default=str),
+        json.dumps(rubric, ensure_ascii=False, default=str),
+    ]
+    terms: set[str] = set()
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{3,}", "\n".join(text_parts).lower()):
+        if token in SCORE_TERM_STOPWORDS:
+            continue
+        terms.add(token)
+    return terms
+
+
+SCORE_TERM_STOPWORDS = {
+    "category",
+    "code",
+    "data",
+    "dataset",
+    "datasets",
+    "description",
+    "evidence",
+    "experiment",
+    "implementation",
+    "metric",
+    "metrics",
+    "method",
+    "methods",
+    "model",
+    "models",
+    "result",
+    "results",
+    "score",
+    "task",
+    "test",
+    "train",
+    "with",
+    "without",
+}
+
+
+def collect_code_file_infos(code_dir: Path, *, focus_terms: set[str]) -> list[dict[str, Any]]:
+    infos: list[dict[str, Any]] = []
     for path in sorted(code_dir.rglob("*.py")):
         if not path.is_file():
             continue
@@ -1624,18 +1721,117 @@ def collect_code_text(code_dir: Path, *, max_chars: int) -> tuple[str, list[str]
             continue
         if not text.strip():
             continue
-        header = f"\n# === {rel} ===\n"
-        remaining = max_chars - used - len(header)
-        if remaining <= 0:
+        imports = local_import_names(text)
+        lower = (rel + "\n" + text[:20000]).lower()
+        term_hits = sum(1 for term in focus_terms if term in lower)
+        infos.append(
+            {
+                "path": path,
+                "rel": rel,
+                "stem": path.stem,
+                "text": text,
+                "imports": imports,
+                "term_hits": min(term_hits, 40),
+                "has_main_guard": "__name__" in text and "__main__" in text,
+            }
+        )
+    return infos
+
+
+def local_import_names(text: str) -> set[str]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module.split(".")[0])
+            for alias in node.names:
+                if node.level:
+                    names.add(alias.name.split(".")[0])
+    return names
+
+
+def order_code_files_for_review(infos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stems = {str(info["stem"]): str(info["rel"]) for info in infos}
+    entry_stems = {
+        str(info["stem"])
+        for info in infos
+        if str(info["rel"]).endswith("main.py")
+        or str(info["rel"]).endswith("run.py")
+        or str(info["rel"]).endswith("train.py")
+        or bool(info.get("has_main_guard"))
+    }
+    imported_from_entry = reachable_import_stems(infos, entry_stems, max_depth=2)
+
+    def score(info: dict[str, Any]) -> tuple[int, str]:
+        rel = str(info["rel"])
+        stem = str(info["stem"])
+        value = int(info.get("term_hits", 0))
+        if stem in entry_stems:
+            value += 100
+        if stem in imported_from_entry:
+            value += 70
+        value += path_role_score(rel)
+        if stem not in stems:
+            value -= 10
+        if rel.endswith("__init__.py"):
+            value -= 80
+        return (-value, rel)
+
+    return sorted(infos, key=score)
+
+
+def reachable_import_stems(infos: list[dict[str, Any]], entry_stems: set[str], *, max_depth: int) -> set[str]:
+    known = {str(info["stem"]) for info in infos}
+    imports_by_stem = {str(info["stem"]): set(info.get("imports") or set()) & known for info in infos}
+    reached: set[str] = set()
+    frontier = set(entry_stems)
+    for _ in range(max_depth):
+        next_frontier: set[str] = set()
+        for stem in frontier:
+            for imported in imports_by_stem.get(stem, set()):
+                if imported not in reached:
+                    reached.add(imported)
+                    next_frontier.add(imported)
+        frontier = next_frontier
+        if not frontier:
             break
-        numbered = add_line_numbers(text)
-        snippet = numbered if len(numbered) <= remaining else numbered[:remaining] + "\n# ... clipped ...\n"
-        parts.append(header + snippet)
-        files.append(rel)
-        used += len(header) + len(snippet)
-        if used >= max_chars:
-            break
-    return "\n".join(parts) if parts else "(no Python source files found)", files
+    return reached
+
+
+def path_role_score(rel_path: str) -> int:
+    path = rel_path.lower()
+    score = 0
+    high_value = (
+        "model",
+        "method",
+        "algorithm",
+        "optimizer",
+        "forecast",
+        "runner",
+        "experiment",
+        "evaluation",
+        "metrics",
+        "synth",
+        "dataset",
+        "data",
+        "core",
+    )
+    medium_value = ("feature", "preprocess", "pipeline", "analysis")
+    low_value = ("artifact", "report", "readme", "config")
+    if any(term in path for term in high_value):
+        score += 45
+    if any(term in path for term in medium_value):
+        score += 25
+    if any(term in path for term in low_value):
+        score -= 10
+    return score
 
 
 def add_line_numbers(text: str) -> str:
@@ -1724,6 +1920,10 @@ def build_code_round_prompt(manifest_context: str, leaves: list[dict[str, Any]],
         f"{json.dumps(artifacts['paths'], ensure_ascii=False, indent=2)}\n\n"
         "## Code Files Included\n"
         f"{json.dumps(artifacts['code_files'], ensure_ascii=False, indent=2)}\n\n"
+        "## All Python Files Discovered\n"
+        f"{json.dumps(artifacts.get('all_code_files', []), ensure_ascii=False, indent=2)}\n\n"
+        "## Code Evidence Selection Notes\n"
+        f"{json.dumps(artifacts.get('code_selection_notes', []), ensure_ascii=False, indent=2)}\n\n"
         "## Final Agent-Produced Code With Line Numbers\n"
         "```python\n"
         f"{artifacts['code_text']}\n"

@@ -4,6 +4,29 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-07-03
+
+### Changed
+
+- ARC-Bench scoring now selects code evidence by entrypoint, local import graph,
+  and task-term relevance instead of raw filename order. Strict Code Development
+  reviews are less likely to miss core implementation files such as models,
+  data generation, runners, or evaluators when artifact/config files are large.
+- Result-analysis now normalizes a wider range of experiment outputs into
+  condition-level evidence tables, including raw `cells`, `cell_records`,
+  `condition_summaries`, and method/training-size records. This improves
+  evidence reuse for benchmark submissions and ordinary code-task reports.
+- Result-analysis now matches common project-level metric aliases such as
+  `test_accuracy` to condition-level rows stored as `accuracy`, so primary
+  metric tables remain populated when global and per-cell metric names differ.
+- Code-task failure analysis now searches source files for extracted error
+  tokens when no traceback path is available, giving repair prompts concrete
+  candidate files for errors such as missing attributes, missing fields, or
+  unexpected keyword arguments.
+- Greenfield review-repair prompts now spell out the required fields for each
+  structured edit action, and code-task summaries distinguish a raw partial
+  repair failure from a recovered follow-up review.
+
 ## 2026-06-30
 
 ### Changed

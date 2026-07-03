@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from simple_ar.app.usage import summarize_usage
 from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
@@ -136,6 +136,7 @@ def execute_code_task(
     allow_large_edits: bool = False,
     allow_planning_fallback: bool = False,
     planning_mode: str = "tool_agent",
+    planning_review_rounds: int = 2,
     llm_retry_attempts: int = 1,
     repair_rounds: int = 0,
     budget_profile: str | None = None,
@@ -201,6 +202,8 @@ def execute_code_task(
             planning into requirements/architecture/interfaces/file-plan tools
             with bounded review revision; ``compact`` keeps the older single
             architecture call for compatibility.
+        planning_review_rounds: Maximum reviewer-directed greenfield planning
+            revision rounds before continuing with recorded planning risks.
         llm_retry_attempts: Number of stage-level attempts for LLM-backed work
             planning, patch planning, greenfield architecture/file generation,
             and repair before stopping or explicitly falling back.
@@ -225,6 +228,8 @@ def execute_code_task(
         raise ValueError("timeout_sec must be at least 1")
     if repair_rounds < 0:
         raise ValueError("repair_rounds must be non-negative")
+    if planning_review_rounds < 0:
+        raise ValueError("planning_review_rounds must be non-negative")
     if max_batches is not None and max_batches < 1:
         raise ValueError("max_batches must be at least 1 when provided")
     if cost_cap_usd is not None and cost_cap_usd < 0:
@@ -263,6 +268,7 @@ def execute_code_task(
             max_generated_lines=max_generated_lines,
             allow_planning_fallback=allow_planning_fallback,
             planning_mode=planning_mode,
+            planning_review_rounds=planning_review_rounds,
             llm_retry_attempts=llm_retry_attempts,
             repair_rounds=repair_rounds,
             implementation_provider=implementation_provider,
@@ -856,6 +862,7 @@ def _execute_greenfield_code_task(
     max_generated_lines: int,
     allow_planning_fallback: bool,
     planning_mode: str,
+    planning_review_rounds: int,
     llm_retry_attempts: int,
     repair_rounds: int,
     implementation_provider: str,
@@ -928,6 +935,7 @@ def _execute_greenfield_code_task(
                 max_source_chars_per_file=max_source_chars_per_file,
                 allow_planning_fallback=allow_planning_fallback,
                 planning_mode=planning_mode,
+                planning_review_rounds=planning_review_rounds,
                 llm_retry_attempts=llm_retry_attempts,
                 implementation_provider=implementation_provider,
                 implementation_agent_mode=implementation_agent_mode,
@@ -1485,6 +1493,7 @@ def _attempt_greenfield_review_repair(
     _record(steps, "review", "done", f"status {review.get('status', 'unknown')}")
     if review.get("status") == "failed":
         return False
+    _mark_greenfield_review_repair_recovered(run_dir, paths, review)
     _memory_event(
         run_dir,
         "greenfield_review_repair",
@@ -1496,6 +1505,33 @@ def _attempt_greenfield_review_repair(
         ],
     )
     return True
+
+
+def _mark_greenfield_review_repair_recovered(run_dir: Path, paths: object, review: Mapping[str, object]) -> None:
+    final_status = str(review.get("status", "unknown"))
+    repair_path = paths.meta_dir / "review_repair.json"
+    if repair_path.is_file():
+        repair = read_json(repair_path)
+        if isinstance(repair, dict):
+            repair["final_review_status"] = final_status
+            repair["recovered_by_followup_review"] = final_status != "failed"
+            if final_status != "failed" and repair.get("status") != "patched":
+                repair["effective_status"] = "recovered"
+            write_json(repair_path, repair)
+
+    manifest = load_code_task_manifest(run_dir)
+    repair_section = manifest_section(manifest, "repair")
+    repair_section["review_after_repair_status"] = final_status
+    if final_status != "failed" and repair_section.get("status") != "patched":
+        repair_section["effective_status"] = "recovered"
+    manifest["repair"] = repair_section
+
+    implementation = manifest_section(manifest, "implementation")
+    implementation["review_after_repair_status"] = final_status
+    if final_status != "failed" and implementation.get("review_repair_status") != "patched":
+        implementation["review_repair_effective_status"] = "recovered"
+    manifest["implementation"] = implementation
+    save_code_task_manifest(run_dir, manifest)
 
 
 def _attempt_greenfield_run_repair(

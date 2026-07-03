@@ -679,6 +679,11 @@ def _repair_summary(repair: dict[str, Any]) -> str:
     lines = [
         f"- Status: `{repair.get('status', 'unknown')}`",
     ]
+    effective_status = repair.get("effective_status")
+    if effective_status and effective_status != repair.get("status"):
+        lines.append(f"- Effective status: `{effective_status}`")
+    if repair.get("review_after_repair_status"):
+        lines.append(f"- Review after repair: `{repair.get('review_after_repair_status')}`")
     if legacy_attempts is not None:
         lines.append(f"- Attempts: `{legacy_attempts}`")
     if review_attempts is not None:
