@@ -1554,7 +1554,17 @@ def _attempt_greenfield_run_repair(
     _record(steps, "analyze-failure", "done", f"source {analysis.source}; status {analysis.status}")
     _emit(message_callback, "Attempting bounded generated project run repair.")
     stderr_path = paths.run_artifact_dir / "patched" / "stderr.txt"
+    stdout_path = paths.run_artifact_dir / "patched" / "stdout.txt"
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.is_file() else ""
+    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.is_file() else ""
+    runtime_output_text = "\n".join(
+        part
+        for part in (
+            "STDERR:\n" + stderr_text if stderr_text.strip() else "",
+            "STDOUT:\n" + stdout_text if stdout_text.strip() else "",
+        )
+        if part
+    )
     previous_context = task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
     client = _greenfield_repair_client(
         paths.meta_dir,
@@ -1562,15 +1572,18 @@ def _attempt_greenfield_run_repair(
         use_llm=use_llm,
         message_callback=message_callback,
     )
+    failure_graph = _read_optional_dict(paths.run_artifact_dir / "patched" / "failure_graph.json")
     repair = repair_generated_project_from_run_failure(
         project_dir=paths.workspace_dir / "generated_project",
         failure_analysis={
             "status": analysis.status,
             "source": analysis.source,
             "analysis": _relative_to_run(run_dir, analysis.analysis_path),
+            "failure_graph": "code_task/run/patched/failure_graph.json",
+            "failure_graph_data": failure_graph,
             "implicated_files": list(analysis.implicated_files),
         },
-        stderr_text=stderr_text,
+        stderr_text=runtime_output_text or stderr_text,
         output_path=paths.meta_dir / "run_repair.json",
         code_artifacts=_read_optional_dict(paths.meta_dir / "code_artifacts.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
@@ -1598,7 +1611,7 @@ def _attempt_greenfield_run_repair(
     changed_files = _greenfield_repair_changed_files(repair)
     record_repair_memory(
         run_dir,
-        failure_summary=_failure_summary_for_memory(stderr_text)
+        failure_summary=_failure_summary_for_memory(runtime_output_text or stderr_text)
         or f"Generated project benchmark failure from {analysis.source}.",
         attempted_fix=_greenfield_repair_attempt_summary(repair),
         status=str(repair.get("status", "unknown")),
@@ -1608,14 +1621,14 @@ def _attempt_greenfield_run_repair(
         ],
         metadata={
             "changed_files": changed_files,
-            "stderr_signature": _failure_signature(stderr_text),
+            "stderr_signature": _failure_signature(runtime_output_text or stderr_text),
             "repair_status": repair.get("status", "unknown"),
             "run_repair_count": _greenfield_run_repair_count(load_code_task_manifest(run_dir)),
         },
         key=(
             "greenfield-run-repair:"
             f"{_greenfield_run_repair_count(load_code_task_manifest(run_dir))}:"
-            f"{_failure_signature(stderr_text)[:40]}"
+            f"{_failure_signature(runtime_output_text or stderr_text)[:40]}"
         ),
     )
     if repair.get("status") != "patched":

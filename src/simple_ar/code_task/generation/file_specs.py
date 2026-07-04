@@ -6,6 +6,30 @@ from typing import Any, Mapping
 from simple_ar.code_task.generation.common import scalar_list, text
 
 
+SOURCE_FILE_KINDS = {"source", "doc", "config", "data"}
+RUNTIME_FILE_KINDS = {"runtime_dir", "artifact_placeholder", "output_placeholder"}
+RUNTIME_DIRECTORY_NAMES = {
+    "artifact",
+    "artifacts",
+    "figure",
+    "figures",
+    "log",
+    "logs",
+    "output",
+    "outputs",
+    "plot",
+    "plots",
+    "report",
+    "reports",
+    "result",
+    "results",
+    "submission",
+    "submissions",
+    "table",
+    "tables",
+}
+
+
 def normalize_plan_path(value: object) -> str:
     """Return a safe path relative to the generated project root."""
 
@@ -88,6 +112,7 @@ def _merge_file_rows(
             limit=acceptance_limit,
         ),
         "entrypoint": bool(primary.get("entrypoint")) or bool(secondary.get("entrypoint")),
+        "kind": infer_file_kind(primary.get("path"), primary.get("kind") or secondary.get("kind")),
     }
 
 
@@ -121,4 +146,37 @@ def _strip_generated_root_prefix(value: str) -> str:
         if text.startswith(prefix):
             return text[len(prefix) :]
     return text
+
+
+def infer_file_kind(path_value: object, raw_kind: object = "") -> str:
+    """Classify planned files without depending on any benchmark convention."""
+
+    kind = text(raw_kind).strip().lower().replace("-", "_")
+    if kind in SOURCE_FILE_KINDS | RUNTIME_FILE_KINDS:
+        return kind
+    path = normalize_plan_path(path_value)
+    suffix = PurePosixPath(path).suffix.lower()
+    name = PurePosixPath(path).name.lower()
+    if name in {".gitkeep", ".keep"}:
+        return "artifact_placeholder"
+    parts = tuple(part.lower() for part in PurePosixPath(path).parts)
+    if suffix == "" and name in RUNTIME_DIRECTORY_NAMES:
+        return "runtime_dir"
+    if any(part in RUNTIME_DIRECTORY_NAMES for part in parts[:-1]):
+        return "output_placeholder"
+    if suffix == ".py":
+        return "source"
+    if suffix in {".md", ".txt", ".rst"}:
+        return "doc"
+    if suffix in {".json", ".toml", ".yaml", ".yml", ".csv"}:
+        return "config"
+    return "data"
+
+
+def is_model_generated_file(row: Mapping[str, Any]) -> bool:
+    return infer_file_kind(row.get("path"), row.get("kind")) in SOURCE_FILE_KINDS
+
+
+def is_runtime_placeholder(row: Mapping[str, Any]) -> bool:
+    return infer_file_kind(row.get("path"), row.get("kind")) in RUNTIME_FILE_KINDS
 

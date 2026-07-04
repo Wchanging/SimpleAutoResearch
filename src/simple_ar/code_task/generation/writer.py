@@ -11,6 +11,7 @@ from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.code_task.analysis.interfaces import dependency_context, order_file_specs, public_api
 from simple_ar.code_task.generation.agent_step import run_json_agent_step
 from simple_ar.code_task.generation.common import mapping_list, safe_relative_path, string_list
+from simple_ar.code_task.generation.file_specs import is_model_generated_file, is_runtime_placeholder
 from simple_ar.code_task.generation.implementation_memory import record_generated_file, record_generation_batch
 from simple_ar.code_task.generation.scaffold import fallback_file_content
 from simple_ar.code_task.generation.task_contract import contract_prompt_view
@@ -39,6 +40,7 @@ def write_generated_project(
     project_dir.mkdir(parents=True, exist_ok=True)
     files = order_file_specs([row for row in architecture_plan.get("files", []) if isinstance(row, Mapping)])
     files = files[: max(1, len(files))]
+    planned_parent_dirs = _planned_parent_dirs(files)
     generated: list[dict[str, Any]] = []
     total_lines = 0
     batch_files: list[str] = []
@@ -48,6 +50,12 @@ def write_generated_project(
         rel_path = safe_relative_path(str(file_spec.get("path", "")))
         if not rel_path:
             continue
+        if is_runtime_placeholder(file_spec) or rel_path in planned_parent_dirs:
+            generated.append(_create_runtime_placeholder(project_dir, rel_path, file_spec))
+            continue
+        if not is_model_generated_file(file_spec):
+            file_spec = dict(file_spec)
+            file_spec["kind"] = "data"
         content, mode, summary = _file_content(
             file_spec=file_spec,
             architecture_plan=architecture_plan,
@@ -69,6 +77,11 @@ def write_generated_project(
                 f"({total_lines + line_count}>{max_generated_lines}); refusing to write a partial project."
             )
         target = project_dir / rel_path
+        if target.parent.exists() and not target.parent.is_dir():
+            raise LLMError(
+                f"Generated file plan has a file/directory conflict: parent `{target.parent.relative_to(project_dir)}` "
+                f"must be a directory before writing `{rel_path}`."
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         write_text(target, content)
         exported_api = public_api(target) if target.suffix == ".py" else []
@@ -367,6 +380,7 @@ def _compact_file_specs(files: list[Mapping[str, Any]], *, limit: int) -> list[d
                 "dependencies": string_list(row.get("dependencies"), limit=12),
                 "public_api": string_list(row.get("public_api"), limit=12),
                 "entrypoint": bool(row.get("entrypoint")),
+                "kind": str(row.get("kind") or ""),
             }
         )
     return [row for row in result if row["path"]]
@@ -441,6 +455,44 @@ def _memory_for_prompt(memory: Mapping[str, Any], *, file_limit: int = 12) -> di
         "open_issues": string_list(memory.get("open_issues"), limit=8, tail=True),
         "review_findings": mapping_list(reviews, limit=8, tail=True),
         "repair_history": mapping_list(repairs, limit=6, tail=True),
+    }
+
+
+def _planned_parent_dirs(files: list[Mapping[str, Any]]) -> set[str]:
+    parents: set[str] = set()
+    paths = [safe_relative_path(str(row.get("path", ""))) for row in files]
+    for path in paths:
+        if not path:
+            continue
+        current = Path(path).parent
+        while current.as_posix() not in {"", "."}:
+            parents.add(current.as_posix())
+            current = current.parent
+    return parents
+
+
+def _create_runtime_placeholder(
+    project_dir: Path,
+    rel_path: str,
+    file_spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    target = project_dir / rel_path
+    if target.exists() and target.is_dir():
+        pass
+    elif target.suffix:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("", encoding="utf-8")
+    else:
+        if target.exists() and not target.is_dir():
+            target.unlink()
+        target.mkdir(parents=True, exist_ok=True)
+    return {
+        "path": rel_path,
+        "mode": "deterministic_runtime_placeholder",
+        "kind": str(file_spec.get("kind") or "artifact_placeholder"),
+        "line_count": 0,
+        "summary": str(file_spec.get("purpose") or "Runtime output placeholder created deterministically.")[:500],
+        "public_api": [],
     }
 
 

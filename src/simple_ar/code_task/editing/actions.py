@@ -24,6 +24,7 @@ def apply_repair_actions(
     """Apply structured repair actions to a workspace.
 
     Supported actions are:
+    ``no_change`` to explicitly skip a file;
     ``replace_block`` / ``replace_text`` with ``old_string`` + ``new_string``;
     ``rewrite_function`` with ``function_name`` + ``new_source``;
     ``rewrite_file`` with ``content``;
@@ -53,15 +54,18 @@ def apply_repair_actions(
         return result
 
     workspace = workspace_dir.resolve()
-    allowed = {normalize_action_path(path) for path in allowed_paths or set()}
+    allowed = _allowed_path_set(workspace_dir, allowed_paths or set())
     allowed.discard("")
     changed: list[str] = []
     for index, row in enumerate(rows, start=1):
         action = _action_type(row)
         rel_path = normalize_action_path(str(row.get("path", "")))
+        if action in {"no_change", "skip"} and not rel_path and allowed:
+            rel_path = sorted(allowed)[0]
         if not rel_path:
             _reject(result, index, row, "missing_or_unsafe_path")
             continue
+        rel_path = _canonical_action_path(workspace, rel_path, allowed)
         if allowed and rel_path not in allowed:
             _reject(result, index, row, "path_not_in_allowed_context")
             continue
@@ -78,6 +82,8 @@ def apply_repair_actions(
             _reject(result, index, row, "action_made_no_change")
             continue
         result["applied_actions"].append(record)
+        if record.get("changed") is False:
+            continue
         if rel_path not in changed:
             changed.append(rel_path)
 
@@ -97,6 +103,40 @@ def normalize_action_path(value: str) -> str:
     return path.as_posix()
 
 
+def _allowed_path_set(workspace_dir: Path, paths: set[str]) -> set[str]:
+    workspace_name = workspace_dir.name.replace("\\", "/")
+    result: set[str] = set()
+    for raw in paths:
+        normalized = normalize_action_path(raw)
+        if not normalized:
+            continue
+        result.add(normalized)
+        stripped = _strip_known_root_prefix(normalized, workspace_name=workspace_name)
+        if stripped:
+            result.add(stripped)
+    return result
+
+
+def _canonical_action_path(workspace: Path, rel_path: str, allowed: set[str]) -> str:
+    if not rel_path:
+        return ""
+    if rel_path in allowed or (workspace / rel_path).exists():
+        return rel_path
+    stripped = _strip_known_root_prefix(rel_path, workspace_name=workspace.name)
+    if stripped and (not allowed or stripped in allowed or (workspace / stripped).exists()):
+        return stripped
+    return rel_path
+
+
+def _strip_known_root_prefix(value: str, *, workspace_name: str) -> str:
+    for prefix in ("generated_project/", f"{workspace_name}/"):
+        if value == prefix[:-1]:
+            return ""
+        if value.startswith(prefix):
+            return value[len(prefix) :]
+    return ""
+
+
 class RepairActionError(RuntimeError):
     """Raised when a repair action cannot be applied deterministically."""
 
@@ -111,6 +151,17 @@ def _apply_one_action(
     before_hash = _sha256(before_text) if path.exists() else ""
     before_api = public_api(path) if path.exists() and path.suffix == ".py" else []
 
+    if action in {"no_change", "skip"}:
+        return {
+            "action": "no_change",
+            "path": rel_path,
+            "before_hash": before_hash,
+            "after_hash": before_hash,
+            "before_public_api": before_api,
+            "after_public_api": before_api,
+            "rationale": _string(row.get("rationale")) or _string(row.get("reason")),
+            "changed": False,
+        }
     if action in {"replace_block", "replace_text"}:
         if not path.is_file():
             raise RepairActionError("target_file_missing")

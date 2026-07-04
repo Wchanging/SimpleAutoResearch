@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from simple_ar.core.artifacts import read_json, read_text, write_text
+from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
+from simple_ar.code_task.execution.failure_graph import build_failure_graph
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     is_relative_to,
@@ -94,24 +95,36 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
             "Run `simple-ar code-task validate` or `simple-ar code-task run` first."
         )
 
-    traceback_block = _traceback_block(stderr)
-    runtime_implicated = _implicated_files(traceback_block or stderr, paths.workspace_dir)
-    validation_implicated = _validation_issue_files(validation, paths.workspace_dir)
-    signal_matched_files = _source_signal_files(
-        paths.workspace_dir,
-        "\n".join([stderr, stdout, "\n".join(_signal_lines(stdout, stderr))]),
+    changed_files = _changed_files(manifest)
+    graph = build_failure_graph(
+        workspace_dir=paths.workspace_dir,
+        stdout=stdout,
+        stderr=stderr,
+        validation=validation,
+        changed_files=changed_files,
     )
+    traceback_block = str(graph.get("traceback") or _traceback_block(stderr))
+    runtime_implicated = [
+        str(path) for path in graph.get("traceback_files", []) if isinstance(path, str) and path
+    ]
+    validation_implicated = _validation_issue_files(validation, paths.workspace_dir)
+    signal_matched_files = [
+        str(path) for path in graph.get("signal_matched_files", []) if isinstance(path, str) and path
+    ]
     if not runtime_implicated and signal_matched_files:
         runtime_implicated = signal_matched_files
     implicated_files = _dedupe(
-        runtime_implicated + ([] if (stderr or traceback_block) else validation_implicated)
+        runtime_implicated + ([] if (stderr or stdout or traceback_block) else validation_implicated)
     )
-    signal_lines = _signal_lines(stdout, stderr)
+    signal_lines = [
+        str(line) for line in graph.get("runtime_signals", []) if isinstance(line, str) and line
+    ]
     if not signal_lines and stderr.strip():
         signal_lines = _stderr_fallback_signal_lines(stderr)
     if not signal_lines:
-        signal_lines = _validation_signal_lines(validation)
-    changed_files = _changed_files(manifest)
+        signal_lines = [
+            str(line) for line in graph.get("validation_signals", []) if isinstance(line, str) and line
+        ] or _validation_signal_lines(validation)
 
     status = "no_failure" if report.get("status") == "passed" else "needs_repair"
     markdown = _render_failure_analysis(
@@ -122,10 +135,13 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         signal_lines=signal_lines,
         implicated_files=implicated_files,
         signal_matched_files=signal_matched_files,
+        failure_graph=graph,
         changed_files=changed_files,
         status=status,
     )
     analysis_path = artifacts["failure_analysis"]
+    graph_path = analysis_path.with_name("failure_graph.json")
+    write_json(graph_path, graph)
     write_text(analysis_path, markdown)
     _update_manifest_after_failure_analysis(
         run_dir,
@@ -135,6 +151,7 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         source=str(artifacts["source"]),
         implicated_files=implicated_files,
         signal_matched_files=signal_matched_files,
+        failure_graph_path=graph_path,
     )
     write_code_task_summary(run_dir)
     return FailureAnalysisResult(
@@ -155,6 +172,7 @@ def _render_failure_analysis(
     signal_lines: list[str],
     implicated_files: list[str],
     signal_matched_files: list[str],
+    failure_graph: dict[str, Any],
     changed_files: list[str],
     status: str,
 ) -> str:
@@ -175,7 +193,17 @@ def _render_failure_analysis(
         "",
         "## Likely Cause",
         "",
-        _likely_cause(report, traceback_block, signal_lines),
+        _likely_cause(report, traceback_block, signal_lines, failure_graph=failure_graph),
+        "",
+        "## Failure Graph",
+        "",
+        f"- Primary signal: `{failure_graph.get('primary_signal', '')}`",
+        "- Candidate repair files: "
+        + (
+            ", ".join(f"`{path}`" for path in failure_graph.get("candidate_files", [])[:8])
+            if isinstance(failure_graph.get("candidate_files"), list)
+            else "none"
+        ),
         "",
         "## Implicated Files",
         "",
@@ -259,6 +287,8 @@ def _likely_cause(
     report: dict[str, Any],
     traceback_block: str,
     signal_lines: list[str],
+    *,
+    failure_graph: dict[str, Any] | None = None,
 ) -> str:
     if not report:
         return "Static validation failed before a benchmark execution report was available."
@@ -268,6 +298,8 @@ def _likely_cause(
         return "The benchmark was not launched because static validation reported errors."
     if report.get("timed_out") is True:
         return "The benchmark exceeded the configured timeout."
+    if failure_graph and failure_graph.get("primary_signal"):
+        return f"The strongest execution signal is: `{failure_graph.get('primary_signal')}`"
     if traceback_block:
         last = _last_nonempty_line(traceback_block)
         return f"The latest traceback ends with: `{last}`"
@@ -492,6 +524,7 @@ def _update_manifest_after_failure_analysis(
     source: str,
     implicated_files: list[str],
     signal_matched_files: list[str],
+    failure_graph_path: Path,
 ) -> None:
     layout = manifest_section(manifest, "layout")
     benchmark = manifest.get("benchmark", {})
@@ -499,7 +532,9 @@ def _update_manifest_after_failure_analysis(
     if isinstance(benchmark, dict):
         latest_label = str(benchmark.get("latest_label") or latest_label)
     analysis_rel = analysis_path.relative_to(run_dir).as_posix()
+    graph_rel = failure_graph_path.relative_to(run_dir).as_posix()
     layout["failure_analysis"] = analysis_rel
+    layout["failure_graph"] = graph_rel
     failure = manifest_section(manifest, "failure_analysis")
     failure.update(
         {
@@ -507,6 +542,7 @@ def _update_manifest_after_failure_analysis(
             "source": source,
             "generated_at": utcnow_iso(),
             "analysis": analysis_rel,
+            "failure_graph": graph_rel,
             "run_label": latest_label if source != "validation" else "",
             "implicated_files": implicated_files,
             "signal_matched_files": signal_matched_files,

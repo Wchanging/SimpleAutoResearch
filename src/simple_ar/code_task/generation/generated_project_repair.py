@@ -238,6 +238,10 @@ def _apply_llm_file_repair_response(
     fallback_summary: str,
 ) -> dict[str, Any] | None:
     target = project_dir / rel_path
+    if _response_declares_no_change(response):
+        notes.append(f"Skipped {rel_path}; repair response declared no change for this target.")
+        return None
+    before_api = public_api(target) if target.suffix == ".py" and target.is_file() else []
     action_result: dict[str, Any] | None = None
     action_rejection = ""
     actions = response.get("actions")
@@ -260,6 +264,9 @@ def _apply_llm_file_repair_response(
                     "public_api": public_api(target) if target.suffix == ".py" and target.is_file() else [],
                     "edit_application": action_result,
                 }
+        elif action_result.get("status") == "skipped" and not action_result.get("rejected_actions"):
+            notes.append(f"Skipped {rel_path}; structured actions made no changes.")
+            return None
         elif action_result.get("rejected_actions"):
             action_rejection = (
                 f"{rel_path}: structured repair actions were rejected: "
@@ -274,6 +281,15 @@ def _apply_llm_file_repair_response(
             unresolved.append(f"{rel_path}: LLM repair returned neither actions nor content.")
         return None
     content = _strip_markdown_fence(content.rstrip() + "\n")
+    guard_error = _whole_file_rewrite_guard(
+        rel_path=rel_path,
+        content=content,
+        before_api=before_api,
+        response=response,
+    )
+    if guard_error:
+        unresolved.append(f"{rel_path}: whole-file repair rejected: {guard_error}")
+        return None
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     error = _compile_error(target) if target.suffix == ".py" else ""
@@ -313,6 +329,98 @@ def _restore_repair_target(target: Path, previous_content: str, previous_exists:
         target.write_text(previous_content, encoding="utf-8")
     elif target.exists():
         target.unlink()
+
+
+def _response_declares_no_change(response: Mapping[str, Any]) -> bool:
+    status = str(response.get("status") or response.get("action") or "").strip().lower().replace("-", "_")
+    if status in {"no_change", "skip", "skipped", "not_applicable"}:
+        return True
+    actions = response.get("actions")
+    rows = actions if isinstance(actions, list) else []
+    meaningful = [row for row in rows if isinstance(row, Mapping)]
+    if meaningful and all(
+        str(row.get("action") or "").strip().lower().replace("-", "_") in {"no_change", "skip"}
+        for row in meaningful
+    ):
+        return True
+    return False
+
+
+def _whole_file_rewrite_guard(
+    *,
+    rel_path: str,
+    content: str,
+    before_api: list[str],
+    response: Mapping[str, Any],
+) -> str:
+    if not rel_path.endswith(".py"):
+        return ""
+    stripped = content.strip()
+    if not stripped:
+        return "empty_python_content"
+    lowered = stripped.lower()
+    first_line = next((line.strip().lower() for line in stripped.splitlines() if line.strip()), "")
+    placeholder_lines = {
+        "no_op",
+        "noop",
+        "pass",
+        "no change",
+        "no changes needed",
+        "not applicable",
+    }
+    if first_line in placeholder_lines or lowered in placeholder_lines:
+        return "placeholder_or_no_change_content"
+    has_python_shape = bool(
+        re.search(r"^\s*(from|import|def|class|@|[A-Za-z_][A-Za-z0-9_]*\s*=)", content, re.MULTILINE)
+    )
+    if not has_python_shape:
+        return "content_does_not_look_like_python_source"
+    try:
+        tree = compile(content, rel_path, "exec")
+    except SyntaxError as exc:
+        return f"syntax_error:{exc.msg}"
+    del tree
+    if before_api:
+        # Avoid writing to disk just to inspect API: parse definitions directly.
+        after_api_names = _public_api_names_from_source(content)
+        before_names = {_api_name_from_signature(item) for item in before_api if isinstance(item, str)}
+        before_names.discard("")
+        if before_names and not after_api_names:
+            return "public_api_would_be_removed"
+        lost = sorted(name for name in before_names if name not in after_api_names)
+        allow_break = bool(response.get("allow_api_breaking_change"))
+        if lost and not allow_break and len(lost) == len(before_names):
+            return "all_existing_public_api_would_be_removed"
+    return ""
+
+
+def _api_name_from_signature(value: str) -> str:
+    text = value.strip()
+    if text.startswith("class "):
+        text = text.split(" ", 1)[1]
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text)
+    return match.group(1) if match else ""
+
+
+def _public_api_names_from_source(source: str) -> set[str]:
+    try:
+        tree = compile(source, "<repair-candidate>", "exec", flags=0, dont_inherit=True)
+    except SyntaxError:
+        return set()
+    del tree
+    names: set[str] = set()
+    try:
+        import ast
+
+        parsed = ast.parse(source)
+    except SyntaxError:
+        return names
+    for node in parsed.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and not node.name.startswith("_"):
+            names.add(node.name)
+    return names
 
 
 def _file_line_count(path: Path) -> int:
@@ -1054,12 +1162,30 @@ def _repair_plan_targets(
     selected: list[str] = []
     for row in rows:
         raw_path = row.get("path") if isinstance(row, Mapping) else row
-        path = safe_relative_path(str(raw_path or ""))
+        path = safe_relative_path(_normalize_generated_project_path(str(raw_path or "")))
         if not path or not path.endswith(".py"):
             continue
         if (project_dir / path).is_file():
             selected.append(path)
     return list(dict.fromkeys([*selected, *heuristic_targets]))
+
+
+def _failure_graph_candidate_paths(
+    failure_analysis: Mapping[str, Any],
+    *,
+    project_dir: Path,
+) -> list[str]:
+    graph = failure_analysis.get("failure_graph_data")
+    if not isinstance(graph, Mapping):
+        return []
+    values: list[str] = []
+    for key in ("traceback_files", "candidate_files", "signal_matched_files"):
+        rows = graph.get(key)
+        for raw in rows if isinstance(rows, list) else []:
+            path = _normalize_generated_project_path(str(raw))
+            if path and path.endswith(".py") and (project_dir / path).is_file():
+                values.append(path)
+    return list(dict.fromkeys(values))
 
 
 def _run_repair_context(
@@ -1085,9 +1211,11 @@ def _run_repair_context(
         preferred_roles=("orchestrator", "data", "preprocess", "config", "core", "artifact", "entrypoint"),
     )
     matched = _source_signal_matches(project_dir, all_paths, signal_text)
-    candidate_paths = list(dict.fromkeys([*heuristic_targets, *matched, *ranked]))[:10]
+    graph_candidates = _failure_graph_candidate_paths(failure_analysis, project_dir=project_dir)
+    candidate_paths = list(dict.fromkeys([*graph_candidates, *heuristic_targets, *matched, *ranked]))[:10]
     return {
         "schema_version": "code_task_runtime_repair_context.v1",
+        "failure_graph": _compact_failure_graph_for_repair(failure_analysis),
         "heuristic_targets": heuristic_targets,
         "review_index": _generated_review_index(project_dir, result_schema=result_schema, contract=contract),
         "candidate_files": [
@@ -1097,6 +1225,25 @@ def _run_repair_context(
         ],
         "project_api": _project_api_snapshot(project_dir),
     }
+
+
+def _compact_failure_graph_for_repair(failure_analysis: Mapping[str, Any]) -> dict[str, Any]:
+    graph = failure_analysis.get("failure_graph_data")
+    if not isinstance(graph, Mapping):
+        return {}
+    result: dict[str, Any] = {
+        "schema_version": graph.get("schema_version", "code_task_failure_graph.v1"),
+        "primary_signal": graph.get("primary_signal", ""),
+    }
+    for key, limit in (
+        ("runtime_signals", 8),
+        ("traceback_files", 8),
+        ("candidate_files", 10),
+        ("signal_terms", 16),
+    ):
+        value = graph.get(key)
+        result[key] = value[:limit] if isinstance(value, list) else []
+    return result
 
 
 def _generated_review_index(
@@ -1219,6 +1366,7 @@ def _run_repair_target_paths(
     candidates: list[str] = []
     lowered = text.lower()
     known_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
+    candidates.extend(_failure_graph_candidate_paths(failure_analysis, project_dir=project_dir))
     if _is_empty_greenfield_evidence_failure(lowered):
         candidates.extend(
             _rank_repair_candidates(

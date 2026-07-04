@@ -206,7 +206,7 @@ def _validate_python_file(
                     message=f"Import `{name}` can perform external, destructive, or network operations.",
                 )
             )
-        if not _import_available(name, workspace_dir):
+        if not _import_available(name, workspace_dir, current_file=path):
             issues.append(
                 _issue(
                     severity="warning",
@@ -256,7 +256,7 @@ def _call_name(node: ast.AST) -> str:
     return ""
 
 
-def _import_available(name: str, workspace_dir: Path) -> bool:
+def _import_available(name: str, workspace_dir: Path, *, current_file: Path | None = None) -> bool:
     if not name:
         return True
     if name in sys.builtin_module_names:
@@ -264,7 +264,19 @@ def _import_available(name: str, workspace_dir: Path) -> bool:
     stdlib_names = getattr(sys, "stdlib_module_names", set())
     if name in stdlib_names:
         return True
-    for root in (workspace_dir, workspace_dir / "src"):
+    roots = [workspace_dir, workspace_dir / "src", workspace_dir / "generated_project"]
+    if current_file is not None:
+        roots.insert(0, current_file.parent)
+        roots.insert(1, current_file.parent.parent)
+    seen_roots: set[Path] = set()
+    for root in roots:
+        try:
+            resolved_root = root.resolve()
+        except OSError:
+            continue
+        if resolved_root in seen_roots:
+            continue
+        seen_roots.add(resolved_root)
         if (root / f"{name}.py").is_file():
             return True
         if (root / name / "__init__.py").is_file():

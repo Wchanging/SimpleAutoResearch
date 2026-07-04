@@ -13,6 +13,7 @@ from simple_ar.code_task.analysis.interfaces import (
 from simple_ar.code_task.generation.common import safe_relative_path, string_list
 from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.generation.review import review_generated_project
+from simple_ar.code_task.generation.writer import write_generated_project
 from simple_ar.code_task import initialize_code_task, review_code_task_changes
 from simple_ar.core.artifacts import read_json, write_json, write_text
 
@@ -68,6 +69,34 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             self.assertTrue(dependency["available"])
             self.assertIn("def load_text_classification_splits(config_path=None)", dependency["public_api"])
             self.assertNotIn("load_text_classification_dataset", str(context))
+
+    def test_writer_treats_runtime_output_paths_as_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "generated_project"
+            artifacts = write_generated_project(
+                project_dir=project,
+                architecture_plan={
+                    "files": [
+                        {"path": "main.py", "kind": "source", "entrypoint": True},
+                        {"path": "artifacts", "purpose": "Runtime output directory."},
+                        {"path": "artifacts/results.json", "purpose": "Runtime evidence bundle."},
+                        {"path": "submission/results", "purpose": "Submission metrics directory."},
+                        {"path": "submission/results/metrics.json", "purpose": "Runtime metric mirror."},
+                    ]
+                },
+                result_schema={"required_metrics": []},
+                contract={},
+                memory={},
+                client=None,
+                allow_fallback=True,
+            )
+
+            by_path = {row["path"]: row for row in artifacts["generated_files"]}
+            self.assertTrue((project / "artifacts").is_dir())
+            self.assertTrue((project / "artifacts" / "results.json").is_file())
+            self.assertTrue((project / "submission" / "results").is_dir())
+            self.assertEqual(by_path["artifacts"]["mode"], "deterministic_runtime_placeholder")
+            self.assertEqual(by_path["artifacts/results.json"]["line_count"], 0)
 
     def test_existing_context_snippets_expose_api_without_extra_repo_reads(self) -> None:
         contract = snippet_api_contract(
