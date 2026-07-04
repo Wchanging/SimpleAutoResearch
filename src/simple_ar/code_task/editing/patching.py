@@ -31,6 +31,7 @@ from simple_ar.code_task.editing.scope import (
     is_protected_edit_path,
     protected_patterns_from_manifest,
 )
+from simple_ar.code_task.editing.snapshots import FileSnapshotSet, create_file_snapshot_set
 from simple_ar.code_task.runtime.state import code_task_paths
 from simple_ar.code_task.analysis.context import (
     LoadedCodeTaskContextPack,
@@ -552,15 +553,18 @@ def _apply_controlled_patch_edits(
     old_text_by_path = {item.file_path: read_text(item.file_path) for item in prepared}
     new_text_by_path = {item.file_path: item.updated_text for item in prepared}
     diff_text = _unified_diff(prepared, old_text_by_path, new_text_by_path)
+    snapshot = create_file_snapshot_set(
+        workspace_dir=workspace_dir,
+        snapshot_root=meta_dir / "file_snapshots",
+        label="apply-edits",
+    )
+    snapshot.capture_many(_unique_prepared_paths(prepared))
 
-    written: list[Path] = []
     try:
         for path, new_text in new_text_by_path.items():
             _write_text_atomically(path, new_text)
-            written.append(path)
     except Exception:
-        for path in written:
-            _write_text_atomically(path, old_text_by_path[path])
+        snapshot.restore(_unique_prepared_paths(prepared))
         raise
 
     post_hash_rows = _hash_rows_for_prepared(workspace_dir, prepared)
@@ -576,6 +580,7 @@ def _apply_controlled_patch_edits(
         prepared=prepared,
         pre_hash_rows=pre_hash_rows,
         post_hash_rows=post_hash_rows,
+        snapshot=snapshot,
     )
     write_json(applied_edits_path, applied)
 
@@ -1201,8 +1206,9 @@ def _applied_edits_record(
     prepared: list[_PreparedEdit],
     pre_hash_rows: dict[str, dict[str, Any]],
     post_hash_rows: dict[str, dict[str, Any]],
+    snapshot: FileSnapshotSet | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "schema_version": 1,
         "applied_at": _utcnow_iso(),
         "proposal": _relative_to_run(run_dir, proposal_path),
@@ -1222,6 +1228,10 @@ def _applied_edits_record(
             for item in prepared
         ],
     }
+    if snapshot is not None and snapshot.captured_count:
+        snapshot.write_manifest()
+        record["snapshot"] = snapshot.artifact_record()
+    return record
 
 
 def _applied_budget_record(proposal: dict[str, Any], *, allow_large_edits: bool) -> dict[str, Any]:

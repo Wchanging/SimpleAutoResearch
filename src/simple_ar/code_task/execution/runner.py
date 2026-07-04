@@ -19,6 +19,7 @@ from simple_ar.code_task.editing.attempts import (
 )
 from simple_ar.code_task.execution.comparison import CodeTaskComparisonResult, compare_code_task_runs
 from simple_ar.code_task.execution.environment import ensure_code_task_environment_policy
+from simple_ar.code_task.execution.run_history import archive_run_attempt
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     load_code_task_manifest,
@@ -628,6 +629,16 @@ def _write_execution_result(
     }
     if report_metadata:
         report.update(report_metadata)
+    history_record = archive_run_attempt(
+        run_dir,
+        run_label=run_label,
+        stdout=stdout or "",
+        stderr=stderr or "",
+        metrics=metrics,
+        execution_report=report,
+    )
+    report["history_attempt"] = history_record["id"]
+    report["history_report"] = history_record["execution_report"]
     write_json(report_path, report)
     _update_manifest_after_run(
         run_dir,
@@ -640,6 +651,7 @@ def _write_execution_result(
         metric_values=metrics,
         run_label=run_label,
         run_metadata=run_metadata,
+        history_record=history_record,
     )
     comparison = _maybe_compare_runs(run_dir)
     if run_label == "patched":
@@ -957,6 +969,7 @@ def _update_manifest_after_run(
     metric_values: dict[str, float],
     run_label: str,
     run_metadata: dict[str, Any] | None = None,
+    history_record: dict[str, Any] | None = None,
 ) -> None:
     layout = manifest_section(manifest, "layout")
     layout["run"] = "code_task/run"
@@ -979,6 +992,21 @@ def _update_manifest_after_run(
         "metric_values": metric_values,
         "environment": _execution_environment_record(environment_policy),
     }
+    existing_record = runs.get(run_label)
+    previous_attempts = (
+        existing_record.get("attempts", []) if isinstance(existing_record, dict) else []
+    )
+    previous_attempt_count = (
+        int(existing_record.get("attempt_count", 0) or 0) if isinstance(existing_record, dict) else 0
+    )
+    attempts = [row for row in previous_attempts if isinstance(row, dict)]
+    if history_record:
+        attempts.append(dict(history_record))
+        run_record["latest_attempt"] = history_record["id"]
+        run_record["latest_attempt_dir"] = str(history_record["execution_report"]).rsplit("/", 1)[0]
+    if attempts:
+        run_record["attempts"] = attempts[-50:]
+        run_record["attempt_count"] = max(previous_attempt_count + (1 if history_record else 0), len(attempts))
     if run_metadata:
         run_record.update(run_metadata)
     runs[run_label] = run_record

@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from simple_ar.code_task.editing.snapshots import FileSnapshotSet
+
 
 @dataclass(frozen=True)
 class CompatibilityPatchResult:
@@ -32,6 +34,7 @@ def apply_generated_project_compatibility_patch(
     *,
     project_dir: Path,
     stderr_text: str,
+    snapshot: FileSnapshotSet | None = None,
 ) -> CompatibilityPatchResult:
     """Apply at most one deterministic generated-project compatibility patch."""
 
@@ -41,7 +44,7 @@ def apply_generated_project_compatibility_patch(
         ("unexpected_keyword_argument", _patch_unexpected_keyword_argument),
     ):
         changed: list[str] = []
-        if patcher(project_dir, stderr_text, changed):
+        if patcher(project_dir, stderr_text, changed, snapshot):
             return CompatibilityPatchResult(
                 applied=True,
                 patch_id=patch_id,
@@ -51,7 +54,12 @@ def apply_generated_project_compatibility_patch(
     return CompatibilityPatchResult(applied=False)
 
 
-def _patch_unexpected_keyword_argument(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
+def _patch_unexpected_keyword_argument(
+    project_dir: Path,
+    stderr_text: str,
+    changed: list[str],
+    snapshot: FileSnapshotSet | None,
+) -> bool:
     match = re.search(
         r"TypeError:\s+([A-Za-z_][A-Za-z0-9_]*)\(\) got an unexpected keyword argument '([^']+)'",
         stderr_text,
@@ -67,13 +75,20 @@ def _patch_unexpected_keyword_argument(project_dir: Path, stderr_text: str, chan
         patched = _patch_function_signature(text, function_name=function_name, keyword=keyword)
         if patched == text:
             continue
+        if snapshot is not None:
+            snapshot.capture(path.relative_to(project_dir).as_posix())
         path.write_text(patched, encoding="utf-8")
         changed.append(path.relative_to(project_dir).as_posix())
         return True
     return False
 
 
-def _patch_missing_greenfield_preset(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
+def _patch_missing_greenfield_preset(
+    project_dir: Path,
+    stderr_text: str,
+    changed: list[str],
+    snapshot: FileSnapshotSet | None,
+) -> bool:
     matches = [
         item.strip()
         for item in re.findall(r"Unknown preset '([^']+)'", stderr_text)
@@ -106,12 +121,19 @@ def _patch_missing_greenfield_preset(project_dir: Path, stderr_text: str, change
             base = {}
             payload["base"] = base
         presets[preset_name] = _default_greenfield_preset(base=base, requested=preset_name)
+    if snapshot is not None:
+        snapshot.capture("config.json")
     config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     changed.append("config.json")
     return True
 
 
-def _patch_greenfield_run_experiment_call(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
+def _patch_greenfield_run_experiment_call(
+    project_dir: Path,
+    stderr_text: str,
+    changed: list[str],
+    snapshot: FileSnapshotSet | None,
+) -> bool:
     should_try = (
         "run_experiment" in stderr_text
         and ("unexpected keyword argument" in stderr_text or "unhashable type: 'dict'" in stderr_text)
@@ -137,6 +159,8 @@ def _patch_greenfield_run_experiment_call(project_dir: Path, stderr_text: str, c
         )
     if patched == text:
         return False
+    if snapshot is not None:
+        snapshot.capture("main.py")
     main_path.write_text(patched, encoding="utf-8")
     changed.append("main.py")
     return True

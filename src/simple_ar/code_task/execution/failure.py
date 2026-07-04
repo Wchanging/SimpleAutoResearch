@@ -7,6 +7,7 @@ from typing import Any
 
 from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
 from simple_ar.code_task.execution.failure_graph import build_failure_graph
+from simple_ar.code_task.execution.run_history import archive_failure_artifacts_for_latest_attempt
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
     is_relative_to,
@@ -143,6 +144,15 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
     graph_path = analysis_path.with_name("failure_graph.json")
     write_json(graph_path, graph)
     write_text(analysis_path, markdown)
+    history_failure: dict[str, str] = {}
+    run_label = str(report.get("label") or "").strip()
+    if run_label:
+        history_failure = archive_failure_artifacts_for_latest_attempt(
+            run_dir,
+            run_label=run_label,
+            failure_analysis_path=analysis_path,
+            failure_graph_path=graph_path,
+        )
     _update_manifest_after_failure_analysis(
         run_dir,
         manifest,
@@ -152,6 +162,7 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         implicated_files=implicated_files,
         signal_matched_files=signal_matched_files,
         failure_graph_path=graph_path,
+        history_failure=history_failure,
     )
     write_code_task_summary(run_dir)
     return FailureAnalysisResult(
@@ -525,6 +536,7 @@ def _update_manifest_after_failure_analysis(
     implicated_files: list[str],
     signal_matched_files: list[str],
     failure_graph_path: Path,
+    history_failure: dict[str, str] | None = None,
 ) -> None:
     layout = manifest_section(manifest, "layout")
     benchmark = manifest.get("benchmark", {})
@@ -548,6 +560,26 @@ def _update_manifest_after_failure_analysis(
             "signal_matched_files": signal_matched_files,
         }
     )
+    if history_failure:
+        failure["history_failure_analysis"] = history_failure.get("failure_analysis", "")
+        failure["history_failure_graph"] = history_failure.get("failure_graph", "")
+        benchmark = manifest_section(manifest, "benchmark")
+        runs = benchmark.get("runs")
+        run_record = runs.get(latest_label) if isinstance(runs, dict) else None
+        attempts = run_record.get("attempts") if isinstance(run_record, dict) else None
+        if isinstance(attempts, list):
+            for row in reversed(attempts):
+                if isinstance(row, dict) and row.get("id") == run_record.get("latest_attempt"):
+                    row.update(history_failure)
+                    break
+            run_record["attempts"] = attempts
+            if history_failure.get("failure_analysis"):
+                run_record["latest_failure_analysis"] = history_failure["failure_analysis"]
+            if history_failure.get("failure_graph"):
+                run_record["latest_failure_graph"] = history_failure["failure_graph"]
+            runs[latest_label] = run_record
+            benchmark["runs"] = runs
+            manifest["benchmark"] = benchmark
     manifest["layout"] = layout
     manifest["failure_analysis"] = failure
     if status == "needs_repair":

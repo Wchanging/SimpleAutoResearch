@@ -40,7 +40,11 @@ from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_run_failure,
 )
 from simple_ar.code_task.generation.review import review_generated_project
-from simple_ar.code_task.orchestration.execute import _apply_greenfield_review_repair_metadata
+from simple_ar.code_task.orchestration.execute import (
+    _apply_greenfield_review_repair_metadata,
+    _attempt_greenfield_run_repair,
+)
+from simple_ar.code_task.runtime.state import code_task_paths
 from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
     prepare_code_task_experiment,
@@ -929,6 +933,9 @@ primary_metric = "accuracy"
             edit_application = repair["regenerated_files"][0]["edit_application"]
             self.assertEqual(edit_application["status"], "patched")
             self.assertEqual(edit_application["applied_actions"][0]["action"], "replace_block")
+            self.assertEqual(repair["snapshot"]["captured_count"], 1)
+            self.assertTrue(Path(repair["snapshot"]["manifest"]).is_file())
+            self.assertFalse((root / "run_repair_backups").exists())
 
     def test_greenfield_review_flags_stdlib_shadow_and_nested_artifact_path(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -1014,6 +1021,31 @@ primary_metric = "accuracy"
             self.assertFalse((project_dir / "types.py").exists())
             self.assertTrue((project_dir / "types_schema.py").exists())
             self.assertIn("from types_schema import ConditionSpec", read_text(project_dir / "config.py"))
+
+    def test_greenfield_run_repair_renames_stdlib_shadow_package_dir(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            package = project_dir / "io"
+            package.mkdir(parents=True)
+            write_text(package / "__init__.py", "")
+            write_text(package / "artifacts.py", "def write_run_artifacts():\n    return 'ok'\n")
+            write_text(project_dir / "artifacts.py", "from io.artifacts import write_run_artifacts\n")
+            write_text(project_dir / "main.py", "from artifacts import write_run_artifacts\nprint(write_run_artifacts())\n")
+
+            repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair"},
+                stderr_text="ModuleNotFoundError: No module named 'io.artifacts'; 'io' is not a package",
+                output_path=root / "stdlib_shadow_package_repair.json",
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            self.assertFalse((project_dir / "io").exists())
+            self.assertTrue((project_dir / "project_io" / "artifacts.py").exists())
+            self.assertIn("from project_io.artifacts import write_run_artifacts", read_text(project_dir / "artifacts.py"))
+            self.assertGreaterEqual(repair["snapshot"]["captured_count"], 4)
 
     def test_greenfield_run_repair_fixes_nested_artifact_results_path(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -2301,6 +2333,12 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(applied["editor"]["source"], "legacy_or_manual_proposal")
             self.assertTrue(applied["edits"][0]["old_sha256"])
             self.assertTrue(applied["edits"][0]["new_sha256"])
+            self.assertEqual(applied["snapshot"]["captured_count"], 1)
+            snapshot_path = Path(applied["snapshot"]["manifest"])
+            self.assertTrue(snapshot_path.is_file())
+            snapshot = read_json(snapshot_path)
+            self.assertEqual(snapshot["files"][0]["path"], "spam_model.py")
+            self.assertEqual(snapshot["files"][0]["kind"], "file")
             diff_text = read_text(run_dir / "code_task" / "patch.diff")
             self.assertIn("+    lowered = text.lower()", diff_text)
             manifest = read_json(run_dir / "manifest.json")
@@ -2729,6 +2767,25 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(report["environment"]["mode"], "current")
             self.assertEqual(report["command"][0], sys.executable)
             self.assertEqual(manifest["status"], "benchmark_passed")
+            attempt_1 = run_dir / "code_task" / "run" / "patched" / "attempts" / "attempt-001"
+            self.assertTrue((attempt_1 / "execution_report.json").is_file())
+            self.assertTrue((attempt_1 / "stdout.txt").is_file())
+            self.assertTrue((attempt_1 / "stderr.txt").is_file())
+            self.assertEqual(report["history_attempt"], "attempt-001")
+
+            second = run_code_task_benchmark(run_dir, timeout_sec=10)
+
+            self.assertEqual(second.status, "passed")
+            attempt_2 = run_dir / "code_task" / "run" / "patched" / "attempts" / "attempt-002"
+            self.assertTrue((attempt_2 / "execution_report.json").is_file())
+            self.assertTrue((attempt_2 / "stdout.txt").is_file())
+            manifest = read_json(run_dir / "manifest.json")
+            run_record = manifest["benchmark"]["runs"]["patched"]
+            self.assertEqual(run_record["latest_attempt"], "attempt-002")
+            self.assertEqual(run_record["attempt_count"], 2)
+            self.assertEqual(len(run_record["attempts"]), 2)
+            latest_report = read_json(run_dir / "code_task" / "run" / "patched" / "execution_report.json")
+            self.assertEqual(latest_report["history_attempt"], "attempt-002")
 
     def test_run_code_task_baseline_records_pre_patch_result(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -3191,6 +3248,15 @@ protected_patterns = ["pyproject.toml"]
             analysis_text = read_text(analysis.analysis_path)
             self.assertIn("# Failure Analysis", analysis_text)
             self.assertIn("AssertionError", analysis_text)
+            history_dir = run_dir / "code_task" / "run" / "patched" / "attempts" / "attempt-001"
+            self.assertTrue((history_dir / "failure_analysis.md").is_file())
+            self.assertTrue((history_dir / "failure_graph.json").is_file())
+            manifest = read_json(run_dir / "manifest.json")
+            latest_attempt = manifest["benchmark"]["runs"]["patched"]["attempts"][0]
+            self.assertEqual(
+                latest_attempt["failure_analysis"],
+                "code_task/run/patched/attempts/attempt-001/failure_analysis.md",
+            )
 
             repair = propose_repair_edits(run_dir, use_llm=False)
             self.assertEqual(repair.mode, "offline")
@@ -3232,6 +3298,44 @@ protected_patterns = ["pyproject.toml"]
             analysis_text = read_text(analysis.analysis_path)
             self.assertIn("Experiment failed: 'str' object has no attribute 'X'", analysis_text)
             self.assertNotIn("strongest error signal is: `warning", analysis_text)
+
+    def test_greenfield_run_repair_analyzes_failure_when_budget_exhausted(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nDiagnose final failure even when repair budget is gone.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python broken_runtime.py",
+            )
+            write_text(
+                run_dir / "code_task" / "workspace" / "broken_runtime.py",
+                "print(\"ERROR: final budget exhausted signal\")\nraise SystemExit(1)\n",
+            )
+            failed = run_code_task_benchmark(run_dir, timeout_sec=10, skip_validation=True)
+            self.assertEqual(failed.status, "failed")
+
+            repaired = _attempt_greenfield_run_repair(
+                run_dir,
+                code_task_paths(run_dir),
+                [],
+                repair_rounds=0,
+                model=None,
+                repair_model=None,
+                use_llm=False,
+                max_generated_lines=1000,
+                message_callback=None,
+            )
+
+            self.assertFalse(repaired)
+            analysis_text = read_text(run_dir / "code_task" / "run" / "patched" / "failure_analysis.md")
+            self.assertIn("final budget exhausted signal", analysis_text)
 
     def test_execute_runs_to_approval_gate(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

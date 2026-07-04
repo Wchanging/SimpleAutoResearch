@@ -170,6 +170,7 @@ def _render_summary(
         "- Baseline execution: `code_task/run/baseline/execution_report.json`",
         "- Patched execution: `code_task/run/patched/execution_report.json`",
         "- Stdout/stderr: `code_task/run/<label>/stdout.txt`, `code_task/run/<label>/stderr.txt`",
+        "- Run history: `code_task/run/<label>/attempts/attempt-*/`",
     ]
     if comparison:
         artifact_lines.insert(-1, "- Comparison: `code_task/run/comparison.json`")

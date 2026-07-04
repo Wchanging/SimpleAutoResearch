@@ -29,8 +29,9 @@ from simple_ar.agent_backends import (
     validate_agent_mode_for_provider,
 )
 from simple_ar.core.artifacts import write_json
-from simple_ar.code_task.analysis.interfaces import dependency_context, public_api
+from simple_ar.code_task.analysis.interfaces import dependency_context, public_api, public_api_from_source
 from simple_ar.code_task.editing.actions import apply_repair_actions
+from simple_ar.code_task.editing.snapshots import FileSnapshotSet, create_file_snapshot_set
 from simple_ar.code_task.generation.common import contains_any, safe_relative_path
 from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.review_pipeline import build_review_index, compact_review_index
@@ -91,11 +92,11 @@ def repair_generated_project_from_review(
         write_json(output_path, summary)
         return summary
 
-    backup_dir = output_path.parent / "review_repair_backups" / "generated_project_before_review_repair"
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir)
-    shutil.copytree(project_dir, backup_dir)
-    summary["backup_dir"] = backup_dir.as_posix()
+    snapshot = create_file_snapshot_set(
+        workspace_dir=project_dir,
+        snapshot_root=output_path.parent / "repair_snapshots",
+        label="review-repair",
+    )
 
     changed: list[str] = []
     unresolved: list[str] = []
@@ -107,18 +108,20 @@ def repair_generated_project_from_review(
         original = path.read_text(encoding="utf-8", errors="replace")
         repaired = _repair_common_python_generation_error(rel, original)
         if repaired != original:
+            snapshot.capture(rel)
             path.write_text(repaired, encoding="utf-8")
             if not _compile_error(path):
                 changed.append(rel)
                 continue
-            path.write_text(original, encoding="utf-8")
+            snapshot.restore([rel])
         if path.name == "__init__.py":
+            snapshot.capture(rel)
             path.write_text('"""Generated experiment package."""\n\n__all__ = []\n', encoding="utf-8")
             if not _compile_error(path):
                 changed.append(rel)
                 summary["notes"].append(f"Replaced invalid package marker in {rel}.")
                 continue
-            path.write_text(original, encoding="utf-8")
+            snapshot.restore([rel])
         unresolved.append(f"{rel}: {error}")
 
     _repair_fallback_support_modules(
@@ -128,6 +131,7 @@ def repair_generated_project_from_review(
         changed=changed,
         notes=summary["notes"],
         unresolved=unresolved,
+        snapshot=snapshot,
     )
 
     if client is not None:
@@ -144,11 +148,12 @@ def repair_generated_project_from_review(
             changed=changed,
             notes=summary["notes"],
             unresolved=unresolved,
+            snapshot=snapshot,
         )
         if regenerated:
             summary["regenerated_files"] = regenerated
 
-    _repair_missing_static_artifacts(project_dir, review_report, changed, summary["notes"])
+    _repair_missing_static_artifacts(project_dir, review_report, changed, summary["notes"], snapshot=snapshot)
 
     summary["changed_files"] = changed
     summary["unresolved_errors"] = unresolved
@@ -159,6 +164,7 @@ def repair_generated_project_from_review(
         summary["notes"].append("Patched deterministic Python compile issues; rerun review before execution.")
     else:
         summary["notes"].append("No deterministic review repairs were available.")
+    _attach_snapshot_summary(summary, snapshot)
     write_json(output_path, summary)
     return summary
 
@@ -177,6 +183,7 @@ def _regenerate_review_failed_files(
     changed: list[str],
     notes: list[str],
     unresolved: list[str],
+    snapshot: FileSnapshotSet,
 ) -> list[dict[str, Any]]:
     target_paths = _review_repair_target_paths(review_report=review_report, code_artifacts=code_artifacts)
     if not target_paths:
@@ -218,6 +225,7 @@ def _regenerate_review_failed_files(
             unresolved=unresolved,
             mode_prefix="llm_review_repair",
             fallback_summary="Regenerated after review failure.",
+            snapshot=snapshot,
         )
         if applied is not None:
             regenerated.append(applied)
@@ -236,11 +244,14 @@ def _apply_llm_file_repair_response(
     unresolved: list[str],
     mode_prefix: str,
     fallback_summary: str,
+    snapshot: FileSnapshotSet | None = None,
 ) -> dict[str, Any] | None:
     target = project_dir / rel_path
     if _response_declares_no_change(response):
         notes.append(f"Skipped {rel_path}; repair response declared no change for this target.")
         return None
+    if snapshot is not None:
+        snapshot.capture(rel_path)
     before_api = public_api(target) if target.suffix == ".py" and target.is_file() else []
     action_result: dict[str, Any] | None = None
     action_rejection = ""
@@ -250,7 +261,13 @@ def _apply_llm_file_repair_response(
         if action_result.get("status") == "patched":
             error = _compile_error(target) if target.suffix == ".py" and target.is_file() else ""
             if error:
-                _restore_repair_target(target, previous_content, previous_exists)
+                _restore_repair_target(
+                    target,
+                    previous_content,
+                    previous_exists,
+                    snapshot=snapshot,
+                    rel_path=rel_path,
+                )
                 unresolved.append(f"{rel_path}: action repair failed to compile: {error}")
             else:
                 if rel_path not in changed:
@@ -294,7 +311,13 @@ def _apply_llm_file_repair_response(
     target.write_text(content, encoding="utf-8")
     error = _compile_error(target) if target.suffix == ".py" else ""
     if error:
-        _restore_repair_target(target, previous_content, previous_exists)
+        _restore_repair_target(
+            target,
+            previous_content,
+            previous_exists,
+            snapshot=snapshot,
+            rel_path=rel_path,
+        )
         unresolved.append(f"{rel_path}: repaired file failed to compile: {error}")
         return None
     if rel_path not in changed:
@@ -323,12 +346,28 @@ def _apply_llm_file_repair_response(
     }
 
 
-def _restore_repair_target(target: Path, previous_content: str, previous_exists: bool) -> None:
+def _restore_repair_target(
+    target: Path,
+    previous_content: str,
+    previous_exists: bool,
+    *,
+    snapshot: FileSnapshotSet | None = None,
+    rel_path: str = "",
+) -> None:
+    if snapshot is not None and rel_path:
+        snapshot.restore([rel_path])
+        return
     if previous_exists:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(previous_content, encoding="utf-8")
     elif target.exists():
         target.unlink()
+
+
+def _attach_snapshot_summary(summary: dict[str, Any], snapshot: FileSnapshotSet) -> None:
+    if snapshot.captured_count or snapshot.restored_count:
+        snapshot.write_manifest()
+        summary["snapshot"] = snapshot.artifact_record()
 
 
 def _response_declares_no_change(response: Mapping[str, Any]) -> bool:
@@ -405,22 +444,11 @@ def _api_name_from_signature(value: str) -> str:
 
 
 def _public_api_names_from_source(source: str) -> set[str]:
-    try:
-        tree = compile(source, "<repair-candidate>", "exec", flags=0, dont_inherit=True)
-    except SyntaxError:
-        return set()
-    del tree
-    names: set[str] = set()
-    try:
-        import ast
-
-        parsed = ast.parse(source)
-    except SyntaxError:
-        return names
-    for node in parsed.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and not node.name.startswith("_"):
-            names.add(node.name)
-    return names
+    return {
+        _api_name_from_signature(item)
+        for item in public_api_from_source(source)
+        if _api_name_from_signature(item)
+    }
 
 
 def _file_line_count(path: Path) -> int:
@@ -440,6 +468,7 @@ def _repair_fallback_support_modules(
     changed: list[str],
     notes: list[str],
     unresolved: list[str],
+    snapshot: FileSnapshotSet | None = None,
 ) -> None:
     """Repair generic generated-project support modules without task-specific code.
 
@@ -453,6 +482,8 @@ def _repair_fallback_support_modules(
         return
     target = project_dir / "generated_experiment" / "resources.py"
     target.parent.mkdir(parents=True, exist_ok=True)
+    if snapshot is not None:
+        snapshot.capture("generated_experiment/resources.py")
     target.write_text(_resources_module(), encoding="utf-8")
     error = _compile_error(target)
     if error:
@@ -627,6 +658,8 @@ def _repair_missing_static_artifacts(
     review_report: Mapping[str, Any],
     changed: list[str],
     notes: list[str],
+    *,
+    snapshot: FileSnapshotSet | None = None,
 ) -> None:
     findings = _review_findings(review_report)
     summaries = " ".join(str(item.get("summary", "")) for item in findings).lower()
@@ -634,18 +667,24 @@ def _repair_missing_static_artifacts(
     if "missing_entrypoint" in categories:
         main = project_dir / "main.py"
         if not main.exists() or not main.read_text(encoding="utf-8", errors="replace").strip():
+            if snapshot is not None:
+                snapshot.capture("main.py")
             main.write_text(_main_script(), encoding="utf-8")
             changed.append("main.py")
             notes.append("Generated a deterministic thin main.py entrypoint after review reported it missing.")
     if "missing_required_artifact" in categories and "readme" in summaries:
         readme = project_dir / "README.md"
         if not readme.exists() or not readme.read_text(encoding="utf-8", errors="replace").strip():
+            if snapshot is not None:
+                snapshot.capture("README.md")
             readme.write_text(_generated_readme(project_dir), encoding="utf-8")
             changed.append("README.md")
             notes.append("Generated a minimal README because the task explicitly required one.")
     if "config" in summaries:
         config = project_dir / "config.example.json"
         if not config.exists():
+            if snapshot is not None:
+                snapshot.capture("config.example.json")
             config.write_text(
                 json.dumps(
                     {
@@ -879,28 +918,29 @@ def repair_generated_project_from_guard(
         summary["notes"].append("No missing required metrics were detected.")
         write_json(output_path, summary)
         return summary
+    snapshot = create_file_snapshot_set(
+        workspace_dir=project_dir,
+        snapshot_root=output_path.parent / "repair_snapshots",
+        label="guard-repair",
+    )
     runner = project_dir / "generated_experiment" / "runner.py"
     if not runner.parent.is_dir():
         runner.parent.mkdir(parents=True, exist_ok=True)
-    if runner.exists():
-        backup = runner.with_suffix(".py.before_repair")
-        backup.write_text(runner.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
-        summary["notes"].append(f"Backed up previous runner to {backup.name}.")
+    snapshot.capture("generated_experiment/runner.py")
     runner.write_text(_fallback_runner(missing, result_schema), encoding="utf-8")
     main = project_dir / "main.py"
-    if main.exists():
-        backup = main.with_suffix(".py.before_repair")
-        backup.write_text(main.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
-        summary["notes"].append(f"Backed up previous main to {backup.name}.")
+    snapshot.capture("main.py")
     main.write_text(_main_script(), encoding="utf-8")
     summary["changed_files"].append("main.py")
     init = project_dir / "generated_experiment" / "__init__.py"
     if not init.exists():
+        snapshot.capture("generated_experiment/__init__.py")
         init.write_text('"""Generated experiment package."""\n', encoding="utf-8")
         summary["changed_files"].append("generated_experiment/__init__.py")
     summary["changed_files"].append("generated_experiment/runner.py")
     summary["status"] = "patched"
     summary["notes"].append("Rewrote runner with deterministic required-metric fallback.")
+    _attach_snapshot_summary(summary, snapshot)
     write_json(output_path, summary)
     return summary
 
@@ -923,8 +963,8 @@ def repair_generated_project_from_run_failure(
 
     This helper covers objective Python runtime mismatches that commonly occur
     when separate generated files disagree on an internal API. It is intentionally
-    conservative: patch, compile, and keep a backup; otherwise report that no
-    deterministic repair was available.
+    conservative: patch, compile, and keep file-level snapshots for rollback;
+    otherwise report that no deterministic repair was available.
     """
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -943,11 +983,11 @@ def repair_generated_project_from_run_failure(
         write_json(output_path, summary)
         return summary
 
-    backup_dir = output_path.parent / "run_repair_backups" / "generated_project_before_run_repair"
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir)
-    shutil.copytree(project_dir, backup_dir)
-    summary["backup_dir"] = backup_dir.as_posix()
+    snapshot = create_file_snapshot_set(
+        workspace_dir=project_dir,
+        snapshot_root=output_path.parent / "repair_snapshots",
+        label="run-repair",
+    )
 
     changed: list[str] = []
     patched = False
@@ -956,29 +996,31 @@ def repair_generated_project_from_run_failure(
             "Skipped deterministic quick patches because previous repair context shows repeated failure."
         )
     else:
-        compat_patch = apply_generated_project_compatibility_patch(project_dir=project_dir, stderr_text=stderr_text)
+        compat_patch = apply_generated_project_compatibility_patch(
+            project_dir=project_dir,
+            stderr_text=stderr_text,
+            snapshot=snapshot,
+        )
         patched = compat_patch.applied
         if compat_patch.applied:
             changed.extend(path for path in compat_patch.changed_files if path not in changed)
             summary["notes"].append(compat_patch.note)
     if not patched:
-        patched = _patch_stdlib_shadow_module(project_dir, stderr_text, changed)
+        patched = _patch_stdlib_shadow_module(project_dir, stderr_text, changed, snapshot=snapshot)
     if not patched:
-        patched = _patch_nested_artifact_results_path(project_dir, stderr_text, changed)
+        patched = _patch_nested_artifact_results_path(project_dir, stderr_text, changed, snapshot=snapshot)
     if patched:
         compile_errors = _compile_project(project_dir)
         if not compile_errors:
             summary["status"] = "patched"
             summary["changed_files"] = changed
             summary["notes"].append("Patched an internal generated entrypoint/API mismatch.")
+            _attach_snapshot_summary(summary, snapshot)
             write_json(output_path, summary)
             return summary
         summary["unresolved_errors"].extend(compile_errors)
-        if backup_dir.is_dir():
-            if project_dir.exists():
-                shutil.rmtree(project_dir)
-            shutil.copytree(backup_dir, project_dir)
-            changed.clear()
+        snapshot.restore()
+        changed.clear()
 
     if client is not None:
         regenerated = _regenerate_run_failed_files(
@@ -995,6 +1037,7 @@ def repair_generated_project_from_run_failure(
             changed=changed,
             notes=summary["notes"],
             unresolved=summary["unresolved_errors"],
+            snapshot=snapshot,
         )
         if regenerated:
             summary["regenerated_files"] = regenerated
@@ -1003,17 +1046,16 @@ def repair_generated_project_from_run_failure(
                 summary["status"] = "patched"
                 summary["changed_files"] = changed
                 summary["notes"].append("Regenerated bounded files after benchmark runtime failure.")
+                _attach_snapshot_summary(summary, snapshot)
                 write_json(output_path, summary)
                 return summary
             summary["unresolved_errors"].extend(compile_errors)
-            if backup_dir.is_dir():
-                if project_dir.exists():
-                    shutil.rmtree(project_dir)
-                shutil.copytree(backup_dir, project_dir)
-                changed.clear()
+            snapshot.restore()
+            changed.clear()
 
     summary["changed_files"] = changed
     summary["notes"].append("No deterministic run-failure repair was available.")
+    _attach_snapshot_summary(summary, snapshot)
     write_json(output_path, summary)
     return summary
 
@@ -1033,6 +1075,7 @@ def _regenerate_run_failed_files(
     changed: list[str],
     notes: list[str],
     unresolved: list[str],
+    snapshot: FileSnapshotSet,
 ) -> list[dict[str, Any]]:
     heuristic_targets = _run_repair_target_paths(
         project_dir=project_dir,
@@ -1111,6 +1154,7 @@ def _regenerate_run_failed_files(
             unresolved=unresolved,
             mode_prefix="llm_run_repair",
             fallback_summary="Regenerated after benchmark runtime failure.",
+            snapshot=snapshot,
         )
         if applied is not None:
             regenerated.append(applied)
@@ -1582,53 +1626,116 @@ def _should_skip_quick_runtime_patches(previous_repair_context: str) -> bool:
     )
 
 
-def _patch_stdlib_shadow_module(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
-    module = _shadowed_stdlib_module(project_dir, stderr_text)
-    if not module:
+def _patch_stdlib_shadow_module(
+    project_dir: Path,
+    stderr_text: str,
+    changed: list[str],
+    *,
+    snapshot: FileSnapshotSet | None = None,
+) -> bool:
+    shadow = _shadowed_stdlib_module(project_dir, stderr_text)
+    if not shadow:
         return False
-    source = project_dir / f"{module}.py"
-    if not source.is_file():
+    module = shadow["module"]
+    source = project_dir / str(shadow["source"])
+    if not source.exists():
         return False
-    replacement = _replacement_module_name(project_dir, module)
-    destination = project_dir / f"{replacement}.py"
+    replacement = _replacement_module_name(project_dir, module, package=source.is_dir())
+    suffix = ".py" if source.is_file() else ""
+    destination = project_dir / f"{replacement}{suffix}"
+    if destination.exists():
+        return False
+    if snapshot is not None:
+        _snapshot_path_tree(snapshot, project_dir=project_dir, relative_path=source.relative_to(project_dir).as_posix())
+        _snapshot_rename_destination(
+            snapshot,
+            project_dir=project_dir,
+            source=source,
+            destination=destination,
+        )
     source.rename(destination)
-    _rewrite_local_module_imports(project_dir, old=module, new=replacement)
-    changed.append(f"{module}.py -> {replacement}.py")
+    _rewrite_local_module_imports(project_dir, old=module, new=replacement, snapshot=snapshot)
+    changed.append(f"{source.relative_to(project_dir).as_posix()} -> {destination.relative_to(project_dir).as_posix()}")
     for path in sorted(project_dir.rglob("*.py")):
         if "__pycache__" in path.parts:
             continue
         rel = path.relative_to(project_dir).as_posix()
-        if rel not in changed and rel != f"{replacement}.py":
+        if rel not in changed and rel != destination.relative_to(project_dir).as_posix():
             try:
                 content = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             if replacement in content:
                 changed.append(rel)
-    if f"{replacement}.py" not in changed:
-        changed.append(f"{replacement}.py")
+    replacement_rel = destination.relative_to(project_dir).as_posix()
+    if replacement_rel not in changed:
+        changed.append(replacement_rel)
     return True
 
 
-def _shadowed_stdlib_module(project_dir: Path, stderr_text: str) -> str:
+def _shadowed_stdlib_module(project_dir: Path, stderr_text: str) -> dict[str, str]:
     lowered = stderr_text.lower()
-    for path in sorted(project_dir.glob("*.py")):
-        module = path.stem
+    candidates = [*sorted(project_dir.glob("*.py")), *sorted(path for path in project_dir.iterdir() if path.is_dir())]
+    for path in candidates:
+        module = path.stem if path.is_file() else path.name
         if module not in _STDLIB_SHADOW_MODULES:
             continue
         path_text = path.as_posix().lower()
         if (
             f"module '{module}'" in lowered
+            or f"module named '{module}." in lowered
+            or f"no module named '{module}." in lowered
+            or f"'{module}' is not a package" in lowered
             or f"from '{module}'" in lowered
             or f"import name" in lowered and f"{module}.py" in lowered
             or path_text in lowered.replace("\\", "/")
         ):
-            return module
-    return ""
+            return {
+                "module": module,
+                "source": path.relative_to(project_dir).as_posix(),
+                "kind": "file" if path.is_file() else "directory",
+            }
+    return {}
 
 
-def _replacement_module_name(project_dir: Path, module: str) -> str:
-    candidates = [f"{module}_schema", f"project_{module}", f"local_{module}"]
+def _snapshot_path_tree(snapshot: FileSnapshotSet, *, project_dir: Path, relative_path: str) -> None:
+    source = project_dir / relative_path
+    if source.is_file():
+        snapshot.capture(relative_path)
+        return
+    if not source.is_dir():
+        snapshot.capture(relative_path)
+        return
+    for path in sorted(source.rglob("*")):
+        if path.is_file():
+            snapshot.capture(path.relative_to(project_dir).as_posix())
+
+
+def _snapshot_rename_destination(
+    snapshot: FileSnapshotSet,
+    *,
+    project_dir: Path,
+    source: Path,
+    destination: Path,
+) -> None:
+    if source.is_file():
+        snapshot.capture(destination.relative_to(project_dir).as_posix())
+        return
+    if not source.is_dir():
+        return
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        rel_inside = path.relative_to(source)
+        snapshot.capture((destination / rel_inside).relative_to(project_dir).as_posix())
+
+
+def _replacement_module_name(project_dir: Path, module: str, *, package: bool = False) -> str:
+    candidates = (
+        [f"project_{module}", f"local_{module}", f"{module}_schema"]
+        if package
+        else [f"{module}_schema", f"project_{module}", f"local_{module}"]
+    )
     for candidate in candidates:
         if not (project_dir / f"{candidate}.py").exists():
             return candidate
@@ -1638,9 +1745,19 @@ def _replacement_module_name(project_dir: Path, module: str) -> str:
     return f"{module}_schema_{index}"
 
 
-def _rewrite_local_module_imports(project_dir: Path, *, old: str, new: str) -> None:
+def _rewrite_local_module_imports(
+    project_dir: Path,
+    *,
+    old: str,
+    new: str,
+    snapshot: FileSnapshotSet | None = None,
+) -> None:
     from_pattern = re.compile(rf"(^|\n)([ \t]*)from[ \t]+{re.escape(old)}[ \t]+import[ \t]+")
+    from_dotted_pattern = re.compile(rf"(^|\n)([ \t]*)from[ \t]+{re.escape(old)}(\.[A-Za-z_][A-Za-z0-9_.]*)[ \t]+import[ \t]+")
     import_pattern = re.compile(rf"(^|\n)([ \t]*)import[ \t]+{re.escape(old)}([ \t]*(?:#.*)?(?:\n|$))")
+    import_dotted_pattern = re.compile(
+        rf"(^|\n)([ \t]*)import[ \t]+{re.escape(old)}(\.[A-Za-z_][A-Za-z0-9_.]*)([ \t]*(?:as[ \t]+[A-Za-z_][A-Za-z0-9_]*)?[ \t]*(?:#.*)?(?:\n|$))"
+    )
     dynamic_patterns = (
         (f'"{old}"', f'"{new}"'),
         (f"'{old}'", f"'{new}'"),
@@ -1652,16 +1769,26 @@ def _rewrite_local_module_imports(project_dir: Path, *, old: str, new: str) -> N
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        updated = from_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}from {new} import ", content)
+        updated = from_dotted_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}from {new}{m.group(3)} import ", content)
+        updated = from_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}from {new} import ", updated)
+        updated = import_dotted_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}import {new}{m.group(3)}{m.group(4)}", updated)
         updated = import_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}import {new} as {old}{m.group(3)}", updated)
         if path.name in {"main.py", "__main__.py"}:
             for before, after in dynamic_patterns:
                 updated = updated.replace(before, after)
         if updated != content:
+            if snapshot is not None:
+                snapshot.capture(path.relative_to(project_dir).as_posix())
             path.write_text(updated, encoding="utf-8")
 
 
-def _patch_nested_artifact_results_path(project_dir: Path, stderr_text: str, changed: list[str]) -> bool:
+def _patch_nested_artifact_results_path(
+    project_dir: Path,
+    stderr_text: str,
+    changed: list[str],
+    *,
+    snapshot: FileSnapshotSet | None = None,
+) -> bool:
     lowered = stderr_text.lower()
     if "artifacts/results.json" not in lowered or "not written" not in lowered:
         return False
@@ -1687,8 +1814,10 @@ def _patch_nested_artifact_results_path(project_dir: Path, stderr_text: str, cha
         for before, after in replacements.items():
             updated = updated.replace(before, after)
         if updated != content:
-            path.write_text(updated, encoding="utf-8")
             rel = path.relative_to(project_dir).as_posix()
+            if snapshot is not None:
+                snapshot.capture(rel)
+            path.write_text(updated, encoding="utf-8")
             if rel not in changed:
                 changed.append(rel)
             patched = True

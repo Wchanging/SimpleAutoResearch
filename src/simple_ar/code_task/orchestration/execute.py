@@ -1546,12 +1546,13 @@ def _attempt_greenfield_run_repair(
     max_generated_lines: int,
     message_callback: MessageCallback | None,
 ) -> bool:
-    if not _greenfield_run_repair_available(run_dir, repair_rounds):
-        _record(steps, "repair", "skipped", "run repair budget exhausted or disabled")
-        return False
     _emit(message_callback, "Analyzing generated project benchmark failure.")
     analysis = analyze_code_task_failure(run_dir)
     _record(steps, "analyze-failure", "done", f"source {analysis.source}; status {analysis.status}")
+    if not _greenfield_run_repair_available(run_dir, repair_rounds):
+        _record(steps, "repair", "skipped", "run repair budget exhausted or disabled")
+        write_code_task_summary(run_dir)
+        return False
     _emit(message_callback, "Attempting bounded generated project run repair.")
     stderr_path = paths.run_artifact_dir / "patched" / "stderr.txt"
     stdout_path = paths.run_artifact_dir / "patched" / "stdout.txt"

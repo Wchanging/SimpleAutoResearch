@@ -446,7 +446,13 @@ class ExperimentExecutionTests(unittest.TestCase):
             self.assertIsInstance(metrics["macro_f1"], float)
             main = (project / "main.py").read_text(encoding="utf-8")
             self.assertIn("generated_experiment.runner", main)
-            self.assertTrue((project / "main.py.before_repair").is_file())
+            self.assertFalse((project / "main.py.before_repair").exists())
+            self.assertEqual(summary["snapshot"]["captured_count"], 3)
+            snapshot = read_json(Path(summary["snapshot"]["manifest"]))
+            self.assertEqual(
+                sorted(row["path"] for row in snapshot["files"]),
+                ["generated_experiment/__init__.py", "generated_experiment/runner.py", "main.py"],
+            )
 
     def test_local_experiment_tool_gateway_reads_contract_and_results(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
