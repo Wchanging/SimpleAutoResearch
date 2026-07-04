@@ -11,11 +11,12 @@ from simple_ar.code_task.analysis.interfaces import (
     snippet_api_contract,
 )
 from simple_ar.code_task.analysis.entrypoints import analyze_entrypoint_debuggability
+from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.generation.common import safe_relative_path, string_list
 from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.generation.review import review_generated_project
-from simple_ar.code_task.generation.writer import write_generated_project
+from simple_ar.code_task.generation.writer import _response_self_reports_defect, write_generated_project
 from simple_ar.code_task import initialize_code_task, review_code_task_changes
 from simple_ar.core.artifacts import read_json, write_json, write_text
 
@@ -168,6 +169,60 @@ class CodeTaskInterfaceTests(unittest.TestCase):
 
             self.assertEqual(len(analysis["findings"]), 1)
             self.assertEqual(analysis["findings"][0]["path"], "main.py")
+
+    def test_python_source_flags_non_ascii_identifier_only(self) -> None:
+        source = (
+            "message = '中文 text is fine in strings'\n"
+            "def write喟距_results_json():\n"
+            "    return message\n"
+        )
+
+        findings = non_ascii_identifiers(source, path="main.py")
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["kind"], "function")
+
+    def test_review_blocks_non_ascii_python_identifier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(
+                project / "main.py",
+                (
+                    "def write喟距_results_json():\n"
+                    "    return None\n\n"
+                    "def main():\n"
+                    "    print('score: 1.0')\n"
+                ),
+            )
+
+            review = review_generated_project(
+                project_dir=project,
+                code_artifacts={"generated_files": [{"path": "main.py", "mode": "llm", "line_count": 5}]},
+                result_schema={"primary_metric": "score", "required_metrics": ["score"]},
+                resource_plan={"max_files": 4, "max_generated_lines": 200},
+                use_llm=False,
+            )
+
+            self.assertEqual(review["status"], "failed")
+            self.assertTrue(any(row["category"] == "non_ascii_python_identifier" for row in review["findings"]))
+
+    def test_writer_rejects_self_reported_defective_response(self) -> None:
+        self.assertTrue(
+            _response_self_reports_defect(
+                {
+                    "summary": (
+                        "Created main.py. Note: the file content includes an import typo that should be "
+                        "corrected before execution."
+                    )
+                }
+            )
+        )
+        self.assertFalse(_response_self_reports_defect({"summary": "Corrected the import typo and verified the file."}))
+        self.assertFalse(
+            _response_self_reports_defect(
+                {"summary": "Creates output directories before execution and writes measured metrics."}
+            )
+        )
 
     def test_review_blocks_entrypoint_that_suppresses_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

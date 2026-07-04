@@ -22,6 +22,9 @@ This file records user-visible project changes in reverse chronological order. P
   exceptions while suppressing tracebacks. Friendly CLI errors are still allowed
   when the original traceback is printed, logged, or re-raised, preserving
   repair-localization signal for later iterations.
+- Greenfield file generation now rejects Python files with non-ASCII
+  identifiers and LLM responses that self-report unresolved typos or
+  pre-execution fixes, forcing a retry instead of accepting known-bad code.
 
 ## 2026-07-03
 
@@ -58,6 +61,14 @@ This file records user-visible project changes in reverse chronological order. P
   tokens when no traceback path is available, giving repair prompts concrete
   candidate files for errors such as missing attributes, missing fields, or
   unexpected keyword arguments.
+- Code-task run repair now feeds failure graphs, stdout/stderr, validation
+  reports, and recent repair history into runtime repair planning. Structured
+  repair also supports explicit `no_change` actions and rejects whole-file
+  rewrites that would erase public APIs.
+- Greenfield file plans now distinguish source files from runtime directories
+  and output placeholders such as `.gitkeep`, `artifacts/`, and
+  `submission/results/`, so deterministic placeholders handle these paths
+  instead of forcing LLM-generated source files.
 - Greenfield review-repair prompts now spell out the required fields for each
   structured edit action, and code-task summaries distinguish a raw partial
   repair failure from a recovered follow-up review.
@@ -94,6 +105,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Fixed
 
+- Fixed greenfield file-plan handling for runtime artifact paths such as
+  `artifacts` and `submission/results`. Directories and output placeholders are
+  now deterministic placeholders instead of missing source files, avoiding
+  duplicated or missing `artifacts/results.json` paths.
 - Generated-project review no longer treats defensive text such as "do not use
   placeholder values" as an executable placeholder path, while still blocking
   real dummy/stub outputs.

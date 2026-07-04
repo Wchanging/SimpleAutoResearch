@@ -11,6 +11,8 @@
 - Greenfield code-task review 现在会识别 `runtime_dir`、`artifact_placeholder`、`output_placeholder` 等运行产物占位，不再把所有计划项都当成必须由 LLM 生成的源码文件。
 - Greenfield architecture plan 现在会把紧凑的 metric、artifact、resource 和 interface contract 传递到逐文件生成、review 与 repair prompt，帮助生成代码保留跨文件证据链、输出义务和资源边界。
 - Code-task review 与 generated-project run repair 现在会注入确定性的静态资源风险信号，用于识别循环拟合、候选搜索和 warning flood/timeout 风险；该增强不额外增加默认 LLM 调用次数。
+- Greenfield review 与 repair 现在会拒绝捕获宽泛异常但隐藏原始 traceback 的入口文件。友好的 CLI 错误仍然允许，但必须打印、记录或重新抛出原始 traceback，以保留后续 repair 的定位信号。
+- Greenfield 文件生成现在会拒绝包含非 ASCII Python 标识符的文件，以及在 summary/notes 中自报未修复 typo、坏 import 或运行前仍需修复的问题的 LLM 响应，避免接受模型自己已承认的坏代码。
 
 ## 2026-07-03
 
@@ -18,8 +20,8 @@
 
 - Code-task apply / generated-project repair 现在使用通用文件级 snapshot 记录本轮将修改的文件原始内容，并在失败时按文件回滚；本地可控 repair 不再默认复制整个 generated project，也不再在项目目录里写 `*.before_repair` 旁路备份文件。
 - Code-task benchmark run 现在会在保留 `code_task/run/<label>/` 最新结果槽位的同时，把每次执行的 stdout、stderr、metrics 和 execution report 归档到 `code_task/run/<label>/attempts/attempt-*/`；failure analysis 与 failure graph 也会同步归档到对应 attempt，便于追踪多轮 repair 的真实错误演化而不覆盖历史证据。
-- Code-task run repair ???????? failure graph??? stdout?stderr?validation report ??????????????????structured repair ???? `no_change`????????????????? API ?????????????????????????????
-- Greenfield file plan ??????/??/??/????????????`.gitkeep`?artifacts/output ???????????????? LLM ?????????????Code-task validation ????????????`src/` ? `generated_project/` ???????????? missing-import warning?
+- Code-task run repair 现在会把 failure graph、stdout/stderr、validation report 和最近 repair history 一起交给运行修复规划；structured repair 支持显式 `no_change`，并会拒绝清空 public API 的整文件重写，减少无效改动和接口破坏。
+- Greenfield file plan 现在会区分源码文件、运行目录和输出占位，例如 `.gitkeep`、`artifacts/`、`submission/results/` 与 output placeholder；这些路径由确定性占位创建，不再强制 LLM 生成源码文件，也减少 `src/` 与 `generated_project/` 路径混淆造成的误报。
 - ARC-Bench 批跑现在会为每个 topic 写出 `arc_task_stats.json`，同时放在 run 目录和 finalized submission 目录下；其中包含总耗时、各命令耗时、退出码、日志路径，以及 code-task、result-analysis、score 汇总后的 LLM 请求数、token 和估算费用。
 
 - Result-analysis 现在会匹配常见的项目级/单元格级指标别名，例如把 `test_accuracy` 对齐到条件表中的 `accuracy`，避免全局主指标名和 per-cell 指标名不同导致 Primary Metric Table 为空。
@@ -58,7 +60,7 @@
 
 ### Fixed
 
-- ?? greenfield file plan ? `artifacts`?`submission/results` ?????????????????????????????????????????????????????? `artifacts/results.json` ?????/?????
+- 修复 greenfield file plan 对 `artifacts`、`submission/results` 等运行产物路径的误判：目录和输出占位现在由 deterministic placeholder 处理，不再被当作必须生成的普通源码文件，也避免 `artifacts/results.json` 路径被重复嵌套或漏写。
 - 修复 generated-project review 对 placeholder/dummy 文本的误判。现在“refusing to emit placeholder metrics”“do not use placeholder values”这类防御性说明不会被当成 placeholder 执行路径，但真实的 dummy/stub/placeholder record 仍会被阻断。
 - Generated-project review 增加计划 API 与实际导出 API 的通用契约漂移检查。当 architecture plan 中声明的 public API 没有在对应文件中导出时，会生成 warning，帮助定位 per-file generation 造成的 producer/consumer 命名漂移。
 

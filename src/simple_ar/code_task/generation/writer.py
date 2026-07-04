@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any, Callable, Mapping
 from simple_ar.core.artifacts import write_text
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.code_task.analysis.interfaces import dependency_context, order_file_specs, public_api
+from simple_ar.code_task.analysis.python_source import has_non_ascii_identifier
 from simple_ar.code_task.generation.agent_step import run_json_agent_step
 from simple_ar.code_task.generation.common import mapping_list, safe_relative_path, string_list
 from simple_ar.code_task.generation.file_specs import is_model_generated_file, is_runtime_placeholder
@@ -244,6 +246,13 @@ def _file_content(
                 continue
             content = str(response.get("content", "")).strip()
             summary = str(response.get("summary", "")).strip() or str(file_spec.get("purpose", ""))
+            if _response_self_reports_defect(response):
+                feedback = (
+                    "The previous response self-reported an unresolved typo, broken import, or file that must be "
+                    "corrected before execution. Return a corrected, runnable file and do not mention known defects "
+                    "in the summary unless they are fully fixed."
+                )
+                continue
             if content and not _looks_like_markdown_fence(content):
                 cleaned = _repair_common_generation_error(path, content.rstrip() + "\n")
                 if _is_valid_file_content(cleaned, filename=path):
@@ -546,12 +555,32 @@ def _is_valid_file_content(value: str, *, filename: str) -> bool:
             compile(value, filename, "exec")
         except SyntaxError:
             return False
+        if has_non_ascii_identifier(value, path=filename):
+            return False
     if filename.endswith(".json"):
         try:
             json.loads(value)
         except json.JSONDecodeError:
             return False
     return bool(value.strip())
+
+
+def _response_self_reports_defect(response: Mapping[str, Any]) -> bool:
+    text = " ".join(
+        str(response.get(key) or "")
+        for key in ("summary", "notes", "known_issues", "limitations")
+    ).lower()
+    if not text.strip():
+        return False
+    patterns = (
+        r"\b(?:contains|includes|has)\b.{0,80}\btypo\b",
+        r"\b(?:should|must|needs? to)\s+be\s+(?:corrected|fixed|repaired|resolved)\b",
+        r"\b(?:unresolved|remaining|known)\b.{0,80}\bbefore\s+execution\b",
+        r"\bnot\s+(?:runnable|executable)\b",
+        r"\bwill\s+fail\b",
+        r"\bknown\s+(?:bug|issue|defect)\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _file_output_summary(stage: str, output: Mapping[str, Any]) -> dict[str, Any]:

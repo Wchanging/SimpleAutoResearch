@@ -817,6 +817,16 @@ primary_metric = "accuracy"
                         "risks": [],
                     }
                 path = label.removeprefix("greenfield-run-repair-")
+                if path == "src/report.py":
+                    return {
+                        "content": (
+                            "from __future__ import annotations\n\n"
+                            f"REPAIRED_PATH = {path!r}\n\n"
+                            "def render(summary):\n"
+                            "    return summary['mean']['balanced_accuracy']\n"
+                        ),
+                        "summary": f"Repaired {path}.",
+                    }
                 return {
                     "content": (
                         "from __future__ import annotations\n\n"

@@ -32,6 +32,7 @@ from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import dependency_context, public_api, public_api_from_source
 from simple_ar.code_task.analysis.entrypoints import source_suppresses_entrypoint_traceback
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
+from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.editing.actions import apply_repair_actions
 from simple_ar.code_task.editing.snapshots import FileSnapshotSet, create_file_snapshot_set
 from simple_ar.code_task.generation.common import contains_any, safe_relative_path
@@ -466,6 +467,13 @@ def _post_write_static_guard(*, target: Path, rel_path: str) -> str:
         return (
             f"{suppressed}; generated entrypoints must preserve the original traceback "
             "or re-raise broad exceptions so runtime repair can localize the true failing file."
+        )
+    identifiers = non_ascii_identifiers(source, path=rel_path)
+    if identifiers:
+        first = identifiers[0]
+        return (
+            f"non_ascii_python_identifier:{rel_path}:{first.get('line') or 'unknown'}:"
+            f"{first.get('identifier')}; generated Python identifiers must be ASCII-only."
         )
     return ""
 
@@ -1579,7 +1587,9 @@ def _attribute_error_symbols(signal_text: str) -> list[str]:
     symbols: list[str] = []
     patterns = (
         r"has no attribute ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
+        r"has no attribute\s+([A-Za-z_][A-Za-z0-9_]*)",
         r"attributeerror:[^'\"]*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
+        r"attributeerror:[^\n]*has no attribute\s+([A-Za-z_][A-Za-z0-9_]*)",
     )
     for pattern in patterns:
         symbols.extend(match.lower() for match in re.findall(pattern, signal_text, flags=re.IGNORECASE))
