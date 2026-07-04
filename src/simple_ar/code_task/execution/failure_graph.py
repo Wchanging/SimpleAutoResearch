@@ -39,6 +39,11 @@ RUNTIME_SIGNAL_TOKENS = (
     "ERROR",
     "FAILED",
     "Timed out",
+    "Warning",
+    "ConvergenceWarning",
+    "RuntimeWarning",
+    "TOTAL NO. OF ITERATIONS",
+    "failed to converge",
 )
 
 

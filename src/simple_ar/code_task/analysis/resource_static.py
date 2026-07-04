@@ -101,7 +101,8 @@ def resource_review_findings(
             ),
             "recommendation": (
                 "Bound candidate/seed/fold loops, batch expensive queries, reuse fitted artifacts where valid, "
-                "and make runtime budgets explicit before trusting benchmark execution."
+                "add preprocessing pipelines for iterative estimators when needed, and make runtime budgets explicit "
+                "before trusting benchmark execution."
             ),
         }
     ]
@@ -110,10 +111,29 @@ def resource_review_findings(
 def _analyze_file(tree: ast.AST, *, source: str, path: str) -> dict[str, Any]:
     visitor = _ResourceVisitor()
     visitor.visit(tree)
+    lowered_source = source.lower()
     cap_terms = sorted(term for term in CAP_HINT_TERMS if term in source.lower())
     risk_score = visitor.nested_fit_call_count * 3 + max(0, visitor.max_fit_loop_depth - 1) * 2
     if visitor.fit_call_count and visitor.loop_hint_terms:
         risk_score += 1
+    uses_logistic_regression = (
+        "logisticregression" in lowered_source or "fit_logistic_regression" in lowered_source
+    )
+    uses_scaling_pipeline = any(
+        marker in lowered_source
+        for marker in (
+            "standardscaler",
+            "minmaxscaler",
+            "robustscaler",
+            "make_pipeline",
+            "pipeline(",
+        )
+    )
+    logistic_without_scaling = bool(
+        uses_logistic_regression and visitor.nested_fit_call_count and not uses_scaling_pipeline
+    )
+    if logistic_without_scaling:
+        risk_score += 4
     if cap_terms:
         risk_score = max(0, risk_score - 1)
     return {
@@ -123,6 +143,9 @@ def _analyze_file(tree: ast.AST, *, source: str, path: str) -> dict[str, Any]:
         "max_fit_loop_depth": visitor.max_fit_loop_depth,
         "loop_hint_terms": sorted(visitor.loop_hint_terms)[:12],
         "cap_hint_terms": cap_terms[:12],
+        "uses_logistic_regression": uses_logistic_regression,
+        "uses_scaling_pipeline": uses_scaling_pipeline,
+        "logistic_without_scaling_in_loop": logistic_without_scaling,
         "risk_score": risk_score,
     }
 
@@ -165,9 +188,9 @@ class _ResourceVisitor(ast.NodeVisitor):
 def _is_fit_call(node: ast.Call) -> bool:
     func = node.func
     if isinstance(func, ast.Attribute):
-        return func.attr == "fit" or func.attr.endswith("_fit")
+        return func.attr == "fit" or func.attr.startswith("fit_") or func.attr.endswith("_fit")
     if isinstance(func, ast.Name):
-        return func.id == "fit" or func.id.endswith("_fit")
+        return func.id == "fit" or func.id.startswith("fit_") or func.id.endswith("_fit")
     return False
 
 

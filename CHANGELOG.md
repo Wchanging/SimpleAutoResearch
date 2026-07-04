@@ -25,6 +25,12 @@ This file records user-visible project changes in reverse chronological order. P
 - Greenfield file generation now rejects Python files with non-ASCII
   identifiers and LLM responses that self-report unresolved typos or
   pre-execution fixes, forcing a retry instead of accepting known-bad code.
+- Code-task review now includes a task-triggered active-learning integrity
+  guard that blocks acquisition/query policies from using hidden pool labels
+  during sample selection while leaving non-active-learning tasks unaffected.
+- Benchmark stderr streaming now suppresses repeated warning floods in the
+  live console after the first few occurrences while preserving full stdout and
+  stderr artifacts for diagnosis and repair.
 
 ## 2026-07-03
 

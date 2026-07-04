@@ -2243,13 +2243,49 @@ def _emit(callback: MessageCallback | None, message: str) -> None:
 def _benchmark_output_callback(callback: MessageCallback | None) -> Callable[[str, str], None] | None:
     if callback is None:
         return None
+    repeated: dict[str, int] = {}
 
     def _relay(stream: str, line: str) -> None:
         text = line.rstrip()
-        if text:
-            callback(f"benchmark {stream}: {text}")
+        if not text:
+            return
+        if stream == "stderr":
+            signature = _repeated_warning_signature(text)
+            if signature:
+                repeated[signature] = repeated.get(signature, 0) + 1
+                count = repeated[signature]
+                if count > 3:
+                    if count == 4:
+                        callback(f"benchmark {stream}: repeated warning suppressed after 3 occurrence(s): {signature}")
+                    elif count % 50 == 0:
+                        callback(f"benchmark {stream}: repeated warning still occurring ({count} occurrence(s)): {signature}")
+                    return
+        callback(f"benchmark {stream}: {text}")
 
     return _relay
+
+
+def _repeated_warning_signature(text: str) -> str:
+    normalized = " ".join(str(text).split())
+    lowered = normalized.lower()
+    if not normalized:
+        return ""
+    warning_markers = (
+        "warning",
+        "convergencewarning",
+        "runtimewarning",
+        "userwarning",
+        "stop: total no. of iterations reached limit",
+        "increase the number of iterations",
+        "you might also want to scale the data",
+    )
+    if not any(marker in lowered for marker in warning_markers):
+        return ""
+    normalized = re.sub(r'File "[^"]+", line \d+', 'File "<path>", line <n>', normalized)
+    normalized = re.sub(r"[A-Za-z]:[\\/][^\s:]+", "<path>", normalized)
+    normalized = re.sub(r"/[^\s:]+", "<path>", normalized)
+    normalized = re.sub(r"\b\d+(?:\.\d+)?\b", "<num>", normalized)
+    return normalized[:220]
 
 
 def _first_error_line(text: str) -> str:

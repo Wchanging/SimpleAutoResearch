@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import py_compile
 import re
 import sys
@@ -24,7 +25,7 @@ from simple_ar.code_task.review_pipeline import (
 )
 
 
-GREENFIELD_REVIEW_CONTRACT_VERSION = 7
+GREENFIELD_REVIEW_CONTRACT_VERSION = 8
 _STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
     "types",
     "typing",
@@ -238,6 +239,7 @@ def _deterministic_findings(
         findings.append(item)
     findings.extend(_interface_contract_findings(project_dir, architecture_plan=architecture_plan))
     findings.extend(_semantic_scaffold_findings(project_dir, contract=contract, result_schema=result_schema))
+    findings.extend(_scientific_contract_findings(project_dir, contract=contract))
     findings.extend(_task_acceptance_findings(project_dir, contract=contract, dependency_advice=dependency_advice))
     return findings
 
@@ -414,6 +416,203 @@ def _semantic_scaffold_findings(
         if len(findings) >= 8:
             break
     return findings
+
+
+def _scientific_contract_findings(
+    project_dir: Path,
+    *,
+    contract: Mapping[str, Any],
+) -> list[ReviewFinding]:
+    """Check task-derived scientific integrity contracts.
+
+    The checks here are intentionally conditional on the task text. They avoid
+    encoding benchmark-specific expectations, but catch common scientific
+    contract violations once the user/task explicitly names the relevant
+    paradigm. For pool-based active learning, query policies may observe
+    unlabeled features and model predictions, but must not use hidden pool
+    labels to decide which sample to query.
+    """
+
+    task_text = _task_text(contract)
+    if not _looks_like_active_learning_task(task_text):
+        return []
+    findings: list[ReviewFinding] = []
+    for path in sorted(project_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            source = path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source)
+        except (OSError, SyntaxError):
+            continue
+        rel = path.relative_to(project_dir).as_posix()
+        for row in _active_learning_label_leaks(tree):
+            findings.append(
+                _finding(
+                    "blocking",
+                    "hidden_label_acquisition_leakage",
+                    (
+                        f"`{rel}` function `{row['function']}` appears to use hidden pool labels "
+                        f"inside acquisition/training/loss logic near line {row['line']}."
+                    ),
+                    recommendation=(
+                        "Active-learning query policies should select from unlabeled-pool features and current model "
+                        "predictions only. Use labels only after the chosen index is queried and moved into the labeled set."
+                    ),
+                )
+            )
+            if len(findings) >= 8:
+                return findings
+    return findings
+
+
+def _looks_like_active_learning_task(text: str) -> bool:
+    normalized = " ".join(text.replace("-", " ").replace("_", " ").split())
+    markers = (
+        "active learning",
+        "pool based",
+        "unlabeled pool",
+        "label budget",
+        "query strategy",
+        "query strategies",
+        "uncertainty sampling",
+        "margin sampling",
+        "query by committee",
+        "expected error reduction",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _active_learning_label_leaks(tree: ast.AST) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _looks_like_acquisition_function(node.name):
+            continue
+        hidden_names = _hidden_label_names_from_function(node)
+        if not hidden_names:
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            if not _looks_like_training_or_scoring_call(call):
+                continue
+            if any(_node_mentions_name(arg, hidden_names) for arg in [*call.args, *[kw.value for kw in call.keywords]]):
+                rows.append({"function": node.name, "line": getattr(call, "lineno", getattr(node, "lineno", 0))})
+                break
+    return rows
+
+
+def _looks_like_acquisition_function(name: str) -> bool:
+    lowered = name.lower()
+    markers = (
+        "acquire",
+        "query",
+        "select",
+        "strategy",
+        "qbc",
+        "committee",
+        "uncertainty",
+        "margin",
+        "expected",
+        "reduction",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _hidden_label_names_from_function(node: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Attribute) and child.attr.lower() in {"y_pool", "pool_y", "hidden_labels"}:
+            names.add(child.attr)
+        elif isinstance(child, ast.Name) and child.id.lower() in {"y_pool", "pool_y", "hidden_labels"}:
+            names.add(child.id)
+        elif isinstance(child, ast.Assign):
+            names.update(_hidden_names_from_assignment(child.targets, child.value))
+        elif isinstance(child, ast.AnnAssign) and child.target is not None:
+            names.update(_hidden_names_from_assignment([child.target], child.value))
+    return names
+
+
+def _hidden_names_from_assignment(targets: list[ast.expr], value: ast.AST | None) -> set[str]:
+    if value is None:
+        return set()
+    source_mentions_hidden = _node_mentions_attr(value, {"y_pool", "pool_y", "hidden_labels"}) or (
+        _call_name(value) in {"_as_arrays", "as_arrays", "pool_arrays"} and _call_mentions_pool_source(value)
+    )
+    if not source_mentions_hidden:
+        return set()
+    result: set[str] = set()
+    for target in targets:
+        result.update(_assigned_label_names(target))
+    return result
+
+
+def _assigned_label_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Name) and _looks_like_label_name(node.id):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        result: set[str] = set()
+        for item in node.elts:
+            if isinstance(item, ast.Name) and _looks_like_label_name(item.id):
+                result.add(item.id)
+        return result
+    return set()
+
+
+def _looks_like_label_name(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in {"y", "labels", "label", "y_pool", "pool_y", "hidden_labels"} or lowered.endswith("_y")
+
+
+def _looks_like_training_or_scoring_call(node: ast.Call) -> bool:
+    name = _call_name(node).lower()
+    if not name:
+        return False
+    return any(marker in name for marker in ("fit", "train", "loss", "score", "metric"))
+
+
+def _call_mentions_pool_source(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    text = " ".join(_name_tokens(arg) for arg in node.args)
+    text = f"{text} {' '.join(_name_tokens(kw.value) for kw in node.keywords)}".lower()
+    return any(marker in text for marker in ("pool", "unlabeled", "candidate"))
+
+
+def _name_tokens(node: ast.AST) -> str:
+    tokens: list[str] = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name):
+            tokens.append(child.id)
+        elif isinstance(child, ast.Attribute):
+            tokens.append(child.attr)
+    return " ".join(tokens)
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Call):
+        return _call_name(node.func)
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _call_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
+def _node_mentions_name(node: ast.AST, names: set[str]) -> bool:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id in names:
+            return True
+        if isinstance(child, ast.Attribute) and child.attr in names:
+            return True
+    return False
+
+
+def _node_mentions_attr(node: ast.AST, attrs: set[str]) -> bool:
+    return any(isinstance(child, ast.Attribute) and child.attr in attrs for child in ast.walk(node))
 
 
 def _task_acceptance_findings(
@@ -635,9 +834,22 @@ def _task_text(contract: Mapping[str, Any]) -> str:
         str(contract.get("objective") or ""),
         str(contract.get("task") or ""),
     ]
-    criteria = contract.get("success_criteria")
-    if isinstance(criteria, list):
-        parts.extend(str(item) for item in criteria)
+    for key in (
+        "success_criteria",
+        "explicit_requirements",
+        "deliverables",
+        "constraints",
+        "evaluation_focus",
+        "data_requirements",
+        "dependency_hints",
+    ):
+        value = contract.get(key)
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value)
+    for key in ("evidence_plan", "metric_contract", "generation_plan"):
+        value = contract.get(key)
+        if isinstance(value, Mapping):
+            parts.append(str(value))
     return "\n".join(parts).lower()
 
 

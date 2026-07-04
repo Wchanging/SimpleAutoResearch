@@ -35,6 +35,7 @@ from simple_ar.code_task import (
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
 from simple_ar.code_task.editing.actions import apply_repair_actions
 from simple_ar.code_task.generation.dependencies import DEPENDENCY_CATALOG, build_dependency_advice
+from simple_ar.code_task.analysis.resource_static import analyze_resource_risks, resource_review_findings
 from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
     repair_generated_project_from_run_failure,
@@ -57,6 +58,114 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CodeTaskTests(unittest.TestCase):
+    def test_greenfield_review_blocks_active_learning_hidden_label_leakage(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            write_text(root / "main.py", "from strategies import select_qbc\n")
+            write_text(
+                root / "strategies.py",
+                (
+                    "from sklearn.linear_model import LogisticRegression\n"
+                    "def _as_arrays(pool_state):\n"
+                    "    return pool_state.X_pool, pool_state.y_pool\n"
+                    "def select_qbc(pool_state, seed):\n"
+                    "    X, y = _as_arrays(pool_state)\n"
+                    "    model = LogisticRegression(max_iter=1000)\n"
+                    "    model.fit(X, y)\n"
+                    "    return 0\n"
+                ),
+            )
+
+            report = review_generated_project(
+                project_dir=root,
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "main.py", "line_count": 1, "mode": "llm"},
+                        {"path": "strategies.py", "line_count": 8, "mode": "llm"},
+                    ]
+                },
+                result_schema={"primary_metric": "score", "required_metrics": []},
+                resource_plan={
+                    "max_files": 10,
+                    "max_generated_lines": 200,
+                    "execution_budget": {"resource_risk_warning_score": 99},
+                },
+                contract={
+                    "task": "Run a pool-based active learning query strategy benchmark with an unlabeled pool and label budget.",
+                    "success_criteria": [],
+                },
+                use_llm=False,
+            )
+
+            categories = {item.get("category") for item in report.get("findings", [])}
+            self.assertIn("hidden_label_acquisition_leakage", categories)
+
+    def test_greenfield_review_does_not_apply_active_learning_guard_to_plain_task(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            write_text(root / "main.py", "from strategies import select_qbc\n")
+            write_text(
+                root / "strategies.py",
+                (
+                    "from sklearn.linear_model import LogisticRegression\n"
+                    "def _as_arrays(pool_state):\n"
+                    "    return pool_state.X_pool, pool_state.y_pool\n"
+                    "def select_qbc(pool_state, seed):\n"
+                    "    X, y = _as_arrays(pool_state)\n"
+                    "    model = LogisticRegression(max_iter=1000)\n"
+                    "    model.fit(X, y)\n"
+                    "    return 0\n"
+                ),
+            )
+
+            report = review_generated_project(
+                project_dir=root,
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "main.py", "line_count": 1, "mode": "llm"},
+                        {"path": "strategies.py", "line_count": 8, "mode": "llm"},
+                    ]
+                },
+                result_schema={"primary_metric": "score", "required_metrics": []},
+                resource_plan={
+                    "max_files": 10,
+                    "max_generated_lines": 200,
+                    "execution_budget": {"resource_risk_warning_score": 99},
+                },
+                contract={"task": "Train and evaluate a supervised classifier on labeled tabular data."},
+                use_llm=False,
+            )
+
+            categories = {item.get("category") for item in report.get("findings", [])}
+            self.assertNotIn("hidden_label_acquisition_leakage", categories)
+
+    def test_resource_static_flags_loop_heavy_logistic_without_scaling(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            write_text(
+                root / "model_loop.py",
+                (
+                    "from sklearn.linear_model import LogisticRegression\n"
+                    "def run(X, y):\n"
+                    "    for seed in range(5):\n"
+                    "        model = LogisticRegression(max_iter=1000)\n"
+                    "        model.fit(X, y)\n"
+                    "    return model\n"
+                ),
+            )
+
+            analysis = analyze_resource_risks(root)
+            files = analysis.get("files", [])
+            self.assertTrue(any(row.get("logistic_without_scaling_in_loop") for row in files))
+            findings = resource_review_findings(
+                root,
+                resource_plan={"execution_budget": {"resource_risk_warning_score": 1}},
+            )
+            self.assertTrue(any(item.get("category") == "resource_fit_loop_risk" for item in findings))
+
     def test_repair_action_rewrite_function_preserves_method_indentation(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
