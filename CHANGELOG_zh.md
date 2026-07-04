@@ -4,6 +4,14 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-07-04
+
+### Changed
+
+- Greenfield code-task review 现在会识别 `runtime_dir`、`artifact_placeholder`、`output_placeholder` 等运行产物占位，不再把所有计划项都当成必须由 LLM 生成的源码文件。
+- Greenfield architecture plan 现在会把紧凑的 metric、artifact、resource 和 interface contract 传递到逐文件生成、review 与 repair prompt，帮助生成代码保留跨文件证据链、输出义务和资源边界。
+- Code-task review 与 generated-project run repair 现在会注入确定性的静态资源风险信号，用于识别循环拟合、候选搜索和 warning flood/timeout 风险；该增强不额外增加默认 LLM 调用次数。
+
 ## 2026-07-03
 
 ### Changed

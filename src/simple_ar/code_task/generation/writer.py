@@ -287,6 +287,8 @@ def greenfield_file_prompt(
         "- Do not access network, shell, credentials, user home directories, or external datasets.\n"
         "- The project entrypoint must print each required metric as `metric_name: number`.\n"
         "- Required metrics must be computed from real project outputs. Do not fill missing required metrics with 0.0, empty records, or placeholder values.\n"
+        "- Entrypoints may print friendly errors, but must not catch broad exceptions without traceback.print_exc(), "
+        "logging.exception/logger.exception, or re-raising; repair needs real traceback files and lines.\n"
         "- Implement only this file's planned responsibility. Do not duplicate a full "
         "experiment pipeline in helper modules when another planned file owns orchestration.\n"
         "- Keep one authoritative `run_experiment` path for metric calculation; helper "
@@ -366,6 +368,10 @@ def _architecture_for_file_prompt(
         "data_flow": string_list(architecture_plan.get("data_flow"), limit=12),
         "test_strategy": string_list(architecture_plan.get("test_strategy"), limit=10),
         "risks": string_list(architecture_plan.get("risks"), limit=8),
+        "metric_contract": _compact_mapping(architecture_plan.get("metric_contract"), limit=2800),
+        "artifact_contract": _compact_mapping(architecture_plan.get("artifact_contract"), limit=2800),
+        "resource_contract": _compact_mapping(architecture_plan.get("resource_contract"), limit=2200),
+        "interface_registry": _compact_mapping(architecture_plan.get("interface_registry"), limit=4200),
         "planning": architecture_plan.get("planning", {}),
     }
 
@@ -384,6 +390,15 @@ def _compact_file_specs(files: list[Mapping[str, Any]], *, limit: int) -> list[d
             }
         )
     return [row for row in result if row["path"]]
+
+
+def _compact_mapping(value: object, *, limit: int) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    text = json.dumps(dict(value), ensure_ascii=False, default=str)
+    if len(text) <= limit:
+        return dict(value)
+    return {"truncated_json": text[:limit], "truncated": True}
 
 
 def _dependency_advice_for_prompt(advice: Mapping[str, Any], *, package_limit: int = 40) -> dict[str, Any]:

@@ -10,6 +10,8 @@ from simple_ar.code_task.analysis.interfaces import (
     order_file_specs,
     snippet_api_contract,
 )
+from simple_ar.code_task.analysis.entrypoints import analyze_entrypoint_debuggability
+from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.generation.common import safe_relative_path, string_list
 from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.generation.review import review_generated_project
@@ -70,6 +72,26 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             self.assertIn("def load_text_classification_splits(config_path=None)", dependency["public_api"])
             self.assertNotIn("load_text_classification_dataset", str(context))
 
+    def test_resource_static_flags_fit_inside_nested_loops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(
+                project / "search.py",
+                (
+                    "def run(model, datasets, candidates):\n"
+                    "    for dataset in datasets:\n"
+                    "        for candidate in candidates:\n"
+                    "            model.fit(dataset.X, dataset.y)\n"
+                    "    return model\n"
+                ),
+            )
+
+            analysis = analyze_resource_risks(project)
+
+            self.assertGreaterEqual(analysis["nested_fit_call_count"], 1)
+            self.assertGreaterEqual(analysis["max_fit_loop_depth"], 2)
+            self.assertEqual(analysis["files"][0]["path"], "search.py")
+
     def test_writer_treats_runtime_output_paths_as_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp) / "generated_project"
@@ -97,6 +119,111 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             self.assertTrue((project / "submission" / "results").is_dir())
             self.assertEqual(by_path["artifacts"]["mode"], "deterministic_runtime_placeholder")
             self.assertEqual(by_path["artifacts/results.json"]["line_count"], 0)
+
+    def test_review_accepts_runtime_placeholders_as_runtime_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(project / "main.py", "def main():\n    print('score: 1.0')\n")
+            (project / "artifacts").mkdir()
+            write_text(project / "artifacts" / "results.json", "{}\n")
+
+            review = review_generated_project(
+                project_dir=project,
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "main.py", "kind": "source", "mode": "llm", "line_count": 2},
+                        {"path": "artifacts", "kind": "runtime_dir", "mode": "deterministic_runtime_placeholder", "line_count": 0},
+                        {
+                            "path": "artifacts/results.json",
+                            "kind": "output_placeholder",
+                            "mode": "deterministic_runtime_placeholder",
+                            "line_count": 0,
+                        },
+                    ]
+                },
+                result_schema={"primary_metric": "score", "required_metrics": ["score"]},
+                resource_plan={"max_files": 8, "max_generated_lines": 200},
+                use_llm=False,
+            )
+
+            self.assertNotIn("missing_file", {row["category"] for row in review["findings"]})
+
+    def test_entrypoint_static_analysis_flags_suppressed_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(
+                project / "main.py",
+                (
+                    "import sys\n\n"
+                    "def main():\n"
+                    "    try:\n"
+                    "        raise RuntimeError('hidden')\n"
+                    "    except Exception as exc:\n"
+                    "        print(f'ERROR: {exc}', file=sys.stderr)\n"
+                    "        return 1\n"
+                ),
+            )
+
+            analysis = analyze_entrypoint_debuggability(project)
+
+            self.assertEqual(len(analysis["findings"]), 1)
+            self.assertEqual(analysis["findings"][0]["path"], "main.py")
+
+    def test_review_blocks_entrypoint_that_suppresses_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(
+                project / "main.py",
+                (
+                    "def main():\n"
+                    "    try:\n"
+                    "        print('score: 1.0')\n"
+                    "    except Exception as exc:\n"
+                    "        print(f'ERROR: {exc}')\n"
+                    "        return 1\n"
+                ),
+            )
+
+            review = review_generated_project(
+                project_dir=project,
+                code_artifacts={"generated_files": [{"path": "main.py", "mode": "llm", "line_count": 7}]},
+                result_schema={"primary_metric": "score", "required_metrics": ["score"]},
+                resource_plan={"max_files": 4, "max_generated_lines": 200},
+                use_llm=False,
+            )
+
+            self.assertEqual(review["status"], "failed")
+            self.assertTrue(
+                any(row["category"] == "entrypoint_exception_suppresses_traceback" for row in review["findings"])
+            )
+
+    def test_review_accepts_entrypoint_that_preserves_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(
+                project / "main.py",
+                (
+                    "import traceback\n\n"
+                    "def main():\n"
+                    "    try:\n"
+                    "        print('score: 1.0')\n"
+                    "    except Exception:\n"
+                    "        traceback.print_exc()\n"
+                    "        return 1\n"
+                ),
+            )
+
+            review = review_generated_project(
+                project_dir=project,
+                code_artifacts={"generated_files": [{"path": "main.py", "mode": "llm", "line_count": 8}]},
+                result_schema={"primary_metric": "score", "required_metrics": ["score"]},
+                resource_plan={"max_files": 4, "max_generated_lines": 200},
+                use_llm=False,
+            )
+
+            self.assertFalse(
+                any(row["category"] == "entrypoint_exception_suppresses_traceback" for row in review["findings"])
+            )
 
     def test_existing_context_snippets_expose_api_without_extra_repo_reads(self) -> None:
         contract = snippet_api_contract(

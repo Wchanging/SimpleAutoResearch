@@ -406,18 +406,60 @@ def _resource_plan(
     allow_gpu = bool(resource_decision.get("allow_gpu")) and not task_cpu_only
     if task_cpu_only:
         profile = "local_cpu"
+    execution_budget = _execution_budget(task_text=task_text, profile=profile, max_files=max_files)
     return {
         "schema_version": "code_task_greenfield_resource_plan.v1",
         "profile": profile,
         "allow_gpu": allow_gpu,
         "max_files": max_files,
         "max_generated_lines": max_generated_lines,
+        "execution_budget": execution_budget,
         "decision": resource_decision,
         "constraint_overrides": [
             "Task text explicitly requires CPU-only execution; GPU preference from environment probe was disabled."
         ]
         if task_cpu_only
         else [],
+    }
+
+
+def _execution_budget(*, task_text: str, profile: str, max_files: int) -> dict[str, Any]:
+    text = " ".join(str(task_text or "").lower().replace("-", " ").split())
+    is_ml = any(
+        token in text
+        for token in (
+            "classifier",
+            "cross validation",
+            "dataset",
+            "experiment",
+            "model",
+            "regression",
+            "scikit",
+            "sklearn",
+            "training",
+        )
+    )
+    scale = "medium" if max_files >= 12 else "compact"
+    if profile in {"gpu", "large"}:
+        max_runtime = 900 if scale == "medium" else 600
+    elif profile == "local_cpu":
+        max_runtime = 300 if scale == "medium" else 180
+    else:
+        max_runtime = 450 if scale == "medium" else 240
+    return {
+        "schema_version": "code_task_execution_budget.v1",
+        "profile": profile,
+        "scale": scale,
+        "max_runtime_sec_hint": max_runtime,
+        "max_model_fit_operations_hint": 600 if is_ml and scale == "medium" else 180,
+        "resource_risk_warning_score": 4,
+        "resource_risk_blocking_score": 18,
+        "guidance": [
+            "Keep benchmark paths bounded and deterministic; prefer smoke/standard presets over exhaustive sweeps.",
+            "When using model fitting, cap dataset, seed, fold, candidate, query, and hyperparameter loops explicitly.",
+            "If an exact method is expensive, implement a documented bounded approximation instead of an unbounded nested loop.",
+            "Runtime artifacts should preserve measured evidence without printing unbounded logs.",
+        ],
     }
 
 

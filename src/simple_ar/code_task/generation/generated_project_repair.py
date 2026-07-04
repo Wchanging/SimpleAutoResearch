@@ -30,6 +30,8 @@ from simple_ar.agent_backends import (
 )
 from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import dependency_context, public_api, public_api_from_source
+from simple_ar.code_task.analysis.entrypoints import source_suppresses_entrypoint_traceback
+from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.editing.actions import apply_repair_actions
 from simple_ar.code_task.editing.snapshots import FileSnapshotSet, create_file_snapshot_set
 from simple_ar.code_task.generation.common import contains_any, safe_relative_path
@@ -269,6 +271,15 @@ def _apply_llm_file_repair_response(
                     rel_path=rel_path,
                 )
                 unresolved.append(f"{rel_path}: action repair failed to compile: {error}")
+            elif guard_error := _post_write_static_guard(target=target, rel_path=rel_path):
+                _restore_repair_target(
+                    target,
+                    previous_content,
+                    previous_exists,
+                    snapshot=snapshot,
+                    rel_path=rel_path,
+                )
+                unresolved.append(f"{rel_path}: action repair rejected: {guard_error}")
             else:
                 if rel_path not in changed:
                     changed.append(rel_path)
@@ -319,6 +330,16 @@ def _apply_llm_file_repair_response(
             rel_path=rel_path,
         )
         unresolved.append(f"{rel_path}: repaired file failed to compile: {error}")
+        return None
+    if guard_error := _post_write_static_guard(target=target, rel_path=rel_path):
+        _restore_repair_target(
+            target,
+            previous_content,
+            previous_exists,
+            snapshot=snapshot,
+            rel_path=rel_path,
+        )
+        unresolved.append(f"{rel_path}: whole-file repair rejected: {guard_error}")
         return None
     if rel_path not in changed:
         changed.append(rel_path)
@@ -430,6 +451,22 @@ def _whole_file_rewrite_guard(
         allow_break = bool(response.get("allow_api_breaking_change"))
         if lost and not allow_break and len(lost) == len(before_names):
             return "all_existing_public_api_would_be_removed"
+    return ""
+
+
+def _post_write_static_guard(*, target: Path, rel_path: str) -> str:
+    if target.suffix != ".py" or not target.is_file():
+        return ""
+    try:
+        source = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"could_not_read_repaired_file:{exc}"
+    suppressed = source_suppresses_entrypoint_traceback(source, path=rel_path)
+    if suppressed:
+        return (
+            f"{suppressed}; generated entrypoints must preserve the original traceback "
+            "or re-raise broad exceptions so runtime repair can localize the true failing file."
+        )
     return ""
 
 
@@ -605,6 +642,8 @@ def _review_file_repair_prompt(
         "- Preserve the exact public API requested by the file spec when practical.\n"
         "- Fix the implementation path that caused the review finding; do not satisfy implementation findings by documentation-only changes.\n"
         "- Do not fill missing required metrics with 0.0, empty records, or placeholder values. Fail clearly if a metric cannot be measured.\n"
+        "- Do not hide the original exception in entrypoints. If you catch broad exceptions, also call traceback.print_exc(), "
+        "logging.exception/logger.exception, or re-raise so later repair can see the real file and line.\n"
         "- If this file writes run artifacts, write under `artifacts/` relative to the current working directory.\n"
         "- Required task artifacts include `artifacts/results.json` and `artifacts/report.md` whenever requested by the task.\n"
         "- The benchmark parser still needs metrics printed by main.py as `metric_name: number`.\n\n"
@@ -1268,6 +1307,7 @@ def _run_repair_context(
             if (project_dir / path).is_file()
         ],
         "project_api": _project_api_snapshot(project_dir),
+        "resource_static": analyze_resource_risks(project_dir),
     }
 
 
@@ -1377,6 +1417,8 @@ def _run_repair_plan_prompt(
         "- If the error mentions an attribute/type mismatch, inspect the object producer, object consumer, and the call site.\n"
         "- Build a dependency trace from failing metric/field -> aggregate/report consumer -> record object -> producer function -> call site before choosing files.\n"
         "- If a required metric is missing or invalid, inspect whether the raw evidence required for that metric was lost earlier in the data flow.\n"
+        "- If the failure is a timeout, repeated warning flood, or apparent hang, use resource_static to identify nested fit/search loops and propose a bounded algorithmic repair.\n"
+        "- If stderr is generic because an entrypoint caught the real exception, choose the entrypoint only to restore traceback visibility; do not treat the generic wrapper as the root cause.\n"
         "- Use Previous repair context to avoid repeating the same failed localization or patch strategy.\n"
         "- If the same error survived a prior repair, explicitly explain why the previous fix was insufficient before selecting target files.\n"
         "- Do not choose files only because they appear in validation warnings if benchmark stderr contains a clearer runtime failure.\n"
@@ -1863,6 +1905,8 @@ def _run_file_repair_prompt(
         "- Keep behavior local and deterministic; no network, shell, credentials, or hidden downloads.\n"
         "- Do not fake metrics. Fix the runtime path so the benchmark can produce measured outputs.\n"
         "- Do not convert unresolved runtime errors into a successful all-zero run.\n"
+        "- Do not replace a concrete traceback with a generic entrypoint-only error. Preserve traceback.print_exc(), "
+        "logging.exception/logger.exception, or re-raise broad exceptions.\n"
         "- Do not use self-check, empty datasets, or placeholder records as substitutes for full benchmark mode.\n"
         "- Use Previous repair context to avoid reapplying a patch that already failed to change the observed error.\n"
         "- If the same error survived a previous patch, explain in code comments only where useful and fix the producer/consumer contract, not just the visible traceback line.\n"

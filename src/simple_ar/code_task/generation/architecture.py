@@ -152,7 +152,7 @@ def normalize_architecture_plan(
             resource_plan=resource_plan,
             domain_profile={},
         )["files"]
-    return {
+    plan = {
         "schema_version": "greenfield_architecture.v1",
         "mode": "greenfield_project",
         "objective": clean_text(value.get("objective")) or clean_text(contract.get("objective")),
@@ -164,6 +164,8 @@ def normalize_architecture_plan(
         "risks": scalar_list(value.get("risks"))[:8],
         "files": files,
     }
+    plan.update(_shared_contracts(contract=contract, resource_plan=resource_plan, files=files, raw=value))
+    return plan
 
 
 def fallback_architecture_plan(
@@ -183,7 +185,7 @@ def fallback_architecture_plan(
     entrypoint_hint = ""
     if isinstance(expected_entrypoints, list) and expected_entrypoints:
         entrypoint_hint = f" Domain entrypoint hint: {expected_entrypoints[0]}."
-    return {
+    plan = {
         "schema_version": "greenfield_architecture.v1",
         "mode": "greenfield_project",
         "objective": objective,
@@ -217,6 +219,61 @@ def fallback_architecture_plan(
                 domain_profile=domain_profile,
             )
         ),
+    }
+    plan.update(_shared_contracts(contract=contract, resource_plan=resource_plan, files=plan["files"], raw={}))
+    return plan
+
+
+def _shared_contracts(
+    *,
+    contract: Mapping[str, Any],
+    resource_plan: Mapping[str, Any],
+    files: list[dict[str, Any]],
+    raw: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build compact cross-file contracts shared by writer, review, and repair."""
+
+    evidence_plan = contract.get("evidence_plan") if isinstance(contract.get("evidence_plan"), Mapping) else {}
+    metric_contract = contract.get("metric_contract") if isinstance(contract.get("metric_contract"), Mapping) else {}
+    interfaces = raw.get("interfaces") if isinstance(raw.get("interfaces"), Mapping) else {}
+    return {
+        "artifact_contract": {
+            "required_artifacts": scalar_list(evidence_plan.get("required_artifacts"))[:30],
+            "required_comparisons": scalar_list(evidence_plan.get("required_comparisons"))[:30],
+            "hypotheses": scalar_list(evidence_plan.get("hypotheses"))[:20],
+            "claim_policy": scalar_list(evidence_plan.get("claim_policy"))[:8],
+        },
+        "metric_contract": {
+            "primary_metric": metric_contract.get("primary_metric", ""),
+            "required_metrics": scalar_list(metric_contract.get("required_metrics"))[:40],
+            "metric_directions": metric_contract.get("metric_directions", {}),
+            "default_fill_policy": metric_contract.get("default_fill_policy", "do_not_fill_missing_required_metrics_with_zero"),
+        },
+        "resource_contract": dict(resource_plan.get("execution_budget", {}))
+        if isinstance(resource_plan.get("execution_budget"), Mapping)
+        else {},
+        "interface_registry": _interface_registry(files=files, interfaces=interfaces),
+    }
+
+
+def _interface_registry(*, files: list[dict[str, Any]], interfaces: Mapping[str, Any]) -> dict[str, Any]:
+    module_apis = interfaces.get("module_apis") if isinstance(interfaces.get("module_apis"), list) else []
+    shared_schemas = interfaces.get("shared_schemas") if isinstance(interfaces.get("shared_schemas"), list) else []
+    by_file = []
+    for row in files:
+        by_file.append(
+            {
+                "path": row.get("path", ""),
+                "dependencies": scalar_list(row.get("dependencies"))[:16],
+                "public_api": scalar_list(row.get("public_api"))[:20],
+                "acceptance_criteria": scalar_list(row.get("acceptance_criteria"))[:12],
+                "kind": row.get("kind", ""),
+            }
+        )
+    return {
+        "files": [row for row in by_file if row.get("path")],
+        "module_apis": [dict(row) for row in module_apis if isinstance(row, Mapping)][:20],
+        "shared_schemas": [dict(row) for row in shared_schemas if isinstance(row, Mapping)][:16],
     }
 
 
