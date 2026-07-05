@@ -945,6 +945,112 @@ primary_metric = "accuracy"
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["status"], "benchmark_failed")
 
+    def test_greenfield_benchmark_reports_artifact_path_mismatch(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nWrite artifacts/results.json and artifacts/report.md with measured rows.\n",
+            )
+            run_dir = root / "runs" / "artifact-path-mismatch"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="score",
+                metric_directions={"score": "higher"},
+            )
+            project_dir = run_dir / "code_task" / "workspace" / "generated_project"
+            project_dir.mkdir(parents=True)
+            write_text(
+                project_dir / "main.py",
+                (
+                    "from pathlib import Path\n"
+                    "root_artifacts = Path('artifacts')\n"
+                    "root_artifacts.mkdir(parents=True, exist_ok=True)\n"
+                    "(root_artifacts / 'results.json').write_text('{\"raw_records\": [{\"score\": 1.0}], \"global_metrics\": {\"score\": 1.0}}')\n"
+                    "(root_artifacts / 'report.md').write_text('# Report\\n')\n"
+                    "expected = Path('generated_project') / 'artifacts'\n"
+                    "expected.mkdir(parents=True, exist_ok=True)\n"
+                    "(expected / 'results.json').write_text('')\n"
+                    "print('score: 1.0')\n"
+                ),
+            )
+
+            result = run_code_task_benchmark(run_dir, timeout_sec=30, skip_validation=True)
+
+            self.assertEqual(result.status, "failed")
+            report = read_json(result.report_path)
+            self.assertEqual(report["quality_guard"]["reason"], "artifact_path_mismatch")
+            scan = read_json(run_dir / report["artifact_scan"])
+            self.assertEqual(scan["status"], "warning")
+            self.assertTrue(
+                any(item.get("code") == "artifact_path_mismatch" for item in scan["findings"])
+            )
+            analysis = analyze_code_task_failure(run_dir)
+            self.assertIn("artifact_path_mismatch", read_text(analysis.analysis_path))
+
+    def test_greenfield_artifact_scan_ignores_downstream_submission_signals(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                (
+                    "# Task\n\n"
+                    "- Execution produces a machine-readable metrics artifact.\n"
+                    "- Write `generated_project/artifacts/results.json` with measured rows.\n"
+                    "- Write `generated_project/artifacts/report.md` with the final report.\n"
+                    "- A downstream adapter will convert this run into `submission/results/metrics.json` "
+                    "and `submission/README.md`.\n"
+                ),
+            )
+            run_dir = root / "runs" / "downstream-signals"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="score",
+                metric_directions={"score": "higher"},
+            )
+            project_dir = run_dir / "code_task" / "workspace" / "generated_project"
+            project_dir.mkdir(parents=True)
+            write_text(
+                project_dir / "main.py",
+                (
+                    "from pathlib import Path\n"
+                    "import json\n"
+                    "artifacts = Path('generated_project/artifacts')\n"
+                    "artifacts.mkdir(parents=True, exist_ok=True)\n"
+                    "(artifacts / 'results.json').write_text(json.dumps({'raw_records': [{'score': 1.0}], 'global_metrics': {'score': 1.0}}))\n"
+                    "(artifacts / 'report.md').write_text('# Report\\n')\n"
+                    "submission = Path('submission/results')\n"
+                    "submission.mkdir(parents=True, exist_ok=True)\n"
+                    "(submission / 'metrics.json').write_text('{}')\n"
+                    "print('score: 1.0')\n"
+                ),
+            )
+
+            result = run_code_task_benchmark(run_dir, timeout_sec=30, skip_validation=True)
+
+            self.assertEqual(result.status, "passed")
+            report = read_json(result.report_path)
+            self.assertNotIn("quality_guard", report)
+            scan = read_json(run_dir / report["artifact_scan"])
+            scanned_paths = {row["expected_path"] for row in scan["artifacts"]}
+            self.assertIn("generated_project/artifacts/results.json", scanned_paths)
+            self.assertIn("generated_project/artifacts/report.md", scanned_paths)
+            self.assertNotIn("generated_project/submission/results/metrics.json", scanned_paths)
+
     def test_greenfield_run_repair_targets_custom_project_layout(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
@@ -3107,6 +3213,38 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(len(run_record["attempts"]), 2)
             latest_report = read_json(run_dir / "code_task" / "run" / "patched" / "execution_report.json")
             self.assertEqual(latest_report["history_attempt"], "attempt-002")
+
+    def test_run_code_task_benchmark_stops_warning_flood_with_watchdog(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nStop noisy runaway benchmark output.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python warning_flood.py",
+            )
+            write_text(
+                run_dir / "code_task" / "workspace" / "warning_flood.py",
+                (
+                    "import sys, time\n"
+                    "for _ in range(10000):\n"
+                    "    print('ConvergenceWarning: STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT', file=sys.stderr, flush=True)\n"
+                    "    time.sleep(0.001)\n"
+                ),
+            )
+
+            result = run_code_task_benchmark(run_dir, timeout_sec=30, skip_validation=True)
+
+            self.assertEqual(result.status, "failed")
+            report = read_json(result.report_path)
+            self.assertEqual(report["runtime_watchdog"]["reason"], "warning_flood")
+            self.assertIn("Runtime output watchdog", read_text(result.stderr_path))
 
     def test_run_code_task_baseline_records_pre_patch_result(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

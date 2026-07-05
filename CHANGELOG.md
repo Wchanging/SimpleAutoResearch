@@ -8,6 +8,27 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Greenfield file generation now unwraps a single Markdown code fence returned
+  inside the structured `content` field and records failed file-validation
+  attempts under `code_task/meta/generation_steps/invalid_files/`. Retry
+  feedback now includes concrete syntax, JSON, or non-ASCII identifier
+  diagnostics instead of a generic invalid-file message.
+- ARC-Bench batch runner pipe-mode logging now enforces command timeouts while
+  streaming output. Background or redirected overnight runs can no longer miss
+  an outer timeout because the parent process is blocked waiting for child
+  stdout.
+- Code-task benchmark execution now writes a compact runtime artifact scan for
+  generated projects. When a required artifact is empty or missing at the
+  expected path but a valid same-name artifact was written elsewhere, the
+  quality guard reports an explicit artifact path mismatch for repair instead
+  of treating it as a generic benchmark failure.
+- Code-task benchmark execution now includes a conservative output watchdog for
+  warning/repeated-output floods. Obvious runaway output is stopped early,
+  recorded in the execution report, and routed through the normal failure
+  analysis and repair path instead of waiting for the full benchmark timeout.
+- Generated-project run repair now receives artifact-scan and runtime-watchdog
+  evidence and keeps target selection narrower when the failure already has a
+  clear contract-level cause.
 - Greenfield review now includes a lightweight cross-file return-contract
   check. It can block cases where one generated function returns an aggregate
   mapping while another file still passes that value into a consumer annotated

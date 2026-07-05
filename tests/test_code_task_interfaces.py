@@ -121,6 +121,52 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             self.assertEqual(by_path["artifacts"]["mode"], "deterministic_runtime_placeholder")
             self.assertEqual(by_path["artifacts/results.json"]["line_count"], 0)
 
+    def test_writer_strips_single_markdown_fence_from_file_content(self) -> None:
+        class FakeClient:
+            def ask_json(self, _system: str, _prompt: str, **_kwargs: object) -> dict[str, str]:
+                return {"content": "```python\nprint('score: 1.0')\n```", "summary": "Fenced but valid Python."}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "generated_project"
+            artifacts = write_generated_project(
+                project_dir=project,
+                architecture_plan={"files": [{"path": "main.py", "kind": "source", "entrypoint": True}]},
+                result_schema={"required_metrics": ["score"]},
+                contract={},
+                memory={},
+                client=FakeClient(),  # type: ignore[arg-type]
+                allow_fallback=False,
+                agent_step_dir=Path(tmp) / "steps",
+            )
+
+            self.assertEqual(artifacts["generated_files"][0]["mode"], "llm_repaired")
+            self.assertEqual((project / "main.py").read_text(encoding="utf-8"), "print('score: 1.0')\n")
+
+    def test_writer_records_invalid_file_generation_diagnostics(self) -> None:
+        class FakeClient:
+            def ask_json(self, _system: str, _prompt: str, **_kwargs: object) -> dict[str, str]:
+                return {"content": "def broken(:\n    pass\n", "summary": "Invalid Python."}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "generated_project"
+            steps = Path(tmp) / "steps"
+            with self.assertRaises(Exception):
+                write_generated_project(
+                    project_dir=project,
+                    architecture_plan={"files": [{"path": "main.py", "kind": "source", "entrypoint": True}]},
+                    result_schema={"required_metrics": ["score"]},
+                    contract={},
+                    memory={},
+                    client=FakeClient(),  # type: ignore[arg-type]
+                    retry_attempts=2,
+                    allow_fallback=False,
+                    agent_step_dir=steps,
+                )
+
+            failure = read_json(steps / "invalid_files" / "main.py" / "attempt-001.json")
+            self.assertEqual(failure["validation"]["reason"], "syntax_error")
+            self.assertTrue((steps / "invalid_files" / "main.py" / "attempt-001.py").is_file())
+
     def test_review_accepts_runtime_placeholders_as_runtime_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

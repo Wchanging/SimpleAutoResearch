@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -19,6 +20,12 @@ from simple_ar.code_task.editing.attempts import (
 )
 from simple_ar.code_task.execution.comparison import CodeTaskComparisonResult, compare_code_task_runs
 from simple_ar.code_task.execution.environment import ensure_code_task_environment_policy
+from simple_ar.code_task.execution.artifact_contract import (
+    compact_artifact_scan,
+    expected_artifact_row,
+    has_artifact_path_mismatch,
+    scan_required_artifacts,
+)
 from simple_ar.code_task.execution.run_history import archive_run_attempt
 from simple_ar.code_task.runtime.state import (
     code_task_paths,
@@ -34,6 +41,18 @@ from simple_ar.experiment.metrics import parse_metric_lines
 
 CONTROL_TOKENS = {"|", "||", "&&", ";", "<", ">", ">>", "2>", "2>>"}
 OUTPUT_CHAR_LIMIT = 200_000
+WATCHDOG_OUTPUT_CHAR_LIMIT = 1_000_000
+WATCHDOG_WARNING_LINE_LIMIT = 300
+WATCHDOG_REPEATED_LINE_LIMIT = 160
+WATCHDOG_MIN_ELAPSED_SEC = 1.0
+WATCHDOG_WARNING_TOKENS = (
+    "warning",
+    "convergencewarning",
+    "runtimewarning",
+    "total no. of iterations",
+    "failed to converge",
+    "maximum iterations",
+)
 OutputCallback = Callable[[str, str], None]
 StreamOutputMode = str
 STREAM_OUTPUT_ALIASES = {
@@ -63,6 +82,82 @@ class CodeTaskRunError(RuntimeError):
 
 
 VALID_RUN_LABELS = {"baseline", "patched"}
+
+
+class _OutputWatchdog:
+    """Detect obvious output floods while preserving normal long runs."""
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.total_chars = 0
+        self.line_count = 0
+        self.warning_line_count = 0
+        self.repeated_lines: dict[str, int] = {}
+        self.samples: list[str] = []
+        self.triggered: dict[str, Any] | None = None
+
+    def observe(self, stream_name: str, text: str) -> None:
+        if self.triggered is not None:
+            return
+        display = _display_stream_text(text)
+        if not display:
+            return
+        self.total_chars += len(text)
+        self.line_count += 1
+        if len(self.samples) < 12:
+            self.samples.append(f"{stream_name}: {display[:240]}")
+        normalized = _normalize_watchdog_line(display)
+        if normalized:
+            self.repeated_lines[normalized] = self.repeated_lines.get(normalized, 0) + 1
+        lowered = display.lower()
+        if any(token in lowered for token in WATCHDOG_WARNING_TOKENS):
+            self.warning_line_count += 1
+        elapsed = time.monotonic() - self.started
+        if elapsed < WATCHDOG_MIN_ELAPSED_SEC:
+            return
+        if self.warning_line_count >= WATCHDOG_WARNING_LINE_LIMIT:
+            self._trigger(
+                "warning_flood",
+                stream_name=stream_name,
+                elapsed_sec=elapsed,
+                detail=f"{self.warning_line_count} warning-like lines observed.",
+            )
+        elif normalized and self.repeated_lines.get(normalized, 0) >= WATCHDOG_REPEATED_LINE_LIMIT:
+            self._trigger(
+                "repeated_output_flood",
+                stream_name=stream_name,
+                elapsed_sec=elapsed,
+                detail=f"Line repeated {self.repeated_lines[normalized]} times.",
+            )
+        elif self.total_chars >= WATCHDOG_OUTPUT_CHAR_LIMIT:
+            self._trigger(
+                "output_volume_limit",
+                stream_name=stream_name,
+                elapsed_sec=elapsed,
+                detail=f"Captured output exceeded {WATCHDOG_OUTPUT_CHAR_LIMIT} characters.",
+            )
+
+    def _trigger(self, reason: str, *, stream_name: str, elapsed_sec: float, detail: str) -> None:
+        self.triggered = {
+            "schema_version": "code_task_runtime_watchdog.v1",
+            "reason": reason,
+            "stream": stream_name,
+            "elapsed_sec": round(elapsed_sec, 3),
+            "line_count": self.line_count,
+            "warning_line_count": self.warning_line_count,
+            "total_chars": self.total_chars,
+            "detail": detail,
+            "sample_lines": self.samples[-12:],
+        }
+
+
+def _normalize_watchdog_line(text: str) -> str:
+    text = " ".join(text.strip().split())
+    if not text:
+        return ""
+    # Keep the semantic shape while ignoring counters and timings.
+    text = re.sub(r"\d+(?:\.\d+)?", "<num>", text.lower())
+    return text[:240]
 
 
 @dataclass(frozen=True)
@@ -186,13 +281,36 @@ def run_code_task_benchmark(
         stderr, stderr_truncated = _clip_output(completed.stderr)
         metrics = parse_metric_lines(stdout)
         status = "passed" if completed.returncode == 0 else "failed"
-        report_metadata: dict[str, Any] | None = None
-        run_metadata: dict[str, Any] | None = None
+        report_metadata: dict[str, Any] = {}
+        run_metadata: dict[str, Any] = {}
+        artifact_scan: dict[str, Any] | None = None
+        if _is_greenfield_manifest(manifest):
+            artifact_scan = scan_required_artifacts(run_dir, manifest)
+            artifact_scan_path = _write_runtime_artifact_scan(run_dir, label, artifact_scan)
+            artifact_scan_rel = _relative_to_run(run_dir, artifact_scan_path)
+            artifact_scan_summary = compact_artifact_scan(artifact_scan)
+            report_metadata.update(
+                {
+                    "artifact_scan": artifact_scan_rel,
+                    "artifact_scan_summary": artifact_scan_summary,
+                }
+            )
+            run_metadata.update(
+                {
+                    "artifact_scan": artifact_scan_rel,
+                    "artifact_scan_summary": artifact_scan_summary,
+                }
+            )
+        watchdog_record = getattr(completed, "simple_ar_watchdog", None)
+        if isinstance(watchdog_record, dict):
+            report_metadata["runtime_watchdog"] = watchdog_record
+            run_metadata["runtime_watchdog"] = watchdog_record
         quality_guard = _greenfield_result_quality_guard(
             run_dir,
             manifest,
             status=status,
             metrics=metrics,
+            artifact_scan=artifact_scan,
         )
         if quality_guard is not None:
             status = "failed"
@@ -200,8 +318,8 @@ def run_code_task_benchmark(
             stderr_prefix = stderr.rstrip()
             stderr_text = f"{stderr_prefix}\n{guard_message}\n" if stderr_prefix else guard_message + "\n"
             stderr, stderr_truncated = _clip_output(stderr_text)
-            report_metadata = {"quality_guard": quality_guard}
-            run_metadata = {"quality_guard": quality_guard}
+            report_metadata["quality_guard"] = quality_guard
+            run_metadata["quality_guard"] = quality_guard
         return _write_execution_result(
             run_dir,
             manifest=manifest,
@@ -219,8 +337,8 @@ def run_code_task_benchmark(
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
             run_label=label,
-            report_metadata=report_metadata,
-            run_metadata=run_metadata,
+            report_metadata=report_metadata or None,
+            run_metadata=run_metadata or None,
         )
     except subprocess.TimeoutExpired as exc:
         duration_sec = round(time.monotonic() - started, 3)
@@ -362,20 +480,8 @@ def _run_command(
     output_callback: OutputCallback | None,
 ) -> subprocess.CompletedProcess[str]:
     mode = normalize_stream_output_mode(stream_output)
-    if mode in {"off", "summary"}:
-        completed = subprocess.run(
-            command_args,
-            cwd=cwd,
-            env=_safe_env(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            check=False,
-        )
-        if mode == "summary" and output_callback is not None:
-            _emit_output_summary(completed.stdout, completed.stderr, output_callback)
-        return completed
-
+    watchdog = _OutputWatchdog()
+    callback = output_callback if mode not in {"off", "summary"} else None
     process = subprocess.Popen(
         command_args,
         cwd=cwd,
@@ -386,42 +492,76 @@ def _run_command(
     )
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
+    stop_event = threading.Event()
     stdout_thread = threading.Thread(
         target=_read_stream,
-        args=(process.stdout, "stdout", stdout_chunks, output_callback, mode),
+        args=(process.stdout, "stdout", stdout_chunks, callback, mode, watchdog, stop_event),
         daemon=True,
     )
     stderr_thread = threading.Thread(
         target=_read_stream,
-        args=(process.stderr, "stderr", stderr_chunks, output_callback, mode),
+        args=(process.stderr, "stderr", stderr_chunks, callback, mode, watchdog, stop_event),
         daemon=True,
     )
     stdout_thread.start()
     stderr_thread.start()
-    try:
-        returncode = process.wait(timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
+    deadline = time.monotonic() + timeout_sec
+    killed_by_watchdog = False
+    returncode: int | None = None
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            break
+        if watchdog.triggered is not None:
+            killed_by_watchdog = True
+            stop_event.set()
+            process.kill()
+            try:
+                returncode = process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                returncode = 124
+            break
+        if time.monotonic() >= deadline:
+            stop_event.set()
+            process.kill()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            stdout_thread.join(timeout=2)
+            stderr_thread.join(timeout=2)
+            raise subprocess.TimeoutExpired(
+                command_args,
+                timeout_sec,
+                output="".join(stdout_chunks),
+                stderr="".join(stderr_chunks),
+            )
+        time.sleep(0.05)
+    if killed_by_watchdog:
+        stop_event.set()
         process.kill()
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             pass
-        stdout_thread.join(timeout=2)
-        stderr_thread.join(timeout=2)
-        raise subprocess.TimeoutExpired(
-            command_args,
-            timeout_sec,
-            output="".join(stdout_chunks),
-            stderr="".join(stderr_chunks),
-        )
     stdout_thread.join(timeout=2)
     stderr_thread.join(timeout=2)
-    return subprocess.CompletedProcess(
+    stdout = "".join(stdout_chunks)
+    stderr = "".join(stderr_chunks)
+    if watchdog.triggered is not None:
+        detail = str(watchdog.triggered.get("detail") or watchdog.triggered.get("reason") or "output flood")
+        stderr = stderr.rstrip() + f"\nRuntime output watchdog aborted benchmark: {detail}\n"
+    completed = subprocess.CompletedProcess(
         command_args,
-        returncode,
-        stdout="".join(stdout_chunks),
-        stderr="".join(stderr_chunks),
+        int(returncode if returncode is not None else 124),
+        stdout=stdout,
+        stderr=stderr,
     )
+    if watchdog.triggered is not None:
+        setattr(completed, "simple_ar_watchdog", watchdog.triggered)
+    if mode == "summary" and output_callback is not None:
+        _emit_output_summary(completed.stdout, completed.stderr, output_callback)
+    return completed
 
 
 def normalize_stream_output_mode(value: bool | str) -> StreamOutputMode:
@@ -447,6 +587,8 @@ def _read_stream(
     chunks: list[str],
     callback: OutputCallback | None,
     mode: StreamOutputMode,
+    watchdog: _OutputWatchdog | None = None,
+    stop_event: threading.Event | None = None,
 ) -> None:
     if stream is None:
         return
@@ -480,6 +622,8 @@ def _read_stream(
 
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
             raw = stream.read(1)
             if not raw:
                 break
@@ -489,6 +633,10 @@ def _read_stream(
             chunks.append(char)
             if char == "\n":
                 line = "".join(buffer)
+                if watchdog is not None:
+                    watchdog.observe(stream_name, line)
+                    if watchdog.triggered is not None and stop_event is not None:
+                        stop_event.set()
                 if pending_progress:
                     if _display_stream_text(pending_progress) != _display_stream_text(line):
                         emit(pending_progress, progress=True, force=True)
@@ -498,6 +646,10 @@ def _read_stream(
             elif char == "\r":
                 if mode == "auto":
                     text = "".join(buffer)
+                    if watchdog is not None:
+                        watchdog.observe(stream_name, text)
+                        if watchdog.triggered is not None and stop_event is not None:
+                            stop_event.set()
                     if not emit(text, progress=True):
                         pending_progress = text
                     buffer.clear()
@@ -510,6 +662,8 @@ def _read_stream(
             chunks.append(tail)
             buffer.append(tail)
         if buffer:
+            if watchdog is not None:
+                watchdog.observe(stream_name, "".join(buffer))
             if pending_progress:
                 if _display_stream_text(pending_progress) != _display_stream_text("".join(buffer)):
                     emit(pending_progress, progress=True, force=True)
@@ -850,20 +1004,63 @@ def _benchmark_command(manifest: dict[str, Any]) -> str:
     return ""
 
 
+def _is_greenfield_manifest(manifest: dict[str, Any]) -> bool:
+    code_task = manifest.get("code_task")
+    return isinstance(code_task, dict) and str(code_task.get("kind") or "") == "greenfield"
+
+
+def _write_runtime_artifact_scan(run_dir: Path, label: str, scan: dict[str, Any]) -> Path:
+    paths = code_task_paths(run_dir)
+    run_dir_for_label = _run_label_dir(paths.run_artifact_dir, label)
+    run_dir_for_label.mkdir(parents=True, exist_ok=True)
+    path = run_dir_for_label / "artifact_scan.json"
+    write_json(path, scan)
+    return path
+
+
 def _greenfield_result_quality_guard(
     run_dir: Path,
     manifest: dict[str, Any],
     *,
     status: str,
     metrics: dict[str, float],
+    artifact_scan: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if status != "passed":
         return None
-    code_task = manifest.get("code_task")
-    if not isinstance(code_task, dict) or str(code_task.get("kind") or "") != "greenfield":
+    if not _is_greenfield_manifest(manifest):
         return None
     paths = code_task_paths(run_dir)
-    results_path = _greenfield_results_artifact_path(paths.workspace_dir)
+    if artifact_scan and has_artifact_path_mismatch(artifact_scan):
+        return {
+            "status": "failed",
+            "reason": "artifact_path_mismatch",
+            "message": (
+                "Generated benchmark quality guard failed: a required artifact was "
+                "written to a same-name path outside the expected generated-project "
+                "artifact location. See the run artifact_scan.json."
+            ),
+            "artifact_scan": compact_artifact_scan(artifact_scan),
+        }
+    results_row = expected_artifact_row(artifact_scan or {}, "artifacts/results.json")
+    results_rel = (
+        str(results_row.get("expected_path", "generated_project/artifacts/results.json"))
+        if isinstance(results_row, dict)
+        else "generated_project/artifacts/results.json"
+    )
+    results_path = paths.workspace_dir / results_rel
+    parse_status = str(results_row.get("parse_status", "")) if isinstance(results_row, dict) else ""
+    if isinstance(results_row, dict) and parse_status in {"empty", "invalid_json", "unreadable"}:
+        return {
+            "status": "failed",
+            "reason": f"{parse_status}_results_artifact",
+            "message": (
+                "Generated benchmark quality guard failed: expected "
+                f"{results_rel} is {parse_status}. See artifact_scan.json for details."
+            ),
+            "artifact": _relative_to_run(run_dir, results_path),
+            "artifact_scan": compact_artifact_scan(artifact_scan or {}),
+        }
     if not results_path.is_file():
         return None
     try:
@@ -877,6 +1074,7 @@ def _greenfield_result_quality_guard(
                 f"could not read generated_project/artifacts/results.json ({exc})."
             ),
             "artifact": _relative_to_run(run_dir, results_path),
+            "artifact_scan": compact_artifact_scan(artifact_scan or {}),
         }
     if not isinstance(results, dict):
         return None

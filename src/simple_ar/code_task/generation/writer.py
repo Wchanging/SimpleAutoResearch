@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from simple_ar.core.artifacts import write_text
+from simple_ar.core.artifacts import write_json, write_text
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.code_task.analysis.interfaces import dependency_context, order_file_specs, public_api
-from simple_ar.code_task.analysis.python_source import has_non_ascii_identifier
+from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.generation.agent_step import run_json_agent_step
 from simple_ar.code_task.generation.common import mapping_list, safe_relative_path, string_list
 from simple_ar.code_task.generation.file_specs import is_model_generated_file, is_runtime_placeholder
@@ -253,15 +255,21 @@ def _file_content(
                     "in the summary unless they are fully fixed."
                 )
                 continue
-            if content and not _looks_like_markdown_fence(content):
-                cleaned = _repair_common_generation_error(path, content.rstrip() + "\n")
-                if _is_valid_file_content(cleaned, filename=path):
-                    mode = "llm_repaired" if cleaned != content.rstrip() + "\n" else "llm"
-                    return cleaned, mode, summary[:500]
-            feedback = (
-                "The previous response was empty, fenced, or invalid for the requested file type. "
-                "Return a complete, concise file in the JSON content field and preserve exact dependency APIs."
+            candidate = content.rstrip() + "\n" if content else ""
+            cleaned = _repair_common_generation_error(path, candidate)
+            validation = _validate_file_content(cleaned, filename=path)
+            if validation.valid:
+                mode = "llm_repaired" if cleaned != candidate else "llm"
+                return cleaned, mode, summary[:500]
+            _record_invalid_file_generation(
+                agent_step_dir,
+                path=path,
+                attempt=attempt,
+                validation=validation,
+                content=cleaned or candidate,
+                summary=summary,
             )
+            feedback = _file_validation_feedback(validation)
         if not allow_fallback:
             raise LLMError(
                 f"LLM file generation failed for `{path}` after {attempts} attempt(s); "
@@ -549,20 +557,118 @@ def _looks_like_markdown_fence(value: str) -> bool:
     return stripped.startswith("```") or stripped.endswith("```")
 
 
+@dataclass(frozen=True)
+class FileContentValidation:
+    valid: bool
+    reason: str = ""
+    detail: str = ""
+
+
 def _is_valid_file_content(value: str, *, filename: str) -> bool:
+    return _validate_file_content(value, filename=filename).valid
+
+
+def _validate_file_content(value: str, *, filename: str) -> FileContentValidation:
+    if not value.strip():
+        return FileContentValidation(False, "empty_content", "The response content field was empty.")
+    if _looks_like_markdown_fence(value):
+        return FileContentValidation(False, "markdown_fence", "The response still contains a Markdown code fence.")
     if filename.endswith(".py"):
         try:
             compile(value, filename, "exec")
-        except SyntaxError:
-            return False
-        if has_non_ascii_identifier(value, path=filename):
-            return False
+        except SyntaxError as exc:
+            line = _line_at(value, int(exc.lineno or 0))
+            return FileContentValidation(
+                False,
+                "syntax_error",
+                f"{exc.msg} at line {exc.lineno or '?'} offset {exc.offset or '?'}"
+                + (f": {line.strip()[:180]}" if line else ""),
+            )
+        identifiers = non_ascii_identifiers(value, path=filename)
+        if identifiers:
+            preview = "; ".join(
+                f"{row.get('kind')} `{row.get('identifier')}` line {row.get('line')}"
+                for row in identifiers[:5]
+            )
+            return FileContentValidation(False, "non_ascii_identifier", preview)
     if filename.endswith(".json"):
         try:
             json.loads(value)
-        except json.JSONDecodeError:
-            return False
-    return bool(value.strip())
+        except json.JSONDecodeError as exc:
+            return FileContentValidation(False, "json_decode_error", f"{exc.msg} at line {exc.lineno} column {exc.colno}")
+    return FileContentValidation(True)
+
+
+def _file_validation_feedback(validation: FileContentValidation) -> str:
+    if validation.reason == "syntax_error":
+        return (
+            "The previous file did not compile as Python. "
+            f"Exact validation error: {validation.detail}. "
+            "Return one smaller, complete Python file in the JSON content field. Preserve exact dependency APIs."
+        )
+    if validation.reason == "non_ascii_identifier":
+        return (
+            "The previous Python file used non-ASCII identifiers, which break stable imports/patching. "
+            f"Problem identifiers: {validation.detail}. "
+            "Use ASCII names for functions, classes, variables, imports, and attributes; non-ASCII text is allowed only in strings/comments."
+        )
+    if validation.reason == "json_decode_error":
+        return (
+            "The previous JSON file was invalid. "
+            f"Exact validation error: {validation.detail}. "
+            "Return valid JSON content only in the JSON content field."
+        )
+    if validation.reason == "markdown_fence":
+        return (
+            "The previous response still contained a Markdown code fence after cleanup. "
+            "Return raw file content only inside the JSON content string."
+        )
+    return (
+        "The previous response content was empty or invalid for the requested file type. "
+        f"Validation reason: {validation.reason or 'unknown'} {validation.detail}. "
+        "Return a complete, concise file in the JSON content field and preserve exact dependency APIs."
+    )
+
+
+def _record_invalid_file_generation(
+    artifact_dir: Path | None,
+    *,
+    path: str,
+    attempt: int,
+    validation: FileContentValidation,
+    content: str,
+    summary: str,
+) -> None:
+    if artifact_dir is None:
+        return
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", path).strip("_") or "file"
+    target_dir = artifact_dir / "invalid_files" / safe_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(path).suffix or ".txt"
+    content_path = target_dir / f"attempt-{attempt:03d}{suffix if suffix.startswith('.') else '.txt'}"
+    write_text(content_path, content)
+    write_json(
+        target_dir / f"attempt-{attempt:03d}.json",
+        {
+            "schema_version": "greenfield_file_validation_failure.v1",
+            "path": path,
+            "attempt": attempt,
+            "validation": asdict(validation),
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "content_chars": len(content),
+            "content_artifact": str(content_path.relative_to(artifact_dir)).replace("\\", "/"),
+            "summary": summary[:500],
+        },
+    )
+
+
+def _line_at(value: str, lineno: int) -> str:
+    if lineno <= 0:
+        return ""
+    lines = value.splitlines()
+    if lineno > len(lines):
+        return ""
+    return lines[lineno - 1]
 
 
 def _response_self_reports_defect(response: Mapping[str, Any]) -> bool:
@@ -612,10 +718,19 @@ def _repair_common_generation_error(path: str, value: str) -> str:
     useful run.
     """
 
+    value = _strip_single_markdown_fence(value)
     stripped = value.lstrip("\ufeff")
     leading = value[: len(value) - len(stripped)]
     if path.endswith("__init__.py"):
         for marker in ('__"""', "__'''"):
             if stripped.startswith(marker):
                 return leading + stripped[2:]
+    return value
+
+
+def _strip_single_markdown_fence(value: str) -> str:
+    stripped = value.strip()
+    match = re.fullmatch(r"```(?:[A-Za-z0-9_+.-]+)?[ \t]*\n(.*)\n```", stripped, flags=re.DOTALL)
+    if match:
+        return match.group(1).rstrip() + "\n"
     return value

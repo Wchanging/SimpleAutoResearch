@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
+from simple_ar.code_task.execution.artifact_contract import compact_artifact_scan
 from simple_ar.code_task.execution.failure_graph import build_failure_graph
 from simple_ar.code_task.execution.run_history import archive_failure_artifacts_for_latest_attempt
 from simple_ar.code_task.runtime.state import (
@@ -86,6 +87,7 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         if not isinstance(report_value, dict):
             raise RuntimeError(f"Expected JSON object in {report_path}")
         report = report_value
+    artifact_scan = _read_optional_json(artifacts.get("artifact_scan")) if artifacts.get("artifact_scan") else {}
 
     stdout = _read_optional(artifacts["stdout"])
     stderr = _read_optional(artifacts["stderr"])
@@ -104,6 +106,10 @@ def analyze_code_task_failure(run_dir: Path) -> FailureAnalysisResult:
         validation=validation,
         changed_files=changed_files,
     )
+    if artifact_scan:
+        graph["artifact_scan"] = compact_artifact_scan(artifact_scan)
+    if isinstance(report.get("runtime_watchdog"), dict):
+        graph["runtime_watchdog"] = report["runtime_watchdog"]
     traceback_block = str(graph.get("traceback") or _traceback_block(stderr))
     runtime_implicated = [
         str(path) for path in graph.get("traceback_files", []) if isinstance(path, str) and path
@@ -216,6 +222,12 @@ def _render_failure_analysis(
             else "none"
         ),
         "",
+        "## Runtime Contracts",
+        "",
+        _artifact_scan_summary(failure_graph.get("artifact_scan")),
+        "",
+        _runtime_watchdog_summary(failure_graph.get("runtime_watchdog")),
+        "",
         "## Implicated Files",
         "",
         _bullet_list([f"`{path}`" for path in implicated_files]) or "- None found in traceback.",
@@ -271,6 +283,52 @@ def _execution_summary(report: dict[str, Any], status_line: str) -> str:
     )
 
 
+def _artifact_scan_summary(value: object) -> str:
+    if not isinstance(value, dict):
+        return "- Artifact scan: not available."
+    lines = [f"- Artifact scan status: `{value.get('status', 'unknown')}`"]
+    findings = value.get("findings")
+    for finding in findings if isinstance(findings, list) else []:
+        if not isinstance(finding, dict):
+            continue
+        lines.append(
+            "- "
+            f"{finding.get('code', 'artifact_issue')} at "
+            f"`{finding.get('expected_path', '')}`: "
+            f"{finding.get('message', '')}"
+        )
+        candidates = finding.get("candidate_paths")
+        if isinstance(candidates, list) and candidates:
+            lines.append("  candidates: " + ", ".join(f"`{item}`" for item in candidates[:4]))
+    artifacts = value.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts[:4]:
+            if not isinstance(artifact, dict):
+                continue
+            lines.append(
+                "- "
+                f"`{artifact.get('expected_path', '')}`: "
+                f"{artifact.get('parse_status', 'unknown')} "
+                f"({artifact.get('size', 0)} bytes)"
+            )
+    return "\n".join(lines)
+
+
+def _runtime_watchdog_summary(value: object) -> str:
+    if not isinstance(value, dict):
+        return "- Runtime watchdog: not triggered."
+    lines = [
+        f"- Runtime watchdog: `{value.get('reason', 'triggered')}`",
+        f"- Detail: {value.get('detail', '')}",
+        f"- Elapsed seconds: `{value.get('elapsed_sec', '')}`",
+        f"- Warning-like lines: `{value.get('warning_line_count', 0)}`",
+    ]
+    samples = value.get("sample_lines")
+    if isinstance(samples, list) and samples:
+        lines.append("- Samples: " + " | ".join(f"`{str(item)[:160]}`" for item in samples[:4]))
+    return "\n".join(lines)
+
+
 def _validation_summary(validation: dict[str, Any]) -> str:
     if not validation:
         return "- No validation report found."
@@ -309,6 +367,15 @@ def _likely_cause(
         return "The benchmark was not launched because static validation reported errors."
     if report.get("timed_out") is True:
         return "The benchmark exceeded the configured timeout."
+    if isinstance(report.get("runtime_watchdog"), dict):
+        watchdog = report["runtime_watchdog"]
+        return (
+            "The benchmark was stopped by the runtime output watchdog: "
+            f"`{watchdog.get('reason', 'triggered')}` ({watchdog.get('detail', '')})."
+        )
+    quality_guard = report.get("quality_guard")
+    if isinstance(quality_guard, dict) and quality_guard.get("reason") == "artifact_path_mismatch":
+        return "The run wrote a required artifact to the wrong workspace path; repair the artifact output path contract."
     if failure_graph and failure_graph.get("primary_signal"):
         return f"The strongest execution signal is: `{failure_graph.get('primary_signal')}`"
     if traceback_block:
@@ -601,6 +668,12 @@ def _latest_failure_artifacts(paths: Any, manifest: dict[str, Any]) -> dict[str,
             report_value = _read_optional_json(report)
             if report_value.get("status") == "blocked_by_validation":
                 source = "validation"
+            artifact_scan_rel = report_value.get("artifact_scan")
+            artifact_scan = (
+                paths.run_dir / str(artifact_scan_rel)
+                if isinstance(artifact_scan_rel, str) and artifact_scan_rel
+                else run_dir / "artifact_scan.json"
+            )
             return {
                 "source": source,
                 "execution_report": report,
@@ -608,6 +681,7 @@ def _latest_failure_artifacts(paths: Any, manifest: dict[str, Any]) -> dict[str,
                 "stderr": paths.run_dir / str(stderr_rel),
                 "validation_report": validation_report,
                 "failure_analysis": run_dir / "failure_analysis.md",
+                "artifact_scan": artifact_scan,
             }
     return {
         "source": "validation",

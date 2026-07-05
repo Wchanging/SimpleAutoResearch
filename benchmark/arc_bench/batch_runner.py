@@ -18,8 +18,10 @@ import argparse
 import errno
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -870,17 +872,56 @@ def _run_logged_pipe(
         env=env,
     )
     assert proc.stdout is not None
-    for line in proc.stdout:
-        print(line, end="")
-        log.write(line)
-    try:
-        return proc.wait(timeout=timeout if timeout > 0 else None)
-    except subprocess.TimeoutExpired:
+
+    output_queue: queue.Queue[str | None] = queue.Queue()
+
+    def reader() -> None:
+        try:
+            while True:
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    break
+                output_queue.put(chunk)
+        finally:
+            output_queue.put(None)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    reader_done = False
+    timed_out = False
+
+    while True:
+        if deadline is not None and time.monotonic() >= deadline and proc.poll() is None:
+            timed_out = True
+            break
+        try:
+            item = output_queue.get(timeout=0.1)
+        except queue.Empty:
+            item = None
+            queue_empty = True
+        else:
+            queue_empty = False
+        if item is None:
+            if not queue_empty:
+                reader_done = True
+            if proc.poll() is not None and reader_done and output_queue.empty():
+                break
+            continue
+        print(item, end="")
+        log.write(item)
+        log.flush()
+
+    if timed_out:
         proc.kill()
         message = f"\nCommand timed out after {timeout}s.\n"
         print(message, end="")
         log.write(message)
+        log.flush()
+        thread.join(timeout=2)
         return 124
+    thread.join(timeout=2)
+    return proc.wait()
 
 
 def _run_logged_pty(

@@ -844,8 +844,11 @@ def _review_file_repair_prompt(
         "- Do not fill missing required metrics with 0.0, empty records, or placeholder values. Fail clearly if a metric cannot be measured.\n"
         "- Do not hide the original exception in entrypoints. If you catch broad exceptions, also call traceback.print_exc(), "
         "logging.exception/logger.exception, or re-raise so later repair can see the real file and line.\n"
-        "- If this file writes run artifacts, write under `artifacts/` relative to the current working directory.\n"
-        "- Required task artifacts include `artifacts/results.json` and `artifacts/report.md` whenever requested by the task.\n"
+        "- If artifact_scan provides an expected_path, write the required artifact to that exact workspace-relative path.\n"
+        "- For generated greenfield projects, task artifact paths such as `artifacts/results.json` normally resolve under "
+        "`generated_project/artifacts/results.json` because the project root is `generated_project/`.\n"
+        "- Required task artifacts include `artifacts/results.json` and `artifacts/report.md` whenever requested by the task; "
+        "keep writer, config, and entrypoint paths consistent.\n"
         "- The benchmark parser still needs metrics printed by main.py as `metric_name: number`.\n\n"
         f"Target path: {rel_path}\n\n"
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
@@ -1470,7 +1473,28 @@ def _repair_plan_targets(
             continue
         if (project_dir / path).is_file():
             selected.append(path)
-    return list(dict.fromkeys([*selected, *heuristic_targets]))
+    selected = list(dict.fromkeys(selected))
+    heuristic_targets = list(dict.fromkeys(heuristic_targets))
+    if selected and _repair_plan_has_clear_scope(repair_plan):
+        return selected[:_RUN_REPAIR_MAX_FILES]
+    if selected:
+        return list(dict.fromkeys([*selected, *heuristic_targets[:2]]))[:_RUN_REPAIR_MAX_FILES]
+    return heuristic_targets[:_RUN_REPAIR_MAX_FILES]
+
+
+def _repair_plan_has_clear_scope(repair_plan: Mapping[str, Any]) -> bool:
+    scope = str(repair_plan.get("repair_scope", "")).strip().lower()
+    if scope in {"block", "function", "file"}:
+        return True
+    failure_kind = str(repair_plan.get("failure_kind", "")).strip().lower()
+    if any(token in failure_kind for token in ("artifact", "watchdog", "warning_flood", "timeout")):
+        return True
+    affected = repair_plan.get("affected_contracts")
+    if isinstance(affected, list):
+        lowered = {str(item).strip().lower() for item in affected}
+        if lowered & {"artifact", "resource", "runtime"}:
+            return True
+    return False
 
 
 def _failure_graph_candidate_paths(
@@ -1519,6 +1543,7 @@ def _run_repair_context(
     return {
         "schema_version": "code_task_runtime_repair_context.v1",
         "failure_graph": _compact_failure_graph_for_repair(failure_analysis),
+        "runtime_contracts": _runtime_contract_context(failure_analysis),
         "heuristic_targets": heuristic_targets,
         "review_index": _generated_review_index(project_dir, result_schema=result_schema, contract=contract),
         "return_contract_mismatches": find_return_contract_mismatches(project_dir),
@@ -1548,7 +1573,25 @@ def _compact_failure_graph_for_repair(failure_analysis: Mapping[str, Any]) -> di
     ):
         value = graph.get(key)
         result[key] = value[:limit] if isinstance(value, list) else []
+    for key in ("artifact_scan", "runtime_watchdog"):
+        value = graph.get(key)
+        if isinstance(value, Mapping):
+            result[key] = dict(value)
     return result
+
+
+def _runtime_contract_context(failure_analysis: Mapping[str, Any]) -> dict[str, Any]:
+    graph = failure_analysis.get("failure_graph_data")
+    if not isinstance(graph, Mapping):
+        return {}
+    context: dict[str, Any] = {}
+    artifact_scan = graph.get("artifact_scan")
+    if isinstance(artifact_scan, Mapping):
+        context["artifact_scan"] = dict(artifact_scan)
+    watchdog = graph.get("runtime_watchdog")
+    if isinstance(watchdog, Mapping):
+        context["runtime_watchdog"] = dict(watchdog)
+    return context
 
 
 def _generated_review_index(
@@ -1639,6 +1682,8 @@ def _run_repair_plan_prompt(
         "- Build a dependency trace from failing metric/field -> aggregate/report consumer -> record object -> producer function -> call site before choosing files.\n"
         "- If a required metric is missing or invalid, inspect whether the raw evidence required for that metric was lost earlier in the data flow.\n"
         "- If the failure is a timeout, repeated warning flood, or apparent hang, use resource_static to identify nested fit/search loops and propose a bounded algorithmic repair.\n"
+        "- If artifact_scan reports artifact_path_mismatch, fix the output path contract first: expected path, actual candidate path, writer, config, and entrypoint must agree.\n"
+        "- If runtime_watchdog reports warning_flood or repeated_output_flood, repair the root loop/convergence/resource cause; do not merely suppress warnings.\n"
         "- If stderr is generic because an entrypoint caught the real exception, choose the entrypoint only to restore traceback visibility; do not treat the generic wrapper as the root cause.\n"
         "- Use Previous repair context to avoid repeating the same failed localization or patch strategy.\n"
         "- If the same error survived a prior repair, explicitly explain why the previous fix was insufficient before selecting target files.\n"
@@ -1674,7 +1719,23 @@ def _run_repair_target_paths(
     lowered = text.lower()
     known_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
     candidates.extend(_failure_graph_candidate_paths(failure_analysis, project_dir=project_dir))
-    if _is_empty_greenfield_evidence_failure(lowered):
+    if _is_artifact_path_contract_failure(lowered):
+        candidates.extend(
+            _rank_repair_candidates(
+                known_paths,
+                signal_text=lowered,
+                preferred_roles=("artifact", "config", "entrypoint", "orchestrator"),
+            )[:5]
+        )
+    elif _is_runtime_watchdog_failure(lowered):
+        candidates.extend(
+            _rank_repair_candidates(
+                known_paths,
+                signal_text=lowered,
+                preferred_roles=("core", "orchestrator", "config", "data", "preprocess", "entrypoint"),
+            )[:6]
+        )
+    elif _is_empty_greenfield_evidence_failure(lowered):
         candidates.extend(
             _rank_repair_candidates(
                 known_paths,
@@ -1803,6 +1864,25 @@ def _attribute_error_symbols(signal_text: str) -> list[str]:
         r"has no attribute\s+([A-Za-z_][A-Za-z0-9_]*)",
         r"attributeerror:[^'\"]*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
         r"attributeerror:[^\n]*has no attribute\s+([A-Za-z_][A-Za-z0-9_]*)",
+    )
+
+
+def _is_artifact_path_contract_failure(text: str) -> bool:
+    return (
+        "artifact_path_mismatch" in text
+        or "artifact path contract" in text
+        or "same-name artifact" in text
+        or "wrong workspace path" in text
+    )
+
+
+def _is_runtime_watchdog_failure(text: str) -> bool:
+    return (
+        "runtime_watchdog" in text
+        or "runtime output watchdog" in text
+        or "warning_flood" in text
+        or "repeated_output_flood" in text
+        or "output_volume_limit" in text
     )
     for pattern in patterns:
         symbols.extend(match.lower() for match in re.findall(pattern, signal_text, flags=re.IGNORECASE))

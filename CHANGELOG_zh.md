@@ -8,6 +8,10 @@
 
 ### Changed
 
+- Code-task benchmark 执行现在会为 generated project 写出 compact artifact scan；当必需产物在期望路径为空或缺失、但 workspace 其他位置存在同名有效产物时，quality guard 会明确报告 artifact path mismatch，并把证据交给后续 failure analysis / repair，而不是把它当成普通 benchmark 失败。
+- Code-task benchmark 执行新增保守的 runtime output watchdog；明显 warning flood 或重复输出刷屏会提前中断，写入 execution report，并进入普通 failure analysis / repair 路径，而不是一直等到完整 timeout。
+- Generated-project run repair 现在会读取 artifact scan 和 runtime watchdog 证据；当失败已经有明确契约级根因时，会收窄目标文件选择，减少无谓的大范围重写。
+
 - Code-task 与 8 阶段代码生成现在共享 canonical `task_contract.json`：`init`、greenfield generation、8 阶段 code bridge、review 和 repair 会读取同一份任务契约，并写出轻量 coverage artifact，减少 planning / review / repair 各自重新猜任务导致的漂移。
 - Code-task 运行修复新增通用 `RepairPlan` / `AtomicPatchSet` 审计 artifact，generated-project review 会写出 analyzer registry，result-analysis 也会读取 task contract 中的必需指标和 claim specs；8 阶段 run 结果会同步暴露 code-task contract 摘要，便于后续报告和 benchmark adapter 复用同一任务语义。
 - Greenfield review 新增轻量级跨文件 return-contract 检查，可阻断“某个生成函数返回聚合 mapping，但另一个文件仍按 record sequence 消费”的 producer/consumer 漂移。
