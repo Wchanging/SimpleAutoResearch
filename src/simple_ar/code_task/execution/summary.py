@@ -163,7 +163,10 @@ def _render_summary(
         )
     artifact_lines = [
         "- Workspace: `code_task/workspace`",
+        "- Task contract: `code_task/meta/task_contract.json`",
+        "- Contract coverage: `code_task/meta/task_contract_coverage.json`",
         "- Environment report: `code_task/meta/environment_report.json`",
+        "- Analyzer registry: `code_task/meta/analyzer_registry.json`",
         "- Patch plan: `code_task/patch_plan.md`",
         "- Patch diff: `code_task/patch.diff`",
         "- Validation report: `code_task/meta/validation_report.json`",

@@ -328,6 +328,35 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(rows[0]["mean"], 0.77)
         self.assertEqual(rows[0]["std"], 0.03)
 
+    def test_task_contract_supplies_required_metrics_and_claim_specs(self) -> None:
+        context = AnalysisContext(
+            task_id="T11",
+            metrics={"accuracy": 0.91},
+            task_contract={
+                "schema_version": "code_task_contract.v3",
+                "contract_id": "contract-test",
+                "version_hash": "abc123",
+                "metric_contract": {
+                    "primary_metric": "accuracy",
+                    "required_metrics": ["accuracy", "macro_f1"],
+                },
+                "claim_specs": [
+                    {
+                        "claim_id": "H1",
+                        "statement": "The classifier should improve macro-F1 without hurting accuracy.",
+                        "required_metrics": ["accuracy", "macro_f1"],
+                    }
+                ],
+            },
+        )
+
+        result = run_result_analysis(context)
+
+        self.assertIn("macro_f1", result.audit.missing_required_metrics)
+        self.assertEqual(result.claims[0].claim_id, "H1")
+        self.assertEqual(result.claims[0].verdict, "not_evaluated")
+        self.assertEqual(result.claims_payload["task_contract"]["contract_id"], "contract-test")
+
 
 if __name__ == "__main__":
     unittest.main()

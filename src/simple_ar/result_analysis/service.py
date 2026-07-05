@@ -129,7 +129,7 @@ def existing_claims(context: AnalysisContext) -> list[AnalysisClaim]:
             ]
             break
     if not isinstance(rows, list):
-        return []
+        return contract_claims(context)
     statements = hypothesis_statement_map(context.hypotheses)
     claims: list[AnalysisClaim] = []
     for index, row in enumerate(rows, start=1):
@@ -161,6 +161,50 @@ def existing_claims(context: AnalysisContext) -> list[AnalysisClaim]:
     return claims
 
 
+def contract_claims(context: AnalysisContext) -> list[AnalysisClaim]:
+    contract = context.task_contract if isinstance(context.task_contract, dict) else {}
+    rows = contract.get("claim_specs")
+    claims: list[AnalysisClaim] = []
+    if isinstance(rows, list):
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                continue
+            statement = str(row.get("statement") or row.get("claim") or row.get("description") or "").strip()
+            if not statement:
+                continue
+            claims.append(
+                AnalysisClaim(
+                    claim_id=str(row.get("claim_id") or row.get("id") or f"claim-{index}"),
+                    claim=statement,
+                    verdict="not_evaluated",
+                    evidence=[],
+                    metric_refs=normalize_metric_refs(row.get("metric_refs") or row.get("required_metrics")),
+                    limitations=["Claim was derived from task_contract and requires measured evidence."],
+                    confidence="low",
+                )
+            )
+    if claims:
+        return claims
+    evidence_plan = contract.get("evidence_plan") if isinstance(contract.get("evidence_plan"), dict) else {}
+    hypotheses = evidence_plan.get("hypotheses") if isinstance(evidence_plan, dict) else []
+    for index, item in enumerate(hypotheses if isinstance(hypotheses, list) else [], start=1):
+        statement = str(item).strip()
+        if not statement:
+            continue
+        claims.append(
+            AnalysisClaim(
+                claim_id=f"contract-hypothesis-{index}",
+                claim=statement,
+                verdict="not_evaluated",
+                evidence=[],
+                metric_refs=[],
+                limitations=["Hypothesis was derived from task_contract.evidence_plan and requires measured evidence."],
+                confidence="low",
+            )
+        )
+    return claims
+
+
 def hypothesis_statement_map(hypotheses: list[dict[str, Any]]) -> dict[str, str]:
     statements: dict[str, str] = {}
     for index, row in enumerate(hypotheses, start=1):
@@ -181,6 +225,14 @@ def row_verdict(row: dict[str, Any]) -> str:
 
 def hypothesis_placeholder_claims(context: AnalysisContext, metric_summary: dict[str, Any]) -> list[AnalysisClaim]:
     hypotheses = context.hypotheses or []
+    if not hypotheses and isinstance(context.task_contract, dict):
+        evidence_plan = context.task_contract.get("evidence_plan")
+        if isinstance(evidence_plan, dict) and isinstance(evidence_plan.get("hypotheses"), list):
+            hypotheses = [
+                {"id": f"contract-hypothesis-{index}", "statement": str(item)}
+                for index, item in enumerate(evidence_plan["hypotheses"], start=1)
+                if str(item).strip()
+            ]
     if not hypotheses:
         return [
             AnalysisClaim(
@@ -279,6 +331,7 @@ def build_prompt(
 ) -> str:
     context_payload = context.model_dump(mode="json")
     context_payload["project_results"] = compact_project_results_for_prompt(context.project_results, metric_summary)
+    context_payload["task_contract"] = compact_task_contract_for_prompt(context.task_contract)
     payload = {
         "context": context_payload,
         "metric_summary": metric_summary,
@@ -301,6 +354,44 @@ def build_prompt(
         "- If metrics are weak, missing, all zero, or only resource signals, say so clearly.\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2, default=str)}"
     )
+
+
+def compact_task_contract_for_prompt(contract: dict[str, Any], *, max_task_chars: int = 1600) -> dict[str, Any]:
+    if not isinstance(contract, dict) or not contract:
+        return {}
+    metric_contract = contract.get("metric_contract") if isinstance(contract.get("metric_contract"), dict) else {}
+    artifact_contract = contract.get("artifact_contract") if isinstance(contract.get("artifact_contract"), dict) else {}
+    evidence_plan = contract.get("evidence_plan") if isinstance(contract.get("evidence_plan"), dict) else {}
+    task = str(contract.get("task") or "")
+    return {
+        "schema_version": contract.get("schema_version", ""),
+        "contract_id": contract.get("contract_id", ""),
+        "version_hash": contract.get("version_hash", ""),
+        "task_kind": contract.get("task_kind", ""),
+        "objective": contract.get("objective", ""),
+        "task_excerpt": task[:max_task_chars],
+        "success_criteria": normalize_string_list(contract.get("success_criteria"))[:20],
+        "metric_contract": {
+            "primary_metric": metric_contract.get("primary_metric", ""),
+            "required_metrics": normalize_string_list(metric_contract.get("required_metrics"))[:30],
+            "metric_directions": dict(metric_contract.get("metric_directions") or {}),
+        },
+        "artifact_contract": {
+            "required_artifacts": normalize_string_list(artifact_contract.get("required_artifacts"))[:30],
+            "required_comparisons": normalize_string_list(artifact_contract.get("required_comparisons"))[:30],
+        },
+        "evidence_plan": {
+            "hypotheses": normalize_string_list(evidence_plan.get("hypotheses"))[:20],
+            "required_conditions": normalize_string_list(evidence_plan.get("required_conditions"))[:30],
+            "required_datasets": normalize_string_list(evidence_plan.get("required_datasets"))[:30],
+            "required_comparisons": normalize_string_list(evidence_plan.get("required_comparisons"))[:30],
+        },
+        "claim_specs": [
+            row for row in contract.get("claim_specs", []) if isinstance(row, dict)
+        ][:20]
+        if isinstance(contract.get("claim_specs"), list)
+        else [],
+    }
 
 
 def normalize_llm_result(
@@ -581,6 +672,13 @@ def claims_payload(
         "summary_metrics": context.metrics,
         "metric_summary": metric_summary,
         "rubric_coverage": rubric_coverage,
+        "task_contract": {
+            "contract_id": context.task_contract.get("contract_id", ""),
+            "version_hash": context.task_contract.get("version_hash", ""),
+            "schema_version": context.task_contract.get("schema_version", ""),
+        }
+        if isinstance(context.task_contract, dict) and context.task_contract
+        else {},
         "hypothesis_verdicts": [claim.model_dump(mode="json") for claim in claims],
         "claims": [claim.model_dump(mode="json") for claim in claims],
     }

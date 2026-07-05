@@ -14,6 +14,7 @@ from simple_ar.code_task.generation.common import safe_relative_path
 from simple_ar.code_task.generation.file_specs import infer_file_kind, is_runtime_placeholder
 from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
 from simple_ar.code_task.analysis.entrypoints import analyze_entrypoint_debuggability
+from simple_ar.code_task.analysis.analyzers import write_analyzer_registry
 from simple_ar.code_task.analysis.interfaces import (
     find_local_api_mismatches,
     find_return_contract_mismatches,
@@ -82,6 +83,7 @@ def review_generated_project(
         deterministic_findings=deterministic,
     )
     if meta_dir is not None:
+        write_analyzer_registry(meta_dir / "analyzer_registry.json")
         write_json(meta_dir / "review_index.json", review_index)
         write_json(
             meta_dir / "review_clusters.json",
@@ -122,6 +124,7 @@ def review_generated_project(
             "review_mode": "layered",
             "review_index": "code_task/meta/review_index.json" if meta_dir is not None else "",
             "review_clusters": "code_task/meta/review_clusters.json" if meta_dir is not None else "",
+            "analyzer_registry": "code_task/meta/analyzer_registry.json" if meta_dir is not None else "",
             "review_cluster_count": len(review_clusters),
         },
     )

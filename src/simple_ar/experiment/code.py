@@ -6,6 +6,7 @@ from typing import Any
 
 from simple_ar.core.artifacts import read_json, write_json, write_text
 from simple_ar.code_task import execute_code_task, initialize_code_task
+from simple_ar.code_task.generation.task_contract import build_greenfield_task_contract, save_task_contract
 from simple_ar.core.pipeline import Context
 from simple_ar.experiment.code_task_bridge import (
     build_code_task_experiment_script,
@@ -77,16 +78,14 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
         },
     )
     task_file = ctx.artifact_path("generated_code_task.md")
-    write_text(
-        task_file,
-        _greenfield_task_markdown(
-            contract=contract,
-            result_schema=result_schema,
-            resource_plan=resource_plan,
-            dependency_plan=dependency_plan,
-            domain_profile=domain_profile,
-        ),
+    task_text = _greenfield_task_markdown(
+        contract=contract,
+        result_schema=result_schema,
+        resource_plan=resource_plan,
+        dependency_plan=dependency_plan,
+        domain_profile=domain_profile,
     )
+    write_text(task_file, task_text)
     code_task_run_dir = ctx.stage_dir() / "code_task_run"
     if not (code_task_run_dir / "manifest.json").is_file():
         initialize_code_task(
@@ -99,6 +98,13 @@ def _execute_greenfield_code(ctx: Context, plan: dict[str, Any]) -> None:
             env_mode="current",
             primary_metric=str(result_schema.get("primary_metric") or ""),
         )
+    _write_embedded_code_task_contract(
+        code_task_run_dir=code_task_run_dir,
+        task_text=task_text,
+        contract=contract,
+        result_schema=result_schema,
+        resource_plan=resource_plan,
+    )
     execute_result = execute_code_task(
         code_task_run_dir,
         to_step="review",
@@ -171,6 +177,88 @@ def _json_block(value: dict[str, Any]) -> str:
     import json
 
     return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def _write_embedded_code_task_contract(
+    *,
+    code_task_run_dir: Path,
+    task_text: str,
+    contract: dict[str, Any],
+    result_schema: dict[str, Any],
+    resource_plan: dict[str, Any],
+) -> None:
+    generation = contract.get("generation_plan") if isinstance(contract.get("generation_plan"), dict) else {}
+    max_files = _positive_int(generation.get("max_files") or resource_plan.get("max_files"), 8)
+    max_generated_lines = _positive_int(
+        generation.get("max_generated_lines") or resource_plan.get("max_generated_lines"),
+        1600,
+    )
+    hypothesis = str(contract.get("hypothesis") or "").strip()
+    primary = str(result_schema.get("primary_metric") or "").strip()
+    required_metrics = _string_list(result_schema.get("required_metrics"))
+    if primary:
+        required_metrics.insert(0, primary)
+    expected_outputs = _string_list(contract.get("expected_outputs"))
+    extra_contract = {
+        "contract_id": contract.get("contract_id", ""),
+        "explicit_requirements": [
+            str(contract.get("objective") or "").strip(),
+            hypothesis,
+            *expected_outputs,
+        ],
+        "deliverables": expected_outputs,
+        "constraints": _string_list(contract.get("constraints")) + _string_list(resource_plan.get("constraints")),
+        "success_criteria": _string_list(result_schema.get("success_criteria")),
+        "required_metrics": list(dict.fromkeys(item for item in required_metrics if item)),
+        "evidence_plan": {
+            "hypotheses": [hypothesis] if hypothesis else [],
+            "required_metrics": list(dict.fromkeys(item for item in required_metrics if item)),
+            "required_artifacts": expected_outputs,
+            "claim_policy": [
+                "Ground conclusions in measured outputs from the generated project.",
+                "State unsupported or inconclusive findings explicitly.",
+            ],
+        },
+    }
+    canonical = build_greenfield_task_contract(
+        task_text,
+        benchmark_command="python generated_project/main.py",
+        max_files=max_files,
+        max_generated_lines=max_generated_lines,
+        result_schema=result_schema,
+        source={
+            "kind": "eight_stage_design",
+            "origin": "05-design",
+            "contract_id": str(contract.get("contract_id") or ""),
+            "task_file": "06-code/generated_code_task.md",
+            "artifacts": [
+                "05-design/experiment_contract.json",
+                "05-design/result_schema.json",
+                "05-design/resource_plan.json",
+                "05-design/dependency_plan.json",
+                "05-design/domain_profile.json",
+            ],
+        },
+        extra_contract=extra_contract,
+    )
+    risks = _string_list(contract.get("risks"))
+    if risks:
+        canonical["design_risks"] = risks[:12]
+    save_task_contract(code_task_run_dir / "code_task" / "meta", canonical)
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _positive_int(value: object, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
 
 
 def _project_code_task_outputs(ctx: Context, code_task_run_dir: Path) -> None:

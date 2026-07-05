@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Code-task 与 8 阶段代码生成现在共享 canonical `task_contract.json`：`init`、greenfield generation、8 阶段 code bridge、review 和 repair 会读取同一份任务契约，并写出轻量 coverage artifact，减少 planning / review / repair 各自重新猜任务导致的漂移。
+- Code-task 运行修复新增通用 `RepairPlan` / `AtomicPatchSet` 审计 artifact，generated-project review 会写出 analyzer registry，result-analysis 也会读取 task contract 中的必需指标和 claim specs；8 阶段 run 结果会同步暴露 code-task contract 摘要，便于后续报告和 benchmark adapter 复用同一任务语义。
 - Greenfield review 新增轻量级跨文件 return-contract 检查，可阻断“某个生成函数返回聚合 mapping，但另一个文件仍按 record sequence 消费”的 producer/consumer 漂移。
 - Generated-project run repair 现在会把 return-contract mismatch 证据注入 repair context，并在每轮 run repair 后先重跑确定性项目 review，再进入 benchmark rerun，避免 repair 修好一个运行错误却引入新的跨文件契约问题。
 - Generated-project review repair 现在会在调用 LLM 之前执行确定性的 local-API alias 修复：如果一个文件导入 `module.symbol`，而目标模块里已经存在 `_symbol` 私有实现，则自动补公共 alias 并复查项目，减少脆弱的 old/new 字符串修复失败。

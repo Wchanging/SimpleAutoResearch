@@ -45,6 +45,7 @@ from simple_ar.code_task.editing.snapshots import FileSnapshotSet, create_file_s
 from simple_ar.code_task.generation.common import contains_any, safe_relative_path
 from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.review_pipeline import build_review_index, compact_review_index
+from simple_ar.code_task.repair_contract import atomic_patch_set_record, normalize_repair_plan
 from simple_ar.integrations.llm import LLMClient
 
 _RUN_REPAIR_MAX_FILES = 8
@@ -1276,9 +1277,12 @@ def repair_generated_project_from_run_failure(
             notes=summary["notes"],
             unresolved=summary["unresolved_errors"],
             snapshot=snapshot,
+            artifact_dir=output_path.parent,
         )
         if regenerated:
             summary["regenerated_files"] = regenerated
+            summary["repair_plan"] = (output_path.parent / "run_repair_plan.json").as_posix()
+            summary["atomic_patch_set"] = (output_path.parent / "atomic_patch_set.json").as_posix()
             compile_errors = _compile_project(project_dir)
             if not compile_errors:
                 summary["status"] = "patched"
@@ -1314,6 +1318,7 @@ def _regenerate_run_failed_files(
     notes: list[str],
     unresolved: list[str],
     snapshot: FileSnapshotSet,
+    artifact_dir: Path,
 ) -> list[dict[str, Any]]:
     heuristic_targets = _run_repair_target_paths(
         project_dir=project_dir,
@@ -1330,7 +1335,7 @@ def _regenerate_run_failed_files(
         result_schema=result_schema,
         contract=contract,
     )
-    repair_plan = _plan_run_repair_targets(
+    raw_repair_plan = _plan_run_repair_targets(
         failure_analysis=failure_analysis,
         stderr_text=stderr_text,
         result_schema=result_schema,
@@ -1341,6 +1346,13 @@ def _regenerate_run_failed_files(
         client=client,
         unresolved=unresolved,
     )
+    repair_plan = normalize_repair_plan(
+        raw_repair_plan,
+        failure_analysis=failure_analysis,
+        fallback_targets=heuristic_targets,
+        contract=contract,
+    )
+    write_json(artifact_dir / "run_repair_plan.json", repair_plan)
     target_paths = _repair_plan_targets(
         project_dir=project_dir,
         repair_plan=repair_plan,
@@ -1396,6 +1408,15 @@ def _regenerate_run_failed_files(
         )
         if applied is not None:
             regenerated.append(applied)
+    snapshot_record = snapshot.artifact_record() if snapshot.captured_count or snapshot.restored_count else {}
+    write_json(
+        artifact_dir / "atomic_patch_set.json",
+        atomic_patch_set_record(
+            repair_plan=repair_plan,
+            applied_records=regenerated,
+            snapshot=snapshot_record,
+        ),
+    )
     return regenerated
 
 

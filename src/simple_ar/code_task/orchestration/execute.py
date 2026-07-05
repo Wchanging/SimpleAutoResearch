@@ -26,6 +26,12 @@ from simple_ar.code_task.analysis.context import (
 from simple_ar.code_task.editing.patching import PatchValidationError, apply_patch_edits, propose_patch_edits
 from simple_ar.code_task.editing.planning import generate_patch_plan
 from simple_ar.code_task.generation.greenfield import generate_greenfield_code_task
+from simple_ar.code_task.generation.task_contract import (
+    build_greenfield_task_contract,
+    contract_coverage,
+    load_task_contract,
+    save_task_contract,
+)
 from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
     repair_generated_project_from_run_failure,
@@ -1884,22 +1890,42 @@ def _greenfield_resource_plan(paths: object, *, max_files: int, max_generated_li
 
 
 def _greenfield_contract_for_review(paths: object) -> dict[str, Any]:
+    contract = load_task_contract(paths.meta_dir)
+    if contract:
+        architecture = _read_optional_dict(paths.meta_dir / "architecture_plan.json")
+        write_json(paths.meta_dir / "task_contract_coverage.json", contract_coverage(contract, architecture))
+        return contract
     task_path = paths.task_dir / "task.md"
     task = read_text(task_path) if task_path.is_file() else ""
-    return {
-        "schema_version": "code_task_greenfield_contract.v1",
-        "objective": _first_meaningful_task_line(task),
-        "task": task,
-        "success_criteria": [],
-    }
+    manifest = load_code_task_manifest(paths.run_dir)
+    result_schema = _greenfield_result_schema_from_manifest(manifest)
+    architecture = _read_optional_dict(paths.meta_dir / "architecture_plan.json")
+    generation_plan = architecture.get("generation_plan") if isinstance(architecture.get("generation_plan"), dict) else {}
+    contract = build_greenfield_task_contract(
+        task,
+        benchmark_command=str((manifest.get("benchmark") or {}).get("command") or "python generated_project/main.py")
+        if isinstance(manifest.get("benchmark"), dict)
+        else "python generated_project/main.py",
+        max_files=_positive_int(generation_plan.get("max_files"), 8),
+        max_generated_lines=_positive_int(generation_plan.get("max_generated_lines"), 1600),
+        result_schema=result_schema,
+        source={
+            "kind": "legacy_reconstructed",
+            "task_file": "code_task/task.md",
+            "origin": "greenfield_review_repair_compatibility",
+        },
+    )
+    save_task_contract(paths.meta_dir, contract)
+    write_json(paths.meta_dir / "task_contract_coverage.json", contract_coverage(contract, architecture))
+    return contract
 
 
-def _first_meaningful_task_line(text: str) -> str:
-    for line in text.splitlines():
-        stripped = line.strip().strip("#").strip()
-        if stripped:
-            return stripped[:240]
-    return ""
+def _positive_int(value: object, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
 
 
 def _refresh_greenfield_code_artifacts(

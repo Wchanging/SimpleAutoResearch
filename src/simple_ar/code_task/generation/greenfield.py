@@ -25,7 +25,13 @@ from simple_ar.code_task.generation.architecture import (
     file_plan_from_architecture,
     render_architecture_markdown,
 )
-from simple_ar.code_task.generation.task_contract import build_greenfield_task_contract
+from simple_ar.code_task.generation.task_contract import (
+    build_greenfield_task_contract,
+    contract_coverage,
+    finalize_task_contract,
+    load_task_contract,
+    save_task_contract,
+)
 from simple_ar.code_task.generation.writer import write_generated_project
 from simple_ar.code_task.generation.implementation_memory import initial_implementation_memory
 from simple_ar.code_task.generation.review import review_generated_project
@@ -104,13 +110,26 @@ def generate_greenfield_code_task(
     resource_decision = _optional_json(paths.meta_dir / "resource_decision.json")
     result_schema = _result_schema_from_manifest(manifest)
     benchmark_command = _benchmark_command(manifest)
-    contract = _contract_from_task(
-        task_text,
-        benchmark_command=benchmark_command,
-        max_files=max_files,
-        max_generated_lines=max_generated_lines,
-        result_schema=result_schema,
-    )
+    existing_contract = load_task_contract(paths.meta_dir)
+    if existing_contract:
+        contract = dict(existing_contract)
+        if not contract.get("benchmark_command"):
+            contract["benchmark_command"] = benchmark_command
+    else:
+        contract = _contract_from_task(
+            task_text,
+            benchmark_command=benchmark_command,
+            max_files=max_files,
+            max_generated_lines=max_generated_lines,
+            result_schema=result_schema,
+            source={
+                "kind": "code_task",
+                "task_file": "code_task/task.md",
+                "origin": "greenfield_generation",
+            },
+        )
+    contract = finalize_task_contract(contract)
+    save_task_contract(paths.meta_dir, contract)
     result_schema = _result_schema_with_contract_metrics(result_schema, contract)
     resource_plan = _resource_plan(
         resource_decision,
@@ -179,6 +198,7 @@ def generate_greenfield_code_task(
             "planning_mode": planning_mode,
             "planning_review_rounds": planning_review_rounds,
             "planning_dir": "code_task/meta/planning",
+            "task_contract": "code_task/meta/task_contract.json",
             "models": {
                 "default": model or "",
                 "planner": planner_model or "",
@@ -188,9 +208,11 @@ def generate_greenfield_code_task(
             "resource_plan": resource_plan,
             "dependency_plan": dependency_plan,
             "dependency_advice": "code_task/meta/dependency_advice.json",
+            "task_contract_hash": contract.get("version_hash", ""),
         },
     )
     write_json(architecture_plan_path, architecture)
+    write_json(paths.meta_dir / "task_contract_coverage.json", contract_coverage(contract, architecture))
     write_text(paths.meta_dir / "architecture_plan.md", render_architecture_markdown(architecture))
     write_json(file_plan_path, file_plan_from_architecture(architecture))
 
@@ -282,6 +304,7 @@ def generate_greenfield_code_task(
         review=review,
         provider=provider,
         agent_mode=implementation_agent_mode or ("handoff" if agent_result else "model"),
+        contract=contract,
     )
     write_code_task_summary(root)
     return GreenfieldCodeTaskResult(
@@ -352,6 +375,8 @@ def _contract_from_task(
     max_files: int,
     max_generated_lines: int,
     result_schema: dict[str, Any],
+    source: dict[str, Any] | None = None,
+    extra_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return build_greenfield_task_contract(
         task_text,
@@ -359,6 +384,8 @@ def _contract_from_task(
         max_files=max_files,
         max_generated_lines=max_generated_lines,
         result_schema=result_schema,
+        source=source,
+        extra_contract=extra_contract,
     )
 
 
@@ -596,6 +623,7 @@ def _update_manifest_after_generation(
     review: dict[str, Any],
     provider: str,
     agent_mode: str,
+    contract: dict[str, Any],
 ) -> None:
     layout = manifest_section(manifest, "layout")
     layout.update(
@@ -607,6 +635,8 @@ def _update_manifest_after_generation(
             "code_artifacts": "code_task/meta/code_artifacts.json",
             "code_backend": "code_task/meta/code_backend.json",
             "review_report": "code_task/meta/review_report.json",
+            "task_contract": "code_task/meta/task_contract.json",
+            "task_contract_coverage": "code_task/meta/task_contract_coverage.json",
         }
     )
     manifest["layout"] = layout
@@ -621,6 +651,8 @@ def _update_manifest_after_generation(
             "review_status": review.get("status", "unknown"),
             "provider": _normalize_provider(provider),
             "agent_mode": agent_mode,
+            "task_contract": "code_task/meta/task_contract.json",
+            "task_contract_hash": contract.get("version_hash", ""),
         }
     )
     manifest["implementation"] = implementation

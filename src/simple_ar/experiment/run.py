@@ -208,6 +208,10 @@ def _write_run_outputs(
     dependency_plan = design_json(ctx, "dependency_plan.json")
     code_review = load_optional_json(ctx.run_dir / "06-code" / "code_review.json")
     code_artifacts = load_optional_json(ctx.run_dir / "06-code" / "code_artifacts.json")
+    task_contract = _first_optional_json(
+        ctx.run_dir / "06-code" / "code_task_run" / "code_task" / "meta" / "task_contract.json",
+        ctx.run_dir / "06-code" / "task_contract.json",
+    )
     review_recovery = load_optional_json(ctx.run_dir / "06-code" / "review_failure_recovery.json")
     comparisons = _code_task_comparison_projection(ctx)
     artifacts = {
@@ -220,6 +224,11 @@ def _write_run_outputs(
         artifacts["code_review"] = "06-code/code_review.json"
     if code_artifacts:
         artifacts["code_artifacts"] = "06-code/code_artifacts.json"
+    if task_contract:
+        artifacts["code_task_contract"] = "06-code/code_task_run/code_task/meta/task_contract.json"
+    code_task_summary = ctx.run_dir / "06-code" / "code_task_run" / "code_task" / "summary.md"
+    if code_task_summary.is_file():
+        artifacts["code_task_summary"] = "06-code/code_task_run/code_task/summary.md"
     if review_recovery:
         artifacts["review_failure_recovery"] = "06-code/review_failure_recovery.json"
     if comparisons:
@@ -243,6 +252,8 @@ def _write_run_outputs(
         canonical["code_review"] = _compact_code_review(code_review)
     if code_artifacts:
         canonical["code_artifacts"] = _compact_code_artifacts(code_artifacts)
+    if task_contract:
+        canonical["code_task_contract"] = _compact_code_task_contract(task_contract)
     if review_recovery:
         canonical["review_failure_recovery"] = review_recovery
     guard = evaluate_result_guard(canonical, result_schema=result_schema)
@@ -306,6 +317,31 @@ def _compact_code_artifacts(artifacts: dict[str, Any]) -> dict[str, Any]:
         "entrypoint": artifacts.get("entrypoint", "experiment.py"),
         "project_dir": artifacts.get("project_dir", "generated_project"),
         "generated_files": files[:30],
+    }
+
+
+def _compact_code_task_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    metric_contract = contract.get("metric_contract") if isinstance(contract.get("metric_contract"), dict) else {}
+    artifact_contract = contract.get("artifact_contract") if isinstance(contract.get("artifact_contract"), dict) else {}
+    evidence_plan = contract.get("evidence_plan") if isinstance(contract.get("evidence_plan"), dict) else {}
+    return {
+        "schema_version": contract.get("schema_version", "code_task_contract.v3"),
+        "contract_id": contract.get("contract_id", ""),
+        "version_hash": contract.get("version_hash", ""),
+        "task_kind": contract.get("task_kind", ""),
+        "objective": str(contract.get("objective") or "")[:500],
+        "metric_contract": {
+            "primary_metric": metric_contract.get("primary_metric", ""),
+            "required_metrics": list(metric_contract.get("required_metrics") or [])[:30],
+            "metric_directions": dict(metric_contract.get("metric_directions") or {}),
+        },
+        "artifact_contract": {
+            "required_artifacts": list(artifact_contract.get("required_artifacts") or [])[:30],
+        },
+        "evidence_plan": {
+            "hypotheses": list(evidence_plan.get("hypotheses") or [])[:20],
+            "required_comparisons": list(evidence_plan.get("required_comparisons") or [])[:20],
+        },
     }
 
 

@@ -9,6 +9,7 @@ from simple_ar.code_task.editing.scope import (
     is_edit_allowed_path,
     protected_patterns_from_manifest,
 )
+from simple_ar.code_task.generation.task_contract import load_task_contract
 from simple_ar.code_task.memory import record_review_finding, task_memory_context
 from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
 from simple_ar.code_task.review_pipeline import (
@@ -55,10 +56,11 @@ def review_code_task_changes(
     manifest = load_code_task_manifest(root)
     changed_files = _changed_files(manifest, paths)
     deterministic = _deterministic_findings(root, manifest, changed_files)
+    contract = _contract_from_run(paths)
     review_index = build_review_index(
         paths.workspace_dir,
         result_schema=_result_schema_from_manifest(manifest),
-        contract=_contract_from_run(paths),
+        contract=contract,
     )
     review_clusters = build_review_clusters(
         review_index,
@@ -351,6 +353,9 @@ def _result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 def _contract_from_run(paths: Any) -> dict[str, Any]:
+    contract = load_task_contract(paths.meta_dir)
+    if contract:
+        return contract
     task_text = _read_optional_text(paths.task_dir / "task.md")
     return {
         "objective": task_text[:2000],

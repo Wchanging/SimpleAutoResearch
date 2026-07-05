@@ -845,6 +845,7 @@ def analyze_submission_results(
         project_results=project_results,
         run_dir=run_dir,
         code_src=code_src,
+        task_contract=load_code_task_contract(run_dir),
         fallback_readme=fallback_readme,
         fallback_claims=fallback_claims,
     )
@@ -2346,6 +2347,7 @@ def build_analysis_context(
     project_results: dict[str, Any],
     run_dir: Path,
     code_src: Path | None,
+    task_contract: dict[str, Any] | None = None,
     fallback_readme: str,
     fallback_claims: dict[str, Any],
 ) -> dict[str, Any]:
@@ -2360,6 +2362,7 @@ def build_analysis_context(
         "metric_directions": metric_directions_from_manifest(design.get("metrics") or []),
         "metrics": metrics,
         "project_results": project_results,
+        "task_contract": task_contract or {},
         "existing_writeup": clip_text(extract_project_writeup(run_dir, code_src) or fallback_readme, 16000),
         "run_dir": str(run_dir),
         "benchmark": "arc-bench",
@@ -2494,6 +2497,18 @@ def load_project_results(run_dir: Path, code_src: Path | None) -> dict[str, Any]
                 if isinstance(data, dict):
                     data.setdefault("_artifact_source", str(path))
                     return data
+    return {}
+
+
+def load_code_task_contract(run_dir: Path) -> dict[str, Any]:
+    candidates = [
+        run_dir / "code_task" / "meta" / "task_contract.json",
+        run_dir / "06-code" / "code_task_run" / "code_task" / "meta" / "task_contract.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            data = read_json(path)
+            return data if isinstance(data, dict) else {}
     return {}
 
 

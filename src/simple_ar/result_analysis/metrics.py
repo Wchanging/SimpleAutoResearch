@@ -60,6 +60,14 @@ def build_metric_summary(context: AnalysisContext) -> dict[str, Any]:
 
 def expected_metric_names(context: AnalysisContext) -> list[str]:
     names: list[str] = []
+    contract_metrics = (
+        context.task_contract.get("metric_contract")
+        if isinstance(context.task_contract.get("metric_contract"), dict)
+        else {}
+    )
+    required = contract_metrics.get("required_metrics") if isinstance(contract_metrics, dict) else []
+    if isinstance(required, list):
+        names.extend(str(name) for name in required if str(name).strip())
     for row in context.expected_metrics:
         if isinstance(row, dict) and row.get("name"):
             names.append(str(row["name"]))

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.core.artifacts import write_json, write_text
+from simple_ar.code_task.generation.task_contract import build_greenfield_task_contract, save_task_contract
 from simple_ar.code_task.execution.comparison import normalize_metric_directions
 from simple_ar.code_task.editing.scope import default_edit_scope
 from simple_ar.code_task.execution.environment import build_code_task_environment_policy
@@ -142,7 +143,8 @@ def initialize_code_task(
     task_dir.mkdir(parents=True, exist_ok=True)
     meta_dir.mkdir(parents=True, exist_ok=True)
 
-    write_text(task_dir / "task.md", task_source.read_text(encoding="utf-8", errors="replace"))
+    task_text = task_source.read_text(encoding="utf-8", errors="replace")
+    write_text(task_dir / "task.md", task_text)
     workspace = create_workspace(
         WorkspaceSpec(
             code_root=source_root,
@@ -205,6 +207,24 @@ def initialize_code_task(
             kind=normalized_kind,
         ),
     )
+    if normalized_kind != "greenfield":
+        result_schema = _init_result_schema(primary_metric_value, normalized_metric_directions)
+        save_task_contract(
+            meta_dir,
+            build_greenfield_task_contract(
+                task_text,
+                benchmark_command=benchmark_command or "",
+                max_files=0,
+                max_generated_lines=0,
+                result_schema=result_schema,
+                task_kind=normalized_kind,
+                source={
+                    "kind": "code_task_init",
+                    "task_file": str(task_source),
+                    "origin": "initialize_code_task",
+                },
+            ),
+        )
 
     return CodeTaskInitResult(
         kind=normalized_kind,
@@ -310,6 +330,18 @@ def _normalize_kind(value: str) -> str:
     if kind == "existing_project":
         return kind
     raise ValueError("code-task kind must be existing_project or greenfield")
+
+
+def _init_result_schema(primary_metric: str, metric_directions: dict[str, str]) -> dict[str, Any]:
+    primary = (primary_metric or "").strip() or "score"
+    required = [primary]
+    required.extend(str(name) for name in metric_directions if str(name).strip() and str(name) not in required)
+    return {
+        "schema_version": "code_task_result_schema.v1",
+        "primary_metric": primary,
+        "required_metrics": required,
+        "metric_directions": dict(metric_directions),
+    }
 
 
 def _utcnow_iso() -> str:

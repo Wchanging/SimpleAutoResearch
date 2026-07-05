@@ -52,6 +52,7 @@ class AnalysisContext(_Model):
     metric_directions: dict[str, MetricDirection] = Field(default_factory=dict)
     metrics: dict[str, float] = Field(default_factory=dict)
     project_results: dict[str, Any] = Field(default_factory=dict)
+    task_contract: dict[str, Any] = Field(default_factory=dict)
     existing_writeup: str = ""
     artifacts: dict[str, str] = Field(default_factory=dict)
     run_dir: str = ""

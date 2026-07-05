@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from pathlib import Path
 from typing import Any, Mapping
 
+from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.code_task.generation.common import string_list
 
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|\[[ xX]\])\s+(?P<text>.+?)\s*$")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.+?)\s*$")
+CANONICAL_CONTRACT_SCHEMA_VERSION = "code_task_contract.v3"
+LEGACY_GREENFIELD_CONTRACT_SCHEMA_VERSION = "code_task_greenfield_contract.v2"
+TASK_CONTRACT_FILENAME = "task_contract.json"
+TASK_CONTRACT_COVERAGE_FILENAME = "task_contract_coverage.json"
 
 
 def build_greenfield_task_contract(
@@ -17,6 +25,9 @@ def build_greenfield_task_contract(
     max_files: int,
     max_generated_lines: int,
     result_schema: Mapping[str, Any],
+    task_kind: str = "greenfield",
+    source: Mapping[str, Any] | None = None,
+    extra_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a generic implementation contract from a code-task request.
 
@@ -34,17 +45,44 @@ def build_greenfield_task_contract(
     data_requirements = _filter_by_keywords(requirements, _DATA_KEYWORDS)
     dependency_hints = _filter_by_keywords(requirements, _DEPENDENCY_KEYWORDS)
     required_metrics = _dedupe(_required_metrics(result_schema) + _required_metrics_from_requirements(requirements))
+    source_data = dict(source or {})
+    extra = dict(extra_contract or {})
+    extra_requirements = string_list(extra.get("explicit_requirements"), limit=80)
+    extra_deliverables = string_list(extra.get("deliverables"), limit=40)
+    extra_constraints = string_list(extra.get("constraints"), limit=40)
+    extra_success = string_list(extra.get("success_criteria"), limit=60)
+    extra_metrics = string_list(extra.get("required_metrics"), limit=60)
+    if extra_requirements:
+        requirements = _dedupe(requirements + extra_requirements)
+        deliverables = _filter_by_keywords(requirements, _DELIVERABLE_KEYWORDS)
+        constraints = _filter_by_keywords(requirements, _CONSTRAINT_KEYWORDS)
+        evaluation_focus = _filter_by_keywords(requirements, _EVALUATION_KEYWORDS)
+        data_requirements = _filter_by_keywords(requirements, _DATA_KEYWORDS)
+        dependency_hints = _filter_by_keywords(requirements, _DEPENDENCY_KEYWORDS)
+    if extra_deliverables:
+        deliverables = _dedupe(deliverables + extra_deliverables)
+    if extra_constraints:
+        constraints = _dedupe(constraints + extra_constraints)
+    if extra_metrics:
+        required_metrics = _dedupe(required_metrics + extra_metrics)
     evidence_plan = _build_evidence_plan(
         requirements=requirements,
         required_metrics=required_metrics,
         result_schema=result_schema,
     )
+    if isinstance(extra.get("evidence_plan"), Mapping):
+        evidence_plan = _merge_evidence_plan(evidence_plan, extra["evidence_plan"])
+    normalized_kind = str(task_kind or "greenfield").strip().lower().replace("-", "_")
     success_criteria = [
-        "Generated project lives under code_task/workspace/generated_project.",
         f"The configured benchmark command exits with status 0 exactly as written: `{benchmark_command}`.",
-        "The entrypoint prints parseable metric lines when metrics are requested.",
         "No network access or destructive filesystem behavior is required.",
     ]
+    if normalized_kind == "greenfield":
+        success_criteria.insert(0, "Generated project lives under code_task/workspace/generated_project.")
+        success_criteria.append("The entrypoint prints parseable metric lines when metrics are requested.")
+    else:
+        success_criteria.insert(0, "Code changes stay within the configured editable workspace and edit scope.")
+        success_criteria.append("Patched code preserves existing public APIs unless the task explicitly requires a change.")
     for metric in required_metrics[:20]:
         success_criteria.append(f"Required metric `{metric}` is produced from measured project outputs, not a default fill value.")
     for item in deliverables[:12]:
@@ -53,14 +91,18 @@ def build_greenfield_task_contract(
         success_criteria.append(f"Evaluation requirement is addressed: {item}")
     for item in evidence_plan.get("hypotheses", [])[:12]:
         success_criteria.append(f"Hypothesis evidence is captured and reported: {item}")
-    return {
-        "schema_version": "code_task_greenfield_contract.v2",
-        "contract_id": "code-task-greenfield",
-        "task_kind": "greenfield",
+    success_criteria = _dedupe(success_criteria + extra_success)
+    contract_id = str(extra.get("contract_id") or source_data.get("contract_id") or f"code-task-{normalized_kind}").strip()
+    contract = {
+        "schema_version": CANONICAL_CONTRACT_SCHEMA_VERSION,
+        "legacy_schema_version": LEGACY_GREENFIELD_CONTRACT_SCHEMA_VERSION,
+        "contract_id": contract_id or f"code-task-{normalized_kind}",
+        "source": _contract_source(source_data),
+        "task_kind": normalized_kind,
         "objective": objective,
         "task": task_text,
         "benchmark_command": benchmark_command,
-        "success_criteria": _dedupe(success_criteria)[:40],
+        "success_criteria": success_criteria[:60],
         "explicit_requirements": requirements,
         "deliverables": deliverables,
         "constraints": constraints,
@@ -79,6 +121,133 @@ def build_greenfield_task_contract(
             "max_generated_lines": max_generated_lines,
             "files_per_batch": 4,
         },
+    }
+    if isinstance(extra.get("artifact_contract"), Mapping):
+        contract["artifact_contract"] = dict(extra["artifact_contract"])
+    else:
+        contract["artifact_contract"] = _artifact_contract_from_evidence(evidence_plan)
+    if isinstance(extra.get("claim_specs"), list):
+        contract["claim_specs"] = [dict(row) for row in extra["claim_specs"] if isinstance(row, Mapping)]
+    else:
+        contract["claim_specs"] = []
+    return finalize_task_contract(contract)
+
+
+def finalize_task_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a task contract and attach stable canonical metadata."""
+
+    data = dict(contract)
+    data["schema_version"] = CANONICAL_CONTRACT_SCHEMA_VERSION
+    data.setdefault("contract_id", "code-task")
+    data.setdefault("source", _contract_source({}))
+    for key in (
+        "success_criteria",
+        "explicit_requirements",
+        "deliverables",
+        "constraints",
+        "evaluation_focus",
+        "data_requirements",
+        "dependency_hints",
+    ):
+        data[key] = string_list(data.get(key), limit=120)
+    if not isinstance(data.get("metric_contract"), Mapping):
+        data["metric_contract"] = {}
+    if not isinstance(data.get("evidence_plan"), Mapping):
+        data["evidence_plan"] = {}
+    if not isinstance(data.get("artifact_contract"), Mapping):
+        data["artifact_contract"] = _artifact_contract_from_evidence(data["evidence_plan"])
+    if not isinstance(data.get("generation_plan"), Mapping):
+        data["generation_plan"] = {}
+    if not isinstance(data.get("claim_specs"), list):
+        data["claim_specs"] = []
+    data["version_hash"] = task_contract_hash(data)
+    return data
+
+
+def save_task_contract(meta_dir: Path, contract: Mapping[str, Any]) -> Path:
+    """Persist the canonical code-task contract under ``code_task/meta``."""
+
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    final = finalize_task_contract(contract)
+    path = meta_dir / TASK_CONTRACT_FILENAME
+    write_json(path, final)
+    write_json(meta_dir / TASK_CONTRACT_COVERAGE_FILENAME, contract_coverage(final))
+    return path
+
+
+def load_task_contract(meta_dir: Path) -> dict[str, Any]:
+    """Load the canonical contract when present, returning an empty dict otherwise."""
+
+    path = meta_dir / TASK_CONTRACT_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        data = read_json(path)
+    except Exception:
+        return {}
+    return finalize_task_contract(data) if isinstance(data, Mapping) else {}
+
+
+def task_contract_hash(contract: Mapping[str, Any]) -> str:
+    """Return a stable hash for contract content excluding derived metadata."""
+
+    normalized = {
+        str(key): value
+        for key, value in contract.items()
+        if key not in {"version_hash", "coverage", "derived_views"}
+    }
+    raw = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def contract_coverage(contract: Mapping[str, Any], derived: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return deterministic coverage metadata for the canonical contract.
+
+    The check is intentionally lightweight. It does not judge scientific
+    correctness; it exposes whether hard contract surfaces exist and whether a
+    derived plan can be tied back to the same contract version.
+    """
+
+    derived_data = dict(derived or {})
+    required_metrics = string_list(
+        (contract.get("metric_contract") or {}).get("required_metrics")
+        if isinstance(contract.get("metric_contract"), Mapping)
+        else [],
+        limit=80,
+    )
+    required_artifacts = string_list(
+        (contract.get("artifact_contract") or {}).get("required_artifacts")
+        if isinstance(contract.get("artifact_contract"), Mapping)
+        else [],
+        limit=80,
+    )
+    required_evidence = []
+    evidence = contract.get("evidence_plan")
+    if isinstance(evidence, Mapping):
+        for key in ("hypotheses", "required_conditions", "required_datasets", "required_comparisons"):
+            required_evidence.extend(f"{key}: {item}" for item in string_list(evidence.get(key), limit=40))
+    omitted: list[str] = []
+    if derived_data:
+        text = json.dumps(derived_data, ensure_ascii=False, default=str).lower()
+        for metric in required_metrics:
+            if metric.lower() not in text:
+                omitted.append(f"metric:{metric}")
+        for artifact in required_artifacts:
+            probe = artifact.split()[-1].strip("`'\"") if artifact else ""
+            if probe and probe.lower() not in text:
+                omitted.append(f"artifact:{artifact[:120]}")
+    return {
+        "schema_version": "code_task_contract_coverage.v1",
+        "contract_id": contract.get("contract_id", ""),
+        "version_hash": contract.get("version_hash") or task_contract_hash(contract),
+        "requirement_count": len(string_list(contract.get("explicit_requirements"), limit=200)),
+        "success_criteria_count": len(string_list(contract.get("success_criteria"), limit=200)),
+        "required_metric_count": len(required_metrics),
+        "required_artifact_count": len(required_artifacts),
+        "required_evidence_count": len(required_evidence),
+        "derived_view_checked": bool(derived_data),
+        "omitted_contract_items": omitted[:80],
+        "status": "warning" if omitted else "passed",
     }
 
 
@@ -100,7 +269,7 @@ def contract_prompt_view(
 
     task_text = str(contract.get("task") or "")
     return {
-        "schema_version": contract.get("schema_version", "code_task_greenfield_contract.v2"),
+        "schema_version": contract.get("schema_version", CANONICAL_CONTRACT_SCHEMA_VERSION),
         "contract_id": contract.get("contract_id", ""),
         "task_kind": contract.get("task_kind", ""),
         "objective": contract.get("objective", ""),
@@ -263,6 +432,49 @@ def _build_evidence_plan(
         ],
         "primary_metric": result_schema.get("primary_metric", ""),
     }
+
+
+def _merge_evidence_plan(base: Mapping[str, Any], extra: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key in (
+        "hypotheses",
+        "required_conditions",
+        "required_datasets",
+        "required_metrics",
+        "required_artifacts",
+        "required_comparisons",
+        "record_granularity",
+        "claim_policy",
+    ):
+        result[key] = _dedupe(string_list(base.get(key), limit=120) + string_list(extra.get(key), limit=120))
+    for key, value in extra.items():
+        if key not in result and value not in (None, "", [], {}):
+            result[key] = value
+    return result
+
+
+def _artifact_contract_from_evidence(evidence_plan: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "code_task_artifact_contract.v1",
+        "required_artifacts": string_list(evidence_plan.get("required_artifacts"), limit=80),
+        "required_comparisons": string_list(evidence_plan.get("required_comparisons"), limit=80),
+        "hypotheses": string_list(evidence_plan.get("hypotheses"), limit=40),
+        "claim_policy": string_list(evidence_plan.get("claim_policy"), limit=20),
+    }
+
+
+def _contract_source(value: Mapping[str, Any]) -> dict[str, Any]:
+    kind = str(value.get("kind") or value.get("source_kind") or "user_task").strip() or "user_task"
+    result = {
+        "kind": kind,
+        "task_file": str(value.get("task_file") or ""),
+        "origin": str(value.get("origin") or ""),
+        "contract_id": str(value.get("contract_id") or ""),
+    }
+    artifacts = value.get("artifacts")
+    if isinstance(artifacts, list):
+        result["artifacts"] = [str(item) for item in artifacts if str(item).strip()][:40]
+    return result
 
 
 def _first_meaningful_line(text: str) -> str:
