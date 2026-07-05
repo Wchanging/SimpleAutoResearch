@@ -15,6 +15,7 @@ import shutil
 import py_compile
 import re
 import sys
+import ast
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Mapping
@@ -31,6 +32,7 @@ from simple_ar.agent_backends import (
 from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import (
     dependency_context,
+    find_local_api_mismatches,
     find_return_contract_mismatches,
     public_api,
     public_api_from_source,
@@ -142,7 +144,18 @@ def repair_generated_project_from_review(
         snapshot=snapshot,
     )
 
-    if client is not None:
+    _repair_missing_local_api_aliases(
+        project_dir,
+        review_report=review_report,
+        changed=changed,
+        notes=summary["notes"],
+        unresolved=unresolved,
+        snapshot=snapshot,
+    )
+
+    _repair_missing_static_artifacts(project_dir, review_report, changed, summary["notes"], snapshot=snapshot)
+
+    if client is not None and _review_needs_llm_repair(project_dir, review_report):
         regenerated = _regenerate_review_failed_files(
             project_dir=project_dir,
             review_report=review_report,
@@ -160,8 +173,6 @@ def repair_generated_project_from_review(
         )
         if regenerated:
             summary["regenerated_files"] = regenerated
-
-    _repair_missing_static_artifacts(project_dir, review_report, changed, summary["notes"], snapshot=snapshot)
 
     summary["changed_files"] = changed
     summary["unresolved_errors"] = unresolved
@@ -589,6 +600,132 @@ def _repair_fallback_support_modules(
     if "generated_experiment/resources.py" not in changed:
         changed.append("generated_experiment/resources.py")
     notes.append("Generated a deterministic generic resources.py support module.")
+
+
+def _repair_missing_local_api_aliases(
+    project_dir: Path,
+    *,
+    review_report: Mapping[str, Any],
+    changed: list[str],
+    notes: list[str],
+    unresolved: list[str],
+    snapshot: FileSnapshotSet | None = None,
+) -> None:
+    """Patch objective local API alias gaps without another LLM call.
+
+    A common generated-project failure mode is: one file imports
+    ``module.public_name`` while the target module contains the implementation
+    as ``_public_name``. When this exact shape is present, adding a public alias
+    is safer and cheaper than asking the model to guess an old/new edit block.
+    """
+
+    for item in _review_findings(review_report):
+        if str(item.get("category", "")).strip() != "missing_local_api":
+            continue
+        for module_name, missing_symbol in _missing_local_api_refs(item):
+            rel_path = _module_name_to_path(module_name)
+            if not rel_path:
+                continue
+            target = project_dir / rel_path
+            if not target.is_file() or target.suffix != ".py":
+                continue
+            try:
+                source = target.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                unresolved.append(f"{rel_path}: could not read target module for API alias repair: {exc}")
+                continue
+            names = _top_level_names(source)
+            if missing_symbol in names:
+                continue
+            private_symbol = f"_{missing_symbol}"
+            if private_symbol not in names:
+                continue
+            alias_line = f"{missing_symbol} = {private_symbol}"
+            if alias_line in source:
+                continue
+            if snapshot is not None:
+                snapshot.capture(rel_path)
+            repaired = source.rstrip() + (
+                "\n\n# Public alias added by review repair for cross-file generated-code compatibility.\n"
+                f"{alias_line}\n"
+            )
+            target.write_text(repaired, encoding="utf-8")
+            error = _compile_error(target)
+            if error:
+                _restore_repair_target(target, source, True, snapshot=snapshot, rel_path=rel_path)
+                unresolved.append(f"{rel_path}: local API alias repair failed to compile: {error}")
+                continue
+            if rel_path not in changed:
+                changed.append(rel_path)
+            notes.append(f"Added deterministic public alias `{missing_symbol}` for `{private_symbol}` in {rel_path}.")
+
+
+def _review_needs_llm_repair(project_dir: Path, review_report: Mapping[str, Any]) -> bool:
+    """Return whether unresolved blocking findings still need model repair."""
+
+    local_api_remaining = find_local_api_mismatches(project_dir)
+    for item in _review_findings(review_report):
+        severity = str(item.get("severity", "blocking")).strip() or "blocking"
+        category = str(item.get("category", "")).strip()
+        if severity != "blocking":
+            continue
+        if category == "missing_local_api" and not local_api_remaining:
+            continue
+        if category == "missing_entrypoint" and (project_dir / "main.py").is_file():
+            continue
+        if category == "missing_required_artifact":
+            summary = str(item.get("summary", "")).lower()
+            if "readme" in summary and (project_dir / "README.md").is_file():
+                continue
+        return True
+    return False
+
+
+def _missing_local_api_refs(item: Mapping[str, Any]) -> list[tuple[str, str]]:
+    text = " ".join(
+        str(value)
+        for value in (
+            item.get("summary", ""),
+            item.get("recommendation", ""),
+            " ".join(str(row) for row in item.get("evidence", []) if isinstance(row, str))
+            if isinstance(item.get("evidence"), list)
+            else "",
+        )
+    )
+    refs: list[tuple[str, str]] = []
+    for match in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.([A-Za-z_][A-Za-z0-9_]*)`", text):
+        module_name = match.group(1)
+        symbol = match.group(2)
+        if module_name and symbol:
+            refs.append((module_name, symbol))
+    return list(dict.fromkeys(refs))
+
+
+def _module_name_to_path(module_name: str) -> str:
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$", module_name):
+        return ""
+    return module_name.replace(".", "/") + ".py"
+
+
+def _top_level_names(source: str) -> set[str]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            names.update(_assignment_names(node))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(alias.asname or alias.name.split(".")[-1] for alias in node.names if alias.name != "*")
+    return names
+
+
+def _assignment_names(node: ast.Assign | ast.AnnAssign) -> list[str]:
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    return [target.id for target in targets if isinstance(target, ast.Name)]
 
 
 def _review_repair_target_paths(

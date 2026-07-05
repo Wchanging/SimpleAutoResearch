@@ -16,6 +16,10 @@ This file records user-visible project changes in reverse chronological order. P
   into repair context and reruns deterministic project review after each run
   repair before rerunning the benchmark. This catches producer/consumer drift
   introduced by a repair without adding a default LLM review call.
+- Generated-project review repair now applies a deterministic local-API alias
+  fix before asking the LLM. If one generated file imports `module.symbol` and
+  the target module already contains `_symbol`, the repair adds a public alias
+  and rechecks the project instead of relying on brittle old/new string edits.
 
 ## 2026-07-04
 

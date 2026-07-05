@@ -412,6 +412,79 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("def detect_resources", content)
             self.assertIn("def select_profile", content)
 
+    def test_greenfield_review_repair_adds_private_helper_alias_without_llm(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "generated_project"
+            project.mkdir(parents=True)
+            write_text(
+                project / "strategy_core.py",
+                (
+                    "from __future__ import annotations\n\n"
+                    "def _normalize_strategy_name(strategy: str) -> str:\n"
+                    "    return {'random_sampling': 'random'}.get(strategy, strategy)\n"
+                ),
+            )
+            write_text(
+                project / "active_loop.py",
+                (
+                    "from __future__ import annotations\n\n"
+                    "from strategy_core import normalize_strategy_name\n\n"
+                    "def run(strategy: str) -> str:\n"
+                    "    return normalize_strategy_name(strategy)\n"
+                ),
+            )
+            artifacts = {
+                "generated_files": [
+                    {"path": "strategy_core.py", "mode": "llm", "line_count": 4},
+                    {"path": "active_loop.py", "mode": "llm", "line_count": 6},
+                ]
+            }
+            review = review_generated_project(
+                project_dir=project,
+                code_artifacts=artifacts,
+                result_schema={},
+                resource_plan={},
+                contract={},
+                dependency_advice={},
+                architecture_plan={"files": []},
+                client=None,
+                use_llm=False,
+            )
+            categories = {item["category"] for item in review["findings"]}
+            self.assertIn("missing_local_api", categories)
+
+            class NoCallClient:
+                def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                    raise AssertionError("review repair should not call the LLM for deterministic alias repair")
+
+            repair = repair_generated_project_from_review(
+                project_dir=project,
+                review_report=review,
+                output_path=root / "review_repair.json",
+                code_artifacts=artifacts,
+                client=NoCallClient(),  # type: ignore[arg-type]
+            )
+
+            self.assertEqual(repair["status"], "patched")
+            self.assertIn("strategy_core.py", repair["changed_files"])
+            content = read_text(project / "strategy_core.py")
+            self.assertIn("normalize_strategy_name = _normalize_strategy_name", content)
+            rereview = review_generated_project(
+                project_dir=project,
+                code_artifacts=artifacts,
+                result_schema={},
+                resource_plan={},
+                contract={},
+                dependency_advice={},
+                architecture_plan={"files": []},
+                client=None,
+                use_llm=False,
+            )
+            categories = {item["category"] for item in rereview["findings"]}
+            self.assertNotIn("missing_local_api", categories)
+
     def test_init_copies_workspace_and_indexes_python_ast(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

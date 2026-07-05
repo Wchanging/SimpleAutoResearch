@@ -4,6 +4,14 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-07-05
+
+### Changed
+
+- Greenfield review 新增轻量级跨文件 return-contract 检查，可阻断“某个生成函数返回聚合 mapping，但另一个文件仍按 record sequence 消费”的 producer/consumer 漂移。
+- Generated-project run repair 现在会把 return-contract mismatch 证据注入 repair context，并在每轮 run repair 后先重跑确定性项目 review，再进入 benchmark rerun，避免 repair 修好一个运行错误却引入新的跨文件契约问题。
+- Generated-project review repair 现在会在调用 LLM 之前执行确定性的 local-API alias 修复：如果一个文件导入 `module.symbol`，而目标模块里已经存在 `_symbol` 私有实现，则自动补公共 alias 并复查项目，减少脆弱的 old/new 字符串修复失败。
+
 ## 2026-07-04
 
 ### Changed
