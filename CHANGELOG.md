@@ -31,6 +31,10 @@ This file records user-visible project changes in reverse chronological order. P
 - Benchmark stderr streaming now suppresses repeated warning floods in the
   live console after the first few occurrences while preserving full stdout and
   stderr artifacts for diagnosis and repair.
+- Generated-project run repair now rejects unapproved public API signature
+  drift during structured actions and whole-file rewrites, reducing the chance
+  that a later repair fixes one runtime error while silently breaking an
+  existing producer/consumer contract.
 
 ## 2026-07-03
 

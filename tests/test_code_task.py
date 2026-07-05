@@ -1056,6 +1056,54 @@ primary_metric = "accuracy"
             self.assertTrue(Path(repair["snapshot"]["manifest"]).is_file())
             self.assertFalse((root / "run_repair_backups").exists())
 
+    def test_greenfield_run_repair_rejects_unapproved_public_api_drift(self) -> None:
+        class FakeClient:
+            def ask_json(self, _system: str, _prompt: str, *, label: str = "") -> dict[str, object]:
+                if label == "greenfield-run-repair-plan":
+                    return {
+                        "diagnosis": "The artifact path producer/consumer contract is mismatched.",
+                        "root_cause": "config.get_artifact_paths contract drifted.",
+                        "target_files": [{"path": "config.py"}],
+                        "repair_scope": "file",
+                        "repair_strategy": "Rewrite config.",
+                    }
+                return {
+                    "summary": "Rewrite config but accidentally change the public return contract.",
+                    "content": (
+                        "from __future__ import annotations\n\n"
+                        "from pathlib import Path\n"
+                        "from typing import Tuple\n\n"
+                        "def get_artifact_paths() -> Tuple[Path, Path]:\n"
+                        "    return Path('artifacts/results.json'), Path('artifacts/report.md')\n"
+                    ),
+                }
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project_dir = root / "generated_project"
+            project_dir.mkdir(parents=True)
+            original = (
+                "from __future__ import annotations\n\n"
+                "from pathlib import Path\n\n"
+                "def get_artifact_paths() -> dict[str, Path]:\n"
+                "    return {'results': Path('artifacts/results.json'), 'report': Path('artifacts/report.md')}\n"
+            )
+            write_text(project_dir / "config.py", original)
+
+            repair = repair_generated_project_from_run_failure(
+                project_dir=project_dir,
+                failure_analysis={"status": "needs_repair", "implicated_files": ["generated_project/config.py"]},
+                stderr_text='TypeError: tuple indices must be integers or slices, not str; paths["results"]',
+                output_path=root / "run_repair_api_drift.json",
+                code_artifacts={"generated_files": [{"path": "config.py", "mode": "llm"}]},
+                client=FakeClient(),
+            )
+
+            self.assertNotEqual(repair["status"], "patched")
+            self.assertIn("public_api_signature_would_change", "\n".join(repair["unresolved_errors"]))
+            self.assertEqual((project_dir / "config.py").read_text(encoding="utf-8"), original)
+
     def test_greenfield_review_flags_stdlib_shadow_and_nested_artifact_path(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

@@ -281,6 +281,15 @@ def _apply_llm_file_repair_response(
                     rel_path=rel_path,
                 )
                 unresolved.append(f"{rel_path}: action repair rejected: {guard_error}")
+            elif api_error := _public_api_change_guard(action_result=action_result, response=response):
+                _restore_repair_target(
+                    target,
+                    previous_content,
+                    previous_exists,
+                    snapshot=snapshot,
+                    rel_path=rel_path,
+                )
+                unresolved.append(f"{rel_path}: action repair rejected: {api_error}")
             else:
                 if rel_path not in changed:
                     changed.append(rel_path)
@@ -443,16 +452,54 @@ def _whole_file_rewrite_guard(
     del tree
     if before_api:
         # Avoid writing to disk just to inspect API: parse definitions directly.
-        after_api_names = _public_api_names_from_source(content)
+        after_api = public_api_from_source(content)
+        after_api_names = {_api_name_from_signature(item) for item in after_api if _api_name_from_signature(item)}
         before_names = {_api_name_from_signature(item) for item in before_api if isinstance(item, str)}
         before_names.discard("")
         if before_names and not after_api_names:
             return "public_api_would_be_removed"
         lost = sorted(name for name in before_names if name not in after_api_names)
         allow_break = bool(response.get("allow_api_breaking_change"))
-        if lost and not allow_break and len(lost) == len(before_names):
-            return "all_existing_public_api_would_be_removed"
+        if not allow_break and _public_api_contract_breaks(before_api, after_api):
+            return "public_api_signature_would_change"
+        if lost and not allow_break:
+            return "existing_public_api_would_be_removed"
     return ""
+
+
+def _public_api_change_guard(*, action_result: Mapping[str, Any], response: Mapping[str, Any]) -> str:
+    if response.get("allow_api_breaking_change"):
+        return ""
+    applied = action_result.get("applied_actions")
+    rows = [row for row in applied if isinstance(row, Mapping)] if isinstance(applied, list) else []
+    for row in rows:
+        before = row.get("before_public_api")
+        after = row.get("after_public_api")
+        before_api = [str(item) for item in before] if isinstance(before, list) else []
+        after_api = [str(item) for item in after] if isinstance(after, list) else []
+        if _public_api_contract_breaks(before_api, after_api):
+            return "public_api_signature_would_change"
+    return ""
+
+
+def _public_api_contract_breaks(before_api: list[str], after_api: list[str]) -> bool:
+    before_map = _public_api_map(before_api)
+    after_map = _public_api_map(after_api)
+    for name, signature in before_map.items():
+        if name not in after_map:
+            return True
+        if after_map[name] != signature:
+            return True
+    return False
+
+
+def _public_api_map(rows: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in rows:
+        name = _api_name_from_signature(str(item))
+        if name and name not in result:
+            result[name] = str(item)
+    return result
 
 
 def _post_write_static_guard(*, target: Path, rel_path: str) -> str:
@@ -641,6 +688,8 @@ def _review_file_repair_prompt(
         "- `rewrite_file` actions must include the complete replacement file text in `content`.\n"
         "- `add_file` actions must include the complete new file text in `content`.\n"
         "- Use `rewrite_file` or top-level `content` only when the file-level contract is structurally wrong.\n"
+        "- Public API signatures are preserved by default. If the root cause truly requires an API break, set "
+        "`allow_api_breaking_change: true` and explain which producer/consumer files are covered by the repair.\n"
         "- If you choose a broad rewrite, explain why a smaller repair is insufficient in `summary`.\n\n"
         "Hard rules:\n"
         "- Return JSON only; do not use markdown fences.\n"
@@ -1907,7 +1956,8 @@ def _run_file_repair_prompt(
         "- Use `replace_block` with unique `old_string`/`new_string` for call-site, field, import, or return-shape fixes.\n"
         "- Use `rewrite_function` with `function_name` and `new_source` for one-function repairs.\n"
         "- Use `rewrite_file` or top-level `content` only when the file's whole responsibility or public API must change.\n"
-        "- If changing a public API, make the repair plan include producer and consumer files; otherwise preserve it.\n\n"
+        "- Public API signatures are preserved by default. If changing one is truly required, set "
+        "`allow_api_breaking_change: true` and make the repair plan include producer and consumer files; otherwise preserve it.\n\n"
         "Hard rules:\n"
         "- Return JSON only; do not use markdown fences.\n"
         "- Every action must include `action`, `path`, `rationale`, and the required action fields.\n"
