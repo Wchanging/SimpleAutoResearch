@@ -14,7 +14,11 @@ from simple_ar.code_task.generation.common import safe_relative_path
 from simple_ar.code_task.generation.file_specs import infer_file_kind, is_runtime_placeholder
 from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
 from simple_ar.code_task.analysis.entrypoints import analyze_entrypoint_debuggability
-from simple_ar.code_task.analysis.interfaces import find_local_api_mismatches, project_api_contract
+from simple_ar.code_task.analysis.interfaces import (
+    find_local_api_mismatches,
+    find_return_contract_mismatches,
+    project_api_contract,
+)
 from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.analysis.resource_static import resource_review_findings
 from simple_ar.code_task.review_pipeline import (
@@ -25,7 +29,7 @@ from simple_ar.code_task.review_pipeline import (
 )
 
 
-GREENFIELD_REVIEW_CONTRACT_VERSION = 8
+GREENFIELD_REVIEW_CONTRACT_VERSION = 9
 _STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
     "types",
     "typing",
@@ -238,6 +242,7 @@ def _deterministic_findings(
     for item in _entrypoint_debuggability_findings(project_dir):
         findings.append(item)
     findings.extend(_interface_contract_findings(project_dir, architecture_plan=architecture_plan))
+    findings.extend(_return_contract_findings(project_dir))
     findings.extend(_semantic_scaffold_findings(project_dir, contract=contract, result_schema=result_schema))
     findings.extend(_scientific_contract_findings(project_dir, contract=contract))
     findings.extend(_task_acceptance_findings(project_dir, contract=contract, dependency_advice=dependency_advice))
@@ -415,6 +420,27 @@ def _semantic_scaffold_findings(
             )
         if len(findings) >= 8:
             break
+    return findings
+
+
+def _return_contract_findings(project_dir: Path) -> list[ReviewFinding]:
+    findings: list[ReviewFinding] = []
+    for row in find_return_contract_mismatches(project_dir)[:8]:
+        findings.append(
+            _finding(
+                "blocking",
+                "return_contract_mismatch",
+                (
+                    f"`{row.get('caller')}` passes `{row.get('variable')}` from `{row.get('producer')}` "
+                    f"({row.get('producer_kind')}) into `{row.get('consumer')}`, which expects "
+                    f"{row.get('consumer_expected_kind')}."
+                ),
+                recommendation=(
+                    "Align the producer and consumer data contract before execution: either return the expected "
+                    "record sequence from the producer, or update the consumer/call site to accept the aggregate mapping."
+                ),
+            )
+        )
     return findings
 
 

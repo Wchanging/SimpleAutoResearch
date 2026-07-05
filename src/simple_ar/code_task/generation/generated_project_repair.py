@@ -29,7 +29,12 @@ from simple_ar.agent_backends import (
     validate_agent_mode_for_provider,
 )
 from simple_ar.core.artifacts import write_json
-from simple_ar.code_task.analysis.interfaces import dependency_context, public_api, public_api_from_source
+from simple_ar.code_task.analysis.interfaces import (
+    dependency_context,
+    find_return_contract_mismatches,
+    public_api,
+    public_api_from_source,
+)
 from simple_ar.code_task.analysis.entrypoints import source_suppresses_entrypoint_traceback
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
@@ -1358,6 +1363,7 @@ def _run_repair_context(
         "failure_graph": _compact_failure_graph_for_repair(failure_analysis),
         "heuristic_targets": heuristic_targets,
         "review_index": _generated_review_index(project_dir, result_schema=result_schema, contract=contract),
+        "return_contract_mismatches": find_return_contract_mismatches(project_dir),
         "candidate_files": [
             _candidate_file_context(project_dir, path)
             for path in candidate_paths

@@ -1109,6 +1109,34 @@ def _execute_greenfield_code_task(
             )
             if not repaired:
                 return _result(paths, steps, "benchmark_failed", "Review code_task/run/patched/ for generated project failure.")
+            review = _rerun_greenfield_review(
+                root,
+                paths,
+                max_files=max_files,
+                max_generated_lines=max_generated_lines,
+            )
+            _record(steps, "review", "done", f"post-run-repair status {review.get('status', 'unknown')}")
+            if isinstance(review, dict) and review.get("status") == "failed":
+                if not _attempt_greenfield_review_repair(
+                    root,
+                    paths,
+                    steps,
+                    model=model,
+                    reviewer_model=reviewer_model or model,
+                    repair_model=repair_model or model,
+                    use_llm=use_llm,
+                    repair_rounds=repair_rounds,
+                    max_files=max_files,
+                    max_generated_lines=max_generated_lines,
+                    message_callback=message_callback,
+                    summary="Repaired generated project after run repair introduced review-blocking contract issues.",
+                ):
+                    return _result(
+                        paths,
+                        steps,
+                        "review_failed",
+                        "Review code_task/meta/review_report.json after generated project run repair.",
+                    )
             _emit(message_callback, "Run repair patched generated project; rerunning static validation.")
             validation = validate_code_task(
                 root,

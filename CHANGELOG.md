@@ -4,6 +4,19 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-07-05
+
+### Changed
+
+- Greenfield review now includes a lightweight cross-file return-contract
+  check. It can block cases where one generated function returns an aggregate
+  mapping while another file still passes that value into a consumer annotated
+  for a sequence of records.
+- Generated-project run repair now injects return-contract mismatch evidence
+  into repair context and reruns deterministic project review after each run
+  repair before rerunning the benchmark. This catches producer/consumer drift
+  introduced by a repair without adding a default LLM review call.
+
 ## 2026-07-04
 
 ### Changed

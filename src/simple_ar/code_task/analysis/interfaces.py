@@ -223,6 +223,239 @@ def find_local_api_mismatches(
     ]
 
 
+def find_return_contract_mismatches(project_dir: Path) -> list[dict[str, Any]]:
+    """Find simple cross-function return/argument shape mismatches.
+
+    This is intentionally lightweight static analysis, not a type checker. It
+    catches a common generated-code failure mode where one file changes a
+    producer from returning a sequence of records to returning an aggregate
+    mapping, while another file still passes that value to a consumer annotated
+    for ``Sequence[...]`` or ``list[...]``.
+    """
+
+    modules, trees = _project_modules(project_dir)
+    functions = _project_function_contracts(project_dir, trees)
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, str, str]] = set()
+    for path, tree in trees.items():
+        caller = path.relative_to(project_dir).as_posix()
+        aliases = _import_aliases(_module_name(project_dir, path), tree, modules, path.name == "__init__.py")
+        local_functions = {
+            node.name: f"{_module_name(project_dir, path)}.{node.name}"
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        aliases.update(local_functions)
+        for fn in [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            variable_kinds: dict[str, dict[str, str]] = {}
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Assign):
+                    kind = _value_contract_kind(node.value, aliases, functions)
+                    if not kind:
+                        continue
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            variable_kinds[target.id] = kind
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    kind = _value_contract_kind(node.value, aliases, functions) if node.value is not None else {}
+                    if kind:
+                        variable_kinds[node.target.id] = kind
+                elif isinstance(node, ast.Call):
+                    callee_key = _resolve_call_contract(node.func, aliases, functions)
+                    callee = functions.get(callee_key or "")
+                    if not callee:
+                        continue
+                    expected = callee.get("first_param_kind", "")
+                    if expected not in {"sequence", "record_sequence"}:
+                        continue
+                    if not node.args or not isinstance(node.args[0], ast.Name):
+                        continue
+                    actual = variable_kinds.get(node.args[0].id, {})
+                    if actual.get("kind") != "mapping":
+                        continue
+                    key = (caller, getattr(node, "lineno", 0), node.args[0].id, str(callee.get("qualified_name", "")))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    findings.append(
+                        {
+                            "caller": caller,
+                            "line": getattr(node, "lineno", 0),
+                            "variable": node.args[0].id,
+                            "producer": actual.get("producer", ""),
+                            "producer_path": actual.get("path", ""),
+                            "producer_kind": actual.get("kind", ""),
+                            "consumer": callee.get("qualified_name", ""),
+                            "consumer_path": callee.get("path", ""),
+                            "consumer_expected_kind": expected,
+                        }
+                    )
+    return findings[:20]
+
+
+def _project_modules(project_dir: Path) -> tuple[dict[str, tuple[Path, set[str]]], dict[Path, ast.Module]]:
+    modules: dict[str, tuple[Path, set[str]]] = {}
+    trees: dict[Path, ast.Module] = {}
+    for path in sorted(project_dir.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        module = _module_name(project_dir, path)
+        if not module:
+            continue
+        trees[path] = tree
+        modules[module] = (path, _exported_names(tree))
+    return modules, trees
+
+
+def _project_function_contracts(project_dir: Path, trees: Mapping[Path, ast.Module]) -> dict[str, dict[str, str]]:
+    contracts: dict[str, dict[str, str]] = {}
+    for path, tree in trees.items():
+        module = _module_name(project_dir, path)
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            qualified = f"{module}.{node.name}"
+            contracts[qualified] = {
+                "qualified_name": qualified,
+                "path": path.relative_to(project_dir).as_posix(),
+                "return_kind": _function_return_kind(node),
+                "first_param_kind": _first_param_kind(node),
+            }
+    return contracts
+
+
+def _import_aliases(current: str, tree: ast.Module, modules: Mapping[str, tuple[Path, set[str]]], is_package: bool) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in modules:
+                    local = alias.asname or alias.name.split(".")[-1]
+                    aliases[local] = alias.name
+        elif isinstance(node, ast.ImportFrom):
+            base = _resolve_import_module(current, node.module, node.level, is_package)
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                local = alias.asname or alias.name
+                child = f"{base}.{alias.name}" if base else alias.name
+                if child in modules or child in aliases:
+                    aliases[local] = child
+                elif base in modules:
+                    aliases[local] = f"{base}.{alias.name}"
+    return aliases
+
+
+def _function_return_kind(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    annotated = _annotation_kind(node.returns)
+    if annotated:
+        return annotated
+    assigned: dict[str, str] = {}
+    returns: list[str] = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Assign):
+            kind = _literal_kind(child.value)
+            if kind:
+                for target in child.targets:
+                    if isinstance(target, ast.Name):
+                        assigned[target.id] = kind
+        elif isinstance(child, ast.Return) and child.value is not None:
+            if isinstance(child.value, ast.Name) and child.value.id in assigned:
+                returns.append(assigned[child.value.id])
+            else:
+                kind = _literal_kind(child.value)
+                if kind:
+                    returns.append(kind)
+    if returns and all(kind == returns[0] for kind in returns):
+        return returns[0]
+    return ""
+
+
+def _first_param_kind(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    args = list(node.args.args)
+    if args and args[0].arg in {"self", "cls"}:
+        args = args[1:]
+    if not args:
+        return ""
+    return _annotation_kind(args[0].annotation)
+
+
+def _annotation_kind(node: ast.AST | None) -> str:
+    if node is None:
+        return ""
+    try:
+        text = ast.unparse(node).lower()
+    except Exception:
+        return ""
+    if any(marker in text for marker in ("sequence", "list", "tuple", "iterable")):
+        if any(marker in text for marker in ("summary", "record", "row", "trace")):
+            return "record_sequence"
+        return "sequence"
+    if any(marker in text for marker in ("dict", "mapping", "metricbundle")):
+        return "mapping"
+    return ""
+
+
+def _literal_kind(node: ast.AST) -> str:
+    if isinstance(node, ast.Dict):
+        return "mapping"
+    if isinstance(node, (ast.List, ast.ListComp, ast.Tuple)):
+        return "sequence"
+    if isinstance(node, ast.Call):
+        name = _contract_call_name(node.func).lower()
+        if name in {"dict", "defaultdict"} or name.endswith(".dict"):
+            return "mapping"
+        if name in {"list", "tuple"}:
+            return "sequence"
+    return ""
+
+
+def _value_contract_kind(
+    node: ast.AST,
+    aliases: Mapping[str, str],
+    functions: Mapping[str, dict[str, str]],
+) -> dict[str, str]:
+    if isinstance(node, ast.Call):
+        key = _resolve_call_contract(node.func, aliases, functions)
+        contract = functions.get(key or "")
+        if contract and contract.get("return_kind"):
+            return {
+                "kind": str(contract["return_kind"]),
+                "producer": str(contract["qualified_name"]),
+                "path": str(contract["path"]),
+            }
+    kind = _literal_kind(node)
+    return {"kind": kind, "producer": "", "path": ""} if kind else {}
+
+
+def _resolve_call_contract(
+    func: ast.AST,
+    aliases: Mapping[str, str],
+    functions: Mapping[str, dict[str, str]],
+) -> str:
+    name = _contract_call_name(func)
+    if not name:
+        return ""
+    if name in aliases:
+        return aliases[name]
+    if name in functions:
+        return name
+    return aliases.get(name.split(".")[0], "")
+
+
+def _contract_call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _contract_call_name(node.value)
+        return f"{parent}.{node.attr}" if parent else node.attr
+    return ""
+
+
 def _append_mismatch(
     findings: list[dict[str, Any]],
     seen: set[tuple[str, int, str, str]],

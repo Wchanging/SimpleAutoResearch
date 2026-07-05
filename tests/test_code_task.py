@@ -141,6 +141,60 @@ class CodeTaskTests(unittest.TestCase):
             categories = {item.get("category") for item in report.get("findings", [])}
             self.assertNotIn("hidden_label_acquisition_leakage", categories)
 
+    def test_greenfield_review_blocks_return_contract_mismatch(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            write_text(
+                root / "producer.py",
+                (
+                    "from __future__ import annotations\n\n"
+                    "def run_all_experiments(config):\n"
+                    "    bundle = {'seed_summaries': [], 'required_metrics': {}}\n"
+                    "    return bundle\n"
+                ),
+            )
+            write_text(
+                root / "metrics.py",
+                (
+                    "from __future__ import annotations\n\n"
+                    "from typing import Sequence\n\n"
+                    "class SeedSummary:\n"
+                    "    pass\n\n"
+                    "def aggregate_seed_summaries(seed_summaries: Sequence[SeedSummary]):\n"
+                    "    return list(seed_summaries)\n"
+                ),
+            )
+            write_text(
+                root / "main.py",
+                (
+                    "from __future__ import annotations\n\n"
+                    "from producer import run_all_experiments\n"
+                    "from metrics import aggregate_seed_summaries\n\n"
+                    "def main():\n"
+                    "    seed_summaries = run_all_experiments({})\n"
+                    "    return aggregate_seed_summaries(seed_summaries)\n"
+                ),
+            )
+
+            report = review_generated_project(
+                project_dir=root,
+                code_artifacts={
+                    "generated_files": [
+                        {"path": "producer.py", "mode": "llm"},
+                        {"path": "metrics.py", "mode": "llm"},
+                        {"path": "main.py", "mode": "llm"},
+                    ]
+                },
+                result_schema={"primary_metric": "accuracy", "required_metrics": ["accuracy"]},
+                resource_plan={"max_files": 10, "max_generated_lines": 300},
+                contract={"task": "Run an experiment and aggregate seed summaries."},
+                use_llm=False,
+            )
+
+            categories = {item.get("category") for item in report.get("findings", [])}
+            self.assertIn("return_contract_mismatch", categories)
+
     def test_resource_static_flags_loop_heavy_logistic_without_scaling(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
