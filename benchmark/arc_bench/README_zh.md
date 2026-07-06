@@ -302,3 +302,32 @@ uv run python benchmark/arc_bench/adapter.py judge \
   --submission-dir benchmark/arc_bench/submissions/ml/ML02/<run-id>/submission \
   --judge-command "python /path/to/arc_judge.py --submission {submission_dir} --output {output_dir}"
 ```
+
+## 批次指标汇总
+
+跑完一批任务后，可以直接汇总论文表格常用指标，不会重新执行实验、finalize 或 score：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py summarize
+```
+
+默认读取最近一次 batch state，并写出：
+
+```text
+benchmark/arc_bench/batch_state/<batch>.summary.json
+benchmark/arc_bench/batch_state/<batch>.summary.md
+```
+
+汇总内容包括 Code Development、Code Execution、Result Analysis、Overall 的均值，以及平均耗时、各命令耗时、平均 LLM 调用次数、输入 token、输出 token 和总 token。查看历史批次时使用：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py summarize \
+  --state-file benchmark/arc_bench/batch_state/<batch>.json
+```
+
+只汇总一组或几个任务：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py summarize --topic-set quick
+uv run python benchmark/arc_bench/batch_runner.py summarize --topics ML04 ML02
+```

@@ -8,6 +8,12 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- ARC-Bench batch runner now has a `summarize` command that aggregates a batch
+  into paper-style Code Development, Code Execution, Result Analysis, Overall,
+  runtime, command-duration, and LLM token/call means without rerunning
+  experiments.
+- ARC-Bench `--topic-set all` now includes ML17, matching the prepared ML01-ML25
+  package set instead of silently running only 24 topics.
 - Greenfield file generation now unwraps a single Markdown code fence returned
   inside the structured `content` field and records failed file-validation
   attempts under `code_task/meta/generation_steps/invalid_files/`. Retry

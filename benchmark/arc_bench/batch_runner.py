@@ -45,6 +45,7 @@ SPECIALIZED_TOPICS = [
     "ML21",
     "ML23",
     "ML07",
+    "ML17",
 ]
 TOPIC_SETS = {
     "quick": QUICK_TOPICS,
@@ -119,6 +120,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     status_parser = subparsers.add_parser("status", help="Print batch state summary.")
     _add_path_options(status_parser)
     status_parser.set_defaults(func=_status_command)
+
+    summarize_parser = subparsers.add_parser(
+        "summarize",
+        help="Aggregate batch scores, durations, and LLM usage without rerunning any topic.",
+    )
+    _add_summary_options(summarize_parser)
+    summarize_parser.set_defaults(func=_summarize_command)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
@@ -201,6 +209,23 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         help="Override code-task --llm-retry-attempts for every execute call; 0 keeps each TOML default.",
+    )
+
+
+def _add_summary_options(parser: argparse.ArgumentParser) -> None:
+    _add_path_options(parser)
+    parser.add_argument(
+        "--topic-set",
+        choices=sorted(TOPIC_SETS),
+        help="Optional named topic set filter; omit to summarize all topics in the state file.",
+    )
+    parser.add_argument("--topics", nargs="+", help="Optional explicit topic filter, e.g. --topics ML04 ML02.")
+    parser.add_argument(
+        "--output-prefix",
+        help=(
+            "Optional output path prefix. Defaults to '<state-file>.summary' and writes "
+            "both .json and .md."
+        ),
     )
 
 
@@ -379,6 +404,27 @@ def _status_command(args: argparse.Namespace) -> int:
         return 0
     _print(f"[state] {ctx.state_file}")
     _print_summary(state, sorted(state))
+    return 0
+
+
+def _summarize_command(args: argparse.Namespace) -> int:
+    ctx = _context_from_args(args)
+    state = _load_state(ctx.state_file)
+    if not state:
+        if ctx.state_file.exists():
+            _print(f"State file has no topic entries: {ctx.state_file}.")
+        else:
+            _print(f"No state file found at {ctx.state_file}.")
+        return 0
+    topics = _resolve_summary_topics(args, state)
+    if not topics:
+        _print("No topics selected for summary.")
+        return 0
+    summary = _build_batch_summary(ctx, state, topics)
+    json_path, md_path = _write_batch_summary(ctx, summary, output_prefix=getattr(args, "output_prefix", None))
+    _print(render_batch_summary_markdown(summary))
+    _print(f"\n[summary] wrote {_rel(ctx.repo_root, json_path)}")
+    _print(f"[summary] wrote {_rel(ctx.repo_root, md_path)}")
     return 0
 
 
@@ -1548,6 +1594,362 @@ def _print_summary(state: dict[str, TopicState], topics: Iterable[str]) -> None:
             suffix_parts.append(f"${cost:.4f}")
         suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
         _print(f"{topic:>4}  {row.status:<16} {detail}{suffix}")
+
+
+def _resolve_summary_topics(args: argparse.Namespace, state: dict[str, TopicState]) -> list[str]:
+    if getattr(args, "topics", None):
+        raw_topics = [str(topic).upper() for topic in args.topics]
+    elif getattr(args, "topic_set", None):
+        raw_topics = TOPIC_SETS[str(args.topic_set)]
+    else:
+        raw_topics = sorted(state)
+    seen: set[str] = set()
+    topics: list[str] = []
+    for topic in raw_topics:
+        if topic in seen:
+            continue
+        seen.add(topic)
+        if topic in state:
+            topics.append(topic)
+    return topics
+
+
+def _build_batch_summary(ctx: RunnerContext, state: dict[str, TopicState], topics: list[str]) -> dict[str, Any]:
+    rows = [_build_summary_row(ctx, _topic_state(state, topic)) for topic in topics]
+    scored_rows = [row for row in rows if _is_number(row.get("overall_score"))]
+    usage_rows = [row for row in rows if _is_number(row.get("llm_total_tokens"))]
+    duration_rows = [row for row in rows if _is_number(row.get("duration_sec"))]
+    command_names = ("init", "execute", "finalize", "score")
+    aggregate = {
+        "topic_count": len(rows),
+        "completed_count": sum(1 for row in rows if row.get("status") == "completed"),
+        "scored_count": len(scored_rows),
+        "failed_count": sum(1 for row in rows if row.get("status") not in {"completed", "pending"}),
+        "score_means": {
+            "code_development": _mean(_score_values(scored_rows, "Code Development")),
+            "code_execution": _mean(_score_values(scored_rows, "Code Execution")),
+            "result_analysis": _mean(_score_values(scored_rows, "Result Analysis")),
+            "overall": _mean([row.get("overall_score") for row in scored_rows]),
+        },
+        "runtime_means_sec": {
+            "total": _mean([row.get("duration_sec") for row in duration_rows]),
+            **{
+                name: _mean(
+                    [
+                        row.get("command_durations_sec", {}).get(name)
+                        for row in rows
+                        if isinstance(row.get("command_durations_sec"), dict)
+                    ]
+                )
+                for name in command_names
+            },
+        },
+        "llm_usage_means": {
+            "requests": _mean([row.get("llm_request_count") for row in usage_rows]),
+            "input_tokens": _mean([row.get("llm_input_tokens") for row in usage_rows]),
+            "output_tokens": _mean([row.get("llm_output_tokens") for row in usage_rows]),
+            "total_tokens": _mean([row.get("llm_total_tokens") for row in usage_rows]),
+            "estimated_cost_usd": _mean([row.get("estimated_cost_usd") for row in usage_rows]),
+        },
+        "llm_usage_totals": {
+            "requests": sum(_num(row.get("llm_request_count")) for row in rows),
+            "input_tokens": sum(_num(row.get("llm_input_tokens")) for row in rows),
+            "output_tokens": sum(_num(row.get("llm_output_tokens")) for row in rows),
+            "total_tokens": sum(_num(row.get("llm_total_tokens")) for row in rows),
+            "estimated_cost_usd": round(sum(_num(row.get("estimated_cost_usd")) for row in rows), 6),
+        },
+    }
+    return {
+        "schema_version": "simple_ar_arc_batch_summary.v1",
+        "generated_at": _now(),
+        "state_file": _rel(ctx.repo_root, ctx.state_file),
+        "topics": topics,
+        "aggregate": aggregate,
+        "rows": rows,
+    }
+
+
+def _build_summary_row(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
+    stats = _read_topic_stats(ctx, topic_state)
+    judge = _read_judge_result(ctx, topic_state)
+    usage = stats.get("llm_usage") if isinstance(stats.get("llm_usage"), dict) else {}
+    usage_totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
+    if not usage_totals:
+        usage_totals = topic_state.stats if isinstance(topic_state.stats, dict) else {}
+    command_durations = _command_durations(stats.get("commands"), topic_state.command_results)
+    category_scores = judge.get("category_scores") if isinstance(judge.get("category_scores"), dict) else {}
+    row = {
+        "topic": topic_state.topic,
+        "status": topic_state.status,
+        "attempts": topic_state.attempts,
+        "run_dir": topic_state.run_dir,
+        "output_dir": topic_state.output_dir,
+        "last_error": topic_state.last_error,
+        "duration_sec": _first_number(stats.get("duration_sec"), topic_state.duration_sec),
+        "command_duration_sec": _first_number(
+            stats.get("command_duration_sec"),
+            topic_state.stats.get("command_duration_sec") if isinstance(topic_state.stats, dict) else None,
+        ),
+        "command_durations_sec": command_durations,
+        "scoring_profile": judge.get("scoring_profile", ""),
+        "code_development": _category_score(category_scores, "Code Development"),
+        "code_execution": _category_score(category_scores, "Code Execution"),
+        "result_analysis": _category_score(category_scores, "Result Analysis"),
+        "overall_score": _first_number(judge.get("overall_score"), judge.get("overall_strict")),
+        "results_only": _first_number(judge.get("results_only")),
+        "llm_request_count": _first_number(usage_totals.get("request_count"), usage_totals.get("llm_request_count")),
+        "llm_input_tokens": _first_number(usage_totals.get("input_tokens"), usage_totals.get("llm_input_tokens")),
+        "llm_output_tokens": _first_number(usage_totals.get("output_tokens"), usage_totals.get("llm_output_tokens")),
+        "llm_total_tokens": _first_number(usage_totals.get("total_tokens"), usage_totals.get("llm_total_tokens")),
+        "estimated_cost_usd": _first_number(usage_totals.get("estimated_cost_usd")),
+    }
+    return row
+
+
+def _read_topic_stats(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
+    candidates: list[Path] = []
+    if topic_state.output_dir:
+        candidates.append(_abs(ctx.repo_root, topic_state.output_dir) / "arc_task_stats.json")
+    if topic_state.run_dir:
+        candidates.append(_abs(ctx.repo_root, topic_state.run_dir) / "arc_task_stats.json")
+    for path in candidates:
+        data = _read_json_dict(path)
+        if data:
+            return data
+    stats = topic_state.stats if isinstance(topic_state.stats, dict) else {}
+    return {
+        "duration_sec": topic_state.duration_sec or stats.get("duration_sec"),
+        "command_duration_sec": stats.get("command_duration_sec"),
+        "commands": topic_state.command_results,
+        "llm_usage": {
+            "totals": {
+                "request_count": stats.get("llm_request_count"),
+                "input_tokens": stats.get("llm_input_tokens"),
+                "output_tokens": stats.get("llm_output_tokens"),
+                "total_tokens": stats.get("llm_total_tokens"),
+                "estimated_cost_usd": stats.get("estimated_cost_usd"),
+            }
+        },
+    }
+
+
+def _read_judge_result(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
+    if not topic_state.output_dir:
+        return {}
+    return _read_json_dict(_abs(ctx.repo_root, topic_state.output_dir) / "judge" / "judge_result.json")
+
+
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _command_durations(primary: Any, fallback: Any) -> dict[str, float]:
+    rows = primary if isinstance(primary, list) else fallback
+    if not isinstance(rows, list):
+        return {}
+    durations: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = _command_name(row.get("command"))
+        if not name:
+            continue
+        value = _first_number(row.get("duration_sec"))
+        if value is None:
+            continue
+        durations[name] = round(durations.get(name, 0.0) + value, 3)
+    return durations
+
+
+def _command_name(command: Any) -> str:
+    if not isinstance(command, list):
+        return ""
+    parts = [str(part) for part in command]
+    text = " ".join(parts)
+    if "code-task init" in text:
+        return "init"
+    if "code-task execute" in text:
+        return "execute"
+    if "adapter.py finalize" in text:
+        return "finalize"
+    if "adapter.py score" in text:
+        return "score"
+    return ""
+
+
+def _category_score(category_scores: dict[str, Any], expected: str) -> float | None:
+    expected_keys = _score_keys(expected)
+    for category, value in category_scores.items():
+        if _score_key(str(category)) not in expected_keys:
+            continue
+        if isinstance(value, dict):
+            return _first_number(value.get("score"))
+        return _first_number(value)
+    return None
+
+
+def _score_keys(value: str) -> set[str]:
+    key = _score_key(value)
+    aliases = {
+        "codedevelopment": {"codedevelopment", "codedev", "cd"},
+        "codeexecution": {"codeexecution", "codeexec", "ce"},
+        "resultanalysis": {"resultanalysis", "resultsanalysis", "ra"},
+    }
+    return aliases.get(key, {key})
+
+
+def _score_key(value: str) -> str:
+    value = value.lower().replace("&", "and")
+    return "".join(char for char in value if char.isalnum())
+
+
+def _score_values(rows: list[dict[str, Any]], category: str) -> list[Any]:
+    key_map = {
+        "Code Development": "code_development",
+        "Code Execution": "code_execution",
+        "Result Analysis": "result_analysis",
+    }
+    key = key_map[category]
+    return [row.get(key) for row in rows]
+
+
+def _mean(values: Iterable[Any]) -> float | None:
+    numbers = [_num(value) for value in values if _is_number(value)]
+    if not numbers:
+        return None
+    return round(sum(numbers) / len(numbers), 4)
+
+
+def _first_number(*values: Any) -> float | None:
+    for value in values:
+        if _is_number(value):
+            return _num(value)
+    return None
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _num(value: Any) -> float:
+    return float(value) if _is_number(value) else 0.0
+
+
+def _write_batch_summary(
+    ctx: RunnerContext,
+    summary: dict[str, Any],
+    *,
+    output_prefix: str | None,
+) -> tuple[Path, Path]:
+    if output_prefix:
+        prefix = _abs(ctx.repo_root, output_prefix)
+    else:
+        prefix = ctx.state_file.with_name(f"{ctx.state_file.stem}.summary")
+    json_path = prefix.parent / f"{prefix.name}.json"
+    md_path = prefix.parent / f"{prefix.name}.md"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    md_path.write_text(render_batch_summary_markdown(summary), encoding="utf-8")
+    return json_path, md_path
+
+
+def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
+    aggregate = summary.get("aggregate") if isinstance(summary.get("aggregate"), dict) else {}
+    score = aggregate.get("score_means") if isinstance(aggregate.get("score_means"), dict) else {}
+    runtime = aggregate.get("runtime_means_sec") if isinstance(aggregate.get("runtime_means_sec"), dict) else {}
+    usage_means = aggregate.get("llm_usage_means") if isinstance(aggregate.get("llm_usage_means"), dict) else {}
+    usage_totals = aggregate.get("llm_usage_totals") if isinstance(aggregate.get("llm_usage_totals"), dict) else {}
+    rows = summary.get("rows") if isinstance(summary.get("rows"), list) else []
+    lines = [
+        "# ARC-Bench Batch Summary",
+        "",
+        f"- State file: `{summary.get('state_file', '')}`",
+        f"- Generated at: `{summary.get('generated_at', '')}`",
+        f"- Topics: `{aggregate.get('topic_count', 0)}` total, `{aggregate.get('completed_count', 0)}` completed, `{aggregate.get('scored_count', 0)}` scored, `{aggregate.get('failed_count', 0)}` failed",
+        "",
+        "## Score Means",
+        "",
+        "| Code Dev | Code Exec | Result Analysis | Overall |",
+        "| ---: | ---: | ---: | ---: |",
+        (
+            f"| {_fmt_score(score.get('code_development'))} | {_fmt_score(score.get('code_execution'))} | "
+            f"{_fmt_score(score.get('result_analysis'))} | {_fmt_score(score.get('overall'))} |"
+        ),
+        "",
+        "## Runtime And API Means",
+        "",
+        "| Total Time | Execute | Finalize | Score | LLM Calls | Input Tokens | Output Tokens | Total Tokens | Cost |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        (
+            f"| {_fmt_seconds(runtime.get('total'))} | {_fmt_seconds(runtime.get('execute'))} | "
+            f"{_fmt_seconds(runtime.get('finalize'))} | {_fmt_seconds(runtime.get('score'))} | "
+            f"{_fmt_number(usage_means.get('requests'))} | {_fmt_int(usage_means.get('input_tokens'))} | "
+            f"{_fmt_int(usage_means.get('output_tokens'))} | {_fmt_int(usage_means.get('total_tokens'))} | "
+            f"{_fmt_cost(usage_means.get('estimated_cost_usd'))} |"
+        ),
+        "",
+        "## API Totals",
+        "",
+        "| LLM Calls | Input Tokens | Output Tokens | Total Tokens | Cost |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+        (
+            f"| {_fmt_int(usage_totals.get('requests'))} | {_fmt_int(usage_totals.get('input_tokens'))} | "
+            f"{_fmt_int(usage_totals.get('output_tokens'))} | {_fmt_int(usage_totals.get('total_tokens'))} | "
+            f"{_fmt_cost(usage_totals.get('estimated_cost_usd'))} |"
+        ),
+        "",
+        "## Topic Details",
+        "",
+        "| Topic | Status | Profile | Code Dev | Code Exec | Result Analysis | Overall | Time | Calls | Input | Output | Total |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            "| "
+            f"{row.get('topic', '')} | {row.get('status', '')} | {row.get('scoring_profile', '') or '-'} | "
+            f"{_fmt_score(row.get('code_development'))} | {_fmt_score(row.get('code_execution'))} | "
+            f"{_fmt_score(row.get('result_analysis'))} | {_fmt_score(row.get('overall_score'))} | "
+            f"{_fmt_seconds(row.get('duration_sec'))} | {_fmt_int(row.get('llm_request_count'))} | "
+            f"{_fmt_int(row.get('llm_input_tokens'))} | {_fmt_int(row.get('llm_output_tokens'))} | "
+            f"{_fmt_int(row.get('llm_total_tokens'))} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _fmt_score(value: Any) -> str:
+    return f"{float(value):.3f}" if _is_number(value) else "-"
+
+
+def _fmt_seconds(value: Any) -> str:
+    if not _is_number(value):
+        return "-"
+    seconds = float(value)
+    if seconds >= 3600:
+        return f"{seconds / 3600:.2f}h"
+    if seconds >= 60:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds:.1f}s"
+
+
+def _fmt_number(value: Any) -> str:
+    return f"{float(value):.1f}" if _is_number(value) else "-"
+
+
+def _fmt_int(value: Any) -> str:
+    return f"{int(round(float(value))):,}" if _is_number(value) else "-"
+
+
+def _fmt_cost(value: Any) -> str:
+    return f"${float(value):.4f}" if _is_number(value) and float(value) else "-"
 
 
 def _abs(repo_root: Path, value: str | Path) -> Path:

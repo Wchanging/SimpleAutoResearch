@@ -65,6 +65,9 @@ stress dependencies, runtime, stochastic evaluation, or task interpretation:
 11. `ML23` - learning-to-rank on synthetic query-document benchmarks.
 12. `ML07` - text feature extraction. Run later unless the server environment
     already has the needed text data path or network/cache assumptions settled.
+13. `ML17` - topic-model comparison on 20newsgroups subsets. Run after the
+    text-data/cache assumptions are settled because it may need the same
+    sklearn text dataset availability as ML07.
 
 | Topic | Config | Task | Run root |
 | --- | --- | --- | --- |

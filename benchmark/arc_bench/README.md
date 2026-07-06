@@ -149,6 +149,19 @@ result analysis, and scoring. The batch state also stores a compact summary, so
 `batch_runner.py status` can show duration and token totals without opening the
 artifact.
 
+Aggregate one batch into paper-style score/runtime/API means:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py summarize
+```
+
+`summarize` reads the latest batch by default and writes
+`<state-file>.summary.json` plus `<state-file>.summary.md`. It reports Code
+Development, Code Execution, Result Analysis, Overall, average wall time,
+average command time, average LLM calls, and average input/output/total tokens.
+Use `--state-file <path>` for an older batch or `--topic-set quick`/`--topics
+ML04 ML02` to filter the rows.
+
 The batch runner only finalizes runs whose business status is
 `benchmark_passed`. If `--score` is added later and a topic already has a valid
 finalized submission, it fills in `judge/` without rerunning the experiment. A

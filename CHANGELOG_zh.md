@@ -8,6 +8,9 @@
 
 ### Changed
 
+- ARC-Bench batch runner 新增 `summarize` 命令，可在不重跑实验的情况下汇总一个 batch 的 Code Development、Code Execution、Result Analysis、Overall、耗时、命令耗时和 LLM token / 调用均值。
+- ARC-Bench `--topic-set all` 现在包含 ML17，与 prepared 的 ML01-ML25 包集合保持一致，不再静默只跑 24 个任务。
+
 - Code-task benchmark 执行现在会为 generated project 写出 compact artifact scan；当必需产物在期望路径为空或缺失、但 workspace 其他位置存在同名有效产物时，quality guard 会明确报告 artifact path mismatch，并把证据交给后续 failure analysis / repair，而不是把它当成普通 benchmark 失败。
 - Code-task benchmark 执行新增保守的 runtime output watchdog；明显 warning flood 或重复输出刷屏会提前中断，写入 execution report，并进入普通 failure analysis / repair 路径，而不是一直等到完整 timeout。
 - Generated-project run repair 现在会读取 artifact scan 和 runtime watchdog 证据；当失败已经有明确契约级根因时，会收窄目标文件选择，减少无谓的大范围重写。
