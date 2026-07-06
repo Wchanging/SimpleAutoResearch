@@ -332,6 +332,11 @@ def greenfield_file_prompt(
         "Metric and evidence data-flow contract:\n"
         "- If a downstream metric needs features, labels, predictions, losses, condition names, seeds, or per-dataset rows, pass those fields explicitly instead of reconstructing them from summaries.\n"
         "- Aggregation code must preserve enough cell-level evidence to justify every required comparison; do not collapse records before analysis/reporting modules have consumed them.\n\n"
+        "Current file implementation obligations:\n"
+        "- The obligations below are this file's owned or directly supported contract items.\n"
+        "- Implement them in executable code or durable artifacts, not only comments/docstrings.\n"
+        "- If an obligation belongs in another file, expose/import the exact API needed rather than duplicating logic.\n\n"
+        f"{json.dumps(_file_obligations_for_prompt(contract, file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"File spec:\n{json.dumps(dict(file_spec), indent=2, ensure_ascii=False)}\n\n"
         f"Actual dependency APIs:\n{json.dumps(dict(dependency_api or {}), indent=2, ensure_ascii=False)}\n\n"
         f"Dependency advice:\n{json.dumps(_dependency_advice_for_prompt(dependency_advice or {}), indent=2, ensure_ascii=False)}\n\n"
@@ -402,6 +407,7 @@ def _compact_file_specs(files: list[Mapping[str, Any]], *, limit: int) -> list[d
                 "purpose": str(row.get("purpose", ""))[:240],
                 "dependencies": string_list(row.get("dependencies"), limit=12),
                 "public_api": string_list(row.get("public_api"), limit=12),
+                "contract_obligations": string_list(row.get("contract_obligations") or row.get("obligation_ids"), limit=16),
                 "entrypoint": bool(row.get("entrypoint")),
                 "kind": str(row.get("kind") or ""),
             }
@@ -470,6 +476,34 @@ def _contract_for_file_prompt(contract: Mapping[str, Any]) -> dict[str, Any]:
         max_requirements=24,
         max_success_criteria=14,
     )
+
+
+def _file_obligations_for_prompt(contract: Mapping[str, Any], file_spec: Mapping[str, Any], *, limit: int = 16) -> list[dict[str, Any]]:
+    implementation = contract.get("implementation_contract")
+    if not isinstance(implementation, Mapping):
+        return []
+    wanted = {str(item).strip() for item in string_list(file_spec.get("contract_obligations"), limit=40)}
+    obligations = implementation.get("obligations")
+    rows = [row for row in obligations if isinstance(row, Mapping)] if isinstance(obligations, list) else []
+    if wanted:
+        selected = [row for row in rows if str(row.get("id") or "").strip() in wanted]
+    else:
+        path = safe_relative_path(str(file_spec.get("path", "")))
+        selected = [
+            row
+            for row in rows
+            if path and path in {safe_relative_path(item) for item in string_list(row.get("owner_files"), limit=20)}
+        ]
+    return [
+        {
+            "id": row.get("id", ""),
+            "category": row.get("category", ""),
+            "requirement": row.get("requirement", ""),
+            "acceptance_criteria": string_list(row.get("acceptance_criteria"), limit=8),
+            "evidence_terms": string_list(row.get("evidence_terms"), limit=8),
+        }
+        for row in selected[:limit]
+    ]
 
 
 def _memory_for_prompt(memory: Mapping[str, Any], *, file_limit: int = 12) -> dict[str, Any]:

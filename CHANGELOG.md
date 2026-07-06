@@ -8,10 +8,26 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Code-task task contracts now support generic implementation obligations.
+  Planning assigns obligations to files, per-file generation receives the owned
+  obligations, and generated-project review checks that owned obligations remain
+  auditable without adding extra default LLM calls.
+- ARC-Bench prepared tasks can now opt in to embedding rubric leaves as generic
+  implementation obligations with `--include-contract`. The default prepared
+  input remains vanilla ARC-Bench text for cleaner paper-facing comparisons.
+- ARC-Bench scoring now builds leaf-targeted code evidence from all discovered
+  Python files and adds an `arc-native` score profile for canonical
+  ARC-style strict-audit prompting with the existing two-reviewer/adjudication
+  protocol.
 - ARC-Bench batch runner now has a `summarize` command that aggregates a batch
   into paper-style Code Development, Code Execution, Result Analysis, Overall,
   runtime, command-duration, and LLM token/call means without rerunning
   experiments.
+- ARC-Bench batch runner now has a `refresh` command that reuses completed
+  run directories to rerun finalize / result-analysis / score only. Refreshed
+  outputs are written as variant submission directories with a new state file,
+  leaving the original submissions untouched; refreshed summaries report
+  incremental post-processing duration and LLM usage.
 - ARC-Bench `--topic-set all` now includes ML17, matching the prepared ML01-ML25
   package set instead of silently running only 24 topics.
 - Greenfield file generation now unwraps a single Markdown code fence returned

@@ -117,6 +117,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     retry_parser.set_defaults(func=_retry_unfinished_command)
 
+    refresh_parser = subparsers.add_parser(
+        "refresh",
+        help="Reuse completed run dirs and rerun finalize/score into a separate output variant.",
+    )
+    _add_common_options(refresh_parser)
+    refresh_parser.add_argument(
+        "--source-state-file",
+        default=None,
+        help=(
+            "State file that contains completed run_dir entries to reuse. "
+            "Defaults to the latest state file."
+        ),
+    )
+    refresh_parser.add_argument(
+        "--variant",
+        default=None,
+        help=(
+            "Suffix for refreshed submission directories. "
+            "Defaults to a timestamped variant derived from the new state file."
+        ),
+    )
+    refresh_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate the variant finalize/score artifacts even if they already look complete.",
+    )
+    refresh_parser.set_defaults(func=_refresh_command)
+
     status_parser = subparsers.add_parser("status", help="Print batch state summary.")
     _add_path_options(status_parser)
     status_parser.set_defaults(func=_status_command)
@@ -153,8 +181,8 @@ def _add_path_options(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "JSON state file used for resume/retry bookkeeping. "
-            "For 'run', omitting this creates a new timestamped state and marks it latest. "
-            "For 'retry-unfinished' and 'status', omitting this reads the latest state."
+            "For 'run' and 'refresh', omitting this creates a new timestamped state and marks it latest. "
+            "For 'retry-unfinished', 'status', and 'summarize', omitting this reads the latest state."
         ),
     )
     parser.add_argument(
@@ -182,7 +210,7 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--score-model", help="Override SIMPLE_AR_MODEL for adapter score.")
     parser.add_argument(
         "--score-profile",
-        choices=("proxy", "arc-auto", "strict"),
+        choices=("proxy", "arc-auto", "strict", "arc-native"),
         default="proxy",
         help="Scoring profile passed to adapter.py score.",
     )
@@ -390,6 +418,72 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
             exit_code = 1
 
     _print_summary(state, topics)
+    return exit_code
+
+
+def _refresh_command(args: argparse.Namespace) -> int:
+    ctx = _context_from_args(args)
+    source_state_file = _resolve_source_state_file(ctx.repo_root, args)
+    source_state = _load_state(source_state_file)
+    _print(f"[source-state] {source_state_file}")
+    if not source_state:
+        if source_state_file.exists():
+            _print(f"Source state file has no topic entries: {source_state_file}.")
+        else:
+            _print(f"No source state file found at {source_state_file}.")
+        return 1
+
+    _remember_latest_state(ctx)
+    refreshed_state = _load_state(ctx.state_file)
+    if not refreshed_state:
+        _save_state(ctx.state_file, refreshed_state)
+    _print(f"[state] {ctx.state_file}")
+
+    topics = _resolve_topics(args, ctx.prepared_root)
+    variant = _refresh_variant(args, ctx)
+    _print(f"[variant] {variant}")
+
+    exit_code = 0
+    for topic in topics:
+        current = _topic_state(source_state, topic)
+        if current.status != "completed":
+            result = TopicState(
+                topic=topic,
+                status="source_not_completed",
+                attempts=current.attempts,
+                run_dir=current.run_dir,
+                output_dir=current.output_dir,
+                last_error=f"source state status is {current.status}",
+                logs=list(current.logs),
+                commands=list(current.commands),
+                command_results=list(current.command_results),
+                updated_at=_now(),
+            )
+            _print(f"[skip] {topic}: source state status is {current.status}; cannot refresh finalize/score.")
+            refreshed_state[topic] = result
+            _save_state(ctx.state_file, refreshed_state)
+            exit_code = 1
+            continue
+
+        result = _refresh_completed_topic(
+            ctx,
+            topic,
+            current,
+            analyze=args.analyze,
+            analysis_model=args.analysis_model,
+            score=args.score,
+            score_model=args.score_model,
+            score_profile=args.score_profile,
+            variant=variant,
+            force=args.force,
+            incremental_stats=True,
+        )
+        refreshed_state[topic] = result
+        _save_state(ctx.state_file, refreshed_state)
+        if result.status != "completed":
+            exit_code = 1
+
+    _print_summary(refreshed_state, topics)
     return exit_code
 
 
@@ -711,9 +805,15 @@ def _refresh_completed_topic(
     score: bool,
     score_model: str | None,
     score_profile: str,
+    variant: str | None = None,
+    force: bool = False,
+    incremental_stats: bool = False,
 ) -> TopicState:
     started_monotonic = time.monotonic()
     started_at = _now()
+    logs = [] if incremental_stats else list(current.logs)
+    commands = [] if incremental_stats else list(current.commands)
+    command_results = [] if incremental_stats else list(current.command_results)
     topic_state = TopicState(
         topic=topic,
         status="running",
@@ -721,11 +821,17 @@ def _refresh_completed_topic(
         run_dir=current.run_dir,
         output_dir=current.output_dir,
         started_at=started_at,
-        logs=list(current.logs),
-        commands=list(current.commands),
-        command_results=list(current.command_results),
+        logs=logs,
+        commands=commands,
+        command_results=command_results,
         updated_at=_now(),
     )
+    topic_state.stats["skip_run_stats_write"] = True
+    if incremental_stats:
+        topic_state.stats["skip_code_task_usage"] = True
+        topic_state.stats["source_run_dir"] = current.run_dir
+        topic_state.stats["source_output_dir"] = current.output_dir
+        topic_state.stats["variant"] = variant or ""
     if not current.run_dir:
         return _finalize_topic_state(
             ctx,
@@ -743,11 +849,13 @@ def _refresh_completed_topic(
             started_monotonic=started_monotonic,
         )
 
-    output_dir = _abs(ctx.repo_root, current.output_dir) if current.output_dir else ctx.submissions_root / topic / run_dir.name
+    output_dir = _variant_output_dir(ctx, topic, run_dir, variant) if variant else (
+        _abs(ctx.repo_root, current.output_dir) if current.output_dir else ctx.submissions_root / topic / run_dir.name
+    )
     topic_state.output_dir = _rel(ctx.repo_root, output_dir)
     topic_log_root = ctx.log_root / topic / _timestamp()
 
-    finalize_complete = _finalized_output_complete(
+    finalize_complete = False if force else _finalized_output_complete(
         output_dir,
         require_analysis=analyze,
         require_score=False,
@@ -789,7 +897,7 @@ def _refresh_completed_topic(
             )
 
     if score:
-        score_complete = _finalized_output_complete(
+        score_complete = False if force else _finalized_output_complete(
             output_dir,
             require_analysis=analyze,
             require_score=True,
@@ -1090,7 +1198,17 @@ def _build_topic_stats(ctx: RunnerContext, topic_state: TopicState) -> dict[str,
     )
     run_dir = _abs(ctx.repo_root, topic_state.run_dir) if topic_state.run_dir else None
     output_dir = _abs(ctx.repo_root, topic_state.output_dir) if topic_state.output_dir else None
-    usage = _collect_topic_llm_usage(ctx, run_dir=run_dir, output_dir=output_dir)
+    usage = _collect_topic_llm_usage(
+        ctx,
+        run_dir=run_dir,
+        output_dir=output_dir,
+        include_code_task=topic_state.stats.get("skip_code_task_usage") is not True,
+    )
+    metadata = {
+        key: topic_state.stats.get(key)
+        for key in ("source_run_dir", "source_output_dir", "variant")
+        if topic_state.stats.get(key)
+    }
     return {
         "schema_version": "simple_ar_arc_task_stats.v1",
         "topic": topic_state.topic,
@@ -1105,6 +1223,8 @@ def _build_topic_stats(ctx: RunnerContext, topic_state: TopicState) -> dict[str,
         "last_error": topic_state.last_error,
         "commands": command_results,
         "llm_usage": usage,
+        "write_run_stats": topic_state.stats.get("skip_run_stats_write") is not True,
+        "metadata": metadata,
     }
 
 
@@ -1124,7 +1244,7 @@ def _compact_topic_stats_for_state(stats: dict[str, Any]) -> dict[str, Any]:
 
 def _write_topic_stats(ctx: RunnerContext, topic_state: TopicState, stats: dict[str, Any]) -> list[str]:
     written: list[str] = []
-    if topic_state.run_dir:
+    if topic_state.run_dir and stats.get("write_run_stats") is not False:
         run_dir = _abs(ctx.repo_root, topic_state.run_dir)
         if run_dir.exists():
             path = run_dir / "arc_task_stats.json"
@@ -1144,9 +1264,10 @@ def _collect_topic_llm_usage(
     *,
     run_dir: Path | None,
     output_dir: Path | None,
+    include_code_task: bool = True,
 ) -> dict[str, Any]:
     sources: list[dict[str, Any]] = []
-    if run_dir is not None:
+    if include_code_task and run_dir is not None:
         sources.append(
             _usage_source(
                 ctx,
@@ -1474,9 +1595,31 @@ def _resolve_state_file(repo_root: Path, args: argparse.Namespace) -> Path:
         return _abs(repo_root, raw_state_file)
 
     command = getattr(args, "command", "")
-    if command == "run":
+    if command in {"run", "refresh"}:
         return _new_batch_state_file(repo_root, args)
     return _latest_state_file(repo_root)
+
+
+def _resolve_source_state_file(repo_root: Path, args: argparse.Namespace) -> Path:
+    raw_state_file = getattr(args, "source_state_file", None)
+    if raw_state_file:
+        if str(raw_state_file).strip().lower() == "latest":
+            return _latest_state_file(repo_root)
+        return _abs(repo_root, raw_state_file)
+    return _latest_state_file(repo_root)
+
+
+def _refresh_variant(args: argparse.Namespace, ctx: RunnerContext) -> str:
+    raw = getattr(args, "variant", None)
+    if raw and str(raw).strip():
+        return _safe_filename(str(raw))
+    return _safe_filename(f"refresh-{ctx.state_file.stem}")
+
+
+def _variant_output_dir(ctx: RunnerContext, topic: str, run_dir: Path, variant: str | None) -> Path:
+    if not variant:
+        return ctx.submissions_root / topic / run_dir.name
+    return ctx.submissions_root / topic / f"{run_dir.name}--{_safe_filename(variant)}"
 
 
 def _new_batch_state_file(repo_root: Path, args: argparse.Namespace) -> Path:

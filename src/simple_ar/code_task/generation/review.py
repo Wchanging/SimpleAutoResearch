@@ -12,6 +12,7 @@ from simple_ar.integrations.llm import LLMClient
 from simple_ar.reviewing.schema import ReviewFinding
 from simple_ar.code_task.generation.common import safe_relative_path
 from simple_ar.code_task.generation.file_specs import infer_file_kind, is_runtime_placeholder
+from simple_ar.code_task.generation.task_contract import implementation_obligations
 from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
 from simple_ar.code_task.analysis.entrypoints import analyze_entrypoint_debuggability
 from simple_ar.code_task.analysis.analyzers import write_analyzer_registry
@@ -30,7 +31,7 @@ from simple_ar.code_task.review_pipeline import (
 )
 
 
-GREENFIELD_REVIEW_CONTRACT_VERSION = 9
+GREENFIELD_REVIEW_CONTRACT_VERSION = 10
 _STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
     "types",
     "typing",
@@ -248,6 +249,7 @@ def _deterministic_findings(
     findings.extend(_return_contract_findings(project_dir))
     findings.extend(_semantic_scaffold_findings(project_dir, contract=contract, result_schema=result_schema))
     findings.extend(_scientific_contract_findings(project_dir, contract=contract))
+    findings.extend(_implementation_contract_findings(project_dir, contract=contract, architecture_plan=architecture_plan))
     findings.extend(_task_acceptance_findings(project_dir, contract=contract, dependency_advice=dependency_advice))
     return findings
 
@@ -492,6 +494,76 @@ def _scientific_contract_findings(
             )
             if len(findings) >= 8:
                 return findings
+    return findings
+
+
+def _implementation_contract_findings(
+    project_dir: Path,
+    *,
+    contract: Mapping[str, Any],
+    architecture_plan: Mapping[str, Any],
+) -> list[ReviewFinding]:
+    obligations = implementation_obligations(contract, limit=120)
+    if not obligations:
+        return []
+    files = architecture_plan.get("files")
+    file_rows = [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
+    owners_by_obligation: dict[str, set[str]] = {}
+    for row in file_rows:
+        path = safe_relative_path(str(row.get("path") or ""))
+        if not path:
+            continue
+        for obligation_id in _string_list(row.get("contract_obligations") or row.get("obligation_ids")):
+            owners_by_obligation.setdefault(obligation_id, set()).add(path)
+    findings: list[ReviewFinding] = []
+    for obligation in obligations:
+        obligation_id = str(obligation.get("id") or "").strip()
+        if not obligation_id:
+            continue
+        explicit_owners = {
+            safe_relative_path(item)
+            for item in _string_list(obligation.get("owner_files"))
+            if safe_relative_path(item)
+        }
+        owners = sorted(owners_by_obligation.get(obligation_id, set()) | explicit_owners)
+        if not owners:
+            findings.append(
+                _finding(
+                    "warning",
+                    "implementation_obligation_unowned",
+                    f"Implementation obligation `{obligation_id}` is not assigned to a planned file.",
+                    recommendation="Assign the obligation to at least one source/reporting file through contract_obligations.",
+                )
+            )
+            continue
+        missing_files = [path for path in owners if not (project_dir / path).is_file()]
+        if missing_files:
+            findings.append(
+                _finding(
+                    "blocking",
+                    "implementation_obligation_owner_missing",
+                    f"Implementation obligation `{obligation_id}` is assigned to missing file(s): {', '.join(missing_files[:6])}.",
+                )
+            )
+            continue
+        terms = _string_list(obligation.get("evidence_terms"))[:8]
+        if not terms:
+            continue
+        owner_text = "\n".join(_safe_read(project_dir / path).lower() for path in owners)
+        if not any(term.lower() in owner_text for term in terms if term.strip()):
+            findings.append(
+                _finding(
+                    "warning",
+                    "implementation_obligation_evidence_not_visible",
+                    (
+                        f"Implementation obligation `{obligation_id}` has owner file(s) but none visibly contain "
+                        f"its evidence terms: {', '.join(terms[:6])}."
+                    ),
+                    recommendation="Ensure owned files implement the requirement with concrete names/records/APIs that make the obligation auditable.",
+                )
+            )
+        if len(findings) >= 20:
+            break
     return findings
 
 
@@ -1091,6 +1163,18 @@ def _requires_multiple_tasks(text: str) -> bool:
         "multiple conditions",
     )
     return any(signal in text for signal in signals)
+
+
+def _string_list(value: object, *, limit: int = 80) -> list[str]:
+    rows = value if isinstance(value, list) else []
+    return [str(item).strip() for item in rows if str(item).strip()][:limit]
+
+
+def _safe_read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _finding(severity: str, category: str, summary: str, *, recommendation: str = "") -> ReviewFinding:

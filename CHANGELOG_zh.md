@@ -8,7 +8,11 @@
 
 ### Changed
 
+- Code-task task contract 现在支持通用 implementation obligations。Planning 会把 obligation 分配到文件，逐文件生成会收到本文件负责的 obligation，generated-project review 会检查这些 obligation 是否仍然可审计；这不会额外增加默认 LLM 调用。
+- ARC-Bench prepared task 现在可以通过 `--include-contract` 显式选择把 rubric leaf 转换成通用 implementation obligation；默认 prepared 输入仍保持 vanilla ARC-Bench 文本，便于更干净地做论文对比。
+- ARC-Bench scoring 现在会从所有 Python 文件中构建 leaf 定向代码证据，并新增 `arc-native` score profile，用现有两评审/分歧复审协议配合更贴近 ARC strict-audit 的 prompt。
 - ARC-Bench batch runner 新增 `summarize` 命令，可在不重跑实验的情况下汇总一个 batch 的 Code Development、Code Execution、Result Analysis、Overall、耗时、命令耗时和 LLM token / 调用均值。
+- ARC-Bench batch runner 新增 `refresh` 命令，可复用已有 completed run 只重跑 finalize / result-analysis / score，并把结果写入带 variant 后缀的平行 submission 与新 state；原始 submission 不会被覆盖，refresh summary 的耗时和 token 统计为本次后处理重算的增量口径。
 - ARC-Bench `--topic-set all` 现在包含 ML17，与 prepared 的 ML01-ML25 包集合保持一致，不再静默只跑 24 个任务。
 
 - Code-task benchmark 执行现在会为 generated project 写出 compact artifact scan；当必需产物在期望路径为空或缺失、但 workspace 其他位置存在同名有效产物时，quality guard 会明确报告 artifact path mismatch，并把证据交给后续 failure analysis / repair，而不是把它当成普通 benchmark 失败。

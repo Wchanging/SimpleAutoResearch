@@ -239,6 +239,7 @@ def _stage_prompt(
             "Use exactly these keys; every list must contain at most 6 short strings, and every string must be <= 120 characters:\n"
             "- objective: string\n"
             "- hard_requirements: string[]\n"
+            "- implementation_obligations: at most 12 {id, requirement, evidence_terms}\n"
             "- deliverables: string[]\n"
             "- constraints: string[]\n"
             "- data_requirements: string[]\n"
@@ -250,7 +251,7 @@ def _stage_prompt(
             "- Do not invent benchmark-specific fields. Preserve fields explicitly requested by the task/result schema.\n"
             "- Convert prose requirements into testable implementation obligations.\n"
             "- Mention optional dependencies only if they are task-relevant and installed/available in the context.\n\n"
-            "- Preserve every explicit hypothesis/comparison/artifact from evidence_plan as an implementation obligation.\n\n"
+            "- Preserve every explicit hypothesis/comparison/artifact from evidence_plan and implementation_contract as an implementation obligation.\n\n"
             f"{base}{feedback_block}"
         )
     if stage == "architecture":
@@ -258,7 +259,7 @@ def _stage_prompt(
             "Tool: architecture_outline.\n"
             "Design the project architecture from the requirements brief. Return one compact strict JSON object with fields:\n"
             "- architecture_summary: string\n"
-            "- modules: at most 8 {name, responsibility, inputs, outputs, dependencies}; nested lists at most 5 strings\n"
+            "- modules: at most 8 {name, responsibility, inputs, outputs, dependencies, obligation_ids}; nested lists at most 5 strings\n"
             "- data_flow: at most 6 ordered flow steps\n"
             "- test_strategy: at most 6 validation/smoke/benchmark checks\n"
             "- risks: at most 6 realistic implementation risks and mitigations\n\n"
@@ -267,6 +268,7 @@ def _stage_prompt(
             "- Keep the design bounded by resource_plan.max_files and max_generated_lines.\n"
             "- Prefer one authoritative orchestrator plus small modules with clear ownership.\n"
             "- Make cross-module dependencies explicit; downstream file planning will use this directly.\n"
+            "- Assign each important implementation_contract obligation to at least one module via obligation_ids.\n"
             "- Avoid filler modules and avoid hardcoding one benchmark's hidden conventions.\n\n"
             f"{base}\nRequirements brief JSON:\n{_json_block(state.get('requirements'))}\n{feedback_block}"
         )
@@ -292,7 +294,7 @@ def _stage_prompt(
             "Tool: file_plan.\n"
             "Produce the final file plan. Return one compact strict JSON object with fields:\n"
             "- objective: string\n"
-            "- files: array of {path, kind, purpose, dependencies, public_api, acceptance_criteria, entrypoint}\n\n"
+            "- files: array of {path, kind, purpose, dependencies, public_api, acceptance_criteria, entrypoint, contract_obligations}\n\n"
             "Rules:\n"
             "- No Markdown. Keep each purpose/criterion <= 160 characters.\n"
             "- Keep paths relative to the generated project root, POSIX-style, and inside that root.\n"
@@ -306,6 +308,7 @@ def _stage_prompt(
             "- Each file's dependencies must refer only to paths in this file plan.\n"
             "- Each dependency must be justified by a declared public_api or shared schema.\n"
             "- Acceptance criteria should be checkable and tied to task/result schema requirements.\n"
+            "- contract_obligations must list ids from implementation_contract that the file owns or directly supports.\n"
             "- At least one file must own evidence preservation/reporting when evidence_plan contains hypotheses, comparisons, or required artifacts.\n"
             "- Do not add task-irrelevant boilerplate just to increase size.\n\n"
             f"{base}\nRequirements brief JSON:\n{_json_block(state.get('requirements'))}\n"
@@ -401,6 +404,7 @@ def _normalize_stage_result(stage: str, value: Mapping[str, Any]) -> dict[str, A
         return {
             "objective": clean_text(value.get("objective")),
             "hard_requirements": scalar_list(value.get("hard_requirements"))[:50],
+            "implementation_obligations": _normalize_named_rows(value.get("implementation_obligations"), max_rows=24),
             "deliverables": scalar_list(value.get("deliverables"))[:30],
             "constraints": scalar_list(value.get("constraints"))[:30],
             "data_requirements": scalar_list(value.get("data_requirements"))[:30],
@@ -441,6 +445,11 @@ def _shared_contracts(
 ) -> dict[str, Any]:
     evidence_plan = contract.get("evidence_plan") if isinstance(contract.get("evidence_plan"), Mapping) else {}
     metric_contract = contract.get("metric_contract") if isinstance(contract.get("metric_contract"), Mapping) else {}
+    implementation_contract = (
+        contract.get("implementation_contract")
+        if isinstance(contract.get("implementation_contract"), Mapping)
+        else {}
+    )
     module_apis = interfaces.get("module_apis") if isinstance(interfaces.get("module_apis"), list) else []
     shared_schemas = interfaces.get("shared_schemas") if isinstance(interfaces.get("shared_schemas"), list) else []
     return {
@@ -466,6 +475,7 @@ def _shared_contracts(
                     "dependencies": scalar_list(row.get("dependencies"))[:16],
                     "public_api": scalar_list(row.get("public_api"))[:20],
                     "acceptance_criteria": scalar_list(row.get("acceptance_criteria"))[:12],
+                    "contract_obligations": scalar_list(row.get("contract_obligations"))[:24],
                     "kind": row.get("kind", ""),
                 }
                 for row in files
@@ -474,7 +484,28 @@ def _shared_contracts(
             "module_apis": [dict(row) for row in module_apis if isinstance(row, Mapping)][:20],
             "shared_schemas": [dict(row) for row in shared_schemas if isinstance(row, Mapping)][:16],
         },
+        "implementation_contract": {
+            "schema_version": implementation_contract.get("schema_version", "code_task_implementation_contract.v1"),
+            "ownership_policy": implementation_contract.get("ownership_policy", ""),
+            "obligations": [
+                dict(row)
+                for row in implementation_contract.get("obligations", [])
+                if isinstance(row, Mapping)
+            ][:80],
+            "owner_index": _obligation_owner_index(files),
+        },
     }
+
+
+def _obligation_owner_index(files: list[dict[str, Any]]) -> dict[str, list[str]]:
+    owners: dict[str, list[str]] = {}
+    for row in files:
+        path = str(row.get("path") or "")
+        if not path:
+            continue
+        for obligation_id in scalar_list(row.get("contract_obligations"), limit=40):
+            owners.setdefault(obligation_id, []).append(path)
+    return owners
 
 
 def _planning_blockers(plan: Mapping[str, Any], review: Mapping[str, Any]) -> list[str]:
@@ -560,6 +591,7 @@ def _recover_degenerate_file_plan(
             "dependencies": ["generated_experiment/runner.py"],
             "public_api": ["main(argv=None)"],
             "acceptance_criteria": ["Runs with `python main.py` and prints parseable metrics."],
+            "contract_obligations": [],
             "entrypoint": True,
             "kind": "source",
         },
@@ -569,6 +601,7 @@ def _recover_degenerate_file_plan(
             "dependencies": [],
             "public_api": [],
             "acceptance_criteria": ["Allows generated_experiment package imports."],
+            "contract_obligations": [],
             "entrypoint": False,
             "kind": "source",
         },
@@ -578,6 +611,7 @@ def _recover_degenerate_file_plan(
             "dependencies": [],
             "public_api": ["run_experiment(config=None) -> dict[str, float]"],
             "acceptance_criteria": ["Runs the full project workflow and returns/prints required metrics."],
+            "contract_obligations": [],
             "entrypoint": False,
             "kind": "source",
         },
@@ -596,6 +630,7 @@ def _recover_degenerate_file_plan(
                 "dependencies": [],
                 "public_api": _module_public_api(name, interfaces),
                 "acceptance_criteria": _module_acceptance(module),
+                "contract_obligations": scalar_list(module.get("obligation_ids") or module.get("contract_obligations"))[:24],
                 "entrypoint": False,
                 "kind": "source",
             }
@@ -718,6 +753,7 @@ def _normalize_modules(value: object) -> list[dict[str, Any]]:
                 "inputs": scalar_list(row.get("inputs"))[:12],
                 "outputs": scalar_list(row.get("outputs"))[:12],
                 "dependencies": scalar_list(row.get("dependencies"))[:12],
+                "obligation_ids": scalar_list(row.get("obligation_ids") or row.get("contract_obligations"))[:24],
             }
         )
     return result
@@ -750,6 +786,7 @@ def _normalize_files(value: object, *, max_files: int) -> list[dict[str, Any]]:
                 "dependencies": normalize_dependency_paths(row.get("dependencies"), limit=16),
                 "public_api": scalar_list(row.get("public_api"))[:40],
                 "acceptance_criteria": scalar_list(row.get("acceptance_criteria"))[:16],
+                "contract_obligations": scalar_list(row.get("contract_obligations") or row.get("obligation_ids"))[:24],
                 "entrypoint": bool(row.get("entrypoint")) or path == "main.py",
                 "kind": infer_file_kind(path, row.get("kind")),
             }

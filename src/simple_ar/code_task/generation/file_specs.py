@@ -111,6 +111,11 @@ def _merge_file_rows(
             scalar_list(secondary.get("acceptance_criteria")),
             limit=acceptance_limit,
         ),
+        "contract_obligations": _merge_unique(
+            scalar_list(primary.get("contract_obligations") or primary.get("obligation_ids")),
+            scalar_list(secondary.get("contract_obligations") or secondary.get("obligation_ids")),
+            limit=40,
+        ),
         "entrypoint": bool(primary.get("entrypoint")) or bool(secondary.get("entrypoint")),
         "kind": infer_file_kind(primary.get("path"), primary.get("kind") or secondary.get("kind")),
     }
@@ -122,6 +127,7 @@ def _file_row_score(row: Mapping[str, Any]) -> int:
         + 30 * len(scalar_list(row.get("acceptance_criteria")))
         + 20 * len(scalar_list(row.get("public_api")))
         + 10 * len(scalar_list(row.get("dependencies")))
+        + 10 * len(scalar_list(row.get("contract_obligations") or row.get("obligation_ids")))
     )
 
 

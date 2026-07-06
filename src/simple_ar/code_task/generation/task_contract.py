@@ -12,7 +12,7 @@ from simple_ar.code_task.generation.common import string_list
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)]|\[[ xX]\])\s+(?P<text>.+?)\s*$")
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.+?)\s*$")
-CANONICAL_CONTRACT_SCHEMA_VERSION = "code_task_contract.v3"
+CANONICAL_CONTRACT_SCHEMA_VERSION = "code_task_contract.v4"
 LEGACY_GREENFIELD_CONTRACT_SCHEMA_VERSION = "code_task_greenfield_contract.v2"
 TASK_CONTRACT_FILENAME = "task_contract.json"
 TASK_CONTRACT_COVERAGE_FILENAME = "task_contract_coverage.json"
@@ -46,7 +46,7 @@ def build_greenfield_task_contract(
     dependency_hints = _filter_by_keywords(requirements, _DEPENDENCY_KEYWORDS)
     required_metrics = _dedupe(_required_metrics(result_schema) + _required_metrics_from_requirements(requirements))
     source_data = dict(source or {})
-    extra = dict(extra_contract or {})
+    extra = _merge_extra_contracts(_embedded_extra_contract(task_text), extra_contract or {})
     extra_requirements = string_list(extra.get("explicit_requirements"), limit=80)
     extra_deliverables = string_list(extra.get("deliverables"), limit=40)
     extra_constraints = string_list(extra.get("constraints"), limit=40)
@@ -93,6 +93,11 @@ def build_greenfield_task_contract(
         success_criteria.append(f"Hypothesis evidence is captured and reported: {item}")
     success_criteria = _dedupe(success_criteria + extra_success)
     contract_id = str(extra.get("contract_id") or source_data.get("contract_id") or f"code-task-{normalized_kind}").strip()
+    implementation_obligations = _normalize_implementation_obligations(
+        extra.get("implementation_obligations"),
+        fallback_requirements=requirements,
+        evidence_plan=evidence_plan,
+    )
     contract = {
         "schema_version": CANONICAL_CONTRACT_SCHEMA_VERSION,
         "legacy_schema_version": LEGACY_GREENFIELD_CONTRACT_SCHEMA_VERSION,
@@ -120,6 +125,14 @@ def build_greenfield_task_contract(
             "max_files": max_files,
             "max_generated_lines": max_generated_lines,
             "files_per_batch": 4,
+        },
+        "implementation_contract": {
+            "schema_version": "code_task_implementation_contract.v1",
+            "obligations": implementation_obligations,
+            "ownership_policy": str(
+                extra.get("ownership_policy")
+                or "Every nontrivial obligation should be owned by at least one planned source/reporting artifact."
+            ),
         },
     }
     if isinstance(extra.get("artifact_contract"), Mapping):
@@ -160,6 +173,7 @@ def finalize_task_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
         data["generation_plan"] = {}
     if not isinstance(data.get("claim_specs"), list):
         data["claim_specs"] = []
+    data["implementation_contract"] = _normalize_implementation_contract(data.get("implementation_contract"))
     data["version_hash"] = task_contract_hash(data)
     return data
 
@@ -226,6 +240,7 @@ def contract_coverage(contract: Mapping[str, Any], derived: Mapping[str, Any] | 
     if isinstance(evidence, Mapping):
         for key in ("hypotheses", "required_conditions", "required_datasets", "required_comparisons"):
             required_evidence.extend(f"{key}: {item}" for item in string_list(evidence.get(key), limit=40))
+    obligations = implementation_obligations(contract, limit=120)
     omitted: list[str] = []
     if derived_data:
         text = json.dumps(derived_data, ensure_ascii=False, default=str).lower()
@@ -236,6 +251,15 @@ def contract_coverage(contract: Mapping[str, Any], derived: Mapping[str, Any] | 
             probe = artifact.split()[-1].strip("`'\"") if artifact else ""
             if probe and probe.lower() not in text:
                 omitted.append(f"artifact:{artifact[:120]}")
+        for obligation in obligations:
+            obligation_id = str(obligation.get("id") or "").strip()
+            requirement = str(obligation.get("requirement") or "").strip()
+            evidence_terms = string_list(obligation.get("evidence_terms"), limit=8)
+            probes = [obligation_id, *evidence_terms]
+            if requirement:
+                probes.extend(_important_terms(requirement, limit=4))
+            if probes and not any(str(item).lower() in text for item in probes if str(item).strip()):
+                omitted.append(f"obligation:{obligation_id or requirement[:80]}")
     return {
         "schema_version": "code_task_contract_coverage.v1",
         "contract_id": contract.get("contract_id", ""),
@@ -245,6 +269,7 @@ def contract_coverage(contract: Mapping[str, Any], derived: Mapping[str, Any] | 
         "required_metric_count": len(required_metrics),
         "required_artifact_count": len(required_artifacts),
         "required_evidence_count": len(required_evidence),
+        "implementation_obligation_count": len(obligations),
         "derived_view_checked": bool(derived_data),
         "omitted_contract_items": omitted[:80],
         "status": "warning" if omitted else "passed",
@@ -291,7 +316,227 @@ def contract_prompt_view(
         "generation_plan": dict(contract.get("generation_plan", {}))
         if isinstance(contract.get("generation_plan"), Mapping)
         else {},
+        "implementation_contract": implementation_contract_prompt_view(contract, max_items=24),
     }
+
+
+def implementation_obligations(contract: Mapping[str, Any], *, limit: int = 80) -> list[dict[str, Any]]:
+    """Return normalized implementation obligations from a task contract.
+
+    This is intentionally benchmark-neutral. Adapters may provide obligations
+    from rubric leaves, paper sections, or competition specs, but the core only
+    sees stable ids, requirements, evidence terms, and optional owner files.
+    """
+
+    implementation = contract.get("implementation_contract")
+    if isinstance(implementation, Mapping):
+        return _normalize_implementation_obligations(implementation.get("obligations"))[:limit]
+    return []
+
+
+def implementation_contract_prompt_view(
+    contract: Mapping[str, Any],
+    *,
+    max_items: int = 24,
+) -> dict[str, Any]:
+    implementation = contract.get("implementation_contract")
+    if not isinstance(implementation, Mapping):
+        return {"schema_version": "code_task_implementation_contract.v1", "obligations": []}
+    obligations = implementation_obligations(contract, limit=max_items)
+    return {
+        "schema_version": implementation.get("schema_version", "code_task_implementation_contract.v1"),
+        "ownership_policy": str(implementation.get("ownership_policy") or ""),
+        "obligations": [
+            {
+                "id": row.get("id", ""),
+                "category": row.get("category", ""),
+                "requirement": row.get("requirement", ""),
+                "acceptance_criteria": row.get("acceptance_criteria", []),
+                "evidence_terms": row.get("evidence_terms", []),
+                "owner_files": row.get("owner_files", []),
+            }
+            for row in obligations
+        ],
+    }
+
+
+def _merge_extra_contracts(first: Mapping[str, Any], second: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(first or {})
+    for key, value in dict(second or {}).items():
+        if key in {
+            "explicit_requirements",
+            "deliverables",
+            "constraints",
+            "success_criteria",
+            "required_metrics",
+            "implementation_obligations",
+            "claim_specs",
+        }:
+            existing = result.get(key)
+            rows: list[Any] = []
+            if isinstance(existing, list):
+                rows.extend(existing)
+            elif existing not in (None, "", {}, []):
+                rows.append(existing)
+            if isinstance(value, list):
+                rows.extend(value)
+            elif value not in (None, "", {}, []):
+                rows.append(value)
+            result[key] = rows
+        elif key == "evidence_plan" and isinstance(value, Mapping) and isinstance(result.get(key), Mapping):
+            result[key] = _merge_evidence_plan(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _embedded_extra_contract(task_text: str) -> dict[str, Any]:
+    """Parse optional machine-readable contract hints embedded in task text.
+
+    The marker is generic on purpose, so benchmark adapters can pass structured
+    obligations without adding benchmark-specific configuration to core code.
+    """
+
+    pattern = re.compile(
+        r"```(?:json\s+)?simple_ar_extra_contract\s*\n(?P<body>.*?)\n```",
+        re.IGNORECASE | re.DOTALL,
+    )
+    merged: dict[str, Any] = {}
+    for match in pattern.finditer(task_text or ""):
+        body = match.group("body").strip()
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, Mapping):
+            merged = _merge_extra_contracts(merged, parsed)
+    return merged
+
+
+def _normalize_implementation_contract(value: object) -> dict[str, Any]:
+    data = dict(value) if isinstance(value, Mapping) else {}
+    data["schema_version"] = "code_task_implementation_contract.v1"
+    data["obligations"] = _normalize_implementation_obligations(data.get("obligations"))
+    data.setdefault(
+        "ownership_policy",
+        "Every nontrivial obligation should be owned by at least one planned source/reporting artifact.",
+    )
+    return data
+
+
+def _normalize_implementation_obligations(
+    value: object,
+    *,
+    fallback_requirements: list[str] | None = None,
+    evidence_plan: Mapping[str, Any] | None = None,
+    limit: int = 120,
+) -> list[dict[str, Any]]:
+    rows = value if isinstance(value, list) else []
+    normalized: list[dict[str, Any]] = []
+    for index, row in enumerate(rows[:limit], start=1):
+        if isinstance(row, Mapping):
+            requirement = _clean(str(row.get("requirement") or row.get("description") or row.get("text") or ""), max_chars=500)
+            raw_id = str(row.get("id") or row.get("leaf_id") or row.get("criterion_id") or "").strip()
+            category = _clean(str(row.get("category") or row.get("task_category") or ""), max_chars=120)
+            source = _clean(str(row.get("source") or ""), max_chars=120)
+            acceptance = string_list(row.get("acceptance_criteria") or row.get("checks"), limit=12)
+            evidence_terms = string_list(row.get("evidence_terms") or row.get("terms"), limit=16)
+            owner_files = string_list(row.get("owner_files") or row.get("owners"), limit=12)
+            weight = row.get("weight", row.get("scoring_weight", 1.0))
+        else:
+            requirement = _clean(str(row), max_chars=500)
+            raw_id = ""
+            category = ""
+            source = ""
+            acceptance = []
+            evidence_terms = []
+            owner_files = []
+            weight = 1.0
+        if not requirement:
+            continue
+        obligation_id = _obligation_id(raw_id or requirement, index=index)
+        if not evidence_terms:
+            evidence_terms = _important_terms(requirement, limit=10)
+        normalized.append(
+            {
+                "id": obligation_id,
+                "category": category or "implementation",
+                "source": source,
+                "requirement": requirement,
+                "acceptance_criteria": acceptance[:12],
+                "evidence_terms": evidence_terms[:16],
+                "owner_files": owner_files[:12],
+                "weight": _safe_float(weight, default=1.0),
+            }
+        )
+    if normalized:
+        return _dedupe_obligations(normalized)
+
+    derived: list[str] = []
+    evidence = evidence_plan if isinstance(evidence_plan, Mapping) else {}
+    for key in ("hypotheses", "required_conditions", "required_datasets", "required_artifacts", "required_comparisons"):
+        for item in string_list(evidence.get(key), limit=20):
+            derived.append(f"{key}: {item}")
+    for item in (fallback_requirements or [])[:24]:
+        if any(token in item.lower() for token in ("must", "required", "condition", "dataset", "hypothesis", "artifact", "compare")):
+            derived.append(item)
+    return _dedupe_obligations(
+        [
+            {
+                "id": _obligation_id(item, index=index),
+                "category": "derived",
+                "source": "task_contract",
+                "requirement": _clean(item, max_chars=500),
+                "acceptance_criteria": [],
+                "evidence_terms": _important_terms(item, limit=10),
+                "owner_files": [],
+                "weight": 1.0,
+            }
+            for index, item in enumerate(_dedupe(derived)[:40], start=1)
+            if item
+        ]
+    )
+
+
+def _dedupe_obligations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        key = str(row.get("id") or row.get("requirement") or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
+
+
+def _obligation_id(value: str, *, index: int) -> str:
+    text = value.strip().lower()
+    if re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{1,80}", text):
+        return text[:80]
+    slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    if not slug:
+        slug = f"obligation-{index:03d}"
+    return slug[:80]
+
+
+def _important_terms(text: str, *, limit: int) -> list[str]:
+    terms: list[str] = []
+    for quoted in re.findall(r"`([^`]{2,80})`", text):
+        terms.append(quoted.strip())
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{3,}", text):
+        lowered = token.lower()
+        if lowered in _OBLIGATION_TERM_STOPWORDS:
+            continue
+        terms.append(token)
+    return _dedupe(terms)[:limit]
+
+
+def _safe_float(value: object, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _extract_requirement_lines(task_text: str, *, max_items: int = 80, max_chars: int = 320) -> list[str]:
@@ -660,3 +905,47 @@ _DEPENDENCY_KEYWORDS = (
     "rich",
     "pydantic",
 )
+
+_OBLIGATION_TERM_STOPWORDS = {
+    "about",
+    "above",
+    "after",
+    "against",
+    "analysis",
+    "artifact",
+    "artifacts",
+    "baseline",
+    "bench",
+    "benchmark",
+    "condition",
+    "conditions",
+    "data",
+    "dataset",
+    "datasets",
+    "evidence",
+    "experiment",
+    "experiments",
+    "generated",
+    "implementation",
+    "include",
+    "method",
+    "methods",
+    "metric",
+    "metrics",
+    "model",
+    "models",
+    "output",
+    "project",
+    "report",
+    "required",
+    "requires",
+    "result",
+    "results",
+    "should",
+    "source",
+    "task",
+    "that",
+    "this",
+    "with",
+    "without",
+}

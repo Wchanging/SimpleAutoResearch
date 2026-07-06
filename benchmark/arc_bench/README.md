@@ -59,6 +59,21 @@ The recommended ML test order is maintained in:
 benchmark/arc_bench/prepared/ml/INDEX.md
 ```
 
+By default, prepared tasks preserve the vanilla ARC-Bench input text: manifest
+content plus rubric leaves in readable Markdown. For ablations of
+SimpleAutoResearch's task-contract mechanism, you may opt in to an additional
+machine-readable contract block:
+
+```bash
+uv run python benchmark/arc_bench/adapter.py prepare-ml \
+  --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
+  --prepared-root benchmark/arc_bench/prepared/ml_contract \
+  --include-contract
+```
+
+Do not mix contract-enhanced prepared packages with vanilla ARC-Bench comparison
+runs unless the difference is reported explicitly.
+
 ## Optional ML Dependencies
 
 Before running the breadth or full ML topic sets, install the common scientific
@@ -178,6 +193,46 @@ export SIMPLE_AR_LLM_TIMEOUT_SEC=300
 export SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 ```
 
+## Refresh Analyze / Score Only
+
+If ML01-ML25 already have completed `code-task execute` runs and you only want
+to regenerate result analysis or judge outputs with newer adapter logic, use
+`refresh`. It reads `run_dir` entries from an existing state file, skips
+init/execute, and writes a separate submission variant instead of overwriting
+the previous output.
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py refresh \
+  --source-state-file benchmark/arc_bench/batch_state/20260706-011743-all.json \
+  --topic-set all \
+  --analyze \
+  --score \
+  --score-profile strict \
+  --variant strict-rerun-01
+```
+
+Example output layout:
+
+```text
+benchmark/arc_bench/submissions/ml/ML02/<run-id>--strict-rerun-01/
+benchmark/arc_bench/batch_state/<new-refresh-state>.json
+```
+
+Summarize the refreshed result set with the new state file:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py summarize \
+  --state-file benchmark/arc_bench/batch_state/<new-refresh-state>.json
+```
+
+The refreshed state reports incremental duration and LLM usage for the new
+finalize/result-analysis/score pass only. The original code-task generation and
+execution cost remains available in the source state file.
+
+When `--variant` is omitted, the runner derives a unique timestamped variant
+from the new state file. Add `--force` only when you intentionally want to
+regenerate an existing variant directory.
+
 ## Retry
 
 Fresh retry for unfinished topics:
@@ -264,7 +319,9 @@ uv run python benchmark/arc_bench/adapter.py score \
   --output-dir "$OUT_DIR/judge"
 ```
 
-For paper-facing comparisons, use the strict profile:
+For paper-facing comparisons, use the strict profile, or `arc-native` when you
+want the built-in scorer to use the canonical ARC-style strict audit prompt and
+leaf-targeted evidence bundle:
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py score \
@@ -293,7 +350,7 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     analysis_prompt.txt          # only when --analyze fails JSON parsing
     analysis_raw_response.txt    # only when --analyze fails JSON parsing
   judge/
-    evidence_bundle.json         # compact benchmark evidence passed to scorer
+    evidence_bundle.json         # compact benchmark evidence passed to scorer, including leaf-targeted code evidence
     judge_result.json            # leaf_grades + scoring_summary
     scorecard.md
     score_round_code_response.json
@@ -302,13 +359,13 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     score_round_results_response.json
     score_round_results_prompt.txt              # only when scoring fails
     score_round_results_response_attempt_*.json # schema retry attempts only
-    strict_reviewer_*.json       # strict profile only
-    strict_disagreements.json    # strict profile only
-    strict_adjudication.json     # strict profile only, when needed
+    reviewer_*.json              # strict / arc-native profile only
+    disagreements.json           # strict / arc-native profile only
+    adjudication.json            # strict / arc-native profile only, when needed
 ```
 
 `finalize --analyze` builds the benchmark-facing README/claims from measured
-results. `score` has three profiles:
+results. `score` has four profiles:
 
 - `proxy` (default): lightweight two-round LLM scorer for development
   regression. It is useful for quick/breadth smoke checks, but should not be
@@ -318,6 +375,10 @@ results. `score` has three profiles:
 - `strict`: runs independent reviewer passes, re-adjudicates per-leaf
   disagreements above the threshold, records the analysis source, and reports
   CD/CE/RA plus overall aggregates. Use this for paper-facing comparisons.
+- `arc-native`: uses the same strict two-reviewer/adjudication protocol with a
+  canonical ARC-style audit prompt and leaf-targeted evidence bundle. Use the
+  separate `judge --judge-command` wrapper only when calling an external native
+  AutoResearchClaw judge binary/script.
 
 If a scoring round returns valid JSON with the wrong top-level schema, the
 adapter retries once with a stricter `grades` contract and saves retry raw

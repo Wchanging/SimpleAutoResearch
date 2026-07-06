@@ -55,6 +55,18 @@ uv run python benchmark/arc_bench/adapter.py prepare-ml \
 benchmark/arc_bench/prepared/ml/INDEX.md
 ```
 
+默认 prepared task 会保持 vanilla ARC-Bench 输入形式：manifest 内容加可读 Markdown
+rubric leaves。若要专门做 SimpleAutoResearch task-contract 机制的消融实验，可以显式开启额外的机器可读 contract，并建议写到单独 prepared root：
+
+```bash
+uv run python benchmark/arc_bench/adapter.py prepare-ml \
+  --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
+  --prepared-root benchmark/arc_bench/prepared/ml_contract \
+  --include-contract
+```
+
+不要把 contract-enhanced prepared 包和 vanilla ARC-Bench 对比结果混在一起汇报，除非明确说明输入差异。
+
 ## 可选 ML 依赖
 
 在运行 breadth 或 all 这类覆盖面更广的 ML 任务组之前，建议先安装常用科学计算库。这样 code-task 在环境探测和规划时能看到可用库，减少不必要的重复造轮子：
@@ -152,6 +164,44 @@ export SIMPLE_AR_LLM_TIMEOUT_SEC=300
 export SIMPLE_AR_MAX_OUTPUT_TOKENS=4096
 ```
 
+## 只重跑 Analyze / Score
+
+如果一批 ML01-ML25 的 `code-task execute` 已经跑完，只想用新的
+result-analysis 或 judge 逻辑重新生成后处理结果，可以使用 `refresh`。它会读取已有
+state 中的 `run_dir`，不会重新 init/execute，也不会覆盖原 submission；新的输出会写入
+带 variant 后缀的目录。
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py refresh \
+  --source-state-file benchmark/arc_bench/batch_state/20260706-011743-all.json \
+  --topic-set all \
+  --analyze \
+  --score \
+  --score-profile strict \
+  --variant strict-rerun-01
+```
+
+输出示例：
+
+```text
+benchmark/arc_bench/submissions/ml/ML02/<run-id>--strict-rerun-01/
+benchmark/arc_bench/batch_state/<new-refresh-state>.json
+```
+
+后续汇总这组新结果时，使用新生成的 state 文件：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py summarize \
+  --state-file benchmark/arc_bench/batch_state/<new-refresh-state>.json
+```
+
+这份 refresh state 的耗时和 LLM token 统计是增量口径，只统计本次
+finalize/result-analysis/score 重算；原始 code-task 生成与执行成本仍保留在 source
+state 里。
+
+如果不传 `--variant`，runner 会用新 state 名自动生成一个唯一 variant。若 variant
+目录已存在且你希望重新覆盖这组后处理结果，再加 `--force`。
+
 ## 重跑与续修
 
 为所有未完成任务重新开新 run：
@@ -238,7 +288,7 @@ uv run python benchmark/arc_bench/adapter.py score \
   --output-dir "$OUT_DIR/judge"
 ```
 
-如果要做论文或正式对比，使用 strict profile：
+如果要做论文或正式对比，使用 strict profile；如果希望内置 scorer 使用更贴近 ARC 原生 strict-audit 的 prompt 和 leaf 定向证据包，可以使用 `arc-native`：
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py score \
@@ -267,7 +317,7 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     analysis_prompt.txt          # 仅在 analyze JSON 解析失败时用于诊断
     analysis_raw_response.txt    # 仅在 analyze JSON 解析失败时用于诊断
   judge/
-    evidence_bundle.json         # scorer 使用的紧凑 benchmark 证据包
+    evidence_bundle.json         # scorer 使用的紧凑 benchmark 证据包，包含 leaf 定向代码证据
     judge_result.json            # leaf_grades + scoring_summary
     scorecard.md
     score_round_code_response.json
@@ -276,17 +326,18 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     score_round_results_response.json
     score_round_results_prompt.txt              # 仅在 scoring 失败时生成
     score_round_results_response_attempt_*.json # 仅记录 schema retry 响应
-    strict_reviewer_*.json       # 仅 strict profile 生成
-    strict_disagreements.json    # 仅 strict profile 生成
-    strict_adjudication.json     # 仅 strict profile 且存在分歧时生成
+    reviewer_*.json              # 仅 strict / arc-native profile 生成
+    disagreements.json           # 仅 strict / arc-native profile 生成
+    adjudication.json            # 仅 strict / arc-native profile 且存在分歧时生成
 ```
 
 `finalize --analyze` 负责根据实测结果生成 benchmark-facing README 和 claims。
-`score` 现在有三档 profile：
+`score` 现在有四档 profile：
 
 - `proxy`：默认轻量 two-round LLM scorer，用于开发回归、quick/breadth 烟测和趋势判断；不要直接当作 AutoResearchClaw strict 分数汇报。
 - `arc-auto`：尽量贴近 `scripts/judge.py` 的自动 two-round judge 行为，保留可恢复的缺 leaf 处理。
 - `strict`：运行独立 reviewer、对超过阈值的 per-leaf 分歧复审，记录 analysis source，并输出 CD/CE/RA 与 overall 汇总；正式论文对比优先使用这一档。
+- `arc-native`：仍由当前 adapter 执行，但使用更贴近 ARC 原生 strict-audit 的 prompt、两评审/分歧复审协议和 leaf 定向代码证据包；只有要调用外部 AutoResearchClaw 原生 judge 脚本时，才使用下面的 `judge --judge-command` 包装器。
 
 如果某轮评分返回了合法 JSON 但顶层 schema 不对，adapter 会带着更严格的 `grades`
 契约重试一次，并保存每次 raw response。若重试后仍不能恢复 `grades` 数组，评分才会失败。

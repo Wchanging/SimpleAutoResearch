@@ -57,6 +57,7 @@ class PrepareOptions:
     allow_external_agent: bool = False
     agent_model: str = ""
     agent_binary: str = ""
+    include_contract: bool = False
 
 
 def main() -> int:
@@ -83,6 +84,15 @@ def main() -> int:
     prepare.add_argument("--allow-external-agent", action="store_true", default=None)
     prepare.add_argument("--agent-model")
     prepare.add_argument("--agent-binary")
+    prepare.add_argument(
+        "--include-contract",
+        action="store_true",
+        default=None,
+        help=(
+            "Opt in to embedding a machine-readable implementation contract in task.md. "
+            "Leave disabled for ARC-Bench comparison runs that should preserve vanilla inputs."
+        ),
+    )
 
     prepare_ml = sub.add_parser("prepare-ml", help="Generate prepared packages for all ML topics.")
     prepare_ml.add_argument("--arc-root", type=Path, help="Path to AutoResearchClaw/experiments/arc_bench.")
@@ -101,6 +111,15 @@ def main() -> int:
     prepare_ml.add_argument("--allow-external-agent", action="store_true", default=None)
     prepare_ml.add_argument("--agent-model")
     prepare_ml.add_argument("--agent-binary")
+    prepare_ml.add_argument(
+        "--include-contract",
+        action="store_true",
+        default=None,
+        help=(
+            "Opt in to embedding machine-readable implementation contracts in generated task.md files. "
+            "Leave disabled for ARC-Bench comparison runs that should preserve vanilla inputs."
+        ),
+    )
 
     finalize = sub.add_parser("finalize", help="Project a SimpleAutoResearch run into ARC submission layout.")
     finalize.add_argument("--prepared-dir", type=Path)
@@ -133,8 +152,12 @@ def main() -> int:
     score.add_argument("--model", help="Optional model override for scoring.")
     score.add_argument(
         "--score-profile",
-        choices=("proxy", "arc-auto", "strict"),
-        help="Scoring profile. proxy is the lightweight internal scorer; strict runs two reviewers and adjudication.",
+        choices=("proxy", "arc-auto", "strict", "arc-native"),
+        help=(
+            "Scoring profile. proxy is the lightweight internal scorer; strict runs two reviewers "
+            "and adjudication; arc-native uses the same two-reviewer strict protocol with a "
+            "canonical ARC-style prompt/evidence bundle."
+        ),
     )
     score.add_argument(
         "--strict-reviewers",
@@ -274,6 +297,7 @@ def build_prepare_options(args: argparse.Namespace, cfg: dict[str, Any]) -> Prep
         allow_external_agent=bool(value_from(args, cfg, "prepare", "allow_external_agent", False)),
         agent_model=str(value_from(args, cfg, "prepare", "agent_model", "")),
         agent_binary=str(value_from(args, cfg, "prepare", "agent_binary", "")),
+        include_contract=bool(value_from(args, cfg, "prepare", "include_contract", False)),
     )
 
 
@@ -365,6 +389,7 @@ def build_batch_prepare_options(
         ),
         agent_model=str(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "agent_model", "")),
         agent_binary=str(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "agent_binary", "")),
+        include_contract=bool(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "include_contract", False)),
     )
 
 
@@ -523,70 +548,91 @@ def render_task_markdown(manifest: dict[str, Any], rubric: dict[str, Any], optio
     hypotheses = manifest.get("hypotheses") or []
     leaves = list(iter_rubric_leaves(rubric))
 
-    return "\n".join(
-        [
-            f"# ARC-Bench Task: {topic} - {title}",
-            "",
-            "You are solving an ARC-Bench autonomous-research topic through a",
-            "SimpleAutoResearch greenfield code task. Build a runnable Python",
-            "project under `generated_project/` that designs, executes, and",
-            "summarizes a credible experiment for the topic below.",
-            "",
-            "This task is evaluated by ARC-Bench-style rubric leaves. Do not",
-            "optimize only for a single stdout metric; implement the experiment",
-            "contract, record condition-level evidence, and write a grounded",
-            "analysis that answers each hypothesis with measured numbers.",
-            "",
-            "## Research Question",
-            "",
-            str(design.get("research_question") or title),
-            "",
-            "## Synthesis / Background",
-            "",
-            str(manifest.get("synthesis") or "(not provided)").strip(),
-            "",
-            "## Hypotheses",
-            "",
-            render_bullets([f"{h.get('id', '?')}: {h.get('statement', '')}" for h in hypotheses]),
-            "",
-            "## Required Conditions",
-            "",
-            render_bullets([f"{c.get('name', '?')}: {c.get('description', '')}" for c in conditions]),
-            "",
-            "## Required Datasets",
-            "",
-            render_bullets([f"{d.get('name', '?')}: {d.get('source', '')}" for d in datasets]),
-            "",
-            "## Required Metrics",
-            "",
-            render_bullets([f"{m.get('name', '?')} ({m.get('direction', 'unknown')}): {m.get('description', '')}" for m in metrics]),
-            "",
-            "## Rubric Leaves",
-            "",
-            render_bullets([f"{leaf.get('id', '?')} [{leaf.get('task_category', 'uncategorized')}]: {leaf.get('requirements', '')}" for leaf in leaves]),
-            "",
-            "## Implementation Requirements",
-            "",
-            "- Create all source files inside `generated_project/`.",
-            "- Provide a CLI entrypoint at `generated_project/main.py`.",
-            f"- The benchmark command is `{options.benchmark_command}` and must exit with code 0.",
-            "- Print stable numeric metric lines as `metric_name: value` or `METRIC metric_name=value`.",
-            "- Write `generated_project/artifacts/results.json` with condition/dataset/seed-level evidence when possible.",
-            "- Write `generated_project/artifacts/report.md` with Method, Results, Hypothesis Verdicts, and Limitations.",
-            "- If a required dataset or optional dependency is unavailable, use a bounded fallback and disclose it in metrics and report.",
-            "- Prefer packaged/local datasets and CPU-bounded algorithms; do not require runtime downloads.",
-            "- Use multiple seeds when the manifest or rubric asks for seed coverage. If the selected preset uses fewer seeds, say so clearly.",
-            "- Claims must be grounded in captured metrics; do not invent numbers in the report.",
-            "",
-            "## Expected ARC Submission Signals",
-            "",
-            "A downstream adapter will convert this run into `submission/code/`,",
-            "`submission/results/metrics.json`, `submission/README.md`, and",
-            "`submission/claims.json`. Make that conversion easy by keeping",
-            "code, metrics, report, and hypothesis verdicts structured.",
-            "",
-        ]
-    )
+    lines = [
+        f"# ARC-Bench Task: {topic} - {title}",
+        "",
+        "You are solving an ARC-Bench autonomous-research topic through a",
+        "SimpleAutoResearch greenfield code task. Build a runnable Python",
+        "project under `generated_project/` that designs, executes, and",
+        "summarizes a credible experiment for the topic below.",
+        "",
+        "This task is evaluated by ARC-Bench-style rubric leaves. Do not",
+        "optimize only for a single stdout metric; implement the experiment",
+        "contract, record condition-level evidence, and write a grounded",
+        "analysis that answers each hypothesis with measured numbers.",
+        "",
+        "## Research Question",
+        "",
+        str(design.get("research_question") or title),
+        "",
+        "## Synthesis / Background",
+        "",
+        str(manifest.get("synthesis") or "(not provided)").strip(),
+        "",
+        "## Hypotheses",
+        "",
+        render_bullets([f"{h.get('id', '?')}: {h.get('statement', '')}" for h in hypotheses]),
+        "",
+        "## Required Conditions",
+        "",
+        render_bullets([f"{c.get('name', '?')}: {c.get('description', '')}" for c in conditions]),
+        "",
+        "## Required Datasets",
+        "",
+        render_bullets([f"{d.get('name', '?')}: {d.get('source', '')}" for d in datasets]),
+        "",
+        "## Required Metrics",
+        "",
+        render_bullets(
+            [f"{m.get('name', '?')} ({m.get('direction', 'unknown')}): {m.get('description', '')}" for m in metrics]
+        ),
+        "",
+        "## Rubric Leaves",
+        "",
+        render_bullets(
+            [
+                f"{leaf.get('id', '?')} [{leaf.get('task_category', 'uncategorized')}]: {leaf.get('requirements', '')}"
+                for leaf in leaves
+            ]
+        ),
+        "",
+        "## Implementation Requirements",
+        "",
+        "- Create all source files inside `generated_project/`.",
+        "- Provide a CLI entrypoint at `generated_project/main.py`.",
+        f"- The benchmark command is `{options.benchmark_command}` and must exit with code 0.",
+        "- Print stable numeric metric lines as `metric_name: value` or `METRIC metric_name=value`.",
+        "- Write `generated_project/artifacts/results.json` with condition/dataset/seed-level evidence when possible.",
+        "- Write `generated_project/artifacts/report.md` with Method, Results, Hypothesis Verdicts, and Limitations.",
+        "- If a required dataset or optional dependency is unavailable, use a bounded fallback and disclose it in metrics and report.",
+        "- Prefer packaged/local datasets and CPU-bounded algorithms; do not require runtime downloads.",
+        "- Use multiple seeds when the manifest or rubric asks for seed coverage. If the selected preset uses fewer seeds, say so clearly.",
+        "- Claims must be grounded in captured metrics; do not invent numbers in the report.",
+        "",
+        "## Expected ARC Submission Signals",
+        "",
+        "A downstream adapter will convert this run into `submission/code/`,",
+        "`submission/results/metrics.json`, `submission/README.md`, and",
+        "`submission/claims.json`. Make that conversion easy by keeping",
+        "code, metrics, report, and hypothesis verdicts structured.",
+        "",
+    ]
+    if options.include_contract:
+        lines.extend(
+            [
+                "## Machine-readable Implementation Contract",
+                "",
+                "The fenced JSON block below is an opt-in SimpleAutoResearch adapter aid.",
+                "It maps benchmark rubric leaves to generic implementation obligations.",
+                "Do not enable this block for vanilla ARC-Bench comparison runs.",
+                "",
+                "```simple_ar_extra_contract",
+                json.dumps(build_arc_extra_contract(manifest, rubric), indent=2, ensure_ascii=False),
+                "```",
+                "",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def render_code_task_toml(
@@ -668,6 +714,85 @@ def render_code_task_toml(
         ]
     )
     return "\n".join(lines)
+
+
+def build_arc_extra_contract(manifest: dict[str, Any], rubric: dict[str, Any]) -> dict[str, Any]:
+    design = manifest.get("experiment_design") or {}
+    leaves = list(iter_rubric_leaves(rubric))
+    obligations = []
+    for leaf in leaves:
+        leaf_id = str(leaf.get("id") or "").strip()
+        requirement = str(leaf.get("requirements") or "").strip()
+        if not leaf_id or not requirement:
+            continue
+        category = str(leaf.get("task_category") or "Uncategorized")
+        obligations.append(
+            {
+                "id": leaf_id,
+                "category": category,
+                "source": "arc_bench_rubric_leaf",
+                "requirement": requirement,
+                "acceptance_criteria": [
+                    f"Satisfy ARC rubric leaf {leaf_id} with executable artifacts, not labels only.",
+                    "Make evidence visible in code, metrics, results, README, or claims as appropriate.",
+                ],
+                "evidence_terms": arc_obligation_terms(leaf),
+                "weight": coerce_weight(leaf.get("weight")),
+            }
+        )
+    metrics = design.get("metrics") if isinstance(design.get("metrics"), list) else []
+    required_metrics = [str(row.get("name")) for row in metrics if isinstance(row, dict) and row.get("name")]
+    return {
+        "contract_id": f"arc-bench-{manifest.get('id', '')}",
+        "explicit_requirements": [
+            f"ARC topic {manifest.get('id', '')}: {manifest.get('title', '')}",
+            str((design or {}).get("research_question") or ""),
+        ],
+        "required_metrics": required_metrics,
+        "implementation_obligations": obligations,
+        "ownership_policy": (
+            "Map each ARC rubric leaf obligation to source/reporting files in the file plan; "
+            "Code Development leaves should be evidenced by executable code, and execution/result leaves by durable artifacts."
+        ),
+        "evidence_plan": {
+            "hypotheses": [
+                f"{row.get('id', '?')}: {row.get('statement', '')}"
+                for row in manifest.get("hypotheses", [])
+                if isinstance(row, dict)
+            ],
+            "required_conditions": [
+                f"{row.get('name', '?')}: {row.get('description', '')}"
+                for row in design.get("conditions", [])
+                if isinstance(row, dict)
+            ],
+            "required_datasets": [
+                f"{row.get('name', '?')}: {row.get('source', '')}"
+                for row in design.get("datasets", [])
+                if isinstance(row, dict)
+            ],
+            "required_metrics": required_metrics,
+            "required_artifacts": [
+                "generated_project/artifacts/results.json with condition/dataset/seed-level evidence",
+                "generated_project/artifacts/report.md with method, results, hypothesis verdicts, and limitations",
+            ],
+        },
+    }
+
+
+def arc_obligation_terms(leaf: dict[str, Any], *, limit: int = 14) -> list[str]:
+    text = " ".join(
+        str(leaf.get(key) or "")
+        for key in ("id", "task_category", "finegrained_task_category", "requirements")
+    )
+    terms: list[str] = []
+    for quoted in re.findall(r"`([^`]{2,80})`", text):
+        terms.append(quoted)
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_]{3,}", text):
+        lowered = token.lower()
+        if lowered in SCORE_TERM_STOPWORDS:
+            continue
+        terms.append(token)
+    return list(dict.fromkeys(term.strip() for term in terms if term.strip()))[:limit]
 
 
 def metric_directions_from_manifest(metrics: list[Any]) -> dict[str, str]:
@@ -985,7 +1110,7 @@ def score_submission_with_llm(
 
     client = LLMClient.from_env(model=model, usage_callback=usage_callback)
 
-    if score_profile == "strict":
+    if score_profile in {"strict", "arc-native"}:
         result = score_submission_strict(
             client=client,
             manifest=manifest,
@@ -997,6 +1122,7 @@ def score_submission_with_llm(
             leaves=leaves,
             reviewer_count=strict_reviewers,
             disagreement_threshold=disagreement_threshold,
+            score_profile=score_profile,
         )
         if usage_rows:
             write_json(output_dir / "llm_usage_summary.json", summarize_llm_usage_rows(usage_rows))
@@ -1085,14 +1211,21 @@ def normalize_score_profile(value: str) -> str:
         "arc": "arc-auto",
         "arc_compatible": "arc-auto",
         "arc-compatible": "arc-auto",
+        "native": "arc-native",
+        "arc_native": "arc-native",
     }
     profile = aliases.get(profile, profile)
-    if profile not in {"proxy", "arc-auto", "strict"}:
-        raise SystemExit(f"unknown score profile: {value!r}; expected proxy, arc-auto, or strict")
+    if profile not in {"proxy", "arc-auto", "strict", "arc-native"}:
+        raise SystemExit(f"unknown score profile: {value!r}; expected proxy, arc-auto, strict, or arc-native")
     return profile
 
 
 def profile_notes(profile: str) -> list[str]:
+    if profile == "arc-native":
+        return [
+            "ARC-native profile uses the strict two-reviewer/disagreement-adjudication protocol with a canonical ARC-style audit prompt.",
+            "It remains implemented by this adapter unless you use the separate `judge --judge-command` path to call an external native judge.",
+        ]
     if profile == "strict":
         return [
             "Strict profile uses independent reviewers and disagreement adjudication.",
@@ -1138,6 +1271,7 @@ def build_submission_evidence_bundle(
         "all_code_files": artifacts.get("all_code_files", []),
         "code_selection_notes": artifacts.get("code_selection_notes", []),
         "code_evidence_excerpt": clip_text(str(artifacts.get("code_text") or ""), 12000),
+        "leaf_code_evidence": clip_data(artifacts.get("leaf_code_evidence", {}), 24000),
         "metrics_digest": artifacts.get("metrics", {}),
         "claims_digest": compact_claims_for_bundle(artifacts.get("claims")),
         "experiment_summary_digest": compact_experiment_summary_for_bundle(artifacts.get("experiment_summary")),
@@ -1228,6 +1362,7 @@ def score_submission_strict(
     leaves: list[dict[str, Any]],
     reviewer_count: int,
     disagreement_threshold: float,
+    score_profile: str = "strict",
 ) -> dict[str, Any]:
     reviewer_count = max(1, min(int(reviewer_count or 2), 3))
     disagreement_threshold = max(0.0, float(disagreement_threshold))
@@ -1285,9 +1420,9 @@ def score_submission_strict(
     result = {
         "schema_version": "simple_ar_arc_judge_result.v1",
         "backend": "llm",
-        "scoring_profile": "strict",
-        "profile_notes": profile_notes("strict"),
-        "prompt_version": "simple_ar_arc_strict_score_v2",
+        "scoring_profile": score_profile,
+        "profile_notes": profile_notes(score_profile),
+        "prompt_version": "simple_ar_arc_strict_score_v3",
         "topic_id": manifest.get("id"),
         "title": manifest.get("title"),
         "prepared_dir": str(prepared_dir),
@@ -1609,6 +1744,11 @@ def load_score_artifacts(
         max_chars=max_code_chars,
         focus_terms=focus_terms,
     )
+    leaf_code_evidence = build_leaf_code_evidence(
+        code_dir,
+        list(iter_rubric_leaves(rubric)),
+        max_total_chars=max(12000, max_code_chars),
+    )
     metrics = read_json(metrics_path) if metrics_path.is_file() else {}
     claims = read_json(claims_path) if claims_path.is_file() else {}
     summary = read_json(summary_path) if summary_path.is_file() else {}
@@ -1624,6 +1764,7 @@ def load_score_artifacts(
         "code_files": code_files,
         "all_code_files": all_code_files,
         "code_selection_notes": code_selection_notes,
+        "leaf_code_evidence": leaf_code_evidence,
         "code_text": code_text,
         "metrics": clip_data(metrics, max_result_chars),
         "claims": clip_data(claims, max_result_chars),
@@ -1676,6 +1817,102 @@ def collect_code_text(
         "Code evidence is selected by entrypoint/import graph and task-term relevance, not raw filename order.",
     )
     return "\n".join(parts) if parts else "(no Python source files found)", included, all_files, notes
+
+
+def build_leaf_code_evidence(
+    code_dir: Path,
+    leaves: list[dict[str, Any]],
+    *,
+    max_total_chars: int,
+) -> dict[str, Any]:
+    """Select deterministic source snippets for each code-development leaf.
+
+    This keeps the judge strict while reducing false negatives from global code
+    truncation. The selector is lexical and benchmark-agnostic apart from using
+    the leaf text supplied by the adapter.
+    """
+
+    if not code_dir.is_dir():
+        return {"schema_version": "arc_leaf_code_evidence.v1", "items": {}, "notes": ["submission/code not found"]}
+    all_terms = score_focus_terms({}, {"sub_tasks": leaves})
+    infos = collect_code_file_infos(code_dir, focus_terms=all_terms)
+    items: dict[str, Any] = {}
+    used = 0
+    per_leaf_budget = max(1800, min(6500, max_total_chars // max(1, len(leaves))))
+    for leaf in leaves:
+        if not is_code_development_leaf(leaf):
+            continue
+        leaf_id = str(leaf.get("id") or "")
+        if not leaf_id:
+            continue
+        terms = arc_obligation_terms(leaf, limit=18)
+        snippets = source_snippets_for_terms(infos, terms, per_leaf_budget=per_leaf_budget)
+        payload = {
+            "category": leaf.get("task_category", ""),
+            "fine_category": leaf.get("finegrained_task_category", ""),
+            "requirements": leaf.get("requirements", ""),
+            "terms": terms,
+            "snippets": snippets,
+        }
+        text_len = len(json.dumps(payload, ensure_ascii=False, default=str))
+        if used + text_len > max_total_chars and items:
+            break
+        items[leaf_id] = payload
+        used += text_len
+    return {
+        "schema_version": "arc_leaf_code_evidence.v1",
+        "selection_policy": "lexical leaf terms over all discovered Python files with line-numbered snippets",
+        "items": items,
+    }
+
+
+def source_snippets_for_terms(
+    infos: list[dict[str, Any]],
+    terms: list[str],
+    *,
+    per_leaf_budget: int,
+) -> list[dict[str, Any]]:
+    if not infos or not terms:
+        return []
+    lowered_terms = [term.lower() for term in terms if term.strip()]
+    candidates: list[tuple[int, str, dict[str, Any], list[tuple[int, str]]]] = []
+    for info in infos:
+        text = str(info.get("text") or "")
+        lines = text.splitlines()
+        hits: list[tuple[int, str]] = []
+        for index, line in enumerate(lines, start=1):
+            low = line.lower()
+            if any(term in low for term in lowered_terms):
+                hits.append((index, line))
+        if not hits:
+            continue
+        rel = str(info.get("rel") or "")
+        score = min(len(hits), 10) * 10 + int(info.get("term_hits") or 0) + path_role_score(rel)
+        candidates.append((score, rel, info, hits[:8]))
+    snippets: list[dict[str, Any]] = []
+    used = 0
+    for _score, rel, info, hits in sorted(candidates, key=lambda row: (-row[0], row[1]))[:8]:
+        lines = str(info.get("text") or "").splitlines()
+        excerpt_parts: list[str] = []
+        seen_ranges: set[tuple[int, int]] = set()
+        for line_no, _line in hits[:4]:
+            start = max(1, line_no - 3)
+            end = min(len(lines), line_no + 5)
+            key = (start, end)
+            if key in seen_ranges:
+                continue
+            seen_ranges.add(key)
+            excerpt_parts.append(
+                "\n".join(f"{idx:04d}: {lines[idx - 1]}" for idx in range(start, end + 1))
+            )
+        excerpt = "\n...\n".join(excerpt_parts)
+        payload = {"path": rel, "excerpt": excerpt}
+        size = len(json.dumps(payload, ensure_ascii=False, default=str))
+        if used + size > per_leaf_budget and snippets:
+            break
+        snippets.append(payload)
+        used += size
+    return snippets
 
 
 def score_focus_terms(manifest: dict[str, Any], rubric: dict[str, Any]) -> set[str]:
@@ -1939,6 +2176,12 @@ def build_code_round_prompt(manifest_context: str, leaves: list[dict[str, Any]],
         f"{json.dumps(artifacts.get('all_code_files', []), ensure_ascii=False, indent=2)}\n\n"
         "## Code Evidence Selection Notes\n"
         f"{json.dumps(artifacts.get('code_selection_notes', []), ensure_ascii=False, indent=2)}\n\n"
+        "## Leaf-Targeted Code Evidence\n"
+        "These snippets are selected from all discovered Python files by rubric-leaf terms. "
+        "Use them to avoid missing relevant implementation details, but still grade strictly.\n"
+        "```json\n"
+        f"{json.dumps(clip_data(artifacts.get('leaf_code_evidence', {}), 30000), ensure_ascii=False, indent=2, default=str)}\n"
+        "```\n\n"
         "## Final Agent-Produced Code With Line Numbers\n"
         "```python\n"
         f"{artifacts['code_text']}\n"
