@@ -28,6 +28,10 @@ This file records user-visible project changes in reverse chronological order. P
   outputs are written as variant submission directories with a new state file,
   leaving the original submissions untouched; refreshed summaries report
   incremental post-processing duration and LLM usage.
+- ARC-Bench `summarize` now merges source run init/execute cost when summarizing
+  refreshed variants. `Total Time` and total tokens represent the full
+  experiment view, while `Postprocess` and `Postprocess Tokens` keep the
+  rerun-only incremental view.
 - ARC-Bench `--topic-set all` now includes ML17, matching the prepared ML01-ML25
   package set instead of silently running only 24 topics.
 - Greenfield file generation now unwraps a single Markdown code fence returned

@@ -225,9 +225,11 @@ uv run python benchmark/arc_bench/batch_runner.py summarize \
   --state-file benchmark/arc_bench/batch_state/<new-refresh-state>.json
 ```
 
-The refreshed state reports incremental duration and LLM usage for the new
-finalize/result-analysis/score pass only. The original code-task generation and
-execution cost remains available in the source state file.
+The refreshed state records only the new finalize/result-analysis/score
+commands. During `summarize`, variant outputs automatically read the source
+run's `arc_task_stats.json` and combine source init/execute cost with the new
+post-processing cost for `Total Time` and total tokens. The `Postprocess` /
+`Postprocess Tokens` columns keep the incremental rerun-only view.
 
 When `--variant` is omitted, the runner derives a unique timestamped variant
 from the new state file. Add `--force` only when you intentionally want to

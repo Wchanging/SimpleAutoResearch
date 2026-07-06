@@ -195,9 +195,10 @@ uv run python benchmark/arc_bench/batch_runner.py summarize \
   --state-file benchmark/arc_bench/batch_state/<new-refresh-state>.json
 ```
 
-这份 refresh state 的耗时和 LLM token 统计是增量口径，只统计本次
-finalize/result-analysis/score 重算；原始 code-task 生成与执行成本仍保留在 source
-state 里。
+这份 refresh state 自身只记录本次 finalize/result-analysis/score 的新增命令；但
+`summarize` 会在发现 variant 输出时，自动读取 source run 的 `arc_task_stats.json`，
+把源 code-task 的 init/execute 成本和本次后处理成本合并为 `Total Time` / 总 token。
+表格中的 `Postprocess` / `Postprocess Tokens` 则保留本次后处理重算的增量口径。
 
 如果不传 `--variant`，runner 会用新 state 名自动生成一个唯一 variant。若 variant
 目录已存在且你希望重新覆盖这组后处理结果，再加 `--force`。

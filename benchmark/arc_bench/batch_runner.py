@@ -1762,6 +1762,8 @@ def _build_batch_summary(ctx: RunnerContext, state: dict[str, TopicState], topic
     scored_rows = [row for row in rows if _is_number(row.get("overall_score"))]
     usage_rows = [row for row in rows if _is_number(row.get("llm_total_tokens"))]
     duration_rows = [row for row in rows if _is_number(row.get("duration_sec"))]
+    postprocess_duration_rows = [row for row in rows if _is_number(row.get("postprocess_duration_sec"))]
+    postprocess_usage_rows = [row for row in rows if _is_number(row.get("postprocess_llm_total_tokens"))]
     command_names = ("init", "execute", "finalize", "score")
     aggregate = {
         "topic_count": len(rows),
@@ -1776,6 +1778,7 @@ def _build_batch_summary(ctx: RunnerContext, state: dict[str, TopicState], topic
         },
         "runtime_means_sec": {
             "total": _mean([row.get("duration_sec") for row in duration_rows]),
+            "postprocess": _mean([row.get("postprocess_duration_sec") for row in postprocess_duration_rows]),
             **{
                 name: _mean(
                     [
@@ -1801,6 +1804,18 @@ def _build_batch_summary(ctx: RunnerContext, state: dict[str, TopicState], topic
             "total_tokens": sum(_num(row.get("llm_total_tokens")) for row in rows),
             "estimated_cost_usd": round(sum(_num(row.get("estimated_cost_usd")) for row in rows), 6),
         },
+        "postprocess_llm_usage_means": {
+            "requests": _mean([row.get("postprocess_llm_request_count") for row in postprocess_usage_rows]),
+            "input_tokens": _mean([row.get("postprocess_llm_input_tokens") for row in postprocess_usage_rows]),
+            "output_tokens": _mean([row.get("postprocess_llm_output_tokens") for row in postprocess_usage_rows]),
+            "total_tokens": _mean([row.get("postprocess_llm_total_tokens") for row in postprocess_usage_rows]),
+        },
+        "postprocess_llm_usage_totals": {
+            "requests": sum(_num(row.get("postprocess_llm_request_count")) for row in rows),
+            "input_tokens": sum(_num(row.get("postprocess_llm_input_tokens")) for row in rows),
+            "output_tokens": sum(_num(row.get("postprocess_llm_output_tokens")) for row in rows),
+            "total_tokens": sum(_num(row.get("postprocess_llm_total_tokens")) for row in rows),
+        },
     }
     return {
         "schema_version": "simple_ar_arc_batch_summary.v1",
@@ -1814,12 +1829,27 @@ def _build_batch_summary(ctx: RunnerContext, state: dict[str, TopicState], topic
 
 def _build_summary_row(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
     stats = _read_topic_stats(ctx, topic_state)
+    source_stats = _read_source_code_task_stats(ctx, stats)
     judge = _read_judge_result(ctx, topic_state)
     usage = stats.get("llm_usage") if isinstance(stats.get("llm_usage"), dict) else {}
     usage_totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
     if not usage_totals:
         usage_totals = topic_state.stats if isinstance(topic_state.stats, dict) else {}
+    postprocess_usage_totals = usage_totals if isinstance(usage_totals, dict) else {}
+    source_code_task_usage = _code_task_usage_from_stats(source_stats)
+    if source_code_task_usage:
+        usage_totals = _merge_usage_totals([source_code_task_usage, postprocess_usage_totals])
     command_durations = _command_durations(stats.get("commands"), topic_state.command_results)
+    source_command_durations = _source_code_task_command_durations(source_stats)
+    if source_command_durations:
+        command_durations = {
+            **source_command_durations,
+            **command_durations,
+        }
+    postprocess_duration = _sum_duration_keys(command_durations, ("finalize", "score"))
+    total_duration = _sum_duration_keys(command_durations, ("init", "execute", "finalize", "score"))
+    if total_duration is None:
+        total_duration = _first_number(stats.get("duration_sec"), topic_state.duration_sec)
     category_scores = judge.get("category_scores") if isinstance(judge.get("category_scores"), dict) else {}
     row = {
         "topic": topic_state.topic,
@@ -1828,7 +1858,8 @@ def _build_summary_row(ctx: RunnerContext, topic_state: TopicState) -> dict[str,
         "run_dir": topic_state.run_dir,
         "output_dir": topic_state.output_dir,
         "last_error": topic_state.last_error,
-        "duration_sec": _first_number(stats.get("duration_sec"), topic_state.duration_sec),
+        "duration_sec": total_duration,
+        "postprocess_duration_sec": _first_number(postprocess_duration),
         "command_duration_sec": _first_number(
             stats.get("command_duration_sec"),
             topic_state.stats.get("command_duration_sec") if isinstance(topic_state.stats, dict) else None,
@@ -1845,6 +1876,10 @@ def _build_summary_row(ctx: RunnerContext, topic_state: TopicState) -> dict[str,
         "llm_output_tokens": _first_number(usage_totals.get("output_tokens"), usage_totals.get("llm_output_tokens")),
         "llm_total_tokens": _first_number(usage_totals.get("total_tokens"), usage_totals.get("llm_total_tokens")),
         "estimated_cost_usd": _first_number(usage_totals.get("estimated_cost_usd")),
+        "postprocess_llm_request_count": _first_number(postprocess_usage_totals.get("request_count")),
+        "postprocess_llm_input_tokens": _first_number(postprocess_usage_totals.get("input_tokens")),
+        "postprocess_llm_output_tokens": _first_number(postprocess_usage_totals.get("output_tokens")),
+        "postprocess_llm_total_tokens": _first_number(postprocess_usage_totals.get("total_tokens")),
     }
     return row
 
@@ -1874,6 +1909,51 @@ def _read_topic_stats(ctx: RunnerContext, topic_state: TopicState) -> dict[str, 
             }
         },
     }
+
+
+def _read_source_code_task_stats(ctx: RunnerContext, stats: dict[str, Any]) -> dict[str, Any]:
+    metadata = stats.get("metadata") if isinstance(stats.get("metadata"), dict) else {}
+    source_run_dir = metadata.get("source_run_dir")
+    if not isinstance(source_run_dir, str) or not source_run_dir.strip():
+        return {}
+    return _read_json_dict(_abs(ctx.repo_root, source_run_dir) / "arc_task_stats.json")
+
+
+def _source_code_task_command_durations(source_stats: dict[str, Any]) -> dict[str, float]:
+    if not source_stats:
+        return {}
+    durations = _command_durations(source_stats.get("commands"), [])
+    return {
+        key: value
+        for key, value in durations.items()
+        if key in {"init", "execute"}
+    }
+
+
+def _code_task_usage_from_stats(source_stats: dict[str, Any]) -> dict[str, Any]:
+    if not source_stats:
+        return {}
+    usage = source_stats.get("llm_usage")
+    if not isinstance(usage, dict):
+        return {}
+    sources = usage.get("sources")
+    if not isinstance(sources, list):
+        return {}
+    summaries: list[dict[str, Any]] = []
+    for source in sources:
+        if not isinstance(source, dict) or source.get("stage") != "code_task":
+            continue
+        summary = source.get("summary")
+        if isinstance(summary, dict):
+            summaries.append(_normalize_usage_summary(summary))
+    return _merge_usage_totals(summaries) if summaries else {}
+
+
+def _sum_duration_keys(durations: dict[str, float], keys: Sequence[str]) -> float | None:
+    values = [durations.get(key) for key in keys if _is_number(durations.get(key))]
+    if not values:
+        return None
+    return round(sum(float(value) for value in values), 3)
 
 
 def _read_judge_result(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
@@ -2008,6 +2088,16 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
     runtime = aggregate.get("runtime_means_sec") if isinstance(aggregate.get("runtime_means_sec"), dict) else {}
     usage_means = aggregate.get("llm_usage_means") if isinstance(aggregate.get("llm_usage_means"), dict) else {}
     usage_totals = aggregate.get("llm_usage_totals") if isinstance(aggregate.get("llm_usage_totals"), dict) else {}
+    postprocess_usage_means = (
+        aggregate.get("postprocess_llm_usage_means")
+        if isinstance(aggregate.get("postprocess_llm_usage_means"), dict)
+        else {}
+    )
+    postprocess_usage_totals = (
+        aggregate.get("postprocess_llm_usage_totals")
+        if isinstance(aggregate.get("postprocess_llm_usage_totals"), dict)
+        else {}
+    )
     rows = summary.get("rows") if isinstance(summary.get("rows"), list) else []
     lines = [
         "# ARC-Bench Batch Summary",
@@ -2027,30 +2117,33 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
         "",
         "## Runtime And API Means",
         "",
-        "| Total Time | Execute | Finalize | Score | LLM Calls | Input Tokens | Output Tokens | Total Tokens | Cost |",
-        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Total Time | Postprocess | Execute | Finalize | Score | LLM Calls | Input Tokens | Output Tokens | Total Tokens | Post Tokens | Cost |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         (
-            f"| {_fmt_seconds(runtime.get('total'))} | {_fmt_seconds(runtime.get('execute'))} | "
+            f"| {_fmt_seconds(runtime.get('total'))} | {_fmt_seconds(runtime.get('postprocess'))} | "
+            f"{_fmt_seconds(runtime.get('execute'))} | "
             f"{_fmt_seconds(runtime.get('finalize'))} | {_fmt_seconds(runtime.get('score'))} | "
             f"{_fmt_number(usage_means.get('requests'))} | {_fmt_int(usage_means.get('input_tokens'))} | "
             f"{_fmt_int(usage_means.get('output_tokens'))} | {_fmt_int(usage_means.get('total_tokens'))} | "
+            f"{_fmt_int(postprocess_usage_means.get('total_tokens'))} | "
             f"{_fmt_cost(usage_means.get('estimated_cost_usd'))} |"
         ),
         "",
         "## API Totals",
         "",
-        "| LLM Calls | Input Tokens | Output Tokens | Total Tokens | Cost |",
-        "| ---: | ---: | ---: | ---: | ---: |",
+        "| LLM Calls | Input Tokens | Output Tokens | Total Tokens | Postprocess Tokens | Cost |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: |",
         (
             f"| {_fmt_int(usage_totals.get('requests'))} | {_fmt_int(usage_totals.get('input_tokens'))} | "
             f"{_fmt_int(usage_totals.get('output_tokens'))} | {_fmt_int(usage_totals.get('total_tokens'))} | "
+            f"{_fmt_int(postprocess_usage_totals.get('total_tokens'))} | "
             f"{_fmt_cost(usage_totals.get('estimated_cost_usd'))} |"
         ),
         "",
         "## Topic Details",
         "",
-        "| Topic | Status | Profile | Code Dev | Code Exec | Result Analysis | Overall | Time | Calls | Input | Output | Total |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Topic | Status | Profile | Code Dev | Code Exec | Result Analysis | Overall | Time | Postprocess | Calls | Input | Output | Total |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         if not isinstance(row, dict):
@@ -2060,7 +2153,8 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
             f"{row.get('topic', '')} | {row.get('status', '')} | {row.get('scoring_profile', '') or '-'} | "
             f"{_fmt_score(row.get('code_development'))} | {_fmt_score(row.get('code_execution'))} | "
             f"{_fmt_score(row.get('result_analysis'))} | {_fmt_score(row.get('overall_score'))} | "
-            f"{_fmt_seconds(row.get('duration_sec'))} | {_fmt_int(row.get('llm_request_count'))} | "
+            f"{_fmt_seconds(row.get('duration_sec'))} | {_fmt_seconds(row.get('postprocess_duration_sec'))} | "
+            f"{_fmt_int(row.get('llm_request_count'))} | "
             f"{_fmt_int(row.get('llm_input_tokens'))} | {_fmt_int(row.get('llm_output_tokens'))} | "
             f"{_fmt_int(row.get('llm_total_tokens'))} |"
         )
