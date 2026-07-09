@@ -9,7 +9,7 @@ class ReportTemplateError(RuntimeError):
     """Raised when a report template or criteria file cannot be loaded."""
 
 
-BUILTIN_TEMPLATE_NAMES = {"survey", "experiment", "reproduction"}
+BUILTIN_TEMPLATE_NAMES = {"survey", "survey_long", "experiment", "reproduction"}
 
 
 def load_report_template_bundle(

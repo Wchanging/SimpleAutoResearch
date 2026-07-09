@@ -309,6 +309,7 @@ def build_writer_brief(
         f"Sections: {sections}\n"
         f"Source handles: {len(context.source_handles)}\n"
         f"Metric sources: {len(context.metric_sources)}\n"
+        f"Survey contract: {'enabled' if memory.survey_contract.get('enabled') else 'disabled'}\n"
     )
 
 
@@ -558,6 +559,7 @@ def _writer_prompt(
         "template_markdown": template.template_markdown,
         "writer_brief": build_writer_brief(context=context, template=template, memory=memory),
         "objective": memory.objective,
+        "survey_contract": _compact_survey_contract(memory.survey_contract),
         "global_research_context": {
             "evidence_summary": context.evidence_summary[:3000],
             "synthesis": context.synthesis_markdown[:3000],
@@ -579,6 +581,10 @@ def _writer_prompt(
             "Do not use prompt-planning phrases such as Hint:, Use this paper as, Paper Brief, or Additional synthesis detail.",
             "Do not write a paper-by-paper literature note dump; group papers by taxonomy and comparison dimensions.",
             "Use the available source set broadly, but compress by grouping similar papers and citing representative evidence.",
+            "For long survey templates, optimize for topic coverage and reader needs: explain foundations, construction patterns, applications, evaluation practice, related surveys, challenges, and future directions.",
+            "When survey_contract is enabled, satisfy its reader_needs, required_facets, expected coverage, and boundaries before adding optional details.",
+            "For long survey templates, use meaningful subheadings inside large sections when they improve navigation.",
+            "For long survey templates, include compact comparison tables and figure-ready conceptual diagram specs when useful, but do not add Markdown image links unless a real generated image artifact exists.",
             "When source_strategy.mode is batch_refine and previous_draft is present, update the existing section instead of appending a separate mini-section.",
             "For incremental source batches, revise taxonomy tables, evidence maps, and contrasts to absorb new papers compactly.",
             "For Method Families, include a compact taxonomy table or grouped comparison before prose.",
@@ -630,6 +636,7 @@ def _reviewer_prompt(
         "section": section.model_dump(mode="json"),
         "criteria_markdown": template.criteria_markdown,
         "objective": memory.objective,
+        "survey_contract": _compact_survey_contract(memory.survey_contract),
         "known_limitations": memory.limitations[:8],
         "allowed_sources": _handles_for_section(memory, section),
         "metric_sources": [metric.model_dump(mode="json") for metric in memory.metric_sources[:12]],
@@ -653,6 +660,10 @@ def _reviewer_prompt(
             "Does the section synthesize across papers instead of listing paper briefs?",
             "Does it contain taxonomy/comparison dimensions when discussing methods?",
             "Does it use the selected source set broadly without becoming a paper-by-paper dump?",
+            "For long survey templates, does the section improve topic coverage for reader needs rather than merely restating a compact technical brief?",
+            "If survey_contract is enabled, does the section cover the relevant required facets without drifting into an experiment report or pipeline log?",
+            "For long survey templates, are construction, applications, evaluation, related surveys, challenges, and future directions covered across the report plan?",
+            "For long survey templates, are tables and figure-ready diagram specs used where they clarify taxonomy, benchmarks, or workflows?",
             "Does Evaluation include an evidence-quality map or equivalent compact comparison when useful?",
             "Are benchmark limitations and transfer boundaries stated near empirical claims?",
             "Is it free of prompt residue such as Hint, Use this paper as, Paper Brief, or Additional synthesis detail?",
@@ -692,6 +703,29 @@ def _json_prompt(payload: dict[str, Any]) -> str:
         "Return exactly one JSON object. Do not wrap it in Markdown fences.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+
+
+def _compact_survey_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(contract, dict) or not contract.get("enabled"):
+        return {}
+    expected = contract.get("expected_coverage") if isinstance(contract.get("expected_coverage"), dict) else {}
+    return {
+        "schema_version": contract.get("schema_version", "survey_contract.v1"),
+        "topic": contract.get("topic", ""),
+        "objective": contract.get("objective", ""),
+        "reader_needs": _string_items(contract.get("reader_needs"))[:6],
+        "required_facets": _string_items(contract.get("required_facets"))[:10],
+        "expected_coverage": expected,
+        "boundaries": _string_items(contract.get("boundaries"))[:6],
+    }
+
+
+def _string_items(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
 
 
 def _normalize_draft_response(response: dict[str, Any], section: ReportSectionPlan) -> dict[str, Any]:

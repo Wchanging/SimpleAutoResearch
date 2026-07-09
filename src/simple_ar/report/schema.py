@@ -24,6 +24,15 @@ class ReportAuditConfig(ReportModel):
     strict: bool = False
 
 
+class ReportFigureConfig(ReportModel):
+    """Optional deterministic figure generation for report artifacts."""
+
+    enabled: bool = False
+    max_figures: int = 0
+    format: Literal["svg"] = "svg"
+    mode: Literal["auto", "off"] = "auto"
+
+
 class ReportRuntimeConfig(ReportModel):
     """User-facing report-stage configuration."""
 
@@ -31,6 +40,9 @@ class ReportRuntimeConfig(ReportModel):
     template: str = "auto"
     criteria: str = "auto"
     style: str = "paper"
+    cost_profile: Literal["auto", "fast", "balanced", "thorough"] = "auto"
+    outline_strategy: Literal["auto", "template", "adaptive"] = "auto"
+    survey_contract: bool = True
     draft_sections: bool = False
     debug_artifacts: bool = False
     agent: str = "llm"
@@ -49,6 +61,7 @@ class ReportRuntimeConfig(ReportModel):
     allow_source_backtracking: bool = True
     max_backtracking_calls: int = 8
     max_backtracking_tokens: int = 6000
+    figures: ReportFigureConfig = Field(default_factory=ReportFigureConfig)
     audit: ReportAuditConfig = Field(default_factory=ReportAuditConfig)
 
 
@@ -144,6 +157,7 @@ class ReportContext(ReportModel):
     metric_sources: list[MetricSource] = Field(default_factory=list)
     citation_key_map: dict[str, str] = Field(default_factory=dict)
     max_section_sources: int = 8
+    survey_contract: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReportMemory(ReportModel):
@@ -153,6 +167,7 @@ class ReportMemory(ReportModel):
     objective: str = ""
     template: str = ""
     report_mode: str = ""
+    survey_contract: dict[str, Any] = Field(default_factory=dict)
     section_plan: list[ReportSectionPlan] = Field(default_factory=list)
     claims_evidence_matrix: list[ClaimEvidenceRecord] = Field(default_factory=list)
     source_handles: list[SourceHandle] = Field(default_factory=list)

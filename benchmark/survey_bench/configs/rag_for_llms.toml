@@ -1,0 +1,102 @@
+[run]
+topic = "Retrieval-Augmented Generation for Large Language Models"
+output_root = "benchmark/survey_bench/results/Retrieval-Augmented-Generation-for-Large-Language-Models"
+to_stage = "report"
+debug_artifacts = false
+
+[llm]
+enabled = true
+workers = 2
+
+[search]
+offline = false
+strict = true
+allow_fixture_fallback = false
+max_papers = 30
+query = "retrieval augmented generation for large language models survey retrieval reranking grounding evaluation hallucination"
+
+[research]
+mode = "strong"
+planner = "llm"
+sources = ["openalex", "semantic_scholar", "arxiv"]
+queries = [
+  "retrieval augmented generation large language models survey",
+  "RAG retrieval reranking generation grounding hallucination",
+  "retrieval augmented language models evaluation benchmarks",
+  "knowledge intensive NLP retrieval augmented generation systems",
+]
+auto_query_expansion = true
+max_retrieval_rounds = 2
+max_queries = 6
+required_facets = [
+  "retrieval_and_indexing",
+  "reranking_and_context_selection",
+  "generation_and_grounding",
+  "evaluation_benchmarks",
+  "applications_limitations_and_future_directions",
+]
+local_documents = []
+use_fulltext = true
+allow_pdf_download = true
+max_fulltext_documents = 12
+max_pdf_mb = 25
+keep_raw_pdf = true
+parser_backend = "pypdf"
+read_screening = "llm"
+read_batch_size = 5
+read_workers = 2
+read_min_shortlist = 20
+read_max_shortlist = 25
+cache = true
+index_backend = "sqlite_fts"
+index_root = ".simple_ar_cache/research_index"
+
+[research.budget]
+max_documents = 25
+max_chunks = 720
+max_context_tokens = 32000
+max_llm_calls = 32
+max_follow_up_queries = 2
+novelty_backend = "local"
+
+[retrieval]
+enabled = true
+top_k = 18
+
+[report]
+mode = "research_only"
+template = "survey_long"
+criteria = "auto"
+style = "long_academic_survey"
+cost_profile = "balanced"
+outline_strategy = "adaptive"
+survey_contract = true
+draft_sections = true
+debug_artifacts = false
+agent = "llm"
+reviewer = "llm"
+max_review_iterations = 1
+max_section_tokens = 8000
+max_report_tokens = 34000
+max_section_sources = 0
+source_strategy = "batch_refine"
+source_batch_size = 12
+max_source_batches = 0
+review_source_batches = false
+review_trace = "meta"
+output_mode = "overwrite"
+output_label = ""
+allow_source_backtracking = true
+max_backtracking_calls = 5
+max_backtracking_tokens = 12000
+
+[report.audit]
+citations = true
+metrics = true
+claims = true
+
+[report.figures]
+enabled = true
+max_figures = 3
+format = "svg"
+mode = "auto"

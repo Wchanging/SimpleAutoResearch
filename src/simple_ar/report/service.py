@@ -47,7 +47,9 @@ from simple_ar.report.citations import (
 )
 from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory, write_report_memory
-from simple_ar.report.schema import AgentReportResult, ReportAuditConfig, ReportRuntimeConfig
+from simple_ar.report.figures import maybe_add_report_figures
+from simple_ar.report.schema import AgentReportResult, ReportAuditConfig, ReportFigureConfig, ReportRuntimeConfig
+from simple_ar.report.survey import attach_survey_contract, is_survey_report
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
 from simple_ar.research.outputs.artifacts import (
@@ -143,6 +145,12 @@ def execute_report(ctx: Context) -> None:
         research_evidence_summary=research_evidence_summary,
         max_section_sources=report_config.max_section_sources,
     )
+    report_context = attach_survey_contract(
+        report_context,
+        template=template,
+        config=report_config,
+        raw_config=ctx.config,
+    )
     report_memory = initialize_report_memory(context=report_context, template=template)
     tool_gateway = ReportToolGateway(report_context)
     agent_removed_unknown_citations: list[str] = []
@@ -215,14 +223,6 @@ def execute_report(ctx: Context) -> None:
     citation_map = _citation_display_map(cited_papers)
     display_body = _display_citation_numbers(report_body, citation_map)
     report = _append_references_section(display_body, cited_papers, citation_map)
-    quality = build_report_quality(report, report_body, search_meta, results, papers, cited_papers)
-    report_audit = build_report_audit(
-        report=report,
-        report_body=report_body,
-        context=report_context,
-        memory=report_memory,
-    )
-    _record_removed_citations(report_audit, removed_unknown_citations)
     ctx.emit(
         "stage_message",
         (
@@ -231,6 +231,23 @@ def execute_report(ctx: Context) -> None:
         ),
     )
     report_dir = _prepare_report_output_dir(ctx, report_config)
+    figure_result = maybe_add_report_figures(
+        report_markdown=report,
+        report_dir=report_dir,
+        config=report_config.figures,
+        template_name=template.name,
+        survey_contract=report_context.survey_contract,
+        emit=lambda message: ctx.emit("stage_message", message),
+    )
+    report = figure_result.report_markdown
+    quality = build_report_quality(report, report_body, search_meta, results, papers, cited_papers)
+    report_audit = build_report_audit(
+        report=report,
+        report_body=report_body,
+        context=report_context,
+        memory=report_memory,
+    )
+    _record_removed_citations(report_audit, removed_unknown_citations)
     if agent_result is not None:
         _write_agent_artifacts(report_dir, agent_result, report_config)
     write_text(report_dir / "report.md", report)
@@ -240,6 +257,15 @@ def execute_report(ctx: Context) -> None:
         _citation_map_artifact(citation_map, cited_papers, report_context.citation_key_map),
     )
     write_report_memory(report_dir / "report_memory.json", report_memory)
+    if figure_result.figures:
+        write_json(
+            report_dir / "figures" / "figures_manifest.json",
+            {
+                "schema_version": "report_figures.v1",
+                "figure_count": len(figure_result.figures),
+                "figures": [figure.model_dump(mode="json") for figure in figure_result.figures],
+            },
+        )
     write_json(report_dir / "report_quality.json", quality)
     write_json(report_dir / "report_audit.json", report_audit.model_dump(mode="json"))
     write_json(
@@ -309,11 +335,14 @@ def _validated_agent_report(
 
 def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
     """Read report runtime config from flattened pipeline config."""
-    return ReportRuntimeConfig(
+    config = ReportRuntimeConfig(
         mode=str(ctx.config.get("report_mode") or "auto"),
         template=str(ctx.config.get("report_template") or "auto"),
         criteria=str(ctx.config.get("report_criteria") or "auto"),
         style=str(ctx.config.get("report_style") or "paper"),
+        cost_profile=_report_cost_profile_config(ctx.config.get("report_cost_profile")),
+        outline_strategy=_report_outline_strategy_config(ctx.config.get("report_outline_strategy")),
+        survey_contract=_bool_config(ctx.config.get("report_survey_contract"), default=True),
         draft_sections=_bool_config(ctx.config.get("report_draft_sections"), default=False),
         debug_artifacts=_bool_config(ctx.config.get("report_debug_artifacts"), default=False),
         agent=str(ctx.config.get("report_agent") or "llm"),
@@ -335,6 +364,12 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
         ),
         max_backtracking_calls=_int_config(ctx.config.get("report_max_backtracking_calls"), default=8),
         max_backtracking_tokens=_int_config(ctx.config.get("report_max_backtracking_tokens"), default=6000),
+        figures=ReportFigureConfig(
+            enabled=_bool_config(ctx.config.get("report_figures_enabled"), default=False),
+            max_figures=_non_negative_int_config(ctx.config.get("report_figures_max_figures"), default=0),
+            format=_report_figure_format_config(ctx.config.get("report_figures_format")),
+            mode=_report_figure_mode_config(ctx.config.get("report_figures_mode")),
+        ),
         audit=ReportAuditConfig(
             citations=_bool_config(ctx.config.get("report_audit_citations"), default=True),
             metrics=_bool_config(ctx.config.get("report_audit_metrics"), default=True),
@@ -342,6 +377,7 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
             strict=_bool_config(ctx.config.get("report_audit_strict"), default=False),
         ),
     )
+    return _apply_report_cost_profile(config)
 
 
 def _write_agent_artifacts(
@@ -398,6 +434,69 @@ def _review_trace_config(value: object) -> str:
 def _report_source_strategy_config(value: object) -> str:
     text = str(value or "full").strip().lower()
     return text if text in {"full", "batch_refine"} else "full"
+
+def _report_cost_profile_config(value: object) -> str:
+    text = str(value or "auto").strip().lower()
+    return text if text in {"auto", "fast", "balanced", "thorough"} else "auto"
+
+def _report_outline_strategy_config(value: object) -> str:
+    text = str(value or "auto").strip().lower()
+    return text if text in {"auto", "template", "adaptive"} else "auto"
+
+def _apply_report_cost_profile(config: ReportRuntimeConfig) -> ReportRuntimeConfig:
+    """Normalize high-level report cost profiles into concrete budgets."""
+    profile = config.cost_profile
+    if profile == "auto":
+        if is_survey_report(template_name=config.template, style=config.style, report_mode=config.mode):
+            profile = "balanced"
+        else:
+            return config
+    updates: dict[str, object] = {"cost_profile": profile}
+    if profile == "fast":
+        updates.update(
+            {
+                "max_section_sources": _cap_positive(config.max_section_sources, default=8, cap=8),
+                "max_source_batches": 1,
+                "source_batch_size": max(config.source_batch_size, 12),
+                "max_review_iterations": 0,
+                "max_backtracking_calls": min(config.max_backtracking_calls, 2),
+            }
+        )
+    elif profile == "balanced":
+        updates.update(
+            {
+                "max_section_sources": _cap_positive(config.max_section_sources, default=12, cap=14),
+                "max_source_batches": (
+                    _balanced_source_batches(config.max_source_batches)
+                    if config.source_strategy == "batch_refine"
+                    else config.max_source_batches
+                ),
+                "source_batch_size": max(config.source_batch_size, 12),
+                "max_review_iterations": min(config.max_review_iterations, 1),
+                "max_backtracking_calls": min(config.max_backtracking_calls, 5),
+            }
+        )
+    elif profile == "thorough":
+        return config.model_copy(update=updates)
+    return config.model_copy(update=updates)
+
+def _cap_positive(value: int, *, default: int, cap: int) -> int:
+    if value <= 0:
+        return default
+    return min(value, cap)
+
+def _balanced_source_batches(value: int) -> int:
+    if value <= 0:
+        return 2
+    return min(value, 2)
+
+def _report_figure_format_config(value: object) -> str:
+    text = str(value or "svg").strip().lower()
+    return text if text in {"svg"} else "svg"
+
+def _report_figure_mode_config(value: object) -> str:
+    text = str(value or "auto").strip().lower()
+    return text if text in {"auto", "off"} else "auto"
 
 def _report_output_mode_config(value: object) -> str:
     text = str(value or "overwrite").strip().lower()

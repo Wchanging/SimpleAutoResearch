@@ -1047,12 +1047,15 @@ def _read_screening_with_llm(
         indent=2,
     )
     max_shortlist = _read_screening_max_shortlist(ctx, len(papers))
+    min_shortlist = _read_screening_min_shortlist(ctx, len(papers), max_shortlist)
+    required_facets = _read_required_facets(ctx)
     coarse_decisions = _read_coarse_screening_with_llm(
         ctx,
         client,
         papers,
         problem_markdown=problem,
         research_plan_json=research_plan_json,
+        min_shortlist=min_shortlist,
     )
     if not coarse_decisions:
         return []
@@ -1078,14 +1081,21 @@ def _read_screening_with_llm(
         problem_markdown=problem,
         research_plan_json=research_plan_json,
         max_shortlist=max_shortlist,
+        min_shortlist=min_shortlist,
     )
     if not reranked:
-        return _coarse_decisions_with_priorities(valid_coarse, max_shortlist=max_shortlist)
+        return _coarse_decisions_with_priorities(
+            valid_coarse,
+            max_shortlist=max_shortlist,
+        )
     return _merge_read_screening_decisions(
         coarse_decisions=valid_coarse,
         rerank_decisions=reranked,
         reranked_ids={str(paper.get("id") or "") for paper in rerank_input},
         max_shortlist=max_shortlist,
+        min_shortlist=min_shortlist,
+        required_facets=required_facets,
+        papers_by_id=paper_by_id,
     )
 
 def _read_coarse_screening_with_llm(
@@ -1095,6 +1105,7 @@ def _read_coarse_screening_with_llm(
     *,
     problem_markdown: str,
     research_plan_json: str,
+    min_shortlist: int = 0,
 ) -> list[dict[str, Any]]:
     """Run abstract-level LLM screening in small concurrent batches."""
     batches = list(_batched(papers, _read_screening_batch_size(ctx)))
@@ -1117,6 +1128,7 @@ def _read_coarse_screening_with_llm(
                     indent=2,
                 ),
                 research_plan_json=research_plan_json,
+                min_shortlist=min_shortlist,
             ),
             label=f"read-coarse-{batch_index:03d}",
         )
@@ -1142,6 +1154,7 @@ def _read_rerank_with_llm(
     problem_markdown: str,
     research_plan_json: str,
     max_shortlist: int,
+    min_shortlist: int = 0,
 ) -> list[dict[str, Any]]:
     """Run the focused reranking pass over coarsely kept papers."""
     if not papers:
@@ -1163,6 +1176,7 @@ def _read_rerank_with_llm(
             research_plan_json=research_plan_json,
             coarse_decisions_json=json.dumps(coarse_decisions, ensure_ascii=False, indent=2),
             max_shortlist=max_shortlist,
+            min_shortlist=min_shortlist,
         ),
         label="read-rerank",
     )
@@ -1208,6 +1222,15 @@ def _read_screening_max_shortlist(ctx: Context, paper_count: int) -> int:
         default=default,
         minimum=1,
         maximum=max(1, paper_count),
+    )
+
+def _read_screening_min_shortlist(ctx: Context, paper_count: int, max_shortlist: int) -> int:
+    return _bounded_config_int(
+        ctx,
+        ("read_screening_min_shortlist", "research_read_min_shortlist"),
+        default=0,
+        minimum=0,
+        maximum=max(0, min(paper_count, max_shortlist)),
     )
 
 def _bounded_config_int(
@@ -1338,6 +1361,9 @@ def _merge_read_screening_decisions(
     rerank_decisions: list[dict[str, Any]],
     reranked_ids: set[str],
     max_shortlist: int,
+    min_shortlist: int = 0,
+    required_facets: list[str] | None = None,
+    papers_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     coarse_by_id = {str(row.get("paper_id") or ""): row for row in coarse_decisions}
     rerank_by_id = {str(row.get("paper_id") or ""): row for row in rerank_decisions}
@@ -1373,7 +1399,194 @@ def _merge_read_screening_decisions(
         if _decision_value(row.get("decision")) == "keep" and paper_id not in allowed_keep_ids:
             row["decision"] = "drop"
             row["reason"] = str(row.get("reason") or "") + " Outside read-stage shortlist budget."
+    _backfill_read_shortlist(
+        output,
+        coarse_by_id=coarse_by_id,
+        min_shortlist=min_shortlist,
+        max_shortlist=max_shortlist,
+        required_facets=required_facets or [],
+        papers_by_id=papers_by_id or {},
+    )
     return output
+
+def _backfill_read_shortlist(
+    rows: list[dict[str, Any]],
+    *,
+    coarse_by_id: dict[str, dict[str, Any]],
+    min_shortlist: int,
+    max_shortlist: int,
+    required_facets: list[str],
+    papers_by_id: dict[str, dict[str, Any]],
+) -> None:
+    """Deterministically backfill plausible papers when LLM reranking is too conservative."""
+    if min_shortlist <= 0:
+        return
+    kept = [row for row in rows if _decision_value(row.get("decision")) == "keep"]
+    target = min(max_shortlist, min_shortlist)
+    if len(kept) >= target:
+        return
+
+    covered_facets = {
+        _facet_value(row)
+        for row in kept
+        if _facet_value(row)
+    }
+    covered_required_facets = {
+        facet
+        for facet in required_facets
+        if any(_facet_matches(covered, facet) for covered in covered_facets)
+    }
+    next_priority = max((_optional_int(row.get("reading_priority")) or 0 for row in kept), default=0) + 1
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if _decision_value(row.get("decision")) == "keep":
+            continue
+        paper_id = str(row.get("paper_id") or "")
+        coarse = coarse_by_id.get(paper_id, {})
+        coarse_decision = _decision_value(coarse.get("decision"))
+        relevance = _score_value(row.get("relevance_score"), row.get("coarse_relevance_score"), coarse.get("coarse_relevance_score"))
+        if coarse_decision != "keep" and relevance < 3:
+            continue
+        candidate = dict(row)
+        candidate["_backfill_score"] = relevance + _score_value(row.get("quality_score"), coarse.get("quality_score"))
+        candidate["_backfill_facet"] = (
+            _facet_value(row)
+            or _facet_value(coarse)
+            or _infer_required_facet(papers_by_id.get(paper_id, {}), required_facets)
+        )
+        candidates.append(candidate)
+
+    candidates.sort(
+        key=lambda row: (
+            0 if _backfill_targets_missing_required(row, covered_required_facets, required_facets) else 1,
+            0 if str(row.get("_backfill_facet") or "") not in covered_facets else 1,
+            -int(row.get("_backfill_score") or 0),
+            str(row.get("paper_id") or ""),
+        )
+    )
+    row_by_id = {str(row.get("paper_id") or ""): row for row in rows}
+    for candidate in candidates:
+        if len(kept) >= target:
+            break
+        paper_id = str(candidate.get("paper_id") or "")
+        row = row_by_id.get(paper_id)
+        if row is None:
+            continue
+        row["decision"] = "keep"
+        row["reading_priority"] = next_priority
+        relevance_score = row.get("relevance_score")
+        if relevance_score is None or relevance_score == "":
+            row["relevance_score"] = candidate.get("coarse_relevance_score") or candidate.get("relevance_score")
+        quality_score = row.get("quality_score")
+        if quality_score is None or quality_score == "":
+            row["quality_score"] = candidate.get("quality_score")
+        row["reason"] = (
+            str(row.get("reason") or "").strip()
+            + " Backfilled from plausible coarse-screened candidates to meet the configured read-stage coverage target."
+        ).strip()
+        facet = str(candidate.get("_backfill_facet") or "").strip()
+        if facet:
+            covered_facets.add(facet)
+            matched_required = _matched_required_facet(facet, required_facets)
+            if matched_required:
+                covered_required_facets.add(matched_required)
+                row["reason"] = (str(row.get("reason") or "").strip() + f" Target facet: {matched_required}.").strip()
+            if not row.get("likely_facet") and not row.get("evidence_role"):
+                row["likely_facet"] = facet
+        kept.append(row)
+        next_priority += 1
+
+def _score_value(*values: object) -> int:
+    for value in values:
+        parsed = _optional_int(value)
+        if parsed is not None:
+            return parsed
+    return 0
+
+def _facet_value(row: dict[str, Any]) -> str:
+    return str(row.get("evidence_role") or row.get("likely_facet") or "").strip().lower()
+
+def _read_required_facets(ctx: Context) -> list[str]:
+    raw = ctx.config.get("research_required_facets") or ctx.config.get("required_facets")
+    if not isinstance(raw, list):
+        return []
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        clean = _normalize_facet(str(item or ""))
+        if clean and clean not in seen:
+            seen.add(clean)
+            output.append(clean)
+    return output
+
+def _infer_required_facet(paper: dict[str, Any], required_facets: list[str]) -> str:
+    if not paper or not required_facets:
+        return ""
+    text = " ".join(
+        str(value or "")
+        for value in (
+            paper.get("title"),
+            paper.get("abstract"),
+            " ".join(_string_items(paper.get("categories"), limit=12)),
+        )
+    ).lower()
+    best_facet = ""
+    best_score = 0
+    for facet in required_facets:
+        score = sum(1 for term in _facet_terms(facet) if term and term in text)
+        if score > best_score:
+            best_score = score
+            best_facet = facet
+    return best_facet if best_score > 0 else ""
+
+def _backfill_targets_missing_required(
+    row: dict[str, Any],
+    covered_required_facets: set[str],
+    required_facets: list[str],
+) -> bool:
+    facet = str(row.get("_backfill_facet") or "").strip().lower()
+    matched = _matched_required_facet(facet, required_facets)
+    return bool(matched and matched not in covered_required_facets)
+
+def _matched_required_facet(facet: str, required_facets: list[str]) -> str:
+    for required in required_facets:
+        if _facet_matches(facet, required):
+            return required
+    return ""
+
+def _facet_matches(value: str, required: str) -> bool:
+    left = _normalize_facet(value)
+    right = _normalize_facet(required)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    left_terms = _facet_terms(left)
+    right_terms = _facet_terms(right)
+    return bool(left_terms and right_terms and len(left_terms & right_terms) >= min(2, len(right_terms)))
+
+def _facet_terms(value: str) -> set[str]:
+    normalized = _normalize_facet(value)
+    terms: set[str] = set()
+    for chunk in normalized.replace("-", "_").replace("/", "_").split("_"):
+        clean = chunk.strip()
+        if len(clean) >= 3 and clean not in {"and", "the", "for", "with", "from"}:
+            terms.add(clean)
+    return terms
+
+def _normalize_facet(value: str) -> str:
+    text = str(value or "").strip().lower()
+    cleaned = []
+    previous_sep = False
+    for char in text:
+        if char.isalnum():
+            cleaned.append(char)
+            previous_sep = False
+        elif not previous_sep:
+            cleaned.append("_")
+            previous_sep = True
+    return "".join(cleaned).strip("_")
 
 def _shortlisted_papers(ctx: Context, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return papers selected by read-stage shortlist, preserving shortlist order."""

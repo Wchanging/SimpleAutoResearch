@@ -196,6 +196,7 @@ def read_coarse_screening_user_prompt(
     problem_markdown: str,
     papers_json: str,
     research_plan_json: str,
+    min_shortlist: int = 0,
 ) -> str:
     """Build the prompt for abstract-level read-stage coarse screening.
 
@@ -220,13 +221,17 @@ def read_coarse_screening_user_prompt(
         "lack useful evidence for the configured research questions.\n"
         "- If a paper is thin but plausibly relevant, keep it with lower "
         "confidence instead of pretending certainty.\n"
+        "- If `min_shortlist` is greater than zero, this run values broader "
+        "coverage for later synthesis. Avoid dropping plausible overview, "
+        "method, benchmark, dataset, or limitation papers too early.\n"
         "- `likely_facet` should be compact, such as overview, method, "
         "benchmark, dataset, code, limitation, or other.\n"
         "- Keep reasons concise and auditable.\n\n"
         f"Topic:\n{topic}\n\n"
         f"Problem artifact:\n{problem_markdown}\n\n"
         f"Research Plan JSON:\n{research_plan_json}\n\n"
-        f"Paper Batch JSON:\n{papers_json}\n"
+        f"Paper Batch JSON:\n{papers_json}\n\n"
+        f"min_shortlist: {min_shortlist}\n"
     )
 
 
@@ -238,6 +243,7 @@ def read_rerank_user_prompt(
     research_plan_json: str,
     coarse_decisions_json: str,
     max_shortlist: int,
+    min_shortlist: int = 0,
 ) -> str:
     """Build the prompt for read-stage reranking of coarsely kept papers."""
     return (
@@ -258,6 +264,9 @@ def read_rerank_user_prompt(
         "- Do not invent methods, datasets, metrics, repositories, or results.\n"
         "- Keep at most `max_shortlist` papers unless the input contains fewer "
         "papers.\n"
+        "- If `min_shortlist` is greater than zero and enough useful papers are "
+        "available, keep at least that many diverse papers. Drop below it only "
+        "when the candidates are off-topic or near duplicates, and explain why.\n"
         "- This is prioritization for reading and synthesis, not final novelty "
         "judgment.\n\n"
         f"Topic:\n{topic}\n\n"
@@ -266,6 +275,7 @@ def read_rerank_user_prompt(
         f"Coarse Decisions JSON:\n{coarse_decisions_json}\n\n"
         f"Kept Papers JSON:\n{papers_json}\n\n"
         f"max_shortlist: {max_shortlist}\n"
+        f"min_shortlist: {min_shortlist}\n"
     )
 
 
@@ -276,6 +286,7 @@ def read_screening_user_prompt(
     papers_json: str,
     research_plan_json: str,
     max_shortlist: int,
+    min_shortlist: int = 0,
 ) -> str:
     """Build the prompt for read-stage paper screening and prioritization."""
     return (
@@ -294,12 +305,16 @@ def read_screening_user_prompt(
         "confidence rather than pretending certainty.\n"
         "- Keep at most `max_shortlist` papers unless all retrieved papers are "
         "clearly necessary.\n"
+        "- If `min_shortlist` is greater than zero and the batch contains enough "
+        "potentially useful papers, avoid over-pruning. Keep borderline but "
+        "relevant papers with lower confidence so the reranker can decide.\n"
         "- This is read-stage screening, not novelty review.\n\n"
         f"Topic:\n{topic}\n\n"
         f"Problem artifact:\n{problem_markdown}\n\n"
         f"Research Plan JSON:\n{research_plan_json}\n\n"
         f"Retrieved Papers JSON:\n{papers_json}\n\n"
         f"max_shortlist: {max_shortlist}\n"
+        f"min_shortlist: {min_shortlist}\n"
     )
 
 

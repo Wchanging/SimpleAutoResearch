@@ -4,6 +4,32 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-07-09
+
+### Added
+
+- 报告生成新增可选的 `[report.figures]` 确定性 SVG 图示能力；`survey_long` 模板可在不增加 LLM 调用的情况下插入本地图示资产，提升长综述的 richness，紧凑报告默认不受影响。
+- Read 阶段新增 `read_min_shortlist`，用于宽覆盖综述任务在粗筛过严时回填合理候选论文。
+- 报告生成新增 survey task contract、自适应 survey outline/source routing 和 `cost_profile` 预算控制；长综述模板默认使用 balanced profile，除非显式设置 `cost_profile = "thorough"`，否则不再无限处理 source batches。
+- Read 阶段 shortlist 回填现在会感知 required facets：宽覆盖综述任务会优先补入仍通过粗筛、且能覆盖缺失 facet 的候选论文，并把补入原因写入 read artifacts。
+- 确定性报告图示现在可以把 survey contract 作为图节点的语义兜底，在不增加 LLM 调用的情况下提升图示和 topic/章节目标的对齐度。
+
+### Changed
+
+- SurveyBench 单 topic 配置现在开启长综述图示，并保留更大的 read shortlist，便于 20-30 篇论文规模的 survey 测试。
+- SurveyBench 导出现在会把 `figures/*.svg` 等相对 Markdown 图片资产随 survey Markdown 一起复制。
+- SurveyBench 单 topic 配置现在默认使用自适应 survey outline 和 balanced report 预算，以降低长报告生成成本并提升章节对齐。
+
+## 2026-07-08
+
+### Added
+
+- 新增 `benchmark/survey_bench/` 轻量适配器，可列出 SurveyBench topics、校验/导出生成的 survey Markdown、调用 SurveyBench 原生 content / quiz 评测脚本，并把结果汇总为 JSON/Markdown。
+- 新增有边界的 SurveyBench 单 topic 配置，默认把运行产物写入 `benchmark/survey_bench/results/<topic>/<timestamp-topic>/`，避免继续混入全局 `runs/`。
+- SurveyBench 适配默认不改写原生 judge prompt，也不把 `HumanSurvey` 暴露给生成阶段；可选 `--normalize-headings` 只做 Markdown 标题编号适配，便于对齐 SurveyBench outline parser。
+- SurveyBench 汇总报告现在输出类似论文主表的分组表格，包含 Outline Quality、Content Quality、Richness 及组内均值。
+- 新增内置 `survey_long` 报告模板和对应 reviewer criteria，用于更长、更面向读者需求的学术综述；SurveyBench 单 topic 配置已切换到该模板并提高检索与报告预算。
+
 ## 2026-07-05
 
 ### Changed

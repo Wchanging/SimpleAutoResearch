@@ -75,6 +75,7 @@ class ResearchSection(_ConfigModel):
     read_screening: str | None = None
     read_batch_size: int | None = None
     read_workers: int | None = None
+    read_min_shortlist: int | None = None
     read_max_shortlist: int | None = None
     cache: bool | None = None
     index_backend: str | None = None
@@ -182,6 +183,9 @@ class ReportSection(_ConfigModel):
     template: str | None = None
     criteria: str | None = None
     style: str | None = None
+    cost_profile: str | None = None
+    outline_strategy: str | None = None
+    survey_contract: bool | None = None
     draft_sections: bool | None = None
     debug_artifacts: bool | None = None
     agent: str | None = None
@@ -200,6 +204,7 @@ class ReportSection(_ConfigModel):
     allow_source_backtracking: bool | None = None
     max_backtracking_calls: int | None = None
     max_backtracking_tokens: int | None = None
+    figures: dict[str, Any] = Field(default_factory=dict)
     audit: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -264,6 +269,7 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "research_read_screening", self.research.read_screening)
         _set_int(result, "research_read_batch_size", self.research.read_batch_size)
         _set_int(result, "research_read_workers", self.research.read_workers)
+        _set_int(result, "research_read_min_shortlist", self.research.read_min_shortlist)
         _set_int(result, "research_read_max_shortlist", self.research.read_max_shortlist)
         _set_bool(result, "research_cache", self.research.cache)
         _set_string(result, "research_index_backend", self.research.index_backend)
@@ -365,6 +371,9 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "report_template", self.report.template)
         _set_string(result, "report_criteria", self.report.criteria)
         _set_string(result, "report_style", self.report.style)
+        _set_string(result, "report_cost_profile", self.report.cost_profile)
+        _set_string(result, "report_outline_strategy", self.report.outline_strategy)
+        _set_bool(result, "report_survey_contract", self.report.survey_contract)
         _set_bool(result, "report_draft_sections", self.report.draft_sections)
         _set_bool(result, "report_debug_artifacts", self.report.debug_artifacts)
         _set_string(result, "report_agent", self.report.agent)
@@ -383,6 +392,7 @@ class PipelineRunConfig(_ConfigModel):
         _set_bool(result, "report_allow_source_backtracking", self.report.allow_source_backtracking)
         _set_int(result, "report_max_backtracking_calls", self.report.max_backtracking_calls)
         _set_int(result, "report_max_backtracking_tokens", self.report.max_backtracking_tokens)
+        _set_report_figures(result, self.report.figures)
         _set_report_audit(result, self.report.audit)
 
         if "code_task_config" not in result and _contains_code_task_config(raw_data):
@@ -502,6 +512,22 @@ def _set_report_audit(result: dict[str, object], value: object) -> None:
     for key, enabled in value.items():
         if isinstance(enabled, bool):
             result[f"report_audit_{key}"] = enabled
+
+
+def _set_report_figures(result: dict[str, object], value: object) -> None:
+    if not isinstance(value, dict):
+        return
+    for key, setting in value.items():
+        normalized = str(key).strip().lower().replace("-", "_")
+        if normalized not in {"enabled", "max_figures", "format", "mode"}:
+            continue
+        target = f"report_figures_{normalized}"
+        if isinstance(setting, bool):
+            result[target] = setting
+        elif isinstance(setting, int) and not isinstance(setting, bool):
+            result[target] = setting
+        elif isinstance(setting, str) and setting.strip():
+            result[target] = setting.strip()
 
 
 def _apply_unified_compatibility(result: dict[str, object]) -> None:

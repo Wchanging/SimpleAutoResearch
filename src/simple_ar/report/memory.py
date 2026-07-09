@@ -11,6 +11,7 @@ from simple_ar.report.schema import (
     ReportSectionPlan,
     ReportTemplateBundle,
 )
+from simple_ar.report.survey import enrich_survey_sections
 
 
 SECTION_PATTERN = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
@@ -33,13 +34,17 @@ def initialize_report_memory(
     template: ReportTemplateBundle,
 ) -> ReportMemory:
     """Create compact report memory from template and stage context."""
-    sections = _section_plan(template.template_markdown, context)
+    sections = enrich_survey_sections(
+        _section_plan(template.template_markdown, context),
+        context=context,
+    )
     claims = _initial_claims(context)
     limitations = _initial_limitations(context)
     return ReportMemory(
         objective=context.problem_markdown.strip()[:1200] or context.topic,
         template=template.name,
         report_mode=context.report_mode,
+        survey_contract=context.survey_contract,
         section_plan=sections,
         claims_evidence_matrix=claims,
         source_handles=context.source_handles,

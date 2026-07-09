@@ -101,14 +101,17 @@ class Context:
     ) -> None:
         if self.reporter is None:
             return
-        self.reporter(
-            PipelineEvent(
-                name=name,
-                message=message,
-                stage=stage or self.current_stage,
-                data=data,
+        try:
+            self.reporter(
+                PipelineEvent(
+                    name=name,
+                    message=message,
+                    stage=stage or self.current_stage,
+                    data=data,
+                )
             )
-        )
+        except (OSError, UnicodeError):
+            return
 
 
 @dataclass(frozen=True)

@@ -34,6 +34,8 @@ benchmark/arc_bench/submissions/
 benchmark/arc_bench/prepared/
 benchmark/arc_bench/batch_logs/
 benchmark/arc_bench/batch_state/
+benchmark/survey_bench/results/
+benchmark/survey_bench/submissions/
 
 # Local planning notes
 MDfiles/
@@ -41,3 +43,4 @@ MDfiles/
 # Reference project; keep it locally for study, but do not vendor it into this repo.
 AutoResearchClaw/
 Auto-claude-code-research-in-sleep/
+SurveyBench/

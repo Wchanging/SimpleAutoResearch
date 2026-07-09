@@ -122,6 +122,7 @@ parser_backend = "basic"      # basic | pypdf | unstructured
 read_screening = "auto"       # auto | llm | deterministic
 read_batch_size = 4
 read_workers = 3
+read_min_shortlist = 0
 read_max_shortlist = 12
 
 # Whether live-provider failures may use cached metadata.
@@ -237,14 +238,18 @@ allow_fallback_scaffold = false # if true, failed LLM code can be replaced by a 
 mode = "auto"                 # auto | research_only | experiment
 
 # Built-in template name or custom Markdown path. auto maps research_only to
-# survey and experiment to experiment.
-template = "auto"             # auto | survey | experiment | reproduction | path/to/template.md
+# survey and experiment to experiment. survey_long is a longer reader-oriented
+# academic survey template for benchmark-style or thesis-style reviews.
+template = "auto"             # auto | survey | survey_long | experiment | reproduction | path/to/template.md
 
 # Built-in reviewer criteria or custom Markdown path. auto follows template.
 criteria = "auto"
 
 # Report tone hint consumed by the report agent.
 style = "paper"               # paper | technical | concise
+cost_profile = "auto"         # auto | fast | balanced | thorough
+outline_strategy = "auto"     # auto | template | adaptive
+survey_contract = true        # add survey task contract for survey templates
 
 # Keep section drafts and full report traces only when needed.
 draft_sections = false
@@ -279,6 +284,14 @@ output_label = ""             # optional folder label for archive/variant
 allow_source_backtracking = true
 max_backtracking_calls = 8
 max_backtracking_tokens = 6000
+
+[report.figures]
+# Optional deterministic Markdown/SVG figure generation after the report draft.
+# It is useful for long surveys, but stays off by default for compact reports.
+enabled = false
+max_figures = 0                # 0 means template default; survey_long defaults to 3
+format = "svg"                 # svg
+mode = "auto"                  # auto | off
 
 [report.audit]
 citations = true
@@ -486,9 +499,12 @@ max_proposal_chars = 42000
 | `[search].strict` | Fails immediately when search cannot produce real/cache results. Use this when fixture fallback would hide a bad run. |
 | `[retrieval].top_k` | Number of local artifact chunks retrieved into later prompts when artifact retrieval is enabled. |
 | `[report].mode` | `auto` chooses based on available experiment results; `research_only` avoids experiment claims; `experiment` expects results. |
-| `[report].template` | Built-in report template name (`survey`, `experiment`, `reproduction`) or a custom Markdown path. `auto` follows `mode`. |
+| `[report].template` | Built-in report template name (`survey`, `survey_long`, `experiment`, `reproduction`) or a custom Markdown path. `auto` follows `mode`. |
 | `[report].criteria` | Built-in reviewer criteria or a custom Markdown path. `auto` follows `template`. |
 | `[report].style` | Tone hint for report writing: `paper`, `technical`, or `concise`. |
+| `[report].cost_profile` | High-level report budget profile. `auto` keeps ordinary reports unchanged and maps long survey templates to `balanced`; `fast` reduces section source batches for smoke tests; `thorough` preserves high-budget behavior. |
+| `[report].outline_strategy` | Section planning mode. `auto`/`adaptive` enrich survey sections with topic-specific goals and source routing; `template` keeps headings exactly as declared by the template. |
+| `[report].survey_contract` | When true, survey templates attach a benchmark-neutral survey task contract to writer/reviewer prompts and report memory. |
 | `[report].draft_sections` | When true, keeps Writer Agent section drafts under `08-report/sections/`. Default false keeps compact reports. |
 | `[report].debug_artifacts` | When true, keeps reviewer findings, tool results, and iteration traces under `08-report/audit/` and `08-report/iterations/`. Default false. |
 | `[report].agent` / `[report].reviewer` | Report writer/reviewer backend. V2.4 local path expects LLM for quality; disabled mode is a fallback. |
@@ -503,6 +519,7 @@ max_proposal_chars = 42000
 | `[report].review_trace` | Reviewer trace retention: `off`, `meta`, or `full`. |
 | `[report].allow_source_backtracking` | Allows report tools to retrieve bounded extra evidence from current-run source handles. |
 | `[report].max_backtracking_calls` / `[report].max_backtracking_tokens` | Source-backtracking call and token budgets. |
+| `[report.figures]` | Optional deterministic report figure generation. `enabled = true` writes local SVG assets and inserts Markdown image links; `survey_long` defaults to 3 figures when `max_figures = 0`. |
 | `[report.audit].citations` / `.metrics` / `.claims` | Enables citation, metric, and claim audit components. |
 | `[report.audit].strict` | Reserved strict mode for blocking final reports on warnings; default false. |
 
@@ -579,6 +596,7 @@ package rather than parsing stdout directly.
 | `[research].read_batch_size` | Number of papers placed in each coarse title/abstract screening prompt. Smaller values are more precise but spend more LLM calls; defaults to `4` and is clamped to `1..8`. |
 | `[research].read_workers` | Concurrent LLM workers for coarse screening batches. Defaults to the lower of `3` and `[llm].workers`, so large retrieval sets can be screened without one giant prompt. |
 | `[research].read_max_shortlist` | Maximum number of papers kept for deeper Paper Briefs and synthesis after coarse screening and reranking. When omitted, small retrieval sets keep all papers and larger sets default to a bounded shortlist. |
+| `[research].read_min_shortlist` | Optional target floor for broad survey-style runs. When greater than zero, read-stage prompts avoid over-pruning plausible papers, while still allowing drops for off-topic or duplicate candidates. Defaults to `0`. |
 | `[research].cache` | Allows live-provider failures to fall back to cached metadata when available. |
 | `[research].index_backend` | Local index backend. `keyword` writes portable chunks only; `sqlite_fts` and `hybrid` update the shared SQLite FTS store; `lancedb` / `hybrid_lancedb` update the shared optional LanceDB store and degrade to a recorded status when LanceDB is not installed. |
 | `[research].index_root` | Shared accelerator-store root for SQLite FTS / LanceDB. Defaults to `.simple_ar_cache/research_index`, or `SIMPLE_AR_RESEARCH_INDEX_ROOT` when set. Use `run` or `local` only when you intentionally want per-run index databases under `02-search/research_index/`. |

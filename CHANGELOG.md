@@ -4,6 +4,58 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-07-09
+
+### Added
+
+- Report generation now supports optional deterministic SVG figures through
+  `[report.figures]`. The built-in `survey_long` template can insert compact
+  local Markdown image assets without extra LLM calls, improving long survey
+  richness while keeping compact reports unchanged by default.
+- Read-stage screening now supports `read_min_shortlist`, allowing broad
+  survey-style runs to backfill plausible candidates when early screening
+  over-prunes the paper set.
+- Report generation now supports survey task contracts, adaptive survey
+  outline/source routing, and `cost_profile` budgets. Long survey templates use
+  a balanced profile by default so SurveyBench-style runs no longer process
+  unlimited source batches unless `cost_profile = "thorough"` is requested.
+- Read-stage shortlist backfill is now facet-aware: when broad survey tasks set
+  required facets, deterministic backfill prefers plausible papers that cover
+  still-missing facets and records that reason in read artifacts.
+- Deterministic report figures can now use the survey contract as a semantic
+  fallback for figure nodes, improving topic alignment without adding LLM calls.
+
+### Changed
+
+- The SurveyBench single-topic config enables long-survey figures and keeps a
+  larger read shortlist for 20-30-paper survey tests.
+- SurveyBench export now copies relative Markdown image assets, such as
+  `figures/*.svg`, together with generated survey Markdown.
+- SurveyBench single-topic configs now use adaptive survey outline planning and
+  balanced report budgets by default.
+
+## 2026-07-08
+
+### Added
+
+- Added a lightweight `benchmark/survey_bench/` adapter that lists SurveyBench
+  topics, validates and exports generated survey Markdown, calls SurveyBench's
+  native content / quiz evaluation scripts, and summarizes result artifacts as
+  JSON/Markdown.
+- Added a bounded single-topic SurveyBench config that writes runs under
+  `benchmark/survey_bench/results/<topic>/<timestamp-topic>/` instead of the
+  global `runs/` tree.
+- The SurveyBench adapter keeps native judge prompts untouched and treats
+  `HumanSurvey` as evaluation-only reference data. Optional
+  `--normalize-headings` performs Markdown heading-number adaptation only, so
+  generated surveys can match SurveyBench's outline parser without adding
+  content.
+- SurveyBench summaries now render paper-style grouped tables with Outline
+  Quality, Content Quality, Richness, and per-group averages.
+- Added the built-in `survey_long` report template and reviewer criteria for
+  longer reader-oriented academic surveys, plus switched the SurveyBench
+  single-topic config to that template with larger retrieval/report budgets.
+
 ## 2026-07-05
 
 ### Changed

@@ -1,0 +1,107 @@
+[run]
+# Single-topic SurveyBench smoke run.
+#
+# The output_root is intentionally under benchmark/survey_bench/results so the
+# generated report, exported survey, native judge outputs, and summaries can be
+# kept together per topic instead of being mixed into the global runs/ tree.
+topic = "LLM-based Multi-Agent"
+output_root = "benchmark/survey_bench/results/LLM-based-Multi-Agent"
+to_stage = "report"
+debug_artifacts = false
+
+[llm]
+enabled = true
+workers = 2
+
+[search]
+offline = false
+strict = true
+allow_fixture_fallback = false
+max_papers = 30
+query = "LLM-based multi-agent systems large language model agents collaboration planning communication survey"
+
+[research]
+mode = "strong"
+planner = "llm"
+sources = ["openalex", "semantic_scholar", "arxiv"]
+queries = [
+  "LLM-based multi-agent systems survey",
+  "large language model multi-agent collaboration",
+  "LLM agents communication coordination planning",
+  "multi-agent LLM benchmarks evaluation",
+]
+auto_query_expansion = true
+max_retrieval_rounds = 2
+max_queries = 6
+required_facets = [
+  "agent_architecture",
+  "communication_and_coordination",
+  "planning_or_reasoning",
+  "evaluation_benchmarks",
+  "applications_and_limitations",
+]
+local_documents = []
+use_fulltext = true
+allow_pdf_download = true
+max_fulltext_documents = 12
+max_pdf_mb = 25
+keep_raw_pdf = true
+parser_backend = "pypdf"
+read_screening = "llm"
+read_batch_size = 5
+read_workers = 2
+read_min_shortlist = 20
+read_max_shortlist = 25
+cache = true
+index_backend = "sqlite_fts"
+index_root = ".simple_ar_cache/research_index"
+
+[research.budget]
+max_documents = 25
+max_chunks = 720
+max_context_tokens = 32000
+max_llm_calls = 32
+max_follow_up_queries = 2
+novelty_backend = "local"
+
+[retrieval]
+enabled = true
+top_k = 18
+
+[report]
+mode = "research_only"
+template = "survey_long"
+criteria = "auto"
+style = "long_academic_survey"
+cost_profile = "balanced"
+outline_strategy = "adaptive"
+survey_contract = true
+draft_sections = true
+debug_artifacts = false
+agent = "llm"
+reviewer = "llm"
+max_review_iterations = 1
+max_section_tokens = 8000
+max_report_tokens = 34000
+max_section_sources = 0
+source_strategy = "batch_refine"
+source_batch_size = 12
+max_source_batches = 0
+review_source_batches = false
+review_trace = "meta"
+output_mode = "overwrite"
+output_label = ""
+allow_source_backtracking = true
+max_backtracking_calls = 5
+max_backtracking_tokens = 12000
+
+[report.audit]
+citations = true
+metrics = true
+claims = true
+
+[report.figures]
+enabled = true
+max_figures = 3
+format = "svg"
+mode = "auto"

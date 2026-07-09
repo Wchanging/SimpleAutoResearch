@@ -115,6 +115,7 @@ parser_backend = "basic"      # basic | pypdf | unstructured
 read_screening = "auto"       # auto | llm | deterministic
 read_batch_size = 4
 read_workers = 3
+read_min_shortlist = 0
 read_max_shortlist = 12
 
 # live provider 失败后是否允许使用 cached metadata。
@@ -236,6 +237,9 @@ criteria = "auto"
 
 # 报告语气提示。
 style = "paper"               # paper | technical | concise
+cost_profile = "auto"         # auto | fast | balanced | thorough
+outline_strategy = "auto"     # auto | template | adaptive
+survey_contract = true        # survey 模板启用通用任务契约
 
 # 默认保持紧凑；需要逐节草稿和完整 trace 时再打开。
 draft_sections = false
@@ -267,6 +271,13 @@ output_label = ""             # archive/variant 的可选目录标签
 allow_source_backtracking = true
 max_backtracking_calls = 8
 max_backtracking_tokens = 6000
+
+[report.figures]
+# 可选的确定性 Markdown/SVG 图示生成；默认关闭，避免紧凑报告产生额外资产。
+enabled = false
+max_figures = 0                # 0 表示使用模板默认值；survey_long 默认为 3 张
+format = "svg"                 # svg
+mode = "auto"                  # auto | off
 
 [report.audit]
 citations = true
@@ -472,9 +483,12 @@ max_proposal_chars = 42000
 | `[search].strict` | 搜索无法产出真实或 cached 结果时直接失败。用于避免 fixture fallback 掩盖坏 run。 |
 | `[retrieval].top_k` | 启用 artifact retrieval 时，后续 prompt 检索多少个本地 artifact chunk。 |
 | `[report].mode` | `auto` 根据是否存在实验结果选择报告结构；`research_only` 避免实验结论；`experiment` 要求有结果证据。 |
-| `[report].template` | 内置报告模板名（`survey`、`experiment`、`reproduction`）或自定义 Markdown 路径。`auto` 跟随 `mode`。 |
+| `[report].template` | 内置报告模板名（`survey`、`survey_long`、`experiment`、`reproduction`）或自定义 Markdown 路径。`auto` 跟随 `mode`。 |
 | `[report].criteria` | 内置 reviewer criteria 或自定义 Markdown 路径。`auto` 跟随 `template`。 |
 | `[report].style` | 报告语气提示：`paper`、`technical` 或 `concise`。 |
+| `[report].cost_profile` | 报告生成预算 profile。`auto` 对普通报告保持原行为，对长 survey 默认使用 `balanced`；`fast` 适合 smoke test；`thorough` 保留高预算行为。 |
+| `[report].outline_strategy` | 章节规划模式。`auto`/`adaptive` 会为 survey 章节注入 topic-specific 目标和 source routing；`template` 完全按模板 heading 生成。 |
+| `[report].survey_contract` | 为 survey 模板启用通用任务契约，将读者需求、覆盖 facets、图表预期和边界写入 report memory/prompt。 |
 | `[report].draft_sections` | 是否把 Writer Agent 的分节草稿保留到 `08-report/sections/`；默认 false 保持紧凑输出。 |
 | `[report].debug_artifacts` | 是否把 reviewer findings、tool results 和 iteration traces 保留到 `08-report/audit/` 与 `08-report/iterations/`；默认 false。 |
 | `[report].agent` / `[report].reviewer` | 报告 writer/reviewer 后端。V2.4 本地路径建议用 LLM；disabled 只是 fallback。 |
@@ -489,6 +503,7 @@ max_proposal_chars = 42000
 | `[report].review_trace` | reviewer trace 保留策略：`off`、`meta` 或 `full`。 |
 | `[report].allow_source_backtracking` | 是否允许 report tools 在当前 run 的 source handles 中有界回查更多证据。 |
 | `[report].max_backtracking_calls` / `[report].max_backtracking_tokens` | source backtracking 调用次数和返回 token 预算。 |
+| `[report.figures]` | 可选的确定性报告图示生成。`enabled = true` 会写出本地 SVG 并插入 Markdown 图片链接；`survey_long` 在 `max_figures = 0` 时默认生成 3 张。 |
 | `[report.audit].citations` / `.metrics` / `.claims` | 启用 citation、metric 和 claim audit 组件。 |
 | `[report.audit].strict` | 后续 strict mode 可把 warning 作为阻断条件；默认 false。 |
 
@@ -554,6 +569,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[research].read_batch_size` | 每个粗筛 prompt 放入几篇论文的 title/abstract。值越小越精细但 LLM 调用更多；默认 `4`，限制在 `1..8`。 |
 | `[research].read_workers` | 粗筛批次的并发 LLM worker 数。默认取 `3` 和 `[llm].workers` 的较小值，用来避免 50+ 篇论文时塞进一个巨大 prompt。 |
 | `[research].read_max_shortlist` | 粗筛和重排后进入深入 Paper Brief 与 synthesis 的论文上限。省略时，小检索集默认全保留，大检索集默认使用有界 shortlist。 |
+| `[research].read_min_shortlist` | 面向宽覆盖综述任务的可选目标下限。大于 0 时，read 阶段会避免过早裁掉可能有用的论文，但仍允许丢弃离题或高度重复的候选。默认 `0`。 |
 | `[research].cache` | live provider 失败后是否允许使用 cached metadata。 |
 | `[research].index_backend` | 本地索引后端。`keyword` 只写可移植 chunks；`sqlite_fts` / `hybrid` 会更新共享 SQLite FTS store；`lancedb` / `hybrid_lancedb` 会更新共享可选 LanceDB store，未安装 LanceDB 时只记录状态，不影响 `chunks.jsonl`。 |
 | `[research].index_root` | SQLite FTS / LanceDB 的共享加速索引目录。默认 `.simple_ar_cache/research_index`，也可通过 `SIMPLE_AR_RESEARCH_INDEX_ROOT` 覆盖。只有明确需要每个 run 自己保存数据库时，才设为 `run` 或 `local`。 |
