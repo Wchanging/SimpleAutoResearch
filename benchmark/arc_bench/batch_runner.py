@@ -209,6 +209,12 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--score", action="store_true", help="Run the built-in LLM leaf-level scorer after finalize.")
     parser.add_argument("--score-model", help="Override SIMPLE_AR_MODEL for adapter score.")
     parser.add_argument(
+        "--native-score",
+        action="store_true",
+        help="Run AutoResearchClaw's native ARC-Bench judge.py after finalize; writes judge_native/.",
+    )
+    parser.add_argument("--native-score-model", help="Override ARC_JUDGE_MODEL for native ARC-Bench judge.")
+    parser.add_argument(
         "--score-profile",
         choices=("proxy", "arc-auto", "strict", "arc-native"),
         default="proxy",
@@ -275,15 +281,17 @@ def _run_command(args: argparse.Namespace) -> int:
                 current,
                 require_analysis=args.analyze,
                 require_score=args.score,
+                require_native_score=args.native_score,
                 score_profile=args.score_profile,
             ):
                 _print(f"[skip] {topic}: already completed at {current.output_dir}")
                 continue
-            if args.score and _completed_state_still_valid(
+            if (args.score or args.native_score) and _completed_state_still_valid(
                 ctx,
                 current,
                 require_analysis=args.analyze,
                 require_score=False,
+                require_native_score=False,
                 score_profile=args.score_profile,
             ):
                 _print(f"[score] {topic}: finalized output exists; scoring without rerunning experiment.")
@@ -291,8 +299,11 @@ def _run_command(args: argparse.Namespace) -> int:
                     ctx,
                     topic,
                     current,
+                    score=args.score,
                     score_model=args.score_model,
                     score_profile=args.score_profile,
+                    native_score=args.native_score,
+                    native_score_model=args.native_score_model,
                 )
                 state[topic] = result
                 _save_state(ctx.state_file, state)
@@ -308,6 +319,8 @@ def _run_command(args: argparse.Namespace) -> int:
             score=args.score,
             score_model=args.score_model,
             score_profile=args.score_profile,
+            native_score=args.native_score,
+            native_score_model=args.native_score_model,
             previous_state=current,
         )
         state[topic] = result
@@ -332,6 +345,7 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
             _topic_state(state, topic),
             require_analysis=args.analyze,
             require_score=args.score,
+            require_native_score=args.native_score,
             score_profile=args.score_profile,
         )
     ]
@@ -343,11 +357,12 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
     exit_code = 0
     for topic in topics:
         current = _topic_state(state, topic)
-        if args.score and current.status == "completed" and _completed_state_still_valid(
+        if (args.score or args.native_score) and current.status == "completed" and _completed_state_still_valid(
             ctx,
             current,
             require_analysis=args.analyze,
             require_score=False,
+            require_native_score=False,
             score_profile=args.score_profile,
         ):
             _print(f"[score] {topic}: finalized output exists; scoring without rerunning experiment.")
@@ -355,8 +370,11 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
                 ctx,
                 topic,
                 current,
+                score=args.score,
                 score_model=args.score_model,
                 score_profile=args.score_profile,
+                native_score=args.native_score,
+                native_score_model=args.native_score_model,
             )
             state[topic] = result
             _save_state(ctx.state_file, state)
@@ -374,6 +392,8 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
                 score=args.score,
                 score_model=args.score_model,
                 score_profile=args.score_profile,
+                native_score=args.native_score,
+                native_score_model=args.native_score_model,
             )
             state[topic] = result
             _save_state(ctx.state_file, state)
@@ -408,6 +428,8 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
             score=args.score,
             score_model=args.score_model,
             score_profile=args.score_profile,
+            native_score=args.native_score,
+            native_score_model=args.native_score_model,
             resume_run_dir=resume_run_dir,
             previous_state=current,
             repair_rounds_override=repair_rounds_override,
@@ -474,6 +496,8 @@ def _refresh_command(args: argparse.Namespace) -> int:
             score=args.score,
             score_model=args.score_model,
             score_profile=args.score_profile,
+            native_score=args.native_score,
+            native_score_model=args.native_score_model,
             variant=variant,
             force=args.force,
             incremental_stats=True,
@@ -562,6 +586,8 @@ def _run_topic(
     score: bool,
     score_model: str | None,
     score_profile: str,
+    native_score: bool,
+    native_score_model: str | None,
     resume_run_dir: Path | None = None,
     previous_state: TopicState | None = None,
     repair_rounds_override: int | None = None,
@@ -718,6 +744,23 @@ def _run_topic(
                 started_monotonic=started_monotonic,
             )
 
+    if native_score:
+        native_result = _run_native_score(
+            ctx,
+            topic=topic,
+            prepared_dir=prepared_dir,
+            output_dir=output_dir,
+            topic_log_root=topic_log_root,
+            model=native_score_model,
+        )
+        _record_command(topic_state, native_result)
+        if native_result.returncode != 0:
+            return _finalize_topic_state(
+                ctx,
+                _fail(topic_state, "native_score_failed", f"native score exited with {native_result.returncode}"),
+                started_monotonic=started_monotonic,
+            )
+
     topic_state.status = "completed"
     topic_state.last_error = None
     topic_state.updated_at = _now()
@@ -731,8 +774,11 @@ def _score_existing_topic(
     topic: str,
     current: TopicState,
     *,
+    score: bool,
     score_model: str | None,
     score_profile: str,
+    native_score: bool,
+    native_score_model: str | None,
 ) -> TopicState:
     started_monotonic = time.monotonic()
     started_at = _now()
@@ -757,36 +803,53 @@ def _score_existing_topic(
     prepared_dir = ctx.prepared_root / topic
     output_dir = _abs(ctx.repo_root, current.output_dir)
     topic_log_root = ctx.log_root / topic / _timestamp()
-    score_cmd = [
-        "uv",
-        "run",
-        "python",
-        "benchmark/arc_bench/adapter.py",
-        "score",
-        "--prepared-dir",
-        _rel(ctx.repo_root, prepared_dir),
-        "--submission-dir",
-        _rel(ctx.repo_root, output_dir / "submission"),
-        "--output-dir",
-        _rel(ctx.repo_root, output_dir / "judge"),
-        "--score-profile",
-        score_profile,
-    ]
-    if score_model:
-        score_cmd.extend(["--model", score_model])
-    score_result = _run_logged(
-        score_cmd,
-        ctx.repo_root,
-        topic_log_root / "score.log",
-        timeout=ctx.score_timeout,
-    )
-    _record_command(topic_state, score_result)
-    if score_result.returncode != 0:
-        return _finalize_topic_state(
-            ctx,
-            _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}"),
-            started_monotonic=started_monotonic,
+    if score:
+        score_cmd = [
+            "uv",
+            "run",
+            "python",
+            "benchmark/arc_bench/adapter.py",
+            "score",
+            "--prepared-dir",
+            _rel(ctx.repo_root, prepared_dir),
+            "--submission-dir",
+            _rel(ctx.repo_root, output_dir / "submission"),
+            "--output-dir",
+            _rel(ctx.repo_root, output_dir / "judge"),
+            "--score-profile",
+            score_profile,
+        ]
+        if score_model:
+            score_cmd.extend(["--model", score_model])
+        score_result = _run_logged(
+            score_cmd,
+            ctx.repo_root,
+            topic_log_root / "score.log",
+            timeout=ctx.score_timeout,
         )
+        _record_command(topic_state, score_result)
+        if score_result.returncode != 0:
+            return _finalize_topic_state(
+                ctx,
+                _fail(topic_state, "score_failed", f"score exited with {score_result.returncode}"),
+                started_monotonic=started_monotonic,
+            )
+    if native_score:
+        native_result = _run_native_score(
+            ctx,
+            topic=topic,
+            prepared_dir=prepared_dir,
+            output_dir=output_dir,
+            topic_log_root=topic_log_root,
+            model=native_score_model,
+        )
+        _record_command(topic_state, native_result)
+        if native_result.returncode != 0:
+            return _finalize_topic_state(
+                ctx,
+                _fail(topic_state, "native_score_failed", f"native score exited with {native_result.returncode}"),
+                started_monotonic=started_monotonic,
+            )
     topic_state.status = "completed"
     topic_state.last_error = None
     topic_state.updated_at = _now()
@@ -805,6 +868,8 @@ def _refresh_completed_topic(
     score: bool,
     score_model: str | None,
     score_profile: str,
+    native_score: bool,
+    native_score_model: str | None,
     variant: str | None = None,
     force: bool = False,
     incremental_stats: bool = False,
@@ -859,6 +924,7 @@ def _refresh_completed_topic(
         output_dir,
         require_analysis=analyze,
         require_score=False,
+        require_native_score=False,
         score_profile=score_profile,
     )
     if finalize_complete:
@@ -901,6 +967,7 @@ def _refresh_completed_topic(
             output_dir,
             require_analysis=analyze,
             require_score=True,
+            require_native_score=False,
             score_profile=score_profile,
         )
         if score_complete:
@@ -937,11 +1004,39 @@ def _refresh_completed_topic(
                     started_monotonic=started_monotonic,
                 )
 
+    if native_score:
+        native_complete = False if force else _finalized_output_complete(
+            output_dir,
+            require_analysis=analyze,
+            require_score=False,
+            require_native_score=True,
+            score_profile=score_profile,
+        )
+        if native_complete:
+            _print(f"[refresh] {topic}: native judge already exists; skipping native score.")
+        else:
+            native_result = _run_native_score(
+                ctx,
+                topic=topic,
+                prepared_dir=prepared_dir,
+                output_dir=output_dir,
+                topic_log_root=topic_log_root,
+                model=native_score_model,
+            )
+            _record_command(topic_state, native_result)
+            if native_result.returncode != 0:
+                return _finalize_topic_state(
+                    ctx,
+                    _fail(topic_state, "native_score_failed", f"native score exited with {native_result.returncode}"),
+                    started_monotonic=started_monotonic,
+                )
+
     if not _completed_state_still_valid(
         ctx,
         topic_state,
         require_analysis=analyze,
         require_score=score,
+        require_native_score=native_score,
         score_profile=score_profile,
     ):
         return _finalize_topic_state(
@@ -1462,6 +1557,7 @@ def _completed_state_still_valid(
     *,
     require_analysis: bool,
     require_score: bool,
+    require_native_score: bool = False,
     score_profile: str = "proxy",
 ) -> bool:
     if not state.run_dir or not state.output_dir:
@@ -1475,7 +1571,44 @@ def _completed_state_still_valid(
         output_dir,
         require_analysis=require_analysis,
         require_score=require_score,
+        require_native_score=require_native_score,
         score_profile=score_profile,
+    )
+
+
+def _run_native_score(
+    ctx: RunnerContext,
+    *,
+    topic: str,
+    prepared_dir: Path,
+    output_dir: Path,
+    topic_log_root: Path,
+    model: str | None,
+) -> CommandResult:
+    native_cmd = [
+        "uv",
+        "run",
+        "python",
+        "benchmark/arc_bench/adapter.py",
+        "native-score",
+        "--prepared-dir",
+        _rel(ctx.repo_root, prepared_dir),
+        "--run-dir",
+        _rel(ctx.repo_root, output_dir),
+        "--output-dir",
+        _rel(ctx.repo_root, output_dir / "judge_native"),
+        "--topic",
+        topic,
+        "--full",
+        "--debug",
+    ]
+    if model:
+        native_cmd.extend(["--model", model])
+    return _run_logged(
+        native_cmd,
+        ctx.repo_root,
+        topic_log_root / "native_score.log",
+        timeout=ctx.score_timeout,
     )
 
 
@@ -1485,6 +1618,7 @@ def _unfinished_or_stale_completed(
     *,
     require_analysis: bool,
     require_score: bool,
+    require_native_score: bool = False,
     score_profile: str = "proxy",
 ) -> bool:
     if state.status != "completed":
@@ -1494,6 +1628,7 @@ def _unfinished_or_stale_completed(
         state,
         require_analysis=require_analysis,
         require_score=require_score,
+        require_native_score=require_native_score,
         score_profile=score_profile,
     )
 
@@ -1503,6 +1638,7 @@ def _finalized_output_complete(
     *,
     require_analysis: bool,
     require_score: bool,
+    require_native_score: bool = False,
     score_profile: str = "proxy",
 ) -> bool:
     required_files = [
@@ -1546,6 +1682,16 @@ def _finalized_output_complete(
         if not isinstance(judge.get("overall_score"), (int, float)):
             return False
         if str(judge.get("scoring_profile") or "proxy") != score_profile:
+            return False
+    if require_native_score:
+        native_result = output_dir / "judge_native" / "judge_result.json"
+        if not native_result.is_file():
+            return False
+        try:
+            judge = json.loads(native_result.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(judge.get("overall_score"), (int, float)):
             return False
     return True
 

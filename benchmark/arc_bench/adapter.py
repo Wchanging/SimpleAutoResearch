@@ -145,6 +145,19 @@ def main() -> int:
     judge.add_argument("--output-dir", type=Path)
     judge.add_argument("--timeout-sec", type=int)
 
+    native_score = sub.add_parser("native-score", help="Run AutoResearchClaw's native ARC-Bench judge.py on a finalized output.")
+    native_score.add_argument("--prepared-dir", type=Path)
+    native_score.add_argument("--run-dir", type=Path, help="Finalized output dir containing submission/ and stage-14/.")
+    native_score.add_argument("--output-dir", type=Path, help="Directory where copied native judge artifacts are stored.")
+    native_score.add_argument("--arc-root", type=Path, help="Path to AutoResearchClaw/experiments/arc_bench.")
+    native_score.add_argument("--topic", help="Topic id, e.g. ML04. Defaults to prepared-dir/manifest.json.")
+    native_score.add_argument("--model", help="Optional ARC_JUDGE_MODEL override for native judge.")
+    native_score.add_argument("--backend", choices=("llm", "local"), default=None)
+    native_score.add_argument("--results-only", action="store_true", default=None)
+    native_score.add_argument("--full", action="store_true", default=None, help="Use native two-round code+results judge; default on.")
+    native_score.add_argument("--debug", action="store_true", default=None)
+    native_score.add_argument("--timeout-sec", type=int)
+
     score = sub.add_parser("score", help="Score a finalized submission against ARC rubric leaves with an LLM.")
     score.add_argument("--prepared-dir", type=Path)
     score.add_argument("--submission-dir", type=Path)
@@ -222,6 +235,9 @@ def main() -> int:
 
     if args.command == "judge":
         return run_judge_command(args, cfg)
+
+    if args.command == "native-score":
+        return run_native_score_command(args, cfg)
 
     if args.command == "score":
         return run_score_command(args, cfg)
@@ -2680,6 +2696,172 @@ def run_judge_command(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     )
     print(f"Judge {status} with return code {returncode}; output saved to {output_dir}")
     return returncode
+
+
+def run_native_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    prepared_dir = Path(value_from(args, cfg, "native_score", "prepared_dir", ""))
+    run_dir = Path(value_from(args, cfg, "native_score", "run_dir", ""))
+    output_dir = Path(value_from(args, cfg, "native_score", "output_dir", ""))
+    arc_root = Path(
+        value_from(args, cfg, "native_score", "arc_root", "AutoResearchClaw/experiments/arc_bench")
+    )
+    topic = str(value_from(args, cfg, "native_score", "topic", "") or "").strip()
+    model = str(value_from(args, cfg, "native_score", "model", "") or "").strip()
+    backend = str(value_from(args, cfg, "native_score", "backend", "llm") or "llm").strip()
+    timeout_sec = int(value_from(args, cfg, "native_score", "timeout_sec", 1800) or 1800)
+    results_only = bool(value_from(args, cfg, "native_score", "results_only", False))
+    full = bool(value_from(args, cfg, "native_score", "full", True))
+    debug = bool(value_from(args, cfg, "native_score", "debug", True))
+
+    if not run_dir:
+        raise SystemExit("--run-dir is required")
+    if not run_dir.is_dir():
+        raise SystemExit(f"native judge run dir not found: {run_dir}")
+    if not output_dir:
+        output_dir = run_dir / "judge_native"
+    if not topic:
+        if not prepared_dir:
+            raise SystemExit("--prepared-dir or --topic is required")
+        manifest_path = prepared_dir / "manifest.json"
+        if not manifest_path.is_file():
+            raise SystemExit(f"prepared manifest not found: {manifest_path}")
+        manifest = read_json(manifest_path)
+        topic = str(manifest.get("id") or "").strip()
+    if not topic:
+        raise SystemExit("could not resolve native judge topic id")
+
+    script = arc_root / "scripts" / "judge.py"
+    if not script.is_file():
+        raise SystemExit(f"AutoResearchClaw native judge.py not found: {script}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    load_project_dotenv(env)
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    if env.get("SIMPLE_AR_MODEL") and not env.get("OPENAI_MODEL"):
+        env["OPENAI_MODEL"] = env["SIMPLE_AR_MODEL"]
+    if model:
+        env["ARC_JUDGE_MODEL"] = model
+    ensure_native_judge_imports(arc_root, output_dir, env)
+
+    command = [
+        sys.executable,
+        str(script),
+        "--run-dir",
+        str(run_dir),
+        "--topic",
+        topic,
+        "--backend",
+        backend,
+    ]
+    if debug:
+        command.append("--debug")
+    if full and not results_only:
+        command.append("--full")
+    elif results_only:
+        command.append("--results-only")
+
+    started = time.time()
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=timeout_sec,
+            env=env,
+        )
+        returncode = completed.returncode
+        stdout = completed.stdout
+        stderr = completed.stderr
+        status = "completed"
+    except subprocess.TimeoutExpired as exc:
+        returncode = 124
+        stdout = decode_process_output(exc.stdout)
+        stderr = decode_process_output(exc.stderr) + f"\nNative judge timed out after {timeout_sec}s.\n"
+        status = "timed_out"
+    ended = time.time()
+
+    write_text(output_dir / "stdout.txt", stdout)
+    write_text(output_dir / "stderr.txt", stderr)
+    native_result = run_dir / "judge_result.json"
+    native_debug = run_dir / "judge_debug.json"
+    copied_result = ""
+    copied_debug = ""
+    if native_result.is_file():
+        shutil.copy2(native_result, output_dir / "judge_result.json")
+        copied_result = str(output_dir / "judge_result.json")
+    if native_debug.is_file():
+        shutil.copy2(native_debug, output_dir / "judge_debug.json")
+        copied_debug = str(output_dir / "judge_debug.json")
+    meta = {
+        "schema_version": "simple_ar_arc_native_judge.v1",
+        "status": status,
+        "returncode": returncode,
+        "topic": topic,
+        "backend": backend,
+        "mode": "results_only" if results_only else "full",
+        "model": env.get("ARC_JUDGE_MODEL") or env.get("OPENAI_MODEL") or "gpt-4o",
+        "command": command,
+        "run_dir": str(run_dir),
+        "output_dir": str(output_dir),
+        "native_result_path": str(native_result) if native_result.is_file() else "",
+        "copied_result_path": copied_result,
+        "copied_debug_path": copied_debug,
+        "started_at": started,
+        "ended_at": ended,
+        "duration_sec": round(ended - started, 3),
+        "stdout_path": str(output_dir / "stdout.txt"),
+        "stderr_path": str(output_dir / "stderr.txt"),
+    }
+    write_json(output_dir / "native_judge_meta.json", meta)
+    if returncode == 0 and copied_result:
+        print(f"Native ARC judge completed; result copied to {copied_result}")
+        return 0
+    print(f"Native ARC judge {status} with return code {returncode}; output saved to {output_dir}")
+    return returncode if returncode != 0 else 1
+
+
+def load_project_dotenv(env: dict[str, str]) -> None:
+    try:
+        from dotenv import dotenv_values
+    except Exception:
+        return
+    values = dotenv_values(Path(".env"))
+    for key, value in values.items():
+        if value is not None and key not in env:
+            env[str(key)] = str(value)
+
+
+def ensure_native_judge_imports(arc_root: Path, output_dir: Path, env: dict[str, str]) -> None:
+    """Provide a tiny compatibility bridge when the ARC checkout lacks paperbench_bridge.
+
+    AutoResearchClaw's native judge imports ``paperbench_bridge.build_submission``
+    before doing any grading. Some benchmark-only checkouts omit that module.
+    Finalized SimpleAutoResearch outputs already contain ``submission/``, so the
+    shim simply verifies the directory exists and returns it.
+    """
+
+    expected = arc_root.parent / "paper_replication" / "scripts" / "paperbench_bridge.py"
+    if expected.is_file():
+        return
+    shim_dir = output_dir / "_native_imports"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    shim = shim_dir / "paperbench_bridge.py"
+    if not shim.is_file():
+        shim.write_text(
+            "from pathlib import Path\n\n"
+            "def build_submission(run_dir, submission_dir, manifest):\n"
+            "    submission_dir = Path(submission_dir)\n"
+            "    if not submission_dir.is_dir():\n"
+            "        raise RuntimeError(f'finalized submission directory not found: {submission_dir}')\n"
+            "    return submission_dir\n",
+            encoding="utf-8",
+        )
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(shim_dir) + (os.pathsep + existing if existing else "")
 
 
 def decode_process_output(value: Any) -> str:
