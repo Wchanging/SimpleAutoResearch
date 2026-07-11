@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from simple_ar.report.schema import ReportSectionDraft
 
 
@@ -31,4 +33,17 @@ def _section_body(markdown: str) -> str:
     body = "\n".join(lines).strip()
     if "## References" in body:
         body = body.split("## References", maxsplit=1)[0].strip()
-    return body
+    return _demote_body_headings(body)
+
+
+def _demote_body_headings(markdown: str) -> str:
+    """Keep section-local headings below the assembled report section level."""
+
+    def replace(match: re.Match[str]) -> str:
+        hashes = match.group(1)
+        title = match.group(2)
+        if len(hashes) <= 2:
+            return f"### {title}"
+        return match.group(0)
+
+    return re.sub(r"(?m)^(#{1,6})\s+(.+\S)\s*$", replace, markdown).strip()

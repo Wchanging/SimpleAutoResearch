@@ -34,6 +34,7 @@ benchmark/arc_bench/submissions/
 benchmark/arc_bench/prepared/
 benchmark/arc_bench/batch_logs/
 benchmark/arc_bench/batch_state/
+benchmark/survey_bench/configs
 benchmark/survey_bench/results/
 benchmark/survey_bench/submissions/
 

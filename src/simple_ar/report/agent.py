@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -23,6 +24,7 @@ from simple_ar.report.schema import (
     ReportToolResult,
     ReviewerFinding,
 )
+from simple_ar.report.survey import is_survey_report, route_section_sources
 from simple_ar.report.tool_gateway import ReportToolGateway
 
 
@@ -59,6 +61,13 @@ and section structure over requests to add more paper-by-paper detail.
 Return one JSON object matching the requested schema."""
 
 
+OUTLINE_PLANNER_SYSTEM = """You are the SimpleAutoResearch survey Outline Planner.
+Create a topic-specific academic survey outline from the current run evidence.
+Do not use external gold outlines, benchmark references, or hidden evaluator
+expectations. Keep the outline broad, readable, and evidence-bounded.
+Return one JSON object matching the requested schema."""
+
+
 def run_report_agent(
     *,
     client: LLMClient | None,
@@ -90,6 +99,14 @@ def run_report_agent(
         return None
 
     current = memory.model_copy(deep=True)
+    current = _maybe_adapt_survey_outline(
+        client=client,
+        context=context,
+        template=template,
+        memory=current,
+        config=config,
+        emit=emit,
+    )
     sections: list[ReportSectionDraft] = []
     iterations: list[ReportIterationRecord] = []
     all_findings: list[ReviewerFinding] = []
@@ -311,6 +328,280 @@ def build_writer_brief(
         f"Metric sources: {len(context.metric_sources)}\n"
         f"Survey contract: {'enabled' if memory.survey_contract.get('enabled') else 'disabled'}\n"
     )
+
+
+def _maybe_adapt_survey_outline(
+    *,
+    client: LLMClient,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    config: ReportRuntimeConfig,
+    emit: Callable[[str], None] | None,
+) -> ReportMemory:
+    contract = memory.survey_contract if isinstance(memory.survey_contract, dict) else {}
+    if not contract.get("enabled"):
+        return memory
+    strategy = str(contract.get("outline_strategy") or config.outline_strategy or "auto").lower()
+    if strategy == "template":
+        return memory
+    if not is_survey_report(template_name=template.name, style=config.style, report_mode=context.report_mode):
+        return memory
+    if len(memory.section_plan) < 3:
+        return memory
+    try:
+        planned = _plan_topic_specific_outline(
+            client=client,
+            context=context,
+            template=template,
+            memory=memory,
+            config=config,
+        )
+    except (LLMError, ValidationError, ValueError, TypeError) as exc:
+        _emit(emit, f"Survey outline planner fallback used; keeping template outline. {exc}")
+        return memory
+    if not planned:
+        return memory
+    _emit(emit, f"Survey outline planner produced {len(planned)} topic-specific section(s).")
+    return memory.model_copy(
+        update={
+            "section_plan": planned,
+            "key_decisions": memory.key_decisions
+            + ["Survey section plan adapted to the topic and current-run evidence before drafting."],
+        }
+    )
+
+
+def _plan_topic_specific_outline(
+    *,
+    client: LLMClient,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    config: ReportRuntimeConfig,
+) -> list[ReportSectionPlan]:
+    response = client.ask_json(
+        OUTLINE_PLANNER_SYSTEM,
+        _outline_planner_prompt(context=context, template=template, memory=memory, config=config),
+        label="report-outline-planner",
+    )
+    sections = _ensure_survey_outline_coverage(_normalize_outline_sections(response))
+    if len(sections) < 5:
+        raise ValueError("outline planner returned fewer than 5 usable sections")
+    budget = _outline_source_budget(memory.survey_contract, config)
+    planned: list[ReportSectionPlan] = []
+    for index, row in enumerate(sections[:12], start=1):
+        heading = _clean_outline_heading(row["heading"])
+        goal = row["goal"]
+        keywords = " ".join(row.get("keywords", []))
+        evidence_handles = route_section_sources(
+            context=context,
+            heading=heading,
+            goal=f"{goal} {keywords}",
+            contract=memory.survey_contract,
+            budget=budget,
+        )
+        planned.append(
+            ReportSectionPlan(
+                section_id=_section_slug(heading) or f"section_{index}",
+                heading=heading,
+                goal=goal,
+                evidence_handles=evidence_handles or _fallback_section_handles(memory, limit=budget),
+                required=True,
+                final_order=index,
+                draft_order=_survey_draft_order(heading, index, len(sections)),
+            )
+        )
+    return _dedupe_section_ids(planned)
+
+
+def _outline_planner_prompt(
+    *,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    config: ReportRuntimeConfig,
+) -> str:
+    payload = {
+        "task": "plan_topic_specific_survey_outline",
+        "topic": context.topic,
+        "report_mode": context.report_mode,
+        "template": template.name,
+        "style": config.style,
+        "survey_contract": _compact_survey_contract(memory.survey_contract),
+        "current_template_sections": [
+            section.model_dump(mode="json") for section in memory.section_plan[:12]
+        ],
+        "available_source_brief": _outline_source_brief(context),
+        "synthesis_excerpt": context.synthesis_markdown[:2500],
+        "evidence_summary_excerpt": context.evidence_summary[:2500],
+            "planning_rules": [
+            "Create 7-10 display sections, including Abstract, Introduction, body sections, and Conclusion.",
+            "Body sections must be topic-specific; do not blindly reuse generic headings if the topic suggests better axes.",
+            "Keep SurveyBench-compatible Markdown in mind: final report will use # Title and ## numbered sections.",
+            "Use headings that a human survey reader would expect for this topic.",
+            "Cover foundations/scope, a taxonomy or method families, system or method construction, evaluation practice, applications or domains when relevant, challenges, and future directions.",
+            "For long surveys, keep coverage broad even when headings are topic-specific: include related surveys or adjacent fields when evidence permits, and include future directions separately when it improves reader utility.",
+            "If a facet has weak evidence, include it only as a limitation or open problem instead of inventing coverage.",
+            "Do not mention SimpleAutoResearch, pipeline stages, artifacts, prompts, or evaluation benchmark internals.",
+            "Do not include a References section; references are appended separately.",
+        ],
+        "output_schema": {
+            "sections": [
+                {
+                    "heading": "Short academic section heading without numbering",
+                    "goal": "Reader-facing purpose and synthesis target for this section",
+                    "keywords": ["routing keywords for evidence selection"],
+                    "required": True,
+                }
+            ],
+            "notes": "optional planning notes",
+        },
+    }
+    return _json_prompt(payload)
+
+
+def _outline_source_brief(context: ReportContext) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for handle in context.source_handles:
+        if handle.kind not in {"paper", "paper_brief"}:
+            continue
+        rows.append(
+            {
+                "handle": handle.handle,
+                "cite_as": handle.citation_key,
+                "title": handle.title[:180],
+                "summary": handle.summary[:500],
+                "section": handle.section[:120],
+                "metadata": _compact_source_metadata(handle.metadata),
+            }
+        )
+        if len(rows) >= 28:
+            break
+    return rows
+
+
+def _compact_source_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    keys = ("method", "contribution", "evaluation", "relevance", "venue", "year")
+    compact: dict[str, str] = {}
+    for key in keys:
+        value = metadata.get(key) if isinstance(metadata, dict) else None
+        if value not in (None, ""):
+            compact[key] = str(value)[:240]
+    return compact
+
+
+def _normalize_outline_sections(response: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = response.get("sections")
+    if not isinstance(raw, list):
+        raise ValueError("outline planner response missing `sections` list")
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        heading = _clean_outline_heading(str(item.get("heading") or ""))
+        if not heading or heading.lower() == "references":
+            continue
+        goal = str(item.get("goal") or "").strip()
+        keywords = item.get("keywords")
+        if isinstance(keywords, str):
+            keyword_rows = [keywords]
+        elif isinstance(keywords, list):
+            keyword_rows = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
+        else:
+            keyword_rows = []
+        rows.append(
+            {
+                "heading": heading,
+                "goal": goal or f"Synthesize evidence relevant to {heading}.",
+                "keywords": keyword_rows[:10],
+            }
+        )
+    return rows
+
+
+def _ensure_survey_outline_coverage(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve broad survey coverage while allowing topic-specific headings."""
+    if not sections:
+        return sections
+    rows = list(sections)
+    text = " ".join(f"{row.get('heading', '')} {row.get('goal', '')}" for row in rows).lower()
+    additions: list[dict[str, Any]] = []
+    if not any(term in text for term in ("related survey", "prior survey", "positioning", "adjacent", "neighboring")):
+        additions.append(
+            {
+                "heading": "Related Surveys and Positioning",
+                "goal": "Position the topic against prior surveys and neighboring fields, explaining what this synthesis adds and where boundaries remain.",
+                "keywords": ["related surveys", "positioning", "adjacent fields", "neighboring areas"],
+            }
+        )
+    if not any(term in text for term in ("future direction", "future work", "research direction")):
+        additions.append(
+            {
+                "heading": "Future Directions",
+                "goal": "State concrete research directions, testable hypotheses, and evidence needed to validate or falsify them.",
+                "keywords": ["future directions", "research directions", "open problems", "hypotheses"],
+            }
+        )
+    if not additions:
+        return rows
+    insert_at = len(rows)
+    for index, row in enumerate(rows):
+        if "conclusion" in str(row.get("heading", "")).lower():
+            insert_at = index
+            break
+    return rows[:insert_at] + additions + rows[insert_at:]
+
+
+def _clean_outline_heading(text: str) -> str:
+    heading = text.strip().strip("#").strip()
+    heading = " ".join(heading.split())
+    heading = re.sub(r"^\d+(?:\.\d+)*\s+", "", heading)
+    return heading[:100]
+
+
+def _outline_source_budget(contract: dict[str, Any], config: ReportRuntimeConfig) -> int:
+    raw = contract.get("section_source_budget") if isinstance(contract, dict) else None
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        value = 24 if config.cost_profile == "thorough" else 12
+    return max(4, min(40, value))
+
+
+def _fallback_section_handles(memory: ReportMemory, *, limit: int) -> list[str]:
+    return [
+        handle.handle
+        for handle in memory.source_handles
+        if handle.kind in {"paper", "paper_brief"}
+    ][:limit]
+
+
+def _survey_draft_order(heading: str, final_order: int, total: int) -> int:
+    lowered = heading.lower()
+    if "abstract" in lowered:
+        return total + 20
+    if "introduction" in lowered:
+        return total + 10
+    if "conclusion" in lowered:
+        return total + 5
+    return final_order
+
+
+def _section_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.strip().lower()).strip("_")[:60]
+
+
+def _dedupe_section_ids(sections: list[ReportSectionPlan]) -> list[ReportSectionPlan]:
+    seen: dict[str, int] = {}
+    result: list[ReportSectionPlan] = []
+    for section in sections:
+        base = section.section_id or "section"
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        section_id = base if count == 1 else f"{base}_{count}"
+        result.append(section.model_copy(update={"section_id": section_id}))
+    return result
 
 
 def _draft_section(

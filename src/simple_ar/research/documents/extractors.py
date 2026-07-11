@@ -146,6 +146,8 @@ def _extract_text(path: Path, *, source_plan: SourcePlan) -> tuple[str, str]:
 
 
 def _read_pdf(path: Path, *, max_pages: int) -> str:
+    if not _path_looks_like_pdf(path):
+        raise RuntimeError("invalid_pdf_header")
     try:
         from pypdf import PdfReader  # type: ignore[import-not-found]
     except ModuleNotFoundError as exc:
@@ -155,6 +157,15 @@ def _read_pdf(path: Path, *, max_pages: int) -> str:
     for page in reader.pages[:max_pages]:
         parts.append(page.extract_text() or "")
     return "\n".join(parts)
+
+
+def _path_looks_like_pdf(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(16)
+    except OSError:
+        return False
+    return header.lstrip().startswith(b"%PDF-")
 
 
 def _read_unstructured(path: Path) -> str:

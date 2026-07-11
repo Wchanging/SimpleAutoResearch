@@ -1,11 +1,12 @@
 [run]
 topic = "Retrieval-Augmented Generation for Large Language Models"
-output_root = "benchmark/survey_bench/results/Retrieval-Augmented-Generation-for-Large-Language-Models"
+output_root = "benchmark/survey_bench/results/topics/topic16-retrieval-augmented-generation-for-large-language-models"
 to_stage = "report"
 debug_artifacts = false
 
 [llm]
 enabled = true
+model = "gpt-4o"
 workers = 2
 
 [search]

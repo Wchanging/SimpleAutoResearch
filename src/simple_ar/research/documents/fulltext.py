@@ -70,12 +70,13 @@ def build_fulltext_manifest(
         attempted when full-text intent and permissions allow them.
     """
     max_documents = _positive_int(source_plan.budget.get("max_fulltext_documents"), default=0)
+    max_fetch_attempts = _fulltext_fetch_attempt_cap(source_plan.budget, target=max_documents)
     max_pdf_bytes = _positive_int(source_plan.budget.get("max_pdf_mb"), default=0) * 1024 * 1024
     keep_raw_pdf = bool(source_plan.budget.get("keep_raw_pdf")) if isinstance(source_plan.budget.get("keep_raw_pdf"), bool) else False
     parser_backend = str(source_plan.budget.get("parser_backend") or "basic")
 
     rows: list[dict[str, Any]] = []
-    selected_count = 0
+    fetch_attempt_count = 0
     cached_count = 0
     hint_count = 0
     for record in records:
@@ -88,12 +89,14 @@ def build_fulltext_manifest(
                 hint,
                 require_fulltext=source_plan.require_fulltext,
                 allow_pdf_download=source_plan.allow_pdf_download,
-                selected_count=selected_count,
+                fetch_attempt_count=fetch_attempt_count,
+                cached_count=cached_count,
                 max_documents=max_documents,
+                max_fetch_attempts=max_fetch_attempts,
                 max_pdf_bytes=max_pdf_bytes,
             )
             if planned.status == "selected":
-                selected_count += 1
+                fetch_attempt_count += 1
                 selected_for_fetch = True
                 if cache_dir is not None:
                     planned = _cache_selected_hint(
@@ -129,18 +132,21 @@ def build_fulltext_manifest(
         "cache_dir": str(cache_dir) if cache_dir else None,
         "budget": {
             "max_fulltext_documents": max_documents,
+            "max_fulltext_fetch_attempts": max_fetch_attempts,
             "max_pdf_mb": _positive_int(source_plan.budget.get("max_pdf_mb"), default=0),
             "keep_raw_pdf": keep_raw_pdf,
             "parser_backend": parser_backend,
         },
         "document_count": len(records),
         "hint_count": hint_count,
-        "selected_count": selected_count,
+        "selected_count": fetch_attempt_count,
+        "fetch_attempt_count": fetch_attempt_count,
         "cached_count": cached_count,
         "status_counts": dict(sorted(status_counts.items())),
         "documents": rows,
         "notes": [
             "Full-text fetching is permissioned and failure-safe; failed fetches do not fail the search stage.",
+            "Fetch failures are replenished from later candidates up to the bounded fetch-attempt cap.",
             "Remote PDFs are selected only when both use_fulltext and allow_pdf_download are enabled.",
             "Local files can be used as full-text inputs without network access.",
         ],
@@ -170,8 +176,10 @@ def _plan_hint(
     *,
     require_fulltext: bool,
     allow_pdf_download: bool,
-    selected_count: int,
+    fetch_attempt_count: int,
+    cached_count: int,
     max_documents: int,
+    max_fetch_attempts: int,
     max_pdf_bytes: int,
 ) -> FulltextHint:
     if hint.local_path:
@@ -184,11 +192,22 @@ def _plan_hint(
         return _replace_hint(hint, status="hint_only", reason="fulltext_disabled")
     if hint.kind == "pdf" and not allow_pdf_download:
         return _replace_hint(hint, status="blocked", reason="pdf_download_disabled")
-    if max_documents and selected_count >= max_documents:
+    if max_documents and cached_count >= max_documents:
         return _replace_hint(hint, status="skipped", reason="max_fulltext_documents_reached")
+    if max_fetch_attempts and fetch_attempt_count >= max_fetch_attempts:
+        return _replace_hint(hint, status="skipped", reason="max_fulltext_fetch_attempts_reached")
     if hint.kind in {"pdf", "html", "text"}:
         return _replace_hint(hint, status="selected", reason="within_fulltext_budget")
     return _replace_hint(hint, status="hint_only", reason="not_fetchable_by_day9")
+
+
+def _fulltext_fetch_attempt_cap(budget: dict[str, Any], *, target: int) -> int:
+    configured = _positive_int(budget.get("max_fulltext_fetch_attempts"), default=0)
+    if configured:
+        return configured
+    if target <= 0:
+        return 0
+    return max(target, target * 2)
 
 
 def _cache_selected_hint(
@@ -240,12 +259,23 @@ def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int) -
     try:
         with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SEC) as response, cache_path.open("wb") as handle:
             length = response.headers.get("Content-Length")
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+            if hint.kind == "pdf" and content_type and not _content_type_may_be_pdf(content_type):
+                raise RuntimeError(f"remote_content_type_not_pdf:{content_type}")
             if max_bytes and length:
                 try:
                     if int(length) > max_bytes:
                         raise RuntimeError("remote_file_exceeds_max_pdf_mb")
                 except ValueError:
                     pass
+            first_chunk = response.read(1024 * 1024)
+            if hint.kind == "pdf" and first_chunk and not _bytes_look_like_pdf(first_chunk):
+                raise RuntimeError("remote_content_not_pdf")
+            if first_chunk:
+                bytes_written += len(first_chunk)
+                if max_bytes and bytes_written > max_bytes:
+                    raise RuntimeError("remote_file_exceeds_max_pdf_mb")
+                handle.write(first_chunk)
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -273,6 +303,15 @@ def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int) -
         reason="remote_fulltext_cached",
         size_bytes=bytes_written,
     )
+
+
+def _content_type_may_be_pdf(content_type: str) -> bool:
+    lowered = content_type.lower()
+    return "pdf" in lowered or "octet-stream" in lowered or "binary" in lowered
+
+
+def _bytes_look_like_pdf(data: bytes) -> bool:
+    return data.lstrip().startswith(b"%PDF-")
 
 
 def _cache_suffix(hint: FulltextHint) -> str:

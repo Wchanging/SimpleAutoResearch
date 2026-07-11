@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ DEFAULT_SURVEYBENCH_ROOT = "SurveyBench"
 DEFAULT_METHOD = "SimpleAutoResearch"
 LOCAL_ROOT = Path(__file__).resolve().parent
 DEFAULT_RESULTS_ROOT = LOCAL_ROOT / "results"
+DEFAULT_SCORE_ROOT = DEFAULT_RESULTS_ROOT / "score"
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,13 @@ class ValidationIssue:
         return {"severity": self.severity, "topic": self.topic, "message": self.message}
 
 
+@dataclass(frozen=True)
+class TopicRef:
+    topic_id: str
+    key: str
+    name: str
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv()
 
@@ -38,11 +47,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     topics = sub.add_parser("topics", help="List SurveyBench topics from HumanSurvey.")
     add_root_args(topics)
+    topics.add_argument("--with-ids", action="store_true", help="Show stable topic ids and result keys.")
     topics.set_defaults(func=cmd_topics)
+
+    run_topic = sub.add_parser("run-topic", help="Run SimpleAutoResearch generation for one SurveyBench topic id.")
+    add_root_args(run_topic)
+    run_topic.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
+    run_topic.add_argument("--to-stage", default="", help="Optional stage override passed to simple-ar run.")
+    run_topic.set_defaults(func=cmd_run_topic)
 
     validate = sub.add_parser("validate", help="Validate generated survey markdown format and filename alignment.")
     add_root_args(validate)
-    validate.add_argument("--survey-dir", type=Path, required=True, help="Directory containing generated .md surveys.")
+    validate.add_argument("--topic-id", default="", help="SurveyBench topic id such as topic16; infers survey/output dirs.")
+    validate.add_argument("--survey-dir", type=Path, default=None, help="Directory containing generated .md surveys.")
     validate.add_argument("--human-dir", type=Path, default=None, help="Optional human reference dir. Defaults to SurveyBench/data/HumanSurvey.")
     validate.add_argument("--output", type=Path, default=None, help="Optional JSON validation report path.")
     validate.add_argument("--allow-subset", action="store_true", help="Allow generated survey dir to contain only a subset of topics.")
@@ -57,6 +74,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     export.add_argument("--normalize-headings", action="store_true", help="Add numeric heading prefixes required by SurveyBench outline parsing when missing.")
     export.add_argument("--force", action="store_true", help="Overwrite existing destination directory.")
     export.set_defaults(func=cmd_export)
+
+    export_report = sub.add_parser("export-report", help="Export one SimpleAutoResearch report.md as one SurveyBench topic file.")
+    add_root_args(export_report)
+    export_report.add_argument("--report-file", type=Path, required=True, help="Generated report.md path.")
+    export_report.add_argument("--topic-id", default="", help="SurveyBench topic id such as topic16; infers topic and method.")
+    export_report.add_argument("--topic", default="", help="SurveyBench topic filename stem, for example 'LLM-based Multi-Agent'.")
+    export_report.add_argument("--method", default=DEFAULT_METHOD, help="SurveyBench method directory name.")
+    export_report.add_argument("--output-dir", type=Path, default=None, help="Override destination dir. Defaults to SurveyBench/data/<method>.")
+    export_report.add_argument("--normalize-headings", action="store_true", help="Add numeric heading prefixes required by SurveyBench outline parsing when missing.")
+    export_report.add_argument("--force", action="store_true", help="Overwrite the destination topic file if it exists.")
+    export_report.set_defaults(func=cmd_export_report)
 
     content = sub.add_parser("eval-content", help="Run SurveyBench native content/outline/richness evaluation.")
     add_eval_args(content)
@@ -82,8 +110,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_native.add_argument("--emb-api-url", default=None)
     run_native.set_defaults(func=cmd_run_native)
 
+    finalize = sub.add_parser("finalize-latest", help="Export, validate, optionally judge, and summarize the latest topic run.")
+    add_root_args(finalize)
+    finalize.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
+    finalize.add_argument("--run-dir", type=Path, default=None, help="Optional run dir. Defaults to latest results/topics/<topic-key> run with 08-report/report.md.")
+    finalize.add_argument("--model", default="gpt-4o", help="Judge model when --eval-content is set.")
+    finalize.add_argument("--eval-content", action="store_true", help="Run native SurveyBench content/outline/richness judge.")
+    finalize.add_argument("--no-normalize-headings", action="store_true", help="Do not normalize headings during export.")
+    finalize.add_argument("--no-force", action="store_true", help="Do not overwrite existing SurveyBench topic file.")
+    finalize.set_defaults(func=cmd_finalize_latest)
+
     summarize = sub.add_parser("summarize", help="Summarize native SurveyBench result artifacts.")
     add_root_args(summarize)
+    summarize.add_argument("--topic-id", default="", help="SurveyBench topic id such as topic16; infers method/output dirs.")
     summarize.add_argument("--method", default=DEFAULT_METHOD)
     summarize.add_argument("--content-dir", type=Path, default=None, help="Directory containing content result JSON.")
     summarize.add_argument("--quiz-dir", type=Path, default=None, help="Directory containing quiz result JSON files.")
@@ -100,11 +139,12 @@ def add_root_args(parser: argparse.ArgumentParser) -> None:
 
 def add_eval_args(parser: argparse.ArgumentParser) -> None:
     add_root_args(parser)
+    parser.add_argument("--topic-id", default="", help="SurveyBench topic id such as topic16; infers method and survey dirs.")
     parser.add_argument("--method", default=DEFAULT_METHOD)
     parser.add_argument("--survey-dir", type=Path, default=None, help="Generated survey dir. Defaults to SurveyBench/data/<method>.")
     parser.add_argument("--human-dir", type=Path, default=None, help="Human reference dir. Defaults to SurveyBench/data/HumanSurvey.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Output directory for native results.")
-    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--model", default="gpt-4o")
     parser.add_argument("--api-key", default=None)
     parser.add_argument("--api-url", default=None)
 
@@ -112,20 +152,44 @@ def add_eval_args(parser: argparse.ArgumentParser) -> None:
 def cmd_topics(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topics = discover_topics(root)
-    for topic in topics:
-        print(topic)
+    for index, topic in enumerate(topics, start=1):
+        if args.with_ids:
+            print(f"topic{index:02d}\t{topic_key(index, topic)}\t{topic}")
+        else:
+            print(topic)
+    return 0
+
+
+def cmd_run_topic(args: argparse.Namespace) -> int:
+    root = resolve_surveybench_root(args.surveybench_root)
+    topic_ref = resolve_topic_ref(root, args.topic_id)
+    config_path = topic_config_path(topic_ref)
+    if not config_path.is_file():
+        raise SystemExit(f"Missing topic config: {config_path}")
+    from simple_ar.cli.main import main as simple_ar_main
+
+    cli_args = ["run", "--config", str(config_path)]
+    if args.to_stage:
+        cli_args.extend(["--to-stage", str(args.to_stage)])
+    simple_ar_main(cli_args)
     return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
+    topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
+    survey_dir = args.survey_dir or (root / "data" / topic_ref.key if topic_ref else None)
+    if survey_dir is None:
+        raise SystemExit("Pass --survey-dir or --topic-id.")
+    output = args.output or (DEFAULT_SCORE_ROOT / topic_ref.key / "validation.json" if topic_ref else None)
     human_dir = resolve_human_dir(root, args.human_dir)
     report = validate_survey_dir(
-        args.survey_dir,
+        survey_dir,
         human_dir=human_dir,
         allow_subset=args.allow_subset,
+        expected_topics=[topic_ref.name] if topic_ref else None,
     )
-    write_validation_report(report, args.output)
+    write_validation_report(report, output)
     print_validation_report(report)
     return 0 if not report["error_count"] else 1
 
@@ -174,11 +238,104 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export_report(args: argparse.Namespace) -> int:
+    root = resolve_surveybench_root(args.surveybench_root)
+    topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
+    topic = args.topic or (topic_ref.name if topic_ref else "")
+    method = _method_for_topic(args.method, topic_ref)
+    if not topic:
+        raise SystemExit("Pass --topic or --topic-id.")
+    topics = set(discover_topics(root))
+    if topic not in topics:
+        raise SystemExit(
+            f"Unknown SurveyBench topic: {topic}. Run `adapter.py topics --with-ids` to list valid names."
+        )
+    report_file = args.report_file
+    if not report_file.exists():
+        raise SystemExit(f"Report file does not exist: {report_file}")
+    target = export_report_file(
+        root=root,
+        report_file=report_file,
+        topic=topic,
+        method=method,
+        output_dir=args.output_dir,
+        normalize_headings=bool(args.normalize_headings),
+        force=bool(args.force),
+        topic_ref=topic_ref,
+    )
+    print(f"Exported `{topic}` survey to {target}")
+    return 0
+
+
+def cmd_finalize_latest(args: argparse.Namespace) -> int:
+    root = resolve_surveybench_root(args.surveybench_root)
+    topic_ref = resolve_topic_ref(root, args.topic_id)
+    run_dir = args.run_dir or latest_topic_run_dir(topic_ref.key)
+    report_file = run_dir / "08-report" / "report.md"
+    if not report_file.is_file():
+        raise SystemExit(f"Missing report file: {report_file}")
+    target = export_report_file(
+        root=root,
+        report_file=report_file,
+        topic=topic_ref.name,
+        method=topic_ref.key,
+        output_dir=None,
+        normalize_headings=not bool(args.no_normalize_headings),
+        force=not bool(args.no_force),
+        topic_ref=topic_ref,
+    )
+    print(f"Exported latest `{topic_ref.topic_id}` report from {run_dir}")
+    print(f"SurveyBench file: {target}")
+
+    validation = validate_survey_dir(
+        root / "data" / topic_ref.key,
+        human_dir=resolve_human_dir(root, None),
+        allow_subset=True,
+        expected_topics=[topic_ref.name],
+    )
+    validation_path = DEFAULT_SCORE_ROOT / topic_ref.key / "validation.json"
+    write_validation_report(validation, validation_path)
+    print_validation_report(validation)
+    if validation["error_count"]:
+        return 1
+
+    if args.eval_content:
+        code = cmd_eval_content(
+            argparse.Namespace(
+                surveybench_root=args.surveybench_root,
+                topic_id=topic_ref.topic_id,
+                method=DEFAULT_METHOD,
+                survey_dir=None,
+                human_dir=None,
+                output_dir=None,
+                model=args.model,
+                api_key=None,
+                api_url=None,
+                mode="overall",
+                setting="with_ref",
+            )
+        )
+        if code != 0:
+            return code
+    return cmd_summarize(
+        argparse.Namespace(
+            surveybench_root=args.surveybench_root,
+            topic_id=topic_ref.topic_id,
+            method=DEFAULT_METHOD,
+            content_dir=None,
+            quiz_dir=None,
+            output_dir=None,
+        )
+    )
+
+
 def cmd_eval_content(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
-    survey_dir = resolve_survey_dir(root, args.method, args.survey_dir)
+    topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
+    method = _method_for_topic(args.method, topic_ref)
+    survey_dir = resolve_survey_dir(root, method, args.survey_dir)
     human_dir = resolve_human_dir(root, args.human_dir)
-    output_dir = args.output_dir or DEFAULT_RESULTS_ROOT / args.method / "content"
+    output_dir = args.output_dir or DEFAULT_SCORE_ROOT / method / "content"
     output_dir.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
@@ -205,9 +362,15 @@ def cmd_eval_content(args: argparse.Namespace) -> int:
 
 def cmd_eval_quiz(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
-    survey_dir = resolve_survey_dir(root, args.method, args.survey_dir)
+    topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
+    method = _method_for_topic(args.method, topic_ref)
+    survey_dir = resolve_survey_dir(root, method, args.survey_dir)
     human_dir = resolve_human_dir(root, args.human_dir)
-    output_dir = args.output_dir or DEFAULT_RESULTS_ROOT / args.method / "quiz"
+    output_dir = args.output_dir or DEFAULT_SCORE_ROOT / method / "quiz"
+    # SurveyBench's native quiz script writes ../results/quiz_logs.txt before
+    # it creates the requested output directory. Create that native results
+    # directory up front without changing judge prompts or scoring logic.
+    (root / "results").mkdir(parents=True, exist_ok=True)
     output_arg = absolute_quiz_output_arg(root, output_dir)
     command = [
         sys.executable,
@@ -248,10 +411,12 @@ def cmd_run_native(args: argparse.Namespace) -> int:
 
 def cmd_summarize(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
-    output_dir = args.output_dir or DEFAULT_RESULTS_ROOT / args.method
-    content_dir = args.content_dir or output_dir / "content"
-    quiz_dir = args.quiz_dir or output_dir / "quiz"
-    summary = summarize_results(method=args.method, content_dir=content_dir, quiz_dir=quiz_dir)
+    topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
+    method = _method_for_topic(args.method, topic_ref)
+    output_dir = args.output_dir or DEFAULT_SCORE_ROOT / method
+    content_dir = args.content_dir or _score_artifact_dir(method, "content", output_dir)
+    quiz_dir = args.quiz_dir or _score_artifact_dir(method, "quiz", output_dir)
+    summary = summarize_results(method=method, content_dir=content_dir, quiz_dir=quiz_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "summary.json"
     md_path = output_dir / "summary.md"
@@ -260,6 +425,16 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     print(f"Summary written to {json_path}")
     print(f"Markdown written to {md_path}")
     return 0
+
+
+def _score_artifact_dir(method: str, name: str, output_dir: Path) -> Path:
+    preferred = output_dir / name
+    if preferred.exists():
+        return preferred
+    legacy = DEFAULT_RESULTS_ROOT / method / name
+    if legacy.exists():
+        return legacy
+    return preferred
 
 
 def resolve_surveybench_root(path: Path) -> Path:
@@ -287,15 +462,104 @@ def resolve_survey_dir(root: Path, method: str, value: Path | None) -> Path:
     return path
 
 
+def topic_config_path(topic_ref: TopicRef) -> Path:
+    return LOCAL_ROOT / "configs" / "topics" / f"{topic_ref.key}.toml"
+
+
+def latest_topic_run_dir(topic_key_value: str) -> Path:
+    topic_root = DEFAULT_RESULTS_ROOT / "topics" / topic_key_value
+    if not topic_root.is_dir():
+        raise SystemExit(f"No generation runs found for topic key: {topic_key_value}")
+    candidates = [
+        path
+        for path in topic_root.iterdir()
+        if path.is_dir() and (path / "08-report" / "report.md").is_file()
+    ]
+    if not candidates:
+        raise SystemExit(f"No completed report run found under: {topic_root}")
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+
+
+def resolve_topic_ref(root: Path, value: str) -> TopicRef:
+    raw = value.strip()
+    if not raw:
+        raise SystemExit("Empty --topic-id.")
+    topics = discover_topics(root)
+    lowered = raw.lower()
+    for index, topic in enumerate(topics, start=1):
+        topic_id = f"topic{index:02d}"
+        key = topic_key(index, topic)
+        if lowered in {topic_id, key.lower(), topic.lower()}:
+            return TopicRef(topic_id=topic_id, key=key, name=topic)
+    raise SystemExit(f"Unknown topic id/name: {value}. Run `adapter.py topics --with-ids`.")
+
+
+def _method_for_topic(method: str, topic_ref: TopicRef | None) -> str:
+    if topic_ref is not None and method == DEFAULT_METHOD:
+        return topic_ref.key
+    return method
+
+
+def export_report_file(
+    *,
+    root: Path,
+    report_file: Path,
+    topic: str,
+    method: str,
+    output_dir: Path | None,
+    normalize_headings: bool,
+    force: bool,
+    topic_ref: TopicRef | None = None,
+) -> Path:
+    destination = output_dir or root / "data" / method
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / f"{topic}.md"
+    if target.exists() and not force:
+        raise SystemExit(f"Destination topic file exists: {target}. Pass --force to overwrite.")
+    text = read_text(report_file)
+    if normalize_headings:
+        text = normalize_markdown_headings(text, topic=topic)
+    write_text(target, text)
+    exported_assets = copy_markdown_assets(text, source_dir=report_file.parent, destination_dir=destination)
+    meta = {
+        "schema_version": "survey_bench_export.v1",
+        "created_at": utcnow(),
+        "method": method,
+        "topic_id": topic_ref.topic_id if topic_ref else "",
+        "topic_key": topic_ref.key if topic_ref else "",
+        "source_report_file": str(report_file),
+        "destination": str(destination),
+        "normalize_headings": bool(normalize_headings),
+        "topic_count": 1,
+        "topics": [topic],
+        "asset_count": len(exported_assets),
+        "assets": sorted(set(exported_assets)),
+    }
+    write_json(destination / "_simple_ar_export.json", meta)
+    return target
+
+
 def discover_topics(root: Path) -> list[str]:
     return sorted(path.stem for path in (root / "data" / "HumanSurvey").glob("*.md"))
 
 
-def validate_survey_dir(survey_dir: Path, *, human_dir: Path, allow_subset: bool = False) -> dict[str, Any]:
+def validate_survey_dir(
+    survey_dir: Path,
+    *,
+    human_dir: Path,
+    allow_subset: bool = False,
+    expected_topics: Sequence[str] | None = None,
+) -> dict[str, Any]:
     survey_dir = survey_dir.resolve()
     if not survey_dir.is_dir():
         raise SystemExit(f"Survey directory not found: {survey_dir}")
     human_topics = sorted(path.stem for path in human_dir.glob("*.md"))
+    if expected_topics is not None:
+        expected = {str(topic).strip() for topic in expected_topics if str(topic).strip()}
+        human_topics = [topic for topic in human_topics if topic in expected]
+        missing_expected = sorted(expected - set(human_topics))
+        if missing_expected:
+            raise SystemExit("Unknown SurveyBench topic(s): " + ", ".join(missing_expected))
     survey_topics = sorted(path.stem for path in survey_dir.glob("*.md"))
     human_set = set(human_topics)
     survey_set = set(survey_topics)
@@ -391,20 +655,37 @@ def run_native_command(root: Path, command: list[str], *, label: str) -> int:
     meta_dir.mkdir(parents=True, exist_ok=True)
     started = utcnow()
     safe_command = sanitize_command(command)
-    print("$ " + " ".join(safe_command))
-    proc = subprocess.run(command, cwd=root / "src")
+    safe_console_print("$ " + " ".join(safe_command))
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    redactions = command_secret_values(command)
+    proc = subprocess.Popen(
+        command,
+        cwd=root / "src",
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        safe_console_print(redact_text(line.rstrip("\n"), redactions))
+    returncode = proc.wait()
     row = {
         "schema_version": "survey_bench_native_command.v1",
         "label": label,
         "started_at": started,
         "finished_at": utcnow(),
-        "returncode": proc.returncode,
+        "returncode": returncode,
         "cwd": str(root / "src"),
         "command": safe_command,
         "native_judge": True,
     }
     write_json(meta_dir / f"{timestamp_slug()}-{label}.json", row)
-    return proc.returncode
+    return returncode
 
 
 def sanitize_command(command: Sequence[str]) -> list[str]:
@@ -426,6 +707,44 @@ def sanitize_command(command: Sequence[str]) -> list[str]:
         if item in secret_flags:
             redact_next = True
     return safe
+
+
+def command_secret_values(command: Sequence[str]) -> list[str]:
+    secret_flags = {
+        "--api_key",
+        "--api-key",
+        "--llm_api_key",
+        "--emb_api_key",
+        "--emb-api-key",
+    }
+    values: list[str] = []
+    capture_next = False
+    for item in command:
+        if capture_next:
+            if item:
+                values.append(str(item))
+            capture_next = False
+            continue
+        if item in secret_flags:
+            capture_next = True
+    return values
+
+
+def redact_text(text: str, secrets: Sequence[str]) -> str:
+    redacted = text
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "<redacted>")
+    return redacted
+
+
+def safe_console_print(text: str) -> None:
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        safe_text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe_text)
 
 
 def summarize_results(*, method: str, content_dir: Path, quiz_dir: Path) -> dict[str, Any]:
@@ -639,6 +958,11 @@ def env_or_value(value: str | None, env_name: str) -> str:
 
 def topic_from_result_name(name: str, suffix: str) -> str:
     return name[: -len(suffix)] if name.endswith(suffix) else Path(name).stem
+
+
+def topic_key(index: int, topic: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")
+    return f"topic{index:02d}-{slug or 'topic'}"
 
 
 def mean(values: Iterable[float]) -> float | None:

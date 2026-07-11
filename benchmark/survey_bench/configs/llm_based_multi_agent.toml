@@ -1,16 +1,17 @@
 [run]
 # Single-topic SurveyBench smoke run.
 #
-# The output_root is intentionally under benchmark/survey_bench/results so the
-# generated report, exported survey, native judge outputs, and summaries can be
-# kept together per topic instead of being mixed into the global runs/ tree.
+# The output_root is intentionally under benchmark/survey_bench/results/topics
+# so generation runs are grouped by SurveyBench topic id/key instead of being
+# mixed with method-level score summaries.
 topic = "LLM-based Multi-Agent"
-output_root = "benchmark/survey_bench/results/LLM-based-Multi-Agent"
+output_root = "benchmark/survey_bench/results/topics/topic11-llm-based-multi-agent"
 to_stage = "report"
 debug_artifacts = false
 
 [llm]
 enabled = true
+model = "gpt-4o"
 workers = 2
 
 [search]
