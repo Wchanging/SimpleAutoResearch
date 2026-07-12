@@ -239,7 +239,7 @@ criteria = "auto"
 style = "paper"               # paper | technical | concise
 cost_profile = "auto"         # auto | fast | balanced | thorough
 outline_strategy = "auto"     # auto | template | adaptive
-survey_contract = true        # survey 模板启用通用任务契约
+longform_contract = true      # survey/longform 模板启用通用长文综合契约
 
 # 默认保持紧凑；需要逐节草稿和完整 trace 时再打开。
 draft_sections = false
@@ -278,6 +278,25 @@ enabled = false
 max_figures = 0                # 0 表示使用模板默认值；survey_long 默认为 3 张
 format = "svg"                 # svg
 mode = "auto"                  # auto | off
+
+[report.longform]
+# 可选的长篇证据综合规划控制。它是通用 report-stage 约束，不是
+# SurveyBench 专用设置；当 survey/longform 模板启用时，会写出
+# 08-report/longform/ 下的 paper selection、taxonomy、outline、
+# citation coverage 和 visual plan 等可审计产物。
+enabled = true
+target_papers = 0              # 0 表示根据已选论文/read 预算推断
+min_papers = 0                 # 0 表示不设置阻断性下限
+target_words = 0               # 0 表示使用模板/profile 默认值
+min_citations_per_section = 3
+target_tables = 0              # 0 表示使用模板/profile 默认值
+evidence_audit = true
+planning_artifacts = true
+
+# 兼容说明：[report.survey] 仍可作为 [report.longform] 的旧别名读取；
+# 新配置建议优先使用 [report.longform]。
+# 兼容说明：[report].survey_contract 仍可作为 [report].longform_contract
+# 的旧别名读取。
 
 [report.audit]
 citations = true
@@ -486,9 +505,9 @@ max_proposal_chars = 42000
 | `[report].template` | 内置报告模板名（`survey`、`survey_long`、`experiment`、`reproduction`）或自定义 Markdown 路径。`auto` 跟随 `mode`。 |
 | `[report].criteria` | 内置 reviewer criteria 或自定义 Markdown 路径。`auto` 跟随 `template`。 |
 | `[report].style` | 报告语气提示：`paper`、`technical` 或 `concise`。 |
-| `[report].cost_profile` | 报告生成预算 profile。`auto` 对普通报告保持原行为，对长 survey 默认使用 `balanced`；`fast` 适合 smoke test；`thorough` 保留高预算行为。 |
-| `[report].outline_strategy` | 章节规划模式。`auto`/`adaptive` 会为 survey 章节注入 topic-specific 目标和 source routing；`template` 完全按模板 heading 生成。 |
-| `[report].survey_contract` | 为 survey 模板启用通用任务契约，将读者需求、覆盖 facets、图表预期和边界写入 report memory/prompt。 |
+| `[report].cost_profile` | 报告生成预算 profile。`auto` 对普通报告保持原行为，对长篇证据综合默认使用 `balanced`；`fast` 适合 smoke test；`thorough` 保留高预算行为。 |
+| `[report].outline_strategy` | 章节规划模式。`auto`/`adaptive` 会为 survey/longform 章节注入 topic-specific 目标和 source routing；`template` 完全按模板 heading 生成。 |
+| `[report].longform_contract` | 为 survey/longform 模板启用通用长文综合契约，将读者需求、覆盖 facets、图表预期和边界写入 report memory/prompt。`[report].survey_contract` 仍作为旧别名兼容。 |
 | `[report].draft_sections` | 是否把 Writer Agent 的分节草稿保留到 `08-report/sections/`；默认 false 保持紧凑输出。 |
 | `[report].debug_artifacts` | 是否把 reviewer findings、tool results 和 iteration traces 保留到 `08-report/audit/` 与 `08-report/iterations/`；默认 false。 |
 | `[report].agent` / `[report].reviewer` | 报告 writer/reviewer 后端。V2.4 本地路径建议用 LLM；disabled 只是 fallback。 |
@@ -504,6 +523,7 @@ max_proposal_chars = 42000
 | `[report].allow_source_backtracking` | 是否允许 report tools 在当前 run 的 source handles 中有界回查更多证据。 |
 | `[report].max_backtracking_calls` / `[report].max_backtracking_tokens` | source backtracking 调用次数和返回 token 预算。 |
 | `[report.figures]` | 可选的确定性报告图示生成。`enabled = true` 会写出本地 SVG 并插入 Markdown 图片链接；`survey_long` 在 `max_figures = 0` 时默认生成 3 张。 |
+| `[report.longform]` | 可选的长篇证据综合规划控制。当 survey/longform 模板启用时，会写出 `08-report/longform/` 下的论文选择、taxonomy、outline、citation coverage 和 visual plan 产物，并把紧凑计划传给 Writer/Reviewer。`[report.survey]` 仍作为旧别名兼容。 |
 | `[report.audit].citations` / `.metrics` / `.claims` | 启用 citation、metric 和 claim audit 组件。 |
 | `[report.audit].strict` | 后续 strict mode 可把 warning 作为阻断条件；默认 false。 |
 

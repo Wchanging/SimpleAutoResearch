@@ -19,7 +19,10 @@ DEFAULT_SURVEYBENCH_ROOT = "SurveyBench"
 DEFAULT_METHOD = "SimpleAutoResearch"
 LOCAL_ROOT = Path(__file__).resolve().parent
 DEFAULT_RESULTS_ROOT = LOCAL_ROOT / "results"
+DEFAULT_TOPIC_RESULTS_ROOT = DEFAULT_RESULTS_ROOT / "topics"
+DEFAULT_THOROUGH_TOPIC_RESULTS_ROOT = DEFAULT_RESULTS_ROOT / "topics-thorough"
 DEFAULT_SCORE_ROOT = DEFAULT_RESULTS_ROOT / "score"
+DEFAULT_THOROUGH_SCORE_ROOT = DEFAULT_RESULTS_ROOT / "score-thorough"
 
 
 @dataclass(frozen=True)
@@ -53,12 +56,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_topic = sub.add_parser("run-topic", help="Run SimpleAutoResearch generation for one SurveyBench topic id.")
     add_root_args(run_topic)
     run_topic.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
+    run_topic.add_argument("--thorough", action="store_true", help="Use configs/topics-thorough and the thorough result namespace.")
     run_topic.add_argument("--to-stage", default="", help="Optional stage override passed to simple-ar run.")
     run_topic.set_defaults(func=cmd_run_topic)
+
+    resume_latest = sub.add_parser("resume-latest", help="Resume the latest SimpleAutoResearch run for one SurveyBench topic id.")
+    add_root_args(resume_latest)
+    resume_latest.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
+    resume_latest.add_argument("--thorough", action="store_true", help="Use configs/topics-thorough and the thorough result namespace.")
+    resume_latest.add_argument("--run-dir", type=Path, default=None, help="Optional run dir. Defaults to the latest topic run, even if report failed.")
+    resume_latest.add_argument("--from-stage", default="report", help="Stage to resume from. Defaults to report.")
+    resume_latest.add_argument("--to-stage", default="report", help="Stage to stop at. Defaults to report.")
+    resume_latest.add_argument("--model", default="", help="Optional model override passed to simple-ar resume.")
+    resume_latest.add_argument("--llm-workers", type=int, default=None, help="Optional LLM worker override passed to simple-ar resume.")
+    resume_latest.add_argument("--quiet", action="store_true", help="Pass --quiet to simple-ar resume.")
+    resume_latest.add_argument(
+        "--overwrite-stage-artifacts",
+        action="store_true",
+        help="Pass --overwrite-stage-artifacts to simple-ar resume.",
+    )
+    resume_latest.set_defaults(func=cmd_resume_latest)
 
     validate = sub.add_parser("validate", help="Validate generated survey markdown format and filename alignment.")
     add_root_args(validate)
     validate.add_argument("--topic-id", default="", help="SurveyBench topic id such as topic16; infers survey/output dirs.")
+    validate.add_argument("--thorough", action="store_true", help="Infer the thorough method and score namespace for --topic-id.")
     validate.add_argument("--survey-dir", type=Path, default=None, help="Directory containing generated .md surveys.")
     validate.add_argument("--human-dir", type=Path, default=None, help="Optional human reference dir. Defaults to SurveyBench/data/HumanSurvey.")
     validate.add_argument("--output", type=Path, default=None, help="Optional JSON validation report path.")
@@ -79,6 +101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_root_args(export_report)
     export_report.add_argument("--report-file", type=Path, required=True, help="Generated report.md path.")
     export_report.add_argument("--topic-id", default="", help="SurveyBench topic id such as topic16; infers topic and method.")
+    export_report.add_argument("--thorough", action="store_true", help="Infer the thorough method name when --topic-id is used.")
     export_report.add_argument("--topic", default="", help="SurveyBench topic filename stem, for example 'LLM-based Multi-Agent'.")
     export_report.add_argument("--method", default=DEFAULT_METHOD, help="SurveyBench method directory name.")
     export_report.add_argument("--output-dir", type=Path, default=None, help="Override destination dir. Defaults to SurveyBench/data/<method>.")
@@ -113,6 +136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     finalize = sub.add_parser("finalize-latest", help="Export, validate, optionally judge, and summarize the latest topic run.")
     add_root_args(finalize)
     finalize.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
+    finalize.add_argument("--thorough", action="store_true", help="Use the latest thorough generation run and write thorough score artifacts.")
     finalize.add_argument("--run-dir", type=Path, default=None, help="Optional run dir. Defaults to latest results/topics/<topic-key> run with 08-report/report.md.")
     finalize.add_argument("--model", default="gpt-4o", help="Judge model when --eval-content is set.")
     finalize.add_argument("--eval-content", action="store_true", help="Run native SurveyBench content/outline/richness judge.")
@@ -123,11 +147,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     summarize = sub.add_parser("summarize", help="Summarize native SurveyBench result artifacts.")
     add_root_args(summarize)
     summarize.add_argument("--topic-id", default="", help="SurveyBench topic id such as topic16; infers method/output dirs.")
+    summarize.add_argument("--thorough", action="store_true", help="Infer the thorough method and score namespace for --topic-id.")
     summarize.add_argument("--method", default=DEFAULT_METHOD)
     summarize.add_argument("--content-dir", type=Path, default=None, help="Directory containing content result JSON.")
     summarize.add_argument("--quiz-dir", type=Path, default=None, help="Directory containing quiz result JSON files.")
     summarize.add_argument("--output-dir", type=Path, default=None, help="Directory for summary JSON/Markdown.")
     summarize.set_defaults(func=cmd_summarize)
+
+    summarize_batch = sub.add_parser("summarize-batch", help="Aggregate per-topic SurveyBench summaries into one table.")
+    add_root_args(summarize_batch)
+    summarize_batch.add_argument("--score-root", type=Path, default=DEFAULT_SCORE_ROOT, help="Root containing per-topic score directories.")
+    summarize_batch.add_argument(
+        "--fallback-score-root",
+        type=Path,
+        default=None,
+        help="Optional fallback score root for topics missing in --score-root.",
+    )
+    summarize_batch.add_argument("--thorough", action="store_true", help="Use the thorough score root by default.")
+    summarize_batch.add_argument("--from-topic", type=int, default=0, help="Optional first topic number, e.g. 10.")
+    summarize_batch.add_argument("--to-topic", type=int, default=0, help="Optional last topic number, e.g. 20.")
+    summarize_batch.add_argument("--output-dir", type=Path, default=None, help="Output directory for batch_summary.json/md.")
+    summarize_batch.set_defaults(func=cmd_summarize_batch)
 
     args = parser.parse_args(argv)
     return args.func(args)
@@ -140,6 +180,7 @@ def add_root_args(parser: argparse.ArgumentParser) -> None:
 def add_eval_args(parser: argparse.ArgumentParser) -> None:
     add_root_args(parser)
     parser.add_argument("--topic-id", default="", help="SurveyBench topic id such as topic16; infers method and survey dirs.")
+    parser.add_argument("--thorough", action="store_true", help="Infer the thorough method and score namespace for --topic-id.")
     parser.add_argument("--method", default=DEFAULT_METHOD)
     parser.add_argument("--survey-dir", type=Path, default=None, help="Generated survey dir. Defaults to SurveyBench/data/<method>.")
     parser.add_argument("--human-dir", type=Path, default=None, help="Human reference dir. Defaults to SurveyBench/data/HumanSurvey.")
@@ -163,7 +204,7 @@ def cmd_topics(args: argparse.Namespace) -> int:
 def cmd_run_topic(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_ref = resolve_topic_ref(root, args.topic_id)
-    config_path = topic_config_path(topic_ref)
+    config_path = topic_config_path(topic_ref, thorough=bool(args.thorough))
     if not config_path.is_file():
         raise SystemExit(f"Missing topic config: {config_path}")
     from simple_ar.cli.main import main as simple_ar_main
@@ -175,13 +216,52 @@ def cmd_run_topic(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_resume_latest(args: argparse.Namespace) -> int:
+    root = resolve_surveybench_root(args.surveybench_root)
+    topic_ref = resolve_topic_ref(root, args.topic_id)
+    thorough = bool(args.thorough)
+    config_path = topic_config_path(topic_ref, thorough=thorough)
+    if not config_path.is_file():
+        raise SystemExit(f"Missing topic config: {config_path}")
+    run_dir = args.run_dir or latest_topic_run_dir(topic_ref.key, thorough=thorough, require_report=False)
+    if not run_dir.is_dir():
+        raise SystemExit(f"Run directory does not exist: {run_dir}")
+    from simple_ar.cli.main import main as simple_ar_main
+
+    cli_args = [
+        "resume",
+        str(run_dir),
+        "--config",
+        str(config_path),
+        "--from-stage",
+        str(args.from_stage or "report"),
+        "--to-stage",
+        str(args.to_stage or "report"),
+    ]
+    if args.model:
+        cli_args.extend(["--model", str(args.model)])
+    if args.llm_workers is not None:
+        cli_args.extend(["--llm-workers", str(args.llm_workers)])
+    if args.quiet:
+        cli_args.append("--quiet")
+    if args.overwrite_stage_artifacts:
+        cli_args.append("--overwrite-stage-artifacts")
+    simple_ar_main(cli_args)
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
-    survey_dir = args.survey_dir or (root / "data" / topic_ref.key if topic_ref else None)
+    method = _method_for_topic(DEFAULT_METHOD, topic_ref, thorough=bool(getattr(args, "thorough", False)))
+    survey_dir = args.survey_dir or (root / "data" / method if topic_ref else None)
     if survey_dir is None:
         raise SystemExit("Pass --survey-dir or --topic-id.")
-    output = args.output or (DEFAULT_SCORE_ROOT / topic_ref.key / "validation.json" if topic_ref else None)
+    output = args.output or (
+        _score_dir_for_topic(DEFAULT_METHOD, topic_ref, thorough=bool(getattr(args, "thorough", False))) / "validation.json"
+        if topic_ref
+        else None
+    )
     human_dir = resolve_human_dir(root, args.human_dir)
     report = validate_survey_dir(
         survey_dir,
@@ -242,7 +322,7 @@ def cmd_export_report(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
     topic = args.topic or (topic_ref.name if topic_ref else "")
-    method = _method_for_topic(args.method, topic_ref)
+    method = _method_for_topic(args.method, topic_ref, thorough=bool(getattr(args, "thorough", False)))
     if not topic:
         raise SystemExit("Pass --topic or --topic-id.")
     topics = set(discover_topics(root))
@@ -270,15 +350,18 @@ def cmd_export_report(args: argparse.Namespace) -> int:
 def cmd_finalize_latest(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_ref = resolve_topic_ref(root, args.topic_id)
-    run_dir = args.run_dir or latest_topic_run_dir(topic_ref.key)
+    thorough = bool(args.thorough)
+    run_dir = args.run_dir or latest_topic_run_dir(topic_ref.key, thorough=thorough)
     report_file = run_dir / "08-report" / "report.md"
     if not report_file.is_file():
         raise SystemExit(f"Missing report file: {report_file}")
+    method = _method_for_topic(DEFAULT_METHOD, topic_ref, thorough=thorough)
+    score_dir = _score_dir_for_topic(DEFAULT_METHOD, topic_ref, thorough=thorough)
     target = export_report_file(
         root=root,
         report_file=report_file,
         topic=topic_ref.name,
-        method=topic_ref.key,
+        method=method,
         output_dir=None,
         normalize_headings=not bool(args.no_normalize_headings),
         force=not bool(args.no_force),
@@ -288,12 +371,12 @@ def cmd_finalize_latest(args: argparse.Namespace) -> int:
     print(f"SurveyBench file: {target}")
 
     validation = validate_survey_dir(
-        root / "data" / topic_ref.key,
+        root / "data" / method,
         human_dir=resolve_human_dir(root, None),
         allow_subset=True,
         expected_topics=[topic_ref.name],
     )
-    validation_path = DEFAULT_SCORE_ROOT / topic_ref.key / "validation.json"
+    validation_path = score_dir / "validation.json"
     write_validation_report(validation, validation_path)
     print_validation_report(validation)
     if validation["error_count"]:
@@ -304,10 +387,10 @@ def cmd_finalize_latest(args: argparse.Namespace) -> int:
             argparse.Namespace(
                 surveybench_root=args.surveybench_root,
                 topic_id=topic_ref.topic_id,
-                method=DEFAULT_METHOD,
+                method=method,
                 survey_dir=None,
                 human_dir=None,
-                output_dir=None,
+                output_dir=score_dir / "content",
                 model=args.model,
                 api_key=None,
                 api_url=None,
@@ -321,10 +404,11 @@ def cmd_finalize_latest(args: argparse.Namespace) -> int:
         argparse.Namespace(
             surveybench_root=args.surveybench_root,
             topic_id=topic_ref.topic_id,
-            method=DEFAULT_METHOD,
+            method=method,
             content_dir=None,
             quiz_dir=None,
-            output_dir=None,
+            output_dir=score_dir,
+            thorough=thorough,
         )
     )
 
@@ -332,10 +416,10 @@ def cmd_finalize_latest(args: argparse.Namespace) -> int:
 def cmd_eval_content(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
-    method = _method_for_topic(args.method, topic_ref)
+    method = _method_for_topic(args.method, topic_ref, thorough=bool(getattr(args, "thorough", False)))
     survey_dir = resolve_survey_dir(root, method, args.survey_dir)
     human_dir = resolve_human_dir(root, args.human_dir)
-    output_dir = args.output_dir or DEFAULT_SCORE_ROOT / method / "content"
+    output_dir = args.output_dir or _score_dir_for_topic(args.method, topic_ref, thorough=bool(getattr(args, "thorough", False))) / "content"
     output_dir.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
@@ -363,10 +447,10 @@ def cmd_eval_content(args: argparse.Namespace) -> int:
 def cmd_eval_quiz(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
-    method = _method_for_topic(args.method, topic_ref)
+    method = _method_for_topic(args.method, topic_ref, thorough=bool(getattr(args, "thorough", False)))
     survey_dir = resolve_survey_dir(root, method, args.survey_dir)
     human_dir = resolve_human_dir(root, args.human_dir)
-    output_dir = args.output_dir or DEFAULT_SCORE_ROOT / method / "quiz"
+    output_dir = args.output_dir or _score_dir_for_topic(args.method, topic_ref, thorough=bool(getattr(args, "thorough", False))) / "quiz"
     # SurveyBench's native quiz script writes ../results/quiz_logs.txt before
     # it creates the requested output directory. Create that native results
     # directory up front without changing judge prompts or scoring logic.
@@ -412,8 +496,8 @@ def cmd_run_native(args: argparse.Namespace) -> int:
 def cmd_summarize(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_ref = resolve_topic_ref(root, args.topic_id) if getattr(args, "topic_id", "") else None
-    method = _method_for_topic(args.method, topic_ref)
-    output_dir = args.output_dir or DEFAULT_SCORE_ROOT / method
+    method = _method_for_topic(args.method, topic_ref, thorough=bool(getattr(args, "thorough", False)))
+    output_dir = args.output_dir or _score_dir_for_topic(args.method, topic_ref, thorough=bool(getattr(args, "thorough", False)))
     content_dir = args.content_dir or _score_artifact_dir(method, "content", output_dir)
     quiz_dir = args.quiz_dir or _score_artifact_dir(method, "quiz", output_dir)
     summary = summarize_results(method=method, content_dir=content_dir, quiz_dir=quiz_dir)
@@ -423,6 +507,28 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     write_json(json_path, summary)
     write_text(md_path, render_summary_markdown(summary))
     print(f"Summary written to {json_path}")
+    print(f"Markdown written to {md_path}")
+    return 0
+
+
+def cmd_summarize_batch(args: argparse.Namespace) -> int:
+    root = resolve_surveybench_root(args.surveybench_root)
+    topic_refs = discover_topic_refs(root)
+    score_root = DEFAULT_THOROUGH_SCORE_ROOT if bool(args.thorough) and args.score_root == DEFAULT_SCORE_ROOT else args.score_root
+    output_dir = args.output_dir or score_root / "batch_summary"
+    summary = summarize_batch_results(
+        score_root=score_root,
+        fallback_score_root=args.fallback_score_root,
+        topic_refs=topic_refs,
+        from_topic=int(args.from_topic or 0),
+        to_topic=int(args.to_topic or 0),
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "batch_summary.json"
+    md_path = output_dir / "batch_summary.md"
+    write_json(json_path, summary)
+    write_text(md_path, render_batch_summary_markdown(summary))
+    print(f"Batch summary written to {json_path}")
     print(f"Markdown written to {md_path}")
     return 0
 
@@ -462,22 +568,35 @@ def resolve_survey_dir(root: Path, method: str, value: Path | None) -> Path:
     return path
 
 
-def topic_config_path(topic_ref: TopicRef) -> Path:
-    return LOCAL_ROOT / "configs" / "topics" / f"{topic_ref.key}.toml"
+def topic_config_path(topic_ref: TopicRef, *, thorough: bool = False) -> Path:
+    group = "topics-thorough" if thorough else "topics"
+    return LOCAL_ROOT / "configs" / group / f"{topic_ref.key}.toml"
 
 
-def latest_topic_run_dir(topic_key_value: str) -> Path:
-    topic_root = DEFAULT_RESULTS_ROOT / "topics" / topic_key_value
+def latest_topic_run_dir(topic_key_value: str, *, thorough: bool = False, require_report: bool = True) -> Path:
+    topic_root = (DEFAULT_THOROUGH_TOPIC_RESULTS_ROOT if thorough else DEFAULT_TOPIC_RESULTS_ROOT) / topic_key_value
     if not topic_root.is_dir():
         raise SystemExit(f"No generation runs found for topic key: {topic_key_value}")
     candidates = [
         path
         for path in topic_root.iterdir()
-        if path.is_dir() and (path / "08-report" / "report.md").is_file()
+        if path.is_dir()
+        and (
+            (path / "08-report" / "report.md").is_file()
+            if require_report
+            else (path / "config_snapshot.json").is_file()
+        )
     ]
     if not candidates:
-        raise SystemExit(f"No completed report run found under: {topic_root}")
-    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[0]
+        detail = "completed report run" if require_report else "resumable run"
+        raise SystemExit(f"No {detail} found under: {topic_root}")
+    return sorted(candidates, key=_run_sort_key, reverse=True)[0]
+
+
+def _run_sort_key(path: Path) -> tuple[str, float]:
+    timestamp = path.name.split("-", 1)[0]
+    normalized_timestamp = timestamp if re.fullmatch(r"\d{8}", timestamp) else ""
+    return normalized_timestamp, path.stat().st_mtime
 
 
 def resolve_topic_ref(root: Path, value: str) -> TopicRef:
@@ -494,10 +613,17 @@ def resolve_topic_ref(root: Path, value: str) -> TopicRef:
     raise SystemExit(f"Unknown topic id/name: {value}. Run `adapter.py topics --with-ids`.")
 
 
-def _method_for_topic(method: str, topic_ref: TopicRef | None) -> str:
+def _method_for_topic(method: str, topic_ref: TopicRef | None, *, thorough: bool = False) -> str:
     if topic_ref is not None and method == DEFAULT_METHOD:
-        return topic_ref.key
+        return f"{topic_ref.key}-thorough" if thorough else topic_ref.key
     return method
+
+
+def _score_dir_for_topic(method: str, topic_ref: TopicRef | None, *, thorough: bool = False) -> Path:
+    root = DEFAULT_THOROUGH_SCORE_ROOT if thorough else DEFAULT_SCORE_ROOT
+    if topic_ref is not None and method == DEFAULT_METHOD:
+        return root / topic_ref.key
+    return root / _method_for_topic(method, topic_ref, thorough=thorough)
 
 
 def export_report_file(
@@ -541,6 +667,18 @@ def export_report_file(
 
 def discover_topics(root: Path) -> list[str]:
     return sorted(path.stem for path in (root / "data" / "HumanSurvey").glob("*.md"))
+
+
+def discover_topic_refs(root: Path) -> list[TopicRef]:
+    return [
+        TopicRef(topic_id=f"topic{index:02d}", key=topic_key(index, topic), name=topic)
+        for index, topic in enumerate(discover_topics(root), start=1)
+    ]
+
+
+def _topic_number(ref: TopicRef) -> int:
+    match = re.search(r"(\d+)$", ref.topic_id)
+    return int(match.group(1)) if match else 0
 
 
 def validate_survey_dir(
@@ -630,12 +768,12 @@ def normalize_markdown_headings(text: str, *, topic: str) -> str:
             normalized.append(line)
             continue
         hashes, title = match.groups()
-        title = title.strip()
+        title = _strip_heading_number(title.strip())
         if re.match(r"(?i)^references\b", title):
             normalized.append("## References")
             continue
-        if re.match(r"^\d+(?:\.\d+)*\s+", title):
-            normalized.append(line)
+        if _is_non_outline_heading(title):
+            normalized.append(f"{hashes} {title}")
             continue
         level = len(hashes)
         counters[level] += 1
@@ -650,8 +788,24 @@ def normalize_markdown_headings(text: str, *, topic: str) -> str:
     return "\n".join(normalized).rstrip() + "\n"
 
 
+def _strip_heading_number(title: str) -> str:
+    """Remove loose pre-existing numbering before applying SurveyBench numbering.
+
+    SurveyBench extracts outlines with headings like ``## 1 Introduction`` and
+    ``### 1.1 Background``. Generated reports sometimes emit headings such as
+    ``### 1. Future direction``; if we leave those untouched or prefix another
+    number, the native outline parser sees noisy labels like ``9.1 1. ...``.
+    """
+
+    return re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", title).strip()
+
+
+def _is_non_outline_heading(title: str) -> bool:
+    return bool(re.match(r"(?i)^(abstract|executive summary|summary|key takeaways?)\b", title.strip()))
+
+
 def run_native_command(root: Path, command: list[str], *, label: str) -> int:
-    meta_dir = DEFAULT_RESULTS_ROOT / "_native_commands"
+    meta_dir = native_command_meta_dir(command) or (DEFAULT_RESULTS_ROOT / "_native_commands")
     meta_dir.mkdir(parents=True, exist_ok=True)
     started = utcnow()
     safe_command = sanitize_command(command)
@@ -684,8 +838,15 @@ def run_native_command(root: Path, command: list[str], *, label: str) -> int:
         "command": safe_command,
         "native_judge": True,
     }
-    write_json(meta_dir / f"{timestamp_slug()}-{label}.json", row)
+    write_json(meta_dir / "native_command.json", row)
     return returncode
+
+
+def native_command_meta_dir(command: Sequence[str]) -> Path | None:
+    for index, item in enumerate(command):
+        if item == "--output_dir" and index + 1 < len(command):
+            return Path(command[index + 1])
+    return None
 
 
 def sanitize_command(command: Sequence[str]) -> list[str]:
@@ -761,6 +922,72 @@ def summarize_results(*, method: str, content_dir: Path, quiz_dir: Path) -> dict
     }
 
 
+def summarize_batch_results(
+    *,
+    score_root: Path,
+    fallback_score_root: Path | None = None,
+    topic_refs: Sequence[TopicRef],
+    from_topic: int = 0,
+    to_topic: int = 0,
+) -> dict[str, Any]:
+    selected = [
+        ref
+        for ref in topic_refs
+        if (not from_topic or _topic_number(ref) >= from_topic)
+        and (not to_topic or _topic_number(ref) <= to_topic)
+    ]
+    rows: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for ref in selected:
+        summary_path = score_root / ref.key / "summary.json"
+        source_root = score_root
+        source_label = "primary"
+        if not summary_path.is_file() and fallback_score_root is not None:
+            fallback_path = fallback_score_root / ref.key / "summary.json"
+            if fallback_path.is_file():
+                summary_path = fallback_path
+                source_root = fallback_score_root
+                source_label = "fallback"
+        if not summary_path.is_file():
+            missing.append(
+                {
+                    "topic_id": ref.topic_id,
+                    "topic_key": ref.key,
+                    "topic": ref.name,
+                    "expected_summary": str(summary_path),
+                }
+            )
+            continue
+        try:
+            summary = read_json(summary_path)
+        except Exception as exc:  # noqa: BLE001
+            missing.append(
+                {
+                    "topic_id": ref.topic_id,
+                    "topic_key": ref.key,
+                    "topic": ref.name,
+                    "expected_summary": str(summary_path),
+                    "error": str(exc),
+                }
+            )
+            continue
+        rows.append(_batch_row_from_summary(ref, summary, summary_path, source_root=source_root, source_label=source_label))
+    return {
+        "schema_version": "survey_bench_batch_summary.v1",
+        "created_at": utcnow(),
+        "score_root": str(score_root),
+        "fallback_score_root": str(fallback_score_root) if fallback_score_root else "",
+        "from_topic": from_topic or None,
+        "to_topic": to_topic or None,
+        "selected_topic_count": len(selected),
+        "completed_topic_count": len(rows),
+        "missing_topic_count": len(missing),
+        "aggregates": _aggregate_batch_rows(rows),
+        "topics": rows,
+        "missing": missing,
+    }
+
+
 def summarize_content(content_dir: Path) -> dict[str, Any]:
     rows: dict[str, Any] = {}
     for path in sorted(content_dir.glob("*.json")) if content_dir.exists() else []:
@@ -780,6 +1007,102 @@ def summarize_content(content_dir: Path) -> dict[str, Any]:
                     flattened[f"{group}.{name}"] = value
     table = build_content_quality_table(overall if isinstance(overall, dict) else {})
     return {"files": rows, "overall_flat": flattened, "quality_table": table}
+
+
+def _batch_row_from_summary(
+    ref: TopicRef,
+    summary: dict[str, Any],
+    summary_path: Path,
+    *,
+    source_root: Path,
+    source_label: str,
+) -> dict[str, Any]:
+    table = summary.get("content", {}).get("quality_table", {}) if isinstance(summary, dict) else {}
+    table = table if isinstance(table, dict) else {}
+    outline = table.get("outline_quality") if isinstance(table.get("outline_quality"), dict) else {}
+    content = table.get("content_quality") if isinstance(table.get("content_quality"), dict) else {}
+    richness = table.get("richness") if isinstance(table.get("richness"), dict) else {}
+    quiz = summary.get("quiz", {}) if isinstance(summary, dict) else {}
+    quiz = quiz if isinstance(quiz, dict) else {}
+    outline_metrics = outline.get("metrics") if isinstance(outline.get("metrics"), dict) else {}
+    content_metrics = content.get("metrics") if isinstance(content.get("metrics"), dict) else {}
+    row = {
+        "topic_id": ref.topic_id,
+        "topic_key": ref.key,
+        "topic": ref.name,
+        "summary_path": str(summary_path),
+        "score_source": source_label,
+        "score_root": str(source_root),
+        "outline_coverage": numeric_or_none(outline_metrics.get("coverage")),
+        "outline_relevance": numeric_or_none(outline_metrics.get("relevance")),
+        "outline_structure": numeric_or_none(outline_metrics.get("structure")),
+        "outline_average": numeric_or_none(outline.get("average")),
+        "content_coverage": numeric_or_none(content_metrics.get("coverage")),
+        "content_depth": numeric_or_none(content_metrics.get("depth")),
+        "content_focus": numeric_or_none(content_metrics.get("focus")),
+        "content_coherence": numeric_or_none(content_metrics.get("coherence")),
+        "content_fluency": numeric_or_none(content_metrics.get("fluency")),
+        "content_average": numeric_or_none(content.get("average")),
+        "richness_figures": numeric_or_none(richness.get("figures")),
+        "richness_tables": numeric_or_none(richness.get("tables")),
+        "richness_total": numeric_or_none(richness.get("total")),
+        "quiz_compare_win_rate": numeric_or_none(quiz.get("compare_win_rate_avg")),
+        "quiz_specific_score": numeric_or_none(quiz.get("specific_score_avg")),
+    }
+    row["richness_elements"] = _sum_optional(row["richness_figures"], row["richness_tables"])
+    row["richness_estimated_chars"] = _estimated_richness_length(
+        elements=row["richness_elements"],
+        richness=row["richness_total"],
+    )
+    row["quality_average"] = mean(
+        value
+        for value in (row["outline_average"], row["content_average"])
+        if isinstance(value, (int, float))
+    )
+    return row
+
+
+def _aggregate_batch_rows(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    metric_keys = [
+        "outline_coverage",
+        "outline_relevance",
+        "outline_structure",
+        "outline_average",
+        "content_coverage",
+        "content_depth",
+        "content_focus",
+        "content_coherence",
+        "content_fluency",
+        "content_average",
+        "quality_average",
+        "richness_figures",
+        "richness_tables",
+        "richness_elements",
+        "richness_total",
+        "richness_estimated_chars",
+        "quiz_compare_win_rate",
+        "quiz_specific_score",
+    ]
+    aggregates: dict[str, Any] = {}
+    for key in metric_keys:
+        values = [row.get(key) for row in rows if isinstance(row.get(key), (int, float))]
+        aggregates[key] = {
+            "mean": mean(float(value) for value in values),
+            "count": len(values),
+        }
+    return aggregates
+
+
+def _sum_optional(left: Any, right: Any) -> float | None:
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return float(left) + float(right)
+    return None
+
+
+def _estimated_richness_length(*, elements: Any, richness: Any) -> float | None:
+    if not isinstance(elements, (int, float)) or not isinstance(richness, (int, float)) or richness <= 0:
+        return None
+    return float(elements) * 100000.0 / float(richness)
 
 
 def build_content_quality_table(overall: dict[str, Any]) -> dict[str, Any]:
@@ -867,6 +1190,161 @@ def render_summary_markdown(summary: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
+    aggregates = summary.get("aggregates", {}) if isinstance(summary.get("aggregates"), dict) else {}
+    lines = [
+        "# SurveyBench Batch Summary",
+        "",
+        f"- Selected topics: `{summary.get('selected_topic_count', 0)}`",
+        f"- Completed topics: `{summary.get('completed_topic_count', 0)}`",
+        f"- Missing topics: `{summary.get('missing_topic_count', 0)}`",
+        "",
+        "## Paper-Style Result Table",
+        "",
+    ]
+    lines.extend(render_batch_paper_style_table(aggregates, method_label="SimpleAutoResearch"))
+    lines.extend(
+        [
+            "",
+        "## Aggregate Means",
+        "",
+        ]
+    )
+    lines.extend(render_batch_aggregate_table(aggregates))
+    lines.extend(["", "## Per-Topic Scores", ""])
+    rows = summary.get("topics", []) if isinstance(summary.get("topics"), list) else []
+    source_counts = _score_source_counts(rows)
+    if source_counts:
+        lines.append(
+            "- Score sources: "
+            + ", ".join(f"`{key}`={value}" for key, value in sorted(source_counts.items()))
+        )
+        lines.append("")
+    lines.extend(render_batch_topic_table(rows))
+    missing = summary.get("missing", []) if isinstance(summary.get("missing"), list) else []
+    if missing:
+        lines.extend(["", "## Missing or Unreadable Topic Summaries", ""])
+        lines.append("| Topic | Expected Summary | Issue |")
+        lines.append("| --- | --- | --- |")
+        for row in missing:
+            topic = f"{row.get('topic_id', '')} {row.get('topic', '')}".strip()
+            issue = row.get("error") or "summary.json not found"
+            lines.append(f"| {escape_table_text(topic)} | `{row.get('expected_summary', '')}` | {escape_table_text(str(issue))} |")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_batch_paper_style_table(aggregates: dict[str, Any], *, method_label: str) -> list[str]:
+    rows = [
+        ("**Outline Quality (1-5)**", ""),
+        ("Coverage", _aggregate_mean(aggregates, "outline_coverage")),
+        ("Relevance", _aggregate_mean(aggregates, "outline_relevance")),
+        ("Structure", _aggregate_mean(aggregates, "outline_structure")),
+        ("**Average**", _aggregate_mean(aggregates, "outline_average")),
+        ("**Content Quality (1-5)**", ""),
+        ("Coverage", _aggregate_mean(aggregates, "content_coverage")),
+        ("Depth", _aggregate_mean(aggregates, "content_depth")),
+        ("Focus", _aggregate_mean(aggregates, "content_focus")),
+        ("Coherence", _aggregate_mean(aggregates, "content_coherence")),
+        ("Fluency", _aggregate_mean(aggregates, "content_fluency")),
+        ("**Average**", _aggregate_mean(aggregates, "content_average")),
+        ("**Richness**", ""),
+        ("Avg. Fig. Num.", _aggregate_mean(aggregates, "richness_figures")),
+        ("Avg. Table Num.", _aggregate_mean(aggregates, "richness_tables")),
+        ("Total Avg.", _aggregate_mean(aggregates, "richness_elements")),
+        ("Native Richness Density", _aggregate_mean(aggregates, "richness_total")),
+    ]
+    lines = [
+        f"| Dimension | {escape_table_text(method_label)} |",
+        "| --- | ---: |",
+    ]
+    for label, value in rows:
+        lines.append(f"| {label} | {fmt(value) if value != '' else ''} |")
+    return lines
+
+
+def _aggregate_mean(aggregates: dict[str, Any], key: str) -> Any:
+    row = aggregates.get(key) if isinstance(aggregates.get(key), dict) else {}
+    return row.get("mean")
+
+
+def render_batch_aggregate_table(aggregates: dict[str, Any]) -> list[str]:
+    groups = [
+        ("Outline Quality (1-5)", [
+            ("outline_coverage", "Coverage"),
+            ("outline_relevance", "Relevance"),
+            ("outline_structure", "Structure"),
+            ("outline_average", "Average"),
+        ]),
+        ("Content Quality (1-5)", [
+            ("content_coverage", "Coverage"),
+            ("content_depth", "Depth"),
+            ("content_focus", "Focus"),
+            ("content_coherence", "Coherence"),
+            ("content_fluency", "Fluency"),
+            ("content_average", "Average"),
+        ]),
+        ("Combined Quality", [
+            ("quality_average", "Outline/Content Avg."),
+        ]),
+        ("Richness", [
+            ("richness_figures", "Avg. Fig. Num."),
+            ("richness_tables", "Avg. Table Num."),
+            ("richness_elements", "Avg. Fig.+Table Num."),
+            ("richness_total", "Native Richness Density"),
+            ("richness_estimated_chars", "Estimated Text Chars"),
+        ]),
+        ("Quiz-Based Evaluation", [
+            ("quiz_compare_win_rate", "Compare Win Rate"),
+            ("quiz_specific_score", "Specific Score"),
+        ]),
+    ]
+    lines = ["| Dimension | Mean | Count |", "| --- | ---: | ---: |"]
+    for title, metrics in groups:
+        lines.append(f"| **{title}** |  |  |")
+        for key, label in metrics:
+            row = aggregates.get(key) if isinstance(aggregates.get(key), dict) else {}
+            lines.append(f"| {label} | {fmt(row.get('mean'))} | {row.get('count', 0)} |")
+    return lines
+
+
+def render_batch_topic_table(rows: Sequence[dict[str, Any]]) -> list[str]:
+    lines = [
+        "_Native richness density follows SurveyBench's original formula: `(figures + tables) / text_length * 1e5`. A short survey with many tables/figures can therefore score very high._",
+        "",
+        "| Topic | Source | Outline Avg. | Content Avg. | Quality Avg. | Fig. | Table | Elements | Richness Density | Est. Chars |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        topic = f"{row.get('topic_id', '')} {row.get('topic', '')}".strip()
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    escape_table_text(topic),
+                    escape_table_text(str(row.get("score_source") or "")),
+                    fmt(row.get("outline_average")),
+                    fmt(row.get("content_average")),
+                    fmt(row.get("quality_average")),
+                    fmt(row.get("richness_figures")),
+                    fmt(row.get("richness_tables")),
+                    fmt(row.get("richness_elements")),
+                    fmt(row.get("richness_total")),
+                    fmt(row.get("richness_estimated_chars")),
+                ]
+            )
+            + " |"
+        )
+    return lines
+
+
+def _score_source_counts(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("score_source") or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def render_content_quality_table(method: str, table: dict[str, Any]) -> list[str]:
     method_label = method or "Method"
     lines = [
@@ -883,7 +1361,7 @@ def render_content_quality_table(method: str, table: dict[str, Any]) -> list[str
     append_group_header(lines, "Richness")
     lines.append(f"| Avg. Fig. Num. | {fmt(richness.get('figures'))} |")
     lines.append(f"| Avg. Table Num. | {fmt(richness.get('tables'))} |")
-    lines.append(f"| Total Avg. | {fmt(richness.get('total'))} |")
+    lines.append(f"| Native Richness Density | {fmt(richness.get('total'))} |")
     return lines
 
 
@@ -976,6 +1454,10 @@ def fmt(value: Any) -> str:
     if value is None:
         return "-"
     return str(value)
+
+
+def escape_table_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.replace("|", "\\|")).strip()
 
 
 def timestamp_slug() -> str:

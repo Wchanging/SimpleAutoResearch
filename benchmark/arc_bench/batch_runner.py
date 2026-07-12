@@ -215,6 +215,13 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--native-score-model", help="Override ARC_JUDGE_MODEL for native ARC-Bench judge.")
     parser.add_argument(
+        "--arc-root",
+        help=(
+            "Path to AutoResearchClaw/experiments/arc_bench for --native-score. "
+            "Defaults to AutoResearchClaw/experiments/arc_bench under the repo root."
+        ),
+    )
+    parser.add_argument(
         "--score-profile",
         choices=("proxy", "arc-auto", "strict", "arc-native"),
         default="proxy",
@@ -558,6 +565,7 @@ class RunnerContext:
     finalize_timeout: int = 0
     score_timeout: int = 0
     llm_retry_attempts: int = 0
+    arc_root: Path | None = None
 
 
 def _context_from_args(args: argparse.Namespace) -> RunnerContext:
@@ -574,6 +582,7 @@ def _context_from_args(args: argparse.Namespace) -> RunnerContext:
         finalize_timeout=getattr(args, "finalize_timeout", 0),
         score_timeout=getattr(args, "score_timeout", 0),
         llm_retry_attempts=getattr(args, "llm_retry_attempts", 0),
+        arc_root=(_abs(repo_root, args.arc_root) if getattr(args, "arc_root", None) else None),
     )
 
 
@@ -1602,6 +1611,8 @@ def _run_native_score(
         "--full",
         "--debug",
     ]
+    if ctx.arc_root is not None:
+        native_cmd.extend(["--arc-root", _rel(ctx.repo_root, ctx.arc_root)])
     if model:
         native_cmd.extend(["--model", model])
     return _run_logged(
@@ -1997,6 +2008,8 @@ def _build_summary_row(ctx: RunnerContext, topic_state: TopicState) -> dict[str,
     if total_duration is None:
         total_duration = _first_number(stats.get("duration_sec"), topic_state.duration_sec)
     category_scores = judge.get("category_scores") if isinstance(judge.get("category_scores"), dict) else {}
+    if not category_scores:
+        category_scores = _category_scores_from_leaf_grades(judge.get("leaf_grades"))
     row = {
         "topic": topic_state.topic,
         "status": topic_state.status,
@@ -2105,7 +2118,20 @@ def _sum_duration_keys(durations: dict[str, float], keys: Sequence[str]) -> floa
 def _read_judge_result(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
     if not topic_state.output_dir:
         return {}
-    return _read_json_dict(_abs(ctx.repo_root, topic_state.output_dir) / "judge" / "judge_result.json")
+    output_dir = _abs(ctx.repo_root, topic_state.output_dir)
+    for path, source in [
+        (output_dir / "judge" / "judge_result.json", "adapter"),
+        (output_dir / "judge_native" / "judge_result.json", "native"),
+    ]:
+        data = _read_json_dict(path)
+        if not data:
+            continue
+        data = dict(data)
+        data.setdefault("judge_source", source)
+        if source == "native":
+            data.setdefault("scoring_profile", "native")
+        return data
+    return {}
 
 
 def _read_json_dict(path: Path) -> dict[str, Any]:
@@ -2147,6 +2173,8 @@ def _command_name(command: Any) -> str:
         return "execute"
     if "adapter.py finalize" in text:
         return "finalize"
+    if "adapter.py native-score" in text:
+        return "score"
     if "adapter.py score" in text:
         return "score"
     return ""
@@ -2161,6 +2189,29 @@ def _category_score(category_scores: dict[str, Any], expected: str) -> float | N
             return _first_number(value.get("score"))
         return _first_number(value)
     return None
+
+
+def _category_scores_from_leaf_grades(leaf_grades: Any) -> dict[str, float]:
+    if not isinstance(leaf_grades, list):
+        return {}
+    weighted: dict[str, dict[str, float]] = {}
+    for leaf in leaf_grades:
+        if not isinstance(leaf, dict):
+            continue
+        category = str(leaf.get("category") or leaf.get("task_category") or "").strip()
+        score = _first_number(leaf.get("score"))
+        if not category or score is None:
+            continue
+        weight = _first_number(leaf.get("weight")) or 1.0
+        bucket = weighted.setdefault(category, {"weighted_sum": 0.0, "weight_sum": 0.0})
+        bucket["weighted_sum"] += float(score) * float(weight)
+        bucket["weight_sum"] += float(weight)
+    out: dict[str, float] = {}
+    for category, bucket in weighted.items():
+        if bucket["weight_sum"] <= 0:
+            continue
+        out[category] = round(bucket["weighted_sum"] / bucket["weight_sum"], 4)
+    return out
 
 
 def _score_keys(value: str) -> set[str]:

@@ -249,7 +249,7 @@ criteria = "auto"
 style = "paper"               # paper | technical | concise
 cost_profile = "auto"         # auto | fast | balanced | thorough
 outline_strategy = "auto"     # auto | template | adaptive
-survey_contract = true        # add survey task contract for survey templates
+longform_contract = true      # add long-form synthesis contract for survey/longform templates
 
 # Keep section drafts and full report traces only when needed.
 draft_sections = false
@@ -292,6 +292,25 @@ enabled = false
 max_figures = 0                # 0 means template default; survey_long defaults to 3
 format = "svg"                 # svg
 mode = "auto"                  # auto | off
+
+[report.longform]
+# Optional long-form synthesis planning controls. These are generic
+# report-stage constraints, not SurveyBench-specific settings. They produce
+# reusable paper-selection, taxonomy, outline, citation-audit, and visual-plan
+# artifacts under 08-report/longform/ when a survey/longform template is active.
+enabled = true
+target_papers = 0              # 0 means infer from selected papers/read budget
+min_papers = 0                 # 0 means no blocking minimum
+target_words = 0               # 0 means template/profile default
+min_citations_per_section = 3
+target_tables = 0              # 0 means template/profile default
+evidence_audit = true
+planning_artifacts = true
+
+# Backward compatibility: [report.survey] is still accepted as an alias for
+# [report.longform], but new configs should prefer [report.longform].
+# Backward compatibility: [report].survey_contract is still accepted as an
+# alias for [report].longform_contract.
 
 [report.audit]
 citations = true
@@ -504,7 +523,7 @@ max_proposal_chars = 42000
 | `[report].style` | Tone hint for report writing: `paper`, `technical`, or `concise`. |
 | `[report].cost_profile` | High-level report budget profile. `auto` keeps ordinary reports unchanged and maps long survey templates to `balanced`; `fast` reduces section source batches for smoke tests; `thorough` preserves high-budget behavior. |
 | `[report].outline_strategy` | Section planning mode. `auto`/`adaptive` enrich survey sections with topic-specific goals and source routing; `template` keeps headings exactly as declared by the template. |
-| `[report].survey_contract` | When true, survey templates attach a benchmark-neutral survey task contract to writer/reviewer prompts and report memory. |
+| `[report].longform_contract` | When true, survey/longform templates attach a benchmark-neutral long-form synthesis contract to writer/reviewer prompts and report memory. `[report].survey_contract` remains a legacy alias. |
 | `[report].draft_sections` | When true, keeps Writer Agent section drafts under `08-report/sections/`. Default false keeps compact reports. |
 | `[report].debug_artifacts` | When true, keeps reviewer findings, tool results, and iteration traces under `08-report/audit/` and `08-report/iterations/`. Default false. |
 | `[report].agent` / `[report].reviewer` | Report writer/reviewer backend. V2.4 local path expects LLM for quality; disabled mode is a fallback. |
@@ -520,6 +539,7 @@ max_proposal_chars = 42000
 | `[report].allow_source_backtracking` | Allows report tools to retrieve bounded extra evidence from current-run source handles. |
 | `[report].max_backtracking_calls` / `[report].max_backtracking_tokens` | Source-backtracking call and token budgets. |
 | `[report.figures]` | Optional deterministic report figure generation. `enabled = true` writes local SVG assets and inserts Markdown image links; `survey_long` defaults to 3 figures when `max_figures = 0`. |
+| `[report.longform]` | Optional long-form synthesis planning controls. When enabled for survey/longform templates, the report stage writes `08-report/longform/` artifacts for paper selection, taxonomy, outline planning, citation coverage, and visual planning, then passes a compact version to the Writer/Reviewer. `[report.survey]` remains a legacy alias. |
 | `[report.audit].citations` / `.metrics` / `.claims` | Enables citation, metric, and claim audit components. |
 | `[report.audit].strict` | Reserved strict mode for blocking final reports on warnings; default false. |
 

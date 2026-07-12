@@ -4,6 +4,19 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-07-11
+
+### Added
+
+- 报告生成新增通用的 `[report.longform]` 长篇证据综合控制。survey 类模板可以在不增加默认 LLM 调用的情况下，写出 `08-report/longform/` 下的论文选择、taxonomy、outline planning、citation coverage 和 visual plan 等可审计产物。
+- SurveyBench 新增独立的 `--thorough` 高预算档位，使用 `configs/topics-thorough/`、`results/topics-thorough/` 和 `results/score-thorough/`，让正式长 survey 评测不会覆盖默认 balanced 迭代结果。
+- 当启用长篇模板时，Report Writer/Reviewer prompt 会收到紧凑的 long-form plan，包括目标论文数量、目标长度、分节 citation key、taxonomy facets 和图表目标。
+
+### Changed
+
+- SurveyBench topic 配置从旧的 `[report.survey]` 名称迁移到 `[report.longform]`。`[report.survey]` 仍作为兼容别名可读取，但新配置建议使用更中性的 `[report.longform]`。
+- 确定性 SVG 图示生成现在可以使用 long-form taxonomy 和 visual plan 作为语义输入，在不读取 benchmark reference survey 的前提下提升图示相关性。
+
 ## 2026-07-09
 
 ### Added

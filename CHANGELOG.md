@@ -4,6 +4,32 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-07-11
+
+### Added
+
+- Report generation now has generic `[report.longform]` controls for long
+  evidence-synthesis reports. Survey-style templates can write auditable
+  `08-report/longform/` artifacts for paper selection, taxonomy, outline
+  planning, citation coverage, and visual planning without adding default LLM
+  calls.
+- SurveyBench now has a separate `--thorough` profile for high-budget topic
+  runs. It uses `configs/topics-thorough/`, `results/topics-thorough/`, and
+  `results/score-thorough/` so final long-survey evaluations do not overwrite
+  balanced iteration runs.
+- Report Writer/Reviewer prompts now receive a compact long-form plan with
+  target papers, target length, section citation keys, taxonomy facets, and
+  visual goals when a long-form template is active.
+
+### Changed
+
+- SurveyBench topic configs now use `[report.longform]` instead of the older
+  `[report.survey]` name. `[report.survey]` remains accepted as a compatibility
+  alias, but new configs should prefer the benchmark-neutral name.
+- Deterministic SVG figure generation can use the long-form taxonomy and
+  visual plan as semantic inputs, improving figure relevance without using
+  benchmark reference surveys.
+
 ## 2026-07-09
 
 ### Added

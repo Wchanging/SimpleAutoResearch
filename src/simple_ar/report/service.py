@@ -48,8 +48,18 @@ from simple_ar.report.citations import (
 from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory, write_report_memory
 from simple_ar.report.figures import maybe_add_report_figures
-from simple_ar.report.schema import AgentReportResult, ReportAuditConfig, ReportFigureConfig, ReportRuntimeConfig
-from simple_ar.report.survey import attach_survey_contract, is_survey_report
+from simple_ar.report.schema import (
+    AgentReportResult,
+    ReportAuditConfig,
+    ReportFigureConfig,
+    ReportLongformConfig,
+    ReportRuntimeConfig,
+)
+from simple_ar.report.survey import (
+    attach_survey_contract,
+    is_survey_report,
+    write_survey_planning_artifacts,
+)
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
 from simple_ar.research.outputs.artifacts import (
@@ -240,6 +250,15 @@ def execute_report(ctx: Context) -> None:
         emit=lambda message: ctx.emit("stage_message", message),
     )
     report = figure_result.report_markdown
+    write_survey_planning_artifacts(
+        report_dir=report_dir,
+        context=report_context,
+        contract=report_context.survey_contract,
+        report_body=report_body,
+        final_report=report,
+        enabled=report_config.longform.planning_artifacts,
+        evidence_audit=report_config.longform.evidence_audit,
+    )
     quality = build_report_quality(report, report_body, search_meta, results, papers, cited_papers)
     report_audit = build_report_audit(
         report=report,
@@ -342,7 +361,10 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
         style=str(ctx.config.get("report_style") or "paper"),
         cost_profile=_report_cost_profile_config(ctx.config.get("report_cost_profile")),
         outline_strategy=_report_outline_strategy_config(ctx.config.get("report_outline_strategy")),
-        survey_contract=_bool_config(ctx.config.get("report_survey_contract"), default=True),
+        survey_contract=_bool_config(
+            _config_alias(ctx.config, "report_longform_contract", "report_survey_contract"),
+            default=True,
+        ),
         draft_sections=_bool_config(ctx.config.get("report_draft_sections"), default=False),
         debug_artifacts=_bool_config(ctx.config.get("report_debug_artifacts"), default=False),
         agent=str(ctx.config.get("report_agent") or "llm"),
@@ -370,6 +392,44 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
             format=_report_figure_format_config(ctx.config.get("report_figures_format")),
             mode=_report_figure_mode_config(ctx.config.get("report_figures_mode")),
         ),
+        longform=ReportLongformConfig(
+            enabled=_bool_config(
+                _config_alias(ctx.config, "report_longform_enabled", "report_survey_enabled"),
+                default=True,
+            ),
+            target_papers=_non_negative_int_config(
+                _config_alias(ctx.config, "report_longform_target_papers", "report_survey_target_papers"),
+                default=0,
+            ),
+            min_papers=_non_negative_int_config(
+                _config_alias(ctx.config, "report_longform_min_papers", "report_survey_min_papers"),
+                default=0,
+            ),
+            target_words=_non_negative_int_config(
+                _config_alias(ctx.config, "report_longform_target_words", "report_survey_target_words"),
+                default=0,
+            ),
+            min_citations_per_section=_non_negative_int_config(
+                _config_alias(
+                    ctx.config,
+                    "report_longform_min_citations_per_section",
+                    "report_survey_min_citations_per_section",
+                ),
+                default=3,
+            ),
+            target_tables=_non_negative_int_config(
+                _config_alias(ctx.config, "report_longform_target_tables", "report_survey_target_tables"),
+                default=0,
+            ),
+            evidence_audit=_bool_config(
+                _config_alias(ctx.config, "report_longform_evidence_audit", "report_survey_evidence_audit"),
+                default=True,
+            ),
+            planning_artifacts=_bool_config(
+                _config_alias(ctx.config, "report_longform_planning_artifacts", "report_survey_planning_artifacts"),
+                default=True,
+            ),
+        ),
         audit=ReportAuditConfig(
             citations=_bool_config(ctx.config.get("report_audit_citations"), default=True),
             metrics=_bool_config(ctx.config.get("report_audit_metrics"), default=True),
@@ -378,6 +438,14 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
         ),
     )
     return _apply_report_cost_profile(config)
+
+
+def _config_alias(config: dict[str, object], primary: str, legacy: str) -> object | None:
+    """Return a config value, accepting one legacy key for compatibility."""
+    value = config.get(primary)
+    if value not in (None, "", [], {}):
+        return value
+    return config.get(legacy)
 
 
 def _write_agent_artifacts(

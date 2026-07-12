@@ -2735,12 +2735,22 @@ def run_native_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> i
         raise SystemExit(f"AutoResearchClaw native judge.py not found: {script}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    native_run_dir, native_stage_meta = prepare_native_judge_run_dir(run_dir, output_dir)
     env = os.environ.copy()
     load_project_dotenv(env)
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
     if env.get("SIMPLE_AR_MODEL") and not env.get("OPENAI_MODEL"):
         env["OPENAI_MODEL"] = env["SIMPLE_AR_MODEL"]
+    judge_model = model or env.get("ARC_JUDGE_MODEL") or env.get("OPENAI_MODEL") or "gpt-4o"
+    if env.get("SIMPLE_AR_LLM_API") and not env.get("ARC_WIRE_API"):
+        simple_ar_api = env["SIMPLE_AR_LLM_API"].strip().lower()
+        if simple_ar_api in {"chat", "chat_completions", "chat-completions"}:
+            env["ARC_WIRE_API"] = "chat_completions"
+        elif simple_ar_api in {"responses", "response"}:
+            env["ARC_WIRE_API"] = "responses"
+    if not env.get("ARC_WIRE_API") and judge_model.lower().startswith(("gpt-4o", "gpt-4.1", "gpt-4-")):
+        env["ARC_WIRE_API"] = "chat_completions"
     if model:
         env["ARC_JUDGE_MODEL"] = model
     ensure_native_judge_imports(arc_root, output_dir, env)
@@ -2749,7 +2759,7 @@ def run_native_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> i
         sys.executable,
         str(script),
         "--run-dir",
-        str(run_dir),
+        str(native_run_dir),
         "--topic",
         topic,
         "--backend",
@@ -2786,8 +2796,8 @@ def run_native_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> i
 
     write_text(output_dir / "stdout.txt", stdout)
     write_text(output_dir / "stderr.txt", stderr)
-    native_result = run_dir / "judge_result.json"
-    native_debug = run_dir / "judge_debug.json"
+    native_result = native_run_dir / "judge_result.json"
+    native_debug = native_run_dir / "judge_debug.json"
     copied_result = ""
     copied_debug = ""
     if native_result.is_file():
@@ -2804,8 +2814,12 @@ def run_native_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> i
         "backend": backend,
         "mode": "results_only" if results_only else "full",
         "model": env.get("ARC_JUDGE_MODEL") or env.get("OPENAI_MODEL") or "gpt-4o",
+        "wire_api": env.get("ARC_WIRE_API", "responses"),
         "command": command,
         "run_dir": str(run_dir),
+        "source_run_dir": str(run_dir),
+        "native_run_dir": str(native_run_dir),
+        "native_staging": native_stage_meta,
         "output_dir": str(output_dir),
         "native_result_path": str(native_result) if native_result.is_file() else "",
         "copied_result_path": copied_result,
@@ -2833,6 +2847,124 @@ def load_project_dotenv(env: dict[str, str]) -> None:
     for key, value in values.items():
         if value is not None and key not in env:
             env[str(key)] = str(value)
+
+
+def prepare_native_judge_run_dir(source_run_dir: Path, output_dir: Path) -> tuple[Path, dict[str, Any]]:
+    """Build a minimal AutoResearchClaw-compatible view of a finalized output.
+
+    SimpleAutoResearch finalization stores runnable code under ``submission/code``.
+    AutoResearchClaw's native judge only discovers a few historical experiment
+    paths, especially ``stage-13/experiment_final``.  The adapter therefore
+    keeps the finalized submission intact and adds a temporary native-compatible
+    code view beside it.
+    """
+
+    native_run_dir = output_dir / "_native_run"
+    if native_run_dir.exists():
+        shutil.rmtree(native_run_dir)
+    native_run_dir.mkdir(parents=True, exist_ok=True)
+
+    copied_inputs: list[str] = []
+    for name in ("submission", "stage-14"):
+        src = source_run_dir / name
+        dst = native_run_dir / name
+        if src.is_dir():
+            copy_tree_clean(src, dst)
+            copied_inputs.append(f"{name}/")
+        elif src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied_inputs.append(name)
+
+    code_source = source_run_dir / "submission" / "code"
+    native_code_file = native_run_dir / "stage-13" / "experiment_final.py"
+    has_native_code = False
+    if code_source.is_dir():
+        bundled_files = write_native_code_bundle(code_source, native_code_file)
+        has_native_code = bool(bundled_files)
+    else:
+        bundled_files = []
+
+    return native_run_dir, {
+        "source_run_dir": str(source_run_dir),
+        "copied_inputs": copied_inputs,
+        "code_source": str(code_source) if code_source.exists() else "",
+        "native_code_file": str(native_code_file) if native_code_file.exists() else "",
+        "native_code_files": bundled_files,
+        "has_native_code": has_native_code,
+    }
+
+
+def write_native_code_bundle(code_source: Path, output_file: Path) -> list[str]:
+    """Write an ordered flat code bundle for AutoResearchClaw's native judge.
+
+    The native judge reads ``stage-13/experiment_final.py`` or concatenates a
+    directory alphabetically, then truncates the code prompt.  SimpleAutoResearch
+    greenfield projects are multi-file packages, so alphabetical order can put
+    analysis/reporting files before the actual implementation.  This bundle keeps
+    original source text unchanged but orders implementation-heavy files first.
+    """
+
+    py_files = [path for path in code_source.rglob("*.py") if path.is_file() and path.stat().st_size > 0]
+    ordered = sorted(
+        py_files,
+        key=lambda path: (
+            _native_code_file_priority(path.relative_to(code_source)),
+            path.stat().st_size,
+            str(path.relative_to(code_source)).lower(),
+        ),
+    )
+    parts: list[str] = []
+    written: list[str] = []
+    for path in ordered:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            continue
+        if not text:
+            continue
+        rel = path.relative_to(code_source).as_posix()
+        parts.append(f"# === {rel} ===\n{text}")
+        written.append(rel)
+    if parts:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+    return written
+
+
+def _native_code_file_priority(rel_path: Path) -> int:
+    path = rel_path.as_posix().lower()
+    name = rel_path.name.lower()
+    if name == "__init__.py":
+        return 90
+    late_terms = ("analysis", "report", "reporting", "artifact", "plot", "figure", "visual", "summary")
+    if any(term in path for term in late_terms):
+        return 70
+    early_terms = (
+        "pipeline",
+        "model",
+        "method",
+        "strategy",
+        "condition",
+        "experiment",
+        "runner",
+        "core",
+        "train",
+        "fit",
+        "simulate",
+        "optimize",
+    )
+    if any(term in path for term in early_terms):
+        return 0
+    data_terms = ("dataset", "data", "input", "feature", "preprocess", "validation")
+    if any(term in path for term in data_terms):
+        return 10
+    config_terms = ("config", "metric", "evaluation", "eval", "score")
+    if any(term in path for term in config_terms):
+        return 20
+    if name == "main.py" or "cli" in path:
+        return 40
+    return 50
 
 
 def ensure_native_judge_imports(arc_root: Path, output_dir: Path, env: dict[str, str]) -> None:

@@ -226,19 +226,33 @@ def _contract_items(survey_contract: dict[str, Any] | None, spec: _FigureSpec) -
         return []
     facets = _string_items(survey_contract.get("required_facets"), limit=12)
     reader_needs = _string_items(survey_contract.get("reader_needs"), limit=8)
+    taxonomy = survey_contract.get("taxonomy") if isinstance(survey_contract.get("taxonomy"), dict) else {}
+    taxonomy_facets = [
+        str(row.get("label") or "")
+        for row in (taxonomy.get("facets") if isinstance(taxonomy.get("facets"), list) else [])
+        if isinstance(row, dict) and str(row.get("label") or "").strip()
+    ][:12]
+    visual = survey_contract.get("visual_plan") if isinstance(survey_contract.get("visual_plan"), dict) else {}
+    visual_items: list[str] = []
+    visual_figures = visual.get("figures") if isinstance(visual.get("figures"), list) else []
+    for row in visual_figures:
+        if not isinstance(row, dict) or row.get("figure_id") != spec.figure_id:
+            continue
+        visual_items.extend(_string_items(row.get("items"), limit=8))
     candidates: list[str] = []
+    candidates.extend(visual_items)
     if spec.figure_id in {"taxonomy-map", "evaluation-landscape"}:
-        candidates.extend(facets)
+        candidates.extend(taxonomy_facets or facets)
     if spec.figure_id == "challenge-roadmap":
         candidates.extend(reader_needs)
-        candidates.extend(facets)
+        candidates.extend(taxonomy_facets or facets)
     if spec.figure_id == "system-construction-flow":
         method_like = [
             item
-            for item in facets
+            for item in (taxonomy_facets or facets)
             if any(term in item.lower() for term in ("method", "model", "system", "architecture", "pipeline", "framework"))
         ]
-        candidates.extend(method_like or facets)
+        candidates.extend(method_like or taxonomy_facets or facets)
     return [_humanize_contract_item(item) for item in candidates]
 
 

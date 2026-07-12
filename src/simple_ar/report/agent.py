@@ -326,7 +326,7 @@ def build_writer_brief(
         f"Sections: {sections}\n"
         f"Source handles: {len(context.source_handles)}\n"
         f"Metric sources: {len(context.metric_sources)}\n"
-        f"Survey contract: {'enabled' if memory.survey_contract.get('enabled') else 'disabled'}\n"
+        f"Long-form synthesis contract: {'enabled' if memory.survey_contract.get('enabled') else 'disabled'}\n"
     )
 
 
@@ -390,10 +390,37 @@ def _plan_topic_specific_outline(
         raise ValueError("outline planner returned fewer than 5 usable sections")
     budget = _outline_source_budget(memory.survey_contract, config)
     planned: list[ReportSectionPlan] = []
-    for index, row in enumerate(sections[:12], start=1):
+    planned_sections = sections[:12]
+    total_target_words = _outline_target_words(memory.survey_contract, default=12000)
+    default_min_citations = _outline_min_citations(memory.survey_contract, default=3)
+    for index, row in enumerate(planned_sections, start=1):
         heading = _clean_outline_heading(row["heading"])
         goal = row["goal"]
         keywords = " ".join(row.get("keywords", []))
+        default_target_words = _planned_section_target_words(
+            heading=heading,
+            index=index,
+            total=len(planned_sections),
+            target_words=total_target_words,
+        )
+        target_words = _coerce_int(
+            row.get("target_words") or default_target_words,
+            default=default_target_words,
+            lower=0,
+            upper=8000,
+        )
+        min_citations = _coerce_int(
+            row.get("min_citations") or default_min_citations,
+            default=default_min_citations,
+            lower=0,
+            upper=20,
+        )
+        subsections = _string_items(row.get("subsections"))[:6] or _default_subsections_for_heading(
+            heading,
+            row.get("keywords", []),
+        )
+        if not _section_allows_subsections(heading):
+            subsections = []
         evidence_handles = route_section_sources(
             context=context,
             heading=heading,
@@ -407,9 +434,12 @@ def _plan_topic_specific_outline(
                 heading=heading,
                 goal=goal,
                 evidence_handles=evidence_handles or _fallback_section_handles(memory, limit=budget),
+                target_words=target_words,
+                min_citations=min_citations,
+                subsections=subsections,
                 required=True,
                 final_order=index,
-                draft_order=_survey_draft_order(heading, index, len(sections)),
+                draft_order=_survey_draft_order(heading, index, len(planned_sections)),
             )
         )
     return _dedupe_section_ids(planned)
@@ -437,6 +467,8 @@ def _outline_planner_prompt(
         "evidence_summary_excerpt": context.evidence_summary[:2500],
             "planning_rules": [
             "Create 7-10 display sections, including Abstract, Introduction, body sections, and Conclusion.",
+            "For long-form surveys, each major body section should include 2-4 planned third-level subsection hints so the final report has a navigable internal structure.",
+            "Do not add subsection hints for Abstract, Introduction, or Conclusion; those sections should remain single-section prose.",
             "Body sections must be topic-specific; do not blindly reuse generic headings if the topic suggests better axes.",
             "Keep SurveyBench-compatible Markdown in mind: final report will use # Title and ## numbered sections.",
             "Use headings that a human survey reader would expect for this topic.",
@@ -452,6 +484,9 @@ def _outline_planner_prompt(
                     "heading": "Short academic section heading without numbering",
                     "goal": "Reader-facing purpose and synthesis target for this section",
                     "keywords": ["routing keywords for evidence selection"],
+                    "target_words": 1200,
+                    "min_citations": 3,
+                    "subsections": ["optional third-level subsection heading"],
                     "required": True,
                 }
             ],
@@ -515,6 +550,9 @@ def _normalize_outline_sections(response: dict[str, Any]) -> list[dict[str, Any]
                 "heading": heading,
                 "goal": goal or f"Synthesize evidence relevant to {heading}.",
                 "keywords": keyword_rows[:10],
+                "target_words": item.get("target_words") or 0,
+                "min_citations": item.get("min_citations") or 0,
+                "subsections": _string_items(item.get("subsections"))[:6],
             }
         )
     return rows
@@ -533,6 +571,11 @@ def _ensure_survey_outline_coverage(sections: list[dict[str, Any]]) -> list[dict
                 "heading": "Related Surveys and Positioning",
                 "goal": "Position the topic against prior surveys and neighboring fields, explaining what this synthesis adds and where boundaries remain.",
                 "keywords": ["related surveys", "positioning", "adjacent fields", "neighboring areas"],
+                "subsections": [
+                    "Prior surveys and their scope",
+                    "Neighboring fields",
+                    "What this synthesis adds",
+                ],
             }
         )
     if not any(term in text for term in ("future direction", "future work", "research direction")):
@@ -541,6 +584,11 @@ def _ensure_survey_outline_coverage(sections: list[dict[str, Any]]) -> list[dict
                 "heading": "Future Directions",
                 "goal": "State concrete research directions, testable hypotheses, and evidence needed to validate or falsify them.",
                 "keywords": ["future directions", "research directions", "open problems", "hypotheses"],
+                "subsections": [
+                    "Open technical problems",
+                    "Evidence needed next",
+                    "Research roadmap",
+                ],
             }
         )
     if not additions:
@@ -567,6 +615,68 @@ def _outline_source_budget(contract: dict[str, Any], config: ReportRuntimeConfig
     except (TypeError, ValueError):
         value = 24 if config.cost_profile == "thorough" else 12
     return max(4, min(40, value))
+
+
+def _outline_target_words(contract: dict[str, Any], *, default: int) -> int:
+    expected = contract.get("expected_coverage") if isinstance(contract, dict) else {}
+    raw = expected.get("target_words") if isinstance(expected, dict) else None
+    return _coerce_int(raw, default=default, lower=1200, upper=50000)
+
+
+def _outline_min_citations(contract: dict[str, Any], *, default: int) -> int:
+    expected = contract.get("expected_coverage") if isinstance(contract, dict) else {}
+    raw = expected.get("min_citations_per_section") if isinstance(expected, dict) else None
+    return _coerce_int(raw, default=default, lower=0, upper=20)
+
+
+def _planned_section_target_words(
+    *,
+    heading: str,
+    index: int,
+    total: int,
+    target_words: int,
+) -> int:
+    lowered = heading.lower()
+    if "abstract" in lowered or "conclusion" in lowered:
+        return max(250, min(900, target_words // max(total * 3, 1)))
+    body_count = max(1, total - 2)
+    body_budget = max(600, target_words - min(1800, target_words // 5))
+    return max(600, min(3500, body_budget // body_count))
+
+
+def _default_subsections_for_heading(heading: str, keywords: object) -> list[str]:
+    lowered = heading.lower()
+    if not _section_allows_subsections(heading):
+        return []
+    if "foundation" in lowered or "taxonomy" in lowered:
+        return ["Core concepts", "Taxonomy axes", "Interactions between axes"]
+    if "method" in lowered or "system" in lowered or "construction" in lowered:
+        return ["Common design pattern", "Representative method families", "Trade-offs"]
+    if "application" in lowered or "use case" in lowered:
+        return ["Task families", "Deployment settings", "Evidence strength"]
+    if "evaluation" in lowered or "benchmark" in lowered:
+        return ["Evaluation protocols", "Metrics and datasets", "Evidence limitations"]
+    if "survey" in lowered or "positioning" in lowered:
+        return ["Prior surveys", "Adjacent fields", "Added synthesis"]
+    if "challenge" in lowered or "future" in lowered:
+        return ["Technical bottlenecks", "Evaluation gaps", "Future research directions"]
+    rows = [str(item).replace("_", " ").title() for item in _string_items(keywords)]
+    return rows[:3]
+
+
+def _section_allows_subsections(heading: str) -> bool:
+    lowered = heading.lower()
+    return not any(term in lowered for term in ("abstract", "introduction", "conclusion"))
+
+
+def _coerce_int(value: object, *, default: int, lower: int, upper: int) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        parsed = default
+    return max(lower, min(upper, parsed))
 
 
 def _fallback_section_handles(memory: ReportMemory, *, limit: int) -> list[str]:
@@ -837,6 +947,7 @@ def _writer_prompt(
         "style": config.style,
         "max_section_tokens": config.max_section_tokens,
         "section": section.model_dump(mode="json"),
+        "section_constraints": _section_constraints(section),
         "source_strategy": {
             "mode": config.source_strategy,
             "batch_index": source_batch_index,
@@ -866,16 +977,20 @@ def _writer_prompt(
         "review_findings": [finding.model_dump(mode="json") for finding in (review.findings if review else [])],
         "extra_tool_context": [result.model_dump(mode="json") for result in extra_context[:6]],
         "style_rules": [
-            "Write as an academic survey for the user topic, not as documentation of the SimpleAutoResearch pipeline.",
+            "Write as a long-form academic synthesis for the user topic, not as documentation of the SimpleAutoResearch pipeline.",
             "Do not include artifact names, file paths, JSON filenames, stage numbers, or command provenance in the body.",
             "Do not create sections named Search Scope, Evidence Summary, Pipeline, Artifacts, or Stage Outputs.",
             "Do not use prompt-planning phrases such as Hint:, Use this paper as, Paper Brief, or Additional synthesis detail.",
             "Do not write a paper-by-paper literature note dump; group papers by taxonomy and comparison dimensions.",
             "Use the available source set broadly, but compress by grouping similar papers and citing representative evidence.",
             "For long survey templates, optimize for topic coverage and reader needs: explain foundations, construction patterns, applications, evaluation practice, related surveys, challenges, and future directions.",
-            "When survey_contract is enabled, satisfy its reader_needs, required_facets, expected coverage, and boundaries before adding optional details.",
+            "When the long-form synthesis contract is enabled, satisfy its reader_needs, required_facets, expected coverage, outline_sections, visual_plan, and boundaries before adding optional details.",
+            "Use selected_paper_brief and taxonomy_facets to group evidence; do not treat them as a rigid answer key or cite papers not present in allowed source handles.",
+            "When outline_sections specify target_words and citation_keys, treat them as section planning constraints and explain any evidence gap conservatively.",
+            "When section_constraints specify target_words, min_citations, or subsections, treat them as local writing constraints for this section.",
+            "If subsections are listed, use them as meaningful `###` subheadings unless the section is Abstract, Introduction, or Conclusion.",
             "For long survey templates, use meaningful subheadings inside large sections when they improve navigation.",
-            "For long survey templates, include compact comparison tables and figure-ready conceptual diagram specs when useful, but do not add Markdown image links unless a real generated image artifact exists.",
+            "For long survey templates, include compact comparison tables aligned with visual_plan when useful, but do not add Markdown image links unless a real generated image artifact exists.",
             "When source_strategy.mode is batch_refine and previous_draft is present, update the existing section instead of appending a separate mini-section.",
             "For incremental source batches, revise taxonomy tables, evidence maps, and contrasts to absorb new papers compactly.",
             "For Method Families, include a compact taxonomy table or grouped comparison before prose.",
@@ -925,6 +1040,7 @@ def _reviewer_prompt(
         "task": "review_one_report_section",
         "report_mode": context.report_mode,
         "section": section.model_dump(mode="json"),
+        "section_constraints": _section_constraints(section),
         "criteria_markdown": template.criteria_markdown,
         "objective": memory.objective,
         "survey_contract": _compact_survey_contract(memory.survey_contract),
@@ -946,15 +1062,17 @@ def _reviewer_prompt(
         "review_focus": [
             "Does this section read like a survey section rather than a pipeline log?",
             "Are citations adjacent to paper-specific claims?",
+            "If section_constraints include target_words, min_citations, or subsections, did the draft reasonably satisfy them without padding or unsupported citations?",
+            "If planned subsections are present for a body section, does the draft use clear internal `###` headings or equivalent navigational structure? Do not require this for Abstract, Introduction, or Conclusion.",
             "Are long paragraphs split into readable units?",
             "Are operational details moved out of the body unless they are reader-facing limitations?",
             "Does the section synthesize across papers instead of listing paper briefs?",
             "Does it contain taxonomy/comparison dimensions when discussing methods?",
             "Does it use the selected source set broadly without becoming a paper-by-paper dump?",
             "For long survey templates, does the section improve topic coverage for reader needs rather than merely restating a compact technical brief?",
-            "If survey_contract is enabled, does the section cover the relevant required facets without drifting into an experiment report or pipeline log?",
+            "If the long-form synthesis contract is enabled, does the section cover the relevant outline_sections, required facets, citation policy, and reader needs without drifting into an experiment report or pipeline log?",
             "For long survey templates, are construction, applications, evaluation, related surveys, challenges, and future directions covered across the report plan?",
-            "For long survey templates, are tables and figure-ready diagram specs used where they clarify taxonomy, benchmarks, or workflows?",
+            "For long survey templates, are tables and figure-ready diagram specs used where the visual_plan indicates they clarify taxonomy, benchmarks, or workflows?",
             "Does Evaluation include an evidence-quality map or equivalent compact comparison when useful?",
             "Are benchmark limitations and transfer boundaries stated near empirical claims?",
             "Is it free of prompt residue such as Hint, Use this paper as, Paper Brief, or Additional synthesis detail?",
@@ -1000,6 +1118,11 @@ def _compact_survey_contract(contract: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(contract, dict) or not contract.get("enabled"):
         return {}
     expected = contract.get("expected_coverage") if isinstance(contract.get("expected_coverage"), dict) else {}
+    selection = contract.get("paper_selection") if isinstance(contract.get("paper_selection"), dict) else {}
+    selected_papers = selection.get("selected_papers") if isinstance(selection.get("selected_papers"), list) else []
+    taxonomy = contract.get("taxonomy") if isinstance(contract.get("taxonomy"), dict) else {}
+    outline = contract.get("outline_plan") if isinstance(contract.get("outline_plan"), dict) else {}
+    visual = contract.get("visual_plan") if isinstance(contract.get("visual_plan"), dict) else {}
     return {
         "schema_version": contract.get("schema_version", "survey_contract.v1"),
         "topic": contract.get("topic", ""),
@@ -1007,6 +1130,50 @@ def _compact_survey_contract(contract: dict[str, Any]) -> dict[str, Any]:
         "reader_needs": _string_items(contract.get("reader_needs"))[:6],
         "required_facets": _string_items(contract.get("required_facets"))[:10],
         "expected_coverage": expected,
+        "selected_paper_brief": [
+            {
+                "cite_as": item.get("citation_key") or item.get("paper_id") or "",
+                "title": str(item.get("title") or "")[:160],
+                "role": item.get("role") or "",
+                "facets": _string_items(item.get("facets"))[:4],
+            }
+            for item in selected_papers[:20]
+            if isinstance(item, dict)
+        ],
+        "taxonomy_facets": [
+            {
+                "label": facet.get("label") or "",
+                "paper_keys": _string_items(facet.get("paper_keys"))[:8],
+                "evidence_count": facet.get("evidence_count") or 0,
+            }
+            for facet in (taxonomy.get("facets") if isinstance(taxonomy.get("facets"), list) else [])[:10]
+            if isinstance(facet, dict)
+        ],
+        "outline_sections": [
+            {
+                "heading": section.get("heading") or "",
+                "goal": section.get("goal") or "",
+                "target_words": section.get("target_words") or "",
+                "min_citations": section.get("min_citations") or "",
+                "subsections": _string_items(section.get("subsections"))[:6],
+                "citation_keys": _string_items(section.get("citation_keys"))[:10],
+            }
+            for section in (outline.get("sections") if isinstance(outline.get("sections"), list) else [])[:12]
+            if isinstance(section, dict)
+        ],
+        "visual_plan": {
+            "tables": [
+                {"title": row.get("title") or "", "purpose": row.get("purpose") or ""}
+                for row in (visual.get("tables") if isinstance(visual.get("tables"), list) else [])[:6]
+                if isinstance(row, dict)
+            ],
+            "figures": [
+                {"title": row.get("title") or "", "items": _string_items(row.get("items"))[:8]}
+                for row in (visual.get("figures") if isinstance(visual.get("figures"), list) else [])[:4]
+                if isinstance(row, dict)
+            ],
+        },
+        "citation_policy": contract.get("citation_policy") if isinstance(contract.get("citation_policy"), dict) else {},
         "boundaries": _string_items(contract.get("boundaries"))[:6],
     }
 
@@ -1182,6 +1349,29 @@ def _source_strategy_instruction(
         "tables, comparisons, and evidence-quality judgments compactly; do not "
         "append a separate list of new papers."
     )
+
+
+def _section_constraints(section: ReportSectionPlan) -> dict[str, Any]:
+    constraints: dict[str, Any] = {
+        "target_words": section.target_words if section.target_words > 0 else "",
+        "min_citations": section.min_citations if section.min_citations > 0 else "",
+        "subsections": section.subsections[:6],
+    }
+    guidance: list[str] = []
+    if section.target_words > 0:
+        guidance.append(
+            "Aim for this approximate section length, but prefer evidence-bounded prose over padding."
+        )
+    if section.min_citations > 0:
+        guidance.append(
+            "Use at least this many distinct allowed citations when the evidence set supports it."
+        )
+    if section.subsections:
+        guidance.append(
+            "Use the subsection list as navigational `###` headings or close equivalents."
+        )
+    constraints["guidance"] = guidance
+    return constraints
 
 
 def _draft_sequence(sections: list[ReportSectionPlan]) -> list[ReportSectionPlan]:

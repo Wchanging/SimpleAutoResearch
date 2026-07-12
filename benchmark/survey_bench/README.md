@@ -48,6 +48,28 @@ The final summary is written to:
 benchmark/survey_bench/results/score/<topic-key>/summary.md
 ```
 
+For final high-budget runs, add `--thorough`. This uses a separate config set
+and result namespace, so balanced smoke-test outputs are not overwritten:
+
+```powershell
+uv run python benchmark\survey_bench\adapter.py run-topic --topic-id topic11 --thorough
+uv run python benchmark\survey_bench\adapter.py resume-latest --topic-id topic11 --thorough --from-stage report
+uv run python benchmark\survey_bench\adapter.py finalize-latest --topic-id topic11 --thorough --eval-content --model gpt-4o
+uv run python benchmark\survey_bench\adapter.py summarize-batch --thorough
+```
+
+Use `resume-latest` when a run already completed search/read but failed in a
+later stage. It reuses the latest topic run directory and passes the matching
+balanced or thorough config to `simple-ar resume`, avoiding a fresh literature
+search. The default is `--from-stage report --to-stage report`; override the
+stage range when you need to rerun read or search.
+
+The thorough profile reads configs from
+`benchmark/survey_bench/configs/topics-thorough/`, writes generation runs under
+`benchmark/survey_bench/results/topics-thorough/<topic-key>/`, exports to
+`SurveyBench/data/<topic-key>-thorough/`, and writes scores under
+`benchmark/survey_bench/results/score-thorough/<topic-key>/`.
+
 Quiz-based evaluation is optional and significantly more expensive than content
 evaluation. Run it only when you explicitly need SurveyBench's quiz protocol.
 
@@ -62,6 +84,9 @@ The topic configs live under `benchmark/survey_bench/configs/topics/`, one TOML
 per SurveyBench topic key. They use `gpt-5.1` for SimpleAutoResearch survey
 generation. Native SurveyBench evaluation examples below use `gpt-4o`, matching
 the paper-comparison setting more closely than smaller judge models.
+The default `topics/` configs are balanced for iteration. The
+`topics-thorough/` configs increase retrieval, read, and report budgets for
+longer surveys with more cited papers, figures, and tables.
 
 The config uses the built-in `survey_long` report template, which is intended
 for longer reader-oriented academic surveys rather than compact technical
@@ -72,6 +97,15 @@ report stage uses `cost_profile = "balanced"` and `outline_strategy =
 "adaptive"` so sections receive a topic-specific outline, topic-specific goals,
 and bounded source batches by default; switch to `cost_profile = "thorough"`
 only for final high-budget runs.
+
+The same configs also set `[report.longform]` targets for paper count, report
+length, citation density, and tables. These are generic SimpleAutoResearch
+long-form synthesis controls rather than SurveyBench-only prompts: each run
+writes `08-report/longform/` artifacts for paper selection, taxonomy, outline
+planning, citation coverage, and visual planning so quality problems can be
+audited without re-running the judge. The older `[report.survey]` section is
+still accepted as a compatibility alias, but new configs should use
+`[report.longform]`.
 
 This writes the run under:
 
@@ -137,6 +171,25 @@ uv run python benchmark/survey_bench/adapter.py summarize \
 
 The summary includes a paper-style grouped table for outline quality, content quality, richness, and per-group averages.
 
+Aggregate all completed topic summaries into one cross-topic table:
+
+```bash
+uv run python benchmark/survey_bench/adapter.py summarize-batch
+```
+
+Aggregate a topic range, for example topic10 through topic20:
+
+```bash
+uv run python benchmark/survey_bench/adapter.py summarize-batch --from-topic 10 --to-topic 20
+```
+
+The batch summary scans `benchmark/survey_bench/results/score/topic*/summary.json` and writes macro means to:
+
+```text
+benchmark/survey_bench/results/score/batch_summary/batch_summary.json
+benchmark/survey_bench/results/score/batch_summary/batch_summary.md
+```
+
 Outputs are written under:
 
 ```text
@@ -146,7 +199,9 @@ benchmark/survey_bench/results/score/topic11-llm-based-multi-agent/
 Recommended local results layout:
 
 - `results/topics/<topic-key>/<timestamp-topic>/`: SimpleAutoResearch generation runs, where `topic-key` can be listed with `topics --with-ids`.
+- `results/topics-thorough/<topic-key>/<timestamp-topic>/`: high-budget generation runs created with `--thorough`.
 - `results/score/<method>/`: native SurveyBench evaluation summaries for an exported method. For single-topic runs, prefer the stable topic key such as `topic11-llm-based-multi-agent` as the method name.
+- `results/score-thorough/<topic-key>/`: native SurveyBench evaluation summaries for `--thorough` exports.
 - `results/_native_commands/`: sanitized records of native judge subprocess calls.
 - `results/_logs/`: optional batch logs.
 - `results/_exports/`: temporary scratch exports from old/manual workflows; safe to delete after the corresponding method directory exists.

@@ -1,17 +1,14 @@
 [run]
-# Single-topic SurveyBench smoke run.
-#
-# The output_root is intentionally under benchmark/survey_bench/results/topics
-# so generation runs are grouped by SurveyBench topic id/key instead of being
-# mixed with method-level score summaries.
-topic = "LLM-based Multi-Agent"
-output_root = "benchmark/survey_bench/results/topics/topic11-llm-based-multi-agent"
+# SurveyBench single-topic run generated from the native topic list.
+# Use the same topic key as the SurveyBench method name when exporting/scoring.
+topic = "Generative Diffusion Models"
+output_root = "benchmark/survey_bench/results/topics/topic08-generative-diffusion-models"
 to_stage = "report"
 debug_artifacts = false
 
 [llm]
 enabled = true
-model = "gpt-4o"
+model = "gpt-5.1"
 workers = 2
 
 [search]
@@ -19,27 +16,27 @@ offline = false
 strict = true
 allow_fixture_fallback = false
 max_papers = 30
-query = "LLM-based multi-agent systems large language model agents collaboration planning communication survey"
+query = "Generative Diffusion Models survey taxonomy methods benchmarks evaluation applications limitations"
 
 [research]
 mode = "strong"
 planner = "llm"
 sources = ["openalex", "semantic_scholar", "arxiv"]
 queries = [
-  "LLM-based multi-agent systems survey",
-  "large language model multi-agent collaboration",
-  "LLM agents communication coordination planning",
-  "multi-agent LLM benchmarks evaluation",
+  "Generative Diffusion Models survey",
+  "Generative Diffusion Models taxonomy methods architectures",
+  "Generative Diffusion Models benchmarks evaluation datasets",
+  "Generative Diffusion Models applications limitations future directions",
 ]
 auto_query_expansion = true
 max_retrieval_rounds = 2
 max_queries = 6
 required_facets = [
-  "agent_architecture",
-  "communication_and_coordination",
-  "planning_or_reasoning",
-  "evaluation_benchmarks",
-  "applications_and_limitations",
+  "background_and_scope",
+  "method_taxonomy",
+  "datasets_benchmarks_and_evaluation",
+  "applications_and_systems",
+  "limitations_and_future_directions",
 ]
 local_documents = []
 use_fulltext = true
@@ -106,7 +103,6 @@ enabled = true
 max_figures = 3
 format = "svg"
 mode = "auto"
-
 [report.longform]
 enabled = true
 target_papers = 25
@@ -116,3 +112,4 @@ min_citations_per_section = 3
 target_tables = 5
 evidence_audit = true
 planning_artifacts = true
+

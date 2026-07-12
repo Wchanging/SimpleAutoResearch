@@ -33,6 +33,28 @@ class ReportFigureConfig(ReportModel):
     mode: Literal["auto", "off"] = "auto"
 
 
+class ReportLongformConfig(ReportModel):
+    """Long-form synthesis planning, coverage, and length controls.
+
+    These options describe a long evidence synthesis target rather than any
+    benchmark-specific output format. Survey templates are the first consumer,
+    but the same controls can support long related-work sections, technical
+    reviews, and reader-oriented research reports.
+    """
+
+    enabled: bool = True
+    target_papers: int = 0
+    min_papers: int = 0
+    target_words: int = 0
+    min_citations_per_section: int = 3
+    target_tables: int = 0
+    evidence_audit: bool = True
+    planning_artifacts: bool = True
+
+
+ReportSurveyConfig = ReportLongformConfig
+
+
 class ReportRuntimeConfig(ReportModel):
     """User-facing report-stage configuration."""
 
@@ -62,6 +84,7 @@ class ReportRuntimeConfig(ReportModel):
     max_backtracking_calls: int = 8
     max_backtracking_tokens: int = 6000
     figures: ReportFigureConfig = Field(default_factory=ReportFigureConfig)
+    longform: ReportLongformConfig = Field(default_factory=ReportLongformConfig)
     audit: ReportAuditConfig = Field(default_factory=ReportAuditConfig)
 
 
@@ -121,6 +144,9 @@ class ReportSectionPlan(ReportModel):
     heading: str
     goal: str
     evidence_handles: list[str] = Field(default_factory=list)
+    target_words: int = 0
+    min_citations: int = 0
+    subsections: list[str] = Field(default_factory=list)
     required: bool = True
     final_order: int = 0
     draft_order: int = 0

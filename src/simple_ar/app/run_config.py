@@ -185,6 +185,7 @@ class ReportSection(_ConfigModel):
     style: str | None = None
     cost_profile: str | None = None
     outline_strategy: str | None = None
+    longform_contract: bool | None = None
     survey_contract: bool | None = None
     draft_sections: bool | None = None
     debug_artifacts: bool | None = None
@@ -205,6 +206,8 @@ class ReportSection(_ConfigModel):
     max_backtracking_calls: int | None = None
     max_backtracking_tokens: int | None = None
     figures: dict[str, Any] = Field(default_factory=dict)
+    longform: dict[str, Any] = Field(default_factory=dict)
+    survey: dict[str, Any] = Field(default_factory=dict)
     audit: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -373,7 +376,11 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "report_style", self.report.style)
         _set_string(result, "report_cost_profile", self.report.cost_profile)
         _set_string(result, "report_outline_strategy", self.report.outline_strategy)
-        _set_bool(result, "report_survey_contract", self.report.survey_contract)
+        if isinstance(self.report.longform_contract, bool):
+            result["report_longform_contract"] = self.report.longform_contract
+            result["report_survey_contract"] = self.report.longform_contract
+        else:
+            _set_bool(result, "report_survey_contract", self.report.survey_contract)
         _set_bool(result, "report_draft_sections", self.report.draft_sections)
         _set_bool(result, "report_debug_artifacts", self.report.debug_artifacts)
         _set_string(result, "report_agent", self.report.agent)
@@ -393,6 +400,8 @@ class PipelineRunConfig(_ConfigModel):
         _set_int(result, "report_max_backtracking_calls", self.report.max_backtracking_calls)
         _set_int(result, "report_max_backtracking_tokens", self.report.max_backtracking_tokens)
         _set_report_figures(result, self.report.figures)
+        _set_report_longform(result, self.report.longform)
+        _set_report_longform(result, self.report.survey, legacy=True)
         _set_report_audit(result, self.report.audit)
 
         if "code_task_config" not in result and _contains_code_task_config(raw_data):
@@ -528,6 +537,39 @@ def _set_report_figures(result: dict[str, object], value: object) -> None:
             result[target] = setting
         elif isinstance(setting, str) and setting.strip():
             result[target] = setting.strip()
+
+
+def _set_report_longform(result: dict[str, object], value: object, *, legacy: bool = False) -> None:
+    if not isinstance(value, dict):
+        return
+    allowed = {
+        "enabled",
+        "target_papers",
+        "min_papers",
+        "target_words",
+        "min_citations_per_section",
+        "target_tables",
+        "evidence_audit",
+        "planning_artifacts",
+    }
+    for key, setting in value.items():
+        normalized = str(key).strip().lower().replace("-", "_")
+        if normalized not in allowed:
+            continue
+        target = f"report_longform_{normalized}"
+        legacy_target = f"report_survey_{normalized}"
+        if isinstance(setting, bool):
+            value_to_set: object = setting
+        elif isinstance(setting, int) and not isinstance(setting, bool):
+            value_to_set = setting
+        elif isinstance(setting, str) and setting.strip():
+            value_to_set = setting.strip()
+        else:
+            continue
+        if not legacy or target not in result:
+            result[target] = value_to_set
+        if legacy and legacy_target not in result:
+            result[legacy_target] = value_to_set
 
 
 def _apply_unified_compatibility(result: dict[str, object]) -> None:

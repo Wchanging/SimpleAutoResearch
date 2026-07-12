@@ -203,6 +203,56 @@ uv run python benchmark/arc_bench/batch_runner.py summarize \
 如果不传 `--variant`，runner 会用新 state 名自动生成一个唯一 variant。若 variant
 目录已存在且你希望重新覆盖这组后处理结果，再加 `--force`。
 
+### 原生 AutoResearchClaw Judge 重评
+
+如果结果要用于论文式对比，建议在 finalize 之后再跑 AutoResearchClaw 自带的
+`experiments/arc_bench/scripts/judge.py --full`。适配器提供了一个很薄的
+`native-score` 包装命令：它会读取本项目根目录 `.env`，必要时把 `SIMPLE_AR_MODEL`
+映射为 `OPENAI_MODEL`，并允许通过 `--native-score-model` 覆盖原生 judge 使用的
+`ARC_JUDGE_MODEL`。
+如果 AutoResearchClaw 没有放在本仓库的 `AutoResearchClaw/experiments/arc_bench`
+位置，请显式传入 `--arc-root`。批量 runner 的 `run`、`refresh` 和
+`retry-unfinished` 在启用 `--native-score` 时也支持同一个参数。
+原生 judge 建议默认使用 `gpt-4o`，除非你是在刻意做评测模型消融。AutoResearchClaw
+原生解析器要求模型只返回单个 JSON 对象，对新模型夹带额外文本的容错较弱。
+
+单个 ML04 已有 finalized 输出的示例：
+
+```bash
+uv run python benchmark/arc_bench/adapter.py native-score \
+  --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
+  --prepared-dir benchmark/arc_bench/prepared/ml/ML04 \
+  --run-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04--strict-rerun-01 \
+  --output-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04--strict-rerun-01/judge_native \
+  --topic ML04 \
+  --model gpt-4o \
+  --full \
+  --debug
+```
+
+如果要复用已有 all 批次，只重新跑原生 judge，并写入新的 variant 目录：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py refresh \
+  --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
+  --source-state-file benchmark/arc_bench/batch_state/20260706-011743-all.json \
+  --topic-set all \
+  --native-score \
+  --native-score-model gpt-4o \
+  --variant native-full-rerun-01 \
+  --score-timeout 3600
+```
+
+输出示例：
+
+```text
+benchmark/arc_bench/submissions/ml/ML04/<run-id>--native-full-rerun-01/judge_native/judge_result.json
+benchmark/arc_bench/batch_state/<new-refresh-state>.json
+```
+
+`adapter.py native-score --backend local` 只建议用于路径冒烟测试；正式对比请使用默认
+LLM backend。
+
 ## 重跑与续修
 
 为所有未完成任务重新开新 run：
@@ -330,6 +380,12 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     reviewer_*.json              # 仅 strict / arc-native profile 生成
     disagreements.json           # 仅 strict / arc-native profile 生成
     adjudication.json            # 仅 strict / arc-native profile 且存在分歧时生成
+  judge_native/
+    judge_result.json            # AutoResearchClaw scripts/judge.py --full 的原生结果副本
+    judge_debug.json             # 启用 --debug 时的原生调试文件
+    native_judge_meta.json       # wrapper 命令、模式、耗时与复制路径
+    stdout.txt
+    stderr.txt
 ```
 
 `finalize --analyze` 负责根据实测结果生成 benchmark-facing README 和 claims。
@@ -338,7 +394,7 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
 - `proxy`：默认轻量 two-round LLM scorer，用于开发回归、quick/breadth 烟测和趋势判断；不要直接当作 AutoResearchClaw strict 分数汇报。
 - `arc-auto`：尽量贴近 `scripts/judge.py` 的自动 two-round judge 行为，保留可恢复的缺 leaf 处理。
 - `strict`：运行独立 reviewer、对超过阈值的 per-leaf 分歧复审，记录 analysis source，并输出 CD/CE/RA 与 overall 汇总；正式论文对比优先使用这一档。
-- `arc-native`：仍由当前 adapter 执行，但使用更贴近 ARC 原生 strict-audit 的 prompt、两评审/分歧复审协议和 leaf 定向代码证据包；只有要调用外部 AutoResearchClaw 原生 judge 脚本时，才使用下面的 `judge --judge-command` 包装器。
+- `arc-native`：仍由当前 adapter 执行，但使用更严格的 ARC-style audit prompt 和 leaf 定向代码证据包，适合开发诊断；它不等同于外部 AutoResearchClaw `scripts/judge.py`。如果要做论文式原生评测，请使用 `native-score`。
 
 如果某轮评分返回了合法 JSON 但顶层 schema 不对，adapter 会带着更严格的 `grades`
 契约重试一次，并保存每次 raw response。若重试后仍不能恢复 `grades` 数组，评分才会失败。
@@ -347,7 +403,7 @@ leaf 默认 `0.5`；这一缺省只用于非 strict 的自动评分 profile。
 
 ## 外部 Judge
 
-通常使用内置 `score` 即可。只有当你明确要调用外部 ARC-Bench judge 时，才使用包装器：
+通常使用 `native-score` 调用 AutoResearchClaw 自带的 ARC-Bench judge。只有当你明确要调用其他外部 judge 命令时，才使用更底层的包装器：
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py judge \

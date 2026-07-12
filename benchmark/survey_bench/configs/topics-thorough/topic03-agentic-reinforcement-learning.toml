@@ -1,68 +1,65 @@
 [run]
-# Single-topic SurveyBench smoke run.
-#
-# The output_root is intentionally under benchmark/survey_bench/results/topics
-# so generation runs are grouped by SurveyBench topic id/key instead of being
-# mixed with method-level score summaries.
-topic = "LLM-based Multi-Agent"
-output_root = "benchmark/survey_bench/results/topics/topic11-llm-based-multi-agent"
+# SurveyBench single-topic run generated from the native topic list.
+# Use the same topic key as the SurveyBench method name when exporting/scoring.
+topic = "Agentic Reinforcement Learning"
+output_root = "benchmark/survey_bench/results/topics-thorough/topic03-agentic-reinforcement-learning"
 to_stage = "report"
 debug_artifacts = false
 
 [llm]
 enabled = true
-model = "gpt-4o"
+model = "gpt-5.1"
 workers = 2
 
 [search]
 offline = false
 strict = true
 allow_fixture_fallback = false
-max_papers = 30
-query = "LLM-based multi-agent systems large language model agents collaboration planning communication survey"
+max_papers = 70
+query = "Agentic Reinforcement Learning survey taxonomy methods benchmarks evaluation applications limitations"
 
 [research]
 mode = "strong"
 planner = "llm"
 sources = ["openalex", "semantic_scholar", "arxiv"]
 queries = [
-  "LLM-based multi-agent systems survey",
-  "large language model multi-agent collaboration",
-  "LLM agents communication coordination planning",
-  "multi-agent LLM benchmarks evaluation",
+  "Agentic Reinforcement Learning survey",
+  "Agentic Reinforcement Learning taxonomy methods architectures",
+  "Agentic Reinforcement Learning benchmarks evaluation datasets",
+  "Agentic Reinforcement Learning applications limitations future directions",
 ]
 auto_query_expansion = true
-max_retrieval_rounds = 2
-max_queries = 6
+max_retrieval_rounds = 3
+max_queries = 8
 required_facets = [
-  "agent_architecture",
-  "communication_and_coordination",
-  "planning_or_reasoning",
-  "evaluation_benchmarks",
-  "applications_and_limitations",
+  "background_and_scope",
+  "method_taxonomy",
+  "datasets_benchmarks_and_evaluation",
+  "applications_and_systems",
+  "limitations_and_future_directions",
 ]
 local_documents = []
 use_fulltext = true
 allow_pdf_download = true
-max_fulltext_documents = 12
+max_fulltext_documents = 24
 max_pdf_mb = 25
 keep_raw_pdf = true
 parser_backend = "pypdf"
 read_screening = "llm"
 read_batch_size = 5
 read_workers = 2
-read_min_shortlist = 20
-read_max_shortlist = 25
+read_min_shortlist = 35
+read_max_shortlist = 45
 cache = true
 index_backend = "sqlite_fts"
 index_root = ".simple_ar_cache/research_index"
 
 [research.budget]
-max_documents = 25
-max_chunks = 720
-max_context_tokens = 32000
-max_llm_calls = 32
-max_follow_up_queries = 2
+max_documents = 45
+max_chunks = 1400
+max_context_tokens = 52000
+max_llm_calls = 48
+max_follow_up_queries = 3
 novelty_backend = "local"
 
 [retrieval]
@@ -74,7 +71,7 @@ mode = "research_only"
 template = "survey_long"
 criteria = "auto"
 style = "long_academic_survey"
-cost_profile = "balanced"
+cost_profile = "thorough"
 outline_strategy = "adaptive"
 longform_contract = true
 draft_sections = true
@@ -82,11 +79,11 @@ debug_artifacts = false
 agent = "llm"
 reviewer = "llm"
 max_review_iterations = 1
-max_section_tokens = 8000
-max_report_tokens = 34000
+max_section_tokens = 10000
+max_report_tokens = 52000
 max_section_sources = 0
 source_strategy = "batch_refine"
-source_batch_size = 12
+source_batch_size = 10
 max_source_batches = 0
 review_source_batches = false
 review_trace = "meta"
@@ -103,16 +100,16 @@ claims = true
 
 [report.figures]
 enabled = true
-max_figures = 3
+max_figures = 5
 format = "svg"
 mode = "auto"
-
 [report.longform]
 enabled = true
-target_papers = 25
-min_papers = 20
-target_words = 12000
+target_papers = 40
+min_papers = 32
+target_words = 18000
 min_citations_per_section = 3
-target_tables = 5
+target_tables = 10
 evidence_audit = true
 planning_artifacts = true
+

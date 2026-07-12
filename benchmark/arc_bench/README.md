@@ -235,6 +235,59 @@ When `--variant` is omitted, the runner derives a unique timestamped variant
 from the new state file. Add `--force` only when you intentionally want to
 regenerate an existing variant directory.
 
+### Native AutoResearchClaw Judge Rerun
+
+For paper-facing comparisons, prefer running AutoResearchClaw's own
+`experiments/arc_bench/scripts/judge.py` in `--full` mode after finalization.
+The adapter provides a thin wrapper named `native-score`: it loads this
+project's `.env`, maps `SIMPLE_AR_MODEL` to `OPENAI_MODEL` when needed, and
+lets `--native-score-model` override `ARC_JUDGE_MODEL`.
+If AutoResearchClaw is not checked out under this repository as
+`AutoResearchClaw/experiments/arc_bench`, pass `--arc-root` explicitly. The
+same option is available on `batch_runner.py run`, `refresh`, and
+`retry-unfinished` when `--native-score` is enabled.
+For native judge runs, `gpt-4o` is the recommended default unless you are
+intentionally running a model ablation. AutoResearchClaw's native parser expects
+a single JSON object and is less tolerant of extra text from newer models.
+
+Single-topic example using an existing finalized ML04 output:
+
+```bash
+uv run python benchmark/arc_bench/adapter.py native-score \
+  --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
+  --prepared-dir benchmark/arc_bench/prepared/ml/ML04 \
+  --run-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04--strict-rerun-01 \
+  --output-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04--strict-rerun-01/judge_native \
+  --topic ML04 \
+  --model gpt-4o \
+  --full \
+  --debug
+```
+
+To reuse an existing all-topic batch and only rerun native judging into a new
+variant directory:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py refresh \
+  --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
+  --source-state-file benchmark/arc_bench/batch_state/20260706-011743-all.json \
+  --topic-set all \
+  --native-score \
+  --native-score-model gpt-4o \
+  --variant native-full-rerun-01 \
+  --score-timeout 3600
+```
+
+This writes outputs like:
+
+```text
+benchmark/arc_bench/submissions/ml/ML04/<run-id>--native-full-rerun-01/judge_native/judge_result.json
+benchmark/arc_bench/batch_state/<new-refresh-state>.json
+```
+
+Use `--backend local` with `adapter.py native-score` only for path smoke tests;
+real comparisons should use the native LLM backend.
+
 ## Retry
 
 Fresh retry for unfinished topics:
@@ -364,6 +417,12 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     reviewer_*.json              # strict / arc-native profile only
     disagreements.json           # strict / arc-native profile only
     adjudication.json            # strict / arc-native profile only, when needed
+  judge_native/
+    judge_result.json            # copied result from AutoResearchClaw scripts/judge.py --full
+    judge_debug.json             # native debug artifact when --debug is enabled
+    native_judge_meta.json       # wrapper command, mode, duration, and copied paths
+    stdout.txt
+    stderr.txt
 ```
 
 `finalize --analyze` builds the benchmark-facing README/claims from measured
@@ -377,10 +436,11 @@ results. `score` has four profiles:
 - `strict`: runs independent reviewer passes, re-adjudicates per-leaf
   disagreements above the threshold, records the analysis source, and reports
   CD/CE/RA plus overall aggregates. Use this for paper-facing comparisons.
-- `arc-native`: uses the same strict two-reviewer/adjudication protocol with a
-  canonical ARC-style audit prompt and leaf-targeted evidence bundle. Use the
-  separate `judge --judge-command` wrapper only when calling an external native
-  AutoResearchClaw judge binary/script.
+- `arc-native`: still runs inside this adapter, but uses a stricter ARC-style
+  audit prompt and leaf-targeted evidence bundle. It is useful for development
+  diagnostics, but it is not the external AutoResearchClaw `scripts/judge.py`.
+  Use `native-score` when you need the native judge path for paper-facing
+  comparison.
 
 If a scoring round returns valid JSON with the wrong top-level schema, the
 adapter retries once with a stricter `grades` contract and saves retry raw
@@ -390,8 +450,9 @@ warning and default score `0.5` for the non-strict automatic profiles.
 
 ## External Judge
 
-Normally use the built-in `score`. If you specifically want to run an external
-ARC-Bench judge, the wrapper is still available:
+Normally use `native-score` for AutoResearchClaw's bundled ARC-Bench judge. If
+you specifically want to run a different external judge command, the lower-level
+wrapper is still available:
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py judge \
