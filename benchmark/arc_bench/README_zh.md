@@ -83,25 +83,33 @@ uv run python -c "import numpy, scipy, sklearn, pandas, matplotlib, statsmodels,
 
 ## 推荐批量运行
 
-快速链路测试，单个任务失败后继续后续任务：
+快速链路测试或论文主表，优先使用 AutoResearchClaw 原生 `judge.py`：
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py run \
   --topic-set quick \
   --analyze \
-  --score
+  --native-score \
+  --native-score-model gpt-4o
 ```
 
-上面的命令使用默认 `proxy` 评分，适合快速开发回归。如果要做论文实验或对齐
-AutoResearchClaw strict evaluation protocol，建议显式使用 strict profile：
+如果需要按 ARC manual strict audit prompt 做双 reviewer 复核，再使用
+`manual-strict`。可以指定两个 reviewer 模型，例如一个 Claude、一个 Codex/GPT：
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py run \
   --topic-set quick \
   --analyze \
   --score \
-  --score-profile strict
+  --score-profile manual-strict \
+  --strict-reviewer-models claude-opus-4-6,gpt-5.4 \
+  --strict-reviewer-apis chat,responses \
+  --strict-adjudicator-model gpt-5.4
 ```
+
+如果某个 reviewer 模型不支持当前 provider 的 Responses API（常见表现是
+`local:convert_request_failed`），可以用 `--strict-reviewer-apis` 为每个 reviewer
+单独指定 `chat` 或 `responses`。
 
 每次 `run` 都会在 `benchmark/arc_bench/batch_state/` 下创建独立状态文件，例如：
 
@@ -115,19 +123,10 @@ benchmark/arc_bench/batch_state/20260627-153607-quick.json
 任务组：
 
 ```bash
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze --score
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze --score
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze --score
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --score
-```
-
-正式评分版本：
-
-```bash
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze --score --score-profile strict
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze --score --score-profile strict
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze --score --score-profile strict
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --score --score-profile strict
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze --native-score --native-score-model gpt-4o
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze --native-score --native-score-model gpt-4o
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze --native-score --native-score-model gpt-4o
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --native-score --native-score-model gpt-4o
 ```
 
 显式指定任务：
@@ -136,11 +135,54 @@ uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze 
 uv run python benchmark/arc_bench/batch_runner.py run \
   --topics ML04 ML02 ML06 \
   --analyze \
-  --score \
-  --score-profile strict
+  --native-score \
+  --native-score-model gpt-4o
 ```
 
 每个任务结束或失败后，都会写出一份轻量运行/API 统计：
+
+也可以用范围和排除项来跑一部分任务：
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topic-range ML01-ML10 \
+  --exclude-topics ML02 ML06 \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o
+```
+
+低成本消融建议每组都写入独立 state file 或 refresh variant，避免和主实验混在一起。下面这些开关会透传给 `simple-ar code-task execute`：
+
+```bash
+# 不给 repair prompt 结构化 failure-graph 上下文。
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML06 ML09 ML10 \
+  --repair-context raw_logs_only \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o \
+  --state-file benchmark/arc_bench/batch_state/ablation-no-failure-graph.json
+
+# 不给 repair prompt 之前的 repair memory。
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML06 ML09 ML10 \
+  --no-repair-memory \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o \
+  --state-file benchmark/arc_bench/batch_state/ablation-no-repair-memory.json
+
+# 使用最小 task-contract prompt 视图，可作为 Plan-then-Code 风格近似 baseline。
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML06 ML09 ML10 \
+  --contract-context minimal \
+  --repair-rounds 0 \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o \
+  --state-file benchmark/arc_bench/batch_state/ablation-minimal-contract.json
+```
 
 ```text
 benchmark/arc_bench/runs/ml/ML04/<run-id>/arc_task_stats.json
@@ -151,9 +193,9 @@ benchmark/arc_bench/submissions/ml/ML04/<run-id>/arc_task_stats.json
 
 批跑脚本不会只看命令退出码。`execute` 后会读取 run 的 `manifest.json`，
 只有业务状态达到 `benchmark_passed` 才会继续 `finalize`。如果后续补加
-`--score`，并且某个任务已经有有效 submission，它会直接补 `judge/`，不会重跑实验。
-不同 score profile 的 judge 不会互相当作已完成产物；后续补加 `--score-profile strict`
-时，会单独生成/刷新 strict judge。
+`--score`，并且某个任务已经有有效 submission，它会直接补 `judge/` 或
+`judge_manual_strict/`，不会重跑实验。不同 score profile 的 judge 不会互相当作已完成产物；
+后续补加 `--score-profile manual-strict` 时，会单独生成/刷新 manual strict judge。
 如果服务器网络不稳定，可以加 `--llm-retry-attempts 5`，临时覆盖所有
 `code-task execute` 调用的阶段级 LLM 重试次数。
 默认情况下，LLM 调用不会向 provider 传客户端超时和输出上限。如果你需要为了费用控制
@@ -177,14 +219,14 @@ uv run python benchmark/arc_bench/batch_runner.py refresh \
   --topic-set all \
   --analyze \
   --score \
-  --score-profile strict \
-  --variant strict-rerun-01
+  --score-profile manual-strict \
+  --variant manual-strict-rerun-01
 ```
 
 输出示例：
 
 ```text
-benchmark/arc_bench/submissions/ml/ML02/<run-id>--strict-rerun-01/
+benchmark/arc_bench/submissions/ml/ML02/<run-id>--manual-strict-rerun-01/
 benchmark/arc_bench/batch_state/<new-refresh-state>.json
 ```
 
@@ -192,7 +234,8 @@ benchmark/arc_bench/batch_state/<new-refresh-state>.json
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py summarize \
-  --state-file benchmark/arc_bench/batch_state/<new-refresh-state>.json
+  --state-file benchmark/arc_bench/batch_state/<new-refresh-state>.json \
+  --judge-source manual-strict
 ```
 
 这份 refresh state 自身只记录本次 finalize/result-analysis/score 的新增命令；但
@@ -222,8 +265,8 @@ uv run python benchmark/arc_bench/batch_runner.py summarize \
 uv run python benchmark/arc_bench/adapter.py native-score \
   --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
   --prepared-dir benchmark/arc_bench/prepared/ml/ML04 \
-  --run-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04--strict-rerun-01 \
-  --output-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04--strict-rerun-01/judge_native \
+  --run-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04 \
+  --output-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04/judge_native \
   --topic ML04 \
   --model gpt-4o \
   --full \
@@ -261,8 +304,8 @@ LLM backend。
 uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --topic-set quick \
   --analyze \
-  --score \
-  --score-profile strict \
+  --native-score \
+  --native-score-model gpt-4o \
   --llm-retry-attempts 5
 ```
 
@@ -274,8 +317,8 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --state-file benchmark/arc_bench/batch_state/20260627-153607-quick.json \
   --topic-set quick \
   --analyze \
-  --score \
-  --score-profile strict
+  --native-score \
+  --native-score-model gpt-4o
 ```
 
 复用上一次失败 run，并额外给 repair 预算：
@@ -284,8 +327,8 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
 uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --topic-set quick \
   --analyze \
-  --score \
-  --score-profile strict \
+  --native-score \
+  --native-score-model gpt-4o \
   --resume-existing \
   --extend-repair-rounds 2
 ```
@@ -339,14 +382,18 @@ uv run python benchmark/arc_bench/adapter.py score \
   --output-dir "$OUT_DIR/judge"
 ```
 
-如果要做论文或正式对比，使用 strict profile；如果希望内置 scorer 使用更贴近 ARC 原生 strict-audit 的 prompt 和 leaf 定向证据包，可以使用 `arc-native`：
+如果要做双 reviewer strict 复核，使用 `manual-strict`。它会加载
+AutoResearchClaw 的 `manual_strict_audit_prompt.md`，并在当前 adapter 中执行
+两个独立 reviewer、per-leaf 分歧检测和 adjudication：
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py score \
   --prepared-dir benchmark/arc_bench/prepared/ml/ML02 \
   --submission-dir "$OUT_DIR/submission" \
-  --output-dir "$OUT_DIR/judge_strict" \
-  --score-profile strict \
+  --output-dir "$OUT_DIR/judge_manual_strict" \
+  --score-profile manual-strict \
+  --strict-reviewer-models claude-opus-4-6,gpt-5.4 \
+  --strict-adjudicator-model gpt-5.4 \
   --strict-reviewers 2 \
   --disagreement-threshold 0.20
 ```
@@ -377,9 +424,13 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     score_round_results_response.json
     score_round_results_prompt.txt              # 仅在 scoring 失败时生成
     score_round_results_response_attempt_*.json # 仅记录 schema retry 响应
-    reviewer_*.json              # 仅 strict / arc-native profile 生成
-    disagreements.json           # 仅 strict / arc-native profile 生成
-    adjudication.json            # 仅 strict / arc-native profile 且存在分歧时生成
+  judge_manual_strict/
+    evidence_bundle.json
+    judge_result.json
+    scorecard.md
+    reviewer_*.json
+    disagreements.json
+    adjudication.json
   judge_native/
     judge_result.json            # AutoResearchClaw scripts/judge.py --full 的原生结果副本
     judge_debug.json             # 启用 --debug 时的原生调试文件
@@ -389,17 +440,15 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
 ```
 
 `finalize --analyze` 负责根据实测结果生成 benchmark-facing README 和 claims。
-`score` 现在有四档 profile：
+正式推荐只使用两类 judge：
 
-- `proxy`：默认轻量 two-round LLM scorer，用于开发回归、quick/breadth 烟测和趋势判断；不要直接当作 AutoResearchClaw strict 分数汇报。
-- `arc-auto`：尽量贴近 `scripts/judge.py` 的自动 two-round judge 行为，保留可恢复的缺 leaf 处理。
-- `strict`：运行独立 reviewer、对超过阈值的 per-leaf 分歧复审，记录 analysis source，并输出 CD/CE/RA 与 overall 汇总；正式论文对比优先使用这一档。
-- `arc-native`：仍由当前 adapter 执行，但使用更严格的 ARC-style audit prompt 和 leaf 定向代码证据包，适合开发诊断；它不等同于外部 AutoResearchClaw `scripts/judge.py`。如果要做论文式原生评测，请使用 `native-score`。
+- `native-score`：调用 AutoResearchClaw 自带 `scripts/judge.py`，输出到 `judge_native/`；适合作为论文主表的原生 judge 路径。
+- `score --score-profile manual-strict`：在当前 adapter 中复现 ARC manual strict audit 的双 reviewer + disagreement adjudication 流程，输出到 `judge_manual_strict/`；适合作为严格复核或 appendix。可用 `--strict-reviewer-models` 指定两个 reviewer 模型。
 
 如果某轮评分返回了合法 JSON 但顶层 schema 不对，adapter 会带着更严格的 `grades`
 契约重试一次，并保存每次 raw response。若重试后仍不能恢复 `grades` 数组，评分才会失败。
 如果合法响应遗漏单个 leaf，会记录 warning，并按 AutoResearchClaw `judge.py` 的行为给该
-leaf 默认 `0.5`；这一缺省只用于非 strict 的自动评分 profile。
+leaf 默认 `0.5`；这一缺省只用于内部轻量自动评分，不用于 `manual-strict`。
 
 ## 外部 Judge
 

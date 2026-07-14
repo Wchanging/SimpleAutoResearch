@@ -488,7 +488,36 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Stage-level LLM attempts for planning, greenfield architecture/file generation, and patch repair.",
     )
-    code_task_execute.add_argument("--repair-rounds", type=int, default=0)
+    code_task_execute.add_argument(
+        "--planning-review-rounds",
+        type=int,
+        default=None,
+        help="Override greenfield planning reviewer revision rounds for this execute call.",
+    )
+    code_task_execute.add_argument("--repair-rounds", type=int, default=None)
+    code_task_execute.add_argument(
+        "--repair-context",
+        choices=("full", "raw_logs_only"),
+        default=None,
+        help=(
+            "Ablation control for repair prompts. `full` uses structured failure diagnostics; "
+            "`raw_logs_only` omits failure-graph bundle fields from LLM repair context."
+        ),
+    )
+    code_task_execute.add_argument(
+        "--no-repair-memory",
+        action="store_true",
+        help="Ablation control: do not inject previous repair memory into repair prompts.",
+    )
+    code_task_execute.add_argument(
+        "--contract-context",
+        choices=("full", "minimal"),
+        default=None,
+        help=(
+            "Ablation control for model prompts. `minimal` keeps durable artifacts but passes "
+            "only a task-level contract view to planning/writing/review/repair prompts."
+        ),
+    )
     code_task_execute.add_argument(
         "--baseline-policy",
         choices=("auto", "run", "skip", "provided", "none"),

@@ -156,6 +156,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_summary_options(summarize_parser)
     summarize_parser.set_defaults(func=_summarize_command)
 
+    evidence_parser = subparsers.add_parser(
+        "evidence",
+        help="Build a paper-oriented ARC fidelity/repair evidence summary without rerunning any topic.",
+    )
+    _add_summary_options(evidence_parser)
+    evidence_parser.set_defaults(func=_evidence_command)
+
     args = parser.parse_args(argv)
     return int(args.func(args))
 
@@ -197,13 +204,26 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--topic-set",
         choices=sorted(TOPIC_SETS),
-        default="quick",
+        default=None,
         help=(
-            "Named topic set to run when --topics is not provided. "
+            "Named topic set to run when --topics/--topic-range are not provided. "
             "Use quick, breadth/next, specialized/high-risk, or all."
         ),
     )
     parser.add_argument("--topics", nargs="+", help="Explicit topic list, e.g. --topics ML04 ML02.")
+    parser.add_argument(
+        "--topic-range",
+        action="append",
+        default=[],
+        metavar="ML01-ML10",
+        help="Inclusive topic range. May be repeated; combined with --topics.",
+    )
+    parser.add_argument(
+        "--exclude-topics",
+        nargs="+",
+        default=[],
+        help="Topics to remove from the resolved set, e.g. --exclude-topics ML02 ML17.",
+    )
     parser.add_argument("--analyze", action="store_true", help="Run finalize with LLM result analysis.")
     parser.add_argument("--analysis-model", help="Override SIMPLE_AR_MODEL for finalize --analyze.")
     parser.add_argument("--score", action="store_true", help="Run the built-in LLM leaf-level scorer after finalize.")
@@ -223,9 +243,27 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--score-profile",
-        choices=("proxy", "arc-auto", "strict", "arc-native"),
+        choices=("proxy", "manual-strict"),
         default="proxy",
-        help="Scoring profile passed to adapter.py score.",
+        help=(
+            "Scoring profile passed to adapter.py score. Use manual-strict for two-reviewer strict auditing."
+        ),
+    )
+    parser.add_argument(
+        "--strict-reviewer-models",
+        help="Comma-separated reviewer models for --score-profile manual-strict.",
+    )
+    parser.add_argument(
+        "--strict-reviewer-apis",
+        help="Optional comma-separated reviewer API modes for --score-profile manual-strict, e.g. chat,responses.",
+    )
+    parser.add_argument(
+        "--strict-adjudicator-model",
+        help="Optional adjudicator model for --score-profile manual-strict.",
+    )
+    parser.add_argument(
+        "--strict-adjudicator-api",
+        help="Optional adjudicator API mode for --score-profile manual-strict.",
     )
     parser.add_argument(
         "--execute-timeout",
@@ -251,6 +289,35 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         default=0,
         help="Override code-task --llm-retry-attempts for every execute call; 0 keeps each TOML default.",
     )
+    parser.add_argument(
+        "--repair-rounds",
+        type=int,
+        default=None,
+        help="Override code-task --repair-rounds for every execute call; omit to keep each TOML default.",
+    )
+    parser.add_argument(
+        "--planning-review-rounds",
+        type=int,
+        default=None,
+        help="Override code-task --planning-review-rounds for every execute call; omit to keep each TOML default.",
+    )
+    parser.add_argument(
+        "--repair-context",
+        choices=("full", "raw_logs_only"),
+        default=None,
+        help="Ablation passthrough for code-task execute repair context.",
+    )
+    parser.add_argument(
+        "--no-repair-memory",
+        action="store_true",
+        help="Ablation passthrough: omit previous repair memory from code-task repair prompts.",
+    )
+    parser.add_argument(
+        "--contract-context",
+        choices=("full", "minimal"),
+        default=None,
+        help="Ablation passthrough for code-task prompt contract context.",
+    )
 
 
 def _add_summary_options(parser: argparse.ArgumentParser) -> None:
@@ -261,11 +328,21 @@ def _add_summary_options(parser: argparse.ArgumentParser) -> None:
         help="Optional named topic set filter; omit to summarize all topics in the state file.",
     )
     parser.add_argument("--topics", nargs="+", help="Optional explicit topic filter, e.g. --topics ML04 ML02.")
+    parser.add_argument("--topic-range", action="append", default=[], metavar="ML01-ML10")
+    parser.add_argument("--exclude-topics", nargs="+", default=[])
     parser.add_argument(
         "--output-prefix",
         help=(
             "Optional output path prefix. Defaults to '<state-file>.summary' and writes "
             "both .json and .md."
+        ),
+    )
+    parser.add_argument(
+        "--judge-source",
+        choices=("auto", "native", "manual-strict", "adapter"),
+        default="auto",
+        help=(
+            "Which judge output to summarize. auto prefers native, then manual-strict, then legacy adapter judge."
         ),
     )
 
@@ -364,6 +441,31 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
     exit_code = 0
     for topic in topics:
         current = _topic_state(state, topic)
+        if (
+            (args.score or args.native_score)
+            and current.status in {"score_failed", "native_score_failed"}
+            and _scorable_state_exists(ctx, current)
+        ):
+            _print(f"[score-retry] {topic}: finalized output exists; retrying failed judge only.")
+            result = _score_existing_topic(
+                ctx,
+                topic,
+                current,
+                score=args.score,
+                score_model=args.score_model,
+                score_profile=args.score_profile,
+                native_score=args.native_score,
+                native_score_model=args.native_score_model,
+            )
+            state[topic] = result
+            _save_state(ctx.state_file, state)
+            if result.status != "completed":
+                exit_code = 1
+            continue
+        if (args.score or args.native_score) and current.status in {"score_failed", "native_score_failed"}:
+            _print(f"[skip] {topic}: previous judge failed, but no finalized submission is available to rescore.")
+            exit_code = 1
+            continue
         if (args.score or args.native_score) and current.status == "completed" and _completed_state_still_valid(
             ctx,
             current,
@@ -545,11 +647,33 @@ def _summarize_command(args: argparse.Namespace) -> int:
     if not topics:
         _print("No topics selected for summary.")
         return 0
-    summary = _build_batch_summary(ctx, state, topics)
+    summary = _build_batch_summary(ctx, state, topics, judge_source=getattr(args, "judge_source", "auto"))
     json_path, md_path = _write_batch_summary(ctx, summary, output_prefix=getattr(args, "output_prefix", None))
     _print(render_batch_summary_markdown(summary))
     _print(f"\n[summary] wrote {_rel(ctx.repo_root, json_path)}")
     _print(f"[summary] wrote {_rel(ctx.repo_root, md_path)}")
+    return 0
+
+
+def _evidence_command(args: argparse.Namespace) -> int:
+    ctx = _context_from_args(args)
+    state = _load_state(ctx.state_file)
+    if not state:
+        if ctx.state_file.exists():
+            _print(f"State file has no topic entries: {ctx.state_file}.")
+        else:
+            _print(f"No state file found at {ctx.state_file}.")
+        return 0
+    topics = _resolve_summary_topics(args, state)
+    if not topics:
+        _print("No topics selected for evidence summary.")
+        return 0
+    summary = _build_batch_summary(ctx, state, topics, judge_source=getattr(args, "judge_source", "auto"))
+    evidence = _build_evidence_summary(ctx, summary)
+    json_path, md_path = _write_evidence_summary(ctx, evidence, output_prefix=getattr(args, "output_prefix", None))
+    _print(render_evidence_summary_markdown(evidence))
+    _print(f"\n[evidence] wrote {_rel(ctx.repo_root, json_path)}")
+    _print(f"[evidence] wrote {_rel(ctx.repo_root, md_path)}")
     return 0
 
 
@@ -565,6 +689,15 @@ class RunnerContext:
     finalize_timeout: int = 0
     score_timeout: int = 0
     llm_retry_attempts: int = 0
+    strict_reviewer_models: str | None = None
+    strict_reviewer_apis: str | None = None
+    strict_adjudicator_model: str | None = None
+    strict_adjudicator_api: str | None = None
+    repair_rounds: int | None = None
+    planning_review_rounds: int | None = None
+    repair_context: str | None = None
+    use_repair_memory: bool = True
+    contract_context: str | None = None
     arc_root: Path | None = None
 
 
@@ -582,8 +715,26 @@ def _context_from_args(args: argparse.Namespace) -> RunnerContext:
         finalize_timeout=getattr(args, "finalize_timeout", 0),
         score_timeout=getattr(args, "score_timeout", 0),
         llm_retry_attempts=getattr(args, "llm_retry_attempts", 0),
+        strict_reviewer_models=getattr(args, "strict_reviewer_models", None),
+        strict_reviewer_apis=getattr(args, "strict_reviewer_apis", None),
+        strict_adjudicator_model=getattr(args, "strict_adjudicator_model", None),
+        strict_adjudicator_api=getattr(args, "strict_adjudicator_api", None),
+        repair_rounds=getattr(args, "repair_rounds", None),
+        planning_review_rounds=getattr(args, "planning_review_rounds", None),
+        repair_context=getattr(args, "repair_context", None),
+        use_repair_memory=not bool(getattr(args, "no_repair_memory", False)),
+        contract_context=getattr(args, "contract_context", None),
         arc_root=(_abs(repo_root, args.arc_root) if getattr(args, "arc_root", None) else None),
     )
+
+
+def _normalize_score_profile(value: str | None) -> str:
+    profile = (value or "proxy").strip().lower()
+    return profile
+
+
+def _adapter_judge_dir(output_dir: Path, score_profile: str) -> Path:
+    return output_dir / ("judge_manual_strict" if _normalize_score_profile(score_profile) == "manual-strict" else "judge")
 
 
 def _run_topic(
@@ -660,10 +811,19 @@ def _run_topic(
         "--config",
         _rel(ctx.repo_root, config_path),
     ]
-    if repair_rounds_override is not None and repair_rounds_override > 0:
-        execute_cmd.extend(["--repair-rounds", str(repair_rounds_override)])
+    repair_rounds = repair_rounds_override if repair_rounds_override is not None else ctx.repair_rounds
+    if repair_rounds is not None:
+        execute_cmd.extend(["--repair-rounds", str(repair_rounds)])
+    if ctx.planning_review_rounds is not None:
+        execute_cmd.extend(["--planning-review-rounds", str(ctx.planning_review_rounds)])
     if ctx.llm_retry_attempts > 0:
         execute_cmd.extend(["--llm-retry-attempts", str(ctx.llm_retry_attempts)])
+    if ctx.repair_context:
+        execute_cmd.extend(["--repair-context", ctx.repair_context])
+    if not ctx.use_repair_memory:
+        execute_cmd.append("--no-repair-memory")
+    if ctx.contract_context:
+        execute_cmd.extend(["--contract-context", ctx.contract_context])
     execute_cmd.append("--yes")
     execute_result = _run_logged(
         execute_cmd,
@@ -733,12 +893,20 @@ def _run_topic(
             "--submission-dir",
             _rel(ctx.repo_root, output_dir / "submission"),
             "--output-dir",
-            _rel(ctx.repo_root, output_dir / "judge"),
+            _rel(ctx.repo_root, _adapter_judge_dir(output_dir, score_profile)),
             "--score-profile",
             score_profile,
         ]
         if score_model:
             score_cmd.extend(["--model", score_model])
+        if ctx.strict_reviewer_models:
+            score_cmd.extend(["--strict-reviewer-models", ctx.strict_reviewer_models])
+        if ctx.strict_reviewer_apis:
+            score_cmd.extend(["--strict-reviewer-apis", ctx.strict_reviewer_apis])
+        if ctx.strict_adjudicator_model:
+            score_cmd.extend(["--strict-adjudicator-model", ctx.strict_adjudicator_model])
+        if ctx.strict_adjudicator_api:
+            score_cmd.extend(["--strict-adjudicator-api", ctx.strict_adjudicator_api])
         score_result = _run_logged(
             score_cmd,
             ctx.repo_root,
@@ -824,12 +992,20 @@ def _score_existing_topic(
             "--submission-dir",
             _rel(ctx.repo_root, output_dir / "submission"),
             "--output-dir",
-            _rel(ctx.repo_root, output_dir / "judge"),
+            _rel(ctx.repo_root, _adapter_judge_dir(output_dir, score_profile)),
             "--score-profile",
             score_profile,
         ]
         if score_model:
             score_cmd.extend(["--model", score_model])
+        if ctx.strict_reviewer_models:
+            score_cmd.extend(["--strict-reviewer-models", ctx.strict_reviewer_models])
+        if ctx.strict_reviewer_apis:
+            score_cmd.extend(["--strict-reviewer-apis", ctx.strict_reviewer_apis])
+        if ctx.strict_adjudicator_model:
+            score_cmd.extend(["--strict-adjudicator-model", ctx.strict_adjudicator_model])
+        if ctx.strict_adjudicator_api:
+            score_cmd.extend(["--strict-adjudicator-api", ctx.strict_adjudicator_api])
         score_result = _run_logged(
             score_cmd,
             ctx.repo_root,
@@ -993,12 +1169,20 @@ def _refresh_completed_topic(
                 "--submission-dir",
                 _rel(ctx.repo_root, output_dir / "submission"),
                 "--output-dir",
-                _rel(ctx.repo_root, output_dir / "judge"),
+                _rel(ctx.repo_root, _adapter_judge_dir(output_dir, score_profile)),
                 "--score-profile",
                 score_profile,
             ]
             if score_model:
                 score_cmd.extend(["--model", score_model])
+            if ctx.strict_reviewer_models:
+                score_cmd.extend(["--strict-reviewer-models", ctx.strict_reviewer_models])
+            if ctx.strict_reviewer_apis:
+                score_cmd.extend(["--strict-reviewer-apis", ctx.strict_reviewer_apis])
+            if ctx.strict_adjudicator_model:
+                score_cmd.extend(["--strict-adjudicator-model", ctx.strict_adjudicator_model])
+            if ctx.strict_adjudicator_api:
+                score_cmd.extend(["--strict-adjudicator-api", ctx.strict_adjudicator_api])
             score_result = _run_logged(
                 score_cmd,
                 ctx.repo_root,
@@ -1104,6 +1288,7 @@ def _subprocess_env() -> dict[str, str]:
     env.setdefault("PY_COLORS", "1")
     env.setdefault("CLICOLOR_FORCE", "1")
     env.setdefault("TERM", "xterm-256color")
+    env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
 
@@ -1135,11 +1320,9 @@ def _run_logged_pipe(
 
     def reader() -> None:
         try:
-            while True:
-                chunk = proc.stdout.read(4096)
-                if not chunk:
-                    break
-                output_queue.put(chunk)
+            for line in proc.stdout:
+                if line:
+                    output_queue.put(line)
         finally:
             output_queue.put(None)
 
@@ -1397,6 +1580,14 @@ def _collect_topic_llm_usage(
                 jsonl_path=output_dir / "judge" / "llm_usage.jsonl",
             )
         )
+        sources.append(
+            _usage_source(
+                ctx,
+                stage="manual_strict_score",
+                summary_path=output_dir / "judge_manual_strict" / "llm_usage_summary.json",
+                jsonl_path=output_dir / "judge_manual_strict" / "llm_usage.jsonl",
+            )
+        )
     sources = [row for row in sources if row.get("found")]
     totals = _merge_usage_totals([row.get("summary", {}) for row in sources if isinstance(row.get("summary"), dict)])
     return {
@@ -1516,11 +1707,24 @@ def _usage_float(row: dict[str, Any], *keys: str) -> float:
 
 
 def _resolve_topics(args: argparse.Namespace, prepared_root: Path) -> list[str]:
-    raw_topics = args.topics if getattr(args, "topics", None) else TOPIC_SETS[getattr(args, "topic_set", "quick")]
-    topics = [topic.upper() for topic in raw_topics]
+    ranges = getattr(args, "topic_range", []) or []
+    if getattr(args, "topics", None):
+        raw_topics = list(args.topics)
+    elif ranges:
+        raw_topics = []
+    elif getattr(args, "topic_set", None):
+        raw_topics = list(TOPIC_SETS[str(args.topic_set)])
+    else:
+        raw_topics = list(TOPIC_SETS["quick"])
+    for raw_range in ranges:
+        raw_topics.extend(_expand_topic_range(str(raw_range)))
+    excluded = {_normalize_topic_id(topic) for topic in getattr(args, "exclude_topics", []) or []}
+    topics = [_normalize_topic_id(topic) for topic in raw_topics]
     seen: set[str] = set()
     unique_topics: list[str] = []
     for topic in topics:
+        if topic in excluded:
+            continue
         if topic in seen:
             continue
         seen.add(topic)
@@ -1529,6 +1733,37 @@ def _resolve_topics(args: argparse.Namespace, prepared_root: Path) -> list[str]:
     if missing:
         raise SystemExit(f"Missing prepared topic(s): {', '.join(missing)} under {prepared_root}")
     return unique_topics
+
+
+def _normalize_topic_id(value: object) -> str:
+    text = str(value).strip().upper().replace("_", "")
+    if text.startswith("ML") and text[2:].isdigit():
+        return f"ML{int(text[2:]):02d}"
+    if text.isdigit():
+        return f"ML{int(text):02d}"
+    return text
+
+
+def _expand_topic_range(value: str) -> list[str]:
+    text = value.strip().upper().replace("_", "")
+    if not text:
+        return []
+    if "-" not in text:
+        return [_normalize_topic_id(text)]
+    left, right = [part.strip() for part in text.split("-", 1)]
+    start = _topic_number(left)
+    end = _topic_number(right)
+    if start is None or end is None:
+        raise SystemExit(f"Invalid --topic-range `{value}`. Expected format like ML01-ML10.")
+    step = 1 if end >= start else -1
+    return [f"ML{number:02d}" for number in range(start, end + step, step)]
+
+
+def _topic_number(value: str) -> int | None:
+    topic = _normalize_topic_id(value)
+    if topic.startswith("ML") and topic[2:].isdigit():
+        return int(topic[2:])
+    return None
 
 
 def _repair_budget_exhausted(run_dir: Path, config_path: Path) -> bool:
@@ -1644,6 +1879,18 @@ def _unfinished_or_stale_completed(
     )
 
 
+def _scorable_state_exists(ctx: RunnerContext, state: TopicState) -> bool:
+    if not state.output_dir:
+        return False
+    output_dir = _abs(ctx.repo_root, state.output_dir)
+    required_files = [
+        output_dir / "submission" / "README.md",
+        output_dir / "submission" / "claims.json",
+        output_dir / "submission" / "results" / "metrics.json",
+    ]
+    return all(path.is_file() for path in required_files) and (output_dir / "submission" / "code").exists()
+
+
 def _finalized_output_complete(
     output_dir: Path,
     *,
@@ -1680,19 +1927,20 @@ def _finalized_output_complete(
         if not isinstance(analysis, dict) or analysis.get("llm_used") is not True:
             return False
     if require_score:
+        judge_dir = _adapter_judge_dir(output_dir, score_profile)
         for path in [
-            output_dir / "judge" / "judge_result.json",
-            output_dir / "judge" / "scorecard.md",
+            judge_dir / "judge_result.json",
+            judge_dir / "scorecard.md",
         ]:
             if not path.is_file():
                 return False
         try:
-            judge = json.loads((output_dir / "judge" / "judge_result.json").read_text(encoding="utf-8"))
+            judge = json.loads((judge_dir / "judge_result.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return False
         if not isinstance(judge.get("overall_score"), (int, float)):
             return False
-        if str(judge.get("scoring_profile") or "proxy") != score_profile:
+        if _normalize_score_profile(str(judge.get("scoring_profile") or "proxy")) != _normalize_score_profile(score_profile):
             return False
     if require_native_score:
         native_result = output_dir / "judge_native" / "judge_result.json"
@@ -1897,15 +2145,24 @@ def _print_summary(state: dict[str, TopicState], topics: Iterable[str]) -> None:
 
 
 def _resolve_summary_topics(args: argparse.Namespace, state: dict[str, TopicState]) -> list[str]:
+    ranges = getattr(args, "topic_range", []) or []
     if getattr(args, "topics", None):
-        raw_topics = [str(topic).upper() for topic in args.topics]
+        raw_topics = [_normalize_topic_id(topic) for topic in args.topics]
+    elif ranges:
+        raw_topics = []
     elif getattr(args, "topic_set", None):
-        raw_topics = TOPIC_SETS[str(args.topic_set)]
+        raw_topics = list(TOPIC_SETS[str(args.topic_set)])
     else:
         raw_topics = sorted(state)
+    for raw_range in ranges:
+        raw_topics.extend(_expand_topic_range(str(raw_range)))
+    excluded = {_normalize_topic_id(topic) for topic in getattr(args, "exclude_topics", []) or []}
     seen: set[str] = set()
     topics: list[str] = []
     for topic in raw_topics:
+        topic = _normalize_topic_id(topic)
+        if topic in excluded:
+            continue
         if topic in seen:
             continue
         seen.add(topic)
@@ -1914,13 +2171,21 @@ def _resolve_summary_topics(args: argparse.Namespace, state: dict[str, TopicStat
     return topics
 
 
-def _build_batch_summary(ctx: RunnerContext, state: dict[str, TopicState], topics: list[str]) -> dict[str, Any]:
-    rows = [_build_summary_row(ctx, _topic_state(state, topic)) for topic in topics]
+def _build_batch_summary(
+    ctx: RunnerContext,
+    state: dict[str, TopicState],
+    topics: list[str],
+    *,
+    judge_source: str = "auto",
+) -> dict[str, Any]:
+    rows = [_build_summary_row(ctx, _topic_state(state, topic), judge_source=judge_source) for topic in topics]
     scored_rows = [row for row in rows if _is_number(row.get("overall_score"))]
     usage_rows = [row for row in rows if _is_number(row.get("llm_total_tokens"))]
     duration_rows = [row for row in rows if _is_number(row.get("duration_sec"))]
     postprocess_duration_rows = [row for row in rows if _is_number(row.get("postprocess_duration_sec"))]
     postprocess_usage_rows = [row for row in rows if _is_number(row.get("postprocess_llm_total_tokens"))]
+    repair_rows = [row for row in rows if _is_number(row.get("total_repair_count"))]
+    execution_attempt_rows = [row for row in rows if _is_number(row.get("execution_attempts"))]
     command_names = ("init", "execute", "finalize", "score")
     aggregate = {
         "topic_count": len(rows),
@@ -1973,21 +2238,49 @@ def _build_batch_summary(ctx: RunnerContext, state: dict[str, TopicState], topic
             "output_tokens": sum(_num(row.get("postprocess_llm_output_tokens")) for row in rows),
             "total_tokens": sum(_num(row.get("postprocess_llm_total_tokens")) for row in rows),
         },
+        "repair_means": {
+            "total_repair_count": _mean([row.get("total_repair_count") for row in repair_rows]),
+            "review_repair_count": _mean([row.get("review_repair_count") for row in repair_rows]),
+            "run_repair_count": _mean([row.get("run_repair_count") for row in repair_rows]),
+            "existing_project_repair_count": _mean([row.get("repair_count") for row in repair_rows]),
+            "execution_attempts": _mean([row.get("execution_attempts") for row in execution_attempt_rows]),
+            "failed_execution_attempts": _mean([row.get("failed_execution_attempts") for row in execution_attempt_rows]),
+            "repair_memory_entries": _mean([row.get("repair_memory_entries") for row in rows]),
+            "review_findings_entries": _mean([row.get("review_findings_entries") for row in rows]),
+        },
+        "repair_totals": {
+            "total_repair_count": sum(_num(row.get("total_repair_count")) for row in rows),
+            "review_repair_count": sum(_num(row.get("review_repair_count")) for row in rows),
+            "run_repair_count": sum(_num(row.get("run_repair_count")) for row in rows),
+            "existing_project_repair_count": sum(_num(row.get("repair_count")) for row in rows),
+            "execution_attempts": sum(_num(row.get("execution_attempts")) for row in rows),
+            "failed_execution_attempts": sum(_num(row.get("failed_execution_attempts")) for row in rows),
+            "repair_memory_entries": sum(_num(row.get("repair_memory_entries")) for row in rows),
+            "review_findings_entries": sum(_num(row.get("review_findings_entries")) for row in rows),
+        },
+        "failure_type_counts": _count_values(
+            row.get("failure_type")
+            for row in rows
+            if isinstance(row.get("failure_type"), str) and row.get("failure_type")
+        ),
     }
     return {
         "schema_version": "simple_ar_arc_batch_summary.v1",
         "generated_at": _now(),
         "state_file": _rel(ctx.repo_root, ctx.state_file),
+        "judge_source": judge_source,
         "topics": topics,
         "aggregate": aggregate,
         "rows": rows,
     }
 
 
-def _build_summary_row(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
+def _build_summary_row(ctx: RunnerContext, topic_state: TopicState, *, judge_source: str = "auto") -> dict[str, Any]:
     stats = _read_topic_stats(ctx, topic_state)
     source_stats = _read_source_code_task_stats(ctx, stats)
-    judge = _read_judge_result(ctx, topic_state)
+    source_run_dir = _source_run_dir_for_summary(ctx, topic_state, stats)
+    repair_stats = _repair_stats_from_run_dir(ctx, source_run_dir) if source_run_dir else {}
+    judge = _read_judge_result(ctx, topic_state, judge_source=judge_source)
     usage = stats.get("llm_usage") if isinstance(stats.get("llm_usage"), dict) else {}
     usage_totals = usage.get("totals") if isinstance(usage.get("totals"), dict) else {}
     if not usage_totals:
@@ -2024,6 +2317,7 @@ def _build_summary_row(ctx: RunnerContext, topic_state: TopicState) -> dict[str,
             topic_state.stats.get("command_duration_sec") if isinstance(topic_state.stats, dict) else None,
         ),
         "command_durations_sec": command_durations,
+        "judge_source": judge.get("judge_source", ""),
         "scoring_profile": judge.get("scoring_profile", ""),
         "code_development": _category_score(category_scores, "Code Development"),
         "code_execution": _category_score(category_scores, "Code Execution"),
@@ -2039,6 +2333,7 @@ def _build_summary_row(ctx: RunnerContext, topic_state: TopicState) -> dict[str,
         "postprocess_llm_input_tokens": _first_number(postprocess_usage_totals.get("input_tokens")),
         "postprocess_llm_output_tokens": _first_number(postprocess_usage_totals.get("output_tokens")),
         "postprocess_llm_total_tokens": _first_number(postprocess_usage_totals.get("total_tokens")),
+        **repair_stats,
     }
     return row
 
@@ -2078,6 +2373,174 @@ def _read_source_code_task_stats(ctx: RunnerContext, stats: dict[str, Any]) -> d
     return _read_json_dict(_abs(ctx.repo_root, source_run_dir) / "arc_task_stats.json")
 
 
+def _source_run_dir_for_summary(ctx: RunnerContext, topic_state: TopicState, stats: dict[str, Any]) -> Path | None:
+    metadata = stats.get("metadata") if isinstance(stats.get("metadata"), dict) else {}
+    source_run_dir = metadata.get("source_run_dir")
+    if isinstance(source_run_dir, str) and source_run_dir.strip():
+        path = _abs(ctx.repo_root, source_run_dir)
+        if path.exists():
+            return path
+    if topic_state.run_dir:
+        path = _abs(ctx.repo_root, topic_state.run_dir)
+        if path.exists():
+            return path
+    run_dir = stats.get("run_dir")
+    if isinstance(run_dir, str) and run_dir.strip():
+        path = _abs(ctx.repo_root, run_dir)
+        if path.exists():
+            return path
+    return None
+
+
+def _repair_stats_from_run_dir(ctx: RunnerContext, run_dir: Path) -> dict[str, Any]:
+    manifest = _read_json_dict(run_dir / "manifest.json")
+    repair = manifest.get("repair") if isinstance(manifest.get("repair"), dict) else {}
+    repair_count = _int_or_none(repair.get("repair_count")) or 0
+    review_repair_count = _int_or_none(repair.get("review_repair_count")) or 0
+    run_repair_count = _int_or_none(repair.get("run_repair_count")) or 0
+    execution_attempts, failed_execution_attempts, latest_failure_graph = _execution_attempt_stats(manifest)
+    failure_graph_path = _resolve_failure_graph_path(run_dir, manifest, latest_failure_graph)
+    failure_graph = _read_json_dict(failure_graph_path) if failure_graph_path else {}
+    failure_signal = _failure_signal_from_graph(failure_graph)
+    failure_type = _classify_failure_signal(failure_signal)
+    return {
+        "source_run_dir": _rel(ctx.repo_root, run_dir),
+        "repair_status": repair.get("status", "") if isinstance(repair.get("status"), str) else "",
+        "repair_count": repair_count,
+        "review_repair_count": review_repair_count,
+        "run_repair_count": run_repair_count,
+        "total_repair_count": repair_count + review_repair_count + run_repair_count,
+        "latest_review_repair": repair.get("latest_review_repair", "") if isinstance(repair.get("latest_review_repair"), str) else "",
+        "latest_run_repair": repair.get("latest_run_repair", "") if isinstance(repair.get("latest_run_repair"), str) else "",
+        "repair_memory_entries": _count_nonblank_lines(run_dir / "code_task" / "memory" / "repair_memory.jsonl"),
+        "review_findings_entries": _count_nonblank_lines(run_dir / "code_task" / "memory" / "review_findings.jsonl"),
+        "execution_attempts": execution_attempts,
+        "failed_execution_attempts": failed_execution_attempts,
+        "failure_type": failure_type,
+        "failure_signal": failure_signal,
+        "failure_graph": _rel(ctx.repo_root, failure_graph_path) if failure_graph_path else "",
+    }
+
+
+def _execution_attempt_stats(manifest: dict[str, Any]) -> tuple[int, int, str]:
+    attempts = _execution_attempts_from_manifest(manifest)
+    if attempts:
+        failed = sum(1 for attempt in attempts if _attempt_failed(attempt))
+        latest_failure_graph = ""
+        for attempt in reversed(attempts):
+            graph = attempt.get("failure_graph") if isinstance(attempt, dict) else None
+            if isinstance(graph, str) and graph:
+                latest_failure_graph = graph
+                break
+        return len(attempts), failed, latest_failure_graph
+    benchmark = manifest.get("benchmark") if isinstance(manifest.get("benchmark"), dict) else {}
+    executed = bool(benchmark.get("executed"))
+    return (1 if executed else 0), (0 if executed and benchmark.get("last_status") == "passed" else 0), ""
+
+
+def _execution_attempts_from_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    benchmark = manifest.get("benchmark") if isinstance(manifest.get("benchmark"), dict) else {}
+    attempts = _find_attempt_lists(benchmark)
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for attempt in attempts:
+        key = str(attempt.get("id") or attempt.get("execution_report") or len(unique))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(attempt)
+    return unique
+
+
+def _find_attempt_lists(value: Any) -> list[dict[str, Any]]:
+    attempts: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        direct = value.get("attempts")
+        if isinstance(direct, list):
+            attempts.extend(row for row in direct if isinstance(row, dict))
+        for child_key, child in value.items():
+            if child_key == "attempts":
+                continue
+            attempts.extend(_find_attempt_lists(child))
+    elif isinstance(value, list):
+        for child in value:
+            attempts.extend(_find_attempt_lists(child))
+    return attempts
+
+
+def _attempt_failed(attempt: dict[str, Any]) -> bool:
+    status = str(attempt.get("status") or "").lower()
+    if status and status != "passed":
+        return True
+    returncode = _int_or_none(attempt.get("returncode"))
+    return returncode is not None and returncode != 0
+
+
+def _resolve_failure_graph_path(run_dir: Path, manifest: dict[str, Any], latest_failure_graph: str) -> Path | None:
+    candidates: list[str] = []
+    if latest_failure_graph:
+        candidates.append(latest_failure_graph)
+    failure_analysis = manifest.get("failure_analysis") if isinstance(manifest.get("failure_analysis"), dict) else {}
+    for key in ("history_failure_graph", "failure_graph"):
+        value = failure_analysis.get(key)
+        if isinstance(value, str) and value:
+            candidates.append(value)
+    layout = manifest.get("layout") if isinstance(manifest.get("layout"), dict) else {}
+    value = layout.get("failure_graph")
+    if isinstance(value, str) and value:
+        candidates.append(value)
+    candidates.append("code_task/run/patched/failure_graph.json")
+    for candidate in candidates:
+        path = run_dir / candidate
+        if path.is_file():
+            return path
+    return None
+
+
+def _failure_signal_from_graph(graph: dict[str, Any]) -> str:
+    primary = graph.get("primary_signal")
+    if isinstance(primary, str) and primary.strip():
+        return _compact_text(primary)
+    for key in ("runtime_signals", "validation_signals", "signal_terms"):
+        value = graph.get(key)
+        if isinstance(value, list):
+            text = " ".join(str(item) for item in value[:12] if item)
+            if text.strip():
+                return _compact_text(text)
+    traceback = graph.get("traceback")
+    if isinstance(traceback, str) and traceback.strip():
+        return _compact_text(traceback)
+    return ""
+
+
+def _classify_failure_signal(signal: str) -> str:
+    text = signal.lower()
+    if not text:
+        return ""
+    if "convergencewarning" in text or "warning" in text or "total no. of iterations" in text:
+        return "warning/noise"
+    if "has no attribute" in text or "attributeerror" in text:
+        return "attribute/interface mismatch"
+    if "keyerror" in text or "not found" in text or "missing" in text:
+        return "key/schema mismatch"
+    if "typeerror" in text or "unexpected keyword" in text or "positional argument" in text:
+        return "type/interface mismatch"
+    if "timeout" in text or "timed out" in text or "killed" in text or "memory" in text:
+        return "timeout/resource"
+    if "valueerror" in text or "invalid" in text or "cannot" in text or "failed" in text:
+        return "value/schema mismatch"
+    return "runtime/other"
+
+
+def _count_nonblank_lines(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    try:
+        return sum(1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip())
+    except OSError:
+        return 0
+
+
 def _source_code_task_command_durations(source_stats: dict[str, Any]) -> dict[str, float]:
     if not source_stats:
         return {}
@@ -2115,14 +2578,21 @@ def _sum_duration_keys(durations: dict[str, float], keys: Sequence[str]) -> floa
     return round(sum(float(value) for value in values), 3)
 
 
-def _read_judge_result(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
+def _read_judge_result(ctx: RunnerContext, topic_state: TopicState, *, judge_source: str = "auto") -> dict[str, Any]:
     if not topic_state.output_dir:
         return {}
     output_dir = _abs(ctx.repo_root, topic_state.output_dir)
-    for path, source in [
-        (output_dir / "judge" / "judge_result.json", "adapter"),
-        (output_dir / "judge_native" / "judge_result.json", "native"),
-    ]:
+    candidates_by_source = {
+        "native": [(output_dir / "judge_native" / "judge_result.json", "native")],
+        "manual-strict": [(output_dir / "judge_manual_strict" / "judge_result.json", "manual-strict")],
+        "adapter": [(output_dir / "judge" / "judge_result.json", "adapter")],
+        "auto": [
+            (output_dir / "judge_native" / "judge_result.json", "native"),
+            (output_dir / "judge_manual_strict" / "judge_result.json", "manual-strict"),
+            (output_dir / "judge" / "judge_result.json", "adapter"),
+        ],
+    }
+    for path, source in candidates_by_source.get(judge_source, candidates_by_source["auto"]):
         data = _read_json_dict(path)
         if not data:
             continue
@@ -2130,6 +2600,8 @@ def _read_judge_result(ctx: RunnerContext, topic_state: TopicState) -> dict[str,
         data.setdefault("judge_source", source)
         if source == "native":
             data.setdefault("scoring_profile", "native")
+        elif source == "manual-strict":
+            data.setdefault("scoring_profile", "manual-strict")
         return data
     return {}
 
@@ -2246,6 +2718,36 @@ def _mean(values: Iterable[Any]) -> float | None:
     return round(sum(numbers) / len(numbers), 4)
 
 
+def _count_values(values: Iterable[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        key = value.strip()
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _compact_text(value: str, *, limit: int = 220) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
+
+
 def _first_number(*values: Any) -> float | None:
     for value in values:
         if _is_number(value):
@@ -2279,12 +2781,33 @@ def _write_batch_summary(
     return json_path, md_path
 
 
+def _write_evidence_summary(
+    ctx: RunnerContext,
+    evidence: dict[str, Any],
+    *,
+    output_prefix: str | None,
+) -> tuple[Path, Path]:
+    if output_prefix:
+        prefix = _abs(ctx.repo_root, output_prefix)
+    else:
+        prefix = ctx.state_file.with_name(f"{ctx.state_file.stem}.evidence")
+    json_path = prefix.parent / f"{prefix.name}.json"
+    md_path = prefix.parent / f"{prefix.name}.md"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    md_path.write_text(render_evidence_summary_markdown(evidence), encoding="utf-8")
+    return json_path, md_path
+
+
 def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
     aggregate = summary.get("aggregate") if isinstance(summary.get("aggregate"), dict) else {}
     score = aggregate.get("score_means") if isinstance(aggregate.get("score_means"), dict) else {}
     runtime = aggregate.get("runtime_means_sec") if isinstance(aggregate.get("runtime_means_sec"), dict) else {}
     usage_means = aggregate.get("llm_usage_means") if isinstance(aggregate.get("llm_usage_means"), dict) else {}
     usage_totals = aggregate.get("llm_usage_totals") if isinstance(aggregate.get("llm_usage_totals"), dict) else {}
+    repair_means = aggregate.get("repair_means") if isinstance(aggregate.get("repair_means"), dict) else {}
+    repair_totals = aggregate.get("repair_totals") if isinstance(aggregate.get("repair_totals"), dict) else {}
+    failure_counts = aggregate.get("failure_type_counts") if isinstance(aggregate.get("failure_type_counts"), dict) else {}
     postprocess_usage_means = (
         aggregate.get("postprocess_llm_usage_means")
         if isinstance(aggregate.get("postprocess_llm_usage_means"), dict)
@@ -2301,6 +2824,7 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
         "",
         f"- State file: `{summary.get('state_file', '')}`",
         f"- Generated at: `{summary.get('generated_at', '')}`",
+        f"- Judge source: `{summary.get('judge_source', 'auto')}`",
         f"- Topics: `{aggregate.get('topic_count', 0)}` total, `{aggregate.get('completed_count', 0)}` completed, `{aggregate.get('scored_count', 0)}` scored, `{aggregate.get('failed_count', 0)}` failed",
         "",
         "## Score Means",
@@ -2337,25 +2861,214 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
             f"{_fmt_cost(usage_totals.get('estimated_cost_usd'))} |"
         ),
         "",
+        "## Repair And Execution Signals",
+        "",
+        "| Repair Total | Review Repair | Run Repair | Existing Repair | Exec Attempts | Failed Attempts | Repair Memory | Review Findings |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        (
+            f"| {_fmt_int(repair_totals.get('total_repair_count'))} | "
+            f"{_fmt_int(repair_totals.get('review_repair_count'))} | "
+            f"{_fmt_int(repair_totals.get('run_repair_count'))} | "
+            f"{_fmt_int(repair_totals.get('existing_project_repair_count'))} | "
+            f"{_fmt_int(repair_totals.get('execution_attempts'))} | "
+            f"{_fmt_int(repair_totals.get('failed_execution_attempts'))} | "
+            f"{_fmt_int(repair_totals.get('repair_memory_entries'))} | "
+            f"{_fmt_int(repair_totals.get('review_findings_entries'))} |"
+        ),
+        "",
+        "| Mean Repair | Mean Review Repair | Mean Run Repair | Mean Exec Attempts | Mean Failed Attempts | Mean Repair Memory |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: |",
+        (
+            f"| {_fmt_number(repair_means.get('total_repair_count'))} | "
+            f"{_fmt_number(repair_means.get('review_repair_count'))} | "
+            f"{_fmt_number(repair_means.get('run_repair_count'))} | "
+            f"{_fmt_number(repair_means.get('execution_attempts'))} | "
+            f"{_fmt_number(repair_means.get('failed_execution_attempts'))} | "
+            f"{_fmt_number(repair_means.get('repair_memory_entries'))} |"
+        ),
+        "",
+    ]
+    if failure_counts:
+        lines.extend(
+            [
+                "## Failure Type Counts",
+                "",
+                "| Failure Type | Count |",
+                "| --- | ---: |",
+            ]
+        )
+        for name, count in failure_counts.items():
+            lines.append(f"| {name} | {_fmt_int(count)} |")
+        lines.append("")
+    lines.extend(
+        [
         "## Topic Details",
         "",
-        "| Topic | Status | Profile | Code Dev | Code Exec | Result Analysis | Overall | Time | Postprocess | Calls | Input | Output | Total |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-    ]
+        "| Topic | Status | Judge | Profile | Code Dev | Code Exec | Result Analysis | Overall | Time | Postprocess | Repairs | Exec Attempts | Failure Type | Calls | Input | Output | Total |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
     for row in rows:
         if not isinstance(row, dict):
             continue
         lines.append(
             "| "
-            f"{row.get('topic', '')} | {row.get('status', '')} | {row.get('scoring_profile', '') or '-'} | "
+            f"{row.get('topic', '')} | {row.get('status', '')} | {row.get('judge_source', '') or '-'} | "
+            f"{row.get('scoring_profile', '') or '-'} | "
             f"{_fmt_score(row.get('code_development'))} | {_fmt_score(row.get('code_execution'))} | "
             f"{_fmt_score(row.get('result_analysis'))} | {_fmt_score(row.get('overall_score'))} | "
             f"{_fmt_seconds(row.get('duration_sec'))} | {_fmt_seconds(row.get('postprocess_duration_sec'))} | "
+            f"{_fmt_int(row.get('total_repair_count'))} | {_fmt_int(row.get('execution_attempts'))} | "
+            f"{row.get('failure_type', '') or '-'} | "
             f"{_fmt_int(row.get('llm_request_count'))} | "
             f"{_fmt_int(row.get('llm_input_tokens'))} | {_fmt_int(row.get('llm_output_tokens'))} | "
             f"{_fmt_int(row.get('llm_total_tokens'))} |"
         )
     lines.append("")
+    return "\n".join(lines)
+
+
+def _build_evidence_summary(ctx: RunnerContext, summary: dict[str, Any]) -> dict[str, Any]:
+    rows = [row for row in summary.get("rows", []) if isinstance(row, dict)]
+    failure_examples: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        failure_type = row.get("failure_type")
+        if not isinstance(failure_type, str) or not failure_type:
+            continue
+        bucket = failure_examples.setdefault(failure_type, [])
+        if len(bucket) >= 5:
+            continue
+        bucket.append(
+            {
+                "topic": row.get("topic"),
+                "failure_signal": row.get("failure_signal", ""),
+                "failure_graph": row.get("failure_graph", ""),
+                "source_run_dir": row.get("source_run_dir", ""),
+            }
+        )
+    repair_heavy = sorted(
+        rows,
+        key=lambda row: (_num(row.get("total_repair_count")), _num(row.get("failed_execution_attempts"))),
+        reverse=True,
+    )[:10]
+    high_score_low_repair = sorted(
+        [
+            row
+            for row in rows
+            if _is_number(row.get("overall_score")) and _num(row.get("total_repair_count")) <= 1
+        ],
+        key=lambda row: _num(row.get("overall_score")),
+        reverse=True,
+    )[:10]
+    partial_or_failed = [
+        row
+        for row in rows
+        if row.get("status") != "completed" or not _is_number(row.get("overall_score")) or _num(row.get("overall_score")) < 0.6
+    ][:10]
+    aggregate = summary.get("aggregate") if isinstance(summary.get("aggregate"), dict) else {}
+    return {
+        "schema_version": "simple_ar_arc_fidelity_evidence.v1",
+        "generated_at": _now(),
+        "state_file": summary.get("state_file", _rel(ctx.repo_root, ctx.state_file)),
+        "judge_source": summary.get("judge_source", "auto"),
+        "topic_count": len(rows),
+        "repair_totals": aggregate.get("repair_totals", {}),
+        "repair_means": aggregate.get("repair_means", {}),
+        "failure_type_counts": aggregate.get("failure_type_counts", {}),
+        "failure_examples": failure_examples,
+        "trace_candidates": {
+            "high_score_low_repair": [_evidence_topic_row(row) for row in high_score_low_repair],
+            "repair_heavy": [_evidence_topic_row(row) for row in repair_heavy],
+            "partial_or_failed": [_evidence_topic_row(row) for row in partial_or_failed],
+        },
+        "rows": [_evidence_topic_row(row) for row in rows],
+    }
+
+
+def _evidence_topic_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "topic": row.get("topic"),
+        "status": row.get("status"),
+        "overall_score": row.get("overall_score"),
+        "code_development": row.get("code_development"),
+        "code_execution": row.get("code_execution"),
+        "result_analysis": row.get("result_analysis"),
+        "total_repair_count": row.get("total_repair_count"),
+        "review_repair_count": row.get("review_repair_count"),
+        "run_repair_count": row.get("run_repair_count"),
+        "execution_attempts": row.get("execution_attempts"),
+        "failed_execution_attempts": row.get("failed_execution_attempts"),
+        "repair_memory_entries": row.get("repair_memory_entries"),
+        "failure_type": row.get("failure_type", ""),
+        "failure_signal": row.get("failure_signal", ""),
+        "source_run_dir": row.get("source_run_dir", ""),
+        "output_dir": row.get("output_dir", ""),
+    }
+
+
+def render_evidence_summary_markdown(evidence: dict[str, Any]) -> str:
+    repair_totals = evidence.get("repair_totals") if isinstance(evidence.get("repair_totals"), dict) else {}
+    failure_counts = evidence.get("failure_type_counts") if isinstance(evidence.get("failure_type_counts"), dict) else {}
+    trace_candidates = evidence.get("trace_candidates") if isinstance(evidence.get("trace_candidates"), dict) else {}
+    lines = [
+        "# ARC-Bench Fidelity Evidence Summary",
+        "",
+        f"- State file: `{evidence.get('state_file', '')}`",
+        f"- Generated at: `{evidence.get('generated_at', '')}`",
+        f"- Judge source: `{evidence.get('judge_source', 'auto')}`",
+        f"- Topics: `{evidence.get('topic_count', 0)}`",
+        "",
+        "## Repair Totals",
+        "",
+        "| Total Repair | Review Repair | Run Repair | Existing Repair | Exec Attempts | Failed Attempts | Repair Memory |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        (
+            f"| {_fmt_int(repair_totals.get('total_repair_count'))} | "
+            f"{_fmt_int(repair_totals.get('review_repair_count'))} | "
+            f"{_fmt_int(repair_totals.get('run_repair_count'))} | "
+            f"{_fmt_int(repair_totals.get('existing_project_repair_count'))} | "
+            f"{_fmt_int(repair_totals.get('execution_attempts'))} | "
+            f"{_fmt_int(repair_totals.get('failed_execution_attempts'))} | "
+            f"{_fmt_int(repair_totals.get('repair_memory_entries'))} |"
+        ),
+        "",
+    ]
+    if failure_counts:
+        lines.extend(["## Failure Taxonomy", "", "| Failure Type | Count |", "| --- | ---: |"])
+        for name, count in failure_counts.items():
+            lines.append(f"| {name} | {_fmt_int(count)} |")
+        lines.append("")
+    for key, title in (
+        ("repair_heavy", "Repair-Heavy Trace Candidates"),
+        ("high_score_low_repair", "High-Score Low-Repair Trace Candidates"),
+        ("partial_or_failed", "Partial/Failed Trace Candidates"),
+    ):
+        rows = trace_candidates.get(key) if isinstance(trace_candidates.get(key), list) else []
+        if not rows:
+            continue
+        lines.extend(["## " + title, "", "| Topic | Overall | Repairs | Attempts | Failure Type | Source Run |", "| --- | ---: | ---: | ---: | --- | --- |"])
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"| {row.get('topic', '')} | {_fmt_score(row.get('overall_score'))} | "
+                f"{_fmt_int(row.get('total_repair_count'))} | {_fmt_int(row.get('execution_attempts'))} | "
+                f"{row.get('failure_type', '') or '-'} | `{row.get('source_run_dir', '')}` |"
+            )
+        lines.append("")
+    failure_examples = evidence.get("failure_examples")
+    if isinstance(failure_examples, dict) and failure_examples:
+        lines.extend(["## Failure Examples", ""])
+        for failure_type, examples in failure_examples.items():
+            lines.extend([f"### {failure_type}", "", "| Topic | Signal | Failure Graph |", "| --- | --- | --- |"])
+            for example in examples if isinstance(examples, list) else []:
+                if not isinstance(example, dict):
+                    continue
+                lines.append(
+                    f"| {example.get('topic', '')} | {example.get('failure_signal', '') or '-'} | "
+                    f"`{example.get('failure_graph', '')}` |"
+                )
+            lines.append("")
     return "\n".join(lines)
 
 

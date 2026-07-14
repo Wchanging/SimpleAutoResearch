@@ -116,6 +116,13 @@ class ExecuteSection(_ConfigModel):
     max_files: int | None = None
     max_source_chars_per_file: int | None = None
     max_generated_lines: int | None = None
+    ablation: "ExecuteAblationSection" = Field(default_factory=lambda: ExecuteAblationSection())
+
+
+class ExecuteAblationSection(_ConfigModel):
+    repair_context: str | None = None
+    use_repair_memory: bool | None = None
+    contract_context: str | None = None
 
 
 class ImplementationSection(_ConfigModel):
@@ -251,6 +258,9 @@ class CodeTaskExecuteOptions:
     max_files: int
     max_source_chars_per_file: int
     max_generated_lines: int
+    repair_context: str
+    use_repair_memory: bool
+    contract_context: str
     implementation_provider: str
     implementation_agent_mode: str
     implementation_allow_external_agent: bool
@@ -298,6 +308,7 @@ def load_code_task_execute_options(
 
     config = _load_toml_config(config_path)
     execute = config.execute
+    ablation = execute.ablation
     benchmark = config.benchmark
     llm = config.llm
     models = config.models
@@ -410,6 +421,13 @@ def load_code_task_execute_options(
             or _config_int(resource.max_generated_lines),
             1600,
         ),
+        repair_context=_repair_context_mode(ablation.repair_context),
+        use_repair_memory=_resolve_bool(
+            override=None,
+            value=ablation.use_repair_memory,
+            default=True,
+        ),
+        contract_context=_contract_context_mode(ablation.contract_context),
         implementation_provider=_config_string(implementation.provider) or "local",
         implementation_agent_mode=_config_string(implementation.agent_mode),
         implementation_allow_external_agent=_resolve_bool(
@@ -635,7 +653,7 @@ def _config_string(value: object) -> str | None:
     return None
 
 
-def _portable_path_string(value: str | None) -> str | None:
+def _portable_path_string(value: object) -> str | None:
     """Normalize user-facing path separators without touching artifact IDs.
 
     Python on Windows accepts forward slashes, but POSIX systems treat
@@ -646,7 +664,7 @@ def _portable_path_string(value: str | None) -> str | None:
 
     if value is None:
         return None
-    return value.replace("\\", "/")
+    return str(value).replace("\\", "/")
 
 
 def _config_int(value: object) -> int | None:
@@ -742,6 +760,28 @@ def _planning_mode(value: str | None) -> str:
             "Unsupported [execute].planning_mode. Expected `tool_agent` or `compact`."
         )
     return normalized
+
+
+def _repair_context_mode(value: str | None) -> str:
+    text = (_config_string(value) or "full").lower().replace("-", "_")
+    if text in {"full", "structured", "failure_graph", "failure_graph_bundle"}:
+        return "full"
+    if text in {"raw", "raw_logs", "raw_logs_only", "logs_only", "no_failure_graph"}:
+        return "raw_logs_only"
+    raise CodeTaskConfigError(
+        "Unsupported [execute.ablation].repair_context. Expected `full` or `raw_logs_only`."
+    )
+
+
+def _contract_context_mode(value: str | None) -> str:
+    text = (_config_string(value) or "full").lower().replace("-", "_")
+    if text in {"full", "contract", "task_contract"}:
+        return "full"
+    if text in {"minimal", "plan_then_code", "task_only", "natural_language"}:
+        return "minimal"
+    raise CodeTaskConfigError(
+        "Unsupported [execute.ablation].contract_context. Expected `full` or `minimal`."
+    )
 
 
 def _resolve_string_list(

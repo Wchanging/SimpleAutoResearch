@@ -169,6 +169,7 @@ class LLMClient:
         cls,
         model: str | None = None,
         *,
+        api_mode: str | None = None,
         usage_callback: UsageCallback | None = None,
     ) -> "LLMClient":
         """Load provider settings from ``.env`` and environment variables.
@@ -194,7 +195,7 @@ class LLMClient:
             retry_base_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC", default=1.0),
             retry_max_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC", default=12.0),
             transport_backend=_llm_transport_backend("SIMPLE_AR_LLM_BACKEND"),
-            api_mode=_llm_api_mode("SIMPLE_AR_LLM_API"),
+            api_mode=_llm_api_mode_value(api_mode) if api_mode else _llm_api_mode("SIMPLE_AR_LLM_API"),
             json_response_format=_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"),
             chat_token_limit_param=_chat_token_limit_param_mode("SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM"),
         )
@@ -712,7 +713,11 @@ def _json_response_format_mode(env_name: str) -> str:
 
 
 def _llm_api_mode(env_name: str) -> str:
-    value = os.environ.get(env_name, "responses").strip().lower().replace("-", "_")
+    return _llm_api_mode_value(os.environ.get(env_name, "responses"))
+
+
+def _llm_api_mode_value(value: str | None) -> str:
+    value = str(value or "responses").strip().lower().replace("-", "_")
     aliases = {
         "": "responses",
         "auto": "auto",

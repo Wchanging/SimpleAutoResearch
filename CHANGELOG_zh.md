@@ -4,6 +4,18 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-07-12
+
+### Added
+
+- SurveyBench 批量汇总新增 mixed summary 支持，可优先使用 `score-thorough/`，并对缺失 topic 回退到 `score/`，同时输出更接近论文主表的 Outline / Content / Richness 分组表。
+- SurveyBench 原生评测命令记录现在写入对应 score 输出目录的 `native_command.json`，便于追踪单次评测来源，而不再堆积到全局 `_native_commands/`。
+
+### Changed
+
+- 长篇 report 生成会把每个章节的目标字数、最少引用数和子标题约束贯穿到 Writer/Reviewer prompt；摘要、引言和结论不再被强制拆出内部小标题。
+- 更新实验与证据链补充报告中的 SurveyBench 结果，改为引用最新 mixed 汇总，并补充 report 阶段长综述能力升级说明。
+
 ## 2026-07-11
 
 ### Added

@@ -1199,6 +1199,7 @@ def repair_generated_project_from_run_failure(
     contract: Mapping[str, Any] | None = None,
     dependency_advice: Mapping[str, Any] | None = None,
     previous_repair_context: str = "",
+    repair_context_mode: str = "full",
     client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Apply narrow deterministic repairs after generated-project run failure.
@@ -1218,6 +1219,10 @@ def repair_generated_project_from_run_failure(
         "changed_files": [],
         "unresolved_errors": [],
         "notes": [],
+        "ablation": {
+            "repair_context": repair_context_mode,
+            "use_repair_memory": bool(previous_repair_context.strip()),
+        },
     }
     if not project_dir.is_dir():
         summary["status"] = "failed"
@@ -1275,6 +1280,7 @@ def repair_generated_project_from_run_failure(
             contract=contract or {},
             dependency_advice=dependency_advice or {},
             previous_repair_context=previous_repair_context,
+            repair_context_mode=repair_context_mode,
             client=client,
             changed=changed,
             notes=summary["notes"],
@@ -1316,6 +1322,7 @@ def _regenerate_run_failed_files(
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
     previous_repair_context: str,
+    repair_context_mode: str,
     client: LLMClient,
     changed: list[str],
     notes: list[str],
@@ -1328,6 +1335,7 @@ def _regenerate_run_failed_files(
         failure_analysis=failure_analysis,
         stderr_text=stderr_text,
         code_artifacts=code_artifacts,
+        repair_context_mode=repair_context_mode,
     )
     repair_context = _run_repair_context(
         project_dir=project_dir,
@@ -1337,9 +1345,14 @@ def _regenerate_run_failed_files(
         heuristic_targets=heuristic_targets,
         result_schema=result_schema,
         contract=contract,
+        repair_context_mode=repair_context_mode,
+    )
+    prompt_failure_analysis = _failure_analysis_for_repair_prompt(
+        failure_analysis,
+        repair_context_mode=repair_context_mode,
     )
     raw_repair_plan = _plan_run_repair_targets(
-        failure_analysis=failure_analysis,
+        failure_analysis=prompt_failure_analysis,
         stderr_text=stderr_text,
         result_schema=result_schema,
         contract=contract,
@@ -1351,7 +1364,7 @@ def _regenerate_run_failed_files(
     )
     repair_plan = normalize_repair_plan(
         raw_repair_plan,
-        failure_analysis=failure_analysis,
+        failure_analysis=prompt_failure_analysis,
         fallback_targets=heuristic_targets,
         contract=contract,
     )
@@ -1382,7 +1395,7 @@ def _regenerate_run_failed_files(
                     current_content=previous,
                     file_spec=spec,
                     project_dir=project_dir,
-                    failure_analysis=failure_analysis,
+                    failure_analysis=prompt_failure_analysis,
                     stderr_text=stderr_text,
                     repair_plan=repair_plan,
                     repair_context=repair_context,
@@ -1524,6 +1537,7 @@ def _run_repair_context(
     heuristic_targets: list[str],
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
+    repair_context_mode: str = "full",
 ) -> dict[str, Any]:
     all_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
     signal_text = " ".join(
@@ -1538,12 +1552,15 @@ def _run_repair_context(
         preferred_roles=("orchestrator", "data", "preprocess", "config", "core", "artifact", "entrypoint"),
     )
     matched = _source_signal_matches(project_dir, all_paths, signal_text)
-    graph_candidates = _failure_graph_candidate_paths(failure_analysis, project_dir=project_dir)
+    graph_candidates = (
+        _failure_graph_candidate_paths(failure_analysis, project_dir=project_dir)
+        if repair_context_mode != "raw_logs_only"
+        else []
+    )
     candidate_paths = list(dict.fromkeys([*graph_candidates, *heuristic_targets, *matched, *ranked]))[:10]
-    return {
+    context = {
         "schema_version": "code_task_runtime_repair_context.v1",
-        "failure_graph": _compact_failure_graph_for_repair(failure_analysis),
-        "runtime_contracts": _runtime_contract_context(failure_analysis),
+        "context_mode": repair_context_mode,
         "heuristic_targets": heuristic_targets,
         "review_index": _generated_review_index(project_dir, result_schema=result_schema, contract=contract),
         "return_contract_mismatches": find_return_contract_mismatches(project_dir),
@@ -1555,6 +1572,24 @@ def _run_repair_context(
         "project_api": _project_api_snapshot(project_dir),
         "resource_static": analyze_resource_risks(project_dir),
     }
+    if repair_context_mode != "raw_logs_only":
+        context["failure_graph"] = _compact_failure_graph_for_repair(failure_analysis)
+        context["runtime_contracts"] = _runtime_contract_context(failure_analysis)
+    return context
+
+
+def _failure_analysis_for_repair_prompt(
+    failure_analysis: Mapping[str, Any],
+    *,
+    repair_context_mode: str,
+) -> dict[str, Any]:
+    result = dict(failure_analysis)
+    if repair_context_mode == "raw_logs_only":
+        result.pop("failure_graph", None)
+        result.pop("failure_graph_data", None)
+        result["context_mode"] = "raw_logs_only"
+        result["note"] = "Structured failure-graph bundle omitted for ablation."
+    return result
 
 
 def _compact_failure_graph_for_repair(failure_analysis: Mapping[str, Any]) -> dict[str, Any]:
@@ -1708,6 +1743,7 @@ def _run_repair_target_paths(
     failure_analysis: Mapping[str, Any],
     stderr_text: str,
     code_artifacts: Mapping[str, Any],
+    repair_context_mode: str = "full",
 ) -> list[str]:
     text = " ".join(
         [
@@ -1718,7 +1754,8 @@ def _run_repair_target_paths(
     candidates: list[str] = []
     lowered = text.lower()
     known_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
-    candidates.extend(_failure_graph_candidate_paths(failure_analysis, project_dir=project_dir))
+    if repair_context_mode != "raw_logs_only":
+        candidates.extend(_failure_graph_candidate_paths(failure_analysis, project_dir=project_dir))
     if _is_artifact_path_contract_failure(lowered):
         candidates.extend(
             _rank_repair_candidates(

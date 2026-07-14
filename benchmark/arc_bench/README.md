@@ -92,26 +92,34 @@ uv run python -c "import numpy, scipy, sklearn, pandas, matplotlib, statsmodels,
 
 ## Recommended Batch Run
 
-Run the quick confidence pass and continue even if individual topics fail:
+For quick checks or paper-facing main tables, prefer AutoResearchClaw's native
+`judge.py` path:
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py run \
   --topic-set quick \
   --analyze \
-  --score
+  --native-score \
+  --native-score-model gpt-4o
 ```
 
-The command above uses the default `proxy` score profile, which is intended for
-fast development regression. For paper-facing or AutoResearchClaw-protocol
-comparisons, run the same batch with the strict judge profile:
+For a two-reviewer manual strict audit pass, use `manual-strict`. You can set
+two reviewer models, for example one Claude model and one Codex/GPT model:
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py run \
   --topic-set quick \
   --analyze \
   --score \
-  --score-profile strict
+  --score-profile manual-strict \
+  --strict-reviewer-models claude-opus-4-6,gpt-5.4 \
+  --strict-reviewer-apis chat,responses \
+  --strict-adjudicator-model gpt-5.4
 ```
+
+If a reviewer model does not support the provider's Responses API surface
+(for example `local:convert_request_failed`), use `--strict-reviewer-apis` to
+choose `chat` or `responses` per reviewer.
 
 Each `run` command creates a separate state file under
 `benchmark/arc_bench/batch_state/`, for example:
@@ -126,19 +134,10 @@ mixing multiple benchmark batches while keeping retry commands short.
 Topic sets:
 
 ```bash
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze --score
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze --score
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze --score
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --score
-```
-
-Strict scoring variants:
-
-```bash
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze --score --score-profile strict
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze --score --score-profile strict
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze --score --score-profile strict
-uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --score --score-profile strict
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set quick --analyze --native-score --native-score-model gpt-4o
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set breadth --analyze --native-score --native-score-model gpt-4o
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set specialized --analyze --native-score --native-score-model gpt-4o
+uv run python benchmark/arc_bench/batch_runner.py run --topic-set all --analyze --native-score --native-score-model gpt-4o
 ```
 
 Explicit topics:
@@ -147,8 +146,61 @@ Explicit topics:
 uv run python benchmark/arc_bench/batch_runner.py run \
   --topics ML04 ML02 ML06 \
   --analyze \
-  --score \
-  --score-profile strict
+  --native-score \
+  --native-score-model gpt-4o
+```
+
+Subset ranges and exclusions are also supported:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topic-range ML01-ML10 \
+  --exclude-topics ML02 ML06 \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o
+```
+
+For low-cost ablations, keep each result in a separate state file or variant.
+The following switches are passed through to `simple-ar code-task execute`:
+
+```bash
+# No structured failure-graph context in repair prompts.
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML06 ML09 ML10 \
+  --repair-context raw_logs_only \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o \
+  --state-file benchmark/arc_bench/batch_state/ablation-no-failure-graph.json
+
+# No previous repair memory in repair prompts.
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML06 ML09 ML10 \
+  --no-repair-memory \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o \
+  --state-file benchmark/arc_bench/batch_state/ablation-no-repair-memory.json
+
+# Minimal task-contract prompt view, useful as a Plan-then-Code style baseline.
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML06 ML09 ML10 \
+  --contract-context minimal \
+  --repair-rounds 0 \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o \
+  --state-file benchmark/arc_bench/batch_state/ablation-minimal-contract.json
+
+# Fewer greenfield planning-review iterations.
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topics ML06 ML09 ML10 \
+  --planning-review-rounds 0 \
+  --analyze \
+  --native-score \
+  --native-score-model gpt-4o \
+  --state-file benchmark/arc_bench/batch_state/ablation-no-plan-review.json
 ```
 
 Each topic writes a compact runtime/API summary after it finishes or fails:
@@ -173,15 +225,31 @@ uv run python benchmark/arc_bench/batch_runner.py summarize
 `summarize` reads the latest batch by default and writes
 `<state-file>.summary.json` plus `<state-file>.summary.md`. It reports Code
 Development, Code Execution, Result Analysis, Overall, average wall time,
-average command time, average LLM calls, and average input/output/total tokens.
+average command time, repair counts, execution attempts, failure-type counts,
+average LLM calls, and average input/output/total tokens.
 Use `--state-file <path>` for an older batch or `--topic-set quick`/`--topics
 ML04 ML02` to filter the rows.
 
+For paper evidence tables, export a compact repair/fidelity summary without
+rerunning experiments:
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py evidence \
+  --state-file benchmark/arc_bench/batch_state/20260711-native-gpt4o-bundle-all.json \
+  --topic-set all \
+  --judge-source native
+```
+
+This writes `<state-file>.evidence.json` and `<state-file>.evidence.md` with
+repair totals, failure taxonomy, failure graph examples, and candidate runs for
+requirement-trace inspection.
+
 The batch runner only finalizes runs whose business status is
 `benchmark_passed`. If `--score` is added later and a topic already has a valid
-finalized submission, it fills in `judge/` without rerunning the experiment. A
-judge generated by one score profile does not satisfy another profile, so adding
-`--score-profile strict` later will create/refresh the strict judge output.
+finalized submission, it fills in `judge/` or `judge_manual_strict/` without
+rerunning the experiment. A judge generated by one score profile does not
+satisfy another profile, so adding `--score-profile manual-strict` later will
+create/refresh the manual strict judge output.
 For unstable server networks, add `--llm-retry-attempts 5` to override the
 prepared TOML retry budget for every `code-task execute` call.
 LLM calls omit client-side timeout and provider output-limit parameters by
@@ -207,14 +275,14 @@ uv run python benchmark/arc_bench/batch_runner.py refresh \
   --topic-set all \
   --analyze \
   --score \
-  --score-profile strict \
-  --variant strict-rerun-01
+  --score-profile manual-strict \
+  --variant manual-strict-rerun-01
 ```
 
 Example output layout:
 
 ```text
-benchmark/arc_bench/submissions/ml/ML02/<run-id>--strict-rerun-01/
+benchmark/arc_bench/submissions/ml/ML02/<run-id>--manual-strict-rerun-01/
 benchmark/arc_bench/batch_state/<new-refresh-state>.json
 ```
 
@@ -222,7 +290,8 @@ Summarize the refreshed result set with the new state file:
 
 ```bash
 uv run python benchmark/arc_bench/batch_runner.py summarize \
-  --state-file benchmark/arc_bench/batch_state/<new-refresh-state>.json
+  --state-file benchmark/arc_bench/batch_state/<new-refresh-state>.json \
+  --judge-source manual-strict
 ```
 
 The refreshed state records only the new finalize/result-analysis/score
@@ -256,8 +325,8 @@ Single-topic example using an existing finalized ML04 output:
 uv run python benchmark/arc_bench/adapter.py native-score \
   --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
   --prepared-dir benchmark/arc_bench/prepared/ml/ML04 \
-  --run-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04--strict-rerun-01 \
-  --output-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04--strict-rerun-01/judge_native \
+  --run-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04 \
+  --output-dir benchmark/arc_bench/submissions/ml/ML04/20260706-011752-arc-bench-ml04/judge_native \
   --topic ML04 \
   --model gpt-4o \
   --full \
@@ -296,8 +365,8 @@ Fresh retry for unfinished topics:
 uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --topic-set quick \
   --analyze \
-  --score \
-  --score-profile strict \
+  --native-score \
+  --native-score-model gpt-4o \
   --llm-retry-attempts 5
 ```
 
@@ -309,8 +378,8 @@ uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --state-file benchmark/arc_bench/batch_state/20260627-153607-quick.json \
   --topic-set quick \
   --analyze \
-  --score \
-  --score-profile strict
+  --native-score \
+  --native-score-model gpt-4o
 ```
 
 Continue from the previous run and grant more repair attempts:
@@ -319,8 +388,8 @@ Continue from the previous run and grant more repair attempts:
 uv run python benchmark/arc_bench/batch_runner.py retry-unfinished \
   --topic-set quick \
   --analyze \
-  --score \
-  --score-profile strict \
+  --native-score \
+  --native-score-model gpt-4o \
   --resume-existing \
   --extend-repair-rounds 2
 ```
@@ -374,16 +443,19 @@ uv run python benchmark/arc_bench/adapter.py score \
   --output-dir "$OUT_DIR/judge"
 ```
 
-For paper-facing comparisons, use the strict profile, or `arc-native` when you
-want the built-in scorer to use the canonical ARC-style strict audit prompt and
-leaf-targeted evidence bundle:
+For a two-reviewer manual strict audit, use `manual-strict`. It loads
+AutoResearchClaw's bundled `manual_strict_audit_prompt.md` and runs independent
+reviewers, per-leaf disagreement detection, and adjudication inside this
+adapter:
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py score \
   --prepared-dir benchmark/arc_bench/prepared/ml/ML02 \
   --submission-dir "$OUT_DIR/submission" \
-  --output-dir "$OUT_DIR/judge_strict" \
-  --score-profile strict \
+  --output-dir "$OUT_DIR/judge_manual_strict" \
+  --score-profile manual-strict \
+  --strict-reviewer-models claude-opus-4-6,gpt-5.4 \
+  --strict-adjudicator-model gpt-5.4 \
   --strict-reviewers 2 \
   --disagreement-threshold 0.20
 ```
@@ -414,9 +486,13 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
     score_round_results_response.json
     score_round_results_prompt.txt              # only when scoring fails
     score_round_results_response_attempt_*.json # schema retry attempts only
-    reviewer_*.json              # strict / arc-native profile only
-    disagreements.json           # strict / arc-native profile only
-    adjudication.json            # strict / arc-native profile only, when needed
+  judge_manual_strict/
+    evidence_bundle.json
+    judge_result.json
+    scorecard.md
+    reviewer_*.json
+    disagreements.json
+    adjudication.json
   judge_native/
     judge_result.json            # copied result from AutoResearchClaw scripts/judge.py --full
     judge_debug.json             # native debug artifact when --debug is enabled
@@ -426,27 +502,21 @@ benchmark/arc_bench/submissions/ml/ML02/<run-id>/
 ```
 
 `finalize --analyze` builds the benchmark-facing README/claims from measured
-results. `score` has four profiles:
+results. For formal reporting, use only two judge paths:
 
-- `proxy` (default): lightweight two-round LLM scorer for development
-  regression. It is useful for quick/breadth smoke checks, but should not be
-  reported as an AutoResearchClaw strict score.
-- `arc-auto`: keeps the ARC-style automatic two-round scorer behavior closer to
-  `scripts/judge.py`, including recoverable missing-leaf handling.
-- `strict`: runs independent reviewer passes, re-adjudicates per-leaf
-  disagreements above the threshold, records the analysis source, and reports
-  CD/CE/RA plus overall aggregates. Use this for paper-facing comparisons.
-- `arc-native`: still runs inside this adapter, but uses a stricter ARC-style
-  audit prompt and leaf-targeted evidence bundle. It is useful for development
-  diagnostics, but it is not the external AutoResearchClaw `scripts/judge.py`.
-  Use `native-score` when you need the native judge path for paper-facing
-  comparison.
+- `native-score`: calls AutoResearchClaw's bundled `scripts/judge.py` and writes
+  `judge_native/`. Use this for the native judge path in paper tables.
+- `score --score-profile manual-strict`: runs the adapter's two-reviewer manual
+  strict audit using the bundled ARC manual prompt and writes
+  `judge_manual_strict/`. Use this for strict review or appendix diagnostics.
+  Use `--strict-reviewer-models` to choose separate reviewer models.
 
 If a scoring round returns valid JSON with the wrong top-level schema, the
 adapter retries once with a stricter `grades` contract and saves retry raw
 responses. If the retry still cannot produce a recoverable `grades` array,
 scoring fails. If a valid response omits one leaf, that leaf is recorded with
-warning and default score `0.5` for the non-strict automatic profiles.
+warning and default score `0.5` for the internal lightweight automatic scorer;
+this fallback is not used by `manual-strict`.
 
 ## External Judge
 

@@ -165,17 +165,38 @@ def main() -> int:
     score.add_argument("--model", help="Optional model override for scoring.")
     score.add_argument(
         "--score-profile",
-        choices=("proxy", "arc-auto", "strict", "arc-native"),
+        choices=("proxy", "manual-strict"),
         help=(
-            "Scoring profile. proxy is the lightweight internal scorer; strict runs two reviewers "
-            "and adjudication; arc-native uses the same two-reviewer strict protocol with a "
-            "canonical ARC-style prompt/evidence bundle."
+            "Scoring profile. proxy is the lightweight internal scorer; manual-strict runs "
+            "the ARC manual strict-style two-reviewer disagreement protocol."
         ),
+    )
+    score.add_argument(
+        "--strict-reviewer-models",
+        help=(
+            "Comma-separated reviewer model list for manual-strict, e.g. "
+            "claude-opus-4-6,gpt-5.4. Defaults to --model / environment model for all reviewers."
+        ),
+    )
+    score.add_argument(
+        "--strict-reviewer-apis",
+        help=(
+            "Optional comma-separated API modes for manual-strict reviewers, e.g. "
+            "chat,responses. Defaults to SIMPLE_AR_LLM_API for each reviewer."
+        ),
+    )
+    score.add_argument(
+        "--strict-adjudicator-model",
+        help="Optional adjudicator model for manual-strict disagreements; defaults to --model / environment model.",
+    )
+    score.add_argument(
+        "--strict-adjudicator-api",
+        help="Optional API mode for the manual-strict adjudicator, e.g. chat or responses.",
     )
     score.add_argument(
         "--strict-reviewers",
         type=int,
-        help="Number of independent reviewers for --score-profile strict. Use 1 only for low-cost previews.",
+        help="Number of independent reviewers for --score-profile manual-strict. Use 1 only for low-cost previews.",
     )
     score.add_argument(
         "--disagreement-threshold",
@@ -1041,6 +1062,10 @@ def run_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     max_writeup_chars = int(value_from(args, cfg, "score", "max_writeup_chars", 16000))
     score_profile = str(value_from(args, cfg, "score", "score_profile", "proxy") or "proxy").strip().lower()
     strict_reviewers = int(value_from(args, cfg, "score", "strict_reviewers", 2))
+    strict_reviewer_models = str(value_from(args, cfg, "score", "strict_reviewer_models", "") or "")
+    strict_reviewer_apis = str(value_from(args, cfg, "score", "strict_reviewer_apis", "") or "")
+    strict_adjudicator_model = str(value_from(args, cfg, "score", "strict_adjudicator_model", "") or "")
+    strict_adjudicator_api = str(value_from(args, cfg, "score", "strict_adjudicator_api", "") or "")
     disagreement_threshold = float(value_from(args, cfg, "score", "disagreement_threshold", 0.20))
 
     if not prepared_raw:
@@ -1066,6 +1091,10 @@ def run_score_command(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
         model=model or None,
         score_profile=score_profile,
         strict_reviewers=strict_reviewers,
+        strict_reviewer_models=parse_model_list(strict_reviewer_models),
+        strict_reviewer_apis=parse_model_list(strict_reviewer_apis),
+        strict_adjudicator_model=strict_adjudicator_model or None,
+        strict_adjudicator_api=strict_adjudicator_api or None,
         disagreement_threshold=disagreement_threshold,
         max_code_chars=max_code_chars,
         max_result_chars=max_result_chars,
@@ -1085,6 +1114,10 @@ def score_submission_with_llm(
     model: str | None,
     score_profile: str = "proxy",
     strict_reviewers: int = 2,
+    strict_reviewer_models: list[str] | None = None,
+    strict_reviewer_apis: list[str] | None = None,
+    strict_adjudicator_model: str | None = None,
+    strict_adjudicator_api: str | None = None,
     disagreement_threshold: float = 0.20,
     max_code_chars: int,
     max_result_chars: int,
@@ -1124,11 +1157,32 @@ def score_submission_with_llm(
         usage_rows.append(row)
         append_jsonl(output_dir / "llm_usage.jsonl", row)
 
-    client = LLMClient.from_env(model=model, usage_callback=usage_callback)
-
-    if score_profile in {"strict", "arc-native"}:
+    if score_profile == "manual-strict":
+        reviewer_models = strict_reviewer_models or [model or ""]
+        reviewer_count = max(1, min(int(strict_reviewers or len(reviewer_models) or 2), 3))
+        if len(reviewer_models) == 1 and reviewer_count > 1:
+            reviewer_models = reviewer_models * reviewer_count
+        reviewer_models = reviewer_models[:reviewer_count]
+        reviewer_apis = list(strict_reviewer_apis or [])
+        if len(reviewer_apis) == 1 and reviewer_count > 1:
+            reviewer_apis = reviewer_apis * reviewer_count
+        reviewer_apis = (reviewer_apis + [""] * reviewer_count)[:reviewer_count]
+        clients = [
+            LLMClient.from_env(
+                model=item or model,
+                api_mode=reviewer_apis[index] or None,
+                usage_callback=usage_callback,
+            )
+            for index, item in enumerate(reviewer_models)
+        ]
+        adjudicator_client = LLMClient.from_env(
+            model=strict_adjudicator_model or model,
+            api_mode=strict_adjudicator_api,
+            usage_callback=usage_callback,
+        )
         result = score_submission_strict(
-            client=client,
+            clients=clients,
+            adjudicator_client=adjudicator_client,
             manifest=manifest,
             rubric=rubric,
             prepared_dir=prepared_dir,
@@ -1136,13 +1190,14 @@ def score_submission_with_llm(
             output_dir=output_dir,
             artifacts=artifacts,
             leaves=leaves,
-            reviewer_count=strict_reviewers,
             disagreement_threshold=disagreement_threshold,
             score_profile=score_profile,
         )
         if usage_rows:
             write_json(output_dir / "llm_usage_summary.json", summarize_llm_usage_rows(usage_rows))
         return result
+
+    client = LLMClient.from_env(model=model, usage_callback=usage_callback)
 
     manifest_context = build_manifest_context(manifest)
     code_leaves = [leaf for leaf in leaves if is_code_development_leaf(leaf)]
@@ -1221,36 +1276,20 @@ def score_submission_with_llm(
 
 def normalize_score_profile(value: str) -> str:
     profile = (value or "proxy").strip().lower()
-    aliases = {
-        "quick": "proxy",
-        "fast": "proxy",
-        "arc": "arc-auto",
-        "arc_compatible": "arc-auto",
-        "arc-compatible": "arc-auto",
-        "native": "arc-native",
-        "arc_native": "arc-native",
-    }
-    profile = aliases.get(profile, profile)
-    if profile not in {"proxy", "arc-auto", "strict", "arc-native"}:
-        raise SystemExit(f"unknown score profile: {value!r}; expected proxy, arc-auto, strict, or arc-native")
+    if profile not in {"proxy", "manual-strict"}:
+        raise SystemExit(f"unknown score profile: {value!r}; expected proxy or manual-strict")
     return profile
 
 
+def parse_model_list(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
 def profile_notes(profile: str) -> list[str]:
-    if profile == "arc-native":
+    if profile == "manual-strict":
         return [
-            "ARC-native profile uses the strict two-reviewer/disagreement-adjudication protocol with a canonical ARC-style audit prompt.",
-            "It remains implemented by this adapter unless you use the separate `judge --judge-command` path to call an external native judge.",
-        ]
-    if profile == "strict":
-        return [
-            "Strict profile uses independent reviewers and disagreement adjudication.",
-            "Use this profile for paper-facing comparisons; it is slower and more expensive than proxy.",
-        ]
-    if profile == "arc-auto":
-        return [
-            "ARC-auto profile approximates ARC-Bench's automatic two-round LLM judge.",
-            "It is useful for regression testing but is not a substitute for strict two-reviewer evaluation.",
+            "Manual-strict profile follows ARC-Bench's manual strict audit contract: independent reviewers, per-leaf disagreement detection, and adjudication.",
+            "It is implemented by this adapter with the bundled manual_strict_audit_prompt; use `native-score` when you need AutoResearchClaw scripts/judge.py.",
         ]
     return [
         "Proxy profile is a lightweight internal two-round scorer for development regression.",
@@ -1368,7 +1407,8 @@ def extract_number_claims(text: str, *, limit: int = 24) -> list[str]:
 
 def score_submission_strict(
     *,
-    client: Any,
+    clients: list[Any],
+    adjudicator_client: Any,
     manifest: dict[str, Any],
     rubric: dict[str, Any],
     prepared_dir: Path,
@@ -1376,15 +1416,17 @@ def score_submission_strict(
     output_dir: Path,
     artifacts: dict[str, Any],
     leaves: list[dict[str, Any]],
-    reviewer_count: int,
     disagreement_threshold: float,
-    score_profile: str = "strict",
+    score_profile: str = "manual-strict",
 ) -> dict[str, Any]:
-    reviewer_count = max(1, min(int(reviewer_count or 2), 3))
+    clients = clients[:3]
+    if not clients:
+        raise SystemExit("manual-strict requires at least one reviewer client")
+    reviewer_count = len(clients)
     disagreement_threshold = max(0.0, float(disagreement_threshold))
     reviewers: list[dict[str, Any]] = []
     all_warnings: list[str] = []
-    for index in range(reviewer_count):
+    for index, client in enumerate(clients):
         reviewer_id = chr(ord("A") + index)
         reviewer = run_strict_reviewer(
             client=client,
@@ -1403,7 +1445,7 @@ def score_submission_strict(
     adjudication: dict[str, Any] = {"leaf_grades": [], "raw_round": {}, "warnings": []}
     if disagreements:
         adjudication = run_strict_adjudication(
-            client=client,
+            client=adjudicator_client,
             manifest=manifest,
             leaves=leaves,
             artifacts=artifacts,
@@ -1438,7 +1480,7 @@ def score_submission_strict(
         "backend": "llm",
         "scoring_profile": score_profile,
         "profile_notes": profile_notes(score_profile),
-        "prompt_version": "simple_ar_arc_strict_score_v3",
+        "prompt_version": "arc_manual_strict_audit_prompt+simple_ar_inputs_v1",
         "topic_id": manifest.get("id"),
         "title": manifest.get("title"),
         "prepared_dir": str(prepared_dir),
@@ -1458,7 +1500,9 @@ def score_submission_strict(
         "reviewers": summarize_reviewer_results(reviewers),
         "disagreements": disagreements,
         "adjudication": adjudication,
-        "model": client.model,
+        "model": ",".join(str(getattr(client, "model", "")) for client in clients),
+        "reviewer_models": [str(getattr(client, "model", "")) for client in clients],
+        "adjudicator_model": str(getattr(adjudicator_client, "model", "")),
         "scored_at": time.time(),
     }
     write_json(output_dir / "judge_result.json", result)
@@ -1476,47 +1520,25 @@ def run_strict_reviewer(
     reviewer_id: str,
 ) -> dict[str, Any]:
     manifest_context = build_manifest_context(manifest)
-    code_leaves = [leaf for leaf in leaves if is_code_development_leaf(leaf)]
-    result_leaves = [leaf for leaf in leaves if not is_code_development_leaf(leaf)]
-    leaf_grades: list[dict[str, Any]] = []
-    raw_rounds: dict[str, Any] = {}
-    warnings_: list[str] = []
     system = strict_score_system_prompt(reviewer_id)
-    if code_leaves:
-        prompt = strict_prompt_addendum(build_code_round_prompt(manifest_context, code_leaves, artifacts), artifacts)
-        raw, grades, round_warnings = run_score_round(
-            client,
-            prompt,
-            code_leaves,
-            label=f"arc-bench-strict-reviewer-{reviewer_id.lower()}-code",
-            round_name=f"reviewer_{reviewer_id.lower()}_code",
-            raw_response_path=output_dir / f"reviewer_{reviewer_id.lower()}_code_response.json",
-            prompt_debug_path=output_dir / f"reviewer_{reviewer_id.lower()}_code_prompt.txt",
-            system_prompt_text=system,
-        )
-        raw_rounds["code"] = raw
-        leaf_grades.extend(grades)
-        warnings_.extend(round_warnings)
-    if result_leaves:
-        prompt = strict_prompt_addendum(build_results_round_prompt(manifest_context, result_leaves, artifacts), artifacts)
-        raw, grades, round_warnings = run_score_round(
-            client,
-            prompt,
-            result_leaves,
-            label=f"arc-bench-strict-reviewer-{reviewer_id.lower()}-results",
-            round_name=f"reviewer_{reviewer_id.lower()}_results",
-            raw_response_path=output_dir / f"reviewer_{reviewer_id.lower()}_results_response.json",
-            prompt_debug_path=output_dir / f"reviewer_{reviewer_id.lower()}_results_prompt.txt",
-            system_prompt_text=system,
-        )
-        raw_rounds["results"] = raw
-        leaf_grades.extend(grades)
-        warnings_.extend(round_warnings)
+    prompt = build_manual_strict_review_prompt(manifest_context, leaves, artifacts)
+    raw, leaf_grades, warnings_ = run_score_round(
+        client,
+        prompt,
+        leaves,
+        label=f"arc-bench-manual-strict-reviewer-{reviewer_id.lower()}",
+        round_name=f"reviewer_{reviewer_id.lower()}",
+        raw_response_path=output_dir / f"reviewer_{reviewer_id.lower()}_response.json",
+        prompt_debug_path=output_dir / f"reviewer_{reviewer_id.lower()}_prompt.txt",
+        system_prompt_text=system,
+    )
+    raw_rounds: dict[str, Any] = {"manual_strict": raw}
     leaf_grades = order_leaf_grades(leaf_grades, leaves)
     category_scores = compute_category_scores(leaf_grades)
     overall = compute_overall_score(leaf_grades)
     return {
         "reviewer_id": reviewer_id,
+        "model": str(getattr(client, "model", "")),
         "leaf_grades": leaf_grades,
         "category_scores": category_scores,
         "overall_score": overall,
@@ -1529,15 +1551,62 @@ def run_strict_reviewer(
 
 
 def strict_score_system_prompt(reviewer_id: str) -> str:
+    manual_prompt = load_manual_strict_audit_prompt()
     return (
-        score_system_prompt()
-        + f" You are strict reviewer {reviewer_id}. Work independently. "
-        "For each leaf, quote concrete evidence using file path + line number, JSON key path, metric name, or numeric value. "
-        "Do not give high scores for fluent prose alone. Code Development requires real executable implementation, not labels. "
-        "Code Execution requires completed runs, persisted artifacts, and coverage over required conditions/datasets/seeds/metrics. "
-        "Result Analysis receives double weight conceptually: verify that each conclusion is traceable to measured numbers and that limitations are honest. "
-        "If adapter-generated analysis is being scored, state whether the score relies on adapter-facing artifacts rather than original agent writeup. "
-        "Apply the strict audit contract: implementation correctness, number grounding, verdict-data consistency, coverage, and unfinished-run penalties."
+        f"{manual_prompt}\n\n"
+        f"You are independent reviewer {reviewer_id}. Work independently and do not assume another reviewer will fix your omissions. "
+        "Return valid JSON only. If the canonical prompt asks for `leaf_grades`, you may instead use the compact `grades` array requested by the user message; both represent the same per-leaf scores."
+    )
+
+
+def load_manual_strict_audit_prompt() -> str:
+    prompt_path = Path("AutoResearchClaw/experiments/arc_bench/scripts/prompts/manual_strict_audit_prompt.md")
+    if prompt_path.is_file():
+        return prompt_path.read_text(encoding="utf-8", errors="replace")
+    return score_system_prompt()
+
+
+def build_manual_strict_review_prompt(
+    manifest_context: str,
+    leaves: list[dict[str, Any]],
+    artifacts: dict[str, Any],
+) -> str:
+    result_payload = {
+        "paths": artifacts["paths"],
+        "experiment_summary": artifacts["experiment_summary"],
+        "metrics": artifacts["metrics"],
+        "claims": artifacts["claims"],
+    }
+    return (
+        "## Resolved ARC Cell Inputs\n"
+        "Use these resolved SimpleAutoResearch/ARC adapter paths as the per-cell file paths section required by the manual strict prompt.\n\n"
+        "## Topic Context / Manifest Digest\n"
+        f"{manifest_context}\n\n"
+        "## Rubric Leaves\n"
+        f"{format_leaves_for_prompt(leaves)}\n\n"
+        "## Artifact Paths\n"
+        f"{json.dumps(artifacts['paths'], ensure_ascii=False, indent=2)}\n\n"
+        "## Captured Execution Artifacts\n"
+        "```json\n"
+        f"{json.dumps(result_payload, ensure_ascii=False, indent=2, default=str)}\n"
+        "```\n\n"
+        "## Evidence Bundle Summary\n"
+        "```json\n"
+        f"{json.dumps(clip_data(artifacts.get('evidence_bundle') or {}, 26000), ensure_ascii=False, indent=2, default=str)}\n"
+        "```\n\n"
+        "## Leaf-Targeted Code Evidence\n"
+        "```json\n"
+        f"{json.dumps(clip_data(artifacts.get('leaf_code_evidence', {}), 32000), ensure_ascii=False, indent=2, default=str)}\n"
+        "```\n\n"
+        "## Final Agent-Produced Code With Line Numbers\n"
+        "```python\n"
+        f"{artifacts['code_text']}\n"
+        "```\n\n"
+        "## Agent Writeup / README\n"
+        f"{artifacts['writeup']}\n\n"
+        "Apply the manual strict prompt's procedure leaf-by-leaf. Cite concrete paths, line numbers, JSON keys, metric names, or measured values. "
+        "Do not reward fluent prose without artifact evidence. If a required artifact is missing from the provided bundle, treat it as absent rather than inferred.\n\n"
+        f"{score_output_instruction(leaves)}"
     )
 
 
@@ -1720,6 +1789,7 @@ def summarize_reviewer_results(reviewers: list[dict[str, Any]]) -> list[dict[str
     return [
         {
             "reviewer_id": row.get("reviewer_id"),
+            "model": row.get("model"),
             "overall_score": row.get("overall_score"),
             "results_only": row.get("results_only"),
             "category_scores": row.get("category_scores"),
@@ -2482,8 +2552,7 @@ def build_scoring_summary(
 
 def summarize_round_reasoning(raw_responses: dict[str, Any]) -> str:
     parts: list[str] = []
-    for name in ("code", "results"):
-        response = raw_responses.get(name)
+    for name, response in raw_responses.items():
         if isinstance(response, dict) and response.get("overall_reasoning"):
             parts.append(f"{name}: {response['overall_reasoning']}")
     return " ".join(parts)
@@ -2510,7 +2579,7 @@ def render_scorecard(result: dict[str, Any]) -> str:
     ]
     if result.get("analysis_source"):
         lines.append(f"- Analysis source: `{result.get('analysis_source')}`")
-    if result.get("scoring_profile") == "strict":
+    if result.get("scoring_profile") == "manual-strict":
         lines.extend(
             [
                 f"- Reviewers: `{summary.get('reviewer_count', 0)}`",

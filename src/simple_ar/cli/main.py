@@ -1248,7 +1248,12 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
     use_llm = False if args.no_llm else options.use_llm
     timeout = args.timeout if args.timeout != 60 else options.timeout_sec
     to_step = args.to_step or options.to_step
-    repair_rounds = args.repair_rounds if args.repair_rounds != 0 else options.repair_rounds
+    repair_rounds = args.repair_rounds if args.repair_rounds is not None else options.repair_rounds
+    planning_review_rounds = (
+        args.planning_review_rounds
+        if args.planning_review_rounds is not None
+        else options.planning_review_rounds
+    )
     max_files = args.max_files if args.max_files != 8 else options.max_files
     max_source_chars = (
         args.max_source_chars_per_file
@@ -1267,6 +1272,9 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
     llm_retry_attempts = args.llm_retry_attempts or options.llm_retry_attempts
     baseline_policy = args.baseline_policy or options.baseline_policy
     baseline_metrics_file = args.baseline_metrics_file or options.baseline_metrics_file
+    repair_context = args.repair_context or options.repair_context
+    use_repair_memory = False if args.no_repair_memory else options.use_repair_memory
+    contract_context = args.contract_context or options.contract_context
     inline_apply_proposed_edits = False
     inline_allow_large_edits = False
 
@@ -1312,9 +1320,12 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             ),
             allow_planning_fallback=allow_planning_fallback,
             planning_mode=planning_mode,
-            planning_review_rounds=options.planning_review_rounds,
+            planning_review_rounds=planning_review_rounds,
             llm_retry_attempts=llm_retry_attempts,
             repair_rounds=repair_rounds,
+            repair_context=repair_context,
+            use_repair_memory=use_repair_memory,
+            contract_context=contract_context,
             budget_profile=options.budget_profile,
             edit_budget_overrides=options.edit_budget_overrides,
             max_batches=options.max_batches,

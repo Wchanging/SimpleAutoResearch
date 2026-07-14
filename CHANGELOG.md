@@ -4,6 +4,34 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-07-12
+
+### Added
+
+- ARC-Bench batch runs now expose `--planning-review-rounds` for low-cost
+  planning-review ablations without editing per-topic TOML files.
+- ARC-Bench `summarize` now reports repair counts, execution attempts, repair
+  memory entries, and lightweight failure-type counts alongside score,
+  runtime, and token means.
+- ARC-Bench batch runner now has an `evidence` command that exports compact
+  paper-oriented repair/fidelity evidence summaries from an existing state file
+  without rerunning experiments.
+- SurveyBench batch summaries now support mixed scoring: `score-thorough/`
+  results are used first and missing topics can fall back to `score/`, with a
+  paper-style Outline / Content / Richness table rendered in the summary.
+- SurveyBench native evaluation command metadata is now written next to the
+  corresponding score output as `native_command.json` instead of accumulating
+  in a global `_native_commands/` directory.
+
+### Changed
+
+- Long-form report generation now carries per-section target words, minimum
+  citation counts, and subsection constraints into Writer/Reviewer prompts;
+  Abstract, Introduction, and Conclusion are no longer forced to contain nested
+  subsections.
+- Updated the experiment evidence-chain supplement with the latest mixed
+  SurveyBench results and the report-stage long-form upgrades.
+
 ## 2026-07-11
 
 ### Added

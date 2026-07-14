@@ -145,6 +145,9 @@ def execute_code_task(
     planning_review_rounds: int = 2,
     llm_retry_attempts: int = 1,
     repair_rounds: int = 0,
+    repair_context: str = "full",
+    use_repair_memory: bool = True,
+    contract_context: str = "full",
     budget_profile: str | None = None,
     edit_budget_overrides: dict[str, Any] | None = None,
     max_batches: int | None = None,
@@ -215,6 +218,14 @@ def execute_code_task(
             and repair before stopping or explicitly falling back.
         repair_rounds: Maximum repair proposals execute may create after a
             validation or benchmark failure. Proposals are never auto-applied.
+        repair_context: Repair-prompt ablation mode. ``full`` includes
+            structured diagnostic bundle fields; ``raw_logs_only`` omits them
+            from LLM repair context while leaving run artifacts intact.
+        use_repair_memory: Whether repair prompts should include previous
+            repair memory. Disable only for controlled ablations.
+        contract_context: Contract-prompt ablation mode. ``full`` propagates
+            the task contract; ``minimal`` keeps artifacts but passes a smaller
+            task-level view to model prompts.
         budget_profile: Optional edit budget profile passed to edit proposal
             normalization.
         edit_budget_overrides: Optional numeric budget overrides from config.
@@ -277,6 +288,9 @@ def execute_code_task(
             planning_review_rounds=planning_review_rounds,
             llm_retry_attempts=llm_retry_attempts,
             repair_rounds=repair_rounds,
+            repair_context=repair_context,
+            use_repair_memory=use_repair_memory,
+            contract_context=contract_context,
             implementation_provider=implementation_provider,
             implementation_agent_mode=implementation_agent_mode,
             implementation_allow_external_agent=implementation_allow_external_agent,
@@ -871,6 +885,9 @@ def _execute_greenfield_code_task(
     planning_review_rounds: int,
     llm_retry_attempts: int,
     repair_rounds: int,
+    repair_context: str,
+    use_repair_memory: bool,
+    contract_context: str,
     implementation_provider: str,
     implementation_agent_mode: str,
     implementation_allow_external_agent: bool,
@@ -950,6 +967,7 @@ def _execute_greenfield_code_task(
                 implementation_agent_binary=implementation_agent_binary,
                 implementation_agent_args=implementation_agent_args,
                 implementation_agent_timeout_sec=implementation_agent_timeout_sec,
+                contract_context=contract_context,
                 message_callback=message_callback,
             )
             _record(
@@ -983,6 +1001,8 @@ def _execute_greenfield_code_task(
                     repair_rounds=repair_rounds,
                     max_files=max_files,
                     max_generated_lines=max_generated_lines,
+                    use_repair_memory=use_repair_memory,
+                    contract_context=contract_context,
                     message_callback=message_callback,
                     summary="Repaired generated project after review failure and passed deterministic rereview.",
                 ):
@@ -1012,6 +1032,7 @@ def _execute_greenfield_code_task(
                     paths,
                     max_files=max_files,
                     max_generated_lines=max_generated_lines,
+                    contract_context=contract_context,
                 )
                 _record(steps, "review", "done", f"refreshed status {review.get('status', 'unknown')}")
             else:
@@ -1028,6 +1049,8 @@ def _execute_greenfield_code_task(
                     repair_rounds=repair_rounds,
                     max_files=max_files,
                     max_generated_lines=max_generated_lines,
+                    use_repair_memory=use_repair_memory,
+                    contract_context=contract_context,
                     message_callback=message_callback,
                     summary="Repaired existing generated project after review failure and passed deterministic rereview.",
                 ):
@@ -1111,6 +1134,9 @@ def _execute_greenfield_code_task(
                 repair_model=repair_model or model,
                 use_llm=use_llm,
                 max_generated_lines=max_generated_lines,
+                repair_context=repair_context,
+                use_repair_memory=use_repair_memory,
+                contract_context=contract_context,
                 message_callback=message_callback,
             )
             if not repaired:
@@ -1120,6 +1146,7 @@ def _execute_greenfield_code_task(
                 paths,
                 max_files=max_files,
                 max_generated_lines=max_generated_lines,
+                contract_context=contract_context,
             )
             _record(steps, "review", "done", f"post-run-repair status {review.get('status', 'unknown')}")
             if isinstance(review, dict) and review.get("status") == "failed":
@@ -1134,6 +1161,8 @@ def _execute_greenfield_code_task(
                     repair_rounds=repair_rounds,
                     max_files=max_files,
                     max_generated_lines=max_generated_lines,
+                    use_repair_memory=use_repair_memory,
+                    contract_context=contract_context,
                     message_callback=message_callback,
                     summary="Repaired generated project after run repair introduced review-blocking contract issues.",
                 ):
@@ -1493,6 +1522,8 @@ def _attempt_greenfield_review_repair(
     repair_rounds: int,
     max_files: int,
     max_generated_lines: int,
+    use_repair_memory: bool,
+    contract_context: str,
     message_callback: MessageCallback | None,
     summary: str,
 ) -> bool:
@@ -1509,6 +1540,8 @@ def _attempt_greenfield_review_repair(
         message_callback=message_callback,
         max_files=max_files,
         max_generated_lines=max_generated_lines,
+        use_repair_memory=use_repair_memory,
+        contract_context=contract_context,
     )
     _record(steps, "repair", "done", f"review repair {repair.get('status', 'unknown')}")
     made_changes = bool(repair.get("changed_files") or repair.get("regenerated_files"))
@@ -1523,6 +1556,7 @@ def _attempt_greenfield_review_repair(
         paths,
         max_files=max_files,
         max_generated_lines=max_generated_lines,
+        contract_context=contract_context,
     )
     _record(steps, "review", "done", f"status {review.get('status', 'unknown')}")
     if review.get("status") == "failed":
@@ -1578,6 +1612,9 @@ def _attempt_greenfield_run_repair(
     repair_model: str | None,
     use_llm: bool,
     max_generated_lines: int,
+    repair_context: str,
+    use_repair_memory: bool,
+    contract_context: str,
     message_callback: MessageCallback | None,
 ) -> bool:
     _emit(message_callback, "Analyzing generated project benchmark failure.")
@@ -1600,7 +1637,11 @@ def _attempt_greenfield_run_repair(
         )
         if part
     )
-    previous_context = task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
+    previous_context = (
+        task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
+        if use_repair_memory
+        else ""
+    )
     client = _greenfield_repair_client(
         paths.meta_dir,
         model=repair_model or model,
@@ -1623,9 +1664,10 @@ def _attempt_greenfield_run_repair(
         code_artifacts=_read_optional_dict(paths.meta_dir / "code_artifacts.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
         result_schema=_greenfield_result_schema_from_manifest(load_code_task_manifest(run_dir)),
-        contract=_greenfield_contract_for_review(paths),
+        contract=_contract_for_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         previous_repair_context=previous_context,
+        repair_context_mode=repair_context,
         client=client,
     )
     _record(steps, "repair", "done", f"run repair {repair.get('status', 'unknown')}")
@@ -1691,6 +1733,8 @@ def _repair_greenfield_review_failure(
     message_callback: MessageCallback | None,
     max_files: int,
     max_generated_lines: int,
+    use_repair_memory: bool,
+    contract_context: str,
 ) -> dict[str, Any]:
     review_path = paths.meta_dir / "review_report.json"
     review = read_json(review_path) if review_path.is_file() else {}
@@ -1698,7 +1742,11 @@ def _repair_greenfield_review_failure(
     repair_path = paths.meta_dir / "review_repair.json"
     manifest = load_code_task_manifest(run_dir)
     code_artifacts = _read_optional_dict(paths.meta_dir / "code_artifacts.json")
-    previous_context = task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
+    previous_context = (
+        task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
+        if use_repair_memory
+        else ""
+    )
     client = _greenfield_repair_client(
         paths.meta_dir,
         model=model,
@@ -1712,7 +1760,7 @@ def _repair_greenfield_review_failure(
         code_artifacts=code_artifacts,
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
         result_schema=_greenfield_result_schema_from_manifest(manifest),
-        contract=_greenfield_contract_for_review(paths),
+        contract=_contract_for_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         previous_repair_context=previous_context,
         client=client,
@@ -1771,6 +1819,7 @@ def _rerun_greenfield_review(
     *,
     max_files: int,
     max_generated_lines: int,
+    contract_context: str = "full",
 ) -> dict[str, Any]:
     manifest = load_code_task_manifest(run_dir)
     code_artifacts = _read_optional_dict(paths.meta_dir / "code_artifacts.json")
@@ -1779,7 +1828,7 @@ def _rerun_greenfield_review(
         code_artifacts=code_artifacts,
         result_schema=_greenfield_result_schema_from_manifest(manifest),
         resource_plan=_greenfield_resource_plan(paths, max_files=max_files, max_generated_lines=max_generated_lines),
-        contract=_greenfield_contract_for_review(paths),
+        contract=_contract_for_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         implementation_memory=_read_optional_dict(paths.task_dir / "memory" / "implementation_memory.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
@@ -1918,6 +1967,41 @@ def _greenfield_contract_for_review(paths: object) -> dict[str, Any]:
     save_task_contract(paths.meta_dir, contract)
     write_json(paths.meta_dir / "task_contract_coverage.json", contract_coverage(contract, architecture))
     return contract
+
+
+def _contract_for_prompt_context(contract: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
+    """Return the contract view passed to model prompts for ablations.
+
+    The durable ``task_contract.json`` remains unchanged.  ``minimal`` is only a
+    prompt-context variant for Plan-then-Code style ablations.
+    """
+
+    if mode != "minimal":
+        return dict(contract)
+    return {
+        "schema_version": str(contract.get("schema_version") or "code_task_contract.v1"),
+        "context_mode": "minimal",
+        "objective": str(contract.get("objective") or "")[:1200],
+        "task_text": str(contract.get("task_text") or contract.get("task") or "")[:6000],
+        "benchmark_command": str(contract.get("benchmark_command") or ""),
+        "success_criteria": _string_list_for_prompt(contract.get("success_criteria"), limit=8),
+        "constraints": _string_list_for_prompt(contract.get("constraints"), limit=8),
+        "note": (
+            "Ablation prompt view: full implementation/artifact/metric/analysis "
+            "contracts are intentionally omitted from model context."
+        ),
+    }
+
+
+def _string_list_for_prompt(value: object, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            result.append(text[:500])
+    return result[:limit]
 
 
 def _positive_int(value: object, default: int) -> int:

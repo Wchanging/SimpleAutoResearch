@@ -32,12 +32,16 @@ def mapping_list(value: Any, *, limit: int | None = None, tail: bool = False) ->
     return rows[-limit:] if tail else rows[:limit]
 
 
-def scalar_list(value: object) -> list[str]:
+def scalar_list(value: object, *, limit: int | None = None, tail: bool = False) -> list[str]:
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    return []
+        rows = [str(item).strip() for item in value if str(item).strip()]
+    elif isinstance(value, str) and value.strip():
+        rows = [value.strip()]
+    else:
+        rows = []
+    if limit is None:
+        return rows
+    return rows[-limit:] if tail else rows[:limit]
 
 
 def contains_any(value: str, needles: tuple[str, ...]) -> bool:

@@ -86,6 +86,7 @@ def generate_greenfield_code_task(
     llm_retry_attempts: int = 1,
     planning_mode: str = "tool_agent",
     planning_review_rounds: int = 2,
+    contract_context: str = "full",
     message_callback: MessageCallback | None = None,
 ) -> GreenfieldCodeTaskResult:
     """Generate a greenfield project inside a code-task workspace.
@@ -130,6 +131,7 @@ def generate_greenfield_code_task(
         )
     contract = finalize_task_contract(contract)
     save_task_contract(paths.meta_dir, contract)
+    prompt_contract = _contract_for_prompt_context(contract, mode=contract_context)
     result_schema = _result_schema_with_contract_metrics(result_schema, contract)
     resource_plan = _resource_plan(
         resource_decision,
@@ -170,7 +172,7 @@ def generate_greenfield_code_task(
     _emit(message_callback, "Planning greenfield project architecture.")
     planning_dir = paths.meta_dir / "planning"
     architecture, architecture_mode = build_architecture_plan(
-        contract=contract,
+        contract=prompt_contract,
         result_schema=result_schema,
         resource_plan=resource_plan,
         domain_profile=domain_profile,
@@ -197,6 +199,9 @@ def generate_greenfield_code_task(
             "entrypoint": benchmark_command,
             "planning_mode": planning_mode,
             "planning_review_rounds": planning_review_rounds,
+            "ablation": {
+                "contract_context": contract_context,
+            },
             "planning_dir": "code_task/meta/planning",
             "task_contract": "code_task/meta/task_contract.json",
             "models": {
@@ -217,7 +222,7 @@ def generate_greenfield_code_task(
     write_json(file_plan_path, file_plan_from_architecture(architecture))
 
     memory = initial_implementation_memory(
-        contract=contract,
+        contract=prompt_contract,
         architecture_plan=architecture,
         mode=architecture_mode,
     )
@@ -231,7 +236,7 @@ def generate_greenfield_code_task(
             project_dir=project_dir,
             provider=provider,
             agent_mode=implementation_agent_mode,
-            contract=contract,
+            contract=prompt_contract,
             result_schema=result_schema,
             architecture=architecture,
             memory=memory,
@@ -248,7 +253,7 @@ def generate_greenfield_code_task(
             project_dir=project_dir,
             architecture_plan=architecture,
             result_schema=result_schema,
-            contract=contract,
+            contract=prompt_contract,
             memory=memory,
             dependency_advice=dependency_advice,
             client=writer_client,
@@ -287,7 +292,7 @@ def generate_greenfield_code_task(
         code_artifacts=code_artifacts,
         result_schema=result_schema,
         resource_plan=resource_plan,
-        contract=contract,
+        contract=prompt_contract,
         dependency_advice=dependency_advice,
         implementation_memory=memory,
         architecture_plan=architecture,
@@ -387,6 +392,35 @@ def _contract_from_task(
         source=source,
         extra_contract=extra_contract,
     )
+
+
+def _contract_for_prompt_context(contract: dict[str, Any], *, mode: str) -> dict[str, Any]:
+    if mode != "minimal":
+        return dict(contract)
+    return {
+        "schema_version": contract.get("schema_version", "code_task_contract.v1"),
+        "context_mode": "minimal",
+        "objective": str(contract.get("objective") or "")[:1200],
+        "task_text": str(contract.get("task_text") or contract.get("task") or "")[:6000],
+        "benchmark_command": str(contract.get("benchmark_command") or ""),
+        "success_criteria": _string_list(contract.get("success_criteria"), limit=8),
+        "constraints": _string_list(contract.get("constraints"), limit=8),
+        "note": (
+            "Ablation prompt view: full implementation/artifact/metric/analysis "
+            "contracts are intentionally omitted from model context."
+        ),
+    }
+
+
+def _string_list(value: object, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            result.append(text[:500])
+    return result[:limit]
 
 
 def _result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:

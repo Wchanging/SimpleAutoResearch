@@ -648,6 +648,9 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | `[execute].planning_review_rounds` | standalone code-task 中 greenfield planning reviewer 可触发的最大回修轮数。默认 `2`；轻量 smoke example 可设为 `1`，大型服务器任务可按需调大。 |
 | `[execute].llm_retry_attempts` | work-plan、patch-plan、greenfield 架构规划和 greenfield 文件生成的 LLM 尝试次数；全部失败后才停止或显式 fallback。 |
 | `[execute].repair_rounds` | validation/benchmark 失败后最多生成几轮 bounded repair proposal；repair 仍需审核。 |
+| `[execute.ablation].repair_context` | 仅用于消融实验。`full` 使用结构化 failure diagnostics；`raw_logs_only` 在 repair prompt 中只保留原始日志和普通上下文，不注入 failure-graph bundle。 |
+| `[execute.ablation].use_repair_memory` | 仅用于消融实验。设为 `false` 时，repair prompt 不读取之前的 repair memory。 |
+| `[execute.ablation].contract_context` | 仅用于消融实验。`full` 使用完整 task contract prompt 视图；`minimal` 只给任务目标、任务文本、benchmark 命令和少量约束，适合近似 Plan-then-Code baseline。 |
 | `[execute].max_files` | plan/proposal/repair 步骤纳入 LLM 上下文的最大文件数。 |
 | `[execute].max_source_chars_per_file` | LLM 上下文中单个文件的 source snippet 字符预算。 |
 | `[execute].max_generated_lines` | greenfield 生成行数预算。省略时会回退到 `[resource].max_generated_lines`，再回退到保守默认值。 |
@@ -956,6 +959,11 @@ allow_large_edits = false
 allow_planning_fallback = false
 planning_review_rounds = 2
 llm_retry_attempts = 3
+
+[execute.ablation]
+repair_context = "full"       # full | raw_logs_only；普通任务保持 full
+use_repair_memory = true      # false 仅用于消融实验
+contract_context = "full"     # full | minimal；minimal 仅用于消融实验
 
 [models.code_task]
 planner = "gpt-4o-mini"
