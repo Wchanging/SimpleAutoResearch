@@ -345,6 +345,14 @@ def _add_summary_options(parser: argparse.ArgumentParser) -> None:
             "Which judge output to summarize. auto prefers native, then manual-strict, then legacy adapter judge."
         ),
     )
+    parser.add_argument(
+        "--failed-as-zero",
+        action="store_true",
+        help=(
+            "Include failed/unscored topics in score means as zero for Code Dev, "
+            "Code Exec, Result Analysis, and Overall. Useful for one-shot ablations."
+        ),
+    )
 
 
 def _run_command(args: argparse.Namespace) -> int:
@@ -647,7 +655,13 @@ def _summarize_command(args: argparse.Namespace) -> int:
     if not topics:
         _print("No topics selected for summary.")
         return 0
-    summary = _build_batch_summary(ctx, state, topics, judge_source=getattr(args, "judge_source", "auto"))
+    summary = _build_batch_summary(
+        ctx,
+        state,
+        topics,
+        judge_source=getattr(args, "judge_source", "auto"),
+        failed_as_zero=bool(getattr(args, "failed_as_zero", False)),
+    )
     json_path, md_path = _write_batch_summary(ctx, summary, output_prefix=getattr(args, "output_prefix", None))
     _print(render_batch_summary_markdown(summary))
     _print(f"\n[summary] wrote {_rel(ctx.repo_root, json_path)}")
@@ -2177,8 +2191,11 @@ def _build_batch_summary(
     topics: list[str],
     *,
     judge_source: str = "auto",
+    failed_as_zero: bool = False,
 ) -> dict[str, Any]:
     rows = [_build_summary_row(ctx, _topic_state(state, topic), judge_source=judge_source) for topic in topics]
+    if failed_as_zero:
+        rows = [_with_failed_zero_scores(row) for row in rows]
     scored_rows = [row for row in rows if _is_number(row.get("overall_score"))]
     usage_rows = [row for row in rows if _is_number(row.get("llm_total_tokens"))]
     duration_rows = [row for row in rows if _is_number(row.get("duration_sec"))]
@@ -2191,6 +2208,7 @@ def _build_batch_summary(
         "topic_count": len(rows),
         "completed_count": sum(1 for row in rows if row.get("status") == "completed"),
         "scored_count": len(scored_rows),
+        "zero_imputed_count": sum(1 for row in rows if row.get("score_imputed_zero") is True),
         "failed_count": sum(1 for row in rows if row.get("status") not in {"completed", "pending"}),
         "score_means": {
             "code_development": _mean(_score_values(scored_rows, "Code Development")),
@@ -2269,6 +2287,7 @@ def _build_batch_summary(
         "generated_at": _now(),
         "state_file": _rel(ctx.repo_root, ctx.state_file),
         "judge_source": judge_source,
+        "failed_as_zero": failed_as_zero,
         "topics": topics,
         "aggregate": aggregate,
         "rows": rows,
@@ -2335,7 +2354,44 @@ def _build_summary_row(ctx: RunnerContext, topic_state: TopicState, *, judge_sou
         "postprocess_llm_total_tokens": _first_number(postprocess_usage_totals.get("total_tokens")),
         **repair_stats,
     }
+    if not row.get("failure_type"):
+        row["failure_type"] = _fallback_failure_type(row)
     return row
+
+
+def _with_failed_zero_scores(row: dict[str, Any]) -> dict[str, Any]:
+    if _is_number(row.get("overall_score")):
+        return row
+    status = str(row.get("status") or "").strip()
+    if status in {"", "pending"}:
+        return row
+    out = dict(row)
+    out["code_development"] = 0.0
+    out["code_execution"] = 0.0
+    out["result_analysis"] = 0.0
+    out["overall_score"] = 0.0
+    out["score_imputed_zero"] = True
+    if not out.get("failure_type"):
+        out["failure_type"] = _fallback_failure_type(out)
+    return out
+
+
+def _fallback_failure_type(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "").strip().lower()
+    error = str(row.get("last_error") or "").strip()
+    signal = str(row.get("failure_signal") or error or status)
+    classified = _classify_failure_signal(signal)
+    if classified:
+        return classified
+    if status in {"execute_failed", "run_failed", "repair_failed"}:
+        return "execute_failed"
+    if status in {"score_failed", "native_score_failed"}:
+        return "score_failed"
+    if status in {"finalize_failed", "analysis_failed"}:
+        return "finalize_failed"
+    if status and status not in {"completed", "pending"}:
+        return status
+    return ""
 
 
 def _read_topic_stats(ctx: RunnerContext, topic_state: TopicState) -> dict[str, Any]:
@@ -2825,7 +2881,9 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
         f"- State file: `{summary.get('state_file', '')}`",
         f"- Generated at: `{summary.get('generated_at', '')}`",
         f"- Judge source: `{summary.get('judge_source', 'auto')}`",
+        f"- Failed-as-zero: `{bool(summary.get('failed_as_zero'))}`",
         f"- Topics: `{aggregate.get('topic_count', 0)}` total, `{aggregate.get('completed_count', 0)}` completed, `{aggregate.get('scored_count', 0)}` scored, `{aggregate.get('failed_count', 0)}` failed",
+        f"- Zero-imputed rows: `{aggregate.get('zero_imputed_count', 0)}`",
         "",
         "## Score Means",
         "",
