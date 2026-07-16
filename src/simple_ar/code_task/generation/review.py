@@ -31,7 +31,7 @@ from simple_ar.code_task.review_pipeline import (
 )
 
 
-GREENFIELD_REVIEW_CONTRACT_VERSION = 10
+GREENFIELD_REVIEW_CONTRACT_VERSION = 11
 _STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
     "types",
     "typing",
@@ -737,9 +737,13 @@ def _task_acceptance_findings(
     if "readme" in text and not _nonempty_file(project_dir / "README.md"):
         findings.append(
             _finding(
-                "blocking",
+                "warning",
                 "missing_required_artifact",
-                "Task requests a README, but generated_project/README.md is missing or empty.",
+                (
+                    "Task requests a README, but generated_project/README.md is missing or empty. "
+                    "This packaging gap should be penalized by review/judge, but it does not prevent "
+                    "benchmark execution."
+                ),
             )
         )
     expected_artifacts = [

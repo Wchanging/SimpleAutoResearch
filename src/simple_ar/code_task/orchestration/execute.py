@@ -82,6 +82,30 @@ EXECUTE_STEPS = (
     "repair",
 )
 
+GREENFIELD_RUNTIME_REVIEW_BLOCKERS = (
+    "unsafe",
+    "path_traversal",
+    "missing_entrypoint",
+    "missing_file",
+    "python_compile",
+    "syntax",
+    "stdlib_module_shadow",
+    "missing_local_api",
+    "import_error",
+    "module_not_found",
+    "nested_artifact_path_risk",
+    "network",
+    "shell",
+    "subprocess",
+    "credential",
+    "secret",
+    "home directory",
+    "resource",
+    "timeout",
+    "infinite",
+    "unbounded",
+)
+
 
 @dataclass(frozen=True)
 class ExecuteStepRecord:
@@ -148,6 +172,7 @@ def execute_code_task(
     repair_context: str = "full",
     use_repair_memory: bool = True,
     contract_context: str = "full",
+    review_gate: str = "strict",
     budget_profile: str | None = None,
     edit_budget_overrides: dict[str, Any] | None = None,
     max_batches: int | None = None,
@@ -226,6 +251,11 @@ def execute_code_task(
         contract_context: Contract-prompt ablation mode. ``full`` propagates
             the task contract; ``minimal`` keeps artifacts but passes a smaller
             task-level view to model prompts.
+        review_gate: Greenfield review gate mode. ``strict`` stops on any
+            blocking review finding. ``runtime`` records review findings but
+            only stops before execution for safety or direct executability
+            blockers such as unsafe paths, missing files, Python compile
+            failures, missing entrypoint, or resource-limit violations.
         budget_profile: Optional edit budget profile passed to edit proposal
             normalization.
         edit_budget_overrides: Optional numeric budget overrides from config.
@@ -247,6 +277,7 @@ def execute_code_task(
         raise ValueError("repair_rounds must be non-negative")
     if planning_review_rounds < 0:
         raise ValueError("planning_review_rounds must be non-negative")
+    review_gate = _normalize_review_gate(review_gate)
     if max_batches is not None and max_batches < 1:
         raise ValueError("max_batches must be at least 1 when provided")
     if cost_cap_usd is not None and cost_cap_usd < 0:
@@ -990,30 +1021,34 @@ def _execute_greenfield_code_task(
             )
             _record_review_report_findings(root, result.review_report_path)
             if result.review_status == "failed":
-                if not _attempt_greenfield_review_repair(
-                    root,
-                    paths,
-                    steps,
-                    model=model,
-                    reviewer_model=reviewer_model or model,
-                    repair_model=repair_model or model,
-                    use_llm=use_llm,
-                    repair_rounds=repair_rounds,
-                    max_files=max_files,
-                    max_generated_lines=max_generated_lines,
-                    use_repair_memory=use_repair_memory,
-                    contract_context=contract_context,
-                    message_callback=message_callback,
-                    summary="Repaired generated project after review failure and passed deterministic rereview.",
-                ):
-                    return _result(
+                if _greenfield_review_should_block(result.review_report_path, review_gate=review_gate):
+                    if not _attempt_greenfield_review_repair(
+                        root,
                         paths,
                         steps,
-                        "review_failed",
-                        "Review code_task/meta/review_report.json before validation or execution.",
-                    )
-    if _stop_after("work-plan", to_step):
-        return _result(paths, steps, "stop_point", "Stopped after greenfield generation as requested.")
+                        model=model,
+                        reviewer_model=reviewer_model or model,
+                        repair_model=repair_model or model,
+                        use_llm=use_llm,
+                        repair_rounds=repair_rounds,
+                        max_files=max_files,
+                        max_generated_lines=max_generated_lines,
+                        use_repair_memory=use_repair_memory,
+                        contract_context=contract_context,
+                        message_callback=message_callback,
+                        summary="Repaired generated project after review failure and passed deterministic rereview.",
+                    ):
+                        return _result(
+                            paths,
+                            steps,
+                            "review_failed",
+                            "Review code_task/meta/review_report.json before validation or execution.",
+                        )
+                else:
+                    _emit(message_callback, "Generated project review has non-runtime blockers; continuing to validation/run.")
+                    _record(steps, "review-gate", "warning", "review gate runtime mode allowed benchmark execution")
+        if _stop_after("work-plan", to_step):
+            return _result(paths, steps, "stop_point", "Stopped after greenfield generation as requested.")
 
     for skipped_step in ("batch", "plan", "propose-edits", "apply-edits"):
         if _should_run(skipped_step, to_step):
@@ -1038,28 +1073,32 @@ def _execute_greenfield_code_task(
             else:
                 _record(steps, "review", "skipped", "greenfield review_report.json is current")
             if isinstance(review, dict) and review.get("status") == "failed":
-                if not _attempt_greenfield_review_repair(
-                    root,
-                    paths,
-                    steps,
-                    model=model,
-                    reviewer_model=reviewer_model or model,
-                    repair_model=repair_model or model,
-                    use_llm=use_llm,
-                    repair_rounds=repair_rounds,
-                    max_files=max_files,
-                    max_generated_lines=max_generated_lines,
-                    use_repair_memory=use_repair_memory,
-                    contract_context=contract_context,
-                    message_callback=message_callback,
-                    summary="Repaired existing generated project after review failure and passed deterministic rereview.",
-                ):
-                    return _result(
+                if _greenfield_review_should_block(review, review_gate=review_gate):
+                    if not _attempt_greenfield_review_repair(
+                        root,
                         paths,
                         steps,
-                        "review_failed",
-                        "Review code_task/meta/review_report.json before validation or execution.",
-                    )
+                        model=model,
+                        reviewer_model=reviewer_model or model,
+                        repair_model=repair_model or model,
+                        use_llm=use_llm,
+                        repair_rounds=repair_rounds,
+                        max_files=max_files,
+                        max_generated_lines=max_generated_lines,
+                        use_repair_memory=use_repair_memory,
+                        contract_context=contract_context,
+                        message_callback=message_callback,
+                        summary="Repaired existing generated project after review failure and passed deterministic rereview.",
+                    ):
+                        return _result(
+                            paths,
+                            steps,
+                            "review_failed",
+                            "Review code_task/meta/review_report.json before validation or execution.",
+                        )
+                else:
+                    _emit(message_callback, "Generated project review has non-runtime blockers; continuing to validation/run.")
+                    _record(steps, "review-gate", "warning", "review gate runtime mode allowed benchmark execution")
         elif dry_run:
             return _dry_result(paths, steps, "review", "review generated project")
         else:
@@ -1874,6 +1913,55 @@ def _record_review_report_findings(run_dir: Path, report_path: Path) -> None:
                 "source": row.get("source", "greenfield-reviewer"),
             },
         )
+
+
+def _normalize_review_gate(value: object) -> str:
+    text = str(value or "strict").strip().lower().replace("-", "_")
+    aliases = {
+        "": "strict",
+        "strict": "strict",
+        "full": "strict",
+        "quality": "strict",
+        "runtime": "runtime",
+        "run": "runtime",
+        "execution": "runtime",
+        "safety": "runtime",
+        "safety_only": "runtime",
+        "runtime_only": "runtime",
+        "nonblocking": "runtime",
+        "soft": "runtime",
+    }
+    normalized = aliases.get(text)
+    if normalized is None:
+        raise ValueError("review_gate must be `strict` or `runtime`")
+    return normalized
+
+
+def _greenfield_review_should_block(review_or_path: Mapping[str, Any] | Path, *, review_gate: str) -> bool:
+    review = read_json(review_or_path) if isinstance(review_or_path, Path) else dict(review_or_path)
+    if not isinstance(review, dict) or review.get("status") != "failed":
+        return False
+    if review_gate == "strict":
+        return True
+    if review_gate != "runtime":
+        return True
+    findings = review.get("findings")
+    if not isinstance(findings, list):
+        return True
+    blocking = [row for row in findings if isinstance(row, dict) and str(row.get("severity") or "") == "blocking"]
+    if not blocking:
+        return False
+    return any(_review_finding_blocks_runtime(row) for row in blocking)
+
+
+def _review_finding_blocks_runtime(finding: Mapping[str, Any]) -> bool:
+    text = " ".join(
+        str(finding.get(key) or "")
+        for key in ("category", "summary", "evidence", "recommendation")
+    ).lower()
+    if not text.strip():
+        return True
+    return any(marker in text for marker in GREENFIELD_RUNTIME_REVIEW_BLOCKERS)
 
 
 def _greenfield_run_repair_available(run_dir: Path, repair_rounds: int) -> bool:

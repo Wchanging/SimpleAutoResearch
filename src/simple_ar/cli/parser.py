@@ -519,6 +519,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     code_task_execute.add_argument(
+        "--review-gate",
+        choices=("strict", "runtime"),
+        default=None,
+        help=(
+            "Greenfield review gate mode. `strict` blocks on all blocking review findings; "
+            "`runtime` only blocks safety/direct executability issues and lets judge score packaging/report gaps."
+        ),
+    )
+    code_task_execute.add_argument(
         "--baseline-policy",
         choices=("auto", "run", "skip", "provided", "none"),
         default=None,

@@ -1275,6 +1275,7 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
     repair_context = args.repair_context or options.repair_context
     use_repair_memory = False if args.no_repair_memory else options.use_repair_memory
     contract_context = args.contract_context or options.contract_context
+    review_gate = args.review_gate or options.review_gate
     inline_apply_proposed_edits = False
     inline_allow_large_edits = False
 
@@ -1326,6 +1327,7 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             repair_context=repair_context,
             use_repair_memory=use_repair_memory,
             contract_context=contract_context,
+            review_gate=review_gate,
             budget_profile=options.budget_profile,
             edit_budget_overrides=options.edit_budget_overrides,
             max_batches=options.max_batches,

@@ -318,6 +318,15 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Ablation passthrough for code-task prompt contract context.",
     )
+    parser.add_argument(
+        "--review-gate",
+        choices=("strict", "runtime"),
+        default=None,
+        help=(
+            "Ablation passthrough for greenfield review gating. `runtime` lets "
+            "non-runtime review blockers proceed to validation/run."
+        ),
+    )
 
 
 def _add_summary_options(parser: argparse.ArgumentParser) -> None:
@@ -712,6 +721,7 @@ class RunnerContext:
     repair_context: str | None = None
     use_repair_memory: bool = True
     contract_context: str | None = None
+    review_gate: str | None = None
     arc_root: Path | None = None
 
 
@@ -738,6 +748,7 @@ def _context_from_args(args: argparse.Namespace) -> RunnerContext:
         repair_context=getattr(args, "repair_context", None),
         use_repair_memory=not bool(getattr(args, "no_repair_memory", False)),
         contract_context=getattr(args, "contract_context", None),
+        review_gate=getattr(args, "review_gate", None),
         arc_root=(_abs(repo_root, args.arc_root) if getattr(args, "arc_root", None) else None),
     )
 
@@ -838,6 +849,8 @@ def _run_topic(
         execute_cmd.append("--no-repair-memory")
     if ctx.contract_context:
         execute_cmd.extend(["--contract-context", ctx.contract_context])
+    if ctx.review_gate:
+        execute_cmd.extend(["--review-gate", ctx.review_gate])
     execute_cmd.append("--yes")
     execute_result = _run_logged(
         execute_cmd,

@@ -123,6 +123,7 @@ class ExecuteAblationSection(_ConfigModel):
     repair_context: str | None = None
     use_repair_memory: bool | None = None
     contract_context: str | None = None
+    review_gate: str | None = None
 
 
 class ImplementationSection(_ConfigModel):
@@ -261,6 +262,7 @@ class CodeTaskExecuteOptions:
     repair_context: str
     use_repair_memory: bool
     contract_context: str
+    review_gate: str
     implementation_provider: str
     implementation_agent_mode: str
     implementation_allow_external_agent: bool
@@ -428,6 +430,7 @@ def load_code_task_execute_options(
             default=True,
         ),
         contract_context=_contract_context_mode(ablation.contract_context),
+        review_gate=_review_gate_mode(ablation.review_gate),
         implementation_provider=_config_string(implementation.provider) or "local",
         implementation_agent_mode=_config_string(implementation.agent_mode),
         implementation_allow_external_agent=_resolve_bool(
@@ -781,6 +784,17 @@ def _contract_context_mode(value: str | None) -> str:
         return "minimal"
     raise CodeTaskConfigError(
         "Unsupported [execute.ablation].contract_context. Expected `full` or `minimal`."
+    )
+
+
+def _review_gate_mode(value: str | None) -> str:
+    text = (_config_string(value) or "strict").lower().replace("-", "_")
+    if text in {"strict", "full", "quality"}:
+        return "strict"
+    if text in {"runtime", "run", "execution", "safety", "safety_only", "runtime_only", "soft", "nonblocking"}:
+        return "runtime"
+    raise CodeTaskConfigError(
+        "Unsupported [execute.ablation].review_gate. Expected `strict` or `runtime`."
     )
 
 
