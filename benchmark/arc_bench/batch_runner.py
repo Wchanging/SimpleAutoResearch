@@ -302,6 +302,12 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         help="Override code-task --planning-review-rounds for every execute call; omit to keep each TOML default.",
     )
     parser.add_argument(
+        "--planning-mode",
+        choices=("tool_agent", "compact"),
+        default=None,
+        help="Override code-task --planning-mode for every execute call; omit to keep each TOML default.",
+    )
+    parser.add_argument(
         "--repair-context",
         choices=("full", "raw_logs_only"),
         default=None,
@@ -325,6 +331,15 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         help=(
             "Ablation passthrough for greenfield review gating. `runtime` lets "
             "non-runtime review blockers proceed to validation/run."
+        ),
+    )
+    parser.add_argument(
+        "--skip-any-result",
+        action="store_true",
+        help=(
+            "Skip topics that already have a terminal state, including failures. "
+            "Use this for one-shot ablations where failed topics count as results "
+            "and only interrupted/pending topics should continue."
         ),
     )
 
@@ -376,6 +391,9 @@ def _run_command(args: argparse.Namespace) -> int:
 
     for topic in topics:
         current = _topic_state(state, topic)
+        if args.skip_any_result and not args.force and _state_has_terminal_result(current):
+            _print(f"[skip] {topic}: existing terminal result ({current.status})")
+            continue
         if current.status == "completed" and not args.force:
             if _completed_state_still_valid(
                 ctx,
@@ -438,18 +456,21 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
     state = _load_state(ctx.state_file)
     _print(f"[state] {ctx.state_file}")
     candidate_topics = _resolve_topics(args, ctx.prepared_root)
-    topics = [
-        topic
-        for topic in candidate_topics
+    topics: list[str] = []
+    for topic in candidate_topics:
+        current = _topic_state(state, topic)
+        if getattr(args, "skip_any_result", False) and _state_has_terminal_result(current):
+            _print(f"[skip] {topic}: existing terminal result ({current.status})")
+            continue
         if _unfinished_or_stale_completed(
             ctx,
-            _topic_state(state, topic),
+            current,
             require_analysis=args.analyze,
             require_score=args.score,
             require_native_score=args.native_score,
             score_profile=args.score_profile,
-        )
-    ]
+        ):
+            topics.append(topic)
 
     if not topics:
         _print("No unfinished topics found.")
@@ -718,6 +739,7 @@ class RunnerContext:
     strict_adjudicator_api: str | None = None
     repair_rounds: int | None = None
     planning_review_rounds: int | None = None
+    planning_mode: str | None = None
     repair_context: str | None = None
     use_repair_memory: bool = True
     contract_context: str | None = None
@@ -745,6 +767,7 @@ def _context_from_args(args: argparse.Namespace) -> RunnerContext:
         strict_adjudicator_api=getattr(args, "strict_adjudicator_api", None),
         repair_rounds=getattr(args, "repair_rounds", None),
         planning_review_rounds=getattr(args, "planning_review_rounds", None),
+        planning_mode=getattr(args, "planning_mode", None),
         repair_context=getattr(args, "repair_context", None),
         use_repair_memory=not bool(getattr(args, "no_repair_memory", False)),
         contract_context=getattr(args, "contract_context", None),
@@ -841,6 +864,8 @@ def _run_topic(
         execute_cmd.extend(["--repair-rounds", str(repair_rounds)])
     if ctx.planning_review_rounds is not None:
         execute_cmd.extend(["--planning-review-rounds", str(ctx.planning_review_rounds)])
+    if ctx.planning_mode:
+        execute_cmd.extend(["--planning-mode", ctx.planning_mode])
     if ctx.llm_retry_attempts > 0:
         execute_cmd.extend(["--llm-retry-attempts", str(ctx.llm_retry_attempts)])
     if ctx.repair_context:
@@ -1904,6 +1929,15 @@ def _unfinished_or_stale_completed(
         require_native_score=require_native_score,
         score_profile=score_profile,
     )
+
+
+def _state_has_terminal_result(state: TopicState) -> bool:
+    status = (state.status or "").strip().lower()
+    if status in {"", "pending", "running"}:
+        return False
+    if status == "completed":
+        return True
+    return bool(state.run_dir or state.output_dir or state.last_error or state.logs or state.commands)
 
 
 def _scorable_state_exists(ctx: RunnerContext, state: TopicState) -> bool:
