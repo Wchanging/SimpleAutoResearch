@@ -2240,10 +2240,14 @@ def _build_batch_summary(
     judge_source: str = "auto",
     failed_as_zero: bool = False,
 ) -> dict[str, Any]:
-    rows = [_build_summary_row(ctx, _topic_state(state, topic), judge_source=judge_source) for topic in topics]
+    raw_rows = [_build_summary_row(ctx, _topic_state(state, topic), judge_source=judge_source) for topic in topics]
+    zero_rows = [_with_failed_zero_scores(row) for row in raw_rows]
+    rows = raw_rows
     if failed_as_zero:
-        rows = [_with_failed_zero_scores(row) for row in rows]
+        rows = zero_rows
     scored_rows = [row for row in rows if _is_number(row.get("overall_score"))]
+    scored_raw_rows = [row for row in raw_rows if _is_number(row.get("overall_score"))]
+    scored_zero_rows = [row for row in zero_rows if _is_number(row.get("overall_score"))]
     usage_rows = [row for row in rows if _is_number(row.get("llm_total_tokens"))]
     duration_rows = [row for row in rows if _is_number(row.get("duration_sec"))]
     postprocess_duration_rows = [row for row in rows if _is_number(row.get("postprocess_duration_sec"))]
@@ -2263,6 +2267,25 @@ def _build_batch_summary(
             "result_analysis": _mean(_score_values(scored_rows, "Result Analysis")),
             "overall": _mean([row.get("overall_score") for row in scored_rows]),
         },
+        "score_means_scored": {
+            "code_development": _mean(_score_values(scored_raw_rows, "Code Development")),
+            "code_execution": _mean(_score_values(scored_raw_rows, "Code Execution")),
+            "result_analysis": _mean(_score_values(scored_raw_rows, "Result Analysis")),
+            "overall": _mean([row.get("overall_score") for row in scored_raw_rows]),
+        },
+        "score_means_failed_zero": {
+            "code_development": _mean(_score_values(scored_zero_rows, "Code Development")),
+            "code_execution": _mean(_score_values(scored_zero_rows, "Code Execution")),
+            "result_analysis": _mean(_score_values(scored_zero_rows, "Result Analysis")),
+            "overall": _mean([row.get("overall_score") for row in scored_zero_rows]),
+        },
+        "completion_rate": round(
+            sum(1 for row in raw_rows if row.get("status") == "completed") / len(raw_rows),
+            4,
+        )
+        if raw_rows
+        else None,
+        "scored_rate": round(len(scored_raw_rows) / len(raw_rows), 4) if raw_rows else None,
         "runtime_means_sec": {
             "total": _mean([row.get("duration_sec") for row in duration_rows]),
             "postprocess": _mean([row.get("postprocess_duration_sec") for row in postprocess_duration_rows]),
@@ -3003,6 +3026,12 @@ def _write_evidence_summary(
 def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
     aggregate = summary.get("aggregate") if isinstance(summary.get("aggregate"), dict) else {}
     score = aggregate.get("score_means") if isinstance(aggregate.get("score_means"), dict) else {}
+    score_scored = aggregate.get("score_means_scored") if isinstance(aggregate.get("score_means_scored"), dict) else score
+    score_failed_zero = (
+        aggregate.get("score_means_failed_zero")
+        if isinstance(aggregate.get("score_means_failed_zero"), dict)
+        else score
+    )
     runtime = aggregate.get("runtime_means_sec") if isinstance(aggregate.get("runtime_means_sec"), dict) else {}
     usage_means = aggregate.get("llm_usage_means") if isinstance(aggregate.get("llm_usage_means"), dict) else {}
     usage_totals = aggregate.get("llm_usage_totals") if isinstance(aggregate.get("llm_usage_totals"), dict) else {}
@@ -3026,17 +3055,23 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
         f"- State file: `{summary.get('state_file', '')}`",
         f"- Generated at: `{summary.get('generated_at', '')}`",
         f"- Judge source: `{summary.get('judge_source', 'auto')}`",
-        f"- Failed-as-zero: `{bool(summary.get('failed_as_zero'))}`",
         f"- Topics: `{aggregate.get('topic_count', 0)}` total, `{aggregate.get('completed_count', 0)}` completed, `{aggregate.get('scored_count', 0)}` scored, `{aggregate.get('failed_count', 0)}` failed",
-        f"- Zero-imputed rows: `{aggregate.get('zero_imputed_count', 0)}`",
+        f"- Completion rate: `{_fmt_percent(aggregate.get('completion_rate'))}`; scored-only coverage: `{_fmt_percent(aggregate.get('scored_rate'))}`",
+        f"- Legacy score mode: `{'failed-as-zero' if bool(summary.get('failed_as_zero')) else 'scored-only'}`; zero-imputed rows available: `{aggregate.get('zero_imputed_count', 0)}`",
         "",
         "## Score Means",
         "",
-        "| Code Dev | Code Exec | Result Analysis | Overall |",
-        "| ---: | ---: | ---: | ---: |",
+        "| Averaging Mode | Included Rows | Code Dev | Code Exec | Result Analysis | Overall |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
         (
-            f"| {_fmt_score(score.get('code_development'))} | {_fmt_score(score.get('code_execution'))} | "
-            f"{_fmt_score(score.get('result_analysis'))} | {_fmt_score(score.get('overall'))} |"
+            f"| Scored-only | {_fmt_int(aggregate.get('scored_count'))} | "
+            f"{_fmt_score(score_scored.get('code_development'))} | {_fmt_score(score_scored.get('code_execution'))} | "
+            f"{_fmt_score(score_scored.get('result_analysis'))} | {_fmt_score(score_scored.get('overall'))} |"
+        ),
+        (
+            f"| Failed-as-zero | {_fmt_int(aggregate.get('topic_count'))} | "
+            f"{_fmt_score(score_failed_zero.get('code_development'))} | {_fmt_score(score_failed_zero.get('code_execution'))} | "
+            f"{_fmt_score(score_failed_zero.get('result_analysis'))} | {_fmt_score(score_failed_zero.get('overall'))} |"
         ),
         "",
         "## Runtime And API Means",
@@ -3325,6 +3360,10 @@ def _fmt_int(value: Any) -> str:
 
 def _fmt_cost(value: Any) -> str:
     return f"${float(value):.4f}" if _is_number(value) and float(value) else "-"
+
+
+def _fmt_percent(value: Any) -> str:
+    return f"{float(value) * 100:.1f}%" if _is_number(value) else "-"
 
 
 def _md_cell(value: Any) -> str:
