@@ -2402,6 +2402,12 @@ def _build_summary_row(ctx: RunnerContext, topic_state: TopicState, *, judge_sou
         **repair_stats,
     }
     if not row.get("failure_type"):
+        diagnostic_signal = " ".join(
+            str(row.get(key) or "")
+            for key in ("failure_signal", "failure_cause", "review_blockers", "stderr_tail", "last_error", "status")
+        )
+        row["failure_type"] = _classify_failure_signal(diagnostic_signal)
+    if not row.get("failure_type"):
         row["failure_type"] = _fallback_failure_type(row)
     return row
 
@@ -2506,6 +2512,7 @@ def _repair_stats_from_run_dir(ctx: RunnerContext, run_dir: Path) -> dict[str, A
     failure_graph = _read_json_dict(failure_graph_path) if failure_graph_path else {}
     failure_signal = _failure_signal_from_graph(failure_graph)
     failure_type = _classify_failure_signal(failure_signal)
+    diagnostics = _failure_diagnostics_from_run_dir(run_dir, manifest, failure_signal=failure_signal)
     return {
         "source_run_dir": _rel(ctx.repo_root, run_dir),
         "repair_status": repair.get("status", "") if isinstance(repair.get("status"), str) else "",
@@ -2522,7 +2529,89 @@ def _repair_stats_from_run_dir(ctx: RunnerContext, run_dir: Path) -> dict[str, A
         "failure_type": failure_type,
         "failure_signal": failure_signal,
         "failure_graph": _rel(ctx.repo_root, failure_graph_path) if failure_graph_path else "",
+        **diagnostics,
     }
+
+
+def _failure_diagnostics_from_run_dir(run_dir: Path, manifest: dict[str, Any], *, failure_signal: str) -> dict[str, Any]:
+    manifest_status = str(manifest.get("status") or "")
+    benchmark = manifest.get("benchmark") if isinstance(manifest.get("benchmark"), dict) else {}
+    benchmark_status = str(benchmark.get("last_status") or "")
+    review_blockers = _review_blockers_from_run_dir(run_dir)
+    stderr_tail = _stderr_tail_from_run_dir(run_dir)
+    cause = (
+        _likely_cause_from_text(_read_text_file(run_dir / "code_task" / "run" / "patched" / "failure_analysis.md"))
+        or _likely_cause_from_text(_read_text_file(run_dir / "code_task" / "summary.md"))
+        or failure_signal
+        or stderr_tail
+        or review_blockers
+    )
+    stage = ""
+    if manifest_status == "review_failed":
+        stage = "review"
+    elif benchmark_status == "failed" or manifest_status == "failure_analyzed":
+        stage = "run"
+    elif manifest_status:
+        stage = manifest_status
+    return {
+        "failure_stage": stage,
+        "failure_cause": _compact_text(cause, limit=260) if cause else "",
+        "review_blockers": _compact_text(review_blockers, limit=260) if review_blockers else "",
+        "stderr_tail": _compact_text(stderr_tail, limit=260) if stderr_tail else "",
+    }
+
+
+def _likely_cause_from_text(text: str) -> str:
+    if not text:
+        return ""
+    marker = "## Likely Cause"
+    if marker in text:
+        tail = text.split(marker, 1)[1]
+        section = tail.split("\n## ", 1)[0]
+        return _compact_text(section.strip(), limit=260)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "strongest execution signal" in stripped.lower():
+            return _compact_text(stripped, limit=260)
+    return ""
+
+
+def _review_blockers_from_run_dir(run_dir: Path) -> str:
+    report = _read_json_dict(run_dir / "code_task" / "meta" / "review_report.json")
+    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    blockers: list[str] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        severity = str(finding.get("severity") or finding.get("level") or "").lower()
+        if severity != "blocking":
+            continue
+        category = str(finding.get("category") or "").strip()
+        summary = str(finding.get("summary") or finding.get("message") or finding.get("description") or "").strip()
+        if summary:
+            blockers.append(f"{category}: {summary}" if category else summary)
+        if len(blockers) >= 3:
+            break
+    if blockers:
+        return " | ".join(blockers)
+    summary = _read_text_file(run_dir / "code_task" / "summary.md")
+    lines = [line.strip("- ").strip() for line in summary.splitlines() if "`blocking`" in line]
+    return " | ".join(lines[:3])
+
+
+def _stderr_tail_from_run_dir(run_dir: Path) -> str:
+    candidates = [
+        run_dir / "code_task" / "run" / "patched" / "stderr.txt",
+        run_dir / "code_task" / "run" / "patched" / "attempts" / "attempt-001" / "stderr.txt",
+    ]
+    for path in candidates:
+        text = _read_text_file(path)
+        if not text:
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return _compact_text(" ".join(lines[-8:]), limit=260)
+    return ""
 
 
 def _execution_attempt_stats(manifest: dict[str, Any]) -> tuple[int, int, str]:
@@ -2717,6 +2806,15 @@ def _read_json_dict(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _read_text_file(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _command_durations(primary: Any, fallback: Any) -> dict[str, float]:
@@ -3005,6 +3103,31 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
         for name, count in failure_counts.items():
             lines.append(f"| {name} | {_fmt_int(count)} |")
         lines.append("")
+    diagnostic_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("status") != "completed"
+        and (row.get("failure_cause") or row.get("review_blockers") or row.get("stderr_tail"))
+    ]
+    if diagnostic_rows:
+        lines.extend(
+            [
+                "## Failure Diagnostics",
+                "",
+                "| Topic | Status | Stage | Failure Type | Likely Cause | Review Blockers |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for row in diagnostic_rows:
+            cause = row.get("failure_cause") or row.get("stderr_tail") or row.get("last_error") or ""
+            lines.append(
+                "| "
+                f"{_md_cell(row.get('topic', ''))} | {_md_cell(row.get('status', ''))} | "
+                f"{_md_cell(row.get('failure_stage', '') or '-')} | {_md_cell(row.get('failure_type', '') or '-')} | "
+                f"{_md_cell(cause)} | {_md_cell(row.get('review_blockers', '') or '-')} |"
+            )
+        lines.append("")
     lines.extend(
         [
         "## Topic Details",
@@ -3202,6 +3325,11 @@ def _fmt_int(value: Any) -> str:
 
 def _fmt_cost(value: Any) -> str:
     return f"${float(value):.4f}" if _is_number(value) and float(value) else "-"
+
+
+def _md_cell(value: Any) -> str:
+    text = _compact_text(str(value or ""), limit=220)
+    return text.replace("|", "\\|").replace("\n", " ").strip() or "-"
 
 
 def _abs(repo_root: Path, value: str | Path) -> Path:
