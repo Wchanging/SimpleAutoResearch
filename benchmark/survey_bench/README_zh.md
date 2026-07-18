@@ -75,8 +75,7 @@ uv run simple-ar run \
   --config benchmark/survey_bench/configs/topics/topic11-llm-based-multi-agent.toml
 ```
 
-topic 配置统一放在 `benchmark/survey_bench/configs/topics/`，每个 SurveyBench topic key 对应一个 TOML。当前配置使用 `gpt-5.1` 生成 SimpleAutoResearch survey；下面的
-SurveyBench 原生评测示例使用 `gpt-4o` 作为 judge，更接近论文对比设置。
+topic 配置统一放在 `benchmark/survey_bench/configs/topics/`，每个 SurveyBench topic key 对应一个 TOML。`topics/` 和 `topics-thorough/` 现在都使用 `gpt-4o` 生成 SimpleAutoResearch survey；下面的 SurveyBench 原生评测也使用 `gpt-4o`。因此，新运行采用生成与原生评测均为 `gpt-4o` 的单模型协议，更便于与原文实验设置作上下文对比。此前由其他模型生成的结果仍可作为开发记录，但不能在未重跑的情况下标注为该 `gpt-4o` 协议。
 默认 `topics/` 配置用于 balanced 迭代测试；`topics-thorough/` 配置会提高检索、read 和 report 预算，用于生成引用论文更多、篇幅更长、图表更多的正式 survey。
 
 这个配置默认使用内置 `survey_long` 模板，目标是生成更长、更面向读者需求的学术综述，而不是紧凑技术报告；同时会提高检索和 read 阶段预算，让单 topic 测试大致基于 20-30 篇论文展开，并为长 survey 开启确定性的 SVG 图示生成。报告阶段默认使用 `cost_profile = "balanced"` 和 `outline_strategy = "adaptive"`，让章节获得 topic-specific 目标和有界 source batches；只有最终高预算评测时才建议切换到 `cost_profile = "thorough"`。

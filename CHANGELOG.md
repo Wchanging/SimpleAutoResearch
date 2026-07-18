@@ -4,6 +4,15 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-07-18
+
+### Changed
+
+- SurveyBench standard and thorough topic configurations now use `gpt-4o` for
+  generation as well as the documented native content evaluation examples.
+  This establishes a clearly labelled paper-comparison protocol; historical
+  `gpt-5.1`-generated scores remain development results and are not relabelled.
+
 ## 2026-07-12
 
 ### Added

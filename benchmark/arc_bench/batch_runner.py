@@ -3057,7 +3057,7 @@ def render_batch_summary_markdown(summary: dict[str, Any]) -> str:
         f"- Judge source: `{summary.get('judge_source', 'auto')}`",
         f"- Topics: `{aggregate.get('topic_count', 0)}` total, `{aggregate.get('completed_count', 0)}` completed, `{aggregate.get('scored_count', 0)}` scored, `{aggregate.get('failed_count', 0)}` failed",
         f"- Completion rate: `{_fmt_percent(aggregate.get('completion_rate'))}`; scored-only coverage: `{_fmt_percent(aggregate.get('scored_rate'))}`",
-        f"- Legacy score mode: `{'failed-as-zero' if bool(summary.get('failed_as_zero')) else 'scored-only'}`; zero-imputed rows available: `{aggregate.get('zero_imputed_count', 0)}`",
+        f"- Legacy score mode: `{'failed-as-zero' if bool(summary.get('failed_as_zero')) else 'scored-only'}`; both scored-only and failed-as-zero means are reported below",
         "",
         "## Score Means",
         "",

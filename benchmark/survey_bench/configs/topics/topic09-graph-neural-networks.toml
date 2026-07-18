@@ -8,7 +8,7 @@ debug_artifacts = false
 
 [llm]
 enabled = true
-model = "gpt-5.1"
+model = "gpt-4o"
 workers = 2
 
 [search]

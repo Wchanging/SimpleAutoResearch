@@ -81,9 +81,12 @@ uv run simple-ar run \
 ```
 
 The topic configs live under `benchmark/survey_bench/configs/topics/`, one TOML
-per SurveyBench topic key. They use `gpt-5.1` for SimpleAutoResearch survey
-generation. Native SurveyBench evaluation examples below use `gpt-4o`, matching
-the paper-comparison setting more closely than smaller judge models.
+per SurveyBench topic key. Both `topics/` and `topics-thorough/` use `gpt-4o`
+for SimpleAutoResearch survey generation. Native SurveyBench evaluation examples
+also use `gpt-4o`, giving new runs a single-model generation-and-evaluation
+protocol that is easier to compare with the reported SurveyBench setting.
+Historical results generated with another model remain valid development
+artifacts, but must not be labelled as this `gpt-4o` protocol without rerunning.
 The default `topics/` configs are balanced for iteration. The
 `topics-thorough/` configs increase retrieval, read, and report budgets for
 longer surveys with more cited papers, figures, and tables.
