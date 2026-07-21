@@ -50,6 +50,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 | `--experiment-template NAME` | string | 实验模板，例如 `code_task_project`。 |
 | `--experiment-timeout N` | int | 实验子进程 timeout。 |
 | `--report-mode MODE` | enum | `auto`、`research_only` 或 `experiment`。 |
+| `--report-reviewer MODE` | choice | `llm` 或 `disabled`。`disabled` 会关闭 report reviewer/revision loop，但保留写作后的 audit。 |
 | `--no-llm` | flag | 尽可能使用 deterministic fallback，不调用 LLM。 |
 | `--offline-search` | flag | 跳过 live literature providers。 |
 | `--allow-fixture-fallback` | flag | live/cache 失败后允许 fixture metadata。 |
@@ -110,6 +111,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --to-stage report --re
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `--report-output-mode` | choice | `overwrite`、`archive` 或 `variant`。`variant` 会写入 `08-report/variants/<label>/`，不替换当前主报告。 |
+| `--report-reviewer` | choice | `llm` 或 `disabled`。用于在 resume 时覆盖 report reviewer/revision loop。 |
 | `--report-output-label` | string | report archive/variant 的可选目录标签。 |
 | `--overwrite-stage-artifacts` | flag | 关闭 `06-code` / `07-run` 重跑时的默认归档保护。 |
 

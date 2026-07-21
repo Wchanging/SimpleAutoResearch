@@ -9,7 +9,14 @@ from pathlib import Path
 from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
 from simple_ar.core.pipeline import Context
-from simple_ar.report.agent import run_report_agent
+from simple_ar.report.agent import (
+    _merge_completion_draft,
+    _merge_revision_draft,
+    _normalize_draft_response,
+    _outline_is_overly_template_like,
+    run_report_agent,
+)
+from simple_ar.report.assembler import apply_section_numbering
 from simple_ar.report.audit import build_report_audit
 from simple_ar.report.citations import (
     append_references_section as _append_references_section,
@@ -25,7 +32,7 @@ from simple_ar.report.citations import (
 from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.quality import build_report_quality
-from simple_ar.report.schema import ReportRuntimeConfig, ReportToolCall
+from simple_ar.report.schema import ReportRuntimeConfig, ReportSectionDraft, ReportSectionPlan, ReportToolCall
 from simple_ar.report.schema import ReportSectionReview
 from simple_ar.report.service import (
     _build_research_report,
@@ -35,10 +42,18 @@ from simple_ar.report.service import (
 )
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
+from simple_ar.report.survey import _build_taxonomy, enrich_survey_sections
 
 
 class _FakeReportLLM:
-    def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+    def ask_json(
+        self,
+        system: str,
+        user: str,
+        *,
+        label: str = "",
+        max_output_tokens: int | None = None,
+    ) -> dict[str, object]:
         section_id = _extract_prompt_value(user, "section_id") or "section"
         heading = _extract_prompt_value(user, "heading") or "Section"
         if "reviewer" in label:
@@ -74,12 +89,200 @@ class _FakeReportLLM:
         }
 
 
+class _TrackingReportLLM(_FakeReportLLM):
+    def __init__(self) -> None:
+        self.labels: list[str] = []
+
+    def ask_json(
+        self,
+        system: str,
+        user: str,
+        *,
+        label: str = "",
+        max_output_tokens: int | None = None,
+    ) -> dict[str, object]:
+        self.labels.append(label)
+        return super().ask_json(system, user, label=label, max_output_tokens=max_output_tokens)
+
+
 def _extract_prompt_value(prompt: str, key: str) -> str:
     match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', prompt)
     return match.group(1) if match else ""
 
 
 class ReportSafetyTests(unittest.TestCase):
+    def test_outline_template_copy_is_detected_without_rejecting_partial_overlap(self) -> None:
+        copied = [
+            {"heading": heading}
+            for heading in (
+                "Abstract",
+                "Introduction and Scope",
+                "Conceptual Foundations and Taxonomy",
+                "Methods and System Construction",
+                "Applications and Use Cases",
+                "Evaluation, Benchmarks, and Evidence Quality",
+                "Related Surveys and Positioning",
+                "Challenges and Future Directions",
+                "Conclusion",
+            )
+        ]
+        evidence_derived = [
+            {"heading": heading}
+            for heading in (
+                "Abstract",
+                "Introduction",
+                "Gaussian Representation and Optimization",
+                "Densification, Compression, and Rendering Variants",
+                "Novel-View Synthesis and Scene Reconstruction",
+                "Benchmark Protocols and Evaluation Trade-offs",
+                "Challenges and Future Directions",
+                "Conclusion",
+            )
+        ]
+
+        self.assertTrue(_outline_is_overly_template_like(copied))
+        self.assertFalse(_outline_is_overly_template_like(evidence_derived))
+
+    def test_writer_claim_status_does_not_invalidate_section_draft(self) -> None:
+        section = ReportSectionPlan(section_id="methods", heading="Methods", goal="Compare methods.")
+        normalized = _normalize_draft_response(
+            {
+                "section_id": "methods",
+                "heading": "Methods",
+                "status": "supported",
+                "draft_markdown": "Evidence-backed prose.",
+                "claims": [{"status": "supported", "claim": "A supported claim."}],
+            },
+            section,
+        )
+
+        self.assertEqual(normalized["status"], "drafted")
+        self.assertEqual(normalized["claims"][0]["status"], "supported")
+
+    def test_writer_normalizes_common_body_aliases_and_nested_draft(self) -> None:
+        section = ReportSectionPlan(section_id="methods", heading="Methods", goal="Compare methods.")
+        normalized = _normalize_draft_response(
+            {
+                "section": {
+                    "status": "supported",
+                    "content": "Evidence-backed prose [@P1].",
+                }
+            },
+            section,
+        )
+
+        self.assertEqual(normalized["section_id"], "methods")
+        self.assertEqual(normalized["status"], "drafted")
+        self.assertEqual(normalized["draft_markdown"], "Evidence-backed prose [@P1].")
+
+    def test_writer_normalizes_structured_open_questions_and_limitations(self) -> None:
+        section = ReportSectionPlan(section_id="methods", heading="Methods", goal="Compare methods.")
+        normalized = _normalize_draft_response(
+            {
+                "draft_markdown": "Evidence-backed prose [@P1].",
+                "open_questions": [
+                    {"question": "How stable is the conclusion?", "notes": "Across domains."},
+                ],
+                "limitations": [
+                    {"limitation": "Evidence is incomplete.", "notes": "No experiments."},
+                ],
+            },
+            section,
+        )
+
+        self.assertEqual(normalized["open_questions"], ["How stable is the conclusion?"])
+        self.assertEqual(normalized["limitations"], ["Evidence is incomplete."])
+
+    def test_completion_appends_new_prose_without_erasing_prior_draft(self) -> None:
+        previous = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown="Existing evidence synthesis [@P1].",
+            citations=["P1"],
+        )
+        completion = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown="Additional comparison and boundary condition [@P2].",
+            citations=["P2"],
+        )
+
+        merged = _merge_completion_draft(previous, completion)
+
+        self.assertIn("Existing evidence synthesis", merged.draft_markdown)
+        self.assertIn("Additional comparison", merged.draft_markdown)
+        self.assertEqual(merged.citations, ["P1", "P2"])
+
+    def test_completion_does_not_duplicate_a_full_replacement(self) -> None:
+        previous = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown="Existing evidence synthesis [@P1].",
+        )
+        replacement = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown="Existing evidence synthesis [@P1]. Expanded comparison [@P2].",
+        )
+
+        merged = _merge_completion_draft(previous, replacement)
+
+        self.assertEqual(merged.draft_markdown, replacement.draft_markdown)
+
+    def test_completion_strips_headings_but_preserves_added_evidence(self) -> None:
+        previous = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown="### Existing taxonomy\n\nExisting synthesis [@P1].",
+            citations=["P1"],
+        )
+        completion = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown="### Existing taxonomy\n\nAdditional comparison [@P2].",
+            citations=["P2"],
+        )
+
+        merged = _merge_completion_draft(previous, completion)
+
+        self.assertEqual(merged.draft_markdown.count("### Existing taxonomy"), 1)
+        self.assertIn("Additional comparison [@P2].", merged.draft_markdown)
+
+    def test_short_reviewer_revision_cannot_erase_substantive_draft(self) -> None:
+        previous = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown=" ".join(["Existing evidence."] * 100),
+            citations=["P1"],
+        )
+        revised = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown="Brief rewrite.",
+            citations=["P2"],
+        )
+
+        merged = _merge_revision_draft(previous, revised)
+
+        self.assertEqual(merged.draft_markdown, previous.draft_markdown)
+        self.assertEqual(merged.citations, ["P1", "P2"])
+
+    def test_substantive_reviewer_revision_replaces_prior_draft(self) -> None:
+        previous = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown=" ".join(["Existing evidence."] * 100),
+        )
+        revised = ReportSectionDraft(
+            section_id="methods",
+            heading="Methods",
+            draft_markdown=" ".join(["Revised evidence."] * 95),
+        )
+
+        merged = _merge_revision_draft(previous, revised)
+
+        self.assertEqual(merged.draft_markdown, revised.draft_markdown)
+
     def test_report_context_includes_nested_code_task_comparison(self) -> None:
         run_dir = Path(".tmp_tests") / "report-code-task-context"
         if run_dir.exists():
@@ -409,6 +612,49 @@ class ReportSafetyTests(unittest.TestCase):
             result.report_body.index("## Abstract / Executive Summary"),
             result.report_body.index("## Method Families"),
         )
+
+    def test_disabled_report_reviewer_skips_review_and_revision_calls(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=["Ada"],
+            abstract="A paper about agent systems.",
+            url="https://example.com/1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="research_only",
+            goal="# Goal\nStudy agents.",
+            problem="# Problem\nWhat evidence exists?",
+            search_meta={"source": "openalex", "status": "ok"},
+            synthesis="# Synthesis\nAgent workflows have roles.",
+            hypothesis="# Hypothesis\nRole separation may help.",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="- Known evidence [@paper-1].",
+        )
+        template = load_report_template_bundle(
+            report_mode="research_only",
+            config=ReportRuntimeConfig(template="survey"),
+            project_root=Path.cwd(),
+        )
+        client = _TrackingReportLLM()
+        result = run_report_agent(
+            client=client,
+            context=context,
+            template=template,
+            memory=initialize_report_memory(context=context, template=template),
+            config=ReportRuntimeConfig(template="survey", reviewer="disabled"),
+            gateway=ReportToolGateway(context),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.sections)
+        self.assertFalse(any("reviewer" in label or "reviser" in label for label in client.labels))
+        self.assertFalse(any(item.action.startswith("review") or item.action.startswith("revise") for item in result.iterations))
 
     def test_report_agent_can_refine_sections_over_source_batches(self) -> None:
         papers = [
@@ -851,6 +1097,173 @@ class ReportSafetyTests(unittest.TestCase):
         )
 
         self.assertTrue(any("pipeline residue" in error for error in errors))
+
+    def test_research_only_bounds_allow_academic_evidence_terms_in_prose(self) -> None:
+        report = (
+            "# Draft\n\n"
+            "## Method Families\n\n"
+            "Corrective methods can broaden search scope when initial retrieval "
+            "does not support an answer. The evidence summary should distinguish "
+            "source limitations from confirmed findings [@paper-1]."
+        )
+
+        errors = _report_bound_errors(
+            report,
+            search_meta={"source": "openalex", "status": "ok"},
+            plan={},
+            report_mode="research_only",
+            results_present=False,
+        )
+
+        self.assertFalse(any("pipeline residue" in error for error in errors))
+
+    def test_academic_section_numbering_preserves_unnumbered_front_and_back_matter(self) -> None:
+        rendered = apply_section_numbering(
+            """# Example Survey
+
+## Abstract
+
+Summary.
+
+## Introduction
+
+### Scope
+
+## Method Families
+
+### Retrieval Methods
+
+#### Dense Retrieval
+
+## References
+""",
+            mode="academic",
+        )
+
+        self.assertIn("## Abstract", rendered)
+        self.assertIn("## 1 Introduction", rendered)
+        self.assertIn("### 1.1 Scope", rendered)
+        self.assertIn("## 2 Method Families", rendered)
+        self.assertIn("### 2.1 Retrieval Methods", rendered)
+        self.assertIn("#### 2.1.1 Dense Retrieval", rendered)
+        self.assertIn("## References", rendered)
+
+    def test_taxonomy_keeps_coverage_checklist_out_of_organization_axes(self) -> None:
+        taxonomy = _build_taxonomy(
+            topic="Example Topic",
+            coverage_facets=["method_taxonomy", "datasets_benchmarks_and_evaluation"],
+            selected_papers=[
+                {
+                    "citation_key": "P1",
+                    "title": "A Benchmark for Example Topic",
+                    "abstract": "Evaluation metrics and datasets.",
+                    "role": "evaluation",
+                },
+                {
+                    "citation_key": "P2",
+                    "title": "A Survey of Example Topic",
+                    "abstract": "A survey and taxonomy.",
+                    "role": "related_survey",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            [row["label"] for row in taxonomy["coverage_facets"]],
+            ["Method Taxonomy", "Datasets Benchmarks And Evaluation"],
+        )
+        self.assertNotIn("Method Taxonomy", [row["label"] for row in taxonomy["facets"]])
+        self.assertNotIn("Datasets Benchmarks And Evaluation", [row["label"] for row in taxonomy["facets"]])
+
+    def test_survey_outline_fallback_restores_configured_source_budget(self) -> None:
+        papers = [
+            Paper(
+                id=f"paper-{index}",
+                title=f"Example Evidence {index}",
+                authors=[],
+                abstract="Example methods, evaluation, and applications evidence.",
+                url=f"https://example.com/paper-{index}",
+            )
+            for index in range(1, 13)
+        ]
+        context = build_report_context(
+            Context(Path("run"), "Example Topic", config={}),
+            report_mode="research_only",
+            goal="# Goal\nSynthesize the field.",
+            problem="# Problem\nWhat evidence is available?",
+            search_meta={},
+            synthesis="# Synthesis\nMethods and evaluation are both relevant.",
+            hypothesis="",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row() for paper in papers],
+            papers=papers,
+            research_evidence_summary="",
+            max_section_sources=0,
+        ).model_copy(
+            update={
+                "survey_contract": {
+                    "enabled": True,
+                    "outline_strategy": "adaptive",
+                    "section_source_budget": 8,
+                    "topic_terms": ["example", "methods", "evaluation"],
+                    "outline_plan": {
+                        "sections": [
+                            {
+                                "section_id": "methods",
+                                "heading": "Methods",
+                                "goal": "Compare method evidence.",
+                                "citation_keys": ["P1", "P2"],
+                                "target_words": 800,
+                                "min_citations": 3,
+                                "required": True,
+                            },
+                            {
+                                "section_id": "evaluation",
+                                "heading": "Evaluation",
+                                "goal": "Compare evaluation evidence.",
+                                "citation_keys": ["P3", "P4"],
+                                "target_words": 800,
+                                "min_citations": 3,
+                                "required": True,
+                            },
+                            {
+                                "section_id": "applications",
+                                "heading": "Applications",
+                                "goal": "Summarize applications.",
+                                "citation_keys": ["P5", "P6"],
+                                "target_words": 800,
+                                "min_citations": 3,
+                                "required": True,
+                            },
+                            {
+                                "section_id": "challenges",
+                                "heading": "Challenges",
+                                "goal": "Describe limitations and open problems.",
+                                "citation_keys": ["P7", "P8"],
+                                "target_words": 800,
+                                "min_citations": 3,
+                                "required": True,
+                            },
+                            {
+                                "section_id": "conclusion",
+                                "heading": "Conclusion",
+                                "goal": "Conclude the synthesis.",
+                                "citation_keys": ["P9", "P10"],
+                                "target_words": 400,
+                                "min_citations": 0,
+                                "required": True,
+                            },
+                        ]
+                    },
+                }
+            }
+        )
+
+        sections = enrich_survey_sections([], context=context)
+
+        self.assertEqual(len(sections), 5)
+        self.assertTrue(all(len(section.evidence_handles) == 8 for section in sections))
 
 
 if __name__ == "__main__":

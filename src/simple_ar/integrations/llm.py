@@ -233,7 +233,11 @@ class LLMClient:
             request["base_url"] = self._settings.base_url
         output_cap = None
         if self._settings.max_output_tokens is not None:
-            output_cap = max_output_tokens if max_output_tokens is not None else self._settings.max_output_tokens
+            output_cap = (
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._settings.max_output_tokens
+            )
         if output_cap is not None:
             request["max_output_tokens"] = max(1, int(output_cap))
         if response_format is not None:
@@ -356,7 +360,10 @@ class LLMClient:
                 raise
         parsed = parse_json_object(raw)
         if parsed is None:
-            raise LLMError("LLM response did not contain a JSON object")
+            raise LLMError(
+                "LLM response did not contain a JSON object "
+                f"(received {len(raw.strip())} characters)"
+            )
         return parsed
 
     def ask_many(
@@ -493,7 +500,14 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
 
     try:
         value = json.loads(text)
-        return value if isinstance(value, dict) else None
+        if isinstance(value, dict):
+            return value
+        # A few OpenAI-compatible gateways wrap an otherwise valid structured
+        # response in a one-item array.  Accepting that shape is safe while
+        # still rejecting arbitrary arrays, because the public contract
+        # remains a single JSON object.
+        if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+            return value[0]
     except json.JSONDecodeError:
         pass
 
@@ -583,7 +597,7 @@ def _content_from_response(response: object) -> str:
         message = _get_value(first, "message")
         content = _get_value(message, "content") if message is not None else None
         if content is not None:
-            return str(content)
+            return _text_from_content(content)
         text = _get_value(first, "text")
         if text is not None:
             return str(text)
@@ -595,18 +609,39 @@ def _content_from_response(response: object) -> str:
         parts: list[str] = []
         for item in output:
             content = _get_value(item, "content")
-            if isinstance(content, list):
-                for chunk in content:
-                    text = _get_value(chunk, "text")
-                    if text is None:
-                        text = _get_value(chunk, "content")
-                    if text is not None:
-                        parts.append(str(text))
-            elif content is not None:
-                parts.append(str(content))
+            if content is not None:
+                text = _text_from_content(content)
+                if text:
+                    parts.append(text)
         if parts:
             return "\n".join(parts)
     return ""
+
+
+def _text_from_content(content: object) -> str:
+    """Return textual content from string or OpenAI-style content blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for chunk in content:
+            text = _get_value(chunk, "text")
+            if text is None:
+                text = _get_value(chunk, "content")
+            if text is not None:
+                rendered = _text_from_content(text)
+                if rendered:
+                    parts.append(rendered)
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        text = _get_value(content, "text")
+        if text is not None:
+            return _text_from_content(text)
+        nested = _get_value(content, "content")
+        if nested is not None:
+            return _text_from_content(nested)
+        return ""
+    return str(content) if content is not None else ""
 
 
 def _int_value(obj: object, name: str) -> int | None:

@@ -62,6 +62,34 @@ uv run python benchmark\survey_bench\adapter.py finalize-latest --topic-id topic
 uv run python benchmark\survey_bench\adapter.py summarize-batch --thorough
 ```
 
+### 消融：w/o Review-Guided Revision
+
+该消融只移除 report 阶段的 reviewer/revision loop；检索、选文、adaptive outline、
+writer 预算、确定性图示、写作后的 citation/metric/claim audit，以及 SurveyBench 原生
+评测均保持不变。如果已经有完成的 full-system thorough run，可复用其上游产物，只从
+`report` 重跑；原来的 `report.md` 会保留，消融报告写入同级 variant：
+
+```powershell
+uv run python benchmark\survey_bench\adapter.py resume-latest --topic-id topic01 --thorough --without-review-guided-revision --reuse-full-run
+uv run python benchmark\survey_bench\adapter.py finalize-latest --topic-id topic01 --thorough --variant w-o-review-guided-revision --reuse-full-run --eval-content --model gpt-4o
+uv run python benchmark\survey_bench\adapter.py summarize-batch --thorough --variant w-o-review-guided-revision
+```
+
+PowerShell 下对 20 个已有 full-system run 顺序进行 report-only 消融：
+
+```powershell
+1..20 | ForEach-Object {
+  uv run python benchmark\survey_bench\adapter.py resume-latest --topic-id ("topic{0:D2}" -f $_) --thorough --without-review-guided-revision --reuse-full-run
+}
+```
+
+中途失败时，可对单个 topic 重复相同的 `resume-latest` 命令。消融报告位于
+`<full-run>/08-report/variants/w-o-review-guided-revision/`；导出目录为
+`SurveyBench/data/<topic-key>-thorough-w-o-review-guided-revision/`，评分写入
+`benchmark/survey_bench/results/ablations/w-o-review-guided-revision/`，并使用与 full-system
+相同的原生 `gpt-4o` content judge。只有没有可复用 full run 时，才使用
+`run-topic --without-review-guided-revision` 进行端到端消融。
+
 当一次 run 已经完成 search/read，但在 report 或后续阶段失败时，用 `resume-latest`。它会复用该 topic 最新 run 目录，并把 matching 的 balanced/thorough 配置传给 `simple-ar resume`，避免重新检索和阅读论文。默认等价于 `--from-stage report --to-stage report`；如果确实要重跑 read 或 search，可以显式改阶段范围。
 
 thorough 档读取 `benchmark/survey_bench/configs/topics-thorough/`，生成结果写到 `benchmark/survey_bench/results/topics-thorough/<topic-key>/`，导出给 SurveyBench 的 method 为 `<topic-key>-thorough`，评分写到 `benchmark/survey_bench/results/score-thorough/<topic-key>/`。

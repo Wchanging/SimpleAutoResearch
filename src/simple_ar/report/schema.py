@@ -46,6 +46,8 @@ class ReportLongformConfig(ReportModel):
     target_papers: int = 0
     min_papers: int = 0
     target_words: int = 0
+    min_section_word_ratio: float = Field(default=0.6, ge=0.2, le=1.0)
+    max_completion_revisions: int = 1
     min_citations_per_section: int = 3
     target_tables: int = 0
     evidence_audit: bool = True
@@ -62,6 +64,7 @@ class ReportRuntimeConfig(ReportModel):
     template: str = "auto"
     criteria: str = "auto"
     style: str = "paper"
+    section_numbering: Literal["auto", "off", "academic"] = "off"
     cost_profile: Literal["auto", "fast", "balanced", "thorough"] = "auto"
     outline_strategy: Literal["auto", "template", "adaptive"] = "auto"
     survey_contract: bool = True
@@ -202,6 +205,7 @@ class ReportMemory(ReportModel):
     open_questions: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     key_decisions: list[str] = Field(default_factory=list)
+    outline_planning: dict[str, Any] = Field(default_factory=dict)
 
 
 class ReportToolSpec(ReportModel):

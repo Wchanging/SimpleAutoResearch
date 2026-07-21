@@ -58,6 +58,36 @@ uv run python benchmark\survey_bench\adapter.py finalize-latest --topic-id topic
 uv run python benchmark\survey_bench\adapter.py summarize-batch --thorough
 ```
 
+### Ablation: w/o Review-Guided Revision
+
+This ablation removes only the report-stage reviewer/revision loop. Retrieval,
+paper selection, adaptive outline planning, writer budget, deterministic figures,
+post-draft citation/metric/claim audits, and the native SurveyBench evaluator are
+unchanged. When a completed full-system thorough run already exists, reuse its
+upstream artifacts and rerun only `report`; the original `report.md` is
+preserved and the ablation report is written as a sibling variant:
+
+```powershell
+uv run python benchmark\survey_bench\adapter.py resume-latest --topic-id topic01 --thorough --without-review-guided-revision --reuse-full-run
+uv run python benchmark\survey_bench\adapter.py finalize-latest --topic-id topic01 --thorough --variant w-o-review-guided-revision --reuse-full-run --eval-content --model gpt-4o
+uv run python benchmark\survey_bench\adapter.py summarize-batch --thorough --variant w-o-review-guided-revision
+```
+
+For a sequential 20-topic report-only ablation in PowerShell:
+
+```powershell
+1..20 | ForEach-Object {
+  uv run python benchmark\survey_bench\adapter.py resume-latest --topic-id ("topic{0:D2}" -f $_) --thorough --without-review-guided-revision --reuse-full-run
+}
+```
+
+The reused report package is stored under
+`<full-run>/08-report/variants/w-o-review-guided-revision/`; the exported method
+and score output remain isolated under `SurveyBench/data/<topic-key>-thorough-w-o-review-guided-revision/`
+and `benchmark/survey_bench/results/ablations/w-o-review-guided-revision/`.
+Use `run-topic --without-review-guided-revision` only when no compatible full
+run exists and a clean end-to-end ablation is required.
+
 Use `resume-latest` when a run already completed search/read but failed in a
 later stage. It reuses the latest topic run directory and passes the matching
 balanced or thorough config to `simple-ar resume`, avoiding a fresh literature

@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,23 @@ DEFAULT_TOPIC_RESULTS_ROOT = DEFAULT_RESULTS_ROOT / "topics"
 DEFAULT_THOROUGH_TOPIC_RESULTS_ROOT = DEFAULT_RESULTS_ROOT / "topics-thorough"
 DEFAULT_SCORE_ROOT = DEFAULT_RESULTS_ROOT / "score"
 DEFAULT_THOROUGH_SCORE_ROOT = DEFAULT_RESULTS_ROOT / "score-thorough"
+DEFAULT_ABLATION_ROOT = DEFAULT_RESULTS_ROOT / "ablations"
+WITHOUT_REVIEW_GUIDED_REVISION = "w-o-review-guided-revision"
+_CANONICAL_REPORT_ENTRIES = (
+    "report.md",
+    "references.bib",
+    "citation_map.json",
+    "report_memory.json",
+    "outline_planning.json",
+    "report_quality.json",
+    "report_audit.json",
+    "manifest.json",
+    "figures",
+    "longform",
+    "sections",
+    "iterations",
+    "audit",
+)
 
 
 @dataclass(frozen=True)
@@ -57,6 +75,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_root_args(run_topic)
     run_topic.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
     run_topic.add_argument("--thorough", action="store_true", help="Use configs/topics-thorough and the thorough result namespace.")
+    add_ablation_args(run_topic, include_execution=True)
     run_topic.add_argument("--to-stage", default="", help="Optional stage override passed to simple-ar run.")
     run_topic.set_defaults(func=cmd_run_topic)
 
@@ -64,7 +83,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_root_args(resume_latest)
     resume_latest.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
     resume_latest.add_argument("--thorough", action="store_true", help="Use configs/topics-thorough and the thorough result namespace.")
+    add_ablation_args(resume_latest, include_execution=True)
     resume_latest.add_argument("--run-dir", type=Path, default=None, help="Optional run dir. Defaults to the latest topic run, even if report failed.")
+    resume_latest.add_argument(
+        "--reuse-full-run",
+        action="store_true",
+        help=(
+            "Resume only the report stage from the latest completed full-system run, "
+            "writing an isolated report variant instead of rerunning search/read."
+        ),
+    )
     resume_latest.add_argument("--from-stage", default="report", help="Stage to resume from. Defaults to report.")
     resume_latest.add_argument("--to-stage", default="report", help="Stage to stop at. Defaults to report.")
     resume_latest.add_argument("--model", default="", help="Optional model override passed to simple-ar resume.")
@@ -76,6 +104,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Pass --overwrite-stage-artifacts to simple-ar resume.",
     )
     resume_latest.set_defaults(func=cmd_resume_latest)
+
+    recover_sections = sub.add_parser(
+        "recover-sections",
+        help="Deterministically rebuild an isolated report variant from persisted section drafts.",
+    )
+    add_root_args(recover_sections)
+    recover_sections.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
+    recover_sections.add_argument("--thorough", action="store_true", help="Use the thorough result namespace.")
+    recover_sections.add_argument("--run-dir", type=Path, default=None, help="Optional source run directory.")
+    recover_sections.add_argument("--source-variant", required=True, help="Existing variant containing sections/*.md.")
+    recover_sections.add_argument("--variant", required=True, help="New isolated variant for the recovered report.")
+    recover_sections.add_argument(
+        "--section-numbering",
+        choices=("off", "academic"),
+        default="academic",
+        help="Presentation-only heading numbering for the recovered Markdown.",
+    )
+    recover_sections.set_defaults(func=cmd_recover_sections)
 
     validate = sub.add_parser("validate", help="Validate generated survey markdown format and filename alignment.")
     add_root_args(validate)
@@ -137,7 +183,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     add_root_args(finalize)
     finalize.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
     finalize.add_argument("--thorough", action="store_true", help="Use the latest thorough generation run and write thorough score artifacts.")
+    add_ablation_args(finalize)
     finalize.add_argument("--run-dir", type=Path, default=None, help="Optional run dir. Defaults to latest results/topics/<topic-key> run with 08-report/report.md.")
+    finalize.add_argument(
+        "--reuse-full-run",
+        action="store_true",
+        help="Finalize the report variant written into the latest completed full-system run.",
+    )
     finalize.add_argument("--model", default="gpt-4o", help="Judge model when --eval-content is set.")
     finalize.add_argument("--eval-content", action="store_true", help="Run native SurveyBench content/outline/richness judge.")
     finalize.add_argument("--no-normalize-headings", action="store_true", help="Do not normalize headings during export.")
@@ -164,6 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Optional fallback score root for topics missing in --score-root.",
     )
     summarize_batch.add_argument("--thorough", action="store_true", help="Use the thorough score root by default.")
+    add_ablation_args(summarize_batch)
     summarize_batch.add_argument("--from-topic", type=int, default=0, help="Optional first topic number, e.g. 10.")
     summarize_batch.add_argument("--to-topic", type=int, default=0, help="Optional last topic number, e.g. 20.")
     summarize_batch.add_argument("--output-dir", type=Path, default=None, help="Output directory for batch_summary.json/md.")
@@ -175,6 +228,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def add_root_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--surveybench-root", type=Path, default=Path(DEFAULT_SURVEYBENCH_ROOT), help="Path to external SurveyBench checkout.")
+
+
+def add_ablation_args(parser: argparse.ArgumentParser, *, include_execution: bool = False) -> None:
+    """Add isolated SurveyBench ablation namespace controls."""
+    parser.add_argument(
+        "--variant",
+        default="",
+        help="Optional isolated result namespace, for example `w-o-review-guided-revision`.",
+    )
+    if include_execution:
+        parser.add_argument(
+            "--without-review-guided-revision",
+            action="store_true",
+            help=(
+                "Disable the report reviewer/revision loop while retaining the same "
+                "retrieval, outline, writer, final audit, and native SurveyBench judge."
+            ),
+        )
 
 
 def add_eval_args(parser: argparse.ArgumentParser) -> None:
@@ -209,7 +280,13 @@ def cmd_run_topic(args: argparse.Namespace) -> int:
         raise SystemExit(f"Missing topic config: {config_path}")
     from simple_ar.cli.main import main as simple_ar_main
 
+    thorough = bool(args.thorough)
+    variant = resolve_variant(args)
     cli_args = ["run", "--config", str(config_path)]
+    if variant:
+        cli_args.extend(["--output-root", str(topic_results_root(thorough=thorough, variant=variant) / topic_ref.key)])
+    if bool(getattr(args, "without_review_guided_revision", False)):
+        cli_args.extend(["--report-reviewer", "disabled"])
     if args.to_stage:
         cli_args.extend(["--to-stage", str(args.to_stage)])
     simple_ar_main(cli_args)
@@ -223,7 +300,20 @@ def cmd_resume_latest(args: argparse.Namespace) -> int:
     config_path = topic_config_path(topic_ref, thorough=thorough)
     if not config_path.is_file():
         raise SystemExit(f"Missing topic config: {config_path}")
-    run_dir = args.run_dir or latest_topic_run_dir(topic_ref.key, thorough=thorough, require_report=False)
+    variant = resolve_variant(args)
+    reuse_full_run = bool(getattr(args, "reuse_full_run", False))
+    if reuse_full_run and args.run_dir is not None:
+        raise SystemExit("Use either --reuse-full-run or --run-dir, not both.")
+    if reuse_full_run:
+        _require_variant(variant, option="--reuse-full-run")
+        run_dir = latest_topic_run_dir(topic_ref.key, thorough=thorough, require_report=True)
+    else:
+        run_dir = args.run_dir or latest_topic_run_dir(
+            topic_ref.key,
+            thorough=thorough,
+            variant=variant,
+            require_report=False,
+        )
     if not run_dir.is_dir():
         raise SystemExit(f"Run directory does not exist: {run_dir}")
     from simple_ar.cli.main import main as simple_ar_main
@@ -240,14 +330,211 @@ def cmd_resume_latest(args: argparse.Namespace) -> int:
     ]
     if args.model:
         cli_args.extend(["--model", str(args.model)])
+    if bool(getattr(args, "without_review_guided_revision", False)):
+        cli_args.extend(["--report-reviewer", "disabled"])
+    if reuse_full_run:
+        cli_args.extend(["--report-output-mode", "variant", "--report-output-label", variant])
     if args.llm_workers is not None:
         cli_args.extend(["--llm-workers", str(args.llm_workers)])
     if args.quiet:
         cli_args.append("--quiet")
     if args.overwrite_stage_artifacts:
         cli_args.append("--overwrite-stage-artifacts")
-    simple_ar_main(cli_args)
+    if reuse_full_run:
+        # A report-only reuse must be observational with respect to the full
+        # run's canonical report package.  The report stage also updates state
+        # metadata, but a variant must never replace the previous report,
+        # sections, or evidence audits.  Keep a temporary package snapshot as
+        # a final guard around the resumed pipeline.
+        with tempfile.TemporaryDirectory(prefix="simple-ar-report-variant-") as temp_dir:
+            snapshot_dir = Path(temp_dir) / "canonical-report"
+            _snapshot_canonical_report_package(run_dir / "08-report", snapshot_dir)
+            try:
+                simple_ar_main(cli_args)
+            finally:
+                _restore_canonical_report_package(run_dir / "08-report", snapshot_dir)
+        variant_report = report_variant_dir(run_dir, variant) / "report.md"
+        if not variant_report.is_file():
+            raise SystemExit(f"Variant report was not written: {variant_report}")
+    else:
+        simple_ar_main(cli_args)
     return 0
+
+
+def cmd_recover_sections(args: argparse.Namespace) -> int:
+    """Rebuild a report package from persisted Writer section drafts without an LLM call.
+
+    A report can reach final validation after every Writer section has been
+    persisted, yet still fall back because of a later mechanical guard.  This
+    recovery path is deliberately deterministic: it only assembles saved
+    drafts, revalidates their citations, and regenerates deterministic figures
+    from the saved long-form contract.  It never alters the source variant.
+    """
+    root = resolve_surveybench_root(args.surveybench_root)
+    topic_ref = resolve_topic_ref(root, args.topic_id)
+    thorough = bool(args.thorough)
+    source_variant = resolve_variant(argparse.Namespace(variant=args.source_variant))
+    target_variant = resolve_variant(argparse.Namespace(variant=args.variant))
+    if source_variant == target_variant:
+        raise SystemExit("--source-variant and --variant must differ.")
+    run_dir = args.run_dir or latest_topic_run_dir(topic_ref.key, thorough=thorough, require_report=False)
+    source_dir = report_variant_dir(run_dir, source_variant)
+    section_dir = source_dir / "sections"
+    if not section_dir.is_dir():
+        raise SystemExit(f"Missing persisted section drafts: {section_dir}")
+    target_dir = report_variant_dir(run_dir, target_variant)
+    if target_dir.exists():
+        raise SystemExit(f"Recovery target already exists: {target_dir}")
+
+    from simple_ar.literature.models import Paper
+    from simple_ar.literature.verify import find_citation_ids, validate_citations
+    from simple_ar.report.assembler import apply_section_numbering, assemble_report_sections
+    from simple_ar.report.citations import (
+        append_references_section,
+        citation_display_map,
+        expand_short_citation_keys,
+        sanitize_report_citations,
+    )
+    from simple_ar.report.figures import maybe_add_report_figures
+    from simple_ar.report.schema import ReportFigureConfig, ReportMemory, ReportSectionDraft
+    from simple_ar.report.service import _display_citation_numbers
+
+    memory_path = source_dir / "report_memory.json"
+    papers_path = run_dir / "02-search" / "papers.jsonl"
+    if not memory_path.is_file() or not papers_path.is_file():
+        raise SystemExit("Recovery requires report_memory.json and 02-search/papers.jsonl.")
+    memory = ReportMemory.model_validate(json.loads(memory_path.read_text(encoding="utf-8")))
+    papers = [
+        Paper.from_row(json.loads(line))
+        for line in papers_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not papers:
+        raise SystemExit("Recovery requires at least one paper record.")
+    drafts = _recovery_section_drafts(section_dir)
+    if not drafts:
+        raise SystemExit(f"No non-empty Markdown drafts found in {section_dir}")
+    body = assemble_report_sections(title=topic_ref.name, sections=drafts)
+    citation_key_map = {f"P{index}": paper.id for index, paper in enumerate(papers, start=1)}
+    body = expand_short_citation_keys(body, citation_key_map)
+    allowed_ids = {paper.id for paper in papers}
+    body, removed_unknown = sanitize_report_citations(body, allowed_ids)
+    validate_citations(body, allowed_ids)
+    cited_ids = find_citation_ids(body)
+    cited_papers = [paper for paper in papers if paper.id in cited_ids]
+    if not cited_papers:
+        raise SystemExit("Recovered report does not cite any paper from the source run.")
+    citation_map = citation_display_map(cited_papers)
+    report = append_references_section(_display_citation_numbers(body, citation_map), cited_papers, citation_map)
+
+    target_dir.mkdir(parents=True, exist_ok=False)
+    figure_result = maybe_add_report_figures(
+        report_markdown=report,
+        report_dir=target_dir,
+        config=ReportFigureConfig(enabled=True, max_figures=5, format="svg", mode="auto"),
+        template_name=memory.template or "survey_long",
+        survey_contract=memory.survey_contract,
+    )
+    report = apply_section_numbering(
+        figure_result.report_markdown,
+        mode=args.section_numbering,
+        template_name=memory.template or "survey_long",
+        style="long_academic_survey",
+    )
+    write_text(target_dir / "report.md", report)
+    shutil.copytree(section_dir, target_dir / "sections")
+    write_json(
+        target_dir / "recovery_manifest.json",
+        {
+            "schema_version": "survey_report_recovery.v1",
+            "source_variant": source_variant,
+            "recovery_variant": target_variant,
+            "section_count": len(drafts),
+            "cited_paper_count": len(cited_papers),
+            "removed_unknown_citation_ids": removed_unknown,
+            "figures_regenerated": len(figure_result.figures),
+            "deterministic": True,
+            "llm_calls": 0,
+        },
+    )
+    print(f"Recovered {len(drafts)} section draft(s) into {target_dir}")
+    return 0
+
+
+def _recovery_section_drafts(section_dir: Path) -> list[Any]:
+    """Load section files in a reader-oriented deterministic order."""
+    from simple_ar.report.schema import ReportSectionDraft
+
+    drafts: list[ReportSectionDraft] = []
+    for path in section_dir.glob("*.md"):
+        markdown = read_text(path).strip()
+        if not markdown:
+            continue
+        heading_match = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", markdown)
+        heading = heading_match.group(1).strip() if heading_match else path.stem.replace("_", " ").title()
+        drafts.append(
+            ReportSectionDraft(
+                section_id=path.stem,
+                heading=heading,
+                status="drafted",
+                draft_markdown=markdown,
+            )
+        )
+    return sorted(drafts, key=lambda draft: (_recovery_section_rank(draft.heading), draft.heading.lower()))
+
+
+def _recovery_section_rank(heading: str) -> int:
+    """Use conventional academic ordering when a discarded plan is unavailable."""
+    text = heading.lower()
+    if "abstract" in text:
+        return 0
+    if any(token in text for token in ("introduction", "scope", "background")):
+        return 1
+    if any(token in text for token in ("foundation", "concept", "taxonomy", "terminology", "positioning")):
+        return 2
+    if any(token in text for token in ("method", "system", "construction", "implementation")):
+        return 3
+    if any(token in text for token in ("application", "use case", "domain")):
+        return 4
+    if any(token in text for token in ("evaluation", "benchmark", "evidence quality")):
+        return 5
+    if any(token in text for token in ("trust", "privacy", "explainability", "safety")):
+        return 6
+    if any(token in text for token in ("challenge", "limitation", "future")):
+        return 7
+    if "conclusion" in text:
+        return 9
+    return 8
+
+
+def _snapshot_canonical_report_package(stage_dir: Path, snapshot_dir: Path) -> None:
+    """Copy only canonical report artifacts before a reusable variant run."""
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    for name in _CANONICAL_REPORT_ENTRIES:
+        source = stage_dir / name
+        if not source.exists():
+            continue
+        target = snapshot_dir / name
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
+
+
+def _restore_canonical_report_package(stage_dir: Path, snapshot_dir: Path) -> None:
+    """Restore the canonical report package without touching variants/metadata."""
+    for name in _CANONICAL_REPORT_ENTRIES:
+        target = stage_dir / name
+        if target.is_dir():
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+    for source in snapshot_dir.iterdir():
+        target = stage_dir / source.name
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy2(source, target)
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -351,12 +638,21 @@ def cmd_finalize_latest(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_ref = resolve_topic_ref(root, args.topic_id)
     thorough = bool(args.thorough)
-    run_dir = args.run_dir or latest_topic_run_dir(topic_ref.key, thorough=thorough)
-    report_file = run_dir / "08-report" / "report.md"
+    variant = resolve_variant(args)
+    reuse_full_run = bool(getattr(args, "reuse_full_run", False))
+    if reuse_full_run and args.run_dir is not None:
+        raise SystemExit("Use either --reuse-full-run or --run-dir, not both.")
+    if reuse_full_run:
+        _require_variant(variant, option="--reuse-full-run")
+        run_dir = latest_topic_run_dir(topic_ref.key, thorough=thorough, require_report=True)
+        report_file = report_variant_dir(run_dir, variant) / "report.md"
+    else:
+        run_dir = args.run_dir or latest_topic_run_dir(topic_ref.key, thorough=thorough, variant=variant)
+        report_file = run_dir / "08-report" / "report.md"
     if not report_file.is_file():
         raise SystemExit(f"Missing report file: {report_file}")
-    method = _method_for_topic(DEFAULT_METHOD, topic_ref, thorough=thorough)
-    score_dir = _score_dir_for_topic(DEFAULT_METHOD, topic_ref, thorough=thorough)
+    method = _method_for_topic(DEFAULT_METHOD, topic_ref, thorough=thorough, variant=variant)
+    score_dir = _score_dir_for_topic(DEFAULT_METHOD, topic_ref, thorough=thorough, variant=variant)
     target = export_report_file(
         root=root,
         report_file=report_file,
@@ -514,7 +810,12 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 def cmd_summarize_batch(args: argparse.Namespace) -> int:
     root = resolve_surveybench_root(args.surveybench_root)
     topic_refs = discover_topic_refs(root)
-    score_root = DEFAULT_THOROUGH_SCORE_ROOT if bool(args.thorough) and args.score_root == DEFAULT_SCORE_ROOT else args.score_root
+    variant = resolve_variant(args)
+    score_root = (
+        score_results_root(thorough=bool(args.thorough), variant=variant)
+        if variant and args.score_root == DEFAULT_SCORE_ROOT
+        else DEFAULT_THOROUGH_SCORE_ROOT if bool(args.thorough) and args.score_root == DEFAULT_SCORE_ROOT else args.score_root
+    )
     output_dir = args.output_dir or score_root / "batch_summary"
     summary = summarize_batch_results(
         score_root=score_root,
@@ -573,8 +874,14 @@ def topic_config_path(topic_ref: TopicRef, *, thorough: bool = False) -> Path:
     return LOCAL_ROOT / "configs" / group / f"{topic_ref.key}.toml"
 
 
-def latest_topic_run_dir(topic_key_value: str, *, thorough: bool = False, require_report: bool = True) -> Path:
-    topic_root = (DEFAULT_THOROUGH_TOPIC_RESULTS_ROOT if thorough else DEFAULT_TOPIC_RESULTS_ROOT) / topic_key_value
+def latest_topic_run_dir(
+    topic_key_value: str,
+    *,
+    thorough: bool = False,
+    variant: str = "",
+    require_report: bool = True,
+) -> Path:
+    topic_root = topic_results_root(thorough=thorough, variant=variant) / topic_key_value
     if not topic_root.is_dir():
         raise SystemExit(f"No generation runs found for topic key: {topic_key_value}")
     candidates = [
@@ -613,17 +920,76 @@ def resolve_topic_ref(root: Path, value: str) -> TopicRef:
     raise SystemExit(f"Unknown topic id/name: {value}. Run `adapter.py topics --with-ids`.")
 
 
-def _method_for_topic(method: str, topic_ref: TopicRef | None, *, thorough: bool = False) -> str:
+def _method_for_topic(
+    method: str,
+    topic_ref: TopicRef | None,
+    *,
+    thorough: bool = False,
+    variant: str = "",
+) -> str:
     if topic_ref is not None and method == DEFAULT_METHOD:
-        return f"{topic_ref.key}-thorough" if thorough else topic_ref.key
+        suffix = "-thorough" if thorough else ""
+        if variant:
+            suffix += f"-{variant}"
+        return f"{topic_ref.key}{suffix}"
     return method
 
 
-def _score_dir_for_topic(method: str, topic_ref: TopicRef | None, *, thorough: bool = False) -> Path:
-    root = DEFAULT_THOROUGH_SCORE_ROOT if thorough else DEFAULT_SCORE_ROOT
+def _score_dir_for_topic(
+    method: str,
+    topic_ref: TopicRef | None,
+    *,
+    thorough: bool = False,
+    variant: str = "",
+) -> Path:
+    root = score_results_root(thorough=thorough, variant=variant)
     if topic_ref is not None and method == DEFAULT_METHOD:
         return root / topic_ref.key
-    return root / _method_for_topic(method, topic_ref, thorough=thorough)
+    return root / _method_for_topic(method, topic_ref, thorough=thorough, variant=variant)
+
+
+def resolve_variant(args: argparse.Namespace) -> str:
+    """Return one safe, explicit result namespace for an optional ablation."""
+    requested = str(getattr(args, "variant", "") or "").strip()
+    without_revision = bool(getattr(args, "without_review_guided_revision", False))
+    if without_revision:
+        if requested and requested != WITHOUT_REVIEW_GUIDED_REVISION:
+            raise SystemExit(
+                "--without-review-guided-revision requires --variant "
+                f"`{WITHOUT_REVIEW_GUIDED_REVISION}` when --variant is provided."
+            )
+        return WITHOUT_REVIEW_GUIDED_REVISION
+    if not requested:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", requested.lower()).strip("-")
+    if not slug:
+        raise SystemExit("--variant must contain at least one letter or digit.")
+    return slug
+
+
+def topic_results_root(*, thorough: bool, variant: str = "") -> Path:
+    base = DEFAULT_THOROUGH_TOPIC_RESULTS_ROOT if thorough else DEFAULT_TOPIC_RESULTS_ROOT
+    if not variant:
+        return base
+    return DEFAULT_ABLATION_ROOT / variant / base.name
+
+
+def score_results_root(*, thorough: bool, variant: str = "") -> Path:
+    base = DEFAULT_THOROUGH_SCORE_ROOT if thorough else DEFAULT_SCORE_ROOT
+    if not variant:
+        return base
+    return DEFAULT_ABLATION_ROOT / variant / base.name
+
+
+def report_variant_dir(run_dir: Path, variant: str) -> Path:
+    """Return the isolated report package path within a reused completed run."""
+    _require_variant(variant, option="report variant")
+    return run_dir / "08-report" / "variants" / variant
+
+
+def _require_variant(variant: str, *, option: str) -> None:
+    if not variant:
+        raise SystemExit(f"{option} requires --variant or a named ablation switch.")
 
 
 def export_report_file(
@@ -1250,7 +1616,7 @@ def render_batch_paper_style_table(aggregates: dict[str, Any], *, method_label: 
         ("**Richness**", ""),
         ("Avg. Fig. Num.", _aggregate_mean(aggregates, "richness_figures")),
         ("Avg. Table Num.", _aggregate_mean(aggregates, "richness_tables")),
-        ("Total Avg.", _aggregate_mean(aggregates, "richness_elements")),
+        ("Avg. Fig.+Table Num.", _aggregate_mean(aggregates, "richness_elements")),
         ("Native Richness Density", _aggregate_mean(aggregates, "richness_total")),
     ]
     lines = [

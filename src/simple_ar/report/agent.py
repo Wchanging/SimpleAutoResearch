@@ -35,8 +35,10 @@ Use short citation keys exactly as provided, in Pandoc-style form like [@P1].
 Write survey prose, not a pipeline run log: do not mention artifact paths,
 stage names, JSON files, tool traces, or search/debug internals unless the
 section is explicitly about limitations.
-Keep paragraphs short. Prefer 2-4 compact paragraphs or a short comparison
-list instead of one dense block.
+Keep paragraphs short and focused. Use as many paragraphs as the requested
+section target needs; only when no substantive length target is provided,
+prefer 2-4 compact paragraphs or a short comparison list instead of one dense
+block.
 For survey reports, synthesize across papers: build taxonomies, contrast
 assumptions, compare evaluation settings, and state boundary conditions.
 When many sources are available, use them to improve coverage and confidence;
@@ -221,6 +223,28 @@ def run_report_agent(
                                 )
                             )
 
+            completed, completion_attempted = _complete_section_if_needed(
+                client=client,
+                context=context,
+                template=template,
+                memory=current,
+                section=section,
+                draft=draft,
+                config=config,
+                emit=emit,
+            )
+            if completion_attempted:
+                draft = completed
+                iterations.append(
+                    _iteration(
+                        section_index,
+                        section,
+                        "complete_contract",
+                        draft.status,
+                        draft.used_sources,
+                    )
+                )
+
             if config.reviewer == "disabled":
                 sections.append(draft)
                 _merge_draft_into_memory(current, draft, [])
@@ -267,7 +291,7 @@ def run_report_agent(
                     label=f"report-reviser-{section.section_id}",
                     emit=emit,
                 )
-                draft = revised
+                draft = _merge_revision_draft(draft, revised)
                 iterations.append(_iteration(section_index, section, "revise", draft.status, draft.used_sources))
 
                 if config.max_review_iterations > 1:
@@ -349,23 +373,54 @@ def _maybe_adapt_survey_outline(
         return memory
     if len(memory.section_plan) < 3:
         return memory
-    try:
-        planned = _plan_topic_specific_outline(
-            client=client,
-            context=context,
-            template=template,
-            memory=memory,
-            config=config,
-        )
-    except (LLMError, ValidationError, ValueError, TypeError) as exc:
-        _emit(emit, f"Survey outline planner fallback used; keeping template outline. {exc}")
-        return memory
+    errors: list[str] = []
+    planned: list[ReportSectionPlan] = []
+    for attempt in (1, 2):
+        try:
+            planned = _plan_topic_specific_outline(
+                client=client,
+                context=context,
+                template=template,
+                memory=memory,
+                config=config,
+                retry=attempt == 2,
+            )
+            break
+        except (LLMError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(str(exc))
+            if attempt == 1:
+                _emit(emit, f"Survey outline planner did not yield a usable plan; retrying once. {exc}")
+            else:
+                _emit(emit, f"Survey outline planner fallback used; keeping template outline. {exc}")
     if not planned:
-        return memory
+        return memory.model_copy(
+            update={
+                "outline_planning": {
+                    "schema_version": "report_outline_planning.v1",
+                    "status": "fallback",
+                    "strategy": "deterministic_outline_with_full_evidence_budget",
+                    "attempts": len(errors),
+                    "errors": errors,
+                    "section_source_budget": _outline_source_budget(memory.survey_contract, config),
+                },
+                "key_decisions": memory.key_decisions
+                + [
+                    "Survey outline planner fallback retained the configured evidence budget for every section."
+                ],
+            }
+        )
     _emit(emit, f"Survey outline planner produced {len(planned)} topic-specific section(s).")
     return memory.model_copy(
         update={
             "section_plan": planned,
+            "outline_planning": {
+                "schema_version": "report_outline_planning.v1",
+                "status": "adapted",
+                "strategy": "topic_specific_outline",
+                "attempts": len(errors) + 1,
+                "errors": errors,
+                "section_source_budget": _outline_source_budget(memory.survey_contract, config),
+            },
             "key_decisions": memory.key_decisions
             + ["Survey section plan adapted to the topic and current-run evidence before drafting."],
         }
@@ -379,15 +434,27 @@ def _plan_topic_specific_outline(
     template: ReportTemplateBundle,
     memory: ReportMemory,
     config: ReportRuntimeConfig,
+    retry: bool = False,
 ) -> list[ReportSectionPlan]:
     response = client.ask_json(
         OUTLINE_PLANNER_SYSTEM,
-        _outline_planner_prompt(context=context, template=template, memory=memory, config=config),
-        label="report-outline-planner",
+        _outline_planner_prompt(
+            context=context,
+            template=template,
+            memory=memory,
+            config=config,
+            retry=retry,
+        ),
+        label="report-outline-planner-retry" if retry else "report-outline-planner",
     )
     sections = _ensure_survey_outline_coverage(_normalize_outline_sections(response))
     if len(sections) < 5:
         raise ValueError("outline planner returned fewer than 5 usable sections")
+    if _outline_is_overly_template_like(sections):
+        raise ValueError(
+            "outline reused the default structural headings instead of deriving "
+            "topic-specific body axes from the selected evidence"
+        )
     budget = _outline_source_budget(memory.survey_contract, config)
     planned: list[ReportSectionPlan] = []
     planned_sections = sections[:12]
@@ -451,17 +518,28 @@ def _outline_planner_prompt(
     template: ReportTemplateBundle,
     memory: ReportMemory,
     config: ReportRuntimeConfig,
+    retry: bool = False,
 ) -> str:
+    compact_contract = _compact_survey_contract(memory.survey_contract)
+    # Role groups help the Writer balance sources, but exposing them as
+    # ``taxonomy_facets`` anchors the outline agent to provenance labels.
+    compact_contract["taxonomy_facets"] = []
+    # The deterministic contract outline is a coverage fallback, not a gold
+    # outline. Showing it to the planner made weaker models copy its generic
+    # headings verbatim and still appear to have produced an "adapted" plan.
+    compact_contract["outline_sections"] = []
     payload = {
         "task": "plan_topic_specific_survey_outline",
         "topic": context.topic,
         "report_mode": context.report_mode,
         "template": template.name,
         "style": config.style,
-        "survey_contract": _compact_survey_contract(memory.survey_contract),
-        "current_template_sections": [
-            section.model_dump(mode="json") for section in memory.section_plan[:12]
-        ],
+        "survey_contract": compact_contract,
+        "required_structure": {
+            "front_matter": ["Abstract", "Introduction"],
+            "back_matter": ["Conclusion"],
+            "body_requirement": "Derive 4-7 topic-specific body sections from current-run evidence.",
+        },
         "available_source_brief": _outline_source_brief(context),
         "synthesis_excerpt": context.synthesis_markdown[:2500],
         "evidence_summary_excerpt": context.evidence_summary[:2500],
@@ -470,6 +548,9 @@ def _outline_planner_prompt(
             "For long-form surveys, each major body section should include 2-4 planned third-level subsection hints so the final report has a navigable internal structure.",
             "Do not add subsection hints for Abstract, Introduction, or Conclusion; those sections should remain single-section prose.",
             "Body sections must be topic-specific; do not blindly reuse generic headings if the topic suggests better axes.",
+            "Do not use the default body headings `Conceptual Foundations and Taxonomy`, `Methods and System Construction`, `Applications and Use Cases`, or `Evaluation, Benchmarks, and Evidence Quality`. Replace them with concrete conceptual axes, method families, task settings, or evaluation regimes evident in the selected literature.",
+            "At least three body headings must identify topic-specific concepts from the source brief. A reader should be able to distinguish this outline from an outline for a different research topic without reading the prose.",
+            "Treat required facets as coverage checks, not as section titles or taxonomy axes. Derive reader-facing taxonomy and headings from the source brief and selected papers.",
             "Keep SurveyBench-compatible Markdown in mind: final report will use # Title and ## numbered sections.",
             "Use headings that a human survey reader would expect for this topic.",
             "Cover foundations/scope, a taxonomy or method families, system or method construction, evaluation practice, applications or domains when relevant, challenges, and future directions.",
@@ -477,6 +558,7 @@ def _outline_planner_prompt(
             "If a facet has weak evidence, include it only as a limitation or open problem instead of inventing coverage.",
             "Do not mention SimpleAutoResearch, pipeline stages, artifacts, prompts, or evaluation benchmark internals.",
             "Do not include a References section; references are appended separately.",
+            "Return the requested JSON object with a non-empty `sections` list; do not return prose outside JSON.",
         ],
         "output_schema": {
             "sections": [
@@ -493,7 +575,47 @@ def _outline_planner_prompt(
             "notes": "optional planning notes",
         },
     }
+    if retry:
+        payload["retry_instruction"] = (
+            "The previous outline copied the generic structural template instead of organizing the "
+            "available evidence. Keep the required report functions, but name the body sections after "
+            "concrete concepts, method families, task settings, or evaluation regimes from the source brief. "
+            "Return 7-10 valid, reader-facing sections with the required JSON fields."
+        )
     return _json_prompt(payload)
+
+
+_DEFAULT_SURVEY_BODY_HEADINGS = frozenset(
+    {
+        "conceptual foundations and taxonomy",
+        "methods and system construction",
+        "applications and use cases",
+        "evaluation benchmarks and evidence quality",
+        "related surveys and positioning",
+        "challenges and future directions",
+    }
+)
+
+
+def _outline_is_overly_template_like(sections: list[dict[str, Any]]) -> bool:
+    """Detect copied fallback structure without constraining valid survey organization.
+
+    Generic front and back matter are appropriate.  The signal only fires when
+    most body headings exactly match the deterministic fallback vocabulary,
+    which is evidence that a model copied the contract scaffold rather than
+    synthesizing an outline from the current literature.
+    """
+
+    body_headings = [
+        _clean_outline_heading(str(row.get("heading") or "")).lower()
+        for row in sections
+        if _clean_outline_heading(str(row.get("heading") or "")).lower()
+        not in {"abstract", "introduction", "introduction and scope", "conclusion"}
+    ]
+    if len(body_headings) < 4:
+        return False
+    copied = sum(heading in _DEFAULT_SURVEY_BODY_HEADINGS for heading in body_headings)
+    return copied >= max(3, (len(body_headings) * 3 + 4) // 5)
 
 
 def _outline_source_brief(context: ReportContext) -> list[dict[str, Any]]:
@@ -729,6 +851,8 @@ def _draft_section(
     source_batch_index: int = 1,
     source_batch_count: int = 1,
     prompt_suffix: str = "",
+    include_previous_draft: bool = True,
+    draft_mode: str = "section",
 ) -> ReportSectionDraft:
     prompt = _writer_prompt(
         context=context,
@@ -741,6 +865,8 @@ def _draft_section(
         review=review,
         source_batch_index=source_batch_index,
         source_batch_count=source_batch_count,
+        include_previous_draft=include_previous_draft,
+        draft_mode=draft_mode,
     )
     if prompt_suffix:
         prompt = prompt + "\n\n" + prompt_suffix
@@ -751,8 +877,103 @@ def _draft_section(
     )
     draft = ReportSectionDraft.model_validate(_normalize_draft_response(response, section))
     if not draft.draft_markdown.strip() and draft.status != "skipped":
-        raise LLMError(f"Writer returned empty draft for {section.section_id}")
+        keys = ", ".join(sorted(str(key) for key in response)[:12])
+        raise LLMError(f"Writer returned empty draft for {section.section_id}; response keys: {keys or '(none)'}")
     return draft
+
+
+def _complete_section_if_needed(
+    *,
+    client: LLMClient,
+    context: ReportContext,
+    template: ReportTemplateBundle,
+    memory: ReportMemory,
+    section: ReportSectionPlan,
+    draft: ReportSectionDraft,
+    config: ReportRuntimeConfig,
+    emit: Callable[[str], None] | None,
+) -> tuple[ReportSectionDraft, bool]:
+    """Run one bounded completion pass when a declared section is underfilled.
+
+    Target words are planning constraints rather than a license to pad prose.
+    Still, a long-form section that is only a small fraction of its declared
+    target is an unmet contract, not a stylistic preference.  This pass keeps
+    the original evidence set and requests only missing, non-duplicative prose
+    when the deterministic word-count check finds such a gap.
+    """
+    target_words = int(section.target_words or 0)
+    attempts = max(0, int(config.longform.max_completion_revisions or 0))
+    if target_words <= 0 or attempts <= 0:
+        return draft, False
+    required_words = max(180, int(target_words * config.longform.min_section_word_ratio))
+    current_words = _draft_word_count(draft)
+    if current_words >= required_words:
+        return draft, False
+
+    best = draft
+    for attempt in range(1, attempts + 1):
+        _emit(
+            emit,
+            (
+                f"Writer completing `{section.heading}`: {_draft_word_count(best)}/{required_words} "
+                "minimum planned words."
+            ),
+        )
+        candidate = _draft_section_with_recovery(
+            client=client,
+            context=context,
+            template=template,
+            memory=memory,
+            section=section,
+            config=config,
+            extra_context=[],
+            previous_draft=best,
+            label=f"report-completer-{section.section_id}-{attempt}",
+            source_batch_index=1,
+            source_batch_count=1,
+            emit=emit,
+            include_previous_draft=False,
+            draft_mode="completion",
+            prompt_suffix=_completion_prompt(
+                section=section,
+                current_words=_draft_word_count(best),
+                required_words=required_words,
+            ),
+        )
+        if candidate.draft_markdown.strip():
+            best = _merge_completion_draft(best, candidate)
+        if _draft_word_count(best) >= required_words:
+            break
+    return best, True
+
+
+def _completion_prompt(
+    *,
+    section: ReportSectionPlan,
+    current_words: int,
+    required_words: int,
+) -> str:
+    table_guidance = ""
+    heading = section.heading.lower()
+    if any(term in heading for term in ("taxonomy", "method", "evaluation", "benchmark", "application")):
+        table_guidance = (
+            " Add one compact evidence-grounded Markdown comparison table when it clarifies "
+            "the section; every representative paper in the table must be cited from the allowed set."
+        )
+    return (
+        "This is a contract-completion pass. Return only additional, evidence-bounded Markdown "
+        f"paragraphs for the existing section. The existing draft has about {current_words} words, "
+        f"while this section requires at least about {required_words} substantive words. Add missing "
+        "analysis, comparisons, boundary conditions, and evidence from the complete allowed source "
+        "set. Do not repeat, summarize, replace, or reintroduce existing prose; do not add the "
+        "section heading; do not pad with generic background; do not invent sources; and do not "
+        "mention this completion instruction."
+        + table_guidance
+    )
+
+
+def _draft_word_count(draft: ReportSectionDraft) -> int:
+    return len(re.findall(r"\b\w+[\w'-]*\b", draft.draft_markdown))
 
 
 def _review_section(
@@ -798,6 +1019,9 @@ def _draft_section_with_recovery(
     source_batch_index: int = 1,
     source_batch_count: int = 1,
     emit: Callable[[str], None] | None = None,
+    prompt_suffix: str = "",
+    include_previous_draft: bool = True,
+    draft_mode: str = "section",
 ) -> ReportSectionDraft:
     try:
         return _draft_section(
@@ -813,6 +1037,9 @@ def _draft_section_with_recovery(
             review=review,
             source_batch_index=source_batch_index,
             source_batch_count=source_batch_count,
+            prompt_suffix=prompt_suffix,
+            include_previous_draft=include_previous_draft,
+            draft_mode=draft_mode,
         )
     except (LLMError, ValidationError, ValueError) as exc:
         _emit(emit, f"Writer JSON validation failed for `{section.heading}`; retrying once. {exc}")
@@ -830,11 +1057,15 @@ def _draft_section_with_recovery(
             review=review,
             source_batch_index=source_batch_index,
             source_batch_count=source_batch_count,
-            prompt_suffix=(
+            prompt_suffix=(prompt_suffix + "\n\n" if prompt_suffix else "") + (
                 "The previous response was not accepted as valid JSON. "
                 "Return exactly one JSON object matching the requested schema. "
+                "`draft_markdown` is mandatory and must contain the complete section prose. "
+                "You may leave claims, open_questions, and limitations empty if needed. "
                 "Do not include Markdown fences, commentary, or partial prose outside JSON."
             ),
+            include_previous_draft=include_previous_draft,
+            draft_mode=draft_mode,
         )
     except (LLMError, ValidationError, ValueError) as exc:
         _emit(emit, f"Writer fallback used for `{section.heading}` after retry failed. {exc}")
@@ -940,14 +1171,26 @@ def _writer_prompt(
     review: ReportSectionReview | None,
     source_batch_index: int,
     source_batch_count: int,
+    include_previous_draft: bool,
+    draft_mode: str,
 ) -> str:
+    completion_mode = draft_mode == "completion"
     payload = {
         "task": "draft_or_revise_one_report_section",
+        "draft_mode": draft_mode,
         "report_mode": context.report_mode,
         "style": config.style,
         "max_section_tokens": config.max_section_tokens,
         "section": section.model_dump(mode="json"),
-        "section_constraints": _section_constraints(section),
+        "section_constraints": _section_constraints(
+            section,
+            include_subsections=not completion_mode,
+        ),
+        "length_requirement": (
+            _completion_length_requirement(section)
+            if completion_mode
+            else _section_length_requirement(section)
+        ),
         "source_strategy": {
             "mode": config.source_strategy,
             "batch_index": source_batch_index,
@@ -973,8 +1216,22 @@ def _writer_prompt(
         "claims_evidence_matrix": [
             claim.model_dump(mode="json") for claim in memory.claims_evidence_matrix[:20]
         ],
-        "previous_draft": previous_draft.model_dump(mode="json") if previous_draft else {},
+        "previous_draft": (
+            previous_draft.model_dump(mode="json")
+            if previous_draft is not None and include_previous_draft
+            else {}
+        ),
         "review_findings": [finding.model_dump(mode="json") for finding in (review.findings if review else [])],
+        "revision_preservation_requirement": _revision_preservation_requirement(
+            section=section,
+            previous_draft=previous_draft if include_previous_draft else None,
+            review=review,
+        ),
+        "completion_context": (
+            _completion_context(previous_draft)
+            if completion_mode and previous_draft is not None
+            else {}
+        ),
         "extra_tool_context": [result.model_dump(mode="json") for result in extra_context[:6]],
         "style_rules": [
             "Write as a long-form academic synthesis for the user topic, not as documentation of the SimpleAutoResearch pipeline.",
@@ -985,9 +1242,11 @@ def _writer_prompt(
             "Use the available source set broadly, but compress by grouping similar papers and citing representative evidence.",
             "For long survey templates, optimize for topic coverage and reader needs: explain foundations, construction patterns, applications, evaluation practice, related surveys, challenges, and future directions.",
             "When the long-form synthesis contract is enabled, satisfy its reader_needs, required_facets, expected coverage, outline_sections, visual_plan, and boundaries before adding optional details.",
-            "Use selected_paper_brief and taxonomy_facets to group evidence; do not treat them as a rigid answer key or cite papers not present in allowed source handles.",
+            "Use selected_paper_brief and taxonomy_facets as evidence seeds; derive a topic-specific organizing argument rather than copying checklist labels into the prose.",
             "When outline_sections specify target_words and citation_keys, treat them as section planning constraints and explain any evidence gap conservatively.",
             "When section_constraints specify target_words, min_citations, or subsections, treat them as local writing constraints for this section.",
+            "When length_requirement is present, write enough focused prose to meet it; do not stop after a few compact paragraphs merely because the section is well structured.",
+            "When revision_preservation_requirement is present, return a complete revised section that preserves the valid analytical coverage and approximate length of the previous draft.",
             "If subsections are listed, use them as meaningful `###` subheadings unless the section is Abstract, Introduction, or Conclusion.",
             "For long survey templates, use meaningful subheadings inside large sections when they improve navigation.",
             "For long survey templates, include compact comparison tables aligned with visual_plan when useful, but do not add Markdown image links unless a real generated image artifact exists.",
@@ -1001,12 +1260,13 @@ def _writer_prompt(
             "Keep paragraphs under roughly 120 words; split dense synthesis into short paragraphs or concise bullets.",
             "Use only `cite_as` values such as [@P1] for body citations; never cite long source handles or raw paper ids.",
             "The final renderer will map short citation keys back to verified source ids and numeric citations.",
+            "`draft_markdown` is the required primary payload. Put the complete Markdown prose there and never substitute `content`, `body`, or an explanation outside the JSON object.",
         ],
         "output_schema": {
             "section_id": section.section_id,
             "heading": section.heading,
             "status": "drafted|revised|skipped",
-            "draft_markdown": "Markdown body for this section only; do not include References",
+            "draft_markdown": "REQUIRED non-empty Markdown body for this section only; do not include References",
             "used_sources": ["source handle ids used"],
             "metric_ids": ["metric ids used"],
             "citations": ["short citation keys cited, such as P1"],
@@ -1025,6 +1285,14 @@ def _writer_prompt(
             "limitations": [],
         },
     }
+    if completion_mode:
+        payload["style_rules"].extend(
+            [
+                "This is a continuation pass, not a complete section draft. Return only new body paragraphs that extend the existing section.",
+                "Do not emit Markdown headings at any level, a recap, or another version of an existing subsection.",
+                "Use completion_context.existing_subheadings only to avoid repeating already-covered themes; do not restate the list in the prose.",
+            ]
+        )
     return _json_prompt(payload)
 
 
@@ -1149,6 +1417,14 @@ def _compact_survey_contract(contract: dict[str, Any]) -> dict[str, Any]:
             for facet in (taxonomy.get("facets") if isinstance(taxonomy.get("facets"), list) else [])[:10]
             if isinstance(facet, dict)
         ],
+        "coverage_requirements": [
+            {
+                "label": facet.get("label") or "",
+                "evidence_count": facet.get("evidence_count") or 0,
+            }
+            for facet in (taxonomy.get("coverage_facets") if isinstance(taxonomy.get("coverage_facets"), list) else [])[:10]
+            if isinstance(facet, dict)
+        ],
         "outline_sections": [
             {
                 "heading": section.get("heading") or "",
@@ -1181,13 +1457,48 @@ def _compact_survey_contract(contract: dict[str, Any]) -> dict[str, Any]:
 def _string_items(value: object) -> list[str]:
     if isinstance(value, str):
         return [value] if value.strip() else []
+    if isinstance(value, dict):
+        for key in (
+            "text",
+            "question",
+            "limitation",
+            "description",
+            "message",
+            "content",
+            "body",
+            "label",
+            "title",
+            "name",
+            "notes",
+        ):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return [candidate.strip()]
+        return []
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
+        items: list[str] = []
+        for item in value:
+            items.extend(_string_items(item))
+        return items
     return []
 
 
 def _normalize_draft_response(response: dict[str, Any], section: ReportSectionPlan) -> dict[str, Any]:
     normalized = dict(response)
+    nested = normalized.get("draft")
+    if isinstance(nested, dict):
+        for key, value in nested.items():
+            normalized.setdefault(key, value)
+    nested_section = normalized.get("section")
+    if isinstance(nested_section, dict):
+        for key, value in nested_section.items():
+            normalized.setdefault(key, value)
+    if not str(normalized.get("draft_markdown") or "").strip():
+        for key in ("markdown", "content", "body", "text", "section_markdown"):
+            value = normalized.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized["draft_markdown"] = value
+                break
     normalized.setdefault("section_id", section.section_id)
     normalized.setdefault("heading", section.heading)
     normalized.setdefault("status", "drafted")
@@ -1198,6 +1509,14 @@ def _normalize_draft_response(response: dict[str, Any], section: ReportSectionPl
     normalized.setdefault("claims", [])
     normalized.setdefault("open_questions", [])
     normalized.setdefault("limitations", [])
+    normalized["open_questions"] = _string_items(normalized["open_questions"])
+    normalized["limitations"] = _string_items(normalized["limitations"])
+    # Some models copy a claim-level evidence label such as ``supported`` into
+    # the section-level status field.  The two enums intentionally differ:
+    # preserve the draft and its claim statuses while normalizing the section
+    # lifecycle state to the writer contract.
+    if str(normalized.get("status") or "").strip().lower() not in {"drafted", "revised", "skipped"}:
+        normalized["status"] = "drafted"
     return normalized
 
 
@@ -1295,7 +1614,7 @@ def _merge_incremental_draft(
     previous: ReportSectionDraft,
     revised: ReportSectionDraft,
 ) -> ReportSectionDraft:
-    """Keep the latest prose while preserving accumulated provenance lists."""
+    """Keep accumulated provenance without allowing batch integration to erase prose."""
     used_sources = _stable_union(previous.used_sources, revised.used_sources)
     metric_ids = _stable_union(previous.metric_ids, revised.metric_ids)
     citations = _stable_union(previous.citations, revised.citations)
@@ -1308,7 +1627,15 @@ def _merge_incremental_draft(
             continue
         claims.append(claim)
         claim_ids.add(claim.claim_id)
-    return revised.model_copy(
+    # Batch refinement should extend a draft.  Models occasionally respond to
+    # a later evidence batch with a short summary, which used to replace a
+    # richer preceding section wholesale.  Preserve the longer body in that
+    # case; the bounded completion pass can then integrate the full evidence
+    # set coherently.
+    previous_words = _draft_word_count(previous)
+    revised_words = _draft_word_count(revised)
+    base = revised if revised_words >= max(120, int(previous_words * 0.8)) else previous
+    return base.model_copy(
         update={
             "used_sources": used_sources,
             "metric_ids": metric_ids,
@@ -1318,6 +1645,61 @@ def _merge_incremental_draft(
             "limitations": limitations,
         }
     )
+
+
+def _merge_revision_draft(
+    previous: ReportSectionDraft,
+    revised: ReportSectionDraft,
+) -> ReportSectionDraft:
+    """Accept reviewer rewrites only when they preserve the prior draft's scale."""
+    merged = _merge_incremental_draft(previous, revised)
+    previous_words = _draft_word_count(previous)
+    revised_words = _draft_word_count(revised)
+    if previous_words <= 0 or revised_words >= max(120, int(previous_words * 0.9)):
+        return merged.model_copy(update={"draft_markdown": revised.draft_markdown})
+    return merged.model_copy(update={"draft_markdown": previous.draft_markdown})
+
+
+def _merge_completion_draft(
+    previous: ReportSectionDraft,
+    completion: ReportSectionDraft,
+) -> ReportSectionDraft:
+    """Merge a completion response without allowing a short rewrite to erase prose."""
+    merged = _merge_incremental_draft(previous, completion)
+    prior_body = previous.draft_markdown.strip()
+    added_body = _strip_completion_headings(completion.draft_markdown)
+    if not prior_body:
+        return merged
+    if _completion_looks_like_replacement(prior_body, added_body):
+        if _draft_word_count(completion) >= _draft_word_count(previous):
+            return merged.model_copy(update={"draft_markdown": completion.draft_markdown})
+        return merged.model_copy(update={"draft_markdown": previous.draft_markdown})
+    return merged.model_copy(update={"draft_markdown": f"{prior_body}\n\n{added_body}"})
+
+
+def _strip_completion_headings(markdown: str) -> str:
+    """Keep continuation passes from mutating a section's planned hierarchy.
+
+    A completion is deliberately merged after an existing section.  A writer
+    occasionally adds fresh Markdown headings despite the continuation prompt,
+    which makes the final document look like two competing outlines.  Heading
+    labels add no prose evidence here, so remove them while retaining the
+    accompanying paragraphs or tables.
+    """
+    lines = markdown.strip().splitlines()
+    return "\n".join(line for line in lines if not re.match(r"^\s{0,3}#{1,6}\s+", line)).strip()
+
+
+def _completion_looks_like_replacement(previous: str, candidate: str) -> bool:
+    """Identify an accidental full-section rewrite with a cheap deterministic check."""
+    normalized_previous = re.sub(r"\s+", " ", previous).strip().lower()
+    normalized_candidate = re.sub(r"\s+", " ", candidate).strip().lower()
+    if not normalized_candidate:
+        return True
+    if normalized_candidate in normalized_previous or normalized_previous in normalized_candidate:
+        return True
+    prefix = normalized_previous[:240]
+    return bool(prefix and normalized_candidate.startswith(prefix))
 
 
 def _stable_union(first: list[str], second: list[str]) -> list[str]:
@@ -1351,11 +1733,15 @@ def _source_strategy_instruction(
     )
 
 
-def _section_constraints(section: ReportSectionPlan) -> dict[str, Any]:
+def _section_constraints(
+    section: ReportSectionPlan,
+    *,
+    include_subsections: bool = True,
+) -> dict[str, Any]:
     constraints: dict[str, Any] = {
         "target_words": section.target_words if section.target_words > 0 else "",
         "min_citations": section.min_citations if section.min_citations > 0 else "",
-        "subsections": section.subsections[:6],
+        "subsections": section.subsections[:6] if include_subsections else [],
     }
     guidance: list[str] = []
     if section.target_words > 0:
@@ -1366,12 +1752,64 @@ def _section_constraints(section: ReportSectionPlan) -> dict[str, Any]:
         guidance.append(
             "Use at least this many distinct allowed citations when the evidence set supports it."
         )
-    if section.subsections:
+    if section.subsections and include_subsections:
         guidance.append(
             "Use the subsection list as navigational `###` headings or close equivalents."
         )
     constraints["guidance"] = guidance
     return constraints
+
+
+def _section_length_requirement(section: ReportSectionPlan) -> str:
+    target_words = max(0, int(section.target_words or 0))
+    if target_words <= 0:
+        return ""
+    return (
+        f"Draft approximately {target_words} substantive words for this section. "
+        "Use multiple focused paragraphs and subsections when useful; concise prose does not "
+        "mean stopping before the requested analytical coverage is complete."
+    )
+
+
+def _completion_length_requirement(section: ReportSectionPlan) -> str:
+    target_words = max(0, int(section.target_words or 0))
+    if target_words <= 0:
+        return ""
+    return (
+        "Extend the existing section toward its approximate "
+        f"{target_words}-word target with only missing, evidence-bounded prose. "
+        "Do not rewrite the section or recreate its internal outline."
+    )
+
+
+def _completion_context(previous_draft: ReportSectionDraft) -> dict[str, Any]:
+    headings = [
+        match.group(1).strip()
+        for match in re.finditer(r"(?m)^\s{0,3}#{2,6}\s+(.+?)\s*$", previous_draft.draft_markdown)
+    ]
+    return {
+        "existing_subheadings": headings[:16],
+        "existing_word_count": _draft_word_count(previous_draft),
+    }
+
+
+def _revision_preservation_requirement(
+    *,
+    section: ReportSectionPlan,
+    previous_draft: ReportSectionDraft | None,
+    review: ReportSectionReview | None,
+) -> str:
+    if previous_draft is None or review is None:
+        return ""
+    prior_words = _draft_word_count(previous_draft)
+    if prior_words <= 0:
+        return ""
+    minimum_words = max(120, int(prior_words * 0.9))
+    return (
+        "This is a reviewer-directed revision, not a fresh summary. Return the complete "
+        f"section with at least about {minimum_words} substantive words, preserving valid prior "
+        "analysis and citations while addressing the review findings."
+    )
 
 
 def _draft_sequence(sections: list[ReportSectionPlan]) -> list[ReportSectionPlan]:

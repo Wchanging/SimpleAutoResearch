@@ -8,7 +8,12 @@
 
 ### 变更
 
+- Report 运行现在支持 `--report-reviewer llm|disabled`。`disabled` 会关闭
+  reviewer 驱动的 revision loop，但保留报告写作与写作后的证据 audit；SurveyBench
+  通过独立命名空间的 `--without-review-guided-revision` 提供对应消融，并可使用
+  `--reuse-full-run` 复用已完成 run 的上游产物。
 - SurveyBench 的标准与 thorough topic 配置现在都使用 `gpt-4o` 生成，同时文档中的原生 content 评测示例也使用 `gpt-4o`。这建立了明确标注的论文对比协议；此前由 `gpt-5.1` 生成的结果仍保留为开发记录，但不会被重新标注为该协议结果。
+- paper 风格报告现在会确定性地渲染标题层级：Abstract 与 References 保持不编号，普通章节与小节统一编号。长篇综合中的 coverage checklist 也已与 evidence-derived taxonomy seed 分离，避免检索阶段的操作性 facet 默认变成面向读者的章节标题。
 
 ## 2026-07-12
 

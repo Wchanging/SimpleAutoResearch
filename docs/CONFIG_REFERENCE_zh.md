@@ -239,6 +239,7 @@ criteria = "auto"
 style = "paper"               # paper | technical | concise
 cost_profile = "auto"         # auto | fast | balanced | thorough
 outline_strategy = "auto"     # auto | template | adaptive
+section_numbering = "off"     # auto | off | academic
 longform_contract = true      # survey/longform 模板启用通用长文综合契约
 
 # 默认保持紧凑；需要逐节草稿和完整 trace 时再打开。
@@ -248,6 +249,8 @@ debug_artifacts = false
 # V2.4 本地路径以 LLM writer/reviewer 为报告质量主体。
 agent = "llm"                 # llm | disabled
 reviewer = "llm"              # llm | disabled
+# `disabled` 会关闭 report 的 reviewer/revision loop，但保留 writer、证据路由
+# 以及写作后的 citation/metric/claim audit。
 max_review_iterations = 2
 max_section_tokens = 1200
 max_report_tokens = 5000
@@ -507,6 +510,7 @@ max_proposal_chars = 42000
 | `[report].style` | 报告语气提示：`paper`、`technical` 或 `concise`。 |
 | `[report].cost_profile` | 报告生成预算 profile。`auto` 对普通报告保持原行为，对长篇证据综合默认使用 `balanced`；`fast` 适合 smoke test；`thorough` 保留高预算行为。 |
 | `[report].outline_strategy` | 章节规划模式。`auto`/`adaptive` 会为 survey/longform 章节注入 topic-specific 目标和 source routing；`template` 完全按模板 heading 生成。 |
+| `[report].section_numbering` | 最终 Markdown 标题呈现方式。默认 `off` 保留原始标题。`academic` 会确定性地编号普通节/小节，并保留 Abstract 与 References 不编号；`auto` 会在 paper 风格报告启用。 |
 | `[report].longform_contract` | 为 survey/longform 模板启用通用长文综合契约，将读者需求、覆盖 facets、图表预期和边界写入 report memory/prompt。`[report].survey_contract` 仍作为旧别名兼容。 |
 | `[report].draft_sections` | 是否把 Writer Agent 的分节草稿保留到 `08-report/sections/`；默认 false 保持紧凑输出。 |
 | `[report].debug_artifacts` | 是否把 reviewer findings、tool results 和 iteration traces 保留到 `08-report/audit/` 与 `08-report/iterations/`；默认 false。 |

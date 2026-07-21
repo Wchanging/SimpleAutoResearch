@@ -28,6 +28,7 @@ from simple_ar.core.pipeline import (
     utcnow_iso,
 )
 from simple_ar.report.agent import run_report_agent
+from simple_ar.report.assembler import apply_section_numbering
 from simple_ar.report.audit import build_report_audit
 from simple_ar.report.citations import (
     append_references_section as _append_references_section,
@@ -164,6 +165,11 @@ def execute_report(ctx: Context) -> None:
     report_memory = initialize_report_memory(context=report_context, template=template)
     tool_gateway = ReportToolGateway(report_context)
     agent_removed_unknown_citations: list[str] = []
+    agent_validation: dict[str, Any] = {
+        "schema_version": "report_agent_validation.v1",
+        "attempted": False,
+        "accepted": False,
+    }
     agent_result = run_report_agent(
         client=_llm_client(ctx),
         context=report_context,
@@ -174,6 +180,7 @@ def execute_report(ctx: Context) -> None:
         emit=lambda message: ctx.emit("stage_message", message),
     )
     if agent_result is not None:
+        agent_validation["attempted"] = True
         validated_agent_report = _validated_agent_report(
             ctx,
             agent_result.report_body,
@@ -183,6 +190,7 @@ def execute_report(ctx: Context) -> None:
             citation_key_map=report_context.citation_key_map,
             report_mode=report_mode,
             results_present=results_present,
+            diagnostics=agent_validation,
         )
         if validated_agent_report is not None:
             report, agent_removed_unknown_citations = validated_agent_report
@@ -191,6 +199,7 @@ def execute_report(ctx: Context) -> None:
             report = None
     else:
         report = None
+    agent_fallback_used = agent_result is not None and report is None
     if report is None:
         if report_mode == "research_only":
             report = _build_research_report(
@@ -250,6 +259,12 @@ def execute_report(ctx: Context) -> None:
         emit=lambda message: ctx.emit("stage_message", message),
     )
     report = figure_result.report_markdown
+    report = apply_section_numbering(
+        report,
+        mode=report_config.section_numbering,
+        template_name=template.name,
+        style=report_config.style,
+    )
     write_survey_planning_artifacts(
         report_dir=report_dir,
         context=report_context,
@@ -269,6 +284,8 @@ def execute_report(ctx: Context) -> None:
     _record_removed_citations(report_audit, removed_unknown_citations)
     if agent_result is not None:
         _write_agent_artifacts(report_dir, agent_result, report_config)
+        agent_validation["fallback_used"] = agent_fallback_used
+        write_json(report_dir / "agent_validation.json", agent_validation)
     write_text(report_dir / "report.md", report)
     write_text(report_dir / "references.bib", papers_to_bibtex(cited_papers))
     write_json(
@@ -276,6 +293,8 @@ def execute_report(ctx: Context) -> None:
         _citation_map_artifact(citation_map, cited_papers, report_context.citation_key_map),
     )
     write_report_memory(report_dir / "report_memory.json", report_memory)
+    if report_memory.outline_planning:
+        write_json(report_dir / "outline_planning.json", report_memory.outline_planning)
     if figure_result.figures:
         write_json(
             report_dir / "figures" / "figures_manifest.json",
@@ -318,9 +337,13 @@ def _validated_agent_report(
     citation_key_map: dict[str, str],
     report_mode: str,
     results_present: bool,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[str, list[str]] | None:
     """Accept an agent report only when it respects citation and bound rules."""
     try:
+        if diagnostics is not None:
+            diagnostics["candidate_characters"] = len(report)
+            diagnostics["candidate_words"] = len(re.findall(r"\b[\w-]+\b", report))
         report_body = _strip_references_section(report)
         report_body = _expand_short_citation_keys(report_body, citation_key_map)
         allowed_ids = {paper.id for paper in papers}
@@ -346,8 +369,14 @@ def _validated_agent_report(
         )
         if bound_errors:
             raise LLMError("agent report exceeded artifact bounds: " + "; ".join(bound_errors))
+        if diagnostics is not None:
+            diagnostics["accepted"] = True
+            diagnostics["removed_unknown_citation_ids"] = removed_unknown_citations
         return report_body.strip() + "\n", removed_unknown_citations
     except (LLMError, CitationError) as exc:
+        if diagnostics is not None:
+            diagnostics["accepted"] = False
+            diagnostics["error"] = str(exc)
         ctx.emit("stage_message", f"Report agent output failed validation; using structured fallback. {exc}")
         return None
 
@@ -359,6 +388,7 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
         template=str(ctx.config.get("report_template") or "auto"),
         criteria=str(ctx.config.get("report_criteria") or "auto"),
         style=str(ctx.config.get("report_style") or "paper"),
+        section_numbering=_report_section_numbering_config(ctx.config.get("report_section_numbering")),
         cost_profile=_report_cost_profile_config(ctx.config.get("report_cost_profile")),
         outline_strategy=_report_outline_strategy_config(ctx.config.get("report_outline_strategy")),
         survey_contract=_bool_config(
@@ -408,6 +438,24 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
             target_words=_non_negative_int_config(
                 _config_alias(ctx.config, "report_longform_target_words", "report_survey_target_words"),
                 default=0,
+            ),
+            min_section_word_ratio=_bounded_float_config(
+                _config_alias(
+                    ctx.config,
+                    "report_longform_min_section_word_ratio",
+                    "report_survey_min_section_word_ratio",
+                ),
+                default=0.6,
+                lower=0.2,
+                upper=1.0,
+            ),
+            max_completion_revisions=_non_negative_int_config(
+                _config_alias(
+                    ctx.config,
+                    "report_longform_max_completion_revisions",
+                    "report_survey_max_completion_revisions",
+                ),
+                default=1,
             ),
             min_citations_per_section=_non_negative_int_config(
                 _config_alias(
@@ -495,6 +543,20 @@ def _non_negative_int_config(value: object, *, default: int) -> int:
         return value
     return default
 
+
+def _bounded_float_config(
+    value: object,
+    *,
+    default: float,
+    lower: float,
+    upper: float,
+) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return max(lower, min(float(value), upper))
+    return default
+
 def _review_trace_config(value: object) -> str:
     text = str(value or "meta").strip().lower()
     return text if text in {"off", "meta", "full"} else "meta"
@@ -510,6 +572,11 @@ def _report_cost_profile_config(value: object) -> str:
 def _report_outline_strategy_config(value: object) -> str:
     text = str(value or "auto").strip().lower()
     return text if text in {"auto", "template", "adaptive"} else "auto"
+
+
+def _report_section_numbering_config(value: object) -> str:
+    text = str(value or "off").strip().lower()
+    return text if text in {"auto", "off", "academic"} else "off"
 
 def _apply_report_cost_profile(config: ReportRuntimeConfig) -> ReportRuntimeConfig:
     """Normalize high-level report cost profiles into concrete budgets."""
@@ -920,15 +987,7 @@ def _report_bound_errors(
     if report_mode == "research_only":
         if re.search(r"^##\s+(method|experiments|results)\s*$", lower, flags=re.MULTILINE):
             errors.append("research-only report included experiment sections")
-        forbidden_residue = (
-            "hint:",
-            "use this paper as",
-            "paper brief",
-            "additional synthesis detail",
-            "search scope",
-            "evidence summary",
-        )
-        if any(term in lower for term in forbidden_residue):
+        if _contains_research_only_pipeline_residue(report):
             errors.append("research-only report contained prompt or pipeline residue")
     if report_mode == "experiment" and not results_present:
         errors.append("experiment report mode selected without results.json")
@@ -1007,6 +1066,24 @@ def _report_bound_errors(
         if any(term in lower for term in overclaims):
             errors.append("code-task benchmark was described beyond measured evidence")
     return errors
+
+
+def _contains_research_only_pipeline_residue(report: str) -> bool:
+    """Detect prompt leakage without rejecting normal academic terminology.
+
+    Terms such as "search scope" and "evidence summary" are legitimate in a
+    survey discussion.  They become pipeline residue only when emitted as a
+    standalone prompt label or directive, so the check intentionally anchors
+    matches to the beginning of a Markdown line.
+    """
+    patterns = (
+        r"(?im)^\s*(?:#{1,6}\s*)?hint\s*:",
+        r"(?im)^\s*(?:#{1,6}\s*)?use this paper as\b",
+        r"(?im)^\s*(?:#{1,6}\s*)?paper brief\s*:?(?:\s|$)",
+        r"(?im)^\s*(?:#{1,6}\s*)?additional synthesis detail\s*:?(?:\s|$)",
+        r"(?im)^\s*#{1,6}\s*(?:search scope|evidence summary|pipeline|artifacts|stage outputs)\s*$",
+    )
+    return any(re.search(pattern, report) for pattern in patterns)
 
 def _uses_fixture_metadata(search_meta: dict[str, Any]) -> bool:
     """Return true when literature rows are placeholders rather than live papers."""

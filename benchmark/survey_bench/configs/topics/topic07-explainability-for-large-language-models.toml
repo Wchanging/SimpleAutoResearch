@@ -73,6 +73,7 @@ criteria = "auto"
 style = "long_academic_survey"
 cost_profile = "balanced"
 outline_strategy = "adaptive"
+section_numbering = "academic"
 longform_contract = true
 draft_sections = true
 debug_artifacts = false

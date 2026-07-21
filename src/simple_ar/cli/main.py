@@ -353,6 +353,7 @@ def _apply_run_cli_overrides(config: dict[str, object], args: argparse.Namespace
     _set_if_not_none(config, "experiment_timeout_sec", args.experiment_timeout)
     _set_if_not_none(config, "retrieval_top_k", args.retrieval_top_k)
     _set_if_not_none(config, "report_mode", args.report_mode)
+    _set_if_not_none(config, "report_reviewer", getattr(args, "report_reviewer", None))
     _set_if_not_none(config, "report_output_mode", getattr(args, "report_output_mode", None))
     _set_if_not_none(config, "report_output_label", getattr(args, "report_output_label", None))
     _set_if_not_none(config, "overwrite_stage_artifacts", getattr(args, "overwrite_stage_artifacts", None))

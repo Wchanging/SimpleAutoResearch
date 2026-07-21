@@ -30,6 +30,24 @@ class LLMParsingTests(unittest.TestCase):
     def test_reject_non_object_json(self) -> None:
         self.assertIsNone(parse_json_object("[1, 2, 3]"))
 
+    def test_accept_single_object_array_from_compatible_gateway(self) -> None:
+        self.assertEqual(parse_json_object('[{"a": 1}]'), {"a": 1})
+
+    def test_ask_json_reads_chat_content_blocks(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": [{"type": "text", "text": '{"ok": true}'}],
+                    }
+                }
+            ]
+        }
+
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response):
+            self.assertEqual(client.ask_json("system", "user"), {"ok": True})
+
     def test_ask_json_many_preserves_input_order(self) -> None:
         client = object.__new__(LLMClient)
 

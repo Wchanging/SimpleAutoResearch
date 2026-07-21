@@ -96,7 +96,7 @@ def build_survey_contract(
     )
     taxonomy = _build_taxonomy(
         topic=context.topic,
-        facets=facets,
+        coverage_facets=facets,
         selected_papers=paper_selection["selected_papers"],
     )
     expected_citations = _bounded_int(
@@ -141,7 +141,7 @@ def build_survey_contract(
         target_tables=table_expectation,
     )
     return {
-        "schema_version": "survey_contract.v2",
+        "schema_version": "survey_contract.v3",
         "enabled": True,
         "template": template.name,
         "topic": context.topic,
@@ -210,7 +210,11 @@ def enrich_survey_sections(
         return list(sections)
     planned_sections = _sections_from_outline_plan(contract)
     if planned_sections:
-        return planned_sections
+        return _restore_section_source_budget(
+            planned_sections,
+            context=context,
+            contract=contract,
+        )
     budget = _bounded_int(contract.get("section_source_budget"), default=12, lower=4, upper=40)
     enriched: list[ReportSectionPlan] = []
     for section in sections:
@@ -412,27 +416,34 @@ def _candidate_papers(context: ReportContext) -> list[dict[str, Any]]:
 def _build_taxonomy(
     *,
     topic: str,
-    facets: Sequence[str],
+    coverage_facets: Sequence[str],
     selected_papers: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    groups: list[dict[str, Any]] = []
-    for index, facet in enumerate(facets[:10], start=1):
-        label = _human_label(facet)
-        terms = set(_topic_terms(label))
+    """Keep coverage requirements distinct from evidence-derived organization.
+
+    Configured research facets answer "what must be checked".  They are often
+    operational labels such as ``datasets_benchmarks_and_evaluation`` and are
+    not necessarily defensible conceptual axes for a reader-facing taxonomy.
+    The report planner receives both views: a deterministic coverage checklist
+    and lightweight evidence-role seeds from the selected literature.
+    """
+    coverage_rows: list[dict[str, Any]] = []
+    for index, facet in enumerate(coverage_facets[:10], start=1):
         paper_keys = [
             str(paper.get("citation_key") or paper.get("paper_id") or paper.get("handle") or "")
             for paper in selected_papers
             if _facet_matches_paper(facet, paper)
         ]
-        groups.append(
+        coverage_rows.append(
             {
-                "facet_id": f"facet_{index:02d}",
-                "label": label,
-                "keywords": sorted(terms)[:8],
+                "facet_id": f"coverage_{index:02d}",
+                "label": _human_label(facet),
                 "paper_keys": [key for key in paper_keys if key][:12],
                 "evidence_count": len([key for key in paper_keys if key]),
             }
         )
+
+    groups: list[dict[str, Any]] = []
     if selected_papers:
         role_groups = _role_groups(selected_papers)
         for label, keys in role_groups.items():
@@ -449,12 +460,17 @@ def _build_taxonomy(
             )
     groups = _dedupe_taxonomy_groups(groups)
     return {
-        "schema_version": "survey_taxonomy.v1",
+        "schema_version": "survey_taxonomy.v2",
         "topic": topic,
         "facets": groups[:12],
+        "coverage_facets": coverage_rows,
+        "taxonomy_note": (
+            "Taxonomy seeds are derived from roles in current-run selected papers; "
+            "the outline planner must derive reader-facing conceptual axes from source evidence."
+        ),
         "coverage_note": (
-            "Taxonomy is derived from configured research facets and current-run selected papers; "
-            "it is a writing aid, not a gold outline."
+            "Coverage facets are a deterministic checklist for evidence collection and audit. "
+            "They are not a prescribed report outline or taxonomy."
         ),
     }
 
@@ -468,12 +484,11 @@ def _build_outline_plan(
     selected_papers: Sequence[Mapping[str, Any]],
     min_citations_per_section: int,
 ) -> dict[str, Any]:
-    facets = taxonomy.get("facets") if isinstance(taxonomy.get("facets"), list) else []
-    facet_labels = [
-        str(facet.get("label") or "").strip()
-        for facet in facets
-        if isinstance(facet, Mapping) and str(facet.get("label") or "").strip()
-    ][:8]
+    # Evidence roles are useful for routing and audit, but they are not a
+    # reader-facing taxonomy.  Keeping the deterministic fallback neutral
+    # avoids headings such as "Method Evidence as a Taxonomy Axis" when a
+    # topic-specific outline call cannot be used.
+    facet_labels: list[str] = []
     selected_keys = [
         str(paper.get("citation_key") or paper.get("paper_id") or paper.get("handle") or "")
         for paper in selected_papers
@@ -518,6 +533,36 @@ def _build_outline_plan(
         "target_words": target_words,
         "sections": sections,
     }
+
+
+def _restore_section_source_budget(
+    sections: Sequence[ReportSectionPlan],
+    *,
+    context: ReportContext,
+    contract: Mapping[str, Any],
+) -> list[ReportSectionPlan]:
+    """Restore bounded evidence routing for a deterministic outline fallback.
+
+    The deterministic outline includes a few citation keys as an initial
+    anchor.  Those keys are not a source budget.  Returning them directly
+    silently turns a thorough multi-batch report into a four-source report
+    when adaptive planning is unavailable.  Re-route every section through
+    the configured budget so fallback changes organization, not evidence
+    availability.
+    """
+    budget = _bounded_int(contract.get("section_source_budget"), default=12, lower=4, upper=40)
+    restored: list[ReportSectionPlan] = []
+    for section in sections:
+        routed = route_section_sources(
+            context=context,
+            heading=section.heading,
+            goal=section.goal,
+            contract=contract,
+            budget=budget,
+        )
+        merged = _dedupe_strings([*section.evidence_handles, *routed])[:budget]
+        restored.append(section.model_copy(update={"evidence_handles": merged or section.evidence_handles}))
+    return restored
 
 
 def _build_visual_plan(

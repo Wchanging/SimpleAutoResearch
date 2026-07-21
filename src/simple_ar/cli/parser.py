@@ -34,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Report drafting mode: auto (based on results.json), research_only, or experiment.",
     )
+    run_parser.add_argument(
+        "--report-reviewer",
+        choices=("llm", "disabled"),
+        default=None,
+        help="Override the report reviewer backend. `disabled` skips the reviewer/revision loop.",
+    )
     _add_report_output_args(run_parser)
     run_parser.add_argument("--quiet", action="store_true", default=None)
     run_parser.add_argument(
@@ -66,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "research_only", "experiment"),
         default=None,
         help="Override report drafting mode for a resumed run.",
+    )
+    resume_parser.add_argument(
+        "--report-reviewer",
+        choices=("llm", "disabled"),
+        default=None,
+        help="Override the report reviewer backend. `disabled` skips the reviewer/revision loop.",
     )
     _add_report_output_args(resume_parser)
     resume_parser.add_argument("--quiet", action="store_true", default=None)

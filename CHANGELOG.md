@@ -8,10 +8,42 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Structured LLM responses now normalize OpenAI-compatible chat content blocks
+  and singleton object arrays before JSON validation. Report writers also
+  recognize common nested/body aliases while preserving the canonical
+  `draft_markdown` contract, improving interoperability without changing
+  evaluator behavior.
+- Report execution now accepts `--report-reviewer llm|disabled`. The disabled
+  mode skips the reviewer-directed revision loop while retaining report writing
+  and post-draft evidence audits. SurveyBench exposes this as an isolated
+  `--without-review-guided-revision` ablation namespace and can reuse a
+  completed run's upstream artifacts with `--reuse-full-run`.
 - SurveyBench standard and thorough topic configurations now use `gpt-4o` for
   generation as well as the documented native content evaluation examples.
   This establishes a clearly labelled paper-comparison protocol; historical
   `gpt-5.1`-generated scores remain development results and are not relabelled.
+- Paper-style reports now render their section hierarchy deterministically,
+  keeping Abstract and References unnumbered while numbering ordinary sections
+  and subsections. Long-form coverage checklists are also kept distinct from
+  evidence-derived taxonomy seeds, so operational retrieval facets do not
+  become reader-facing section headings by default.
+- Adaptive long-form outline planning now retries once on an invalid LLM plan.
+  If it still falls back to the deterministic outline, each section retains
+  its configured evidence-source budget and records the decision in
+  `08-report/outline_planning.json` rather than silently drafting from only a
+  few outline anchors.
+- Long-form drafting performs one bounded evidence-preserving completion pass
+  when a section materially misses its configured length target. Batch source
+  integration also preserves richer prior prose instead of replacing it with a
+  shorter later-batch summary. Declared section targets remain writing
+  constraints rather than implicit transport truncation limits.
+- SurveyBench report-only reuse now temporarily snapshots and restores the
+  canonical report package, guaranteeing that `--reuse-full-run` writes only
+  the requested sibling variant and cannot pollute the source run's report
+  artifacts.
+- Report completion retries now preserve their extra completion instruction,
+  and tolerate a claim-level evidence status accidentally placed in the
+  section lifecycle field by normalizing it to a valid draft state.
 
 ## 2026-07-12
 

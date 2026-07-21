@@ -183,6 +183,7 @@ class ReportSection(_ConfigModel):
     template: str | None = None
     criteria: str | None = None
     style: str | None = None
+    section_numbering: str | None = None
     cost_profile: str | None = None
     outline_strategy: str | None = None
     longform_contract: bool | None = None
@@ -374,6 +375,7 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "report_template", self.report.template)
         _set_string(result, "report_criteria", self.report.criteria)
         _set_string(result, "report_style", self.report.style)
+        _set_string(result, "report_section_numbering", self.report.section_numbering)
         _set_string(result, "report_cost_profile", self.report.cost_profile)
         _set_string(result, "report_outline_strategy", self.report.outline_strategy)
         if isinstance(self.report.longform_contract, bool):
@@ -547,6 +549,8 @@ def _set_report_longform(result: dict[str, object], value: object, *, legacy: bo
         "target_papers",
         "min_papers",
         "target_words",
+        "min_section_word_ratio",
+        "max_completion_revisions",
         "min_citations_per_section",
         "target_tables",
         "evidence_audit",
@@ -560,7 +564,7 @@ def _set_report_longform(result: dict[str, object], value: object, *, legacy: bo
         legacy_target = f"report_survey_{normalized}"
         if isinstance(setting, bool):
             value_to_set: object = setting
-        elif isinstance(setting, int) and not isinstance(setting, bool):
+        elif isinstance(setting, (int, float)) and not isinstance(setting, bool):
             value_to_set = setting
         elif isinstance(setting, str) and setting.strip():
             value_to_set = setting.strip()

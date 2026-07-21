@@ -51,6 +51,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 | `--experiment-template NAME` | string | Experiment template, such as `code_task_project`. |
 | `--experiment-timeout N` | int | Subprocess timeout for experiment execution. |
 | `--report-mode MODE` | enum | `auto`, `research_only`, or `experiment`. |
+| `--report-reviewer MODE` | choice | `llm` or `disabled`. `disabled` skips the report reviewer/revision loop but retains post-draft audits. |
 | `--no-llm` | flag | Use deterministic fallback text where possible. |
 | `--offline-search` | flag | Skip live literature providers. |
 | `--allow-fixture-fallback` | flag | Allow fixture metadata after live/cache failures. |
@@ -112,6 +113,7 @@ Common report output options:
 | Option | Type | Description |
 |---|---|---|
 | `--report-output-mode` | choice | `overwrite`, `archive`, or `variant`. `variant` writes `08-report/variants/<label>/` without replacing the current main report. |
+| `--report-reviewer` | choice | `llm` or `disabled`. A resume override for the report reviewer/revision loop. |
 | `--report-output-label` | string | Optional folder label for report archive/variant outputs. |
 | `--overwrite-stage-artifacts` | flag | Disable default archive protection for rerunning `06-code` / `07-run` artifacts. |
 

@@ -249,6 +249,7 @@ criteria = "auto"
 style = "paper"               # paper | technical | concise
 cost_profile = "auto"         # auto | fast | balanced | thorough
 outline_strategy = "auto"     # auto | template | adaptive
+section_numbering = "off"     # auto | off | academic
 longform_contract = true      # add long-form synthesis contract for survey/longform templates
 
 # Keep section drafts and full report traces only when needed.
@@ -258,6 +259,8 @@ debug_artifacts = false
 # V2.4 local path uses LLM writer/reviewer as the main quality mechanism.
 agent = "llm"                 # llm | disabled
 reviewer = "llm"              # llm | disabled
+# `disabled` removes the report reviewer/revision loop while preserving the
+# writer, source routing, and post-draft citation/metric/claim audits.
 max_review_iterations = 2
 max_section_tokens = 1200
 max_report_tokens = 5000
@@ -523,6 +526,7 @@ max_proposal_chars = 42000
 | `[report].style` | Tone hint for report writing: `paper`, `technical`, or `concise`. |
 | `[report].cost_profile` | High-level report budget profile. `auto` keeps ordinary reports unchanged and maps long survey templates to `balanced`; `fast` reduces section source batches for smoke tests; `thorough` preserves high-budget behavior. |
 | `[report].outline_strategy` | Section planning mode. `auto`/`adaptive` enrich survey sections with topic-specific goals and source routing; `template` keeps headings exactly as declared by the template. |
+| `[report].section_numbering` | Final Markdown heading presentation. Default `off` preserves raw headings. `academic` deterministically numbers ordinary section/subsection headings while keeping Abstract and References unnumbered; `auto` enables it for paper-style reports. |
 | `[report].longform_contract` | When true, survey/longform templates attach a benchmark-neutral long-form synthesis contract to writer/reviewer prompts and report memory. `[report].survey_contract` remains a legacy alias. |
 | `[report].draft_sections` | When true, keeps Writer Agent section drafts under `08-report/sections/`. Default false keeps compact reports. |
 | `[report].debug_artifacts` | When true, keeps reviewer findings, tool results, and iteration traces under `08-report/audit/` and `08-report/iterations/`. Default false. |
