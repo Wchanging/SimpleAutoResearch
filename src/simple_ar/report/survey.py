@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.core.artifacts import write_json, write_text
-from simple_ar.report.schema import ReportContext, ReportRuntimeConfig, ReportSectionPlan, ReportTemplateBundle, SourceHandle
+from simple_ar.report.schema import (
+    ReportContext,
+    ReportDocumentPlan,
+    ReportRuntimeConfig,
+    ReportSectionPlan,
+    ReportTemplateBundle,
+    SourceHandle,
+)
 
 
 SURVEY_TEMPLATE_NAMES = {"survey", "survey_long"}
@@ -18,6 +25,7 @@ DEFAULT_SURVEY_FACETS = [
     "evaluation_and_benchmarks",
     "challenges_and_future_directions",
 ]
+
 STOPWORDS = {
     "a",
     "an",
@@ -135,11 +143,6 @@ def build_survey_contract(
         selected_papers=paper_selection["selected_papers"],
         min_citations_per_section=min_citations,
     )
-    visual_plan = _build_visual_plan(
-        taxonomy=taxonomy,
-        target_figures=figure_expectation,
-        target_tables=table_expectation,
-    )
     return {
         "schema_version": "survey_contract.v3",
         "enabled": True,
@@ -172,7 +175,10 @@ def build_survey_contract(
         "paper_selection": paper_selection,
         "taxonomy": taxonomy,
         "outline_plan": outline_plan,
-        "visual_plan": visual_plan,
+        "visual_budget": {
+            "tables": table_expectation,
+            "figures": figure_expectation,
+        },
         "citation_policy": {
             "use_short_keys": True,
             "cite_claims_adjacent_to_text": True,
@@ -272,6 +278,7 @@ def write_survey_planning_artifacts(
     report_dir: Path,
     context: ReportContext,
     contract: dict[str, Any],
+    document_plan: ReportDocumentPlan | None,
     report_body: str,
     final_report: str,
     enabled: bool,
@@ -290,7 +297,7 @@ def write_survey_planning_artifacts(
     paper_selection = contract.get("paper_selection") if isinstance(contract.get("paper_selection"), dict) else {}
     taxonomy = contract.get("taxonomy") if isinstance(contract.get("taxonomy"), dict) else {}
     outline_plan = contract.get("outline_plan") if isinstance(contract.get("outline_plan"), dict) else {}
-    visual_plan = contract.get("visual_plan") if isinstance(contract.get("visual_plan"), dict) else {}
+    visual_plan = _visual_plan_record(document_plan)
     citation_audit = (
         _build_citation_coverage_audit(
             report_body=report_body,
@@ -301,13 +308,21 @@ def write_survey_planning_artifacts(
         if evidence_audit
         else {"schema_version": "survey_citation_coverage_audit.v1", "status": "disabled"}
     )
+    visual_audit = (
+        _build_visual_coverage_audit(final_report=final_report, visual_plan=visual_plan)
+        if evidence_audit
+        else {"schema_version": "survey_visual_coverage_audit.v1", "status": "disabled"}
+    )
     write_json(survey_dir / "longform_contract.json", contract)
     write_json(survey_dir / "paper_selection.json", paper_selection)
     write_json(survey_dir / "taxonomy.json", taxonomy)
     write_json(survey_dir / "outline_plan.json", outline_plan)
+    if document_plan is not None:
+        write_json(survey_dir / "document_plan.json", document_plan.model_dump(mode="json"))
     write_json(survey_dir / "visual_plan.json", visual_plan)
     if evidence_audit:
         write_json(survey_dir / "citation_coverage_audit.json", citation_audit)
+        write_json(survey_dir / "visual_coverage_audit.json", visual_audit)
     write_text(
         survey_dir / "longform_plan.md",
         _render_survey_plan_markdown(
@@ -317,8 +332,54 @@ def write_survey_planning_artifacts(
             outline_plan=outline_plan,
             visual_plan=visual_plan,
             citation_audit=citation_audit,
+            visual_audit=visual_audit,
         ),
     )
+
+
+def _visual_plan_record(document_plan: ReportDocumentPlan | None) -> dict[str, Any]:
+    """Create a backward-readable audit projection from the frozen plan.
+
+    This record is output evidence only.  It is never fed back into Writer or
+    Reviewer as another planning source.
+    """
+    if document_plan is None:
+        return {
+            "schema_version": "report_visual_plan.v1",
+            "requested_table_count": 0,
+            "requested_figure_count": 0,
+            "tables": [],
+            "figures": [],
+        }
+    tables: list[dict[str, Any]] = []
+    figures: list[dict[str, Any]] = []
+    for intent in document_plan.visual_intents:
+        row = {
+            "title": intent.title,
+            "purpose": intent.purpose,
+            "section_id": intent.section_id,
+            "evidence_handles": intent.evidence_handles,
+        }
+        if intent.kind == "table":
+            tables.append(
+                {
+                    **row,
+                    "table_id": intent.visual_id,
+                    "suggested_columns": intent.columns,
+                }
+            )
+        else:
+            figures.append({**row, "figure_id": intent.view or intent.visual_id, "view": intent.view})
+    return {
+        "schema_version": "report_visual_plan.v1",
+        "requested_table_count": int(document_plan.visual_budget.get("tables") or 0),
+        "requested_figure_count": int(document_plan.visual_budget.get("figures") or 0),
+        "planned_table_count": len(tables),
+        "planned_figure_count": len(figures),
+        "tables": tables,
+        "figures": figures,
+        "note": "Projection of the frozen DocumentPlan; configured counts are upper bounds.",
+    }
 
 
 def _build_paper_selection(
@@ -565,63 +626,6 @@ def _restore_section_source_budget(
     return restored
 
 
-def _build_visual_plan(
-    *,
-    taxonomy: Mapping[str, Any],
-    target_figures: int,
-    target_tables: int,
-) -> dict[str, Any]:
-    facets = taxonomy.get("facets") if isinstance(taxonomy.get("facets"), list) else []
-    facet_labels = [
-        str(facet.get("label") or "").strip()
-        for facet in facets
-        if isinstance(facet, Mapping) and str(facet.get("label") or "").strip()
-    ][:8]
-    tables = [
-        {
-            "table_id": "taxonomy-comparison",
-            "title": "Taxonomy and Representative Evidence",
-            "purpose": "Compare method families or conceptual facets with representative cited papers.",
-            "suggested_columns": ["Facet", "Core idea", "Representative papers", "Evidence boundary"],
-        },
-        {
-            "table_id": "evaluation-landscape",
-            "title": "Evaluation Settings and Metrics",
-            "purpose": "Summarize datasets, tasks, metrics, and reproducibility limitations when evidence permits.",
-            "suggested_columns": ["Setting", "Task or dataset", "Metric", "Observed limitation"],
-        },
-        {
-            "table_id": "challenge-map",
-            "title": "Challenges and Future Directions",
-            "purpose": "Connect open challenges with evidence gaps and potential research directions.",
-            "suggested_columns": ["Challenge", "Current evidence", "Risk", "Future direction"],
-        },
-    ][: max(0, target_tables)]
-    figures = [
-        {
-            "figure_id": "taxonomy-map",
-            "title": "Survey Taxonomy Map",
-            "items": facet_labels[:8],
-        },
-        {
-            "figure_id": "system-construction-flow",
-            "title": "System Construction Flow",
-            "items": facet_labels[:8],
-        },
-        {
-            "figure_id": "challenge-roadmap",
-            "title": "Challenge and Future Roadmap",
-            "items": facet_labels[:8],
-        },
-    ][: max(0, target_figures)]
-    return {
-        "schema_version": "survey_visual_plan.v1",
-        "tables": tables,
-        "figures": figures,
-        "note": "Visuals are derived from the current-run taxonomy and report text; no benchmark reference survey is used.",
-    }
-
-
 def _sections_from_outline_plan(contract: Mapping[str, Any]) -> list[ReportSectionPlan]:
     outline = contract.get("outline_plan") if isinstance(contract.get("outline_plan"), Mapping) else {}
     raw_sections = outline.get("sections") if isinstance(outline.get("sections"), list) else []
@@ -762,6 +766,168 @@ def _build_citation_coverage_audit(
     }
 
 
+def _build_visual_coverage_audit(
+    *,
+    final_report: str,
+    visual_plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Record whether planned evidence visuals appear in the rendered report.
+
+    This is intentionally a deterministic post-hoc audit. It never invents a
+    table, changes a score, or blocks ordinary report generation. The existing
+    section reviewer receives the same planned requirements before this point.
+    """
+    planned_tables = [
+        row for row in (visual_plan.get("tables") if isinstance(visual_plan.get("tables"), list) else [])
+        if isinstance(row, Mapping)
+    ]
+    planned_figures = [
+        row for row in (visual_plan.get("figures") if isinstance(visual_plan.get("figures"), list) else [])
+        if isinstance(row, Mapping)
+    ]
+    tables = _markdown_tables_by_section(final_report)
+    realized_tables: list[dict[str, Any]] = []
+    missing_tables: list[dict[str, Any]] = []
+    used_table_indexes: set[int] = set()
+    for plan in planned_tables:
+        match_index = _match_planned_table(plan, tables, used_table_indexes)
+        row = {
+            "table_id": str(plan.get("table_id") or ""),
+            "title": str(plan.get("title") or ""),
+            "section_id": str(plan.get("section_id") or ""),
+        }
+        if match_index is None:
+            missing_tables.append(row)
+            continue
+        used_table_indexes.add(match_index)
+        observed = tables[match_index]
+        realized_tables.append(
+            {
+                **row,
+                "observed_section": observed["section_heading"],
+                "observed_columns": observed["columns"],
+            }
+        )
+
+    image_ids = {
+        match.group(1).strip().lower()
+        for match in re.finditer(r"!\[[^\]]*\]\([^)]*figures/([A-Za-z0-9_-]+)\.svg[^)]*\)", final_report)
+    }
+    realized_figures: list[dict[str, Any]] = []
+    missing_figures: list[dict[str, Any]] = []
+    for plan in planned_figures:
+        figure_id = str(plan.get("figure_id") or "").strip()
+        row = {"figure_id": figure_id, "title": str(plan.get("title") or "")}
+        if figure_id and figure_id.lower() in image_ids:
+            realized_figures.append(row)
+        else:
+            missing_figures.append(row)
+
+    warnings: list[str] = []
+    if missing_tables:
+        warnings.append(f"{len(missing_tables)} planned table(s) were not realized in the final report.")
+    if missing_figures:
+        warnings.append(f"{len(missing_figures)} planned figure(s) were not realized in the final report.")
+    return {
+        "schema_version": "survey_visual_coverage_audit.v1",
+        "requested_table_count": _safe_int(visual_plan.get("requested_table_count"), len(planned_tables)),
+        "planned_table_count": len(planned_tables),
+        "realized_table_count": len(realized_tables),
+        "requested_figure_count": _safe_int(visual_plan.get("requested_figure_count"), len(planned_figures)),
+        "planned_figure_count": len(planned_figures),
+        "realized_figure_count": len(realized_figures),
+        "realized_tables": realized_tables,
+        "missing_tables": missing_tables,
+        "realized_figures": realized_figures,
+        "missing_figures": missing_figures,
+        "unmatched_table_count": max(0, len(tables) - len(used_table_indexes)),
+        "warnings": warnings,
+        "status": "warning" if warnings else "passed",
+    }
+
+
+def _markdown_tables_by_section(markdown: str) -> list[dict[str, Any]]:
+    """Extract simple Markdown tables with their enclosing level-two section."""
+    tables: list[dict[str, Any]] = []
+    current_heading = ""
+    pending_lines: list[str] = []
+    lines = markdown.splitlines()
+    index = 0
+    while index < len(lines):
+        heading = re.match(r"^##\s+(.+?)\s*$", lines[index])
+        if heading:
+            current_heading = _strip_section_number(heading.group(1).strip())
+            pending_lines = []
+            index += 1
+            continue
+        line = lines[index]
+        if _is_markdown_table_header(line) and index + 1 < len(lines) and _is_markdown_table_separator(lines[index + 1]):
+            columns = _markdown_table_cells(line)
+            context = "\n".join(pending_lines[-3:])
+            index += 2
+            while index < len(lines) and lines[index].strip().startswith("|"):
+                index += 1
+            tables.append(
+                {
+                    "section_heading": current_heading,
+                    "columns": columns,
+                    "context": context,
+                }
+            )
+            continue
+        pending_lines.append(line)
+        index += 1
+    return tables
+
+
+def _match_planned_table(
+    plan: Mapping[str, Any],
+    tables: Sequence[Mapping[str, Any]],
+    used_indexes: set[int],
+) -> int | None:
+    expected_section = _normalize_key(str(plan.get("section_id") or plan.get("section_heading") or ""))
+    expected_title = _normalize_key(str(plan.get("title") or ""))
+    expected_columns = {
+        _normalize_key(str(column))
+        for column in (plan.get("suggested_columns") if isinstance(plan.get("suggested_columns"), list) else [])
+        if str(column).strip()
+    }
+    best_index: int | None = None
+    best_score = 0
+    for index, table in enumerate(tables):
+        if index in used_indexes:
+            continue
+        heading = _normalize_key(str(table.get("section_heading") or ""))
+        context = _normalize_key(str(table.get("context") or ""))
+        columns = {_normalize_key(str(value)) for value in table.get("columns", []) if str(value).strip()}
+        score = 0
+        if expected_section and (expected_section == heading or expected_section in heading):
+            score += 3
+        if expected_title and expected_title in context:
+            score += 4
+        score += min(3, len(expected_columns & columns))
+        if score > best_score:
+            best_index = index
+            best_score = score
+    # Older visual-plan artifacts did not retain section assignments. Preserve
+    # their auditability by accepting a strong title/column match, while newer
+    # plans require the additional section signal.
+    required_score = 4 if expected_section else 3
+    return best_index if best_score >= required_score else None
+
+
+def _is_markdown_table_header(line: str) -> bool:
+    return line.strip().startswith("|") and line.count("|") >= 2
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    return bool(re.match(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$", line.strip()))
+
+
+def _markdown_table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|") if cell.strip()]
+
+
 def _render_survey_plan_markdown(
     *,
     contract: Mapping[str, Any],
@@ -770,6 +936,7 @@ def _render_survey_plan_markdown(
     outline_plan: Mapping[str, Any],
     visual_plan: Mapping[str, Any],
     citation_audit: Mapping[str, Any],
+    visual_audit: Mapping[str, Any],
 ) -> str:
     lines = [
         "# Survey Planning Artifacts",
@@ -777,6 +944,7 @@ def _render_survey_plan_markdown(
         f"- Topic: {contract.get('topic', '')}",
         f"- Selected papers: {paper_selection.get('selected_papers') and len(paper_selection.get('selected_papers', [])) or 0} / target {paper_selection.get('target_papers', '')}",
         f"- Citation audit status: {citation_audit.get('status', 'unknown')}",
+        f"- Visual audit status: {visual_audit.get('status', 'unknown')}",
         "",
         "## Taxonomy",
         "",
@@ -831,9 +999,31 @@ def _render_survey_plan_markdown(
             if isinstance(row, Mapping):
                 lines.append(f"- {row.get('title') or row.get('figure_id') or row.get('table_id')}")
         lines.append("")
+    lines.extend(
+        [
+            "## Visual Coverage",
+            "",
+            (
+                f"- Tables: requested {visual_audit.get('requested_table_count', 0)}, "
+                f"planned {visual_audit.get('planned_table_count', 0)}, "
+                f"realized {visual_audit.get('realized_table_count', 0)}."
+            ),
+            (
+                f"- Figures: requested {visual_audit.get('requested_figure_count', 0)}, "
+                f"planned {visual_audit.get('planned_figure_count', 0)}, "
+                f"realized {visual_audit.get('realized_figure_count', 0)}."
+            ),
+            "",
+        ]
+    )
     if citation_audit.get("warnings"):
         lines.extend(["## Warnings", ""])
         for warning in _string_list(citation_audit.get("warnings")):
+            lines.append(f"- {warning}")
+    if visual_audit.get("warnings"):
+        if not citation_audit.get("warnings"):
+            lines.extend(["## Warnings", ""])
+        for warning in _string_list(visual_audit.get("warnings")):
             lines.append(f"- {warning}")
     return "\n".join(lines).rstrip() + "\n"
 

@@ -199,7 +199,6 @@ class ReportSection(_ConfigModel):
     source_strategy: str | None = None
     source_batch_size: int | None = None
     max_source_batches: int | None = None
-    review_source_batches: bool | None = None
     review_trace: str | None = None
     output_mode: str | None = None
     output_label: str | None = None
@@ -394,7 +393,6 @@ class PipelineRunConfig(_ConfigModel):
         _set_string(result, "report_source_strategy", self.report.source_strategy)
         _set_int(result, "report_source_batch_size", self.report.source_batch_size)
         _set_int(result, "report_max_source_batches", self.report.max_source_batches)
-        _set_bool(result, "report_review_source_batches", self.report.review_source_batches)
         _set_string(result, "report_review_trace", self.report.review_trace)
         _set_string(result, "report_output_mode", self.report.output_mode)
         _set_string(result, "report_output_label", self.report.output_label)

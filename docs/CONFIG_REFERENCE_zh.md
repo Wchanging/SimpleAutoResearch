@@ -259,7 +259,6 @@ max_section_sources = 8
 source_strategy = "full"       # full | batch_refine
 source_batch_size = 10
 max_source_batches = 0         # 0 表示使用全部批次
-review_source_batches = false  # true 表示每个 batch_refine 批次后都审查
 review_trace = "meta"         # off | meta | full
 
 # 报告写入策略：
@@ -521,7 +520,6 @@ max_proposal_chars = 42000
 | `[report].source_strategy` | `full` 表示每节一次性使用配置的 source set；`batch_refine` 表示把较大的 source set 分批，并在同一 section 草稿上逐批增量修订。 |
 | `[report].source_batch_size` | `source_strategy = "batch_refine"` 时每批 source handles 数量。 |
 | `[report].max_source_batches` | `batch_refine` 下每节最多处理多少批；`0` 表示处理全部批次。 |
-| `[report].review_source_batches` | 为 true 时，每个 `batch_refine` 批次整合后都会调用 reviewer。质量控制更强，但 LLM 成本更高。 |
 | `[report].output_mode` / `.output_label` | 控制重跑 08-report 时的写入方式：直接覆盖、覆盖前归档旧报告，或写一份不覆盖主报告的 variant。 |
 | `[report].review_trace` | reviewer trace 保留策略：`off`、`meta` 或 `full`。 |
 | `[report].allow_source_backtracking` | 是否允许 report tools 在当前 run 的 source handles 中有界回查更多证据。 |

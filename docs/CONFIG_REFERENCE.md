@@ -261,7 +261,7 @@ agent = "llm"                 # llm | disabled
 reviewer = "llm"              # llm | disabled
 # `disabled` removes the report reviewer/revision loop while preserving the
 # writer, source routing, and post-draft citation/metric/claim audits.
-max_review_iterations = 2
+max_review_iterations = 2  # 0 keeps a final review record but disables auto-revision
 max_section_tokens = 1200
 max_report_tokens = 5000
 # 0 means all selected paper-level handles; positive values bound prompt size.
@@ -271,7 +271,6 @@ max_section_sources = 8
 source_strategy = "full"       # full | batch_refine
 source_batch_size = 10
 max_source_batches = 0         # 0 means all batches
-review_source_batches = false  # true reviews after each batch-refine batch
 review_trace = "meta"         # off | meta | full
 
 # Report write policy:
@@ -531,13 +530,12 @@ max_proposal_chars = 42000
 | `[report].draft_sections` | When true, keeps Writer Agent section drafts under `08-report/sections/`. Default false keeps compact reports. |
 | `[report].debug_artifacts` | When true, keeps reviewer findings, tool results, and iteration traces under `08-report/audit/` and `08-report/iterations/`. Default false. |
 | `[report].agent` / `[report].reviewer` | Report writer/reviewer backend. V2.4 local path expects LLM for quality; disabled mode is a fallback. |
-| `[report].max_review_iterations` | Maximum writer/reviewer revision rounds. |
+| `[report].max_review_iterations` | Maximum section-level review -> targeted-revision cycles. `0` records a final review but disables automatic revision. |
 | `[report].max_section_tokens` / `[report].max_report_tokens` | Token budgets for section drafting and final report assembly. |
 | `[report].max_section_sources` | Maximum model-facing source handles assigned to each section plan. `0` exposes all selected paper-level handles; full-text chunks stay available through bounded backtracking tools. |
 | `[report].source_strategy` | `full` drafts each section from the configured source set in one pass. `batch_refine` splits larger source sets and revises each section incrementally. |
 | `[report].source_batch_size` | Number of source handles per batch when `source_strategy = "batch_refine"`. |
 | `[report].max_source_batches` | Maximum batches per section in `batch_refine`; `0` means all batches. |
-| `[report].review_source_batches` | When true, reviewer checks run after each `batch_refine` integration batch. This improves control but increases LLM cost. |
 | `[report].output_mode` / `.output_label` | Controls reruns of 08-report: overwrite in place, archive the old report before overwriting, or write a separate variant package. |
 | `[report].review_trace` | Reviewer trace retention: `off`, `meta`, or `full`. |
 | `[report].allow_source_backtracking` | Allows report tools to retrieve bounded extra evidence from current-run source handles. |

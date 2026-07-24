@@ -255,7 +255,7 @@ def execute_report(ctx: Context) -> None:
         report_dir=report_dir,
         config=report_config.figures,
         template_name=template.name,
-        survey_contract=report_context.survey_contract,
+        document_plan=report_memory.document_plan,
         emit=lambda message: ctx.emit("stage_message", message),
     )
     report = figure_result.report_markdown
@@ -269,6 +269,7 @@ def execute_report(ctx: Context) -> None:
         report_dir=report_dir,
         context=report_context,
         contract=report_context.survey_contract,
+        document_plan=report_memory.document_plan,
         report_body=report_body,
         final_report=report,
         enabled=report_config.longform.planning_artifacts,
@@ -399,14 +400,16 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
         debug_artifacts=_bool_config(ctx.config.get("report_debug_artifacts"), default=False),
         agent=str(ctx.config.get("report_agent") or "llm"),
         reviewer=str(ctx.config.get("report_reviewer") or "llm"),
-        max_review_iterations=_int_config(ctx.config.get("report_max_review_iterations"), default=2),
+        max_review_iterations=_non_negative_int_config(
+            ctx.config.get("report_max_review_iterations"),
+            default=2,
+        ),
         max_section_tokens=_int_config(ctx.config.get("report_max_section_tokens"), default=1200),
         max_report_tokens=_int_config(ctx.config.get("report_max_report_tokens"), default=5000),
         max_section_sources=_non_negative_int_config(ctx.config.get("report_max_section_sources"), default=8),
         source_strategy=_report_source_strategy_config(ctx.config.get("report_source_strategy")),
         source_batch_size=_int_config(ctx.config.get("report_source_batch_size"), default=10),
         max_source_batches=_non_negative_int_config(ctx.config.get("report_max_source_batches"), default=0),
-        review_source_batches=_bool_config(ctx.config.get("report_review_source_batches"), default=False),
         review_trace=_review_trace_config(ctx.config.get("report_review_trace")),
         output_mode=_report_output_mode_config(ctx.config.get("report_output_mode")),
         output_label=_safe_output_label(ctx.config.get("report_output_label")),
@@ -438,24 +441,6 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
             target_words=_non_negative_int_config(
                 _config_alias(ctx.config, "report_longform_target_words", "report_survey_target_words"),
                 default=0,
-            ),
-            min_section_word_ratio=_bounded_float_config(
-                _config_alias(
-                    ctx.config,
-                    "report_longform_min_section_word_ratio",
-                    "report_survey_min_section_word_ratio",
-                ),
-                default=0.6,
-                lower=0.2,
-                upper=1.0,
-            ),
-            max_completion_revisions=_non_negative_int_config(
-                _config_alias(
-                    ctx.config,
-                    "report_longform_max_completion_revisions",
-                    "report_survey_max_completion_revisions",
-                ),
-                default=1,
             ),
             min_citations_per_section=_non_negative_int_config(
                 _config_alias(
@@ -543,19 +528,6 @@ def _non_negative_int_config(value: object, *, default: int) -> int:
         return value
     return default
 
-
-def _bounded_float_config(
-    value: object,
-    *,
-    default: float,
-    lower: float,
-    upper: float,
-) -> float:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, (int, float)):
-        return max(lower, min(float(value), upper))
-    return default
 
 def _review_trace_config(value: object) -> str:
     text = str(value or "meta").strip().lower()

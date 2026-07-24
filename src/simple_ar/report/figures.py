@@ -9,7 +9,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from simple_ar.core.artifacts import write_text
-from simple_ar.report.schema import ReportFigureConfig
+from simple_ar.report.document_plan import visual_plan_for_renderer
+from simple_ar.report.schema import ReportDocumentPlan, ReportFigureConfig
 
 
 class ReportFigureRecord(BaseModel):
@@ -81,7 +82,7 @@ def maybe_add_report_figures(
     report_dir: Path,
     config: ReportFigureConfig,
     template_name: str = "",
-    survey_contract: dict[str, Any] | None = None,
+    document_plan: ReportDocumentPlan | None = None,
     emit=None,
 ) -> ReportFigureResult:
     """Generate deterministic SVG figures and insert Markdown image links.
@@ -108,24 +109,40 @@ def maybe_add_report_figures(
     generated: list[ReportFigureRecord] = []
     updated = report_markdown
 
-    for spec in _FIGURE_SPECS:
+    specs = {spec.figure_id: spec for spec in _FIGURE_SPECS}
+    planned_figures = visual_plan_for_renderer(document_plan)
+    # Legacy reports without an agent-resolved plan preserve the previous
+    # conservative renderer behavior. A resolved plan with no visual intent is
+    # an explicit decision to render no figures.
+    requested = planned_figures if document_plan is not None else list(specs.values())
+    sections_by_id = {_section_id(section["heading"]): section for section in sections}
+    for item in requested:
         if len(generated) >= max_figures:
             break
-        section = _best_section(sections, spec)
+        if isinstance(item, _FigureSpec):
+            spec = item
+            section = _best_section(sections, spec)
+            title = spec.title
+        else:
+            spec = specs.get(item.view)
+            if spec is None:
+                continue
+            section = sections_by_id.get(item.section_id)
+            title = item.title
         if not section:
             continue
-        items = _figure_items(section["body"], spec, survey_contract=survey_contract)
+        items = _figure_items(section["body"], spec)
         if len(items) < 3:
             items = list(spec.fallback_items)
         path = figures_dir / f"{spec.figure_id}.svg"
-        write_text(path, _render_svg(spec.title, items[:8]))
+        write_text(path, _render_svg(title, items[:8]))
         rel_path = f"figures/{path.name}"
-        image_block = f"\n![{spec.title}]({rel_path})\n\n*{spec.caption}*\n"
+        image_block = f"\n![{title}]({rel_path})\n\n*{spec.caption}*\n"
         updated = _insert_after_heading(updated, section["heading"], image_block)
         generated.append(
             ReportFigureRecord(
                 figure_id=spec.figure_id,
-                title=spec.title,
+                title=title,
                 path=rel_path,
                 anchor=section["heading"],
                 caption=spec.caption,
@@ -183,17 +200,18 @@ def _normalize_heading(heading: str) -> str:
     return text
 
 
+def _section_id(heading: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", _normalize_heading(heading)).strip("_")[:60]
+
+
 def _figure_items(
     section_body: str,
     spec: _FigureSpec,
-    *,
-    survey_contract: dict[str, Any] | None = None,
 ) -> list[str]:
     candidates: list[str] = []
     candidates.extend(_table_first_column_items(section_body))
     candidates.extend(_heading_items(section_body))
     candidates.extend(_bullet_items(section_body))
-    candidates.extend(_contract_items(survey_contract, spec))
     seen: set[str] = set()
     output: list[str] = []
     for item in candidates:
@@ -219,59 +237,6 @@ def _figure_items(
             if len(output) >= 6:
                 break
     return output
-
-
-def _contract_items(survey_contract: dict[str, Any] | None, spec: _FigureSpec) -> list[str]:
-    if not isinstance(survey_contract, dict):
-        return []
-    facets = _string_items(survey_contract.get("required_facets"), limit=12)
-    reader_needs = _string_items(survey_contract.get("reader_needs"), limit=8)
-    taxonomy = survey_contract.get("taxonomy") if isinstance(survey_contract.get("taxonomy"), dict) else {}
-    taxonomy_facets = [
-        str(row.get("label") or "")
-        for row in (taxonomy.get("facets") if isinstance(taxonomy.get("facets"), list) else [])
-        if isinstance(row, dict) and str(row.get("label") or "").strip()
-    ][:12]
-    visual = survey_contract.get("visual_plan") if isinstance(survey_contract.get("visual_plan"), dict) else {}
-    visual_items: list[str] = []
-    visual_figures = visual.get("figures") if isinstance(visual.get("figures"), list) else []
-    for row in visual_figures:
-        if not isinstance(row, dict) or row.get("figure_id") != spec.figure_id:
-            continue
-        visual_items.extend(_string_items(row.get("items"), limit=8))
-    candidates: list[str] = []
-    candidates.extend(visual_items)
-    if spec.figure_id in {"taxonomy-map", "evaluation-landscape"}:
-        candidates.extend(taxonomy_facets or facets)
-    if spec.figure_id == "challenge-roadmap":
-        candidates.extend(reader_needs)
-        candidates.extend(taxonomy_facets or facets)
-    if spec.figure_id == "system-construction-flow":
-        method_like = [
-            item
-            for item in (taxonomy_facets or facets)
-            if any(term in item.lower() for term in ("method", "model", "system", "architecture", "pipeline", "framework"))
-        ]
-        candidates.extend(method_like or taxonomy_facets or facets)
-    return [_humanize_contract_item(item) for item in candidates]
-
-
-def _string_items(value: object, *, limit: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    output: list[str] = []
-    for item in value:
-        text = str(item or "").strip()
-        if text:
-            output.append(text)
-        if len(output) >= limit:
-            break
-    return output
-
-
-def _humanize_contract_item(value: str) -> str:
-    text = re.sub(r"[_-]+", " ", value).strip()
-    return " ".join(part.capitalize() if part.isupper() is False else part for part in text.split())
 
 
 def _table_first_column_items(text: str) -> list[str]:

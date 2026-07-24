@@ -173,12 +173,11 @@ max_section_sources = 0
 source_strategy = "batch_refine"
 source_batch_size = 10
 max_source_batches = 0
-review_source_batches = false
 ```
 
-`batch_refine` drafts each section from the first source batch, then revises
-the same section as later batches arrive. Enable `review_source_batches = true`
-only when you want stronger per-batch control and accept the extra LLM cost.
+`batch_refine` drafts each section from the first source batch, then adds
+evidence-bounded contributions as later batches arrive. The completed section
+is reviewed as a whole, avoiding repeated reviewer calls against partial prose.
 
 ### What Is LLM-Backed vs Deterministic
 

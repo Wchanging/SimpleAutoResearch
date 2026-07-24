@@ -142,10 +142,8 @@ max_section_sources = 0
 source_strategy = "batch_refine"
 source_batch_size = 10
 max_source_batches = 0
-review_source_batches = false
 ```
 
-`batch_refine` 会先用第一批 source 起草每个 section，再随着后续批次进入不断修订同一个 section。只有在需要更强的逐批质量控制、且可以接受更高 LLM 成本时，才建议打开 `review_source_batches = true`。
 
 ### 哪些部分依赖 LLM，哪些部分是确定性的
 

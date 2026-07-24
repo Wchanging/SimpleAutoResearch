@@ -10,12 +10,13 @@ from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
 from simple_ar.core.pipeline import Context
 from simple_ar.report.agent import (
-    _merge_completion_draft,
+    _is_claim_record_response,
     _merge_revision_draft,
     _normalize_draft_response,
     _outline_is_overly_template_like,
     run_report_agent,
 )
+from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
 from simple_ar.report.assembler import apply_section_numbering
 from simple_ar.report.audit import build_report_audit
 from simple_ar.report.citations import (
@@ -32,17 +33,24 @@ from simple_ar.report.citations import (
 from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.quality import build_report_quality
-from simple_ar.report.schema import ReportRuntimeConfig, ReportSectionDraft, ReportSectionPlan, ReportToolCall
+from simple_ar.report.schema import (
+    ReportMemory,
+    ReportRuntimeConfig,
+    ReportSectionDraft,
+    ReportSectionPlan,
+    ReportToolCall,
+)
 from simple_ar.report.schema import ReportSectionReview
 from simple_ar.report.service import (
     _build_research_report,
     _build_report,
+    _report_runtime_config,
     _report_bound_errors,
     _validated_agent_report,
 )
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
-from simple_ar.report.survey import _build_taxonomy, enrich_survey_sections
+from simple_ar.report.survey import _build_taxonomy, _build_visual_coverage_audit, enrich_survey_sections
 
 
 class _FakeReportLLM:
@@ -92,6 +100,8 @@ class _FakeReportLLM:
 class _TrackingReportLLM(_FakeReportLLM):
     def __init__(self) -> None:
         self.labels: list[str] = []
+        self.max_output_tokens_values: list[int | None] = []
+        self.prompts: dict[str, str] = {}
 
     def ask_json(
         self,
@@ -102,7 +112,91 @@ class _TrackingReportLLM(_FakeReportLLM):
         max_output_tokens: int | None = None,
     ) -> dict[str, object]:
         self.labels.append(label)
+        self.max_output_tokens_values.append(max_output_tokens)
+        self.prompts[label] = user
         return super().ask_json(system, user, label=label, max_output_tokens=max_output_tokens)
+
+
+class _TwoRevisionReportLLM(_FakeReportLLM):
+    """Require two targeted revisions for every section before accepting it."""
+
+    def __init__(self) -> None:
+        self.review_counts: dict[str, int] = {}
+
+    def ask_json(
+        self,
+        system: str,
+        user: str,
+        *,
+        label: str = "",
+        max_output_tokens: int | None = None,
+    ) -> dict[str, object]:
+        section_id = _extract_prompt_value(user, "section_id") or "section"
+        if "reviewer" in label:
+            count = self.review_counts.get(section_id, 0) + 1
+            self.review_counts[section_id] = count
+            if count <= 2:
+                return {
+                    "section_id": section_id,
+                    "verdict": "revise_required",
+                    "findings": [
+                        {
+                            "finding_id": f"{section_id}-finding-{count}",
+                            "type": "style",
+                            "severity": "minor",
+                            "message": "Add the requested evidence-qualified comparison.",
+                            "section_id": section_id,
+                            "suggested_action": "Add one concise comparison and retain prior evidence.",
+                        }
+                    ],
+                    "revision_instructions": ["Add one concise comparison and retain prior evidence."],
+                }
+            return {
+                "section_id": section_id,
+                "verdict": "pass",
+                "findings": [],
+                "revision_instructions": [],
+            }
+        response = super().ask_json(system, user, label=label, max_output_tokens=max_output_tokens)
+        if "reviser" in label:
+            response["status"] = "revised"
+            response["draft_markdown"] = str(response["draft_markdown"]) + "\n\nA retained comparison clarifies the boundary conditions."
+        return response
+
+
+class _ClaimRecordThenDraftLLM(_TrackingReportLLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.returned_claim_record = False
+
+    def ask_json(
+        self,
+        system: str,
+        user: str,
+        *,
+        label: str = "",
+        max_output_tokens: int | None = None,
+    ) -> dict[str, object]:
+        self.labels.append(label)
+        self.max_output_tokens_values.append(max_output_tokens)
+        if not self.returned_claim_record and label.startswith("report-writer-"):
+            self.returned_claim_record = True
+            return {
+                "claim_id": "claim:misplaced",
+                "claim": "A nested claim record is not a section draft.",
+                "status": "supported",
+                "evidence_handles": ["paper:paper-1"],
+                "metric_ids": [],
+                "citation_ids": ["P1"],
+                "notes": "Incorrect response level.",
+            }
+        return _FakeReportLLM.ask_json(
+            self,
+            system,
+            user,
+            label=label,
+            max_output_tokens=max_output_tokens,
+        )
 
 
 def _extract_prompt_value(prompt: str, key: str) -> str:
@@ -111,6 +205,13 @@ def _extract_prompt_value(prompt: str, key: str) -> str:
 
 
 class ReportSafetyTests(unittest.TestCase):
+    def test_report_runtime_config_accepts_zero_revision_cycles(self) -> None:
+        config = _report_runtime_config(
+            Context(Path("run"), "Agent Simulation", config={"report_max_review_iterations": 0})
+        )
+
+        self.assertEqual(config.max_review_iterations, 0)
+
     def test_outline_template_copy_is_detected_without_rejecting_partial_overlap(self) -> None:
         copied = [
             {"heading": heading}
@@ -159,6 +260,56 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(normalized["status"], "drafted")
         self.assertEqual(normalized["claims"][0]["status"], "supported")
 
+    def test_claim_record_is_not_accepted_as_a_section_draft(self) -> None:
+        self.assertTrue(
+            _is_claim_record_response(
+                {
+                    "claim_id": "claim:1",
+                    "claim": "A claim.",
+                    "citation_ids": ["P1"],
+                }
+            )
+        )
+        self.assertFalse(
+            _is_claim_record_response(
+                {
+                    "claim_id": "claim:1",
+                    "claim": "A claim.",
+                    "draft_markdown": "Section prose.",
+                }
+            )
+        )
+
+    def test_document_plan_rebalances_section_plan(self) -> None:
+        plan = resolve_document_plan(
+            sections=[
+                ReportSectionPlan(section_id="abstract", heading="Abstract", goal="Summarize.", target_words=250),
+                ReportSectionPlan(section_id="intro", heading="Introduction", goal="Frame.", target_words=2200),
+                ReportSectionPlan(section_id="body", heading="Methods", goal="Explain.", target_words=2800),
+                ReportSectionPlan(section_id="end", heading="Conclusion", goal="Close.", target_words=1200),
+            ],
+            contract={"expected_coverage": {"target_words": 5000}},
+            config=ReportRuntimeConfig(),
+        )
+
+        self.assertEqual(sum(section.target_words for section in plan.sections), 5000)
+
+    def test_document_plan_leaves_reports_without_a_global_target_unchanged(self) -> None:
+        plan = resolve_document_plan(
+            sections=[
+                ReportSectionPlan(
+                    section_id="methods",
+                    heading="Methods",
+                    goal="Explain.",
+                    target_words=900,
+                )
+            ],
+            contract={},
+            config=ReportRuntimeConfig(),
+        )
+
+        self.assertEqual(plan.sections[0].target_words, 900)
+
     def test_writer_normalizes_common_body_aliases_and_nested_draft(self) -> None:
         section = ReportSectionPlan(section_id="methods", heading="Methods", goal="Compare methods.")
         normalized = _normalize_draft_response(
@@ -192,61 +343,6 @@ class ReportSafetyTests(unittest.TestCase):
 
         self.assertEqual(normalized["open_questions"], ["How stable is the conclusion?"])
         self.assertEqual(normalized["limitations"], ["Evidence is incomplete."])
-
-    def test_completion_appends_new_prose_without_erasing_prior_draft(self) -> None:
-        previous = ReportSectionDraft(
-            section_id="methods",
-            heading="Methods",
-            draft_markdown="Existing evidence synthesis [@P1].",
-            citations=["P1"],
-        )
-        completion = ReportSectionDraft(
-            section_id="methods",
-            heading="Methods",
-            draft_markdown="Additional comparison and boundary condition [@P2].",
-            citations=["P2"],
-        )
-
-        merged = _merge_completion_draft(previous, completion)
-
-        self.assertIn("Existing evidence synthesis", merged.draft_markdown)
-        self.assertIn("Additional comparison", merged.draft_markdown)
-        self.assertEqual(merged.citations, ["P1", "P2"])
-
-    def test_completion_does_not_duplicate_a_full_replacement(self) -> None:
-        previous = ReportSectionDraft(
-            section_id="methods",
-            heading="Methods",
-            draft_markdown="Existing evidence synthesis [@P1].",
-        )
-        replacement = ReportSectionDraft(
-            section_id="methods",
-            heading="Methods",
-            draft_markdown="Existing evidence synthesis [@P1]. Expanded comparison [@P2].",
-        )
-
-        merged = _merge_completion_draft(previous, replacement)
-
-        self.assertEqual(merged.draft_markdown, replacement.draft_markdown)
-
-    def test_completion_strips_headings_but_preserves_added_evidence(self) -> None:
-        previous = ReportSectionDraft(
-            section_id="methods",
-            heading="Methods",
-            draft_markdown="### Existing taxonomy\n\nExisting synthesis [@P1].",
-            citations=["P1"],
-        )
-        completion = ReportSectionDraft(
-            section_id="methods",
-            heading="Methods",
-            draft_markdown="### Existing taxonomy\n\nAdditional comparison [@P2].",
-            citations=["P2"],
-        )
-
-        merged = _merge_completion_draft(previous, completion)
-
-        self.assertEqual(merged.draft_markdown.count("### Existing taxonomy"), 1)
-        self.assertIn("Additional comparison [@P2].", merged.draft_markdown)
 
     def test_short_reviewer_revision_cannot_erase_substantive_draft(self) -> None:
         previous = ReportSectionDraft(
@@ -591,8 +687,9 @@ class ReportSafetyTests(unittest.TestCase):
         memory = initialize_report_memory(context=context, template=template)
         gateway = ReportToolGateway(context)
 
+        client = _TrackingReportLLM()
         result = run_report_agent(
-            client=_FakeReportLLM(),
+            client=client,
             context=context,
             template=template,
             memory=memory,
@@ -611,6 +708,52 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertLess(
             result.report_body.index("## Abstract / Executive Summary"),
             result.report_body.index("## Method Families"),
+        )
+
+    def test_report_agent_applies_multiple_review_revision_cycles(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=["Ada"],
+            abstract="A paper about agent systems.",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="research_only",
+            goal="# Goal\nStudy agents.",
+            problem="# Problem\nWhat evidence exists?",
+            search_meta={"source": "openalex", "status": "ok"},
+            synthesis="# Synthesis\nAgent workflows have roles.",
+            hypothesis="# Hypothesis\nRole separation may help.",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="- Known evidence [@paper-1].",
+        )
+        config = ReportRuntimeConfig(template="survey", max_review_iterations=2)
+        template = load_report_template_bundle(
+            report_mode="research_only",
+            config=config,
+            project_root=Path.cwd(),
+        )
+
+        result = run_report_agent(
+            client=_TwoRevisionReportLLM(),
+            context=context,
+            template=template,
+            memory=initialize_report_memory(context=context, template=template),
+            config=config,
+            gateway=ReportToolGateway(context),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(sum(item.action == "revise" for item in result.iterations), len(result.sections) * 2)
+        self.assertEqual(
+            sum(item.action == "review_revision" for item in result.iterations),
+            len(result.sections) * 2,
         )
 
     def test_disabled_report_reviewer_skips_review_and_revision_calls(self) -> None:
@@ -656,7 +799,56 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertFalse(any("reviewer" in label or "reviser" in label for label in client.labels))
         self.assertFalse(any(item.action.startswith("review") or item.action.startswith("revise") for item in result.iterations))
 
-    def test_report_agent_can_refine_sections_over_source_batches(self) -> None:
+    def test_writer_recovers_from_claim_record_with_configured_token_cap(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=["Ada"],
+            abstract="A paper about agent systems.",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="research_only",
+            goal="# Goal\nStudy agents.",
+            problem="# Problem\nWhat evidence exists?",
+            search_meta={"source": "openalex", "status": "ok"},
+            synthesis="# Synthesis\nAgent workflows have roles.",
+            hypothesis="# Hypothesis\nRole separation may help.",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="- Known evidence [@paper-1].",
+        )
+        config = ReportRuntimeConfig(
+            template="survey",
+            reviewer="disabled",
+            max_section_tokens=777,
+        )
+        template = load_report_template_bundle(
+            report_mode="research_only",
+            config=config,
+            project_root=Path.cwd(),
+        )
+        client = _ClaimRecordThenDraftLLM()
+
+        result = run_report_agent(
+            client=client,
+            context=context,
+            template=template,
+            memory=initialize_report_memory(context=context, template=template),
+            config=config,
+            gateway=ReportToolGateway(context),
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(client.returned_claim_record)
+        self.assertTrue(any(label.endswith("-retry") for label in client.labels))
+        self.assertTrue(client.max_output_tokens_values)
+        self.assertTrue(all(value == 777 for value in client.max_output_tokens_values))
+
+    def test_report_agent_uses_plan_controlled_evidence_batches(self) -> None:
         papers = [
             Paper(
                 id=f"paper-{index}",
@@ -689,8 +881,9 @@ class ReportSafetyTests(unittest.TestCase):
         )
         memory = initialize_report_memory(context=context, template=template)
 
+        client = _TrackingReportLLM()
         result = run_report_agent(
-            client=_FakeReportLLM(),
+            client=client,
             context=context,
             template=template,
             memory=memory,
@@ -699,7 +892,6 @@ class ReportSafetyTests(unittest.TestCase):
                 max_review_iterations=0,
                 source_strategy="batch_refine",
                 source_batch_size=5,
-                review_source_batches=True,
             ),
             gateway=ReportToolGateway(context),
         )
@@ -707,7 +899,13 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertTrue(any(item.action == "integrate_sources" for item in result.iterations))
-        self.assertTrue(any(item.action == "review_source_batch" for item in result.iterations))
+        self.assertFalse(any(item.action == "review_source_batch" for item in result.iterations))
+        self.assertTrue(any(item.action == "draft" for item in result.iterations))
+        integration_prompts = [
+            prompt for label, prompt in client.prompts.items() if label.startswith("report-integrator-")
+        ]
+        self.assertTrue(integration_prompts)
+        self.assertTrue(all('"previous_draft": {' in prompt for prompt in integration_prompts))
 
     def test_report_tool_gateway_exports_and_resolves_sources(self) -> None:
         paper = Paper(
@@ -1264,6 +1462,97 @@ Summary.
 
         self.assertEqual(len(sections), 5)
         self.assertTrue(all(len(section.evidence_handles) == 8 for section in sections))
+
+    def test_document_plan_accepts_only_feasible_planner_selected_visuals(self) -> None:
+        sections = [
+            ReportSectionPlan(
+                section_id="evaluation",
+                heading="Evaluation",
+                goal="Compare evidence.",
+                evidence_handles=["paper:P1", "paper:P2", "paper:P3"],
+            ),
+            ReportSectionPlan(
+                section_id="methods",
+                heading="Methods",
+                goal="Compare methods.",
+                evidence_handles=["paper:P4", "paper:P5"],
+            ),
+        ]
+        config = ReportRuntimeConfig(
+            figures={"enabled": True, "max_figures": 2},
+            longform={"target_tables": 2},
+        )
+        plan = resolve_document_plan(
+            sections=sections,
+            contract={},
+            config=config,
+            visual_candidates=[
+                {
+                    "kind": "table",
+                    "title": "Evaluation Settings",
+                    "purpose": "Compare protocols and limitations.",
+                    "section_heading": "Evaluation",
+                    "columns": ["Setting", "Metric", "Limitation"],
+                },
+                {
+                    "kind": "figure",
+                    "title": "Evaluation Landscape",
+                    "purpose": "Show the relationship between evaluation components.",
+                    "section_heading": "Evaluation",
+                    "view": "evaluation-landscape",
+                },
+                {
+                    "kind": "table",
+                    "title": "Unsupported Table",
+                    "purpose": "Should be rejected because its section is absent.",
+                    "section_heading": "Absent",
+                    "columns": ["A", "B"],
+                },
+            ],
+        )
+
+        requirements = visual_requirements(plan, sections[0])
+        self.assertEqual(len(plan.visual_intents), 2)
+        self.assertEqual(requirements["tables"][0]["title"], "Evaluation Settings")
+        self.assertEqual(requirements["figures"][0]["view"], "evaluation-landscape")
+        self.assertEqual(visual_requirements(plan, sections[1]), {"tables": [], "figures": []})
+
+    def test_visual_coverage_audit_matches_captioned_table_and_figure(self) -> None:
+        visual_plan = {
+            "requested_table_count": 2,
+            "requested_figure_count": 1,
+            "tables": [
+                {
+                    "table_id": "taxonomy-comparison",
+                    "title": "Taxonomy and Representative Evidence",
+                    "section_id": "taxonomy",
+                    "suggested_columns": ["Facet", "Core idea", "Representative papers", "Evidence boundary"],
+                },
+                {
+                    "table_id": "evaluation-landscape",
+                    "title": "Evaluation Settings and Metrics",
+                    "section_id": "evaluation",
+                    "suggested_columns": ["Setting", "Task or dataset", "Metric", "Observed limitation"],
+                },
+            ],
+            "figures": [{"figure_id": "taxonomy-map", "title": "Survey Taxonomy Map"}],
+        }
+        report = """## Taxonomy
+
+**Table: Taxonomy and Representative Evidence**
+
+| Facet | Core idea | Representative papers | Evidence boundary |
+| --- | --- | --- | --- |
+| A | B | [@P1] | Limited scope |
+
+![Conceptual taxonomy map](figures/taxonomy-map.svg)
+"""
+        audit = _build_visual_coverage_audit(final_report=report, visual_plan=visual_plan)
+
+        self.assertEqual(audit["realized_table_count"], 1)
+        self.assertEqual(audit["realized_figure_count"], 1)
+        self.assertEqual(audit["missing_tables"][0]["table_id"], "evaluation-landscape")
+        self.assertEqual(audit["status"], "warning")
 
 
 if __name__ == "__main__":

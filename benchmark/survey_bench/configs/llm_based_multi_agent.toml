@@ -88,7 +88,6 @@ max_section_sources = 0
 source_strategy = "batch_refine"
 source_batch_size = 12
 max_source_batches = 0
-review_source_batches = false
 review_trace = "meta"
 output_mode = "overwrite"
 output_label = ""

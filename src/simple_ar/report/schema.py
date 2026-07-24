@@ -46,8 +46,6 @@ class ReportLongformConfig(ReportModel):
     target_papers: int = 0
     min_papers: int = 0
     target_words: int = 0
-    min_section_word_ratio: float = Field(default=0.6, ge=0.2, le=1.0)
-    max_completion_revisions: int = 1
     min_citations_per_section: int = 3
     target_tables: int = 0
     evidence_audit: bool = True
@@ -79,7 +77,6 @@ class ReportRuntimeConfig(ReportModel):
     source_strategy: Literal["full", "batch_refine"] = "full"
     source_batch_size: int = 10
     max_source_batches: int = 0
-    review_source_batches: bool = False
     review_trace: Literal["off", "meta", "full"] = "meta"
     output_mode: Literal["overwrite", "archive", "variant"] = "overwrite"
     output_label: str = ""
@@ -155,6 +152,36 @@ class ReportSectionPlan(ReportModel):
     draft_order: int = 0
 
 
+class ReportVisualIntent(ReportModel):
+    """A planned visual justified by the resolved document evidence.
+
+    Visuals are optional communication choices, not output quotas.  A table is
+    authored in its owning section; a figure is rendered only when its chosen
+    view is supported by the deterministic renderer.
+    """
+
+    visual_id: str
+    kind: Literal["table", "figure"]
+    title: str
+    purpose: str
+    section_id: str
+    evidence_handles: list[str] = Field(default_factory=list)
+    view: str = ""
+    columns: list[str] = Field(default_factory=list)
+
+
+class ReportDocumentPlan(ReportModel):
+    """Frozen, single-source plan consumed by the report-stage agents."""
+
+    schema_version: str = "report_document_plan.v1"
+    status: Literal["resolved", "fallback"] = "resolved"
+    sections: list[ReportSectionPlan] = Field(default_factory=list)
+    target_words: int = 0
+    visual_budget: dict[str, int] = Field(default_factory=dict)
+    visual_intents: list[ReportVisualIntent] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class ReviewerFinding(ReportModel):
     """Structured finding from reviewer or mechanical audit."""
 
@@ -198,6 +225,7 @@ class ReportMemory(ReportModel):
     report_mode: str = ""
     survey_contract: dict[str, Any] = Field(default_factory=dict)
     section_plan: list[ReportSectionPlan] = Field(default_factory=list)
+    document_plan: ReportDocumentPlan | None = None
     claims_evidence_matrix: list[ClaimEvidenceRecord] = Field(default_factory=list)
     source_handles: list[SourceHandle] = Field(default_factory=list)
     metric_sources: list[MetricSource] = Field(default_factory=list)
