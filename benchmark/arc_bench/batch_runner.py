@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -116,6 +118,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     retry_parser.set_defaults(func=_retry_unfinished_command)
+
+    branch_parser = subparsers.add_parser(
+        "branch-runs",
+        help="Clone selected run directories and write an isolated branch state for a controlled follow-up.",
+    )
+    branch_parser.add_argument(
+        "--source-state-file",
+        required=True,
+        help="Existing batch state whose selected run directories will be cloned.",
+    )
+    branch_parser.add_argument(
+        "--state-file",
+        required=True,
+        help="New branch state path. It must not already exist.",
+    )
+    branch_parser.add_argument("--topics", nargs="+", required=True, help="Topics whose run directories to clone.")
+    branch_parser.add_argument(
+        "--run-suffix",
+        required=True,
+        help="Suffix appended to every cloned run directory, for example `compact-ptc-plus1repair`.",
+    )
+    branch_parser.add_argument(
+        "--lineage-file",
+        help="Optional provenance JSON path; defaults next to --state-file.",
+    )
+    branch_parser.add_argument(
+        "--copy-mode",
+        choices=("auto", "copy"),
+        default="auto",
+        help="Use filesystem reflinks when available (`auto`), otherwise copy files normally.",
+    )
+    branch_parser.set_defaults(func=_branch_runs_command)
 
     refresh_parser = subparsers.add_parser(
         "refresh",
@@ -588,6 +622,91 @@ def _retry_unfinished_command(args: argparse.Namespace) -> int:
 
     _print_summary(state, topics)
     return exit_code
+
+
+def _branch_runs_command(args: argparse.Namespace) -> int:
+    """Create an isolated state branch without mutating source run directories.
+
+    This is intentionally a filesystem/provenance operation only.  It does not
+    execute a task, invoke an LLM, or create submission artifacts.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    source_state_path = _abs(repo_root, args.source_state_file)
+    state_path = _abs(repo_root, args.state_file)
+    lineage_path = _abs(repo_root, args.lineage_file) if args.lineage_file else state_path.with_suffix(".lineage.json")
+    if not source_state_path.is_file():
+        raise SystemExit(f"Source state file does not exist: {source_state_path}")
+    if state_path.exists():
+        raise SystemExit(f"Branch state file already exists: {state_path}")
+    if lineage_path.exists():
+        raise SystemExit(f"Lineage file already exists: {lineage_path}")
+
+    try:
+        source_payload = json.loads(source_state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Could not parse source state file {source_state_path}: {exc}") from exc
+    source_topics = source_payload.get("topics", source_payload)
+    if not isinstance(source_topics, dict):
+        raise SystemExit(f"Source state file has no topic mapping: {source_state_path}")
+
+    branch_payload = json.loads(json.dumps(source_payload))
+    branch_topics = branch_payload.get("topics", branch_payload)
+    suffix = _safe_filename(args.run_suffix)
+    requested_topics = list(dict.fromkeys(str(topic) for topic in args.topics))
+    lineage_topics: dict[str, dict[str, str]] = {}
+
+    for topic in requested_topics:
+        source_row = source_topics.get(topic)
+        branch_row = branch_topics.get(topic)
+        if not isinstance(source_row, dict) or not isinstance(branch_row, dict):
+            raise SystemExit(f"Topic is missing from source state: {topic}")
+        raw_run_dir = source_row.get("run_dir")
+        if not isinstance(raw_run_dir, str) or not raw_run_dir.strip():
+            raise SystemExit(f"Topic has no reusable run_dir in source state: {topic}")
+        source_run_dir = _abs(repo_root, raw_run_dir)
+        if not source_run_dir.is_dir():
+            raise SystemExit(f"Source run directory does not exist for {topic}: {source_run_dir}")
+        manifest_path = source_run_dir / "code_task" / "manifest.json"
+        if not manifest_path.is_file():
+            raise SystemExit(f"Source run has no code-task manifest for {topic}: {manifest_path}")
+
+        branch_run_dir = source_run_dir.with_name(f"{source_run_dir.name}--{suffix}")
+        if branch_run_dir.exists():
+            raise SystemExit(f"Branch run directory already exists for {topic}: {branch_run_dir}")
+        _print(f"[branch] {topic}: {_rel(repo_root, source_run_dir)} -> {_rel(repo_root, branch_run_dir)}")
+        _clone_run_directory(source_run_dir, branch_run_dir, copy_mode=args.copy_mode)
+
+        branch_row["run_dir"] = _rel(repo_root, branch_run_dir)
+        branch_row["output_dir"] = None
+        lineage_topics[topic] = {
+            "parent_run_dir": _rel(repo_root, source_run_dir),
+            "branch_run_dir": _rel(repo_root, branch_run_dir),
+        }
+
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(branch_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    lineage_payload = {
+        "created_at": _now(),
+        "source_state_file": _rel(repo_root, source_state_path),
+        "source_state_sha256": hashlib.sha256(source_state_path.read_bytes()).hexdigest(),
+        "branch_state_file": _rel(repo_root, state_path),
+        "run_suffix": suffix,
+        "copy_mode": args.copy_mode,
+        "topics": lineage_topics,
+    }
+    lineage_path.parent.mkdir(parents=True, exist_ok=True)
+    lineage_path.write_text(json.dumps(lineage_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _print(f"[branch] wrote {_rel(repo_root, state_path)}")
+    _print(f"[branch] wrote {_rel(repo_root, lineage_path)}")
+    return 0
+
+
+def _clone_run_directory(source: Path, destination: Path, *, copy_mode: str) -> None:
+    if copy_mode == "auto" and os.name != "nt":
+        subprocess.run(["cp", "-a", "--reflink=auto", str(source), str(destination)], check=True)
+        return
+    shutil.copytree(source, destination, copy_function=shutil.copy2)
 
 
 def _refresh_command(args: argparse.Namespace) -> int:
