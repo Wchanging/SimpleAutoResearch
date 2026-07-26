@@ -32,6 +32,7 @@ from simple_ar.code_task.generation.task_contract import (
     load_task_contract,
     save_task_contract,
 )
+from simple_ar.code_task.generation.prompt_context import contract_prompt_context
 from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
     repair_generated_project_from_run_failure,
@@ -172,6 +173,7 @@ def execute_code_task(
     repair_context: str = "full",
     use_repair_memory: bool = True,
     contract_context: str = "full",
+    planning_snapshot_from: str | Path | None = None,
     review_gate: str = "strict",
     budget_profile: str | None = None,
     edit_budget_overrides: dict[str, Any] | None = None,
@@ -251,6 +253,9 @@ def execute_code_task(
         contract_context: Contract-prompt ablation mode. ``full`` propagates
             the task contract; ``minimal`` keeps artifacts but passes a smaller
             task-level view to model prompts.
+        planning_snapshot_from: Optional source run containing an accepted
+            greenfield plan. Only planning metadata is imported after contract
+            hash verification; generated code and mutable memory are excluded.
         review_gate: Greenfield review gate mode. ``strict`` stops on any
             blocking review finding. ``runtime`` records review findings but
             only stops before execution for safety or direct executability
@@ -322,6 +327,7 @@ def execute_code_task(
             repair_context=repair_context,
             use_repair_memory=use_repair_memory,
             contract_context=contract_context,
+            planning_snapshot_from=planning_snapshot_from,
             review_gate=review_gate,
             implementation_provider=implementation_provider,
             implementation_agent_mode=implementation_agent_mode,
@@ -920,6 +926,7 @@ def _execute_greenfield_code_task(
     repair_context: str,
     use_repair_memory: bool,
     contract_context: str,
+    planning_snapshot_from: str | Path | None,
     review_gate: str,
     implementation_provider: str,
     implementation_agent_mode: str,
@@ -1001,6 +1008,7 @@ def _execute_greenfield_code_task(
                 implementation_agent_args=implementation_agent_args,
                 implementation_agent_timeout_sec=implementation_agent_timeout_sec,
                 contract_context=contract_context,
+                planning_snapshot_from=planning_snapshot_from,
                 message_callback=message_callback,
             )
             _record(
@@ -1705,7 +1713,7 @@ def _attempt_greenfield_run_repair(
         code_artifacts=_read_optional_dict(paths.meta_dir / "code_artifacts.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
         result_schema=_greenfield_result_schema_from_manifest(load_code_task_manifest(run_dir)),
-        contract=_contract_for_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
+        contract=contract_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         previous_repair_context=previous_context,
         repair_context_mode=repair_context,
@@ -1801,7 +1809,7 @@ def _repair_greenfield_review_failure(
         code_artifacts=code_artifacts,
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
         result_schema=_greenfield_result_schema_from_manifest(manifest),
-        contract=_contract_for_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
+        contract=contract_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         previous_repair_context=previous_context,
         client=client,
@@ -1869,7 +1877,7 @@ def _rerun_greenfield_review(
         code_artifacts=code_artifacts,
         result_schema=_greenfield_result_schema_from_manifest(manifest),
         resource_plan=_greenfield_resource_plan(paths, max_files=max_files, max_generated_lines=max_generated_lines),
-        contract=_contract_for_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
+        contract=contract_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         implementation_memory=_read_optional_dict(paths.task_dir / "memory" / "implementation_memory.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
@@ -2057,41 +2065,6 @@ def _greenfield_contract_for_review(paths: object) -> dict[str, Any]:
     save_task_contract(paths.meta_dir, contract)
     write_json(paths.meta_dir / "task_contract_coverage.json", contract_coverage(contract, architecture))
     return contract
-
-
-def _contract_for_prompt_context(contract: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
-    """Return the contract view passed to model prompts for ablations.
-
-    The durable ``task_contract.json`` remains unchanged.  ``minimal`` is only a
-    prompt-context variant for Plan-then-Code style ablations.
-    """
-
-    if mode != "minimal":
-        return dict(contract)
-    return {
-        "schema_version": str(contract.get("schema_version") or "code_task_contract.v1"),
-        "context_mode": "minimal",
-        "objective": str(contract.get("objective") or "")[:1200],
-        "task_text": str(contract.get("task_text") or contract.get("task") or "")[:6000],
-        "benchmark_command": str(contract.get("benchmark_command") or ""),
-        "success_criteria": _string_list_for_prompt(contract.get("success_criteria"), limit=8),
-        "constraints": _string_list_for_prompt(contract.get("constraints"), limit=8),
-        "note": (
-            "Ablation prompt view: full implementation/artifact/metric/analysis "
-            "contracts are intentionally omitted from model context."
-        ),
-    }
-
-
-def _string_list_for_prompt(value: object, *, limit: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text:
-            result.append(text[:500])
-    return result[:limit]
 
 
 def _positive_int(value: object, default: int) -> int:

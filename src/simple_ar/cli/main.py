@@ -1328,6 +1328,7 @@ def _print_code_task_execute(args: argparse.Namespace) -> None:
             repair_context=repair_context,
             use_repair_memory=use_repair_memory,
             contract_context=contract_context,
+            planning_snapshot_from=args.reuse_planning_from,
             review_gate=review_gate,
             budget_profile=options.budget_profile,
             edit_budget_overrides=options.edit_budget_overrides,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, parse_metric_direction_arg
 
@@ -523,11 +524,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     code_task_execute.add_argument(
         "--contract-context",
-        choices=("full", "minimal"),
+        choices=("full", "minimal", "plan_only"),
         default=None,
         help=(
-            "Ablation control for model prompts. `minimal` keeps durable artifacts but passes "
-            "only a task-level contract view to planning/writing/review/repair prompts."
+            "Ablation control for model prompts. `minimal` changes the end-to-end prompt view; "
+            "`plan_only` is valid only with --reuse-planning-from and omits the canonical "
+            "contract from downstream model prompts while retaining the accepted plan."
+        ),
+    )
+    code_task_execute.add_argument(
+        "--reuse-planning-from",
+        type=Path,
+        default=None,
+        help=(
+            "Reuse an immutable greenfield planning snapshot from another run. This imports "
+            "only accepted planning artifacts after verifying the task-contract hash; it never "
+            "copies generated code, implementation memory, review findings, or repair history."
         ),
     )
     code_task_execute.add_argument(

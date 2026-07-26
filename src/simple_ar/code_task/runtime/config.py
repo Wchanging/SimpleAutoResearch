@@ -782,8 +782,10 @@ def _contract_context_mode(value: str | None) -> str:
         return "full"
     if text in {"minimal", "plan_then_code", "task_only", "natural_language"}:
         return "minimal"
+    if text in {"plan_only", "accepted_plan_only", "downstream_plan_only"}:
+        return "plan_only"
     raise CodeTaskConfigError(
-        "Unsupported [execute.ablation].contract_context. Expected `full` or `minimal`."
+        "Unsupported [execute.ablation].contract_context. Expected `full`, `minimal`, or `plan_only`."
     )
 
 

@@ -359,9 +359,18 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--contract-context",
-        choices=("full", "minimal"),
+        choices=("full", "minimal", "plan_only"),
         default=None,
         help="Ablation passthrough for code-task prompt contract context.",
+    )
+    parser.add_argument(
+        "--planning-source-state-file",
+        default=None,
+        help=(
+            "Optional completed batch state whose per-topic accepted planning artifacts are "
+            "reused. Each new run imports only the verified plan snapshot; code, memory, "
+            "review, and repair artifacts are never copied."
+        ),
     )
     parser.add_argument(
         "--review-gate",
@@ -909,6 +918,7 @@ class RunnerContext:
     repair_context: str | None = None
     use_repair_memory: bool = True
     contract_context: str | None = None
+    planning_source_state_file: Path | None = None
     review_gate: str | None = None
     arc_root: Path | None = None
 
@@ -937,9 +947,33 @@ def _context_from_args(args: argparse.Namespace) -> RunnerContext:
         repair_context=getattr(args, "repair_context", None),
         use_repair_memory=not bool(getattr(args, "no_repair_memory", False)),
         contract_context=getattr(args, "contract_context", None),
+        planning_source_state_file=(
+            _abs(repo_root, args.planning_source_state_file)
+            if getattr(args, "planning_source_state_file", None)
+            else None
+        ),
         review_gate=getattr(args, "review_gate", None),
         arc_root=(_abs(repo_root, args.arc_root) if getattr(args, "arc_root", None) else None),
     )
+
+
+def _planning_source_run(ctx: RunnerContext, topic: str) -> Path | None:
+    """Resolve a completed per-topic source run for plan-snapshot reuse."""
+
+    state_path = ctx.planning_source_state_file
+    if state_path is None or not state_path.is_file():
+        return None
+    source = _load_state(state_path).get(topic)
+    if source is None or source.status != "completed" or not source.run_dir:
+        return None
+    run_dir = _abs(ctx.repo_root, source.run_dir)
+    required = (
+        run_dir / "code_task" / "meta" / "task_contract.json",
+        run_dir / "code_task" / "meta" / "architecture_plan.json",
+        run_dir / "code_task" / "meta" / "file_plan.json",
+        run_dir / "code_task" / "meta" / "implementation_plan.json",
+    )
+    return run_dir if all(path.is_file() for path in required) else None
 
 
 def _normalize_score_profile(value: str | None) -> str:
@@ -984,6 +1018,18 @@ def _run_topic(
         return _finalize_topic_state(
             ctx,
             _fail(topic_state, "missing_config", f"Missing config: {config_path}"),
+            started_monotonic=started_monotonic,
+        )
+
+    planning_source_run = _planning_source_run(ctx, topic)
+    if ctx.planning_source_state_file is not None and planning_source_run is None:
+        return _finalize_topic_state(
+            ctx,
+            _fail(
+                topic_state,
+                "missing_planning_source",
+                f"No completed source run for {topic} in {ctx.planning_source_state_file}",
+            ),
             started_monotonic=started_monotonic,
         )
 
@@ -1040,6 +1086,8 @@ def _run_topic(
         execute_cmd.append("--no-repair-memory")
     if ctx.contract_context:
         execute_cmd.extend(["--contract-context", ctx.contract_context])
+    if planning_source_run is not None:
+        execute_cmd.extend(["--reuse-planning-from", _rel(ctx.repo_root, planning_source_run)])
     if ctx.review_gate:
         execute_cmd.extend(["--review-gate", ctx.review_gate])
     execute_cmd.append("--yes")

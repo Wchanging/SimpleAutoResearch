@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,6 +36,7 @@ from simple_ar.code_task.generation.task_contract import (
 )
 from simple_ar.code_task.generation.writer import write_generated_project
 from simple_ar.code_task.generation.implementation_memory import initial_implementation_memory
+from simple_ar.code_task.generation.prompt_context import contract_prompt_context
 from simple_ar.code_task.generation.review import review_generated_project
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
 
@@ -64,6 +67,70 @@ class GreenfieldCodeTaskResult:
     generated_files: tuple[str, ...]
 
 
+def _load_planning_snapshot(
+    *,
+    source_run_dir: Path,
+    target_contract: dict[str, Any],
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """Load immutable planning artifacts without importing mutable implementation state."""
+
+    source_root = source_run_dir.expanduser().resolve()
+    source_meta = source_root / "code_task" / "meta"
+    source_contract = load_task_contract(source_meta)
+    target_hash = str(target_contract.get("version_hash") or "")
+    source_hash = str(source_contract.get("version_hash") or "")
+    if not source_contract or not target_hash or source_hash != target_hash:
+        raise ValueError(
+            "Planning snapshot contract mismatch: source and target must have the same "
+            "canonical task-contract hash."
+        )
+    try:
+        architecture = read_json(source_meta / "architecture_plan.json")
+        implementation = read_json(source_meta / "implementation_plan.json")
+        file_plan = read_json(source_meta / "file_plan.json")
+    except Exception as exc:
+        raise ValueError(f"Planning snapshot is incomplete under {source_meta}") from exc
+    if not isinstance(architecture, dict) or not isinstance(implementation, dict) or not isinstance(file_plan, dict):
+        raise ValueError("Planning snapshot artifacts must be JSON objects")
+    architecture_mode = str(implementation.get("architecture_mode") or "").strip()
+    if not architecture_mode:
+        raise ValueError("Planning snapshot implementation_plan.json has no architecture_mode")
+    return (
+        architecture,
+        architecture_mode,
+        {
+            "schema_version": "greenfield_planning_snapshot.v1",
+            "source_run_dir": str(source_root),
+            "source_contract_path": "code_task/meta/task_contract.json",
+            "source_architecture_path": "code_task/meta/architecture_plan.json",
+            "source_file_plan_path": "code_task/meta/file_plan.json",
+            "source_contract_hash": source_hash,
+            "architecture_hash": _json_hash(architecture),
+            "file_plan_hash": _json_hash(file_plan),
+            "source_planning_mode": str(implementation.get("planning_mode") or ""),
+            "source_planning_review_rounds": implementation.get("planning_review_rounds"),
+            "imported_artifacts": [
+                "architecture_plan.json",
+                "file_plan.json",
+                "implementation_plan.json",
+            ],
+            "excluded_state": [
+                "workspace/generated_project",
+                "memory/implementation_memory.json",
+                "memory/repair_memory.jsonl",
+                "meta/review_report.json",
+                "meta/review_findings.jsonl",
+                "meta/repair_snapshots",
+            ],
+        },
+    )
+
+
+def _json_hash(value: object) -> str:
+    raw = json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def generate_greenfield_code_task(
     run_dir: Path,
     *,
@@ -87,6 +154,7 @@ def generate_greenfield_code_task(
     planning_mode: str = "tool_agent",
     planning_review_rounds: int = 2,
     contract_context: str = "full",
+    planning_snapshot_from: str | Path | None = None,
     message_callback: MessageCallback | None = None,
 ) -> GreenfieldCodeTaskResult:
     """Generate a greenfield project inside a code-task workspace.
@@ -131,7 +199,10 @@ def generate_greenfield_code_task(
         )
     contract = finalize_task_contract(contract)
     save_task_contract(paths.meta_dir, contract)
-    prompt_contract = _contract_for_prompt_context(contract, mode=contract_context)
+    source_snapshot = Path(planning_snapshot_from) if planning_snapshot_from else None
+    if contract_context == "plan_only" and source_snapshot is None:
+        raise ValueError("contract_context='plan_only' requires planning_snapshot_from")
+    prompt_contract = contract_prompt_context(contract, mode=contract_context)
     result_schema = _result_schema_with_contract_metrics(result_schema, contract)
     resource_plan = _resource_plan(
         resource_decision,
@@ -148,13 +219,6 @@ def generate_greenfield_code_task(
     for message in dependency_advice_messages(dependency_advice):
         _emit(message_callback, message)
 
-    planner_client = _llm_client(
-        paths.meta_dir,
-        model=planner_model or model,
-        use_llm=use_llm,
-        allow_fallback=allow_planning_fallback,
-        message_callback=message_callback,
-    )
     writer_client = _llm_client(
         paths.meta_dir,
         model=writer_model or model,
@@ -169,24 +233,46 @@ def generate_greenfield_code_task(
         allow_fallback=allow_planning_fallback,
         message_callback=message_callback,
     )
-    _emit(message_callback, "Planning greenfield project architecture.")
     planning_dir = paths.meta_dir / "planning"
-    architecture, architecture_mode = build_architecture_plan(
-        contract=prompt_contract,
-        result_schema=result_schema,
-        resource_plan=resource_plan,
-        domain_profile=domain_profile,
-        client=planner_client,
-        allow_fallback=allow_planning_fallback or not use_llm,
-        retry_attempts=llm_retry_attempts,
-        planning_mode=planning_mode,
-        planning_review_rounds=planning_review_rounds,
-        planning_dir=planning_dir,
-        message_callback=message_callback,
-    )
+    planning_snapshot: dict[str, Any] | None = None
+    if source_snapshot is not None:
+        _emit(message_callback, "Importing immutable accepted greenfield plan.")
+        architecture, architecture_mode, planning_snapshot = _load_planning_snapshot(
+            source_run_dir=source_snapshot,
+            target_contract=contract,
+        )
+        planning_dir.mkdir(parents=True, exist_ok=True)
+        write_json(paths.meta_dir / "planning_snapshot.json", planning_snapshot)
+    else:
+        planner_client = _llm_client(
+            paths.meta_dir,
+            model=planner_model or model,
+            use_llm=use_llm,
+            allow_fallback=allow_planning_fallback,
+            message_callback=message_callback,
+        )
+        _emit(message_callback, "Planning greenfield project architecture.")
+        architecture, architecture_mode = build_architecture_plan(
+            contract=prompt_contract,
+            result_schema=result_schema,
+            resource_plan=resource_plan,
+            domain_profile=domain_profile,
+            client=planner_client,
+            allow_fallback=allow_planning_fallback or not use_llm,
+            retry_attempts=llm_retry_attempts,
+            planning_mode=planning_mode,
+            planning_review_rounds=planning_review_rounds,
+            planning_dir=planning_dir,
+            message_callback=message_callback,
+        )
     implementation_plan_path = paths.meta_dir / "implementation_plan.json"
     architecture_plan_path = paths.meta_dir / "architecture_plan.json"
     file_plan_path = paths.meta_dir / "file_plan.json"
+    effective_planning_mode = str((planning_snapshot or {}).get("source_planning_mode") or planning_mode)
+    effective_planning_review_rounds = (planning_snapshot or {}).get(
+        "source_planning_review_rounds",
+        planning_review_rounds,
+    )
     write_json(
         implementation_plan_path,
         {
@@ -197,10 +283,11 @@ def generate_greenfield_code_task(
             "agent_mode": implementation_agent_mode or "",
             "project_dir": "code_task/workspace/generated_project",
             "entrypoint": benchmark_command,
-            "planning_mode": planning_mode,
-            "planning_review_rounds": planning_review_rounds,
+            "planning_mode": effective_planning_mode,
+            "planning_review_rounds": effective_planning_review_rounds,
             "ablation": {
                 "contract_context": contract_context,
+                "planning_snapshot": planning_snapshot,
             },
             "planning_dir": "code_task/meta/planning",
             "task_contract": "code_task/meta/task_contract.json",
@@ -392,35 +479,6 @@ def _contract_from_task(
         source=source,
         extra_contract=extra_contract,
     )
-
-
-def _contract_for_prompt_context(contract: dict[str, Any], *, mode: str) -> dict[str, Any]:
-    if mode != "minimal":
-        return dict(contract)
-    return {
-        "schema_version": contract.get("schema_version", "code_task_contract.v1"),
-        "context_mode": "minimal",
-        "objective": str(contract.get("objective") or "")[:1200],
-        "task_text": str(contract.get("task_text") or contract.get("task") or "")[:6000],
-        "benchmark_command": str(contract.get("benchmark_command") or ""),
-        "success_criteria": _string_list(contract.get("success_criteria"), limit=8),
-        "constraints": _string_list(contract.get("constraints"), limit=8),
-        "note": (
-            "Ablation prompt view: full implementation/artifact/metric/analysis "
-            "contracts are intentionally omitted from model context."
-        ),
-    }
-
-
-def _string_list(value: object, *, limit: int) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text:
-            result.append(text[:500])
-    return result[:limit]
 
 
 def _result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
