@@ -149,6 +149,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="auto",
         help="Use filesystem reflinks when available (`auto`), otherwise copy files normally.",
     )
+    branch_parser.add_argument(
+        "--require-pristine",
+        action="store_true",
+        help="Refuse to branch any source run with repair history or more than one execution attempt.",
+    )
     branch_parser.set_defaults(func=_branch_runs_command)
 
     refresh_parser = subparsers.add_parser(
@@ -655,6 +660,8 @@ def _branch_runs_command(args: argparse.Namespace) -> int:
     suffix = _safe_filename(args.run_suffix)
     requested_topics = list(dict.fromkeys(str(topic) for topic in args.topics))
     lineage_topics: dict[str, dict[str, str]] = {}
+    branch_plans: list[tuple[str, dict[str, Any], Path, Path, list[str]]] = []
+    non_pristine: dict[str, list[str]] = {}
 
     for topic in requested_topics:
         source_row = source_topics.get(topic)
@@ -674,6 +681,16 @@ def _branch_runs_command(args: argparse.Namespace) -> int:
         branch_run_dir = source_run_dir.with_name(f"{source_run_dir.name}--{suffix}")
         if branch_run_dir.exists():
             raise SystemExit(f"Branch run directory already exists for {topic}: {branch_run_dir}")
+        integrity_signals = _repair_history_signals(source_run_dir, manifest_path)
+        if integrity_signals:
+            non_pristine[topic] = integrity_signals
+        branch_plans.append((topic, branch_row, source_run_dir, branch_run_dir, integrity_signals))
+
+    if args.require_pristine and non_pristine:
+        details = "; ".join(f"{topic}: {', '.join(signals)}" for topic, signals in sorted(non_pristine.items()))
+        raise SystemExit(f"Refusing to branch non-pristine source run(s): {details}")
+
+    for topic, branch_row, source_run_dir, branch_run_dir, integrity_signals in branch_plans:
         _print(f"[branch] {topic}: {_rel(repo_root, source_run_dir)} -> {_rel(repo_root, branch_run_dir)}")
         _clone_run_directory(source_run_dir, branch_run_dir, copy_mode=args.copy_mode)
 
@@ -682,6 +699,8 @@ def _branch_runs_command(args: argparse.Namespace) -> int:
         lineage_topics[topic] = {
             "parent_run_dir": _rel(repo_root, source_run_dir),
             "branch_run_dir": _rel(repo_root, branch_run_dir),
+            "source_integrity": "pristine" if not integrity_signals else "repair_history_present",
+            "source_integrity_signals": "; ".join(integrity_signals),
         }
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -707,6 +726,34 @@ def _clone_run_directory(source: Path, destination: Path, *, copy_mode: str) -> 
         subprocess.run(["cp", "-a", "--reflink=auto", str(source), str(destination)], check=True)
         return
     shutil.copytree(source, destination, copy_function=shutil.copy2)
+
+
+def _repair_history_signals(run_dir: Path, manifest_path: Path) -> list[str]:
+    """Return conservative signals that a failure snapshot was previously resumed."""
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ["unreadable_manifest"]
+    repair = manifest.get("repair")
+    if not isinstance(repair, dict):
+        repair = {}
+    signals: list[str] = []
+    for key in ("repair_count", "review_repair_count", "run_repair_count"):
+        try:
+            count = int(repair.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            signals.append(f"{key}={count}")
+
+    attempts = _execution_attempts_from_manifest(manifest)
+    if len(attempts) > 1:
+        signals.append(f"execution_attempts={len(attempts)}")
+    snapshot_root = run_dir / "code_task" / "meta" / "repair_snapshots"
+    if snapshot_root.is_dir() and any(snapshot_root.iterdir()):
+        signals.append("repair_snapshots_present")
+    return signals
 
 
 def _refresh_command(args: argparse.Namespace) -> int:
