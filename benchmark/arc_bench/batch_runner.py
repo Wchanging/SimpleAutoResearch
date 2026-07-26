@@ -674,7 +674,7 @@ def _branch_runs_command(args: argparse.Namespace) -> int:
         source_run_dir = _abs(repo_root, raw_run_dir)
         if not source_run_dir.is_dir():
             raise SystemExit(f"Source run directory does not exist for {topic}: {source_run_dir}")
-        manifest_path = source_run_dir / "code_task" / "manifest.json"
+        manifest_path = source_run_dir / "manifest.json"
         if not manifest_path.is_file():
             raise SystemExit(f"Source run has no code-task manifest for {topic}: {manifest_path}")
 
