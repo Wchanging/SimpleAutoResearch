@@ -35,6 +35,7 @@ from simple_ar.code_task import (
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, load_code_task_init_options
 from simple_ar.code_task.editing.actions import apply_repair_actions
 from simple_ar.code_task.generation.dependencies import DEPENDENCY_CATALOG, build_dependency_advice
+from simple_ar.code_task.generation.file_specs import infer_file_kind
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks, resource_review_findings
 from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
@@ -58,6 +59,50 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CodeTaskTests(unittest.TestCase):
+    def test_python_file_in_runtime_named_directory_remains_source(self) -> None:
+        self.assertEqual(infer_file_kind("artifacts/artifacts_io.py"), "source")
+        self.assertEqual(
+            infer_file_kind("report/report_generator.py", "output_placeholder"),
+            "source",
+        )
+        self.assertEqual(infer_file_kind("artifacts/results.json", "output_placeholder"), "output_placeholder")
+
+    def test_repair_add_file_can_populate_empty_placeholder(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            target = root / "artifacts" / "artifacts_io.py"
+            target.parent.mkdir(parents=True)
+            target.touch()
+
+            result = apply_repair_actions(
+                root,
+                [{"action": "add_file", "path": "artifacts/artifacts_io.py", "content": "def save():\n    return 1\n"}],
+            )
+
+            self.assertEqual(result["status"], "patched")
+            self.assertIn("def save", read_text(target))
+
+    def test_repair_rejects_path_below_existing_file(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            write_text(root / "artifacts_io.py", "VALUE = 1\n")
+
+            result = apply_repair_actions(
+                root,
+                [
+                    {
+                        "action": "add_file",
+                        "path": "artifacts_io.py/submission_writer.py",
+                        "content": "VALUE = 2\n",
+                    }
+                ],
+            )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["rejected_actions"][0]["reason"], "parent_path_is_file")
+
     def test_greenfield_review_blocks_active_learning_hidden_label_leakage(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -525,7 +570,7 @@ class CodeTaskTests(unittest.TestCase):
             self.assertIn("tests/**", manifest["edit_scope"]["protected_patterns"])
             self.assertGreaterEqual(manifest["copy"]["skipped_count"], 2)
             task_contract = read_json(run_dir / "code_task" / "meta" / "task_contract.json")
-            self.assertEqual(task_contract["schema_version"], "code_task_contract.v3")
+            self.assertEqual(task_contract["schema_version"], "code_task_contract.v4")
             self.assertEqual(task_contract["task_kind"], "existing_project")
             self.assertEqual(task_contract["contract_id"], "code-task-existing_project")
             self.assertIn("version_hash", task_contract)
@@ -660,7 +705,7 @@ primary_metric = "accuracy"
             self.assertEqual(advice["schema_version"], "code_task_dependency_advice.v1")
             self.assertEqual(advice["policy"], "advice_only_no_auto_install")
             task_contract = read_json(run_dir / "code_task" / "meta" / "task_contract.json")
-            self.assertEqual(task_contract["schema_version"], "code_task_contract.v3")
+            self.assertEqual(task_contract["schema_version"], "code_task_contract.v4")
             self.assertEqual(task_contract["task_kind"], "greenfield")
             self.assertEqual(task_contract["metric_contract"]["primary_metric"], "accuracy")
             self.assertIn("version_hash", task_contract)
@@ -944,6 +989,81 @@ primary_metric = "accuracy"
             self.assertEqual(report["quality_guard"]["reason"], "empty_greenfield_evidence")
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["status"], "benchmark_failed")
+
+    def test_greenfield_benchmark_rejects_zero_exit_without_required_results(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nWrite artifacts/results.json and artifacts/report.md with measured rows.\n",
+            )
+            run_dir = root / "runs" / "missing-results"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="score",
+                metric_directions={"score": "higher"},
+            )
+            project_dir = run_dir / "code_task" / "workspace" / "generated_project"
+            project_dir.mkdir(parents=True)
+            write_text(
+                project_dir / "main.py",
+                "print('ERROR: experiment failed but was swallowed')\n",
+            )
+
+            result = run_code_task_benchmark(run_dir, timeout_sec=30, skip_validation=True)
+
+            self.assertEqual(result.status, "failed")
+            report = read_json(result.report_path)
+            self.assertEqual(report["quality_guard"]["reason"], "missing_results_artifact")
+
+    def test_greenfield_benchmark_rejects_missing_required_report(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            task_file = root / "task.md"
+            write_text(
+                task_file,
+                "# Task\n\nWrite artifacts/results.json and artifacts/report.md with measured rows.\n",
+            )
+            run_dir = root / "runs" / "missing-report"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=None,
+                task_file=task_file,
+                kind="greenfield",
+                benchmark_command="python generated_project/main.py",
+                workspace_mode="empty",
+                primary_metric="score",
+                metric_directions={"score": "higher"},
+            )
+            project_dir = run_dir / "code_task" / "workspace" / "generated_project"
+            project_dir.mkdir(parents=True)
+            write_text(
+                project_dir / "main.py",
+                (
+                    "from pathlib import Path\n"
+                    "artifacts = Path('generated_project') / 'artifacts'\n"
+                    "artifacts.mkdir(parents=True, exist_ok=True)\n"
+                    "(artifacts / 'results.json').write_text("
+                    "'{\"raw_records\": [{\"score\": 1.0}], \"global_metrics\": {\"score\": 1.0}}'"
+                    ")\n"
+                    "print('score: 1.0')\n"
+                ),
+            )
+
+            result = run_code_task_benchmark(run_dir, timeout_sec=30, skip_validation=True)
+
+            self.assertEqual(result.status, "failed")
+            report = read_json(result.report_path)
+            self.assertEqual(report["quality_guard"]["reason"], "missing_required_artifact")
+            self.assertIn("report.md", report["quality_guard"]["message"])
 
     def test_greenfield_benchmark_reports_artifact_path_mismatch(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -3789,6 +3909,9 @@ protected_patterns = ["pyproject.toml"]
                 repair_model=None,
                 use_llm=False,
                 max_generated_lines=1000,
+                repair_context="full",
+                use_repair_memory=True,
+                contract_context="full",
                 message_callback=None,
             )
 

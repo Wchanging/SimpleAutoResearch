@@ -59,10 +59,12 @@ The recommended ML test order is maintained in:
 benchmark/arc_bench/prepared/ml/INDEX.md
 ```
 
-By default, prepared tasks preserve the vanilla ARC-Bench input text: manifest
-content plus rubric leaves in readable Markdown. For ablations of
-SimpleAutoResearch's task-contract mechanism, you may opt in to an additional
-machine-readable contract block:
+The historical SimpleAutoResearch profile injects both public manifest content
+and readable rubric leaves into `task.md`. That is useful for internal
+diagnostics, but it is a rubric-informed generation setting rather than a
+rubric-hidden comparison setting. For ablations of SimpleAutoResearch's
+task-contract mechanism, you may opt in to an additional machine-readable
+contract block:
 
 ```bash
 uv run python benchmark/arc_bench/adapter.py prepare-ml \
@@ -71,8 +73,31 @@ uv run python benchmark/arc_bench/adapter.py prepare-ml \
   --include-contract
 ```
 
-Do not mix contract-enhanced prepared packages with vanilla ARC-Bench comparison
-runs unless the difference is reported explicitly.
+Do not mix contract-enhanced prepared packages with the default prepared
+profile unless the difference is reported explicitly.
+
+### Rubric-Hidden Generation Sensitivity
+
+To test whether generation-time rubric exposure changes outcomes, prepare an
+isolated `manifest_only` package. It retains the public research question,
+background, hypotheses, conditions, datasets, metrics, and runtime interface,
+but removes rubric leaves and the rubric-derived machine-readable contract from
+the task passed to the generation, review, and repair agents. The rubric remains
+available only to the evaluator during scoring.
+
+```bash
+uv run python benchmark/arc_bench/adapter.py prepare-ml \
+  --arc-root /path/to/AutoResearchClaw/experiments/arc_bench \
+  --topics ML01 ML04 ML06 ML08 ML11 ML14 ML17 ML19 ML22 ML25 \
+  --prepared-root benchmark/arc_bench/prepared_manifest_only/ml \
+  --run-root benchmark/arc_bench/runs_manifest_only/ml \
+  --generation-input manifest_only
+```
+
+Run this package with separate run, submission, log, and state roots. Keep all
+generation settings and the evaluator fixed relative to a fresh
+`rubric_informed` counterpart. Do not reuse plans or code from a rubric-informed
+run: those artifacts have already observed the rubric.
 
 ## Optional ML Dependencies
 
@@ -149,6 +174,38 @@ uv run python benchmark/arc_bench/batch_runner.py run \
   --native-score \
   --native-score-model gpt-4o
 ```
+
+### Bounded Parallel Runs
+
+`batch_runner.py run` can execute independent topics concurrently without
+interleaving their detailed Rich/CLI output. The controller is the only writer
+of the batch state file; each worker retains complete `init.log`,
+`execute.log`, `finalize.log`, and `score.log` files under its own topic log
+directory.
+
+```bash
+uv run python benchmark/arc_bench/batch_runner.py run \
+  --topic-set all \
+  --jobs 2 \
+  --progress \
+  --analyze \
+  --score \
+  --score-profile manual-strict \
+  --strict-reviewer-models claude-opus-4-6,gpt-5.4 \
+  --strict-reviewer-apis chat,responses \
+  --strict-adjudicator-model gpt-5.4 \
+  --state-file benchmark/arc_bench/batch_state/all-parallel.json
+```
+
+Use `--jobs 2` as the conservative starting point: each topic can make many
+LLM calls and the manual-strict score itself invokes two reviewers. Parallel
+runs are quiet by default; `--progress` displays one reusable `tqdm` row per
+worker with the active topic, its real runner stage (`init`, `execute`,
+`finalize`, or `score`), and elapsed time. It deliberately does not invent
+percentages inside the variable-length `execute` stage. Use
+`--quiet-subprocess` for the same log-only behavior in a serial run. To resume
+an interrupted one-shot batch without revisiting terminal successes or
+failures, repeat the same command with `--skip-any-result`.
 
 Subset ranges and exclusions are also supported:
 

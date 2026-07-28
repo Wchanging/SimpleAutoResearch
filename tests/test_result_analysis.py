@@ -328,6 +328,58 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(rows[0]["mean"], 0.77)
         self.assertEqual(rows[0]["std"], 0.03)
 
+    def test_normalizes_structurally_distinct_result_records(self) -> None:
+        context = AnalysisContext(
+            task_id="T10-variants",
+            expected_metrics=[
+                {"name": "balanced_accuracy", "direction": "maximize"},
+                {"name": "roc_auc", "direction": "maximize"},
+                {"name": "r2", "direction": "maximize"},
+                {"name": "one_step_rmse", "direction": "minimize"},
+            ],
+            project_results={
+                "root_list_records": [
+                    {
+                        "dataset": "wine",
+                        "condition": "baseline",
+                        "seed": 0,
+                        "metrics": {"balanced_accuracy": 0.8},
+                    }
+                ],
+                "per_run_records": [
+                    {
+                        "dataset": "fraud",
+                        "method_name": "isolation_forest",
+                        "seed": 0,
+                        "roc_auc": 0.74,
+                    }
+                ],
+                "aggregate_metrics": [
+                    {
+                        "dataset_id": "friedman",
+                        "kernel_id": "rbf",
+                        "mean_r2": 0.77,
+                        "n_seeds": 5,
+                    }
+                ],
+                "conditions": [
+                    {
+                        "key": {"model_type": "gp", "seed": 0, "train_size": 100},
+                        "one_step_rmse": 0.31,
+                    }
+                ],
+            },
+        )
+
+        result = run_result_analysis(context)
+        rows = result.metric_summary["result_tables"]["all_metric_rows"]
+        identities = {(row["dataset"], row["condition"], row["metric"]) for row in rows}
+
+        self.assertIn(("wine", "baseline", "balanced_accuracy"), identities)
+        self.assertIn(("fraud", "isolation_forest", "roc_auc"), identities)
+        self.assertIn(("friedman", "rbf", "r2"), identities)
+        self.assertIn(("train_size=100", "gp", "one_step_rmse"), identities)
+
     def test_task_contract_supplies_required_metrics_and_claim_specs(self) -> None:
         context = AnalysisContext(
             task_id="T11",

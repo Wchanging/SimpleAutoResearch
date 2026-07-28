@@ -76,14 +76,22 @@ def _load_planning_snapshot(
 
     source_root = source_run_dir.expanduser().resolve()
     source_meta = source_root / "code_task" / "meta"
+    raw_source_contract = _read_raw_task_contract(source_meta)
     source_contract = load_task_contract(source_meta)
     target_hash = str(target_contract.get("version_hash") or "")
     source_hash = str(source_contract.get("version_hash") or "")
-    if not source_contract or not target_hash or source_hash != target_hash:
+    contract_match_mode = "exact"
+    if not source_contract or not target_hash:
         raise ValueError(
-            "Planning snapshot contract mismatch: source and target must have the same "
-            "canonical task-contract hash."
+            "Planning snapshot contract is missing a canonical task-contract hash."
         )
+    if source_hash != target_hash:
+        if not _is_legacy_contract_compatible(raw_source_contract, target_contract):
+            raise ValueError(
+                "Planning snapshot contract mismatch: source and target must have the same "
+                "canonical task-contract hash."
+            )
+        contract_match_mode = "legacy_v3_compatible"
     try:
         architecture = read_json(source_meta / "architecture_plan.json")
         implementation = read_json(source_meta / "implementation_plan.json")
@@ -105,6 +113,8 @@ def _load_planning_snapshot(
             "source_architecture_path": "code_task/meta/architecture_plan.json",
             "source_file_plan_path": "code_task/meta/file_plan.json",
             "source_contract_hash": source_hash,
+            "target_contract_hash": target_hash,
+            "contract_match_mode": contract_match_mode,
             "architecture_hash": _json_hash(architecture),
             "file_plan_hash": _json_hash(file_plan),
             "source_planning_mode": str(implementation.get("planning_mode") or ""),
@@ -124,6 +134,49 @@ def _load_planning_snapshot(
             ],
         },
     )
+
+
+def _read_raw_task_contract(meta_dir: Path) -> dict[str, Any]:
+    """Read a persisted contract without applying the current schema normalizer."""
+
+    try:
+        value = read_json(meta_dir / "task_contract.json")
+    except Exception:
+        return {}
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _is_legacy_contract_compatible(
+    source_contract: dict[str, Any],
+    target_contract: dict[str, Any],
+) -> bool:
+    """Allow v3 snapshots only when their pre-v4 task semantics are unchanged.
+
+    v4 added ``implementation_contract`` to the persisted schema. Historical v3
+    plans cannot have that field, so their full canonical hashes necessarily differ
+    from a newly initialized run. This compatibility path is deliberately narrow:
+    every field other than schema/version metadata and the v4-only contract must
+    still match exactly.
+    """
+
+    if source_contract.get("schema_version") != "code_task_contract.v3":
+        return False
+    if "implementation_contract" in source_contract:
+        return False
+    return _legacy_contract_identity_hash(source_contract) == _legacy_contract_identity_hash(target_contract)
+
+
+def _legacy_contract_identity_hash(contract: dict[str, Any]) -> str:
+    excluded = {
+        "schema_version",
+        "legacy_schema_version",
+        "version_hash",
+        "implementation_contract",
+        "coverage",
+        "derived_views",
+    }
+    value = {str(key): item for key, item in contract.items() if key not in excluded}
+    return _json_hash(value)
 
 
 def _json_hash(value: object) -> str:
@@ -203,7 +256,11 @@ def generate_greenfield_code_task(
     if contract_context == "plan_only" and source_snapshot is None:
         raise ValueError("contract_context='plan_only' requires planning_snapshot_from")
     prompt_contract = contract_prompt_context(contract, mode=contract_context)
-    result_schema = _result_schema_with_contract_metrics(result_schema, contract)
+    result_schema = _result_schema_for_prompt(
+        result_schema,
+        contract=contract,
+        contract_context=contract_context,
+    )
     resource_plan = _resource_plan(
         resource_decision,
         task_text=task_text,
@@ -511,6 +568,25 @@ def _result_schema_with_contract_metrics(
         directions = {}
     merged["metric_directions"] = dict(directions)
     return merged
+
+
+def _result_schema_for_prompt(
+    result_schema: dict[str, Any],
+    *,
+    contract: dict[str, Any],
+    contract_context: str,
+) -> dict[str, Any]:
+    """Return the execution interface visible to downstream generation prompts.
+
+    The manifest schema is an external execution interface and remains available
+    to every condition. Only the Full condition enriches it with canonical
+    contract metrics. In the shared-plan ``plan_only`` ablation, adding those
+    metrics would leak post-planning contract content back into the writer.
+    """
+
+    if str(contract_context).strip().lower().replace("-", "_") == "plan_only":
+        return dict(result_schema)
+    return _result_schema_with_contract_metrics(result_schema, contract)
 
 
 def _resource_plan(

@@ -23,6 +23,69 @@ def load_adapter_module():
 
 
 class ArcBenchAdapterTests(unittest.TestCase):
+    def test_manifest_only_task_excludes_rubric_criteria(self) -> None:
+        adapter = load_adapter_module()
+        manifest = {
+            "id": "ML99",
+            "title": "Manifest-only test",
+            "synthesis": "A public task summary.",
+            "hypotheses": [{"id": "H1", "statement": "The method improves the metric."}],
+            "experiment_design": {
+                "research_question": "Does the method help?",
+                "conditions": [{"name": "baseline", "description": "Reference condition."}],
+                "datasets": [{"name": "toy", "source": "local fixture"}],
+                "metrics": [{"name": "score", "direction": "higher_is_better", "description": "Primary score."}],
+            },
+        }
+        rubric = {
+            "leaves": [
+                {
+                    "id": "hidden-leaf",
+                    "task_category": "Code Development",
+                    "requirements": "Use the hidden acceptance criterion.",
+                }
+            ]
+        }
+        options = adapter.PrepareOptions(
+            arc_root=Path("arc"),
+            topic="ML99",
+            output_dir=Path("prepared"),
+            simple_ar_output_root=Path("runs"),
+            benchmark_command="python generated_project/main.py",
+            generation_input="manifest_only",
+        )
+
+        task = adapter.render_task_markdown(manifest, rubric, options)
+
+        self.assertIn("Does the method help?", task)
+        self.assertIn("Reference condition.", task)
+        self.assertNotIn("## Rubric Leaves", task)
+        self.assertNotIn("hidden-leaf", task)
+        self.assertNotIn("hidden acceptance criterion", task)
+        self.assertNotIn("rubric", task.lower())
+
+    def test_manifest_only_rejects_rubric_derived_contract(self) -> None:
+        adapter = load_adapter_module()
+        with self.assertRaises(SystemExit):
+            adapter.validate_generation_input("manifest_only", include_contract=True)
+
+    def test_manifest_only_analysis_context_excludes_rubric_criteria(self) -> None:
+        adapter = load_adapter_module()
+        context = adapter.build_analysis_context(
+            manifest={"id": "ML99", "title": "Test", "experiment_design": {}},
+            rubric={"id": "hidden-leaf", "requirements": "Hidden acceptance criterion."},
+            metrics={},
+            project_results={},
+            run_dir=Path("run"),
+            code_src=None,
+            fallback_readme="",
+            fallback_claims={},
+            include_rubric_criteria=False,
+        )
+
+        self.assertEqual(context["criteria"], [])
+        self.assertEqual(context["metadata"]["generation_input"], "manifest_only")
+
     def test_adapter_manifest_normalizes_paths_without_core_coupling(self) -> None:
         manifest = build_adapter_manifest(
             suite="demo",
@@ -60,6 +123,23 @@ class ArcBenchAdapterTests(unittest.TestCase):
             self.assertIn("artifacts", results["_artifact_source"])
             self.assertIn("Real Report", writeup)
             self.assertNotIn("Project Readme", writeup)
+
+    def test_load_project_results_preserves_root_list(self) -> None:
+        adapter = load_adapter_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            code_src = run_dir / "code_task" / "workspace" / "generated_project"
+            artifact_dir = code_src / "artifacts"
+            artifact_dir.mkdir(parents=True)
+            (artifact_dir / "results.json").write_text(
+                '[{"dataset":"wine","condition":"baseline","metrics":{"accuracy":0.9}}]',
+                encoding="utf-8",
+            )
+
+            results = adapter.load_project_results(run_dir, code_src)
+
+            self.assertEqual(results["_artifact_root"], "list")
+            self.assertEqual(len(results["records"]), 1)
 
     def test_strict_disagreement_adjudication_overrides_reviewer_average(self) -> None:
         adapter = load_adapter_module()

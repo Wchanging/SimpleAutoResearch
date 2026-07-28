@@ -1042,6 +1042,35 @@ def _greenfield_result_quality_guard(
             ),
             "artifact_scan": compact_artifact_scan(artifact_scan),
         }
+    unusable_artifacts = [
+        row
+        for row in (artifact_scan or {}).get("artifacts", [])
+        if isinstance(row, dict)
+        and str(row.get("parse_status", "")) in {"missing", "empty", "invalid_json", "unreadable"}
+    ]
+    if unusable_artifacts:
+        row = unusable_artifacts[0]
+        parse_status = str(row.get("parse_status") or "missing")
+        expected_path = str(row.get("expected_path") or row.get("contract_path") or "required artifact")
+        is_results = expected_path.replace("\\", "/").endswith("artifacts/results.json")
+        reason = (
+            "missing_results_artifact"
+            if is_results and parse_status == "missing"
+            else f"{parse_status}_results_artifact"
+            if is_results
+            else f"{parse_status}_required_artifact"
+        )
+        return {
+            "status": "failed",
+            "reason": reason,
+            "message": (
+                "Generated benchmark quality guard failed: expected "
+                f"{expected_path} is {parse_status}. Successful completion requires "
+                "all configured runtime artifacts."
+            ),
+            "artifact": _relative_to_run(run_dir, paths.workspace_dir / expected_path),
+            "artifact_scan": compact_artifact_scan(artifact_scan or {}),
+        }
     results_row = expected_artifact_row(artifact_scan or {}, "artifacts/results.json")
     results_rel = (
         str(results_row.get("expected_path", "generated_project/artifacts/results.json"))
@@ -1049,18 +1078,6 @@ def _greenfield_result_quality_guard(
         else "generated_project/artifacts/results.json"
     )
     results_path = paths.workspace_dir / results_rel
-    parse_status = str(results_row.get("parse_status", "")) if isinstance(results_row, dict) else ""
-    if isinstance(results_row, dict) and parse_status in {"empty", "invalid_json", "unreadable"}:
-        return {
-            "status": "failed",
-            "reason": f"{parse_status}_results_artifact",
-            "message": (
-                "Generated benchmark quality guard failed: expected "
-                f"{results_rel} is {parse_status}. See artifact_scan.json for details."
-            ),
-            "artifact": _relative_to_run(run_dir, results_path),
-            "artifact_scan": compact_artifact_scan(artifact_scan or {}),
-        }
     if not results_path.is_file():
         return None
     try:

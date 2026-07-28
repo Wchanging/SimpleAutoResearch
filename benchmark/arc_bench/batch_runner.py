@@ -15,6 +15,8 @@ server runs can be resumed or failed topics can be retried.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextvars import ContextVar
 import errno
 import hashlib
 import json
@@ -29,7 +31,7 @@ import tomllib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 
 QUICK_TOPICS = ["ML04", "ML02", "ML06", "ML10", "ML08"]
@@ -62,6 +64,12 @@ SUCCESSFUL_RUN_STATUSES = {"benchmark_passed"}
 DEFAULT_STATE_ROOT = Path("benchmark/arc_bench/batch_state")
 LATEST_STATE_POINTER = DEFAULT_STATE_ROOT / "latest_state.json"
 LEGACY_STATE_FILE = DEFAULT_STATE_ROOT / "ml_batch_state.json"
+
+
+# Worker output is intentionally context-local: parallel topic workers keep their
+# detailed subprocess streams in per-topic logs while the controller owns the
+# concise progress display and the shared batch state.
+_CONSOLE_OUTPUT_ENABLED: ContextVar[bool] = ContextVar("console_output_enabled", default=True)
 
 
 @dataclass
@@ -98,6 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     run_parser = subparsers.add_parser("run", help="Run selected topics; completed topics are skipped by default.")
     _add_common_options(run_parser)
+    _add_parallel_options(run_parser)
     run_parser.add_argument("--force", action="store_true", help="Rerun topics even when the state says completed.")
     run_parser.set_defaults(func=_run_command)
 
@@ -392,6 +401,32 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_parallel_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help=(
+            "Maximum number of independent topics to run concurrently. "
+            "The default is 1 and preserves serial execution. Parallel workers write only per-topic logs; "
+            "the controller remains the sole batch-state writer."
+        ),
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show one stage-aware tqdm row per active worker. Recommended with --jobs > 1.",
+    )
+    parser.add_argument(
+        "--quiet-subprocess",
+        action="store_true",
+        help=(
+            "Keep child command stdout/stderr in per-topic log files instead of echoing it to the terminal. "
+            "Parallel runs are quiet by default to avoid interleaved output."
+        ),
+    )
+
+
 def _add_summary_options(parser: argparse.ArgumentParser) -> None:
     _add_path_options(parser)
     parser.add_argument(
@@ -430,11 +465,17 @@ def _add_summary_options(parser: argparse.ArgumentParser) -> None:
 def _run_command(args: argparse.Namespace) -> int:
     ctx = _context_from_args(args)
     topics = _resolve_topics(args, ctx.prepared_root)
+    if args.jobs < 1:
+        raise SystemExit("--jobs must be at least 1")
     _remember_latest_state(ctx)
     state = _load_state(ctx.state_file)
     if not state:
         _save_state(ctx.state_file, state)
     _print(f"[state] {ctx.state_file}")
+
+    if args.jobs > 1:
+        return _run_command_parallel(args, ctx, topics, state)
+
     exit_code = 0
 
     for topic in topics:
@@ -478,18 +519,33 @@ def _run_command(args: argparse.Namespace) -> int:
                     exit_code = 1
                 continue
             _print(f"[stale] {topic}: previous completed state is missing passed run or finalized artifacts; rerunning.")
-        result = _run_topic(
-            ctx,
-            topic,
-            analyze=args.analyze,
-            analysis_model=args.analysis_model,
-            score=args.score,
-            score_model=args.score_model,
-            score_profile=args.score_profile,
-            native_score=args.native_score,
-            native_score_model=args.native_score_model,
-            previous_state=current,
-        )
+        if args.quiet_subprocess:
+            result = _run_topic_worker(
+                ctx,
+                topic,
+                current,
+                analyze=args.analyze,
+                analysis_model=args.analysis_model,
+                score=args.score,
+                score_model=args.score_model,
+                score_profile=args.score_profile,
+                native_score=args.native_score,
+                native_score_model=args.native_score_model,
+                quiet=True,
+            )
+        else:
+            result = _run_topic(
+                ctx,
+                topic,
+                analyze=args.analyze,
+                analysis_model=args.analysis_model,
+                score=args.score,
+                score_model=args.score_model,
+                score_profile=args.score_profile,
+                native_score=args.native_score,
+                native_score_model=args.native_score_model,
+                previous_state=current,
+            )
         state[topic] = result
         _save_state(ctx.state_file, state)
         if result.status != "completed":
@@ -497,6 +553,260 @@ def _run_command(args: argparse.Namespace) -> int:
 
     _print_summary(state, topics)
     return exit_code
+
+
+def _run_command_parallel(
+    args: argparse.Namespace,
+    ctx: RunnerContext,
+    topics: Sequence[str],
+    state: dict[str, TopicState],
+) -> int:
+    """Run independent topics concurrently while the controller owns state writes.
+
+    Code-task runs, submission directories, and command logs are already scoped
+    by topic. The batch JSON is the only shared artifact, so workers return
+    complete ``TopicState`` objects and this controller checkpoints them one at
+    a time as futures finish.
+    """
+
+    scheduled: list[tuple[str, TopicState]] = []
+    exit_code = 0
+    for topic in topics:
+        current = _topic_state(state, topic)
+        if args.skip_any_result and not args.force and _state_has_terminal_result(current):
+            _print(f"[skip] {topic}: existing terminal result ({current.status})")
+            continue
+        if current.status == "completed" and not args.force:
+            if _completed_state_still_valid(
+                ctx,
+                current,
+                require_analysis=args.analyze,
+                require_score=args.score,
+                require_native_score=args.native_score,
+                score_profile=args.score_profile,
+            ):
+                _print(f"[skip] {topic}: already completed at {current.output_dir}")
+                continue
+            if (args.score or args.native_score) and _completed_state_still_valid(
+                ctx,
+                current,
+                require_analysis=args.analyze,
+                require_score=False,
+                require_native_score=False,
+                score_profile=args.score_profile,
+            ):
+                # This operation only touches one existing output directory and
+                # is usually short. Keep it in the controller so a failed score
+                # cannot be confused with a newly-created code-task run.
+                _print(f"[score] {topic}: finalized output exists; scoring without rerunning experiment.")
+                result = _score_existing_topic(
+                    ctx,
+                    topic,
+                    current,
+                    score=args.score,
+                    score_model=args.score_model,
+                    score_profile=args.score_profile,
+                    native_score=args.native_score,
+                    native_score_model=args.native_score_model,
+                )
+                state[topic] = result
+                _save_state(ctx.state_file, state)
+                if result.status != "completed":
+                    exit_code = 1
+                continue
+            _print(f"[stale] {topic}: previous completed state is missing passed run or finalized artifacts; rerunning.")
+
+        # Checkpoint scheduling before the worker starts. If the controller is
+        # interrupted, this topic remains non-terminal and can be resumed with
+        # the ordinary batch commands rather than being mistaken for completion.
+        state[topic] = TopicState(
+            topic=topic,
+            status="running",
+            attempts=current.attempts + 1,
+            started_at=_now(),
+            updated_at=_now(),
+        )
+        _save_state(ctx.state_file, state)
+        scheduled.append((topic, current))
+
+    if not scheduled:
+        _print_summary(state, topics)
+        return exit_code
+
+    quiet_workers = bool(args.quiet_subprocess or args.jobs > 1)
+    progress_slots: queue.Queue[int] | None = None
+    if args.progress:
+        progress_slots = queue.Queue()
+        for position in range(args.jobs):
+            progress_slots.put(position)
+    completed = 0
+    failures = 0
+    with ThreadPoolExecutor(max_workers=args.jobs, thread_name_prefix="arc-topic") as executor:
+        futures: dict[Future[TopicState], str] = {
+            executor.submit(
+                _run_topic_worker,
+                ctx,
+                topic,
+                current,
+                analyze=args.analyze,
+                analysis_model=args.analysis_model,
+                score=args.score,
+                score_model=args.score_model,
+                score_profile=args.score_profile,
+                native_score=args.native_score,
+                native_score_model=args.native_score_model,
+                quiet=quiet_workers,
+                progress_slots=progress_slots,
+            ): topic
+            for topic, current in scheduled
+        }
+        for future in as_completed(futures):
+            topic = futures[future]
+            result = future.result()
+            state[topic] = result
+            _save_state(ctx.state_file, state)
+            completed += 1
+            if result.status != "completed":
+                failures += 1
+                exit_code = 1
+            if not args.progress:
+                outcome = "done" if result.status == "completed" else result.status
+                _print(f"[{outcome}] {topic} ({completed}/{len(scheduled)})")
+
+    _print_summary(state, topics)
+    return exit_code
+
+
+def _run_topic_worker(
+    ctx: RunnerContext,
+    topic: str,
+    previous_state: TopicState,
+    *,
+    analyze: bool,
+    analysis_model: str | None,
+    score: bool,
+    score_model: str | None,
+    score_profile: str,
+    native_score: bool,
+    native_score_model: str | None,
+    quiet: bool,
+    progress_slots: queue.Queue[int] | None = None,
+) -> TopicState:
+    """Run one topic without letting worker output corrupt the progress display."""
+
+    token = _CONSOLE_OUTPUT_ENABLED.set(not quiet)
+    started_monotonic = time.monotonic()
+    progress = _TopicStageProgress.acquire(
+        topic=topic,
+        slots=progress_slots,
+        include_score=score or native_score,
+    )
+
+    def report_stage(stage: str) -> None:
+        if progress is not None:
+            progress.set_stage(stage)
+
+    try:
+        result = _run_topic(
+            ctx,
+            topic,
+            analyze=analyze,
+            analysis_model=analysis_model,
+            score=score,
+            score_model=score_model,
+            score_profile=score_profile,
+            native_score=native_score,
+            native_score_model=native_score_model,
+            previous_state=previous_state,
+            stage_callback=report_stage,
+        )
+        if progress is not None:
+            progress.finish(result.status)
+        return result
+    except Exception as exc:
+        failed = TopicState(
+            topic=topic,
+            attempts=previous_state.attempts + 1,
+            status="runner_exception",
+            last_error=f"Unhandled batch worker exception: {type(exc).__name__}: {exc}",
+            started_at=_now(),
+            updated_at=_now(),
+        )
+        if progress is not None:
+            progress.finish("runner_exception")
+        return _finalize_topic_state(ctx, failed, started_monotonic=started_monotonic)
+    finally:
+        if progress is not None:
+            progress.close()
+        _CONSOLE_OUTPUT_ENABLED.reset(token)
+
+
+class _TopicStageProgress:
+    """One reusable tqdm row representing a real batch-runner stage."""
+
+    def __init__(
+        self,
+        *,
+        topic: str,
+        position: int,
+        slots: queue.Queue[int],
+        include_score: bool,
+    ) -> None:
+        from tqdm import tqdm
+
+        self.topic = topic
+        self.position = position
+        self.slots = slots
+        self.stages = ["init", "execute", "finalize"]
+        if include_score:
+            self.stages.append("score")
+        self.bar = tqdm(
+            total=len(self.stages),
+            position=position,
+            leave=False,
+            dynamic_ncols=True,
+            desc=f"W{position + 1} {topic} init",
+            unit="stage",
+            bar_format="{desc:<24} |{bar}| {n_fmt}/{total_fmt} [{elapsed}]",
+        )
+        self.set_stage("init")
+
+    @classmethod
+    def acquire(
+        cls,
+        *,
+        topic: str,
+        slots: queue.Queue[int] | None,
+        include_score: bool,
+    ) -> _TopicStageProgress | None:
+        if slots is None:
+            return None
+        try:
+            position = slots.get()
+            return cls(topic=topic, position=position, slots=slots, include_score=include_score)
+        except ImportError:
+            slots.put(position)
+            return None
+
+    def set_stage(self, stage: str) -> None:
+        if stage not in self.stages:
+            return
+        self.bar.n = self.stages.index(stage)
+        self.bar.set_description_str(f"W{self.position + 1} {self.topic} {stage}", refresh=True)
+
+    def finish(self, status: str) -> None:
+        if status == "completed":
+            self.bar.n = self.bar.total
+        self.bar.set_description_str(f"W{self.position + 1} {self.topic} {status}", refresh=True)
+
+    def close(self) -> None:
+        self.bar.close()
+        self.slots.put(self.position)
+
+
+def _report_stage(callback: Callable[[str], None] | None, stage: str) -> None:
+    if callback is not None:
+        callback(stage)
 
 
 def _retry_unfinished_command(args: argparse.Namespace) -> int:
@@ -999,6 +1309,7 @@ def _run_topic(
     resume_run_dir: Path | None = None,
     previous_state: TopicState | None = None,
     repair_rounds_override: int | None = None,
+    stage_callback: Callable[[str], None] | None = None,
 ) -> TopicState:
     started_monotonic = time.monotonic()
     started_at = _now()
@@ -1039,6 +1350,7 @@ def _run_topic(
         run_dir = resume_run_dir
         _print(f"[resume] {topic}: {run_dir}")
     else:
+        _report_stage(stage_callback, "init")
         before = _existing_run_dirs(ctx.runs_root / topic)
         init_result = _run_logged(
             ["uv", "run", "simple-ar", "code-task", "init", "--config", _rel(ctx.repo_root, config_path)],
@@ -1061,6 +1373,7 @@ def _run_topic(
             )
 
     topic_state.run_dir = _rel(ctx.repo_root, run_dir)
+    _report_stage(stage_callback, "execute")
     execute_cmd = [
         "uv",
         "run",
@@ -1114,6 +1427,7 @@ def _run_topic(
 
     output_dir = ctx.submissions_root / topic / run_dir.name
     topic_state.output_dir = _rel(ctx.repo_root, output_dir)
+    _report_stage(stage_callback, "finalize")
     finalize_cmd = [
         "uv",
         "run",
@@ -1148,6 +1462,7 @@ def _run_topic(
         )
 
     if score:
+        _report_stage(stage_callback, "score")
         score_cmd = [
             "uv",
             "run",
@@ -1188,6 +1503,7 @@ def _run_topic(
             )
 
     if native_score:
+        _report_stage(stage_callback, "score")
         native_result = _run_native_score(
             ctx,
             topic=topic,
@@ -1524,13 +1840,13 @@ def _run_logged(command: list[str], cwd: Path, log_path: Path, timeout: int = 0)
         log.flush()
         env = _subprocess_env()
         try:
-            if _should_use_pty():
+            if _CONSOLE_OUTPUT_ENABLED.get() and _should_use_pty():
                 returncode = _run_logged_pty(command, cwd, log, env, timeout=timeout)
             else:
                 returncode = _run_logged_pipe(command, cwd, log, env, timeout=timeout)
         except FileNotFoundError as exc:
             message = f"\nCommand failed to start: {exc}\n"
-            print(message, end="")
+            _print(message.rstrip())
             log.write(message)
             returncode = 127
         ended_at = _now()
@@ -1615,14 +1931,15 @@ def _run_logged_pipe(
             if proc.poll() is not None and reader_done and output_queue.empty():
                 break
             continue
-        print(item, end="")
+        if _CONSOLE_OUTPUT_ENABLED.get():
+            print(item, end="")
         log.write(item)
         log.flush()
 
     if timed_out:
         proc.kill()
         message = f"\nCommand timed out after {timeout}s.\n"
-        print(message, end="")
+        _print(message.rstrip())
         log.write(message)
         log.flush()
         thread.join(timeout=2)
@@ -3607,7 +3924,8 @@ def _now() -> str:
 
 
 def _print(message: str) -> None:
-    print(message, flush=True)
+    if _CONSOLE_OUTPUT_ENABLED.get():
+        print(message, flush=True)
 
 
 if __name__ == "__main__":

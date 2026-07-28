@@ -32,6 +32,9 @@ benchmark/arc_bench/__pycache__/
 benchmark/arc_bench/runs/
 benchmark/arc_bench/submissions/
 benchmark/arc_bench/prepared/
+benchmark/arc_bench/prepared_rubric_sensitivity/
+benchmark/arc_bench/runs_rubric_sensitivity/
+benchmark/arc_bench/submissions_rubric_sensitivity/
 benchmark/arc_bench/batch_logs/
 benchmark/arc_bench/batch_state/
 benchmark/survey_bench/__pycache__/

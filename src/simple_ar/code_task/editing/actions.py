@@ -73,6 +73,9 @@ def apply_repair_actions(
         if path is None:
             _reject(result, index, row, "path_escapes_workspace")
             continue
+        if _has_file_ancestor(path, workspace):
+            _reject(result, index, row, "parent_path_is_file")
+            continue
         try:
             record = _apply_one_action(path, rel_path, action, row)
         except RepairActionError as exc:
@@ -193,7 +196,7 @@ def _apply_one_action(
             raise RepairActionError("content_missing")
         after_text = content.rstrip() + "\n"
     elif action == "add_file":
-        if path.exists():
+        if path.exists() and (not path.is_file() or path.stat().st_size > 0):
             raise RepairActionError("target_file_already_exists")
         content = _string(row.get("content")) or _string(row.get("new_string")) or _string(row.get("new"))
         if not content:
@@ -288,6 +291,17 @@ def _workspace_file(workspace: Path, rel_path: str) -> Path | None:
     except ValueError:
         return None
     return target
+
+
+def _has_file_ancestor(path: Path, workspace: Path) -> bool:
+    current = path.parent
+    while current != workspace:
+        if current.exists() and not current.is_dir():
+            return True
+        if workspace not in current.parents:
+            break
+        current = current.parent
+    return False
 
 
 def _action_type(row: Mapping[str, Any]) -> str:

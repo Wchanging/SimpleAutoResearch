@@ -58,6 +58,7 @@ class PrepareOptions:
     agent_model: str = ""
     agent_binary: str = ""
     include_contract: bool = False
+    generation_input: str = "rubric_informed"
 
 
 def main() -> int:
@@ -93,6 +94,14 @@ def main() -> int:
             "Leave disabled for ARC-Bench comparison runs that should preserve vanilla inputs."
         ),
     )
+    prepare.add_argument(
+        "--generation-input",
+        choices=("rubric_informed", "manifest_only"),
+        help=(
+            "Task input profile for generation. `rubric_informed` preserves the historical "
+            "prepared task; `manifest_only` excludes rubric-derived acceptance criteria from task.md."
+        ),
+    )
 
     prepare_ml = sub.add_parser("prepare-ml", help="Generate prepared packages for all ML topics.")
     prepare_ml.add_argument("--arc-root", type=Path, help="Path to AutoResearchClaw/experiments/arc_bench.")
@@ -118,6 +127,14 @@ def main() -> int:
         help=(
             "Opt in to embedding machine-readable implementation contracts in generated task.md files. "
             "Leave disabled for ARC-Bench comparison runs that should preserve vanilla inputs."
+        ),
+    )
+    prepare_ml.add_argument(
+        "--generation-input",
+        choices=("rubric_informed", "manifest_only"),
+        help=(
+            "Task input profile for generation. `manifest_only` keeps the existing task "
+            "specification while excluding rubric-derived acceptance criteria."
         ),
     )
 
@@ -317,6 +334,9 @@ def build_prepare_options(args: argparse.Namespace, cfg: dict[str, Any]) -> Prep
     benchmark_command = str(
         value_from(args, cfg, "prepare", "benchmark_command", "python generated_project/main.py --preset standard")
     )
+    generation_input = str(value_from(args, cfg, "prepare", "generation_input", "rubric_informed"))
+    include_contract = bool(value_from(args, cfg, "prepare", "include_contract", False))
+    validate_generation_input(generation_input, include_contract=include_contract)
     return PrepareOptions(
         arc_root=arc_root,
         topic=topic,
@@ -334,7 +354,8 @@ def build_prepare_options(args: argparse.Namespace, cfg: dict[str, Any]) -> Prep
         allow_external_agent=bool(value_from(args, cfg, "prepare", "allow_external_agent", False)),
         agent_model=str(value_from(args, cfg, "prepare", "agent_model", "")),
         agent_binary=str(value_from(args, cfg, "prepare", "agent_binary", "")),
-        include_contract=bool(value_from(args, cfg, "prepare", "include_contract", False)),
+        include_contract=include_contract,
+        generation_input=generation_input,
     )
 
 
@@ -403,6 +424,11 @@ def build_batch_prepare_options(
             "python generated_project/main.py --preset standard",
         )
     )
+    generation_input = str(
+        multi_section_value(args, cfg, ("prepare_ml", "prepare"), "generation_input", "rubric_informed")
+    )
+    include_contract = bool(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "include_contract", False))
+    validate_generation_input(generation_input, include_contract=include_contract)
     return PrepareOptions(
         arc_root=arc_root,
         topic=topic,
@@ -426,8 +452,19 @@ def build_batch_prepare_options(
         ),
         agent_model=str(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "agent_model", "")),
         agent_binary=str(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "agent_binary", "")),
-        include_contract=bool(multi_section_value(args, cfg, ("prepare_ml", "prepare"), "include_contract", False)),
+        include_contract=include_contract,
+        generation_input=generation_input,
     )
+
+
+def validate_generation_input(generation_input: str, *, include_contract: bool) -> None:
+    if generation_input not in {"rubric_informed", "manifest_only"}:
+        raise SystemExit(f"Unsupported generation input profile: {generation_input}")
+    if generation_input == "manifest_only" and include_contract:
+        raise SystemExit(
+            "--include-contract cannot be combined with --generation-input manifest_only: "
+            "the optional contract is derived from ARC rubric leaves."
+        )
 
 
 def multi_section_value(
@@ -565,6 +602,7 @@ def write_prepared_package(options: PrepareOptions, manifest: dict[str, Any], ru
             metadata={
                 "topic": manifest.get("id"),
                 "benchmark_command": options.benchmark_command,
+                "generation_input": options.generation_input,
                 "adapter_schema_version": "simple_ar_arc_adapter.v1",
             },
         ),
@@ -573,6 +611,24 @@ def write_prepared_package(options: PrepareOptions, manifest: dict[str, Any], ru
     print(f"Prepared ARC-Bench topic {manifest.get('id')} at {out}")
     print(f"Task:   {task_path}")
     print(f"Config: {config_path}")
+
+
+def prepared_generation_input(prepared_dir: Path) -> str:
+    """Read the generation profile recorded by preparation.
+
+    Older prepared packages predate this field and are intentionally treated as
+    the historical rubric-informed profile so existing benchmark runs remain
+    reproducible.
+    """
+
+    meta_path = prepared_dir / "arc_meta.json"
+    if not meta_path.is_file():
+        return "rubric_informed"
+    metadata = read_json(meta_path).get("metadata", {})
+    if not isinstance(metadata, dict):
+        return "rubric_informed"
+    value = str(metadata.get("generation_input") or "rubric_informed")
+    return value if value in {"rubric_informed", "manifest_only"} else "rubric_informed"
 
 
 def render_task_markdown(manifest: dict[str, Any], rubric: dict[str, Any], options: PrepareOptions) -> str:
@@ -584,6 +640,7 @@ def render_task_markdown(manifest: dict[str, Any], rubric: dict[str, Any], optio
     metrics = design.get("metrics") or []
     hypotheses = manifest.get("hypotheses") or []
     leaves = list(iter_rubric_leaves(rubric))
+    rubric_informed = options.generation_input == "rubric_informed"
 
     lines = [
         f"# ARC-Bench Task: {topic} - {title}",
@@ -593,10 +650,22 @@ def render_task_markdown(manifest: dict[str, Any], rubric: dict[str, Any], optio
         "project under `generated_project/` that designs, executes, and",
         "summarizes a credible experiment for the topic below.",
         "",
-        "This task is evaluated by ARC-Bench-style rubric leaves. Do not",
-        "optimize only for a single stdout metric; implement the experiment",
-        "contract, record condition-level evidence, and write a grounded",
-        "analysis that answers each hypothesis with measured numbers.",
+        (
+            "This task is evaluated by ARC-Bench-style rubric leaves. Do not"
+            if rubric_informed
+            else "Do not optimize only for a single stdout metric."
+        ),
+        (
+            "optimize only for a single stdout metric; implement the experiment"
+            if rubric_informed
+            else "Implement the requested experiment, record condition-level evidence,"
+        ),
+        (
+            "contract, record condition-level evidence, and write a grounded"
+            if rubric_informed
+            else "and write a grounded analysis that answers each hypothesis with"
+        ),
+        "analysis that answers each hypothesis with measured numbers." if rubric_informed else "measured numbers.",
         "",
         "## Research Question",
         "",
@@ -624,26 +693,26 @@ def render_task_markdown(manifest: dict[str, Any], rubric: dict[str, Any], optio
             [f"{m.get('name', '?')} ({m.get('direction', 'unknown')}): {m.get('description', '')}" for m in metrics]
         ),
         "",
-        "## Rubric Leaves",
-        "",
-        render_bullets(
-            [
-                f"{leaf.get('id', '?')} [{leaf.get('task_category', 'uncategorized')}]: {leaf.get('requirements', '')}"
-                for leaf in leaves
-            ]
-        ),
-        "",
         "## Implementation Requirements",
         "",
         "- Create all source files inside `generated_project/`.",
         "- Provide a CLI entrypoint at `generated_project/main.py`.",
-        f"- The benchmark command is `{options.benchmark_command}` and must exit with code 0.",
+        (
+            f"- The benchmark command is `{options.benchmark_command}` and must exit with code 0 "
+            "only after successful completion. Propagate failures with a non-zero exit code so they can be repaired."
+        ),
         "- Print stable numeric metric lines as `metric_name: value` or `METRIC metric_name=value`.",
         "- Write `generated_project/artifacts/results.json` with condition/dataset/seed-level evidence when possible.",
         "- Write `generated_project/artifacts/report.md` with Method, Results, Hypothesis Verdicts, and Limitations.",
         "- If a required dataset or optional dependency is unavailable, use a bounded fallback and disclose it in metrics and report.",
         "- Prefer packaged/local datasets and CPU-bounded algorithms; do not require runtime downloads.",
-        "- Use multiple seeds when the manifest or rubric asks for seed coverage. If the selected preset uses fewer seeds, say so clearly.",
+        (
+            "- Use multiple seeds when the manifest or rubric asks for seed coverage. "
+            "If the selected preset uses fewer seeds, say so clearly."
+            if rubric_informed
+            else "- Use multiple seeds when the task calls for seed coverage. "
+            "If the selected preset uses fewer seeds, say so clearly."
+        ),
         "- Claims must be grounded in captured metrics; do not invent numbers in the report.",
         "",
         "## Expected ARC Submission Signals",
@@ -654,6 +723,21 @@ def render_task_markdown(manifest: dict[str, Any], rubric: dict[str, Any], optio
         "code, metrics, report, and hypothesis verdicts structured.",
         "",
     ]
+    if rubric_informed:
+        rubric_section = [
+            "## Rubric Leaves",
+            "",
+            render_bullets(
+                [
+                    f"{leaf.get('id', '?')} [{leaf.get('task_category', 'uncategorized')}]: "
+                    f"{leaf.get('requirements', '')}"
+                    for leaf in leaves
+                ]
+            ),
+            "",
+        ]
+        implementation_index = lines.index("## Implementation Requirements")
+        lines[implementation_index:implementation_index] = rubric_section
     if options.include_contract:
         lines.extend(
             [
@@ -906,6 +990,7 @@ def finalize_submission(
         raise SystemExit(f"run dir not found: {run_dir}")
     manifest = read_json(prepared_dir / "manifest.json")
     rubric = read_json(prepared_dir / "rubric.json")
+    generation_input = prepared_generation_input(prepared_dir)
 
     if output_dir.exists() and any(output_dir.iterdir()):
         if not force:
@@ -944,6 +1029,7 @@ def finalize_submission(
         output_dir=output_dir / "result_analysis",
         use_llm=analyze,
         model=analysis_model or None,
+        include_rubric_criteria=generation_input == "rubric_informed",
     )
     analysis_audit = analysis["analysis_audit"]
     if analyze:
@@ -978,6 +1064,7 @@ def finalize_submission(
                 "analysis": analysis_audit,
                 "adapter_generated_analysis": bool(analyze),
                 "analysis_source": "adapter-generated" if analyze else "agent-original",
+                "generation_input": generation_input,
                 "adapter_schema_version": "simple_ar_arc_submission.v1",
             },
         ),
@@ -998,6 +1085,7 @@ def analyze_submission_results(
     output_dir: Path,
     use_llm: bool,
     model: str | None,
+    include_rubric_criteria: bool = True,
 ) -> dict[str, Any]:
     print("Preparing result-analysis context.")
     context = build_analysis_context(
@@ -1010,6 +1098,7 @@ def analyze_submission_results(
         task_contract=load_code_task_contract(run_dir),
         fallback_readme=fallback_readme,
         fallback_claims=fallback_claims,
+        include_rubric_criteria=include_rubric_criteria,
     )
     try:
         from simple_ar.result_analysis import record_result_analysis_memory, run_result_analysis
@@ -2678,6 +2767,7 @@ def build_analysis_context(
     task_contract: dict[str, Any] | None = None,
     fallback_readme: str,
     fallback_claims: dict[str, Any],
+    include_rubric_criteria: bool = True,
 ) -> dict[str, Any]:
     design = manifest.get("experiment_design") or {}
     return {
@@ -2685,7 +2775,7 @@ def build_analysis_context(
         "title": str(manifest.get("title") or ""),
         "research_question": str(design.get("research_question") or ""),
         "hypotheses": manifest.get("hypotheses", []),
-        "criteria": list(iter_rubric_leaves(rubric)),
+        "criteria": list(iter_rubric_leaves(rubric)) if include_rubric_criteria else [],
         "expected_metrics": design.get("metrics", []),
         "metric_directions": metric_directions_from_manifest(design.get("metrics") or []),
         "metrics": metrics,
@@ -2697,6 +2787,7 @@ def build_analysis_context(
         "artifacts": {"code_source": str(code_src) if code_src else ""},
         "metadata": {
             "schema_version": "simple_ar_arc_analysis_context.v2",
+            "generation_input": "rubric_informed" if include_rubric_criteria else "manifest_only",
             "fallback_claims": clip_data(fallback_claims, max_chars=12000),
             "expected_conditions": design.get("conditions", []),
             "expected_datasets": design.get("datasets", []),
@@ -3123,6 +3214,12 @@ def load_project_results(run_dir: Path, code_src: Path | None) -> dict[str, Any]
                 if isinstance(data, dict):
                     data.setdefault("_artifact_source", str(path))
                     return data
+                if isinstance(data, list):
+                    return {
+                        "records": data,
+                        "_artifact_source": str(path),
+                        "_artifact_root": "list",
+                    }
     return {}
 
 

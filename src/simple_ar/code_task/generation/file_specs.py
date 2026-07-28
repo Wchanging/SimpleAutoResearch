@@ -158,11 +158,15 @@ def infer_file_kind(path_value: object, raw_kind: object = "") -> str:
     """Classify planned files without depending on any benchmark convention."""
 
     kind = text(raw_kind).strip().lower().replace("-", "_")
-    if kind in SOURCE_FILE_KINDS | RUNTIME_FILE_KINDS:
-        return kind
     path = normalize_plan_path(path_value)
     suffix = PurePosixPath(path).suffix.lower()
     name = PurePosixPath(path).name.lower()
+    # Executable Python files remain source even when they live below a
+    # runtime-named package such as ``artifacts`` or ``report``.
+    if suffix in {".py", ".pyi"}:
+        return "source"
+    if kind in SOURCE_FILE_KINDS | RUNTIME_FILE_KINDS:
+        return kind
     if name in {".gitkeep", ".keep"}:
         return "artifact_placeholder"
     parts = tuple(part.lower() for part in PurePosixPath(path).parts)
@@ -170,8 +174,6 @@ def infer_file_kind(path_value: object, raw_kind: object = "") -> str:
         return "runtime_dir"
     if any(part in RUNTIME_DIRECTORY_NAMES for part in parts[:-1]):
         return "output_placeholder"
-    if suffix == ".py":
-        return "source"
     if suffix in {".md", ".txt", ".rst"}:
         return "doc"
     if suffix in {".json", ".toml", ".yaml", ".yml", ".csv"}:

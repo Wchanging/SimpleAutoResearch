@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from simple_ar.integrations.llm import parse_json_object
 
@@ -866,20 +866,22 @@ def find_per_cell_records(data: Any) -> list[dict[str, Any]]:
 
 
 def extract_result_table_rows(data: Any) -> list[dict[str, Any]]:
-    if not isinstance(data, dict):
+    if not isinstance(data, (dict, list)):
         return []
     rows: list[dict[str, Any]] = []
     for record in aggregate_records(data):
         rows.extend(normalized_metric_rows(record))
-    if rows:
-        return dedupe_table_rows(rows)
     rows.extend(aggregate_raw_records(raw_records(data)))
     if rows:
         return dedupe_table_rows(rows)
     return []
 
 
-def aggregate_records(data: dict[str, Any]) -> list[dict[str, Any]]:
+def aggregate_records(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return discover_aggregate_records(data)
+    if not isinstance(data, dict):
+        return []
     records: list[dict[str, Any]] = []
     summary = data.get("summary")
     if isinstance(summary, dict) and isinstance(summary.get("per_cell"), list):
@@ -939,7 +941,11 @@ def looks_like_aggregate_record(record: dict[str, Any]) -> bool:
     return False
 
 
-def raw_records(data: dict[str, Any]) -> list[dict[str, Any]]:
+def raw_records(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return dedupe_records(discover_raw_records(data))
+    if not isinstance(data, dict):
+        return []
     for keys in (
         ("cells", "cell_records", "records", "per_cell"),
         ("rows", "runs", "splits", "seed_evidence"),
@@ -976,8 +982,13 @@ def discover_raw_records(value: Any, *, depth: int = 0, max_depth: int = 4) -> l
     records: list[dict[str, Any]] = []
     if isinstance(value, list):
         dict_rows = [row for row in value if isinstance(row, dict)]
-        if dict_rows and sum(1 for row in dict_rows if looks_like_raw_result_record(row)) >= max(1, len(dict_rows) // 2):
-            return dict_rows
+        raw_rows = [
+            row
+            for row in dict_rows
+            if looks_like_raw_result_record(row) and not looks_like_aggregate_record(row)
+        ]
+        if raw_rows:
+            return raw_rows
         for row in value:
             if isinstance(row, (dict, list)):
                 records.extend(discover_raw_records(row, depth=depth + 1, max_depth=max_depth))
@@ -998,7 +1009,14 @@ def looks_like_raw_result_record(record: dict[str, Any]) -> bool:
         for key, value in record.items()
         if is_number(value) and key not in RAW_NON_METRIC_KEYS and not key.endswith("_id")
     ]
-    return bool(numeric_keys)
+    nested_metrics = record.get("metrics")
+    return bool(
+        numeric_keys
+        or (
+            isinstance(nested_metrics, dict)
+            and any(is_number(value) for value in nested_metrics.values())
+        )
+    )
 
 
 def normalized_metric_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1112,21 +1130,20 @@ def is_auxiliary_metric_name(name: str) -> bool:
 
 
 def record_dataset(record: dict[str, Any]) -> str:
-    value = (
-        record.get("dataset_name")
-        or record.get("dataset")
-        or record.get("dataset_id")
-        or record.get("family")
-        or record.get("regime")
-        or record.get("source")
-        or record.get("data")
-        or ""
-    )
+    aliases = ("dataset_name", "dataset", "dataset_id", "family", "regime", "source", "data")
+    value = first_nonempty(record, aliases)
     if isinstance(value, dict):
         value = value.get("name") or value.get("id") or value.get("dataset_id") or ""
     text = str(value).strip()
     if text:
         return text
+    nested = nested_identity(record)
+    value = first_nonempty(nested, aliases)
+    if value:
+        return str(value).strip()
+    for key in ("n_train", "train_size", "sample_size", "horizon", "step"):
+        if nested.get(key) is not None:
+            return f"{key}={nested[key]}"
     for key in ("n_train", "train_size", "sample_size", "horizon", "step"):
         if record.get(key) is not None:
             return f"{key}={record[key]}"
@@ -1134,18 +1151,29 @@ def record_dataset(record: dict[str, Any]) -> str:
 
 
 def record_condition(record: dict[str, Any]) -> str:
-    value = (
-        record.get("condition_name")
-        or record.get("condition_id")
-        or record.get("strategy_name")
-        or record.get("model")
-        or record.get("model_name")
-        or record.get("method")
-        or record.get("algorithm")
-        or record.get("condition")
-        or record.get("schedule")
-        or ""
+    aliases = (
+        "condition_name",
+        "condition_id",
+        "strategy_name",
+        "model",
+        "model_name",
+        "model_type",
+        "method",
+        "method_name",
+        "algorithm",
+        "algorithm_name",
+        "detector",
+        "detector_name",
+        "estimator",
+        "estimator_name",
+        "learner",
+        "learner_name",
+        "kernel",
+        "kernel_name",
+        "condition",
+        "schedule",
     )
+    value = first_nonempty(record, aliases)
     if isinstance(value, dict):
         value = (
             value.get("condition_id")
@@ -1156,9 +1184,52 @@ def record_condition(record: dict[str, Any]) -> str:
             or ""
         )
     text = str(value).strip()
+    nested = nested_identity(record)
+    if not text:
+        text = str(first_nonempty(nested, aliases) or "").strip()
+    if not text:
+        text = inferred_identifier(record)
+    if not text:
+        text = inferred_identifier(nested)
     if not text and record.get("n_train") is not None and record.get("method") is not None:
         text = f"{record.get('method')}:n_train={record.get('n_train')}"
     return text
+
+
+def first_nonempty(record: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = record.get(key)
+        if value is not None and value != "":
+            return value
+    return ""
+
+
+def nested_identity(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    for key in ("key", "identity", "configuration", "config", "parameters"):
+        value = record.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
+
+def inferred_identifier(record: Mapping[str, Any]) -> str:
+    excluded = {
+        "dataset_id",
+        "hypothesis_id",
+        "claim_id",
+        "seed_id",
+        "split_id",
+        "fold_id",
+        "run_id",
+        "trial_id",
+    }
+    for key, value in record.items():
+        lowered = str(key).lower()
+        if lowered in excluded or not lowered.endswith("_id"):
+            continue
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 def table_row(dataset: str, condition: str, metric: str, mean: Any, std: Any, count: Any) -> dict[str, Any]:
@@ -1221,7 +1292,36 @@ def compact_project_results_for_prompt(data: Any, metric_summary: dict[str, Any]
     source = data.get("_artifact_source")
     if source:
         compact["_artifact_source"] = source
+    tables = metric_summary.get("result_tables")
+    all_rows = tables.get("all_metric_rows") if isinstance(tables, dict) else None
+    if not all_rows:
+        records = raw_records(data)
+        if records:
+            compact["raw_result_count"] = len(records)
+            compact["raw_result_sample"] = bounded_record_sample(records)
     return compact
+
+
+def bounded_record_sample(
+    records: list[dict[str, Any]],
+    *,
+    max_records: int = 8,
+    max_chars: int = 12000,
+) -> list[Any]:
+    sample: list[Any] = []
+    used = 0
+    for record in records[:max_records]:
+        rendered = json.dumps(record, ensure_ascii=False, default=str)
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        if len(rendered) <= remaining:
+            sample.append(record)
+            used += len(rendered)
+            continue
+        sample.append({"_truncated_record": rendered[:remaining]})
+        break
+    return sample
 
 
 def deterministic_limitations(metric_summary: dict[str, Any]) -> list[str]:
