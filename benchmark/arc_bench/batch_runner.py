@@ -1286,6 +1286,27 @@ def _planning_source_run(ctx: RunnerContext, topic: str) -> Path | None:
     return run_dir if all(path.is_file() for path in required) else None
 
 
+def _code_task_init_command(
+    *,
+    repo_root: Path,
+    config_path: Path,
+    output_root: Path,
+) -> list[str]:
+    """Build an init command whose batch output root overrides the TOML default."""
+
+    return [
+        "uv",
+        "run",
+        "simple-ar",
+        "code-task",
+        "init",
+        "--config",
+        _rel(repo_root, config_path),
+        "--output-root",
+        _rel(repo_root, output_root),
+    ]
+
+
 def _normalize_score_profile(value: str | None) -> str:
     profile = (value or "proxy").strip().lower()
     return profile
@@ -1353,7 +1374,11 @@ def _run_topic(
         _report_stage(stage_callback, "init")
         before = _existing_run_dirs(ctx.runs_root / topic)
         init_result = _run_logged(
-            ["uv", "run", "simple-ar", "code-task", "init", "--config", _rel(ctx.repo_root, config_path)],
+            _code_task_init_command(
+                repo_root=ctx.repo_root,
+                config_path=config_path,
+                output_root=ctx.runs_root / topic,
+            ),
             ctx.repo_root,
             topic_log_root / "init.log",
         )
