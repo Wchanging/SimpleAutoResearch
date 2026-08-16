@@ -110,6 +110,25 @@ class CapabilityResult:
             "provenance": dict(self.provenance),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CapabilityResult":
+        if not isinstance(data, dict):
+            raise ValueError("Capability result must be a JSON object.")
+        return cls(
+            status=str(data["status"]),  # type: ignore[arg-type]
+            artifacts=tuple(
+                ArtifactRef.from_dict(item)
+                for item in data.get("artifacts", [])
+                if isinstance(item, dict)
+            ),
+            diagnostics=tuple(str(item) for item in data.get("diagnostics", [])),
+            usage=dict(data.get("usage", {})),
+            provenance={
+                str(key): str(value)
+                for key, value in dict(data.get("provenance", {})).items()
+            },
+        )
+
 
 class CapabilityRegistry:
     """Explicit registry for replaceable capability implementations.

@@ -80,10 +80,12 @@ class CapabilityBoundaryTests(unittest.TestCase):
             )
 
             payload = result.to_dict()
+            restored = CapabilityResult.from_dict(payload)
 
             self.assertEqual(payload["status"], "completed")
             self.assertEqual(payload["artifacts"][0]["path"], "result.json")
             self.assertEqual(payload["usage"]["calls"], 0)
+            self.assertEqual(restored, result)
             self.assertEqual(manifest_ref.kind, "manifest")
             self.assertEqual(manifest_items[0].path, "result.json")
 
