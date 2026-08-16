@@ -20,6 +20,7 @@ from simple_ar.core.artifacts import (
     write_stage_report,
     write_text,
 )
+from simple_ar.core.capabilities import ArtifactStore
 from simple_ar.core.contracts import CONTRACTS, StageContract
 from simple_ar.core.stage_results import collect_stage_result
 from simple_ar.core.stages import STAGE_SEQUENCE, Stage, parse_stage, stage_dir_name, stage_range
@@ -71,6 +72,11 @@ class Context:
 
     def artifact_path(self, filename: str, stage: Stage | None = None) -> Path:
         return self.stage_dir(stage) / filename
+
+    @property
+    def artifact_store(self) -> ArtifactStore:
+        """Return the lightweight run-relative store for new capabilities."""
+        return ArtifactStore(self.run_dir)
 
     def resolve_artifact(self, relative_path: str | None) -> Path | None:
         if not relative_path:
