@@ -23,6 +23,13 @@ class CheckGroup:
 
 
 CHECK_GROUPS: dict[str, CheckGroup] = {
+    "core": CheckGroup(
+        description="Core artifact, capability, attempt, and handoff-package contract tests.",
+        targets=(
+            "tests.test_capabilities",
+            "tests.test_capability_package_example",
+        ),
+    ),
     "quick": CheckGroup(
         description="Fast sanity checks for contracts, config loading, metrics, prompts, and CLI parsing.",
         targets=(
