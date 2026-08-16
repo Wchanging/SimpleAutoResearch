@@ -262,6 +262,7 @@ class SessionController:
                     attempt=attempt,
                     inputs=input_refs,
                     profile=profile or self.manifest.profile,
+                    input_store=self.store,
                 ),
                 **kwargs,
             )

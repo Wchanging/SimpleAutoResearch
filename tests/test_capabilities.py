@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 
 from simple_ar.core.capabilities import (
+    ArtifactRef,
     ArtifactStore,
+    AttemptManifest,
     CapabilityContext,
     CapabilityResult,
     CapabilityRegistry,
@@ -169,6 +171,46 @@ class CapabilityBoundaryTests(unittest.TestCase):
             self.assertEqual(loaded.manifest.budget.attempts, 1)
             self.assertTrue((Path(tmp) / "attempts" / "attempt-001" / "result.json").is_file())
             self.assertEqual(loaded.store.read_attempt_manifest("attempts/attempt-001/attempt_manifest.json").outputs[0].path, "result.json")
+
+    def test_session_controller_resolves_registered_inputs_from_session_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CapabilityRegistry()
+            source_store = ArtifactStore(Path(tmp))
+            source_ref = source_store.write_json("source/input.json", {"value": 7}, kind="input")
+
+            def copy_input(*, context: CapabilityContext) -> CapabilityResult:
+                payload = context.read_input_json(context.inputs[0])
+                output = context.store.write_json("copied.json", payload, kind="result")
+                return CapabilityResult(status="completed", artifacts=(output,))
+
+            registry.register("copy-input", copy_input)
+            controller = SessionController.create(
+                tmp,
+                session_id="session-inputs",
+                topic="input resolution",
+                registry=registry,
+            )
+            result, _ = controller.execute(
+                "copy-input",
+                attempt_id="attempt-001",
+                inputs=(source_ref,),
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(
+                controller.store.read_json("attempts/attempt-001/copied.json"),
+                {"value": 7},
+            )
+
+    def test_capability_context_rejects_unregistered_input(self) -> None:
+        context = CapabilityContext(
+            store=ArtifactStore(Path(".")),
+            attempt=AttemptManifest(attempt_id="attempt-001"),
+        )
+        ref = ArtifactRef(path="missing.json")
+
+        with self.assertRaises(ValueError):
+            context.resolve_input(ref)
 
     def test_session_controller_blocks_repeated_no_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

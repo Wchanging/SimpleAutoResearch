@@ -372,3 +372,24 @@ class CapabilityContext:
     attempt: AttemptManifest
     inputs: tuple[ArtifactRef, ...] = ()
     profile: str | None = None
+    input_store: ArtifactStore | None = None
+
+    def resolve_input(self, ref: ArtifactRef) -> Path:
+        """Resolve a registered input against its source store."""
+        if ref not in self.inputs:
+            raise ValueError(f"Artifact is not a registered input: {ref.path}")
+        return (self.input_store or self.store).resolve(ref)
+
+    def require_input(self, ref: ArtifactRef) -> Path:
+        path = self.resolve_input(ref)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        return path
+
+    def read_input_text(self, ref: ArtifactRef) -> str:
+        self.require_input(ref)
+        return (self.input_store or self.store).read_text(ref)
+
+    def read_input_json(self, ref: ArtifactRef) -> Any:
+        self.require_input(ref)
+        return (self.input_store or self.store).read_json(ref)
