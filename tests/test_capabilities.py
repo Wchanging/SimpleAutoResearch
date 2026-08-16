@@ -4,6 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from simple_ar.core import (
+    ArtifactRef as PublicArtifactRef,
+    ArtifactStore as PublicArtifactStore,
+    CapabilityResult as PublicCapabilityResult,
+)
 from simple_ar.core.capabilities import (
     ArtifactRef,
     ArtifactStore,
@@ -17,6 +22,11 @@ from simple_ar.core.session import BudgetState, SessionController
 
 
 class CapabilityBoundaryTests(unittest.TestCase):
+    def test_core_package_exposes_stable_capability_types(self) -> None:
+        self.assertIs(PublicArtifactRef, ArtifactRef)
+        self.assertIs(PublicArtifactStore, ArtifactStore)
+        self.assertIs(PublicCapabilityResult, CapabilityResult)
+
     def test_pipeline_context_exposes_run_relative_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ctx = Context(Path(tmp) / "run", "toy topic")
