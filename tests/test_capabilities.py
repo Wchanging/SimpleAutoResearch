@@ -10,6 +10,7 @@ from simple_ar.core.capabilities import (
     CapabilityRegistry,
 )
 from simple_ar.core.pipeline import Context
+from simple_ar.core.session import BudgetState, SessionController
 
 
 class CapabilityBoundaryTests(unittest.TestCase):
@@ -45,6 +46,12 @@ class CapabilityBoundaryTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 store.ref("../outside.json")
+
+            with self.assertRaises(ValueError):
+                store.new_attempt("../outside")
+
+            with self.assertRaises(ValueError):
+                store.new_attempt("nested/attempt")
 
     def test_missing_artifact_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,6 +141,86 @@ class CapabilityBoundaryTests(unittest.TestCase):
         registry.register("bad", lambda: "not a result")  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             registry.run("bad")
+
+    def test_session_controller_persists_successful_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CapabilityRegistry()
+
+            def fixture() -> CapabilityResult:
+                store = ArtifactStore(Path(tmp) / "attempts" / "attempt-001")
+                ref = store.write_json("result.json", {"ok": True}, kind="result")
+                return CapabilityResult(status="completed", artifacts=(ref,))
+
+            registry.register("fixture", fixture)
+            controller = SessionController.create(
+                tmp,
+                session_id="session-001",
+                topic="offline fixture",
+                registry=registry,
+            )
+
+            result, decision = controller.execute("fixture", attempt_id="attempt-001")
+            loaded = SessionController.load(tmp, registry=registry)
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(decision.action, "accept")
+            self.assertEqual(loaded.manifest.status, "completed")
+            self.assertEqual(loaded.manifest.decisions[0].attempt_id, "attempt-001")
+            self.assertEqual(loaded.manifest.budget.attempts, 1)
+
+    def test_session_controller_blocks_repeated_no_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CapabilityRegistry()
+            registry.register(
+                "broken",
+                lambda: CapabilityResult(status="failed", diagnostics=("same failure",)),
+            )
+            controller = SessionController.create(
+                tmp,
+                session_id="session-002",
+                topic="offline failure",
+                registry=registry,
+                budget=BudgetState(max_attempts=5, max_no_progress=2),
+            )
+
+            first, first_decision = controller.execute(
+                "broken",
+                attempt_id="attempt-001",
+                trigger="initial",
+            )
+            second, second_decision = controller.execute(
+                "broken",
+                attempt_id="attempt-002",
+                trigger="repair",
+            )
+
+            self.assertEqual(first.status, "failed")
+            self.assertEqual(first_decision.action, "repair")
+            self.assertEqual(second_decision.action, "block")
+            self.assertEqual(controller.manifest.status, "blocked")
+            self.assertEqual(controller.manifest.budget.no_progress, 2)
+            self.assertEqual(controller.manifest.decisions[1].reason, "same failure Session budget exhausted.")
+            self.assertTrue((Path(tmp) / "attempts" / "attempt-001" / "attempt_manifest.json").is_file())
+            self.assertTrue((Path(tmp) / "attempts" / "attempt-002" / "attempt_manifest.json").is_file())
+
+    def test_session_controller_does_not_implicitly_retry_or_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CapabilityRegistry()
+            registry.register("partial", lambda: CapabilityResult(status="partial"))
+            controller = SessionController.create(
+                tmp,
+                session_id="session-003",
+                topic="offline partial",
+                registry=registry,
+                budget=BudgetState(max_attempts=2, max_no_progress=2),
+            )
+
+            controller.execute("partial", attempt_id="attempt-001", trigger="initial")
+
+            self.assertEqual(controller.manifest.status, "running")
+            with self.assertRaises(FileExistsError):
+                controller.execute("partial", attempt_id="attempt-001", trigger="revise")
+            self.assertEqual(controller.manifest.budget.attempts, 1)
 
 
 if __name__ == "__main__":

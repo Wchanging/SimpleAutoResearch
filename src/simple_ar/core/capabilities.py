@@ -41,6 +41,16 @@ def _safe_relative_path(root: Path, path: str | Path) -> str:
     return normalized
 
 
+def _safe_attempt_id(attempt_id: str) -> str:
+    """Keep attempt identifiers as directory names, not arbitrary paths."""
+    value = attempt_id.strip()
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise ValueError("Attempt id must be a non-empty single path component.")
+    if Path(value).is_absolute():
+        raise ValueError("Attempt id must be relative.")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactRef:
     """Small reference to an artifact owned by one run or attempt."""
@@ -338,11 +348,12 @@ class ArtifactStore:
         profile: str | None = None,
         inputs: Iterable[ArtifactRef] = (),
     ) -> tuple["ArtifactStore", AttemptManifest]:
-        child_root = self.root / "attempts" / attempt_id
+        safe_attempt_id = _safe_attempt_id(attempt_id)
+        child_root = self.root / "attempts" / safe_attempt_id
         if child_root.exists():
             raise FileExistsError(f"Attempt already exists: {child_root}")
         manifest = AttemptManifest(
-            attempt_id=attempt_id,
+            attempt_id=safe_attempt_id,
             parent_attempt=parent_attempt,
             trigger=trigger,
             profile=profile,
