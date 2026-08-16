@@ -362,3 +362,13 @@ class ArtifactStore:
         child_store = ArtifactStore(child_root)
         child_store.write_attempt_manifest(manifest)
         return child_store, manifest
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityContext:
+    """Minimal runtime context passed to a controller-managed capability."""
+
+    store: ArtifactStore
+    attempt: AttemptManifest
+    inputs: tuple[ArtifactRef, ...] = ()
+    profile: str | None = None

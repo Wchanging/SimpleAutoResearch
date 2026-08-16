@@ -9,6 +9,7 @@ from simple_ar.core.capabilities import (
     ArtifactRef,
     ArtifactStore,
     CapabilityRegistry,
+    CapabilityContext,
     CapabilityResult,
 )
 
@@ -240,6 +241,8 @@ class SessionController:
         """
         self._ensure_can_execute()
         input_refs = tuple(inputs)
+        if "context" in kwargs:
+            raise ValueError("Capability context is managed by SessionController.")
         parent_attempt = self.manifest.current_attempt
         attempt_store, attempt = self.store.new_attempt(
             attempt_id,
@@ -252,7 +255,16 @@ class SessionController:
         self.manifest.current_attempt = attempt_id
 
         try:
-            result = self.registry.run(capability, **kwargs)
+            result = self.registry.run(
+                capability,
+                context=CapabilityContext(
+                    store=attempt_store,
+                    attempt=attempt,
+                    inputs=input_refs,
+                    profile=profile or self.manifest.profile,
+                ),
+                **kwargs,
+            )
         except Exception as exc:
             result = CapabilityResult(
                 status="failed",

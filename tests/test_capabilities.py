@@ -6,6 +6,7 @@ from pathlib import Path
 
 from simple_ar.core.capabilities import (
     ArtifactStore,
+    CapabilityContext,
     CapabilityResult,
     CapabilityRegistry,
 )
@@ -146,9 +147,8 @@ class CapabilityBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             registry = CapabilityRegistry()
 
-            def fixture() -> CapabilityResult:
-                store = ArtifactStore(Path(tmp) / "attempts" / "attempt-001")
-                ref = store.write_json("result.json", {"ok": True}, kind="result")
+            def fixture(*, context: CapabilityContext) -> CapabilityResult:
+                ref = context.store.write_json("result.json", {"ok": True}, kind="result")
                 return CapabilityResult(status="completed", artifacts=(ref,))
 
             registry.register("fixture", fixture)
@@ -167,14 +167,16 @@ class CapabilityBoundaryTests(unittest.TestCase):
             self.assertEqual(loaded.manifest.status, "completed")
             self.assertEqual(loaded.manifest.decisions[0].attempt_id, "attempt-001")
             self.assertEqual(loaded.manifest.budget.attempts, 1)
+            self.assertTrue((Path(tmp) / "attempts" / "attempt-001" / "result.json").is_file())
+            self.assertEqual(loaded.store.read_attempt_manifest("attempts/attempt-001/attempt_manifest.json").outputs[0].path, "result.json")
 
     def test_session_controller_blocks_repeated_no_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = CapabilityRegistry()
-            registry.register(
-                "broken",
-                lambda: CapabilityResult(status="failed", diagnostics=("same failure",)),
-            )
+            def broken(*, context: CapabilityContext) -> CapabilityResult:
+                return CapabilityResult(status="failed", diagnostics=("same failure",))
+
+            registry.register("broken", broken)
             controller = SessionController.create(
                 tmp,
                 session_id="session-002",
@@ -206,7 +208,10 @@ class CapabilityBoundaryTests(unittest.TestCase):
     def test_session_controller_does_not_implicitly_retry_or_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = CapabilityRegistry()
-            registry.register("partial", lambda: CapabilityResult(status="partial"))
+            def partial(*, context: CapabilityContext) -> CapabilityResult:
+                return CapabilityResult(status="partial")
+
+            registry.register("partial", partial)
             controller = SessionController.create(
                 tmp,
                 session_id="session-003",
