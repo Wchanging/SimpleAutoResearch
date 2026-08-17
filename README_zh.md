@@ -24,6 +24,9 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
 - **研究到代码实验**：可以把 code task 嵌入 8 阶段流程，生成 repo map、context pack、work plan、patch 证据、benchmark 指标和报告证据。
 - **Tool 与外部 Agent 边界**：可以导出真实只读 tool schema，通过 MCP stdio 暴露 run-local tools，并可选把受控 greenfield generation/repair handoff 给 Codex 等外部 CLI agent；外部返回文件仍必须经过 SimpleAutoResearch 的 review 和 run guard。
 - **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
+- **面向贡献者的能力边界**：新的模块可以使用轻量的
+  `ArtifactStore`、`CapabilityResult` 和有界 attempt API，而不必改动已经存在的
+  8 阶段与 code-task 入口。离线参考实现位于 `examples/capability_package_minimal/`。
 - **成熟库基础设施**：pipeline/code-task TOML 配置通过 Pydantic 校验，LLM 调用默认使用 OpenAI Python SDK，并保留 LiteLLM 兼容层；OpenAlex 访问通过 pyalex，终端进度输出开始走 Rich，为后续更清晰的 human-in-the-loop 审核打基础。
 
 ## 安装与配置
@@ -149,6 +152,8 @@ to_stage = "report"
 
 [llm]
 enabled = true
+# 在线阶段在有限 provider 重试后默认失败；只有明确接受降级结果时才设为 true。
+allow_fallback = false
 
 [search]
 offline = false

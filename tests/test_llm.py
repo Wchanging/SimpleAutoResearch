@@ -217,6 +217,22 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(openai_call.call_count, 1)
         sleep.assert_not_called()
 
+    def test_gateway_model_routing_error_is_retryable(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=2))
+        response = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch(
+            "simple_ar.integrations.llm._call_openai_sdk",
+            side_effect=[
+                RuntimeError("503 model not found: no available channel under distributor"),
+                response,
+            ],
+        ) as openai_call, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+            self.assertEqual(client.ask("system", "user", label="gateway-retry"), "ok")
+
+        self.assertEqual(openai_call.call_count, 2)
+        sleep.assert_called_once()
+
     def test_openai_sdk_backend_disables_hidden_retries(self) -> None:
         with patch("openai.OpenAI") as openai_cls:
             openai_cls.return_value.chat.completions.create.return_value = {

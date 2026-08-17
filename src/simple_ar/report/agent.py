@@ -256,7 +256,11 @@ def run_report_agent(
             used_agent=True,
         )
     except (LLMError, ValidationError, ValueError) as exc:
-        _emit(emit, f"Report agent failed validation; using deterministic fallback. {exc}")
+        if not config.allow_llm_fallback:
+            raise LLMError(
+                f"Report agent failed validation and LLM fallback is disabled: {exc}"
+            ) from exc
+        _emit(emit, f"Report agent failed validation; using explicit offline fallback. {exc}")
         return None
 
 
@@ -316,8 +320,15 @@ def _maybe_adapt_survey_outline(
             if attempt == 1:
                 _emit(emit, f"Survey outline planner did not yield a usable plan; retrying once. {exc}")
             else:
-                _emit(emit, f"Survey outline planner fallback used; keeping template outline. {exc}")
+                if config.allow_llm_fallback:
+                    _emit(emit, f"Survey outline planner fallback used; keeping template outline. {exc}")
+                else:
+                    _emit(emit, f"Survey outline planner failed after retry; fallback is disabled. {exc}")
     if not planned:
+        if not config.allow_llm_fallback:
+            raise LLMError(
+                "Survey outline planner failed after bounded retries and LLM fallback is disabled"
+            )
         return memory.model_copy(
             update={
                 "outline_planning": {
@@ -964,6 +975,10 @@ def _draft_section_with_recovery(
             recovery=True,
         )
     except (LLMError, ValidationError, ValueError) as exc:
+        if not config.allow_llm_fallback:
+            raise LLMError(
+                f"Writer failed for `{section.heading}` after bounded retry and LLM fallback is disabled: {exc}"
+            ) from exc
         _emit(emit, f"Writer fallback used for `{section.heading}` after retry failed. {exc}")
         return _fallback_section_draft(section)
 
@@ -1007,6 +1022,10 @@ def _review_section_with_recovery(
             ),
         )
     except (LLMError, ValidationError, ValueError) as exc:
+        if not config.allow_llm_fallback:
+            raise LLMError(
+                f"Reviewer failed for `{section.heading}` after bounded retry and LLM fallback is disabled: {exc}"
+            ) from exc
         _emit(emit, f"Reviewer fallback used for `{section.heading}` after retry failed. {exc}")
         return ReportSectionReview(
             section_id=section.section_id,

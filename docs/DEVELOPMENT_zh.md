@@ -15,6 +15,23 @@ SimpleAutoResearch 现在采用 file-first + state-backed 的形态：
 
 这样项目更容易学习、调试和重构。
 
+## 新模块的能力边界
+
+新的可替换模块可以使用 `src/simple_ar/core/` 中的轻量能力边界，暂时不必
+改动现有 pipeline。`ArtifactRef` 标识已经声明的产物，`ArtifactStore` 提供
+相对于 run 和 attempt 的文件读写，`CapabilityContext` 传递已登记的输入和
+profile，`CapabilityResult` 返回状态、输出引用、诊断和 provenance。
+`CapabilityRegistry` 只使用显式注册，不扫描仓库，也不动态导入任意 provider。
+
+`SessionController` 为新 capability 提供有界 attempt 和 decision 持久化；它
+不替代 `PipelineRunner`，不负责调度无限制的研究图，也不会隐式重试。现有的
+`simple-ar run`、code-task 命令和旧 projection 仍是兼容入口，直到某条真实能力
+线拥有明确的输入/输出契约和回归证据后，才逐步迁移。
+
+最小的端到端参考实现位于 `examples/capability_package_minimal/`。可以运行
+`uv run simple-ar-checks core` 做离线验收。新的能力开发应先遵循这组边界，
+具体的 request/result schema 放在对应领域模块中，不要继续膨胀 core。
+
 旧的巨型 CLI 和 stage handler 模块已经从 `src/simple_ar/_legacy/` 迁出。
 该包现在只保留兼容旧 import path 的别名。新的行为应优先实现到
 `core/`、`research/`、`experiment/`、`report/` 和 `code_task/`
@@ -246,6 +263,7 @@ uv run simple-ar-checks code-task
 uv run simple-ar-checks pipeline
 uv run simple-ar-checks research
 uv run simple-ar-checks code-task-examples
+uv run simple-ar-checks core
 ```
 
 也可以不用 console script，直接运行脚本入口：
@@ -264,6 +282,7 @@ uv run python scripts/run_checks.py code-task
 | 内置 code-task 示例或 benchmark 示例 | `uv run simple-ar-checks code-task-examples`。 |
 | Pipeline、stages、experiment templates、run config | `uv run simple-ar-checks pipeline`。 |
 | Literature、retrieval、evidence ledger、report generation、LLM adapter | `uv run simple-ar-checks research`。 |
+| Core capability boundary、registry、attempt store 和能力包示例 | `uv run simple-ar-checks core`。 |
 | 提交/推送前或大范围重构 | `uv run simple-ar-checks all`。 |
 
 必要时仍可直接运行完整测试：

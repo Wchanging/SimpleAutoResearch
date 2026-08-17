@@ -68,6 +68,7 @@ class ReportRuntimeConfig(ReportModel):
     survey_contract: bool = True
     draft_sections: bool = False
     debug_artifacts: bool = False
+    allow_llm_fallback: bool = False
     agent: str = "llm"
     reviewer: str = "llm"
     max_review_iterations: int = 2

@@ -13,6 +13,21 @@ duplicating the full artifact manual; for concrete commands and file trees, see
 
 The current 8-stage pipeline is one preset, not the whole architecture. SimpleAutoResearch stays module-first so literature review, code improvement, experiment execution, and report writing can be recombined.
 
+## Capability Runs
+
+Alongside the workflow presets, `simple_ar.core` provides an opt-in boundary
+for new replaceable capabilities. A capability receives declared input
+references through `CapabilityContext`, writes outputs through an
+attempt-scoped `ArtifactStore`, and returns a `CapabilityResult`. The
+`SessionController` can persist a bounded attempt and its decision without
+turning the existing pipeline into an unrestricted task graph.
+
+This boundary is additive: it does not migrate the eight stages automatically
+or change the artifact paths expected by existing commands and adapters. The
+offline reference package in `examples/capability_package_minimal/` shows the
+smallest supported handoff; domain-specific schemas belong to the capability,
+not to the shared core.
+
 ### 1. Research Report (Literature-First)
 
 Use this when you want a literature review, survey, or DeepResearch-like report without emphasizing experiments.

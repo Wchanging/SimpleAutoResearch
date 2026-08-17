@@ -87,6 +87,10 @@ class RunConfigTests(unittest.TestCase):
 topic = "agent simulation"
 debug_artifacts = true
 
+[llm]
+enabled = true
+allow_fallback = true
+
 [research]
 mode = "strong"
 planner = "llm"
@@ -122,6 +126,8 @@ novelty_backend = "local"
 
             self.assertEqual(parsed["topic"], "agent simulation")
             self.assertEqual(parsed["debug_artifacts"], True)
+            self.assertEqual(parsed["use_llm"], True)
+            self.assertEqual(parsed["allow_llm_fallback"], True)
             self.assertEqual(parsed["research_mode"], "strong")
             self.assertEqual(parsed["research_planner"], "llm")
             self.assertEqual(parsed["research_sources"], ["local_files", "openalex"])

@@ -53,7 +53,7 @@ debug_artifacts = false
 overwrite_stage_artifacts = false
 
 [llm]
-# true uses the configured OpenAI-compatible model; false uses deterministic fallbacks where possible.
+# true uses the configured OpenAI-compatible model; false selects explicit offline behavior.
 enabled = true
 
 # Optional default model. If omitted, SIMPLE_AR_MODEL or provider default is used.
@@ -61,6 +61,11 @@ model = "gpt-4o-mini"
 
 # Parallel LLM workers for supported stages such as paper note generation.
 workers = 4
+
+# Keep false for real runs: after bounded provider retries, an LLM-backed stage
+# fails and can be resumed instead of looking successful with weaker output.
+# Set true only for an explicit demo/compatibility fallback.
+allow_fallback = false
 
 [search]
 # true skips live providers and uses fixture/local behavior where configured.
@@ -83,8 +88,8 @@ strict = false
 # artifact is retained only when debug_artifacts = true.
 mode = "lite"                 # lite | standard | strong
 
-# Research-question/query planner. auto uses LLM when [llm].enabled is true,
-# then falls back to deterministic planning if the provider is unavailable.
+# Research-question/query planner. auto uses LLM when [llm].enabled is true;
+# with [llm].allow_fallback = false, provider failure stops the stage after retries.
 planner = "auto"              # auto | llm | deterministic
 
 # Provider order for 02-search.
@@ -474,7 +479,7 @@ max_proposal_chars = 42000
 | Section | Used by | Meaning |
 | --- | --- | --- |
 | `[run]` | `run`, `resume` | Topic, output root, stage range, quiet mode, debug artifact retention, and rerun overwrite policy. |
-| `[llm]` | pipeline and code task | LLM enablement, default model, and worker count. |
+| `[llm]` | pipeline and code task | LLM enablement, default model, worker count, and explicit fallback policy. |
 | `[search]` | `02-search` | Provider behavior, fallback policy, result limit, and manual query. |
 | `[research]` | `02-search` | Research-question planning, query expansion, provider order, local documents, cache/index hints. |
 | `[research.budget]` | `02-search` and future evidence stages | Lightweight caps used by research planning; retained in `planning/research_plan.json` only when debug artifacts are enabled. |
@@ -513,6 +518,7 @@ max_proposal_chars = 42000
 | `[run].overwrite_stage_artifacts` | Defaults to `false`. When rerunning `06-code` or `07-run`, existing reviewed artifacts are copied to `archives/<timestamp>/` before new outputs are written. Set `true` only when you explicitly want reruns to overwrite prior code/run artifacts without archive protection. |
 | `[llm].enabled` | Turns LLM-backed planning/notes/synthesis/report/code-task steps on or off. Some real code-task steps need LLM mode to be useful. |
 | `[llm].workers` | Parallelism for supported LLM stages. It does not make every pipeline stage concurrent. |
+| `[llm].allow_fallback` | Defaults to `false`. After bounded provider retries, an online LLM stage fails and can be resumed; set `true` only when an explicitly degraded deterministic output is acceptable. `SIMPLE_AR_LLM_RETRY_*` controls retry timing/count, not this failure policy. |
 | `[search].offline` | Skips live literature providers. Useful for local demos and deterministic tests. |
 | `[search].max_papers` | Maximum number of metadata rows requested/kept by the search stage across the selected source path. It is not a PDF-page or chunk limit. |
 | `[search].query` | Manual provider query. If omitted, SimpleAutoResearch falls back to the topic or the first research query. |
@@ -600,7 +606,7 @@ package rather than parsing stdout directly.
 | Field | Meaning |
 | --- | --- |
 | `[research].mode` | Records intended evidence depth: `lite` for metadata/local notes, `standard` for cache/index-ready use, `strong` for future full-text/vector workflows. |
-| `[research].planner` | Research-question and query-expansion backend. `auto` calls the LLM when `[llm].enabled = true` and falls back to deterministic planning; `llm` explicitly requests that path; `deterministic` disables the extra LLM planner call. |
+| `[research].planner` | Research-question and query-expansion backend. `auto` calls the LLM when `[llm].enabled = true`; after retries, `[llm].allow_fallback` decides whether the stage stops or uses deterministic planning. `llm` explicitly requests the LLM path; `deterministic` disables the extra LLM planner call. |
 | `[research].sources` | Provider order for the search stage. Supported connector names today are `openalex`, `semantic_scholar`, `arxiv`, and `local_files`; `fixture` records offline fixture use. |
 | `[research].queries` | Seed query list used by the research planner. Search executes planned queries in ordered-fallback rounds and can spend later round budget on uncovered facets. LLM planner output also records `query_specs` with title/abstract keyword hints; the full plan is retained only when debug artifacts are enabled. |
 | `[research].auto_query_expansion` | Enables facet-driven follow-up queries from the planned research questions. In deterministic mode these are rule-based; in LLM planner mode the model can add stronger terminology within the same query budget. Disable it when you want only hand-written queries. |

@@ -1042,27 +1042,84 @@ def _greenfield_result_quality_guard(
             ),
             "artifact_scan": compact_artifact_scan(artifact_scan),
         }
+    results_row = expected_artifact_row(artifact_scan or {}, "artifacts/results.json")
+    results_rel = (
+        str(results_row.get("expected_path", "generated_project/artifacts/results.json"))
+        if isinstance(results_row, dict)
+        else "generated_project/artifacts/results.json"
+    )
+    results_path = paths.workspace_dir / results_rel
+    results = None
+    if isinstance(results_row, dict):
+        parse_status = str(results_row.get("parse_status") or "missing")
+        if parse_status in {"missing", "empty", "invalid_json", "unreadable"}:
+            reason = "missing_results_artifact" if parse_status == "missing" else f"{parse_status}_results_artifact"
+            return {
+                "status": "failed",
+                "reason": reason,
+                "message": (
+                    "Generated benchmark quality guard failed: expected "
+                    f"{results_rel} is {parse_status}. Successful completion requires "
+                    "all configured runtime artifacts."
+                ),
+                "artifact": _relative_to_run(run_dir, results_path),
+                "artifact_scan": compact_artifact_scan(artifact_scan or {}),
+            }
+        try:
+            results = json.loads(results_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                "status": "failed",
+                "reason": "unreadable_results_artifact",
+                "message": (
+                    "Generated benchmark quality guard failed: "
+                    f"could not read {results_rel} ({exc})."
+                ),
+                "artifact": _relative_to_run(run_dir, results_path),
+                "artifact_scan": compact_artifact_scan(artifact_scan or {}),
+            }
+
+    if isinstance(results, dict):
+        record_count = _count_result_records(results.get("raw_records"))
+        condition_summary_count = _mapping_size(results.get("condition_summaries"))
+        dataset_summary_count = _mapping_size(results.get("dataset_comparisons"))
+        non_resource_metrics = _non_resource_metric_names(manifest, metrics)
+        all_non_resource_zero = bool(non_resource_metrics) and all(
+            abs(float(metrics.get(name, 0.0))) <= 1e-12 for name in non_resource_metrics
+        )
+        no_structured_evidence = (
+            record_count == 0 and condition_summary_count == 0 and dataset_summary_count == 0
+        )
+        if no_structured_evidence and all_non_resource_zero:
+            return {
+                "status": "failed",
+                "reason": "empty_greenfield_evidence",
+                "message": (
+                    "Generated benchmark quality guard failed: artifacts/results.json contains "
+                    "no condition-level records or summaries, and all non-resource metrics are "
+                    "zero. Treating this run as failed instead of benchmark_passed."
+                ),
+                "artifact": _relative_to_run(run_dir, results_path),
+                "record_count": record_count,
+                "condition_summary_count": condition_summary_count,
+                "dataset_summary_count": dataset_summary_count,
+                "non_resource_metrics": non_resource_metrics,
+            }
+
     unusable_artifacts = [
         row
         for row in (artifact_scan or {}).get("artifacts", [])
         if isinstance(row, dict)
         and str(row.get("parse_status", "")) in {"missing", "empty", "invalid_json", "unreadable"}
+        and not str(row.get("expected_path", "")).replace("\\", "/").endswith("artifacts/results.json")
     ]
     if unusable_artifacts:
         row = unusable_artifacts[0]
         parse_status = str(row.get("parse_status") or "missing")
         expected_path = str(row.get("expected_path") or row.get("contract_path") or "required artifact")
-        is_results = expected_path.replace("\\", "/").endswith("artifacts/results.json")
-        reason = (
-            "missing_results_artifact"
-            if is_results and parse_status == "missing"
-            else f"{parse_status}_results_artifact"
-            if is_results
-            else f"{parse_status}_required_artifact"
-        )
         return {
             "status": "failed",
-            "reason": reason,
+            "reason": f"{parse_status}_required_artifact",
             "message": (
                 "Generated benchmark quality guard failed: expected "
                 f"{expected_path} is {parse_status}. Successful completion requires "
@@ -1071,57 +1128,7 @@ def _greenfield_result_quality_guard(
             "artifact": _relative_to_run(run_dir, paths.workspace_dir / expected_path),
             "artifact_scan": compact_artifact_scan(artifact_scan or {}),
         }
-    results_row = expected_artifact_row(artifact_scan or {}, "artifacts/results.json")
-    results_rel = (
-        str(results_row.get("expected_path", "generated_project/artifacts/results.json"))
-        if isinstance(results_row, dict)
-        else "generated_project/artifacts/results.json"
-    )
-    results_path = paths.workspace_dir / results_rel
-    if not results_path.is_file():
-        return None
-    try:
-        results = json.loads(results_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {
-            "status": "failed",
-            "reason": "unreadable_results_artifact",
-            "message": (
-                "Generated benchmark quality guard failed: "
-                f"could not read generated_project/artifacts/results.json ({exc})."
-            ),
-            "artifact": _relative_to_run(run_dir, results_path),
-            "artifact_scan": compact_artifact_scan(artifact_scan or {}),
-        }
-    if not isinstance(results, dict):
-        return None
-
-    record_count = _count_result_records(results.get("raw_records"))
-    condition_summary_count = _mapping_size(results.get("condition_summaries"))
-    dataset_summary_count = _mapping_size(results.get("dataset_comparisons"))
-    non_resource_metrics = _non_resource_metric_names(manifest, metrics)
-    all_non_resource_zero = bool(non_resource_metrics) and all(
-        abs(float(metrics.get(name, 0.0))) <= 1e-12 for name in non_resource_metrics
-    )
-    no_structured_evidence = (
-        record_count == 0 and condition_summary_count == 0 and dataset_summary_count == 0
-    )
-    if not (no_structured_evidence and all_non_resource_zero):
-        return None
-    return {
-        "status": "failed",
-        "reason": "empty_greenfield_evidence",
-        "message": (
-            "Generated benchmark quality guard failed: artifacts/results.json contains "
-            "no condition-level records or summaries, and all non-resource metrics are "
-            "zero. Treating this run as failed instead of benchmark_passed."
-        ),
-        "artifact": _relative_to_run(run_dir, results_path),
-        "record_count": record_count,
-        "condition_summary_count": condition_summary_count,
-        "dataset_summary_count": dataset_summary_count,
-        "non_resource_metrics": non_resource_metrics,
-    }
+    return None
 
 
 def _count_result_records(value: object) -> int:

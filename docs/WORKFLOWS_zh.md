@@ -8,6 +8,18 @@
 
 当前 8 阶段 pipeline 只是一个预设，不是整个架构本身。SimpleAutoResearch 保持 module-first，这样 literature review、code improvement、experiment execution 和 report writing 可以重新组合。
 
+## Capability 运行
+
+在这些 workflow preset 之外，`simple_ar.core` 为新的可替换能力提供了一层可选
+边界。能力通过 `CapabilityContext` 接收已经声明的输入引用，通过 attempt-local
+的 `ArtifactStore` 写出结果，并返回 `CapabilityResult`。`SessionController` 可以
+持久化一个有界 attempt 和对应 decision，但不会把现有 pipeline 变成不受限制的
+任务图。
+
+这层边界是增量式的：它不会自动迁移八个阶段，也不会改变现有命令和 adapter 依赖
+的产物路径。`examples/capability_package_minimal/` 提供最小离线 handoff 示例；
+具体领域的 schema 应属于对应 capability，不应继续堆进共享 core。
+
 ### 1. Research Report：文献优先
 
 适合想要 literature review、survey 或 DeepResearch-like report，而不强调实验执行的场景。

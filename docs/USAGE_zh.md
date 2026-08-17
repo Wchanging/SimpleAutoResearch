@@ -73,6 +73,8 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传客户端超时。只有你确实想限制单次请求等待时间时才设置正数。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传输出上限。只有你确实想限制模型输出长度时才设置正数。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时和 5xx 响应。
+- 在线 pipeline 阶段在这些重试耗尽后默认失败，并保留可恢复状态。只有明确设置
+  `[llm].allow_fallback = true` 才会写入 deterministic fallback；`--no-llm` 仍然是清晰的离线路径。
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `off` 表示只靠 prompt 和本地解析，兼容性最好；`auto` 会尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；`json_object` 表示强制发送。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
 
@@ -152,7 +154,7 @@ max_source_batches = 0
 - `06-code` 现在有三条受控实现路径：固定模板、已有项目的内嵌 code-task patch、以及没有现成源码时的 greenfield 项目生成。
 - 内嵌 code-task experiment：`06-code` 可以调用 LLM 生成 work plan、patch plan 和受控 edit proposal，但补丁只会应用到 run 目录下的隔离 workspace。
 - Greenfield experiment：`06-code` 可以调用 LLM 做 architecture/file planning 和代码实现；进入 `07-run` 前会写出 review、memory、backend 和 artifact manifest。
-- Guarded reports：如果 LLM 报告缺少必要正文引用、虚构 citation key 或夸大 fixture/toy evidence，会回退到结构化 deterministic report。
+- Guarded reports：如果 LLM 报告缺少必要正文引用、虚构 citation key 或夸大 fixture/toy evidence，默认会在记录校验错误后让阶段失败。只有明确设置 `[llm].allow_fallback = true` 才会生成降级报告。
 - `--no-llm` 会让相关阶段使用离线 fallback 内容。
 
 ### 搜索模式和边界

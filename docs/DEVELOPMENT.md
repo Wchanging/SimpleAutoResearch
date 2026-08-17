@@ -16,6 +16,27 @@ SimpleAutoResearch is now file-first plus state-backed:
 
 This keeps the project easier to learn, debug, and refactor.
 
+## Capability Boundary For New Modules
+
+New replaceable modules may use the small capability boundary in
+`src/simple_ar/core/` without changing the existing pipeline. `ArtifactRef`
+identifies a declared artifact, `ArtifactStore` provides run-relative and
+attempt-local file access, `CapabilityContext` passes registered inputs and a
+profile, and `CapabilityResult` returns status, output references, diagnostics,
+and provenance. `CapabilityRegistry` uses explicit registrations; it does not
+scan the repository or dynamically import arbitrary providers.
+
+`SessionController` adds bounded attempts and decision persistence for new
+capabilities. It does not replace `PipelineRunner`, decide an unrestricted
+research graph, or add implicit retries. Existing `simple-ar run`, code-task
+commands, and their legacy projections remain the compatibility path until a
+real capability has an input/output contract and regression evidence.
+
+The smallest end-to-end reference is
+`examples/capability_package_minimal/`. Run `uv run simple-ar-checks core` to
+verify the boundary offline. New capability work should begin from this
+contract and keep domain-specific request/result schemas outside the core.
+
 The old monolithic CLI and stage handler modules have been moved out of
 `src/simple_ar/_legacy/`. That package now only contains compatibility aliases
 for older imports. New behavior should be implemented in the domain modules
@@ -296,6 +317,7 @@ uv run simple-ar-checks code-task
 uv run simple-ar-checks pipeline
 uv run simple-ar-checks research
 uv run simple-ar-checks code-task-examples
+uv run simple-ar-checks core
 ```
 
 The same runner can be called without the console script:
@@ -314,6 +336,7 @@ Recommended validation layers:
 | Bundled code-task examples or benchmark examples | `uv run simple-ar-checks code-task-examples`. |
 | Pipeline, stages, experiment templates, run config | `uv run simple-ar-checks pipeline`. |
 | Literature, retrieval, evidence ledger, report generation, LLM adapter | `uv run simple-ar-checks research`. |
+| Core capability boundary, registry, attempt store, and package example | `uv run simple-ar-checks core`. |
 | Before commit/push or broad refactors | `uv run simple-ar-checks all`. |
 
 Run the full test suite directly when needed:

@@ -17,6 +17,7 @@ from simple_ar.research.prompts import (
 )
 from simple_ar.pipeline_stages.common import (
     _ensure_heading,
+    _handle_llm_failure,
     _llm_client,
     _markdown_body,
     _safe_read_artifact,
@@ -101,7 +102,7 @@ def _generate_merged_code_task_design_markdown(ctx: Context, spec: Any) -> tuple
                     "codebase_summary": codebase_summary,
                 }
         except LLMError as exc:
-            ctx.emit("stage_message", f"LLM task merge failed; using deterministic fallback. {exc}")
+            _handle_llm_failure(ctx, "LLM task merge failed", exc)
 
     return _fallback_merged_code_task_design_markdown(
         topic=ctx.topic,
@@ -165,7 +166,7 @@ def _generate_code_task_design_markdown(ctx: Context, spec: Any) -> tuple[str, d
                     "codebase_summary": codebase_summary,
                 }
         except LLMError as exc:
-            ctx.emit("stage_message", f"LLM code-task design failed; using deterministic fallback. {exc}")
+            _handle_llm_failure(ctx, "LLM code-task design failed", exc)
 
     return _fallback_code_task_design_markdown(
         topic=ctx.topic,

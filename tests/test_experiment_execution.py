@@ -223,7 +223,7 @@ class ExperimentExecutionTests(unittest.TestCase):
             self.assertTrue((run_dir / "code_task" / "meta" / "file_plan.json").is_file())
             self.assertTrue((run_dir / "code_task" / "meta" / "review_report.json").is_file())
             task_contract = read_json(run_dir / "code_task" / "meta" / "task_contract.json")
-            self.assertEqual(task_contract["schema_version"], "code_task_contract.v3")
+            self.assertEqual(task_contract["schema_version"], "code_task_contract.v4")
             self.assertEqual(task_contract["task_kind"], "greenfield")
             self.assertIn("version_hash", task_contract)
             metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")

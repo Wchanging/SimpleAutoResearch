@@ -365,6 +365,7 @@ def _apply_run_cli_overrides(config: dict[str, object], args: argparse.Namespace
     else:
         config["use_llm"] = bool(config.get("use_llm", True))
         config["mode"] = "llm" if config["use_llm"] else "offline"
+    config["allow_llm_fallback"] = bool(config.get("allow_llm_fallback", False))
     if args.offline_search is True:
         config["use_arxiv"] = False
     else:
@@ -412,6 +413,7 @@ def _default_run_context_config() -> dict[str, object]:
         "experiment_template": "greenfield_project",
         "experiment_timeout_sec": 30,
         "use_llm": True,
+        "allow_llm_fallback": False,
         "use_arxiv": True,
         "allow_fixture_fallback": False,
         "strict_search": False,

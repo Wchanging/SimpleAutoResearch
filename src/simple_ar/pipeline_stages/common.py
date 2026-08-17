@@ -72,8 +72,22 @@ def _llm_client(ctx: Context) -> LLMClient | None:
             usage_callback=lambda usage: record_llm_usage(ctx, usage),
         )
     except LLMError as exc:
-        ctx.emit("stage_message", f"LLM unavailable; using offline fallback. {exc}")
+        _handle_llm_failure(ctx, "LLM client initialization failed", exc)
         return None
+
+
+def _llm_fallback_allowed(ctx: Context) -> bool:
+    """Return whether a failed LLM operation may use deterministic output."""
+    return ctx.config.get("use_llm") is not True or ctx.config.get("allow_llm_fallback") is True
+
+
+def _handle_llm_failure(ctx: Context, message: str, exc: Exception) -> None:
+    """Raise in strict online mode; otherwise announce the explicit fallback."""
+    if not _llm_fallback_allowed(ctx):
+        raise LLMError(
+            f"{message}: {exc}. LLM fallback is disabled; retry the same run or use --no-llm explicitly."
+        ) from exc
+    ctx.emit("stage_message", f"{message}; using explicit offline fallback. {exc}")
 
 def _markdown_body(markdown: str) -> str:
     """Remove one leading Markdown heading to avoid nested report sections."""

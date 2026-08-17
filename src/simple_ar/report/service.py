@@ -179,6 +179,13 @@ def execute_report(ctx: Context) -> None:
         gateway=tool_gateway,
         emit=lambda message: ctx.emit("stage_message", message),
     )
+    if (
+        agent_result is None
+        and ctx.config.get("use_llm") is True
+        and report_config.agent != "disabled"
+        and not report_config.allow_llm_fallback
+    ):
+        raise LLMError("Report agent produced no result and LLM fallback is disabled")
     if agent_result is not None:
         agent_validation["attempted"] = True
         validated_agent_report = _validated_agent_report(
@@ -196,6 +203,12 @@ def execute_report(ctx: Context) -> None:
             report, agent_removed_unknown_citations = validated_agent_report
             report_memory = agent_result.memory
         else:
+            if (
+                ctx.config.get("use_llm") is True
+                and report_config.agent != "disabled"
+                and not report_config.allow_llm_fallback
+            ):
+                raise LLMError("LLM report failed deterministic citation/quality validation")
             report = None
     else:
         report = None
@@ -378,7 +391,10 @@ def _validated_agent_report(
         if diagnostics is not None:
             diagnostics["accepted"] = False
             diagnostics["error"] = str(exc)
-        ctx.emit("stage_message", f"Report agent output failed validation; using structured fallback. {exc}")
+        if ctx.config.get("use_llm") is True and ctx.config.get("allow_llm_fallback") is not True:
+            ctx.emit("stage_message", f"Report agent output failed validation; fallback is disabled. {exc}")
+        else:
+            ctx.emit("stage_message", f"Report agent output failed validation; using explicit fallback. {exc}")
         return None
 
 
@@ -398,6 +414,7 @@ def _report_runtime_config(ctx: Context) -> ReportRuntimeConfig:
         ),
         draft_sections=_bool_config(ctx.config.get("report_draft_sections"), default=False),
         debug_artifacts=_bool_config(ctx.config.get("report_debug_artifacts"), default=False),
+        allow_llm_fallback=_bool_config(ctx.config.get("allow_llm_fallback"), default=False),
         agent=str(ctx.config.get("report_agent") or "llm"),
         reviewer=str(ctx.config.get("report_reviewer") or "llm"),
         max_review_iterations=_non_negative_int_config(

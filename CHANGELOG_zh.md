@@ -4,6 +4,21 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-08-17
+
+### 变更
+
+- 在线 LLM 阶段在有限 provider 重试耗尽后默认失败，不再静默生成 deterministic fallback；明确的离线运行和 `[llm].allow_fallback = true` 仍保留兼容路径。
+- V2.8 本科生工作计划新增证据驱动的假设、实验意图、结果决策和研究迭代交付物。
+
+## 2026-08-16
+
+### 新增
+
+- 为新模块增加可选的 core capability 边界：声明式产物引用、run/attempt 范围内的存储、统一能力结果、显式注册和有界 session attempt。
+- 增加离线参考能力包 `examples/capability_package_minimal/` 和
+  `simple-ar-checks core` 验收分组；现有 pipeline 与 code-task 入口保持不变。
+
 ## 2026-07-18
 
 ### 变更

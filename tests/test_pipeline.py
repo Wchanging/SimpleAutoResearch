@@ -12,6 +12,8 @@ from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentResult,
 )
 from simple_ar.core.pipeline import Context, MissingInputError, PipelineEvent, PipelineRunner
+from simple_ar.integrations.llm import LLMError
+from simple_ar.pipeline_stages.common import _handle_llm_failure
 from simple_ar.pipeline_stages.registry import HANDLERS
 from simple_ar.pipeline_stages.experiment import execute_code, execute_design
 from simple_ar.pipeline_stages.research import execute_read
@@ -26,6 +28,22 @@ def handlers():
 
 
 class PipelineTests(unittest.TestCase):
+    def test_online_llm_failure_does_not_silently_fallback(self) -> None:
+        ctx = Context(Path("offline-test-run"), "toy topic", config={"use_llm": True})
+        with self.assertRaises(LLMError):
+            _handle_llm_failure(ctx, "LLM stage failed", RuntimeError("503"))
+
+    def test_llm_fallback_requires_explicit_opt_in(self) -> None:
+        messages: list[str] = []
+        ctx = Context(
+            Path("offline-test-run"),
+            "toy topic",
+            config={"use_llm": True, "allow_llm_fallback": True},
+            reporter=lambda event: messages.append(event.message),
+        )
+        _handle_llm_failure(ctx, "LLM stage failed", RuntimeError("503"))
+        self.assertTrue(any("explicit offline fallback" in message for message in messages))
+
     def test_run_to_plan_creates_expected_outputs(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

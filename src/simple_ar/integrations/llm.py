@@ -1054,6 +1054,18 @@ def _is_transient_llm_error(exc: Exception) -> bool:
         "403",
         "404",
     )
+    # Some OpenAI-compatible gateways report a temporarily unavailable
+    # routing channel as "model not found". Treat that precise combination as
+    # retryable before applying the generic permanent "not found" rule.
+    gateway_unavailable = (
+        "no available channel",
+        "no available provider",
+        "distributor",
+    )
+    if any(marker in message for marker in gateway_unavailable) and any(
+        marker in message for marker in ("429", "500", "502", "503", "504", "service unavailable")
+    ):
+        return True
     if any(marker in message or marker in name for marker in permanent_markers):
         return False
     return any(marker in message or marker in name for marker in transient_markers)

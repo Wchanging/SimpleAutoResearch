@@ -38,6 +38,7 @@ class LLMSection(_ConfigModel):
     enabled: bool | None = None
     model: str | None = None
     workers: int | None = None
+    allow_fallback: bool | None = None
 
 
 class SearchSection(_ConfigModel):
@@ -247,6 +248,7 @@ class PipelineRunConfig(_ConfigModel):
             result["mode"] = "llm" if self.llm.enabled else "offline"
         _set_string(result, "model", self.llm.model)
         _set_int(result, "llm_max_workers", self.llm.workers)
+        _set_bool(result, "allow_llm_fallback", self.llm.allow_fallback)
 
         _set_int(result, "max_papers", self.search.max_papers)
         _set_string(result, "search_query", self.search.query)

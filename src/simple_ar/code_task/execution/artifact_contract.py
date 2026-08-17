@@ -50,8 +50,14 @@ def scan_required_artifacts(
     code_task = manifest.get("code_task")
     kind = str(code_task.get("kind", "")) if isinstance(code_task, Mapping) else ""
     contract = load_task_contract(paths.meta_dir)
-    artifacts = required_artifacts or _required_artifacts_from_contract(contract)
-    if kind == "greenfield" and not artifacts:
+    if required_artifacts is not None:
+        artifacts = list(required_artifacts)
+    else:
+        artifacts = _required_artifacts_from_contract(contract)
+    # A current task contract with an explicit empty artifact list means that
+    # the task only requires its declared outputs (for example, printed
+    # metrics). Keep the legacy default only for older runs with no contract.
+    if kind == "greenfield" and not artifacts and not contract:
         artifacts = list(DEFAULT_GREENFIELD_ARTIFACTS)
 
     expected_rows: list[dict[str, Any]] = []

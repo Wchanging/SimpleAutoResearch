@@ -48,6 +48,10 @@ experimentation, and gradual extension.
   routing returned files through SimpleAutoResearch review and run guards.
 - **Reviewable artifacts**: each run writes inspectable files under `runs/`
   instead of hiding decisions inside process memory.
+- **Capability boundary for contributors**: new modules can use the small
+  `ArtifactStore`/`CapabilityResult`/bounded-attempt API without changing the
+  established 8-stage and code-task entry points. The offline reference is in
+  `examples/capability_package_minimal/`.
 - **Mature library foundation**: pipeline/code-task TOML configs are validated
   through Pydantic, LLM calls use the OpenAI Python SDK by default with a
   LiteLLM compatibility option, OpenAlex access goes through pyalex, and
@@ -216,6 +220,9 @@ to_stage = "report"
 
 [llm]
 enabled = true
+# Online stages fail after bounded provider retries by default. Set true only
+# when an explicit deterministic fallback is acceptable for a demo.
+allow_fallback = false
 
 [search]
 offline = false

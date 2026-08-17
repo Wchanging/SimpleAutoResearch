@@ -112,6 +112,7 @@ from simple_ar.retrieval.evidence import format_evidence_snippets
 from simple_ar.pipeline_stages.common import (
     _downstream_source_plan,
     _ensure_heading,
+    _handle_llm_failure,
     _llm_client,
     _read_jsonl_artifact,
     _safe_read_json_artifact,
@@ -137,8 +138,13 @@ def execute_plan(ctx: Context) -> None:
                 write_text(ctx.artifact_path("problem.md"), _ensure_heading(problem, "Research Problem"))
                 return
         except LLMError as exc:
-            ctx.emit("stage_message", f"LLM planning failed; using offline fallback. {exc}")
-            pass
+            _handle_llm_failure(ctx, "LLM planning failed", exc)
+
+        _handle_llm_failure(
+            ctx,
+            "LLM planning returned no usable goal/problem",
+            LLMError("response did not contain both goal_markdown and problem_markdown"),
+        )
 
     write_text(
         ctx.artifact_path("goal.md"),
@@ -319,7 +325,7 @@ def _plan_research_retrieval(
             data=response,
         )
     except (LLMError, ValueError) as exc:
-        ctx.emit("stage_message", f"LLM research planning failed; using deterministic fallback. {exc}")
+        _handle_llm_failure(ctx, "LLM research planning failed", exc)
         return deterministic_questions, deterministic_plan
 
 def _research_planner_mode(value: object) -> str:
@@ -981,8 +987,7 @@ def execute_read(ctx: Context) -> None:
                 _write_read_cards(ctx)
             return
         except LLMError as exc:
-            ctx.emit("stage_message", f"LLM reading failed; using offline fallback. {exc}")
-            pass
+            _handle_llm_failure(ctx, "LLM reading failed", exc)
 
     notes = [
         {
@@ -1016,7 +1021,7 @@ def _write_read_review(ctx: Context, papers: list[dict[str, Any]], client: LLMCl
         try:
             llm_decisions = _read_screening_with_llm(ctx, client, papers)
         except LLMError as exc:
-            ctx.emit("stage_message", f"LLM read screening failed; using deterministic shortlist. {exc}")
+            _handle_llm_failure(ctx, "LLM read screening failed", exc)
     meta = write_read_review_artifacts(
         stage_dir=ctx.stage_dir(),
         papers=papers,
@@ -1667,8 +1672,13 @@ def execute_synthesize(ctx: Context) -> None:
                 write_text(ctx.artifact_path("hypothesis.md"), _ensure_heading(hypothesis, "Hypothesis"))
                 return
         except LLMError as exc:
-            ctx.emit("stage_message", f"LLM synthesis failed; using offline fallback. {exc}")
-            pass
+            _handle_llm_failure(ctx, "LLM synthesis failed", exc)
+
+        _handle_llm_failure(
+            ctx,
+            "LLM synthesis returned incomplete output",
+            LLMError("response did not contain both synthesis_markdown and hypothesis_markdown"),
+        )
 
     write_text(
         ctx.artifact_path("synthesis.md"),

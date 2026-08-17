@@ -88,6 +88,9 @@ Notes:
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` and the retry delay settings control bounded
   exponential backoff for transient provider errors such as connection resets,
   rate limits, timeouts, and 5xx responses.
+- Online pipeline stages fail after those retries by default. Set
+  `[llm].allow_fallback = true` only when you explicitly want deterministic
+  fallback artifacts; `--no-llm` remains the clear offline path.
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` controls provider-native JSON mode for
   structured calls. The default `off` uses prompt-only parsing for broad
   provider compatibility. `auto` tries `response_format={"type":"json_object"}`
@@ -193,7 +196,7 @@ is reviewed as a whole, avoiding repeated reviewer calls against partial prose.
 - Greenfield experiment: `06-code` can call the LLM for architecture/file
   planning and implementation; it always writes review, memory, backend, and
   artifact manifests before `07-run` validates canonical metrics.
-- Guarded reports: if an LLM-written report omits required body citations, invents citation keys, or overstates fixture/toy evidence, the report stage writes a structured fallback report instead.
+- Guarded reports: if an LLM-written report omits required body citations, invents citation keys, or overstates fixture/toy evidence, the report stage fails by default after recording the validation error. Set `[llm].allow_fallback = true` only for an explicitly degraded report.
 - `--no-llm` forces offline fallbacks with placeholder content in `goal.md`, `notes.md`, `synthesis.md`, and `report.md`.
 
 ### Search Modes And Boundaries

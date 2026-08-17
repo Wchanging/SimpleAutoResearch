@@ -48,7 +48,7 @@ debug_artifacts = false
 overwrite_stage_artifacts = false
 
 [llm]
-# true 使用 OpenAI-compatible 模型；false 尽量使用 deterministic fallback。
+# true 使用 OpenAI-compatible 模型；false 表示明确选择离线行为。
 enabled = true
 
 # 可选默认模型；省略时使用 SIMPLE_AR_MODEL 或 provider 默认值。
@@ -56,6 +56,10 @@ model = "gpt-4o-mini"
 
 # 支持并发的 LLM 阶段使用的 worker 数，例如 paper note generation。
 workers = 4
+
+# 真实运行建议保持 false：provider 有限重试耗尽后让阶段失败并可恢复，
+# 不要用较弱的输出把一次失败伪装成成功。仅在明确的 demo/兼容场景打开。
+allow_fallback = false
 
 [search]
 # true 跳过 live provider，使用 fixture/local 行为。
@@ -78,7 +82,7 @@ strict = false
 mode = "lite"                 # lite | standard | strong
 
 # research-question/query planner。auto 会在 [llm].enabled = true 时调用 LLM；
-# provider 不可用时回退到 deterministic planning。
+# provider 重试耗尽后，由 [llm].allow_fallback 决定停止还是使用 deterministic planning。
 planner = "auto"              # auto | llm | deterministic
 
 # 02-search 的 provider 顺序。
@@ -458,7 +462,7 @@ max_proposal_chars = 42000
 | Section | 使用方 | 含义 |
 | --- | --- | --- |
 | `[run]` | `run`, `resume` | topic、输出目录、阶段范围和 quiet 模式。 |
-| `[llm]` | pipeline 和 code task | LLM 是否启用、默认模型和 worker 数。 |
+| `[llm]` | pipeline 和 code task | LLM 是否启用、默认模型、worker 数和显式 fallback 策略。 |
 | `[search]` | `02-search` | provider 行为、fallback 策略、结果数量和手动 query。 |
 | `[research]` | `02-search` | research-question 规划、query expansion、provider 顺序、本地文档、cache/index hints。 |
 | `[research.budget]` | `02-search` 和后续 evidence stages | research planning 使用的轻量预算上限；只有启用 debug artifacts 时才会保留到 `planning/research_plan.json`。 |
@@ -497,6 +501,7 @@ max_proposal_chars = 42000
 | `[run].overwrite_stage_artifacts` | 默认 `false`。从 `06-code` 或 `07-run` 重跑时，会先把旧的关键代码/运行产物复制到 `archives/<timestamp>/`，再写入新产物。只有明确想无归档覆盖旧产物时才设为 `true`。 |
 | `[llm].enabled` | 是否启用 LLM 支持的 planning、notes、synthesis、report 和 code-task 步骤。真实 code-task 通常需要 LLM 才有实际意义。 |
 | `[llm].workers` | 支持并发的 LLM 阶段使用的 worker 数；并不代表所有 pipeline 阶段都会并发。 |
+| `[llm].allow_fallback` | 默认 `false`。provider 重试耗尽后，在线 LLM 阶段会失败并可恢复；只有明确接受降级的场景才设为 `true`。`SIMPLE_AR_LLM_RETRY_*` 只控制重试次数和等待时间，不改变失败策略。 |
 | `[search].offline` | 跳过 live literature provider，适合本地 demo 和 deterministic test。 |
 | `[search].max_papers` | search 阶段最多请求/保留多少条 metadata 记录，是总记录上限，不是 PDF 页数或 chunk 上限。 |
 | `[search].query` | 手动 provider query。省略时使用 topic 或 research queries 中的第一个可用 query。 |
@@ -573,7 +578,7 @@ V2.5 foundation 起，新 pipeline config 推荐优先使用这些 section。它
 | 字段 | 含义 |
 | --- | --- |
 | `[research].mode` | 记录计划中的 evidence 深度：`lite` 表示 metadata/本地笔记，`standard` 表示 cache/index-ready，`strong` 预留给全文/向量工作流。 |
-| `[research].planner` | research-question 和 query-expansion 后端。`auto` 会在 `[llm].enabled = true` 时调用 LLM，并在 provider 不可用时回退；`llm` 显式要求走该路径；`deterministic` 禁用额外 LLM planner 调用。 |
+| `[research].planner` | research-question 和 query-expansion 后端。`auto` 会在 `[llm].enabled = true` 时调用 LLM；重试耗尽后由 `[llm].allow_fallback` 决定停止还是回退；`llm` 显式要求走该路径；`deterministic` 禁用额外 LLM planner 调用。 |
 | `[research].sources` | search 阶段 provider 顺序。当前 connector 支持 `openalex`、`semantic_scholar`、`arxiv` 和 `local_files`；`fixture` 用于记录离线 fixture。 |
 | `[research].queries` | 作为 research planner 的 seed queries。Search 会按 ordered-fallback rounds 执行 planned queries，并可把后续轮次预算用于未覆盖 facets。LLM planner 还会记录带 title/abstract keyword hints 的 `query_specs`；完整 plan 只在启用 debug artifacts 时保留。 |
 | `[research].auto_query_expansion` | 是否启用 facet-driven follow-up queries。deterministic 模式下为规则扩展；LLM planner 模式下模型可以在相同 query 预算内补充更强术语。想完全使用手写 query 时可以设为 false。 |

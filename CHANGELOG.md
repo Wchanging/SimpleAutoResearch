@@ -4,6 +4,27 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-08-17
+
+### Changed
+
+- Online LLM-backed stages now fail after bounded provider retries by default
+  instead of silently producing deterministic fallback output. Explicit offline
+  runs and `[llm].allow_fallback = true` retain the compatibility path.
+- The V2.8 undergraduate work plan now includes evidence-grounded hypothesis,
+  experiment-intent, result-decision, and research-iteration deliverables.
+
+## 2026-08-16
+
+### Added
+
+- Added an opt-in core capability boundary for new modules: declared artifact
+  references, run/attempt-local storage, normalized capability results, explicit
+  registration, and bounded session attempts.
+- Added the offline `examples/capability_package_minimal/` reference package and
+  the `simple-ar-checks core` validation group. Existing pipeline and code-task
+  entry points remain unchanged.
+
 ## 2026-07-18
 
 ### Changed
