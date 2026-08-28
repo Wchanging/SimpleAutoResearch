@@ -42,11 +42,8 @@ from simple_ar.research.evidence.pack import (
     compact_evidence_pack_for_storage,
     evidence_pack_markdown,
 )
-from simple_ar.research.store.chunking import build_text_chunks
-from simple_ar.research.documents.records import build_cache_manifest, build_document_records
-from simple_ar.research.documents.extractors import apply_fulltext_extraction
-from simple_ar.research.documents.fulltext import build_fulltext_manifest
-from simple_ar.research.documents.sections import build_document_sections
+from simple_ar.research.documents.ingest import build_document_bundle
+from simple_ar.research.documents.records import build_cache_manifest
 from simple_ar.research.store.index import write_research_index
 from simple_ar.research.tools.contract import (
     artifact_retention_policy_markdown,
@@ -160,20 +157,18 @@ def write_search_document_artifacts(
     candidates, and experiment contracts belong to later pipeline stages.
     """
     compact_artifacts = bool(source_plan.budget.get("compact_artifacts", False))
-    documents = build_document_records(papers=papers, source_plan=source_plan)
-    fulltext_manifest = build_fulltext_manifest(
-        records=documents,
+    bundle = build_document_bundle(
+        papers=papers,
         source_plan=source_plan,
         cache_dir=stage_dir / "documents" / "fulltext_cache",
-    )
-    documents, fulltext_extraction = apply_fulltext_extraction(
-        records=documents,
-        fulltext_manifest=fulltext_manifest,
-        source_plan=source_plan,
         extraction_dir=stage_dir / "documents" / "extracted_text",
+        max_chunks=_chunk_cap(source_plan),
     )
-    sections = build_document_sections(documents)
-    chunks = build_text_chunks(documents, sections=sections, max_chunks=_chunk_cap(source_plan))
+    documents = bundle.records
+    fulltext_manifest = bundle.fulltext_manifest
+    fulltext_extraction = bundle.fulltext_extraction
+    sections = bundle.sections
+    chunks = bundle.chunks
     index_meta = write_research_index(
         index_dir=stage_dir / Path(SEARCH_INDEX_META).parent,
         chunks=chunks,

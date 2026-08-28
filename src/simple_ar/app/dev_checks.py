@@ -62,6 +62,8 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         description="Literature, retrieval, evidence, LLM adapter, and report tests.",
         targets=(
             "tests.test_research_foundation",
+            "tests.test_document_ingest",
+            "tests.test_search_registry",
             "tests.test_literature",
             "tests.test_retrieval",
             "tests.test_evidence",

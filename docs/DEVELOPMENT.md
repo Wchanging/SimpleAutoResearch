@@ -83,6 +83,27 @@ src/simple_ar/research/
 Keep new retrieval/evidence work inside these packages instead of returning to
 the old flat `research/*.py` layout.
 
+### Replacing A Search Provider
+
+`research.sources.base` defines the small provider port:
+`SearchQuery -> SearchResponse`. `research.sources.registry.SearchProviderRegistry`
+owns explicit connector factories, while the search stage keeps query planning,
+deduplication, caching, and artifact projection. The default pipeline remains
+backward compatible, but library callers can pass `provider_registry=` to
+`execute_search` or register a new source name without changing those policies.
+Provider implementations should stay focused on source access and return
+normalized `Paper` objects; they should not write run artifacts or decide
+research coverage.
+
+### Reusing Document Ingest
+
+`research.documents.ingest.build_document_bundle()` is the narrow composition
+boundary for document metadata, permitted full-text handling, sections, and
+chunks. It reuses the existing research records without calling an LLM or
+writing stage artifacts. Search keeps ownership of index persistence and
+legacy JSON/JSONL projections, so a future standalone reader can reuse the
+bundle without inheriting the Search directory layout.
+
 ## Adding A Pipeline Stage
 
 To add a stage to the default research pipeline, update these places together:

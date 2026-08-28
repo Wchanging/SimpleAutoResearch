@@ -75,6 +75,23 @@ src/simple_ar/research/
 ```
 
 新的检索、全文、证据和 card 能力应放入这些包中，不再回到旧的 `research/*.py` 平铺结构。
+
+### 替换检索 Provider
+
+`research.sources.base` 定义了轻量 provider 接口：`SearchQuery -> SearchResponse`。
+`research.sources.registry.SearchProviderRegistry` 只负责显式登记和构造 connector；
+查询规划、去重、缓存和阶段产物投影仍由 search stage 负责。默认 pipeline 保持兼容，
+库调用方可以向 `execute_search` 传入 `provider_registry=`，也可以登记新的 source 名称，
+而不必改动这些策略。新的 provider 应只负责访问数据源并返回规范化的 `Paper` 对象，
+不要写 run 产物，也不要自行决定研究覆盖范围。
+
+### 复用 Document Ingest
+
+`research.documents.ingest.build_document_bundle()` 是当前文档元数据、受许可的全文处理、
+section 和 chunk 之间的最小组合边界。它复用现有 research record，不调用 LLM，也不直接写
+阶段产物。Search 仍负责索引持久化和旧 JSON/JSONL projection，未来的独立 reader 可以复用
+这个 bundle，而不必继承 Search 的目录布局。
+
 ## 添加 Pipeline Stage
 
 向默认 research pipeline 添加 stage 时，需要一起更新：

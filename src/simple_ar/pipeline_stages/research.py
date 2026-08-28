@@ -108,6 +108,10 @@ from simple_ar.research.sources.base import (
     build_source_plan,
     primary_query,
 )
+from simple_ar.research.sources.registry import (
+    SearchProviderRegistry,
+    default_search_provider_registry,
+)
 from simple_ar.retrieval.evidence import format_evidence_snippets
 from simple_ar.pipeline_stages.common import (
     _downstream_source_plan,
@@ -164,7 +168,11 @@ def execute_plan(ctx: Context) -> None:
         ),
     )
 
-def execute_search(ctx: Context) -> None:
+def execute_search(
+    ctx: Context,
+    *,
+    provider_registry: SearchProviderRegistry | None = None,
+) -> None:
     problem = load_problem_markdown(ctx)
     query = _search_query(ctx, problem)
     max_papers = _max_papers(ctx)
@@ -205,7 +213,15 @@ def execute_search(ctx: Context) -> None:
         "status": "pending",
     }
     if _should_use_source_plan(ctx, source_plan):
-        papers, meta_update = _live_literature_search(ctx, source_plan, problem, query_plan, research_questions)
+        registry = provider_registry or _default_search_provider_registry(source_plan, max_papers)
+        papers, meta_update = _live_literature_search(
+            ctx,
+            source_plan,
+            problem,
+            query_plan,
+            research_questions,
+            provider_registry=registry,
+        )
         meta.update(meta_update)
     else:
         ctx.emit("stage_message", "Using fixture paper metadata because --offline-search is enabled.")
@@ -338,12 +354,36 @@ def _research_query_cap(config: dict[str, object], default: int) -> int:
         return min(value, 12)
     return min(max(default, 1), 12)
 
+
+def _default_search_provider_registry(
+    source_plan: SourcePlan,
+    max_papers: int,
+) -> SearchProviderRegistry:
+    """Build the default registry while preserving legacy client injection.
+
+    The client aliases remain in this module for compatibility with existing
+    tests and integrations that replace them at runtime. The registry still
+    owns connector construction; this helper only supplies those legacy
+    factories to it.
+    """
+    return default_search_provider_registry(
+        local_documents=source_plan.local_documents,
+        arxiv_page_size=max_papers,
+        connector_factories={
+            "openalex": lambda: OpenAlexConnector(OpenAlexSearchClient()),
+            "semantic_scholar": lambda: SemanticScholarConnector(SemanticScholarSearchClient()),
+            "arxiv": lambda: ArxivConnector(ArxivSearchClient(page_size=max_papers)),
+        },
+    )
+
 def _live_literature_search(
     ctx: Context,
     source_plan: SourcePlan,
     problem: str,
     query_plan: QueryPlan,
     research_questions: list[ResearchQuestion],
+    *,
+    provider_registry: SearchProviderRegistry | None = None,
 ) -> tuple[list[Paper], dict[str, object]]:
     """Search real literature sources before considering explicit fixture fallback.
 
@@ -362,6 +402,7 @@ def _live_literature_search(
     max_papers = source_plan.max_results_per_query
     max_documents = _research_document_cap(source_plan, max_papers)
     candidate_cap = _candidate_collection_cap(max_documents)
+    provider_registry = provider_registry or _default_search_provider_registry(source_plan, max_papers)
     retrieval_rows: list[dict[str, object]] = []
     candidates: list[RetrievalCandidate] = []
     query_specs = _query_specs_by_query(query_plan)
@@ -376,6 +417,7 @@ def _live_literature_search(
         candidates=candidates,
         round_index=1,
         max_documents=candidate_cap,
+        provider_registry=provider_registry,
     )
 
     if candidates:
@@ -411,6 +453,7 @@ def _live_literature_search(
                 round_index=2,
                 max_documents=candidate_cap,
                 start_query_index=len(query_attempts) + 1,
+                provider_registry=provider_registry,
             )
             papers, selection_rows = select_retrieval_candidates(
                 candidates,
@@ -527,6 +570,7 @@ def _collect_retrieval_round(
     round_index: int,
     max_documents: int,
     start_query_index: int = 1,
+    provider_registry: SearchProviderRegistry,
 ) -> None:
     """Run one bounded retrieval round and append traces/candidates in place."""
     unique_seen = {candidate.paper.id for candidate in candidates}
@@ -542,6 +586,7 @@ def _collect_retrieval_round(
                 query=query,
                 query_index=query_index,
                 round_index=round_index,
+                provider_registry=provider_registry,
             )
             _attach_query_trace(attempt, query_spec)
             retrieval_rows.append(attempt)
@@ -616,10 +661,28 @@ def _search_source_once(
     query: str,
     query_index: int,
     round_index: int,
+    provider_registry: SearchProviderRegistry,
 ) -> tuple[list[Paper], dict[str, object]]:
     max_papers = source_plan.max_results_per_query
+    if not provider_registry.has(source):
+        return [], _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source=source,
+            status="unsupported",
+            returned=0,
+            reason="provider not registered",
+        )
     if source == "local_files":
-        return _search_local_files_once(ctx, source_plan, query, query_index, round_index)
+        return _search_local_files_once(
+            ctx,
+            source_plan,
+            query,
+            query_index,
+            round_index,
+            provider_registry=provider_registry,
+        )
     if source == "openalex":
         return _search_openalex_once(
             ctx,
@@ -628,6 +691,7 @@ def _search_source_once(
             query_index=query_index,
             round_index=round_index,
             cache_enabled=source_plan.cache_enabled,
+            provider_registry=provider_registry,
         )
     if source == "semantic_scholar":
         return _search_semantic_scholar_once(
@@ -637,6 +701,7 @@ def _search_source_once(
             query_index=query_index,
             round_index=round_index,
             cache_enabled=source_plan.cache_enabled,
+            provider_registry=provider_registry,
         )
     if source == "arxiv":
         return _search_arxiv_once(
@@ -646,15 +711,71 @@ def _search_source_once(
             query_index=query_index,
             round_index=round_index,
             cache_enabled=source_plan.cache_enabled,
+            provider_registry=provider_registry,
         )
-    return [], _retrieval_round_row(
-        round_index=round_index,
-        query_index=query_index,
-        query=query,
+    return _search_registered_source_once(
+        ctx,
+        source_plan,
         source=source,
-        status="unsupported",
-        returned=0,
+        query=query,
+        query_index=query_index,
+        round_index=round_index,
+        provider_registry=provider_registry,
     )
+
+
+def _search_registered_source_once(
+    ctx: Context,
+    source_plan: SourcePlan,
+    *,
+    source: str,
+    query: str,
+    query_index: int,
+    round_index: int,
+    provider_registry: SearchProviderRegistry,
+) -> tuple[list[Paper], dict[str, object]]:
+    """Run a connector registered outside the built-in provider set.
+
+    Built-in sources keep their existing exception-specific cache behavior.
+    Extensions have only the source-agnostic connector contract, so failures
+    are converted into a normal retrieval trace at this boundary.
+    """
+    try:
+        ctx.emit(
+            "stage_message",
+            f"Searching {source} for up to {source_plan.max_results_per_query} paper(s) with `{query}`.",
+        )
+        response = provider_registry.resolve(source).search(
+            SearchQuery(query=query, max_results=source_plan.max_results_per_query)
+        )
+        papers = response.papers
+        if papers and source_plan.cache_enabled:
+            put_cache(
+                query,
+                source,
+                source_plan.max_results_per_query,
+                [paper.to_row() for paper in papers],
+            )
+        status = str(response.status or ("ok" if papers else "empty"))
+        return papers, _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source=source,
+            status=status,
+            returned=len(papers),
+        )
+    except Exception as exc:
+        ctx.emit("stage_message", f"{source} search failed. {exc}")
+        return [], _retrieval_round_row(
+            round_index=round_index,
+            query_index=query_index,
+            query=query,
+            source=source,
+            status="error",
+            returned=0,
+            error=str(exc),
+        )
 
 def _search_local_files_once(
     ctx: Context,
@@ -662,6 +783,8 @@ def _search_local_files_once(
     query: str,
     query_index: int,
     round_index: int,
+    *,
+    provider_registry: SearchProviderRegistry,
 ) -> tuple[list[Paper], dict[str, object]]:
     if not source_plan.local_documents:
         return [], _retrieval_round_row(
@@ -677,7 +800,7 @@ def _search_local_files_once(
         "stage_message",
         f"Searching {len(source_plan.local_documents)} local document(s) for `{query}`.",
     )
-    response = LocalFileConnector(source_plan.local_documents).search(
+    response = provider_registry.resolve("local_files").search(
         SearchQuery(query=query, max_results=source_plan.max_results_per_query)
     )
     status = "ok" if response.papers else "empty"
@@ -698,10 +821,11 @@ def _search_openalex_once(
     query_index: int,
     round_index: int,
     cache_enabled: bool,
+    provider_registry: SearchProviderRegistry,
 ) -> tuple[list[Paper], dict[str, object]]:
     try:
         ctx.emit("stage_message", f"Searching OpenAlex for up to {max_papers} paper(s) with `{query}`.")
-        response = OpenAlexConnector(OpenAlexSearchClient()).search(
+        response = provider_registry.resolve("openalex").search(
             SearchQuery(query=query, max_results=max_papers)
         )
         papers = response.papers
@@ -747,10 +871,11 @@ def _search_semantic_scholar_once(
     query_index: int,
     round_index: int,
     cache_enabled: bool,
+    provider_registry: SearchProviderRegistry,
 ) -> tuple[list[Paper], dict[str, object]]:
     try:
         ctx.emit("stage_message", f"Searching Semantic Scholar for up to {max_papers} paper(s) with `{query}`.")
-        response = SemanticScholarConnector(SemanticScholarSearchClient()).search(
+        response = provider_registry.resolve("semantic_scholar").search(
             SearchQuery(query=query, max_results=max_papers)
         )
         papers = response.papers
@@ -796,10 +921,11 @@ def _search_arxiv_once(
     query_index: int,
     round_index: int,
     cache_enabled: bool,
+    provider_registry: SearchProviderRegistry,
 ) -> tuple[list[Paper], dict[str, object]]:
     try:
         ctx.emit("stage_message", f"Searching arXiv for up to {max_papers} paper(s) with `{query}`.")
-        response = ArxivConnector(ArxivSearchClient(page_size=max_papers)).search(
+        response = provider_registry.resolve("arxiv").search(
             SearchQuery(query=query, max_results=max_papers)
         )
         papers = response.papers
@@ -956,7 +1082,12 @@ def _should_use_source_plan(ctx: Context, source_plan: SourcePlan) -> bool:
     """Return whether search should execute planned sources instead of fixture rows."""
     if ctx.config.get("use_arxiv") is True:
         return True
-    return any(source == "local_files" for source in source_plan.sources)
+    if any(source == "local_files" for source in source_plan.sources):
+        return True
+    configured_sources = ctx.config.get("research_sources")
+    if isinstance(configured_sources, list):
+        return any(str(source).strip() and str(source).strip() != "fixture" for source in configured_sources)
+    return False
 
 def _live_search_failure_message(attempts: list[dict[str, object]]) -> str:
     """Explain why live search failed without silently substituting fixture rows."""
