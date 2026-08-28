@@ -8,9 +8,9 @@ the returned bundle.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from simple_ar.literature.models import Paper
 from simple_ar.research.contracts import DocumentRecord, DocumentSection, SourcePlan, TextChunk
@@ -36,6 +36,25 @@ class DocumentBundle:
     fulltext_extraction: dict[str, Any]
     sections: list[DocumentSection]
     chunks: list[TextChunk]
+
+    @classmethod
+    def from_rows(
+        cls,
+        *,
+        documents: Iterable[dict[str, Any]],
+        chunks: Iterable[dict[str, Any]],
+        sections: Iterable[dict[str, Any]] = (),
+        fulltext_manifest: dict[str, Any] | None = None,
+        fulltext_extraction: dict[str, Any] | None = None,
+    ) -> "DocumentBundle":
+        """Hydrate the bundle from persisted, schema-compatible rows."""
+        return cls(
+            records=[_from_row(DocumentRecord, row) for row in documents],
+            fulltext_manifest=dict(fulltext_manifest or {}),
+            fulltext_extraction=dict(fulltext_extraction or {}),
+            sections=[_from_row(DocumentSection, row) for row in sections],
+            chunks=[_from_row(TextChunk, row) for row in chunks],
+        )
 
 
 def build_document_bundle(
@@ -74,3 +93,9 @@ def build_document_bundle(
         sections=sections,
         chunks=chunks,
     )
+
+
+def _from_row(type_hint: type[Any], row: dict[str, Any]) -> Any:
+    """Instantiate a persisted dataclass row while ignoring unknown fields."""
+    allowed = {field.name for field in fields(type_hint)}
+    return type_hint(**{key: value for key, value in row.items() if key in allowed})

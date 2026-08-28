@@ -101,8 +101,10 @@ research coverage.
 boundary for document metadata, permitted full-text handling, sections, and
 chunks. It reuses the existing research records without calling an LLM or
 writing stage artifacts. Search keeps ownership of index persistence and
-legacy JSON/JSONL projections, so a future standalone reader can reuse the
-bundle without inheriting the Search directory layout.
+legacy JSON/JSONL projections. Downstream code can use
+`research.service.load_search_document_bundle(ctx)` to hydrate that same typed
+bundle from state aliases or legacy Search paths, so a reader does not need to
+know which provider or directory layout produced it.
 
 ## Adding A Pipeline Stage
 

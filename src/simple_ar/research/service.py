@@ -6,6 +6,7 @@ from typing import Any
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text
 from simple_ar.core.pipeline import Context
 from simple_ar.core.stages import Stage
+from simple_ar.research.documents.ingest import DocumentBundle
 
 
 def load_problem_markdown(ctx: Context) -> str:
@@ -21,6 +22,22 @@ def load_search_paper_rows(ctx: Context) -> list[dict[str, Any]]:
     if path is None:
         path = ctx.artifact_path("papers.jsonl", Stage.SEARCH)
     return read_jsonl(path)
+
+
+def load_search_document_bundle(ctx: Context) -> DocumentBundle:
+    """Load the search-owned document handoff for downstream readers.
+
+    State aliases are preferred, while the legacy stage paths remain the
+    fallback. Optional sections and manifests may be absent in compact or
+    older runs and are represented by empty fields.
+    """
+    return DocumentBundle.from_rows(
+        documents=_read_jsonl_if_present(ctx, "documents/documents.jsonl"),
+        chunks=_read_jsonl_if_present(ctx, "research_index/chunks.jsonl"),
+        sections=_read_jsonl_if_present(ctx, "documents/sections.jsonl"),
+        fulltext_manifest=_read_json_if_present(ctx, "documents/fulltext_manifest.json"),
+        fulltext_extraction=_read_json_if_present(ctx, "documents/fulltext_extraction.json"),
+    )
 
 
 def load_notes_markdown(ctx: Context) -> str:
@@ -80,6 +97,19 @@ def _state_or_known_artifact(ctx: Context, filename: str) -> Path | None:
         return None
     path = ctx.artifact_path(filename, known_stage)
     return path if path.exists() else None
+
+
+def _read_jsonl_if_present(ctx: Context, filename: str) -> list[dict[str, Any]]:
+    path = _state_or_known_artifact(ctx, filename)
+    return read_jsonl(path) if path is not None else []
+
+
+def _read_json_if_present(ctx: Context, filename: str) -> dict[str, Any]:
+    path = _state_or_known_artifact(ctx, filename)
+    if path is None:
+        return {}
+    data = read_json(path)
+    return data if isinstance(data, dict) else {}
 
 
 _KNOWN_ARTIFACT_STAGES = {

@@ -89,8 +89,9 @@ src/simple_ar/research/
 
 `research.documents.ingest.build_document_bundle()` 是当前文档元数据、受许可的全文处理、
 section 和 chunk 之间的最小组合边界。它复用现有 research record，不调用 LLM，也不直接写
-阶段产物。Search 仍负责索引持久化和旧 JSON/JSONL projection，未来的独立 reader 可以复用
-这个 bundle，而不必继承 Search 的目录布局。
+阶段产物。Search 仍负责索引持久化和旧 JSON/JSONL projection；下游可以通过
+`research.service.load_search_document_bundle(ctx)` 从 state alias 或旧 Search 路径恢复同一个
+typed bundle，因此 reader 不需要知道具体 provider 或目录布局。
 
 ## 添加 Pipeline Stage
 
