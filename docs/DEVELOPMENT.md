@@ -146,6 +146,10 @@ Use `src/simple_ar/experiment/runner.py` for fixed generated-template
 subprocesses. Use `src/simple_ar/code_task/` for LLM-guided project editing,
 workspace isolation, patching, validation, and benchmark comparison.
 
+`experiment.execution.backend.RunResult` is the canonical subprocess result
+model. `experiment.runner.ExperimentRunResult` remains only as a compatibility
+alias, so new execution and analysis code should depend on `RunResult`.
+
 Top-level run config parsing lives in `src/simple_ar/app/run_config.py`. Keep it as
 a thin TOML-to-runtime-options layer; code-task-specific config semantics should
 continue to live in `src/simple_ar/code_task/runtime/config.py` so standalone

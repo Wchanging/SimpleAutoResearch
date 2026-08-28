@@ -128,6 +128,10 @@ code-task templates 位于 `src/simple_ar/experiment/code_task_bridge/`，
 `src/simple_ar/code_task/` 则负责 LLM-guided 项目编辑、workspace 隔离、patch、
 validation 和 benchmark comparison。
 
+`experiment.execution.backend.RunResult` 是统一的 subprocess 结果模型。
+`experiment.runner.ExperimentRunResult` 仅作为兼容别名保留；新的执行和分析代码应依赖
+`RunResult`，避免维护两套相同结果结构。
+
 顶层 run config 解析位于 `src/simple_ar/app/run_config.py`。它应该保持为薄的 TOML-to-runtime-options 层；code-task 专属 config 语义应继续放在 `src/simple_ar/code_task/runtime/config.py`，避免 standalone 和 embedded code-task 行为漂移。
 
 新的 template 应满足：
