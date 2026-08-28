@@ -93,6 +93,12 @@ section 和 chunk 之间的最小组合边界。它复用现有 research record�
 `research.service.load_search_document_bundle(ctx)` 从 state alias 或旧 Search 路径恢复同一个
 typed bundle，因此 reader 不需要知道具体 provider 或目录布局。
 
+### 复用 Read 边界
+
+`research.evidence.reader.ReadRequest` 接收 `DocumentBundle` 以及可选的文档或论文标识；
+`read_documents()` 返回 typed evidence cards 和诊断信息，不调用 LLM，也不写入文件。现有的
+`write_read_card_artifacts()` 仍作为该边界的兼容 projection，因此阶段产物路径和旧调用方保持不变。
+
 ## 添加 Pipeline Stage
 
 向默认 research pipeline 添加 stage 时，需要一起更新：

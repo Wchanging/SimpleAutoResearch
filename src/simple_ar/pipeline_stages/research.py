@@ -38,7 +38,6 @@ from simple_ar.research.connectors import (
     SemanticScholarConnector,
 )
 from simple_ar.research.contracts import (
-    DocumentRecord,
     QueryPlan,
     ResearchQuestion,
     SourcePlan,
@@ -71,7 +70,7 @@ from simple_ar.research.outputs.artifacts import (
     SYNTHESIS_EVIDENCE_PACK_JSON,
     SYNTHESIS_BRIEF_JSON,
     build_research_plan_artifact,
-    write_read_card_artifacts,
+    write_read_card_artifacts_from_result,
     write_read_review_artifacts,
     write_search_document_artifacts,
     write_synthesis_brief_artifact,
@@ -110,6 +109,7 @@ from simple_ar.research.sources.base import (
     build_source_plan,
     primary_query,
 )
+from simple_ar.research.evidence.reader import ReadRequest, read_documents
 from simple_ar.research.sources.registry import (
     SearchProviderRegistry,
     default_search_provider_registry,
@@ -1757,28 +1757,13 @@ def _write_read_cards(ctx: Context) -> None:
     bundle = load_search_document_bundle(ctx)
     if not bundle.records:
         return
+    paper_ids = None
     if ctx.artifact_path(READ_SHORTLIST).exists():
-        shortlisted_ids = _shortlisted_document_ids(ctx)
-        selected_records = [
-            record
-            for record in bundle.records
-            if _record_matches_shortlist(record, shortlisted_ids)
-        ]
-        selected_document_ids = {record.document_id for record in selected_records}
-        documents = [record.to_row() for record in selected_records]
-        chunks = [
-            chunk.to_row()
-            for chunk in bundle.chunks
-            if chunk.document_id in selected_document_ids
-        ]
-    else:
-        documents = [record.to_row() for record in bundle.records]
-        chunks = [chunk.to_row() for chunk in bundle.chunks]
-    meta = write_read_card_artifacts(
-        stage_dir=ctx.stage_dir(),
-        documents=documents,
-        chunks=chunks,
+        paper_ids = tuple(_shortlisted_document_ids(ctx))
+    result = read_documents(
+        ReadRequest(bundle=bundle, paper_ids=paper_ids)
     )
+    meta = write_read_card_artifacts_from_result(stage_dir=ctx.stage_dir(), result=result)
     ctx.emit(
         "stage_message",
         "Built reading cards from retrieved documents.",
@@ -1786,14 +1771,6 @@ def _write_read_cards(ctx: Context) -> None:
         claim_card_count=meta.get("claim_card_count", 0),
     )
 
-
-def _record_matches_shortlist(record: DocumentRecord, shortlisted_ids: set[str]) -> bool:
-    """Match paper- or document-level shortlist IDs to one document record."""
-    identifiers = {record.document_id, record.source_id or ""}
-    paper_id = record.metadata.get("paper_id") if isinstance(record.metadata, dict) else None
-    if paper_id:
-        identifiers.add(str(paper_id))
-    return bool({item for item in identifiers if item} & shortlisted_ids)
 
 def execute_synthesize(ctx: Context) -> None:
     notes = load_notes_markdown(ctx)

@@ -106,6 +106,14 @@ legacy JSON/JSONL projections. Downstream code can use
 bundle from state aliases or legacy Search paths, so a reader does not need to
 know which provider or directory layout produced it.
 
+### Reusing The Read Boundary
+
+`research.evidence.reader.ReadRequest` accepts a `DocumentBundle` and optional
+document or paper identifiers. `read_documents()` returns typed evidence cards
+and diagnostics without calling an LLM or writing files. The existing
+`write_read_card_artifacts()` function remains a compatibility projection over
+that boundary, so stage artifact paths and legacy callers stay unchanged.
+
 ## Adding A Pipeline Stage
 
 To add a stage to the default research pipeline, update these places together:

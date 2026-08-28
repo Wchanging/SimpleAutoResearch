@@ -21,12 +21,6 @@ from simple_ar.research.contracts import (
     SourcePlan,
     TextChunk,
 )
-from simple_ar.research.evidence.cards import (
-    build_code_links,
-    build_dataset_cards,
-    build_evidence_cards,
-    build_method_cards,
-)
 from simple_ar.research.evidence.derivation import (
     build_evidence_review,
     build_experiment_contract,
@@ -43,6 +37,7 @@ from simple_ar.research.evidence.pack import (
     evidence_pack_markdown,
 )
 from simple_ar.research.documents.ingest import build_document_bundle
+from simple_ar.research.evidence.reader import ReadRequest, ReadResult, read_documents
 from simple_ar.research.documents.records import build_cache_manifest
 from simple_ar.research.store.index import write_research_index
 from simple_ar.research.tools.contract import (
@@ -305,18 +300,24 @@ def write_read_card_artifacts(
     documents: list[dict[str, Any]],
     chunks: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Write reading-owned evidence cards.
+    """Compatibility wrapper for the reusable Read boundary."""
+    result = read_documents(
+        ReadRequest(bundle=DocumentBundle.from_rows(documents=documents, chunks=chunks))
+    )
+    return write_read_card_artifacts_from_result(stage_dir=stage_dir, result=result)
 
-    The read stage turns retrieved documents and chunks into structured paper,
-    claim, method, dataset, and code-link cards. These are semantic reading
-    outputs, so they should not be produced by search.
-    """
-    document_records = [_from_row(DocumentRecord, row) for row in documents]
-    text_chunks = [_from_row(TextChunk, row) for row in chunks]
-    paper_cards, claim_cards = build_evidence_cards(documents=document_records, chunks=text_chunks)
-    method_cards = build_method_cards(documents=document_records, chunks=text_chunks)
-    dataset_cards = build_dataset_cards(documents=document_records, chunks=text_chunks)
-    code_links = build_code_links(documents=document_records, chunks=text_chunks)
+
+def write_read_card_artifacts_from_result(
+    *,
+    stage_dir: Path,
+    result: ReadResult,
+) -> dict[str, Any]:
+    """Project a typed Read result into the existing JSONL card artifacts."""
+    paper_cards = result.paper_cards
+    claim_cards = result.claim_cards
+    method_cards = result.method_cards
+    dataset_cards = result.dataset_cards
+    code_links = result.code_links
     write_jsonl(stage_dir / READ_PAPER_CARDS, [card.to_row() for card in paper_cards])
     write_jsonl(stage_dir / READ_CLAIM_CARDS, [card.to_row() for card in claim_cards])
     write_jsonl(stage_dir / READ_METHOD_CARDS, [card.to_row() for card in method_cards])
@@ -333,6 +334,8 @@ def write_read_card_artifacts(
         "method_card_count": len(method_cards),
         "dataset_card_count": len(dataset_cards),
         "code_link_count": len(code_links),
+        "read_status": result.status,
+        "read_diagnostics": list(result.diagnostics),
     }
 
 

@@ -63,6 +63,7 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         targets=(
             "tests.test_research_foundation",
             "tests.test_document_ingest",
+            "tests.test_read_boundary",
             "tests.test_search_registry",
             "tests.test_literature",
             "tests.test_retrieval",
