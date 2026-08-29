@@ -97,6 +97,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         _print_research_experiment(args)
         return
 
+    if args.command == "research-session":
+        _print_research_session(args)
+        return
+
     if args.command == "resume":
         run_dir = Path(args.run_dir)
         topic = _read_topic(run_dir)
@@ -304,6 +308,62 @@ def _experiment_result_schema(args: argparse.Namespace) -> dict[str, object]:
     if directions:
         schema["metric_directions"] = directions
     return schema
+
+
+def _print_research_session(args: argparse.Namespace) -> None:
+    """Run the bounded literature-to-experiment composition."""
+
+    from simple_ar.app.research_brief import (
+        ResearchBriefSessionError,
+        ResearchBriefSessionRequest,
+    )
+    from simple_ar.app.research_session import (
+        ResearchSessionError,
+        ResearchSessionRequest,
+        run_research_session,
+    )
+    from simple_ar.app.session_roots import new_research_session_root
+
+    if (
+        args.max_results < 1
+        or args.max_chunks < 1
+        or args.idea_limit < 1
+        or args.timeout_sec < 1
+    ):
+        raise SystemExit(
+            "--max-results, --max-chunks, --idea-limit, and --timeout-sec "
+            "must be positive."
+        )
+    session_root = new_research_session_root(args.output_root, args.topic)
+    brief_request = ResearchBriefSessionRequest(
+        topic=args.topic,
+        session_root=session_root,
+        local_documents=tuple(Path(path) for path in args.local_document),
+        queries=tuple(args.queries),
+        providers=tuple(args.providers),
+        max_results=args.max_results,
+        max_chunks=args.max_chunks,
+        idea_limit=args.idea_limit,
+    )
+    try:
+        result = run_research_session(
+            ResearchSessionRequest(
+                brief=brief_request,
+                command=tuple(args.command_argv),
+                cwd=Path(args.cwd),
+                timeout_sec=args.timeout_sec,
+                result_schema=_experiment_result_schema(args),
+                label=args.label,
+            )
+        )
+    except (ResearchSessionError, ResearchBriefSessionError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print_line(f"Research session: {result.session_root}")
+    print_line(f"Status: {result.status}")
+    print_line(f"Papers: {len(result.search.papers)}")
+    print_line(f"Documents: {len(result.documents.records)}")
+    print_line(f"Execution: {result.session_root / result.execution_ref.path}")
+    print_line(f"Analysis: {result.session_root / result.analysis_ref.path}")
 
 
 def _print_clean(args: argparse.Namespace) -> None:

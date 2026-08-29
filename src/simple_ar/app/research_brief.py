@@ -118,6 +118,18 @@ class ResearchBriefSessionError(RuntimeError):
     """Raised when a session cannot produce a usable downstream handoff."""
 
 
+@dataclass(frozen=True, slots=True)
+class _ResearchBriefSteps:
+    """Internal state needed by a larger application composition."""
+
+    controller: SessionController
+    plan: ResearchPlanResult
+    search: SearchResult
+    documents: DocumentBundle
+    brief: ResearchBriefResult
+    brief_ref: ArtifactRef
+
+
 def new_research_brief_root(output_root: str | Path, topic: str) -> Path:
     """Create a unique session directory below an application output root."""
 
@@ -137,19 +149,58 @@ def run_research_brief_session(
     """
 
     request.session_root.mkdir(parents=True, exist_ok=True)
-    capability_registry = CapabilityRegistry()
-    register_research_capabilities(
-        capability_registry,
-        names=("plan", "search", "document_ingest", "research_brief"),
-    )
-    controller = SessionController.create(
+    controller = _new_controller(
         request.session_root,
-        session_id=request.session_root.name,
         topic=request.topic,
         profile="research_brief",
-        registry=capability_registry,
+        names=("plan", "search", "document_ingest", "research_brief"),
         budget=BudgetState(max_attempts=6, max_no_progress=2),
     )
+    steps = _run_research_brief_steps(
+        request,
+        controller,
+        search_registry=search_registry,
+    )
+    return ResearchBriefSessionResult(
+        session_root=request.session_root,
+        plan=steps.plan,
+        search=steps.search,
+        documents=steps.documents,
+        brief=steps.brief,
+        brief_ref=steps.brief_ref,
+        attempts=controller.list_attempts(),
+        decisions=tuple(controller.manifest.decisions),
+    )
+
+
+def _new_controller(
+    session_root: Path,
+    *,
+    topic: str,
+    profile: str,
+    names: tuple[str, ...],
+    budget: BudgetState,
+) -> SessionController:
+    capability_registry = CapabilityRegistry()
+    register_research_capabilities(capability_registry, names=names)
+    return SessionController.create(
+        session_root,
+        session_id=session_root.name,
+        topic=topic,
+        profile=profile,
+        registry=capability_registry,
+        budget=budget,
+    )
+
+
+def _run_research_brief_steps(
+    request: ResearchBriefSessionRequest,
+    controller: SessionController,
+    *,
+    search_registry: SearchProviderRegistry | None = None,
+    next_capability: str | None = None,
+) -> _ResearchBriefSteps:
+    """Run the reusable retrieval-to-brief prefix in one controller."""
 
     plan_request = ResearchPlanRequest(
         topic=request.topic,
@@ -231,6 +282,7 @@ def run_research_brief_session(
         "research_brief",
         attempt_id="brief-001",
         inputs=(document_ref,),
+        next_capability=next_capability,
         request=ResearchBriefRequest(
             topic=request.topic,
             bundle=documents,
@@ -248,15 +300,13 @@ def run_research_brief_session(
         controller.store.read_json(brief_ref),
         bundle=documents,
     )
-    return ResearchBriefSessionResult(
-        session_root=request.session_root,
+    return _ResearchBriefSteps(
+        controller=controller,
         plan=plan,
         search=search,
         documents=documents,
         brief=brief,
         brief_ref=brief_ref,
-        attempts=controller.list_attempts(),
-        decisions=tuple(controller.manifest.decisions),
     )
 
 

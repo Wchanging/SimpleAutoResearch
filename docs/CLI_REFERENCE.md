@@ -16,6 +16,7 @@ on command syntax, options, outputs, and short operational notes.
 | `simple-ar run` | Start a new 8-stage research pipeline run. |
 | `simple-ar research-brief` | Build an evidence-backed brief from a topic or local documents. |
 | `simple-ar research-experiment` | Execute and analyze a declared experiment from a research handoff. |
+| `simple-ar research-session` | Run the bounded literature-to-experiment composition in one session. |
 | `simple-ar resume` | Continue an existing research pipeline run. |
 | `simple-ar status` | Print status for a research run or code-task run. |
 | `simple-ar tools ...` | Export tool schemas, call run-local tools, or serve read-only tools over MCP stdio. |
@@ -147,6 +148,30 @@ the application does not retry or repair it implicitly.
 | `--metric NAME` | repeatable | Additional required metric names. |
 | `--metric-direction NAME=DIRECTION` | repeatable | Direction such as `accuracy=higher` or `loss=lower`. |
 | `--command ...` | command | Command passed to the local backend; place it last. |
+
+### `simple-ar research-session`
+
+**Purpose**: run the small end-to-end composition
+`plan -> search -> document_ingest -> research_brief -> experiment -> analysis`
+in one `full_research` session. The experiment command is supplied explicitly;
+code generation and autonomous iteration are outside this entry point.
+
+**Usage** (the command must be the final option):
+
+```bash
+uv run simple-ar research-session \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --cwd examples/research_brief/fixtures \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --command python -c "print('accuracy: 0.75')"
+```
+
+It preserves the same attempt-local artifacts as the individual entries and
+adds no implicit retry or repair policy. Use `research-brief` when execution
+is not yet ready, or `research-experiment` when a persisted direction should
+be executed in a separate session.
 
 ### `simple-ar resume`
 

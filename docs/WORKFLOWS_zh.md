@@ -91,6 +91,11 @@ research direction，调用现有执行后端运行一次明确的命令，再�
 方向到实验的交接仍然明确可检查。执行失败也会作为证据进入分析，但 retry、repair 和实验
 选择仍由调用方负责。
 
+如果希望两段交接保留在同一个 session 中，可以使用
+`simple-ar research-session`。它复用相同的 brief 前缀，再用一个明确提供的
+`ExperimentRequest` 进入现有 Analysis capability；实验命令仍由调用方给出，因此这是
+受控组合，不是自动生成代码或不受限制的研究循环。
+
 如果应用需要使用内置适配器，也可以调用
 `research.register_research_capabilities(registry, names=...)`。不传
 `names` 时注册完整适配器集合，传入时只注册当前路径需要的能力；注册仍然是

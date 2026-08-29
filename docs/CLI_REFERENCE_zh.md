@@ -15,6 +15,7 @@
 | `simple-ar run` | 启动新的 8 阶段 research pipeline。 |
 | `simple-ar research-brief` | 从主题或本地文献构建有证据支持的 research brief。 |
 | `simple-ar research-experiment` | 从 research handoff 执行并分析一个已声明的实验。 |
+| `simple-ar research-session` | 在同一个 session 中运行有界的文献到实验组合流程。 |
 | `simple-ar resume` | 继续已有 research pipeline run。 |
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
 | `simple-ar tools ...` | 导出 tool schema、调用 run-local tool，或通过 MCP stdio 暴露只读 tools。 |
@@ -141,6 +142,28 @@ session 会把输入 handoff、`results.json`、stdout/stderr、guard、diagnosi
 | `--metric NAME` | repeatable | 其他必需指标，可重复传入。 |
 | `--metric-direction NAME=DIRECTION` | repeatable | 指标方向，例如 `accuracy=higher` 或 `loss=lower`。 |
 | `--command ...` | command | 交给本地执行后端的命令，必须放在最后。 |
+
+### `simple-ar research-session`
+
+**一句话说明**：在同一个 `full_research` session 中运行小型端到端组合：
+`plan -> search -> document_ingest -> research_brief -> experiment -> analysis`。
+实验命令仍由调用方明确提供；代码生成和自主迭代不属于这条入口。
+
+**语法用法**（`--command` 必须放在最后）：
+
+```bash
+uv run simple-ar research-session \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --cwd examples/research_brief/fixtures \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --command python -c "print('accuracy: 0.75')"
+```
+
+它保留与两个独立入口相同的 attempt-local 产物，并且不隐式 retry 或 repair。
+如果还没有可执行实验，使用 `research-brief`；如果已经有持久化 direction 需要在
+单独 session 中执行，使用 `research-experiment`。
 
 ### `simple-ar resume`
 

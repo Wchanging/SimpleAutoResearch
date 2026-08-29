@@ -120,6 +120,64 @@ def build_parser() -> argparse.ArgumentParser:
         help="Command to execute; place this option last.",
     )
 
+    session_parser = subparsers.add_parser(
+        "research-session",
+        help="Run a bounded literature-to-experiment research session.",
+    )
+    session_parser.add_argument("--topic", required=True)
+    session_parser.add_argument(
+        "--output-root",
+        default="runs/research-session",
+        help="Parent directory for the timestamped research session.",
+    )
+    session_parser.add_argument(
+        "--local-document",
+        action="append",
+        default=[],
+        help="Local Markdown or text document; may be repeated.",
+    )
+    session_parser.add_argument(
+        "--query",
+        dest="queries",
+        action="append",
+        default=[],
+        help="Search query override; may be repeated.",
+    )
+    session_parser.add_argument(
+        "--provider",
+        dest="providers",
+        action="append",
+        default=[],
+        help="Search provider override; may be repeated.",
+    )
+    session_parser.add_argument("--max-results", type=int, default=10)
+    session_parser.add_argument("--max-chunks", type=int, default=300)
+    session_parser.add_argument("--idea-limit", type=int, default=3)
+    session_parser.add_argument("--cwd", default=".")
+    session_parser.add_argument("--timeout-sec", type=int, default=300)
+    session_parser.add_argument("--label", default="research-session")
+    session_parser.add_argument("--primary-metric", default=None)
+    session_parser.add_argument(
+        "--metric",
+        action="append",
+        default=[],
+        help="Required metric name; may be repeated.",
+    )
+    session_parser.add_argument(
+        "--metric-direction",
+        action="append",
+        default=[],
+        metavar="NAME=DIRECTION",
+        help="Metric direction, such as accuracy=higher; may be repeated.",
+    )
+    session_parser.add_argument(
+        "--command",
+        dest="command_argv",
+        nargs=argparse.REMAINDER,
+        required=True,
+        help="Command to execute; place this option last.",
+    )
+
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
     resume_parser.add_argument("run_dir")
     resume_parser.add_argument("--config", default=None, help="Optional TOML config overrides.")

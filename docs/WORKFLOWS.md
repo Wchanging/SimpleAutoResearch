@@ -114,6 +114,13 @@ existing result-analysis capability. Its input is a persisted
 handoff is explicit and inspectable. Execution failures are analyzed as
 evidence, but retries, repair, and experiment selection remain caller-owned.
 
+For a single session that owns both sides of this handoff, use
+`simple-ar research-session`. It reuses the same brief prefix and continues
+with one explicit `ExperimentRequest` and the existing Analysis capability;
+the command is still supplied by the caller, so this is a controlled
+composition rather than automatic code generation or an unrestricted research
+loop.
+
 Applications that want the built-in adapters can use
 `research.register_research_capabilities(registry, names=...)`. The `names`
 argument is optional for the complete adapter set or can select only the

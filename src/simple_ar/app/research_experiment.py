@@ -99,6 +99,16 @@ class ResearchExperimentSessionError(RuntimeError):
     """Raised when a direction handoff cannot safely reach execution."""
 
 
+@dataclass(frozen=True, slots=True)
+class _ExperimentSteps:
+    """Internal execution-to-analysis handoff within an existing controller."""
+
+    execution: dict[str, Any]
+    analysis: AnalysisResult
+    execution_ref: ArtifactRef
+    analysis_ref: ArtifactRef
+
+
 def run_research_experiment_session(
     request: ResearchExperimentSessionRequest,
     *,
@@ -145,8 +155,11 @@ def run_research_experiment_session(
         schema="experiment_input.v1",
         producer="research.experiment.session",
     )
-    experiment_request = ExperimentRequest(
-        run=RunRequest(
+    steps = _run_experiment_steps(
+        controller,
+        source_ref=source_ref,
+        synthesis=synthesis,
+        run_request=RunRequest(
             command=list(request.command),
             cwd=request.cwd,
             timeout_sec=request.timeout_sec,
@@ -154,6 +167,43 @@ def run_research_experiment_session(
             env=dict(request.env) if request.env is not None else None,
         ),
         result_schema=request.result_schema,
+        analysis_context=build_experiment_analysis_context(
+            topic=request.topic,
+            task_id=request.session_root.name,
+            source_file=request.synthesis_file,
+            synthesis=synthesis,
+            result_schema=request.result_schema,
+        ),
+        backend=backend,
+    )
+    return ResearchExperimentSessionResult(
+        session_root=request.session_root,
+        synthesis=synthesis,
+        execution=steps.execution,
+        analysis=steps.analysis,
+        source_ref=source_ref,
+        execution_ref=steps.execution_ref,
+        analysis_ref=steps.analysis_ref,
+        attempts=controller.list_attempts(),
+        decisions=tuple(controller.manifest.decisions),
+    )
+
+
+def _run_experiment_steps(
+    controller: SessionController,
+    *,
+    source_ref: ArtifactRef,
+    synthesis: SynthesisResult,
+    run_request: RunRequest,
+    result_schema: Mapping[str, Any],
+    analysis_context: AnalysisContext,
+    backend: ExecutionBackend | None,
+) -> _ExperimentSteps:
+    """Run experiment and analysis attempts in a caller-owned session."""
+
+    experiment_request = ExperimentRequest(
+        run=run_request,
+        result_schema=result_schema,
         experiment_contract=synthesis.experiment_contract,
     )
     controller.execute(
@@ -172,7 +222,7 @@ def run_research_experiment_session(
     execution = controller.store.read_json(execution_ref)
     if not isinstance(execution, Mapping):
         raise ResearchExperimentSessionError(
-            f"Execution output is not a JSON object; inspect {request.session_root}."
+            f"Execution output is not a JSON object; inspect {controller.store.root}."
         )
 
     controller.execute(
@@ -180,7 +230,7 @@ def run_research_experiment_session(
         attempt_id="analysis-001",
         inputs=(execution_ref,),
         result_ref=execution_ref,
-        analysis_context=_analysis_context(request, synthesis),
+        analysis_context=analysis_context,
     )
     analysis_ref = controller.attempt_output_ref(
         "analysis-001",
@@ -190,19 +240,13 @@ def run_research_experiment_session(
     analysis_payload = controller.store.read_json(analysis_ref)
     if not isinstance(analysis_payload, Mapping):
         raise ResearchExperimentSessionError(
-            f"Analysis output is not a JSON object; inspect {request.session_root}."
+            f"Analysis output is not a JSON object; inspect {controller.store.root}."
         )
-    analysis = AnalysisHandoff.from_handoff_dict(analysis_payload).analysis
-    return ResearchExperimentSessionResult(
-        session_root=request.session_root,
-        synthesis=synthesis,
+    return _ExperimentSteps(
         execution=dict(execution),
-        analysis=analysis,
-        source_ref=source_ref,
+        analysis=AnalysisHandoff.from_handoff_dict(analysis_payload).analysis,
         execution_ref=execution_ref,
         analysis_ref=analysis_ref,
-        attempts=controller.list_attempts(),
-        decisions=tuple(controller.manifest.decisions),
     )
 
 
@@ -231,13 +275,17 @@ def _load_synthesis(path: Path) -> SynthesisResult:
         ) from exc
 
 
-def _analysis_context(
-    request: ResearchExperimentSessionRequest,
+def build_experiment_analysis_context(
+    *,
+    topic: str,
+    task_id: str,
+    source_file: Path,
     synthesis: SynthesisResult,
+    result_schema: Mapping[str, Any],
 ) -> AnalysisContext:
     contract = synthesis.experiment_contract
     assert contract is not None
-    schema = dict(request.result_schema)
+    schema = dict(result_schema)
     required = schema.get("required_metrics")
     required_names = [
         str(item).strip()
@@ -258,8 +306,8 @@ def _analysis_context(
         for name in metric_names
     ]
     return AnalysisContext(
-        task_id=request.session_root.name,
-        title=request.topic,
+        task_id=task_id,
+        title=topic,
         hypotheses=[
             {
                 "id": contract.contract_id or "hypothesis-1",
@@ -272,7 +320,7 @@ def _analysis_context(
             for name in metric_names
         },
         task_contract={"experiment_contract": contract.to_row()},
-        metadata={"synthesis_file": str(request.synthesis_file)},
+        metadata={"synthesis_file": str(source_file)},
     )
 
 
@@ -291,5 +339,6 @@ __all__ = [
     "ResearchExperimentSessionError",
     "ResearchExperimentSessionRequest",
     "ResearchExperimentSessionResult",
+    "build_experiment_analysis_context",
     "run_research_experiment_session",
 ]
