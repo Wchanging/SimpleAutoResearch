@@ -13,6 +13,8 @@
 | 命令 | 用途 |
 | --- | --- |
 | `simple-ar run` | 启动新的 8 阶段 research pipeline。 |
+| `simple-ar research-brief` | 从主题或本地文献构建有证据支持的 research brief。 |
+| `simple-ar research-experiment` | 从 research handoff 执行并分析一个已声明的实验。 |
 | `simple-ar resume` | 继续已有 research pipeline run。 |
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
 | `simple-ar tools ...` | 导出 tool schema、调用 run-local tool，或通过 MCP stdio 暴露只读 tools。 |
@@ -88,6 +90,57 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 
 真实运行参数较多时，优先使用 TOML。完整字段见
 [配置参考](CONFIG_REFERENCE_zh.md#完整-pipeline-config)。
+
+### `simple-ar research-brief`
+
+**一句话说明**：从主题或本地 Markdown/TXT 文献构建一个有证据支持的 research brief。
+
+**语法用法**：
+
+```bash
+uv run simple-ar research-brief \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --output-root runs/research-brief
+```
+
+命令会创建带时间戳的 session，并把 plan、search、document ingest 和 brief 分别记录在
+独立 attempt 中。它不会静默 retry 或覆盖 attempt；`--query`、`--provider`、
+`--max-results`、`--max-chunks` 和 `--idea-limit` 是这条路径保留的少量控制项。
+
+### `simple-ar research-experiment`
+
+**一句话说明**：接收已经审阅的 `research_brief.v1` 或 `synthesis_result.v1` handoff，
+通过现有执行后端运行一次实验，并把真实结果交给结果分析能力。
+
+**语法用法**（`--command` 必须放在最后）：
+
+```bash
+uv run simple-ar research-experiment \
+  --topic "reliable agents" \
+  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --cwd examples/research_brief/fixtures \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --command python -c "print('accuracy: 0.75')"
+```
+
+执行前会检查输入 handoff；如果 synthesis 不是 `ready` 或没有 experiment contract，入口会拒绝执行。
+session 会把输入 handoff、`results.json`、stdout/stderr、guard、diagnosis 和 `analysis.json`
+分别记录在 `experiment-001/` 与 `analysis-001/` attempt 下。即使实验失败，它仍会被交给分析能力并
+保留为证据；入口不会隐式 retry 或 repair。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `--topic TEXT` | string | 新 session 的主题标签。 |
+| `--synthesis-file PATH` | path | 已持久化的 `research_brief.v1` 或 `synthesis_result.v1` 输入。 |
+| `--output-root DIR` | path | 带时间戳 session 的父目录。 |
+| `--cwd DIR` | path | 传给执行后端的工作目录。 |
+| `--timeout-sec N` | int | 本地执行 timeout。 |
+| `--primary-metric NAME` | string | 结果中应解析到的主指标。 |
+| `--metric NAME` | repeatable | 其他必需指标，可重复传入。 |
+| `--metric-direction NAME=DIRECTION` | repeatable | 指标方向，例如 `accuracy=higher` 或 `loss=lower`。 |
+| `--command ...` | command | 交给本地执行后端的命令，必须放在最后。 |
 
 ### `simple-ar resume`
 

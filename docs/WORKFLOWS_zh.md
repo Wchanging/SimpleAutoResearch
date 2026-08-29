@@ -57,6 +57,40 @@ controller 不会自行推断分支，也不会替调用方选择结果。需要
 并为后续 capability 暴露一个结构化的 `research_brief.json` 输出。这是可选的适配器，
 不是对现有八阶段 research pipeline 的自动替换。
 
+面向用户的最小组合入口是 `simple-ar research-brief`，它只负责一条明确的路径：
+
+```text
+plan -> search -> document_ingest -> research_brief（内部复用 Read + Synthesis）
+```
+
+主题检索可以直接运行：
+
+```bash
+uv run simple-ar research-brief --topic "reliable agents"
+```
+
+如果希望使用可复现的本地输入，可以重复提供 Markdown/TXT 文件：
+
+```bash
+uv run simple-ar research-brief --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --output-root runs/research-brief
+```
+
+命令会在输出目录下创建带时间戳的 session。每次交接保留在独立 attempt 中，通常位于
+`attempts/plan-001/`、`attempts/search-001/`、`attempts/document-001/` 和
+`attempts/brief-001/`；规范输出分别是 `research_plan.json`、`search_result.json`、
+`document_bundle.json` 和 `research_brief.json`。能力结果与 attempt manifest 会记录状态
+和 lineage。该入口不会静默重试或覆盖旧 attempt；`--query`、`--provider`、
+`--max-results`、`--max-chunks` 和 `--idea-limit` 是这条路径保留的少量控制项，更复杂的策略
+仍由上层应用负责。
+
+下一条小组合入口是 `simple-ar research-experiment`。它接收前一个入口生成的
+research direction，调用现有执行后端运行一次明确的命令，再把规范化的 `results.json`
+交给现有结果分析能力。输入是持久化的 `research_brief.v1` 或 `synthesis_result.v1`，因此
+方向到实验的交接仍然明确可检查。执行失败也会作为证据进入分析，但 retry、repair 和实验
+选择仍由调用方负责。
+
 如果应用需要使用内置适配器，也可以调用
 `research.register_research_capabilities(registry, names=...)`。不传
 `names` 时注册完整适配器集合，传入时只注册当前路径需要的能力；注册仍然是

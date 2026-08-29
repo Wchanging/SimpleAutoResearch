@@ -89,6 +89,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         print_line(f"Stages completed: {len(executions)}")
         return
 
+    if args.command == "research-brief":
+        _print_research_brief(args)
+        return
+
+    if args.command == "research-experiment":
+        _print_research_experiment(args)
+        return
+
     if args.command == "resume":
         run_dir = Path(args.run_dir)
         topic = _read_topic(run_dir)
@@ -203,6 +211,99 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     parser.error(f"Unknown command: {args.command}")
+
+
+def _print_research_brief(args: argparse.Namespace) -> None:
+    """Run the small capability-oriented topic-to-brief application path."""
+
+    from simple_ar.app.research_brief import (
+        ResearchBriefSessionError,
+        ResearchBriefSessionRequest,
+        new_research_brief_root,
+        run_research_brief_session,
+    )
+
+    if args.max_results < 1 or args.max_chunks < 1 or args.idea_limit < 1:
+        raise SystemExit("--max-results, --max-chunks, and --idea-limit must be positive.")
+    session_root = new_research_brief_root(args.output_root, args.topic)
+    request = ResearchBriefSessionRequest(
+        topic=args.topic,
+        session_root=session_root,
+        local_documents=tuple(Path(path) for path in args.local_document),
+        queries=tuple(args.queries),
+        providers=tuple(args.providers),
+        max_results=args.max_results,
+        max_chunks=args.max_chunks,
+        idea_limit=args.idea_limit,
+    )
+    try:
+        result = run_research_brief_session(request)
+    except ResearchBriefSessionError as exc:
+        raise SystemExit(str(exc)) from exc
+    print_line(f"Research brief session: {result.session_root}")
+    print_line(f"Status: {result.status}")
+    print_line(f"Papers: {len(result.search.papers)}")
+    print_line(f"Documents: {len(result.documents.records)}")
+    print_line(f"Ideas: {len(result.brief.synthesis.ideas) if result.brief.synthesis else 0}")
+    print_line(f"Brief: {result.brief_path}")
+
+
+def _print_research_experiment(args: argparse.Namespace) -> None:
+    """Run one declared experiment and print its persisted handoffs."""
+
+    from simple_ar.app.research_experiment import (
+        ResearchExperimentSessionError,
+        ResearchExperimentSessionRequest,
+        run_research_experiment_session,
+    )
+    from simple_ar.app.session_roots import new_research_session_root
+
+    if args.timeout_sec < 1:
+        raise SystemExit("--timeout-sec must be positive.")
+    synthesis_file = Path(args.synthesis_file)
+    if not synthesis_file.is_file():
+        raise SystemExit(f"Synthesis handoff not found: {synthesis_file}")
+    session_root = new_research_session_root(args.output_root, args.topic)
+    try:
+        result_schema = _experiment_result_schema(args)
+        result = run_research_experiment_session(
+            ResearchExperimentSessionRequest(
+                topic=args.topic,
+                session_root=session_root,
+                synthesis_file=synthesis_file,
+                command=tuple(args.command_argv),
+                cwd=Path(args.cwd),
+                timeout_sec=args.timeout_sec,
+                result_schema=result_schema,
+                label=args.label,
+            )
+        )
+    except ResearchExperimentSessionError as exc:
+        raise SystemExit(str(exc)) from exc
+    print_line(f"Research experiment session: {result.session_root}")
+    print_line(f"Status: {result.status}")
+    print_line(f"Execution: {result.execution_path}")
+    print_line(f"Analysis: {result.analysis_path}")
+
+
+def _experiment_result_schema(args: argparse.Namespace) -> dict[str, object]:
+    """Normalize the few metric controls exposed by the small CLI."""
+
+    primary = str(args.primary_metric or "").strip()
+    metrics = [str(item).strip() for item in args.metric if str(item).strip()]
+    required = list(dict.fromkeys(([primary] if primary else []) + metrics))
+    directions: dict[str, str] = {}
+    for item in args.metric_direction:
+        name, separator, direction = str(item).partition("=")
+        if not separator or not name.strip() or not direction.strip():
+            raise SystemExit(f"Invalid --metric-direction value: {item!r}")
+        directions[name.strip()] = direction.strip()
+    schema: dict[str, object] = {"required_metrics": required}
+    if primary:
+        schema["primary_metric"] = primary
+    if directions:
+        schema["metric_directions"] = directions
+    return schema
 
 
 def _print_clean(args: argparse.Namespace) -> None:

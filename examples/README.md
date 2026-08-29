@@ -1,11 +1,27 @@
 # Examples
 
+## Research Brief
+
+Build a small evidence-backed brief from a topic and local Markdown/TXT input:
+
+```bash
+uv run simple-ar research-brief --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --output-root runs/research-brief
+```
+
+The session keeps plan, search, document-ingest, and brief handoffs in separate
+attempt directories. The fixture is intentionally small and offline.
+
 SimpleAutoResearch keeps a small set of public example entrypoints. Each one mirrors
 a common user workflow and keeps its config next to the project or task it
 drives.
 
 ```text
 examples/
+  research_brief/
+    fixtures/reliable_agents.md       offline input for the brief example
+
   research_report/
     configs/research_report.toml    search -> read -> synthesize -> report
 

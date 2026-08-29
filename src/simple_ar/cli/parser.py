@@ -50,6 +50,76 @@ def build_parser() -> argparse.ArgumentParser:
         help="Do not archive existing code/run stage artifacts before rerunning those stages.",
     )
 
+    brief_parser = subparsers.add_parser(
+        "research-brief",
+        help="Build an evidence-backed research brief from a topic or local documents.",
+    )
+    brief_parser.add_argument("--topic", required=True)
+    brief_parser.add_argument(
+        "--output-root",
+        default="runs/research-brief",
+        help="Parent directory for the timestamped brief session.",
+    )
+    brief_parser.add_argument(
+        "--local-document",
+        action="append",
+        default=[],
+        help="Local Markdown or text document; may be repeated.",
+    )
+    brief_parser.add_argument(
+        "--query",
+        dest="queries",
+        action="append",
+        default=[],
+        help="Search query override; may be repeated.",
+    )
+    brief_parser.add_argument(
+        "--provider",
+        dest="providers",
+        action="append",
+        default=[],
+        help="Search provider override; may be repeated.",
+    )
+    brief_parser.add_argument("--max-results", type=int, default=10)
+    brief_parser.add_argument("--max-chunks", type=int, default=300)
+    brief_parser.add_argument("--idea-limit", type=int, default=3)
+
+    experiment_parser = subparsers.add_parser(
+        "research-experiment",
+        help="Execute and analyze a declared experiment from a research handoff.",
+    )
+    experiment_parser.add_argument("--topic", required=True)
+    experiment_parser.add_argument("--synthesis-file", required=True)
+    experiment_parser.add_argument(
+        "--output-root",
+        default="runs/research-experiment",
+        help="Parent directory for the timestamped experiment session.",
+    )
+    experiment_parser.add_argument("--cwd", default=".")
+    experiment_parser.add_argument("--timeout-sec", type=int, default=300)
+    experiment_parser.add_argument("--label", default="research-experiment")
+    experiment_parser.add_argument("--primary-metric", default=None)
+    experiment_parser.add_argument(
+        "--metric",
+        action="append",
+        default=[],
+        help="Required metric name; may be repeated.",
+    )
+    experiment_parser.add_argument(
+        "--metric-direction",
+        action="append",
+        default=[],
+        metavar="NAME=DIRECTION",
+        help="Metric direction, such as accuracy=higher; may be repeated.",
+    )
+    experiment_parser.add_argument(
+        "--command",
+        dest="command_argv",
+        nargs=argparse.REMAINDER,
+        required=True,
+        help="Command to execute; place this option last.",
+    )
+
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
     resume_parser.add_argument("run_dir")
     resume_parser.add_argument("--config", default=None, help="Optional TOML config overrides.")

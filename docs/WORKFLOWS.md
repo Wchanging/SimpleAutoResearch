@@ -75,6 +75,45 @@ existing Read and Synthesis boundaries and exposes a single structured
 `research_brief.json` output for the next capability. This is an opt-in adapter,
 not an automatic replacement for the eight-stage research pipeline.
 
+The small user-facing composition is available as `simple-ar research-brief`.
+It owns one explicit path:
+
+```text
+plan -> search -> document_ingest -> research_brief(Read + Synthesis)
+```
+
+For an online topic, the command uses the configured built-in source providers:
+
+```bash
+uv run simple-ar research-brief --topic "reliable agents"
+```
+
+For a reproducible local run, provide one or more Markdown/text documents:
+
+```bash
+uv run simple-ar research-brief --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --output-root runs/research-brief
+```
+
+The command creates a timestamped session directory. Each handoff remains in
+its own attempt, normally under `attempts/plan-001/`, `attempts/search-001/`,
+`attempts/document-001/`, and `attempts/brief-001/`. The canonical outputs are
+`research_plan.json`, `search_result.json`, `document_bundle.json`, and
+`research_brief.json`; capability results and attempt manifests record their
+status and lineage. The command does not silently retry or overwrite a prior
+attempt. `--query`, `--provider`, `--max-results`, `--max-chunks`, and
+`--idea-limit` are the deliberately small controls for this path; more complex
+policies remain application-owned.
+
+The next small composition accepts the resulting research direction through
+`simple-ar research-experiment`. It runs one declared command with the
+existing execution backend and sends its canonical `results.json` to the
+existing result-analysis capability. Its input is a persisted
+`research_brief.v1` or `synthesis_result.v1`, so the direction-to-experiment
+handoff is explicit and inspectable. Execution failures are analyzed as
+evidence, but retries, repair, and experiment selection remain caller-owned.
+
 Applications that want the built-in adapters can use
 `research.register_research_capabilities(registry, names=...)`. The `names`
 argument is optional for the complete adapter set or can select only the

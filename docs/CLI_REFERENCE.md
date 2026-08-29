@@ -14,6 +14,8 @@ on command syntax, options, outputs, and short operational notes.
 | Command | Purpose |
 | --- | --- |
 | `simple-ar run` | Start a new 8-stage research pipeline run. |
+| `simple-ar research-brief` | Build an evidence-backed brief from a topic or local documents. |
+| `simple-ar research-experiment` | Execute and analyze a declared experiment from a research handoff. |
 | `simple-ar resume` | Continue an existing research pipeline run. |
 | `simple-ar status` | Print status for a research run or code-task run. |
 | `simple-ar tools ...` | Export tool schemas, call run-local tools, or serve read-only tools over MCP stdio. |
@@ -89,6 +91,62 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 
 Use a TOML config for real runs with many options. See the
 [Configuration Reference](CONFIG_REFERENCE.md#complete-pipeline-config).
+
+### `simple-ar research-brief`
+
+**Purpose**: build a small evidence-backed brief from a topic or local
+Markdown/text documents.
+
+**Usage**:
+
+```bash
+uv run simple-ar research-brief \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --output-root runs/research-brief
+```
+
+The command creates a timestamped session with separate plan, search, document
+ingest, and brief attempts. It does not silently retry or overwrite an attempt;
+`--query`, `--provider`, `--max-results`, `--max-chunks`, and `--idea-limit` are
+the deliberately small controls for this path.
+
+### `simple-ar research-experiment`
+
+**Purpose**: execute one reviewed `research_brief.v1` or `synthesis_result.v1`
+handoff and analyze the observed result through the existing execution and
+result-analysis capabilities.
+
+**Usage** (the command must be the final option):
+
+```bash
+uv run simple-ar research-experiment \
+  --topic "reliable agents" \
+  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --cwd examples/research_brief/fixtures \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --command python -c "print('accuracy: 0.75')"
+```
+
+The input handoff is checked before execution; a synthesis that is not ready
+or has no experiment contract is rejected. The session records the source
+handoff, `results.json`, captured stdout/stderr, guard and diagnosis artifacts,
+and `analysis.json` under separate `experiment-001/` and `analysis-001/`
+attempts. A failed execution is still analyzed and retained as evidence, but
+the application does not retry or repair it implicitly.
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `--topic TEXT` | string | Topic label for the new session. |
+| `--synthesis-file PATH` | path | Persisted `research_brief.v1` or `synthesis_result.v1` input. |
+| `--output-root DIR` | path | Parent directory for the timestamped session. |
+| `--cwd DIR` | path | Working directory passed to the execution backend. |
+| `--timeout-sec N` | int | Local execution timeout. |
+| `--primary-metric NAME` | string | Primary metric expected in parsed output. |
+| `--metric NAME` | repeatable | Additional required metric names. |
+| `--metric-direction NAME=DIRECTION` | repeatable | Direction such as `accuracy=higher` or `loss=lower`. |
+| `--command ...` | command | Command passed to the local backend; place it last. |
 
 ### `simple-ar resume`
 
