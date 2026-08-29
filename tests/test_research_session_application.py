@@ -44,7 +44,8 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.status, "ready_for_report")
+            self.assertEqual(result.next_capability, "report")
             self.assertEqual(result.execution["status"], "passed")
             self.assertEqual(result.analysis.status, "passed")
             self.assertEqual(
@@ -71,7 +72,7 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                 (root / "session" / "session_manifest.json").read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["profile"], "full_research")
-            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["status"], "running")
 
 
 if __name__ == "__main__":

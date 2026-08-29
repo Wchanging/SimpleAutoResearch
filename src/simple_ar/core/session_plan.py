@@ -40,6 +40,7 @@ class SessionStep:
     capability: str
     attempt_id: str
     inputs: tuple[ArtifactRef, ...] = ()
+    parent_attempt_id: str | None = None
     trigger: str = "sequence"
     profile: str | None = None
     expected_delta: str = ""
@@ -63,6 +64,9 @@ class SessionStep:
             names = ", ".join(sorted(reserved))
             raise ValueError(f"SessionStep handler_kwargs are controller-owned: {names}")
         object.__setattr__(self, "inputs", tuple(self.inputs))
+        if self.parent_attempt_id is not None:
+            parent = str(self.parent_attempt_id).strip()
+            object.__setattr__(self, "parent_attempt_id", parent or None)
         object.__setattr__(self, "handler_kwargs", dict(self.handler_kwargs))
 
 
@@ -91,6 +95,7 @@ def run_session_plan(
             trigger=step.trigger,
             profile=step.profile,
             inputs=step.inputs,
+            parent_attempt_id=step.parent_attempt_id,
             expected_delta=step.expected_delta,
             progressed=step.progressed,
             failure_kind=step.failure_kind,

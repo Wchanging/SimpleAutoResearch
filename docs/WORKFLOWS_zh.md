@@ -96,6 +96,13 @@ research direction，调用现有执行后端运行一次明确的命令，再�
 `ExperimentRequest` 进入现有 Analysis capability；实验命令仍由调用方给出，因此这是
 受控组合，不是自动生成代码或不受限制的研究循环。
 
+同一个 session 还可以通过 `run_research_report_session()` 继续进入现有 Report 边界。
+调用方提供 section drafts、`ReportContext` 和需要追踪的 source refs；适配器会追加
+`report` 与 `report_audit` attempt，不复制或替换之前的 analysis 产物。因此
+`research-session` 前缀在实验和分析完成后会报告 `ready_for_report`，真正的报告 continuation
+完成后 session 才会关闭。section drafts 仍由调用方明确提供，writer/revision 策略不会被
+塞进生命周期 controller。
+
 如果应用需要使用内置适配器，也可以调用
 `research.register_research_capabilities(registry, names=...)`。不传
 `names` 时注册完整适配器集合，传入时只注册当前路径需要的能力；注册仍然是

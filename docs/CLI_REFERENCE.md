@@ -172,6 +172,10 @@ It preserves the same attempt-local artifacts as the individual entries and
 adds no implicit retry or repair policy. Use `research-brief` when execution
 is not yet ready, or `research-experiment` when a persisted direction should
 be executed in a separate session.
+When the experiment and analysis prefix completes, its result status is
+`ready_for_report` because the session remains open for an explicit report
+continuation. The report assembler is currently exposed as a Python application
+adapter (`run_research_report_session`) rather than another flag-heavy CLI.
 
 ### `simple-ar resume`
 

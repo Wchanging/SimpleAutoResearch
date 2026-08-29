@@ -164,6 +164,9 @@ uv run simple-ar research-session \
 它保留与两个独立入口相同的 attempt-local 产物，并且不隐式 retry 或 repair。
 如果还没有可执行实验，使用 `research-brief`；如果已经有持久化 direction 需要在
 单独 session 中执行，使用 `research-experiment`。
+实验与分析前缀完成后，结果状态为 `ready_for_report`，因为 session 仍会为显式报告 continuation
+保持打开。目前报告装配通过 Python 应用适配器 `run_research_report_session` 提供，而不是继续
+增加一组参数繁多的 CLI 开关。
 
 ### `simple-ar resume`
 

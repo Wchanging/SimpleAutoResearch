@@ -82,10 +82,16 @@ class ResearchSessionResult:
     def status(self) -> str:
         execution_status = str(self.execution.get("status") or "unknown")
         if execution_status == "passed" and self.analysis.status == "passed":
-            return "completed"
+            return "ready_for_report"
         if self.analysis.status == "passed":
             return "partial"
         return self.analysis.status
+
+    @property
+    def next_capability(self) -> str | None:
+        """Return the explicit next handoff recorded by the session."""
+
+        return self.decisions[-1].next_capability if self.decisions else None
 
 
 class ResearchSessionError(RuntimeError):
@@ -150,6 +156,7 @@ def run_research_session(
             synthesis=steps.brief.synthesis,
             result_schema=request.result_schema,
         ),
+        analysis_next_capability="report",
         backend=backend,
     )
     return ResearchSessionResult(

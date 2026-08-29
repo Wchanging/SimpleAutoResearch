@@ -174,6 +174,7 @@ def run_research_experiment_session(
             synthesis=synthesis,
             result_schema=request.result_schema,
         ),
+        analysis_next_capability=None,
         backend=backend,
     )
     return ResearchExperimentSessionResult(
@@ -197,6 +198,7 @@ def _run_experiment_steps(
     run_request: RunRequest,
     result_schema: Mapping[str, Any],
     analysis_context: AnalysisContext,
+    analysis_next_capability: str | None,
     backend: ExecutionBackend | None,
 ) -> _ExperimentSteps:
     """Run experiment and analysis attempts in a caller-owned session."""
@@ -229,6 +231,7 @@ def _run_experiment_steps(
         "analysis",
         attempt_id="analysis-001",
         inputs=(execution_ref,),
+        next_capability=analysis_next_capability,
         result_ref=execution_ref,
         analysis_context=analysis_context,
     )

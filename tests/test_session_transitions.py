@@ -746,6 +746,44 @@ class SessionTransitionTests(unittest.TestCase):
                 ["attempt-001"],
             )
 
+    def test_session_plan_can_create_an_explicit_bounded_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CapabilityRegistry()
+
+            def handler(*, context: CapabilityContext) -> CapabilityResult:
+                return CapabilityResult(status="completed")
+
+            registry.register("plan", handler)
+            registry.register("search", handler)
+            controller = SessionController.create(
+                tmp,
+                session_id="session-plan-branch",
+                topic="bounded branch",
+                registry=registry,
+            )
+            controller.execute("plan", attempt_id="attempt-001", next_capability="search")
+
+            outcomes = run_session_plan(
+                controller,
+                [
+                    SessionStep(
+                        "search",
+                        "attempt-002",
+                        parent_attempt_id="attempt-001",
+                    )
+                ],
+            )
+
+            self.assertEqual(len(outcomes), 1)
+            self.assertEqual(outcomes[0][1].action, "accept")
+            self.assertEqual(
+                controller.store.read_attempt_manifest(
+                    "attempts/attempt-002/attempt_manifest.json"
+                ).parent_attempt,
+                "attempt-001",
+            )
+            self.assertEqual(controller.manifest.status, "completed")
+
     def test_explicit_session_plan_passes_transition_signals_to_controller(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = CapabilityRegistry()

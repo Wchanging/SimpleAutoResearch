@@ -121,6 +121,15 @@ the command is still supplied by the caller, so this is a controlled
 composition rather than automatic code generation or an unrestricted research
 loop.
 
+The same session can be continued into the existing report boundary with
+`run_research_report_session()`. The caller supplies section drafts,
+`ReportContext`, and any source refs; the adapter appends `report` and
+`report_audit` attempts without copying or replacing the earlier analysis
+artifact. A successful `research-session` prefix therefore reports
+`ready_for_report`, while the report continuation is the operation that can
+close the session. Supplying drafts explicitly keeps writer/revision policy
+outside the lifecycle controller.
+
 Applications that want the built-in adapters can use
 `research.register_research_capabilities(registry, names=...)`. The `names`
 argument is optional for the complete adapter set or can select only the
