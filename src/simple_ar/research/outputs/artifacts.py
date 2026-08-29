@@ -25,8 +25,6 @@ from simple_ar.research.evidence.derivation import (
     build_evidence_review,
     build_experiment_contract,
     build_gap_summary,
-    build_idea_candidates,
-    build_novelty_checks,
     build_research_eval,
     build_tool_context,
     experiment_contract_markdown,
@@ -36,6 +34,7 @@ from simple_ar.research.evidence.pack import (
     compact_evidence_pack_for_storage,
     evidence_pack_markdown,
 )
+from simple_ar.research.synthesis import SynthesisRequest, synthesize_evidence
 from simple_ar.research.documents.ingest import build_document_bundle
 from simple_ar.research.evidence.reader import ReadRequest, ReadResult, read_documents
 from simple_ar.research.documents.records import build_cache_manifest
@@ -507,12 +506,14 @@ def write_synthesis_evidence_artifacts(
         fulltext_manifest=fulltext_manifest,
         fulltext_extraction=fulltext_extraction,
     )
-    idea_candidates = build_idea_candidates(evidence_pack)
-    novelty_checks = build_novelty_checks(
-        idea_candidates,
-        evidence_pack,
-        backend=str(source_plan_obj.budget.get("novelty_backend") or "local"),
+    synthesis = synthesize_evidence(
+        SynthesisRequest(
+            evidence_pack=evidence_pack,
+            novelty_backend=str(source_plan_obj.budget.get("novelty_backend") or "local"),
+        )
     )
+    idea_candidates = list(synthesis.ideas)
+    novelty_checks = list(synthesis.novelty_checks)
     stored_evidence_pack = compact_evidence_pack_for_storage(evidence_pack)
     write_json(stage_dir / SYNTHESIS_EVIDENCE_PACK_JSON, stored_evidence_pack)
     write_text(stage_dir / SYNTHESIS_EVIDENCE_PACK_MD, evidence_pack_markdown(stored_evidence_pack))

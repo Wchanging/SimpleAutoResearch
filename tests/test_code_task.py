@@ -46,6 +46,7 @@ from simple_ar.code_task.orchestration.execute import (
     _apply_greenfield_review_repair_metadata,
     _attempt_greenfield_run_repair,
 )
+from simple_ar.code_task.editing.patching import _write_text_atomically
 from simple_ar.code_task.runtime.state import code_task_paths
 from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentSpec,
@@ -59,6 +60,27 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CodeTaskTests(unittest.TestCase):
+    def test_atomic_text_write_retries_transient_destination_lock(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            target = Path(tmp) / "result.txt"
+            target.write_text("old\n", encoding="utf-8")
+            original_replace = Path.replace
+            attempts = 0
+
+            def flaky_replace(source: Path, destination: Path) -> Path:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError("transient destination lock")
+                return original_replace(source, destination)
+
+            with patch.object(Path, "replace", new=flaky_replace):
+                _write_text_atomically(target, "new\n")
+
+            self.assertEqual(attempts, 3)
+            self.assertEqual(target.read_text(encoding="utf-8"), "new\n")
+
     def test_python_file_in_runtime_named_directory_remains_source(self) -> None:
         self.assertEqual(infer_file_kind("artifacts/artifacts_io.py"), "source")
         self.assertEqual(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 
 ResearchMode = Literal["lite", "standard", "strong"]
@@ -367,6 +367,25 @@ class IdeaCandidate:
         """Return a JSON-serializable representation."""
         return asdict(self)
 
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "IdeaCandidate":
+        """Restore one idea from a persisted synthesis handoff."""
+
+        return cls(
+            idea_id=str(row.get("idea_id") or ""),
+            title=str(row.get("title") or ""),
+            hypothesis=str(row.get("hypothesis") or ""),
+            motivation_refs=_string_list(row.get("motivation_refs")),
+            proposed_change=str(row.get("proposed_change") or ""),
+            expected_outcome=str(row.get("expected_outcome") or ""),
+            required_baselines=_string_list(row.get("required_baselines")),
+            required_datasets=_string_list(row.get("required_datasets")),
+            metrics=_string_list(row.get("metrics")),
+            feasibility=str(row.get("feasibility") or "unknown"),
+            risks=_string_list(row.get("risks")),
+            schema_version=str(row.get("schema_version") or "idea_candidate.v1"),
+        )
+
 
 @dataclass(frozen=True)
 class NoveltyCheck:
@@ -383,9 +402,22 @@ class NoveltyCheck:
         """Return a JSON-serializable representation."""
         return asdict(self)
 
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "NoveltyCheck":
+        """Restore one novelty check from a persisted synthesis handoff."""
+
+        return cls(
+            idea_id=str(row.get("idea_id") or ""),
+            status=str(row.get("status") or "unknown"),
+            similar_work_refs=_string_list(row.get("similar_work_refs")),
+            risk_level=str(row.get("risk_level") or "unknown"),
+            rationale=str(row.get("rationale") or ""),
+            schema_version=str(row.get("schema_version") or "novelty_check.v1"),
+        )
+
 
 @dataclass(frozen=True)
-class ExperimentContract:
+class ResearchExperimentContract:
     """Bridge artifact from a research hypothesis to code/reproduction work."""
 
     contract_id: str
@@ -405,6 +437,30 @@ class ExperimentContract:
     def to_row(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
         return asdict(self)
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "ResearchExperimentContract":
+        """Restore the research-level contract from a persisted handoff."""
+
+        return cls(
+            contract_id=str(row.get("contract_id") or ""),
+            hypothesis=str(row.get("hypothesis") or ""),
+            motivation_refs=_string_list(row.get("motivation_refs")),
+            baseline=str(row.get("baseline") or "unknown"),
+            dataset=str(row.get("dataset") or "unknown"),
+            metrics=_string_list(row.get("metrics")),
+            proposed_change=str(row.get("proposed_change") or ""),
+            implementation_scope=_string_list(row.get("implementation_scope")),
+            validation_hints=_string_list(row.get("validation_hints")),
+            resource_budget=_dict(row.get("resource_budget")),
+            risks=_string_list(row.get("risks")),
+            report_claim_plan=_string_list(row.get("report_claim_plan")),
+            schema_version=str(row.get("schema_version") or "experiment_contract.v1"),
+        )
+
+
+# Keep the historical import stable while giving new code an unambiguous name.
+ExperimentContract = ResearchExperimentContract
 
 
 def _string_list(value: object) -> list[str]:

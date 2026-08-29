@@ -28,6 +28,8 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         targets=(
             "tests.test_capabilities",
             "tests.test_capability_package_example",
+            "tests.test_session_transitions",
+            "tests.test_public_api",
         ),
     ),
     "quick": CheckGroup(
@@ -70,6 +72,18 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
             "tests.test_evidence",
             "tests.test_llm",
             "tests.test_report",
+            "tests.test_search_capability",
+            "tests.test_research_registry",
+            "tests.test_document_ports",
+            "tests.test_synthesis_capability",
+            "tests.test_research_brief",
+            "tests.test_analysis_capability",
+            "tests.test_research_decisions",
+            "tests.test_experiment_capability",
+            "tests.test_report_ports",
+            "tests.test_report_capability",
+            "tests.test_vertical_capability_flow",
+            "tests.test_literature_session_flow",
         ),
     ),
     "all": CheckGroup(

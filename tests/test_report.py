@@ -18,7 +18,7 @@ from simple_ar.report.agent import (
 )
 from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
 from simple_ar.report.assembler import apply_section_numbering
-from simple_ar.report.audit import build_report_audit
+from simple_ar.report.audit import ReportAuditRequest, audit_report, build_report_audit
 from simple_ar.report.citations import (
     append_references_section as _append_references_section,
     body_citation_ids as _body_citation_ids,
@@ -996,6 +996,15 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(audit.status, "failed")
         self.assertIn("missing", audit.citation_audit.unknown_citations)
         self.assertIn("metric:accuracy", audit.metric_audit.matched_metrics)
+        wrapped = audit_report(
+            ReportAuditRequest(
+                report="# Draft",
+                report_body="# Draft\n\nKnown claim [@missing]. accuracy is 0.75.\n",
+                context=context,
+                memory=memory,
+            )
+        )
+        self.assertEqual(wrapped.status, audit.status)
 
     def test_model_written_references_are_replaced_with_known_papers(self) -> None:
         draft = (

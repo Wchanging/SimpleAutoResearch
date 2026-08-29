@@ -8,11 +8,55 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.research.contracts import DocumentRecord, SourcePlan
+from simple_ar.research.documents.ports import (
+    DocumentParser,
+    DocumentResolver,
+    LocalDocumentResolver,
+    ParsedDocument,
+)
 
 
 EXTRACTION_SCHEMA_VERSION = "fulltext_extraction.v1"
 TEXT_SUFFIXES = {".md", ".txt"}
 MOJIBAKE_SEGMENT_PATTERN = re.compile(r"鈥[\u4e00-\u9fff]")
+
+
+class LocalDocumentParser:
+    """Default local parser used when no external parser is injected."""
+
+    def __init__(self, *, parser_backend: str = "basic", max_pdf_pages: int = 20) -> None:
+        self.parser_backend = str(parser_backend or "basic").strip().lower() or "basic"
+        self.max_pdf_pages = max(1, int(max_pdf_pages))
+
+    @classmethod
+    def from_source_plan(cls, source_plan: SourcePlan) -> "LocalDocumentParser":
+        """Build the default parser without exposing extraction internals."""
+
+        return cls(
+            parser_backend=str(source_plan.budget.get("parser_backend") or "basic"),
+            max_pdf_pages=_positive_int(
+                source_plan.budget.get("max_pdf_pages"),
+                default=20,
+            ),
+        )
+
+    def parse(self, path: Path) -> ParsedDocument:
+        """Parse one local resource using the existing backend semantics."""
+
+        if self.parser_backend == "unstructured":
+            return ParsedDocument(_read_unstructured(path), "unstructured")
+
+        suffix = path.suffix.lower()
+        if suffix in TEXT_SUFFIXES:
+            return ParsedDocument(_read_text(path), "plain_text")
+        if suffix in {".html", ".htm"}:
+            return ParsedDocument(_html_to_text(_read_text(path)), "basic_html")
+        if suffix == ".pdf":
+            return ParsedDocument(
+                _read_pdf(path, max_pages=self.max_pdf_pages),
+                "pypdf_optional",
+            )
+        raise RuntimeError(f"unsupported_fulltext_suffix:{suffix or 'none'}")
 
 
 def apply_fulltext_extraction(
@@ -21,6 +65,8 @@ def apply_fulltext_extraction(
     fulltext_manifest: dict[str, Any],
     source_plan: SourcePlan,
     extraction_dir: Path,
+    resolver: DocumentResolver | None = None,
+    parser: DocumentParser | None = None,
 ) -> tuple[list[DocumentRecord], dict[str, Any]]:
     """Parse cached/local full-text hints into document records.
 
@@ -31,6 +77,9 @@ def apply_fulltext_extraction(
         source_plan: Research source plan controlling parser intent and budget.
         extraction_dir: Directory for extracted text when the source is not
             already plain text.
+        resolver: Optional resolver for cached or local resources.
+        parser: Optional parser port. The configured legacy parser is used when
+            omitted.
 
     Returns:
         A pair of ``(updated_records, extraction_manifest)``. Parsing failures
@@ -51,6 +100,7 @@ def apply_fulltext_extraction(
     updated: list[DocumentRecord] = []
     rows: list[dict[str, Any]] = []
     extraction_dir.mkdir(parents=True, exist_ok=True)
+    resolver = resolver or LocalDocumentResolver()
     for record in records:
         hint = _first_cached_hint(docs_by_id.get(record.document_id, {}))
         if hint is None:
@@ -62,6 +112,8 @@ def apply_fulltext_extraction(
             hint=hint,
             source_plan=source_plan,
             extraction_dir=extraction_dir,
+            resolver=resolver,
+            parser=parser,
         )
         updated.append(parsed_record)
         rows.append(row)
@@ -75,27 +127,61 @@ def _parse_hint(
     hint: dict[str, Any],
     source_plan: SourcePlan,
     extraction_dir: Path,
+    resolver: DocumentResolver,
+    parser: DocumentParser | None,
 ) -> tuple[DocumentRecord, dict[str, Any]]:
-    source_path = Path(str(hint.get("local_path") or ""))
-    if not source_path.is_file():
-        return record, _row(record, status="failed", reason="cached_path_missing", source_path=source_path)
+    try:
+        resolution = resolver.resolve(
+            document_id=record.document_id,
+            local_path=str(hint.get("local_path") or "").strip() or None,
+            url=str(hint.get("url") or "").strip() or None,
+        )
+    except Exception as exc:
+        return record, _row(
+            record,
+            status="failed",
+            reason=f"{type(exc).__name__}: {exc}"[:300],
+            hint=hint,
+        )
+    if resolution.status != "available" or resolution.path is None:
+        return record, _row(
+            record,
+            status="failed",
+            reason=resolution.reason or resolution.status,
+            hint=hint,
+        )
 
     try:
-        text, parser = _extract_text(source_path, source_plan=source_plan)
+        if parser is None:
+            text, parser_name = _extract_text(resolution.path, source_plan=source_plan)
+        else:
+            parsed = parser.parse(resolution.path)
+            if not isinstance(parsed, ParsedDocument):
+                raise TypeError(
+                    f"document parser returned {type(parsed).__name__}; "
+                    "expected ParsedDocument"
+                )
+            text, parser_name = parsed.text, parsed.parser
     except Exception as exc:  # pragma: no cover - parser backend behavior varies by environment.
         return record, _row(
             record,
             status="failed",
             reason=str(exc)[:300] or "extraction_failed",
-            source_path=source_path,
+            source_path=resolution.path,
             hint=hint,
         )
 
     text = _normalize_text(text)
     if not text.strip():
-        return record, _row(record, status="failed", reason="empty_extraction", source_path=source_path, hint=hint)
+        return record, _row(
+            record,
+            status="failed",
+            reason="empty_extraction",
+            source_path=resolution.path,
+            hint=hint,
+        )
 
-    text_path = source_path if source_path.suffix.lower() in TEXT_SUFFIXES else _write_extracted_text(
+    text_path = resolution.path if resolution.path.suffix.lower() in TEXT_SUFFIXES else _write_extracted_text(
         extraction_dir=extraction_dir,
         record=record,
         text=text,
@@ -103,8 +189,8 @@ def _parse_hint(
     metadata = dict(record.metadata)
     metadata["fulltext_extraction"] = {
         "status": "parsed",
-        "parser": parser,
-        "source_path": str(source_path),
+        "parser": parser_name,
+        "source_path": str(resolution.path),
         "extracted_text_path": str(text_path),
         "hint_kind": str(hint.get("kind") or ""),
         "chars": len(text),
@@ -115,34 +201,24 @@ def _parse_hint(
         local_path=str(text_path),
         content_hash=_sha256(text_path),
         extraction_status="parsed",
-        parser=parser,
+        parser=parser_name,
         metadata=metadata,
     )
     return parsed_record, _row(
         parsed_record,
         status="parsed",
         reason="ok",
-        source_path=source_path,
+        source_path=resolution.path,
         extracted_text_path=text_path,
         hint=hint,
         chars=len(text),
-        parser=parser,
+        parser=parser_name,
     )
 
 
 def _extract_text(path: Path, *, source_plan: SourcePlan) -> tuple[str, str]:
-    parser_backend = str(source_plan.budget.get("parser_backend") or "basic").strip().lower()
-    if parser_backend == "unstructured":
-        return _read_unstructured(path), "unstructured"
-
-    suffix = path.suffix.lower()
-    if suffix in TEXT_SUFFIXES:
-        return _read_text(path), "plain_text"
-    if suffix in {".html", ".htm"}:
-        return _html_to_text(_read_text(path)), "basic_html"
-    if suffix == ".pdf":
-        return _read_pdf(path, max_pages=_positive_int(source_plan.budget.get("max_pdf_pages"), default=20)), "pypdf_optional"
-    raise RuntimeError(f"unsupported_fulltext_suffix:{suffix or 'none'}")
+    parsed = LocalDocumentParser.from_source_plan(source_plan).parse(path)
+    return parsed.text, parsed.parser
 
 
 def _read_pdf(path: Path, *, max_pages: int) -> str:

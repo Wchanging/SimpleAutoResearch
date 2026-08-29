@@ -76,9 +76,10 @@ Notes:
   `openai` uses the OpenAI Python SDK directly; `litellm` keeps the older
   LiteLLM compatibility layer.
 - `SIMPLE_AR_LLM_API` controls the request shape. `responses` sends Responses
-  API-style `instructions` plus `input` and automatically falls back to Chat
-  Completions-style `messages` for transient transport disconnects; `chat`
-  sends Chat Completions-style `messages` directly.
+  API-style `instructions` plus `input` and retries transient failures on that
+  API only; `chat` sends Chat Completions-style `messages` directly. The
+  explicit `auto` mode tries Responses and then Chat after bounded retries for
+  compatibility with gateways that expose only one surface.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` is optional. Leave it empty, or set it to
   `0`/`off`/`none`, to omit a client-side timeout; set a positive value only
   when you deliberately want to bound request time.

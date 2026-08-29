@@ -47,11 +47,9 @@ class LLMSettings:
             Python SDK directly; ``litellm`` keeps the old compatibility path.
         api_mode: Provider API surface. ``responses`` uses Responses API-style
             ``instructions`` and ``input``. ``chat`` uses Chat Completions-style
-            ``messages``.
-            ``responses`` falls back to ``chat`` for transient transport
-            failures because some OpenAI-compatible gateways record successful
-            upstream completions while disconnecting the client before it
-            receives the response.
+            ``messages``. Each mode retries its own transient failures only.
+            ``auto`` explicitly tries ``responses`` and then ``chat`` for
+            compatibility with gateways that expose only one surface.
         json_response_format: JSON response-format mode for ``ask_json``.
             ``off`` keeps prompt-only JSON parsing for broad provider
             compatibility. ``auto`` tries provider-native JSON mode and retries
@@ -92,6 +90,9 @@ class LLMUsage:
         source: ``provider`` when usage came from the API, otherwise
             ``estimated``.
         estimated_cost_usd: Estimated USD cost when pricing is configured.
+        provider_attempts: Number of lower-level provider calls used for this
+            successful ``ask()`` request, including transient retries and
+            explicit API-surface attempts handled within that call.
     """
 
     model: str
@@ -101,6 +102,7 @@ class LLMUsage:
     total_tokens: int
     source: str
     estimated_cost_usd: float | None = None
+    provider_attempts: int = 1
 
     def to_row(self) -> dict[str, Any]:
         """Convert usage into a JSON-serializable record."""
@@ -112,6 +114,7 @@ class LLMUsage:
             "total_tokens": self.total_tokens,
             "source": self.source,
             "estimated_cost_usd": self.estimated_cost_usd,
+            "provider_attempts": self.provider_attempts,
         }
 
 
@@ -245,10 +248,17 @@ class LLMClient:
                 request["text"] = {"format": response_format}
             else:
                 request["response_format"] = response_format
-        response = self._request_with_retry(request)
+        response, provider_attempts = self._request_with_retry(request)
 
         output = _content_from_response(response).strip()
-        self._record_usage(response, system, user, output, label=label)
+        self._record_usage(
+            response,
+            system,
+            user,
+            output,
+            label=label,
+            provider_attempts=provider_attempts,
+        )
         return output
 
     def _build_request(self, system: str, user: str) -> dict[str, Any]:
@@ -279,11 +289,12 @@ class LLMClient:
             return self._provider_model
         return self._openai_model
 
-    def _request_with_retry(self, request: dict[str, Any]) -> object:
+    def _request_with_retry(self, request: dict[str, Any]) -> tuple[object, int]:
         """Call the provider with bounded exponential backoff for transient errors."""
         attempts = max(1, int(self._settings.retry_attempts or 1))
         last_error: Exception | None = None
         mode_attempts: list[tuple[str, int, Exception]] = []
+        provider_attempts = 0
         for api_mode in _api_attempt_order(self._settings.api_mode):
             mode_request = _request_for_api_mode(
                 request,
@@ -294,12 +305,24 @@ class LLMClient:
             for attempt in range(1, attempts + 1):
                 attempted = attempt
                 try:
-                    return _call_provider(self._settings.transport_backend, api_mode, mode_request)
+                    provider_attempts += 1
+                    return (
+                        _call_provider(
+                            self._settings.transport_backend,
+                            api_mode,
+                            mode_request,
+                        ),
+                        provider_attempts,
+                    )
                 except Exception as exc:
                     last_error = exc
                     if attempt >= attempts or not _is_transient_llm_error(exc):
                         break
-                    if api_mode == "responses" and _is_response_transport_disconnect(exc):
+                    if (
+                        self._settings.api_mode == "auto"
+                        and api_mode == "responses"
+                        and _is_response_transport_disconnect(exc)
+                    ):
                         break
                     time.sleep(_retry_delay(self._settings, attempt))
             if last_error is None:
@@ -447,6 +470,7 @@ class LLMClient:
         output: str,
         *,
         label: str,
+        provider_attempts: int = 1,
     ) -> None:
         """Record provider usage, falling back to local token estimates."""
         usage = _usage_from_response(response)
@@ -469,6 +493,7 @@ class LLMClient:
             total_tokens=total_tokens,
             source=source,
             estimated_cost_usd=self._estimated_cost(prompt_tokens, completion_tokens),
+            provider_attempts=max(1, int(provider_attempts)),
         )
         if self._usage_callback is not None:
             with self._usage_lock:
@@ -821,8 +846,8 @@ def _api_attempt_order(api_mode: str) -> list[str]:
     if mode == "auto":
         return ["responses", "chat"]
     if mode == "responses":
-        return ["responses", "chat"]
-    return ["responses", "chat"]
+        return ["responses"]
+    return ["responses"]
 
 
 def _call_provider(backend: str, api_mode: str, request: dict[str, Any]) -> object:

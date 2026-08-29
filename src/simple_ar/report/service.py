@@ -48,7 +48,7 @@ from simple_ar.report.citations import (
 )
 from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory, write_report_memory
-from simple_ar.report.figures import maybe_add_report_figures
+from simple_ar.report.ports import DeterministicFigureRenderer, FigureRenderer
 from simple_ar.report.schema import (
     AgentReportResult,
     ReportAuditConfig,
@@ -113,7 +113,11 @@ from simple_ar.pipeline_stages.common import (
     _string_items,
 )
 
-def execute_report(ctx: Context) -> None:
+def execute_report(
+    ctx: Context,
+    *,
+    figure_renderer: FigureRenderer | None = None,
+) -> None:
     goal = _safe_read_artifact(ctx, "goal.md")
     problem = _safe_read_artifact(ctx, "problem.md")
     search_meta = _safe_read_json_artifact(ctx, "search_meta.json")
@@ -263,7 +267,8 @@ def execute_report(ctx: Context) -> None:
         ),
     )
     report_dir = _prepare_report_output_dir(ctx, report_config)
-    figure_result = maybe_add_report_figures(
+    renderer = figure_renderer or DeterministicFigureRenderer()
+    figure_result = renderer.render(
         report_markdown=report,
         report_dir=report_dir,
         config=report_config.figures,

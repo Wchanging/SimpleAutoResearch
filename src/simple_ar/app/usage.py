@@ -29,6 +29,7 @@ def record_llm_usage(ctx: Context, usage: LLMUsage) -> None:
         total_tokens=row["total_tokens"],
         estimated_cost_usd=row["estimated_cost_usd"],
         source=row["source"],
+        provider_attempts=row.get("provider_attempts", 1),
         label=row["label"],
     )
 
@@ -45,6 +46,10 @@ def summarize_usage(records: list[dict[str, Any]]) -> dict[str, Any]:
     prompt_tokens = sum(_int_value(row.get("prompt_tokens")) for row in records)
     completion_tokens = sum(_int_value(row.get("completion_tokens")) for row in records)
     total_tokens = sum(_int_value(row.get("total_tokens")) for row in records)
+    provider_attempts = sum(
+        max(1, _int_value(row.get("provider_attempts")) or 1)
+        for row in records
+    )
     costs = [
         float(row["estimated_cost_usd"])
         for row in records
@@ -61,6 +66,8 @@ def summarize_usage(records: list[dict[str, Any]]) -> dict[str, Any]:
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "provider_attempts": provider_attempts,
+        "retry_count": max(0, provider_attempts - len(records)),
         "estimated_cost_usd": cost_total,
         "by_stage_total_tokens": by_stage,
     }

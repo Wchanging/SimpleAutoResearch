@@ -4,6 +4,7 @@ import difflib
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1194,7 +1195,24 @@ def _unique_prepared_paths(prepared: list[_PreparedEdit]) -> list[str]:
 def _write_text_atomically(path: Path, text: str) -> None:
     temp_path = path.with_name(path.name + ".simple_ar_tmp")
     temp_path.write_text(text, encoding="utf-8")
-    temp_path.replace(path)
+    try:
+        for attempt in range(3):
+            try:
+                temp_path.replace(path)
+                return
+            except PermissionError:
+                if attempt == 2:
+                    raise
+                # Windows scanners can briefly hold the destination between
+                # the write and replace; keep the operation atomic and retry
+                # only that observed transient lock.
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def _applied_edits_record(

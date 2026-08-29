@@ -69,7 +69,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `OPENAI_BASE_URL` 可以指向 OpenAI，也可以指向第三方 OpenAI 兼容 `/v1` 接口。
 - `SIMPLE_AR_MODEL` 是没有传入 `--model` 时的默认模型。
 - `SIMPLE_AR_LLM_BACKEND` 控制传输实现。默认 `openai` 使用 OpenAI Python SDK 直连；`litellm` 保留旧的 LiteLLM 兼容层。
-- `SIMPLE_AR_LLM_API` 控制请求形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`，遇到临时传输中断时会自动退到 Chat Completions 风格的 `messages`；`chat` 会直接发送 Chat Completions 风格的 `messages`。
+- `SIMPLE_AR_LLM_API` 控制请求形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`，临时错误只在同一接口内有限重试；`chat` 会直接发送 Chat Completions 风格的 `messages`。已有的 `auto` 模式才会在 Responses 重试后再尝试 Chat，用于兼容只暴露其中一种接口的网关。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传客户端超时。只有你确实想限制单次请求等待时间时才设置正数。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传输出上限。只有你确实想限制模型输出长度时才设置正数。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时和 5xx 响应。

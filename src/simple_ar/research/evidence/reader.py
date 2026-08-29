@@ -7,9 +7,10 @@ this module is intentionally usable without Search or a pipeline Context.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, fields, replace
+from typing import Any, Literal, Mapping
 
+from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.research.contracts import (
     ClaimCard,
     CodeLink,
@@ -73,6 +74,69 @@ class ReadResult:
             "diagnostics": list(self.diagnostics),
         }
 
+    def to_handoff_dict(self) -> dict[str, object]:
+        """Return cards and source locations for an explicit downstream handoff.
+
+        The handoff keeps document identity and evidence locations, but does
+        not duplicate chunk text.  Callers can therefore persist it beside an
+        attempt without turning the read result into a second document store.
+        """
+        return {
+            "schema_version": "read_result.v1",
+            "status": self.status,
+            "documents": [_document_handoff_row(record) for record in self.bundle.records],
+            "source_spans": [
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "document_id": chunk.document_id,
+                    "source_path": chunk.source_path,
+                    "page": chunk.page,
+                    "line_start": chunk.line_start,
+                    "line_end": chunk.line_end,
+                }
+                for chunk in self.bundle.chunks
+            ],
+            "paper_cards": [card.to_row() for card in self.paper_cards],
+            "claim_cards": [card.to_row() for card in self.claim_cards],
+            "method_cards": [card.to_row() for card in self.method_cards],
+            "dataset_cards": [card.to_row() for card in self.dataset_cards],
+            "code_links": [link.to_row() for link in self.code_links],
+            "diagnostics": list(self.diagnostics),
+        }
+
+    @classmethod
+    def from_handoff_dict(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        bundle: DocumentBundle,
+    ) -> "ReadResult":
+        """Restore a persisted read handoff without network or parser calls.
+
+        The source bundle is required explicitly because the read handoff
+        keeps chunk text in the document artifact rather than copying it a
+        second time. Cards and source locations are restored from the handoff.
+        """
+
+        if str(data.get("schema_version") or "") != "read_result.v1":
+            raise ValueError("Expected a read_result.v1 object.")
+        status = str(data.get("status") or "")
+        if status not in {"completed", "partial", "empty"}:
+            raise ValueError(f"Unsupported read handoff status: {status!r}")
+        result = cls(
+            status=status,  # type: ignore[arg-type]
+            bundle=bundle,
+            paper_cards=_card_rows(data.get("paper_cards"), PaperCard),
+            claim_cards=_card_rows(data.get("claim_cards"), ClaimCard),
+            method_cards=_card_rows(data.get("method_cards"), MethodCard),
+            dataset_cards=_card_rows(data.get("dataset_cards"), DatasetCard),
+            code_links=_card_rows(data.get("code_links"), CodeLink),
+            diagnostics=tuple(
+                str(item) for item in data.get("diagnostics", [])
+            ),
+        )
+        return _with_evidence_validation(result)
+
 
 def read_documents(request: ReadRequest) -> ReadResult:
     """Read selected documents into deterministic evidence cards.
@@ -103,7 +167,7 @@ def read_documents(request: ReadRequest) -> ReadResult:
         diagnostics.append(
             "No text chunks were available; cards may rely on metadata abstracts."
         )
-    return ReadResult(
+    return _with_evidence_validation(ReadResult(
         status=status,
         bundle=bundle,
         paper_cards=tuple(paper_cards),
@@ -112,6 +176,46 @@ def read_documents(request: ReadRequest) -> ReadResult:
         dataset_cards=tuple(dataset_cards),
         code_links=tuple(code_links),
         diagnostics=tuple(diagnostics),
+    ))
+
+
+def run_read_capability(
+    *,
+    context: CapabilityContext,
+    request: ReadRequest,
+) -> CapabilityResult:
+    """Persist one deterministic read handoff through the session boundary.
+
+    Reading remains a pure transformation over a caller-provided bundle.  The
+    adapter owns only the attempt-local artifact and status mapping; it does
+    not fetch documents, call an LLM, or silently expand the selection.
+    """
+    result = read_documents(request)
+    output = context.store.write_json(
+        "read_result.json",
+        result.to_handoff_dict(),
+        kind="read_result",
+        schema="read_result.v1",
+        producer="research.read",
+    )
+    status = {
+        "completed": "completed",
+        "partial": "partial",
+        "empty": "blocked",
+    }[result.status]
+    return CapabilityResult(
+        status=status,  # type: ignore[arg-type]
+        artifacts=(output,),
+        diagnostics=result.diagnostics,
+        usage={
+            "documents": len(result.bundle.records),
+            "chunks": len(result.bundle.chunks),
+            "paper_cards": len(result.paper_cards),
+        },
+        provenance={
+            "capability": "read",
+            "result_schema": "read_result.v1",
+        },
     )
 
 
@@ -157,3 +261,85 @@ def _record_matches(
     if metadata_paper_id:
         paper_identifiers.add(str(metadata_paper_id))
     return bool({item for item in paper_identifiers if item} & paper_ids)
+
+
+def _document_handoff_row(record: DocumentRecord) -> dict[str, object]:
+    """Keep document identity and provenance without duplicating full text."""
+    return {
+        "document_id": record.document_id,
+        "source_id": record.source_id,
+        "title": record.title,
+        "source": record.source,
+        "url": record.url,
+        "doi": record.doi,
+        "published": record.published,
+        "extraction_status": record.extraction_status,
+        "parser": record.parser,
+    }
+
+
+def validate_read_evidence(result: ReadResult) -> tuple[str, ...]:
+    """Return diagnostics for card references absent from the source bundle.
+
+    Cards deliberately point to chunk IDs rather than copying source text. A
+    persisted handoff is only trustworthy when those references still resolve
+    against the bundle supplied by the caller. The check is intentionally
+    narrow: it validates declared references and does not scan files or infer
+    semantic correctness from prose.
+    """
+
+    chunk_ids = {chunk.chunk_id for chunk in result.bundle.chunks}
+    references: list[str] = []
+    for cards in (
+        result.paper_cards,
+        result.claim_cards,
+        result.method_cards,
+        result.dataset_cards,
+        result.code_links,
+    ):
+        for card in cards:
+            for reference in card.evidence_refs:
+                reference = str(reference).strip()
+                if reference:
+                    references.append(reference)
+    missing = sorted({reference for reference in references if reference not in chunk_ids})
+    if not missing:
+        return ()
+    return (
+        f"{len(missing)} read evidence reference(s) do not resolve to the document bundle: "
+        + ", ".join(missing[:8])
+        + (" ..." if len(missing) > 8 else ""),
+    )
+
+
+def _with_evidence_validation(result: ReadResult) -> ReadResult:
+    diagnostics = validate_read_evidence(result)
+    if not diagnostics:
+        return result
+    status = "partial" if result.status == "completed" else result.status
+    return replace(
+        result,
+        status=status,  # type: ignore[arg-type]
+        diagnostics=tuple(dict.fromkeys((*result.diagnostics, *diagnostics))),
+    )
+
+
+def _card_rows(value: object, card_type: type[Any]) -> tuple[Any, ...]:
+    if not isinstance(value, list):
+        return ()
+    allowed = {field.name for field in fields(card_type)}
+    return tuple(
+        card_type(**{key: row[key] for key in allowed if key in row})
+        for row in value
+        if isinstance(row, Mapping)
+    )
+
+
+__all__ = [
+    "ReadRequest",
+    "ReadResult",
+    "ReadStatus",
+    "read_documents",
+    "run_read_capability",
+    "validate_read_evidence",
+]

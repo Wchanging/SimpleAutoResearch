@@ -103,6 +103,7 @@ class CapabilityResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": "capability_result.v1",
             "status": self.status,
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "diagnostics": list(self.diagnostics),
@@ -151,6 +152,8 @@ class CapabilityRegistry:
         normalized = name.strip()
         if not normalized:
             raise ValueError("Capability name cannot be empty.")
+        if not callable(handler):
+            raise TypeError("Capability handler must be callable.")
         if normalized in self._handlers and not replace:
             raise ValueError(f"Capability already registered: {normalized}")
         self._handlers[normalized] = handler
@@ -188,6 +191,7 @@ class AttemptManifest:
     outputs: tuple[ArtifactRef, ...] = ()
     created_at: str = field(default_factory=_utcnow_iso)
     updated_at: str = field(default_factory=_utcnow_iso)
+    capability: str | None = None
 
     def __post_init__(self) -> None:
         if not self.attempt_id.strip():
@@ -202,6 +206,7 @@ class AttemptManifest:
             "parent_attempt": self.parent_attempt,
             "trigger": self.trigger,
             "profile": self.profile,
+            "capability": self.capability,
             "status": self.status,
             "inputs": [artifact.to_dict() for artifact in self.inputs],
             "outputs": [artifact.to_dict() for artifact in self.outputs],
@@ -216,6 +221,7 @@ class AttemptManifest:
             parent_attempt=str(data["parent_attempt"]) if data.get("parent_attempt") else None,
             trigger=str(data.get("trigger", "initial")),
             profile=str(data["profile"]) if data.get("profile") else None,
+            capability=str(data["capability"]) if data.get("capability") else None,
             status=str(data.get("status", "created")),  # type: ignore[arg-type]
             inputs=tuple(
                 ArtifactRef.from_dict(item)
@@ -304,6 +310,31 @@ class ArtifactStore:
         write_json_file(self.resolve(ref), data)
         return ref
 
+    def write_capability_result(
+        self,
+        result: CapabilityResult,
+        *,
+        path: str = "capability_result.json",
+    ) -> ArtifactRef:
+        """Persist one capability outcome as an attempt-local artifact."""
+        return self.write_json(
+            path,
+            result.to_dict(),
+            kind="capability_result",
+            schema="capability_result.v1",
+            producer="capability_runtime",
+        )
+
+    def read_capability_result(
+        self,
+        path: str = "capability_result.json",
+    ) -> CapabilityResult:
+        """Load a previously persisted capability outcome."""
+        payload = self.read_json(path)
+        if not isinstance(payload, dict):
+            raise ValueError("Capability result must be a JSON object.")
+        return CapabilityResult.from_dict(payload)
+
     def write_manifest(
         self,
         artifacts: Iterable[ArtifactRef],
@@ -365,6 +396,7 @@ class ArtifactStore:
         parent_attempt: str | None = None,
         trigger: str = "manual",
         profile: str | None = None,
+        capability: str | None = None,
         inputs: Iterable[ArtifactRef] = (),
     ) -> tuple["ArtifactStore", AttemptManifest]:
         safe_attempt_id = _safe_attempt_id(attempt_id)
@@ -376,6 +408,7 @@ class ArtifactStore:
             parent_attempt=parent_attempt,
             trigger=trigger,
             profile=profile,
+            capability=capability,
             inputs=tuple(inputs),
         )
         child_store = ArtifactStore(child_root)

@@ -16,6 +16,43 @@ SimpleAutoResearch is now file-first plus state-backed:
 
 This keeps the project easier to learn, debug, and refactor.
 
+### Compatibility Audit
+
+The current source-level dependency audit found no safe legacy implementation to
+delete. `core.pipeline` and `core.stage_results` still have direct consumers in
+the pipeline, experiment, report, and test layers. `Context.find_artifact()` is
+still used by compatibility-aware report and stage readers. The private
+`simple_ar._legacy` modules and `pipeline_stages.handlers` contain aliases or a
+small export aggregation rather than a second implementation; they remain for
+older imports. Historical run readers and projections also remain until a
+canonical-artifact migration has a real consumer and regression evidence.
+
+This is an explicit keep decision, not an assumption that every old path is
+permanent. Repeat the scan before a future cleanup and remove only a path whose
+consumers have migrated and whose old-format regression still passes.
+
+## Ownership Map
+
+Use this map when deciding where a change belongs. The stable entry is the
+small public boundary a new caller may depend on; the final column is equally
+important because it prevents domain policy from leaking into the core.
+
+| Area | Stable entry | Owns | Does not own |
+| --- | --- | --- | --- |
+| Core runtime | `simple_ar.core` | artifact references, attempt lineage, bounded decisions, profiles, and transition validation | domain schemas, LLM calls, code edits, retries, or selecting the best result |
+| Sources, documents, and evidence | `research.sources`, `research.documents`, `research.evidence` | provider/parser ports, document bundles, cards, chunks, and provenance-aware handoffs | workflow scheduling, provider-specific policy in core, or copying full text into every handoff |
+| Synthesis | `research.synthesis`, `research.brief` | evidence-derived directions, research contracts, and the smallest literature-to-idea composition | claiming novelty, choosing an experiment automatically, or calling a model implicitly |
+| Experiment and analysis | `research.experiment`, `research.analysis`, existing `experiment.execution` | explicit run requests, canonical results, metric comparison, and result evidence status | code generation, repair policy, retry policy, or deciding the next research stage |
+| Report and audit | `report.capability`, `report.audit`, legacy `report.service` | explicit section assembly, optional figure rendering, citation/metric audit, and legacy report compatibility | hiding missing evidence, inventing figures, or replacing the legacy writer/reviewer without a migration contract |
+| Application and benchmarks | `cli`, `pipeline_stages`, `code_task`, and benchmark adapters | user-facing orchestration, legacy projections, code-task policy, and external evaluator integration | becoming a dependency of the core runtime or changing canonical capability semantics for one benchmark |
+
+When a feature appears to span two rows, keep the coordination in the
+application or an explicit adapter and pass declared `ArtifactRef` inputs. Do
+not make the lower row import private files from the upper row. A new class or
+artifact is justified only when an existing boundary cannot express a real
+consumer's input, output, or failure state; otherwise add a function, adapter,
+or fixture at the existing boundary.
+
 ## Capability Boundary For New Modules
 
 New replaceable modules may use the small capability boundary in
@@ -24,18 +61,139 @@ identifies a declared artifact, `ArtifactStore` provides run-relative and
 attempt-local file access, `CapabilityContext` passes registered inputs and a
 profile, and `CapabilityResult` returns status, output references, diagnostics,
 and provenance. `CapabilityRegistry` uses explicit registrations; it does not
-scan the repository or dynamically import arbitrary providers.
+scan the repository or dynamically import arbitrary providers. When a
+controller-managed capability returns an `available` output reference whose
+file is absent from its attempt store, the controller marks that ref
+`missing`, adds a diagnostic, and downgrades a claimed `completed` result to
+`partial`. It performs this check only on declared outputs; it does not scan
+the attempt or calculate file hashes. Explicit `missing`, `not_rendered`, and
+`failed` artifact statuses remain unchanged.
+
+The built-in research adapters can be registered with
+`research.register_research_capabilities(registry, names=...)`. This helper
+loads only when called, accepts an explicit subset, and supports replacing a
+selected implementation. It does not register the legacy eight-stage handlers
+or create a workflow scheduler. The deterministic `plan` adapter is included
+because it reuses the existing question, query, and source-budget builders and
+writes a `research_plan.v1` handoff without an LLM call. Domain-specific
+`design`, `code`, and `run` implementations remain owned by the application
+until their contracts are ready.
+`research.planning.search_request_from_plan()` is the corresponding in-memory
+handoff to `SearchRequest`; it does not invoke a provider or own search policy.
 
 `SessionController` adds bounded attempts and decision persistence for new
 capabilities. It does not replace `PipelineRunner`, decide an unrestricted
 research graph, or add implicit retries. Existing `simple-ar run`, code-task
 commands, and their legacy projections remain the compatibility path until a
 real capability has an input/output contract and regression evidence.
+The `core` package also contains the historical `pipeline.py` and
+`stage_results.py` compatibility modules; they are not the dependency-free
+runtime boundary for new capabilities. New modules should depend only on the
+artifact/session APIs above, while changes to the legacy collector must retain
+the old pipeline and projection behavior.
+Direct `execute()` calls also resolve the requested handler before creating an
+attempt, so a misspelled or unregistered capability cannot consume budget or
+leave a synthetic failure attempt.
+
+`TransitionPolicy` is the small deterministic guard around that controller.
+`TransitionRecipe` is an explicit allow-list of permitted next capabilities;
+`classify_failure()` normalizes short diagnostic signals into a bounded set of
+failure kinds. Semantic inputs such as evidence sufficiency or hypothesis
+support can request a revisiting target, but the recipe still rejects
+unlisted jumps. The policy never calls an LLM, scans the full run, or retries
+implicitly. `DecisionRecord` records the resulting failure kind and next
+capability together with the budget counters observed at that decision, while
+`list_attempts()` exposes persisted attempt lineage for comparison without
+merging their artifacts.
+`status_snapshot()` provides a compact JSON-ready view for status displays and
+handoffs. It reports session/attempt counts, budget, the latest decision, and
+optional profile-visible targets, plus the ID and capability of each running
+attempt, but never copies artifact contents or picks a domain-specific best
+result. Proposed transition targets are preflighted
+before a capability handler runs, so an impossible jump cannot spend a handler
+call or create an empty attempt. When a later attempt is requested, the same
+recipe is checked against the persisted current capability, so omitting or
+replacing a route proposal cannot bypass the allow-list. A newly created attempt and its session
+running state are persisted before the handler starts, so an interrupted
+process leaves resumable lineage instead of an unmarked invocation.
+After a process-level interruption, a caller may load the session and call
+`recover_interrupted()` for the manually confirmed running attempt. This writes
+an explicit failed capability result and closes that attempt; it never retries,
+overwrites an existing result envelope, or chooses the next domain operation.
+While any attempt is still marked `running`, a new attempt is rejected until
+that explicit recovery is performed. This preserves the one-active-attempt
+lineage without silently creating a second branch. A caller that intentionally
+wants to compare an alternative from an earlier node may pass
+`parent_attempt_id` to `execute()`. The parent must be an existing completed or
+failed attempt, and the transition is checked against that parent's capability
+before a new attempt is created. The default remains the persisted current
+attempt, so ordinary linear runs are unchanged; this option is an explicit
+lineage branch, not a graph scheduler or automatic retry.
+Use `attempt_lineage()` when a caller needs the root-to-node chain for a
+comparison or recovery view. It reads attempt manifests only, does not merge
+artifacts, choose a best result, or schedule work; missing parents and cycles
+are reported explicitly.
+
+`SessionStep` and `run_session_plan()` provide the smallest multi-capability
+handoff on top of this boundary. The caller owns the ordered steps and
+capability-specific handler arguments, as well as optional controller signals
+such as evidence sufficiency or experiment-needed status; the helper
+preflights registered handlers and allowed transitions before the first
+attempt, then stops at the first non-accept decision. It is deliberately not a
+scheduler, retry loop, or arbitrary DAG executor. A higher-level workflow may
+inspect the returned decision and explicitly construct the next bounded
+sequence. The preflight also checks a resumed plan's first capability against
+the persisted current attempt, so a bad continuation is rejected before any
+new handler runs. Every supplied input must be an existing session artifact;
+missing handoffs fail at this boundary without creating an attempt or spending
+session budget.
+
+Attempt outputs are local to their attempt directory. Use
+`SessionController.attempt_output_refs()` when a later capability should read
+an earlier declared output: it returns session-root references such as
+`attempts/attempt-001/result.json` without copying files or selecting a best
+attempt. This keeps cross-capability handoff explicit and prevents a relative
+artifact path from being resolved against the wrong store.
+When a capability emits multiple domain outputs, use
+`attempt_output_ref(..., kind=..., schema=...)` to require one unambiguous
+artifact instead of relying on output order; ambiguous kinds fail explicitly.
+
+`LifecycleProfile` provides five optional, built-in capability scopes:
+`research_brief`, `survey`, `experiment`, `paper_audit`, and `full_research`.
+When a session uses one of these names, the controller rejects a capability or
+transition outside its allow-list before execution. This is a scope check, not
+an automatic workflow or a mandatory start point. Unrecognized profile names
+remain unscoped for compatibility with older callers and experiments.
+When a new session uses a recognized profile without an explicit `BudgetState`,
+its default attempt budget is the number of named capabilities plus two bounded
+recovery attempts. An explicit budget always wins; legacy manifests keep their
+stored counters and limits.
+An attempt may inherit the session profile or omit it; it cannot replace a
+scoped session with another profile.
+Use `SessionController.allowed_targets(source)` when a caller needs to render
+the permitted next steps; do not inspect the recipe or profile internals.
+The composite adapters use the fixed names `research_brief`, `experiment`, and
+`report_audit`, with `analysis` as the canonical result-analysis capability and
+`analyze` retained as a legacy alias, when a profile scope is enabled; arbitrary
+caller-chosen names remain suitable only for an unscoped or legacy session.
+
+The ordered `capabilities` tuple is also the documented conventional path for
+the built-in fixture and for a caller that wants the shortest straight-line
+composition. It is not an implicit execution plan: callers still construct
+`SessionStep` objects, provide capability inputs, and may choose a permitted
+backtrack explicitly.
 
 The smallest end-to-end reference is
 `examples/capability_package_minimal/`. Run `uv run simple-ar-checks core` to
 verify the boundary offline. New capability work should begin from this
 contract and keep domain-specific request/result schemas outside the core.
+
+Each controller-managed attempt records its capability in the attempt manifest
+and stores one `capability_result.json`
+containing only the `CapabilityResult` status, output references, diagnostics,
+usage, and provenance. This preserves the result boundary after the process
+ends without copying full text or raw logs; the legacy eight-stage artifact
+layout is unchanged.
 
 The old monolithic CLI and stage handler modules have been moved out of
 `src/simple_ar/_legacy/`. That package now only contains compatibility aliases
@@ -95,6 +253,41 @@ Provider implementations should stay focused on source access and return
 normalized `Paper` objects; they should not write run artifacts or decide
 research coverage.
 
+### Using The Standalone Search Boundary
+
+`research.sources.capability` provides the smallest multi-source search entry
+point for library callers:
+
+```python
+from simple_ar.research.sources import (
+    SearchRequest,
+    default_search_provider_registry,
+    search_sources,
+)
+
+result = search_sources(
+    SearchRequest(
+        queries=("research topic",),
+        providers=("openalex", "arxiv"),
+        max_results_per_query=5,
+    ),
+    registry=default_search_provider_registry(),
+)
+```
+
+The result preserves one response for each provider/query pair and uses
+`completed`, `partial`, `empty`, or `failed` to distinguish usable results,
+source failures, and successful empty searches. This boundary does not write
+stage files, select candidates, deduplicate papers, or download full text;
+those remain policies of the existing Search stage and its callers.
+When a caller needs a session handoff, `run_search_capability()` persists the
+same normalized paper rows and provider/query response metadata as one
+attempt-local `search_result.json`. It reports partial or empty searches as
+non-complete outcomes and does not add retry or selection policy.
+`SearchResult.from_handoff_dict()` restores that persisted `search_handoff.v1`
+without network access, while retaining diagnostics for response rows that
+refer to missing paper metadata.
+
 ### Reusing Document Ingest
 
 `research.documents.ingest.build_document_bundle()` is the narrow composition
@@ -106,6 +299,24 @@ legacy JSON/JSONL projections. Downstream code can use
 bundle from state aliases or legacy Search paths, so a reader does not need to
 know which provider or directory layout produced it.
 
+`research.documents.ports` provides the small `DocumentResolver` and
+`DocumentParser` ports used after a manifest has selected a local resource.
+`build_local_document_bundle()` is the direct local-document entry point; it
+reuses the existing bundle, section, chunk, and Read logic without running
+Search. The default resolver and parser preserve the existing local/cache
+behavior, while callers can inject a resolver or parser for another storage or
+document service.
+`research.documents.LocalDocumentParser` is the reusable default implementation
+for the existing plain-text, HTML, optional-PDF, and `unstructured` paths. The
+legacy extraction helper still delegates to it, so selecting a different parser
+does not require changing bundle construction or the old Search projection.
+`DocumentBundle.to_handoff_dict()` and `from_handoff_dict()` define the
+restorable `document_bundle.v1` representation. For a session-owned ingest,
+`run_document_ingest_capability()` writes that bundle once as
+`document_bundle.json` and exposes it through the attempt manifest; Read can
+then be run in a later process by explicitly loading the bundle, without
+re-fetching or duplicating it into another stage artifact.
+
 ### Reusing The Read Boundary
 
 `research.evidence.reader.ReadRequest` accepts a `DocumentBundle` and optional
@@ -113,6 +324,199 @@ document or paper identifiers. `read_documents()` returns typed evidence cards
 and diagnostics without calling an LLM or writing files. The existing
 `write_read_card_artifacts()` function remains a compatibility projection over
 that boundary, so stage artifact paths and legacy callers stay unchanged.
+For a session-owned attempt, `run_read_capability()` persists the same cards and
+source locations as one `read_result.json` handoff; it does not copy chunk text,
+fetch documents, or expand the selection.
+Both generated and restored Read results validate declared `evidence_refs`
+against the chunks in the same `DocumentBundle`; an unresolved reference is
+recorded as a diagnostic and downgrades the result to `partial`. The same
+side-effect-free check is available as `validate_read_evidence()`. It validates
+explicit references only; it does not scan files or judge semantic correctness.
+
+### Reusing The Synthesis Boundary
+
+`research.synthesis.SynthesisRequest` accepts the expanded evidence pack already
+assembled by the research pipeline. `synthesize_evidence()` returns bounded
+`IdeaCandidate`, `NoveltyCheck`, and optional `ExperimentContract` objects plus
+an evidence-gap summary. It is deterministic, does not call an LLM, and does
+not write files; the stage-level LLM remains responsible for prose synthesis.
+The existing synthesis artifact writer uses this facade for its structured
+evidence derivation, while legacy artifact paths remain unchanged. Compact
+persisted packs contain card references, so callers should hydrate the card
+rows before invoking the boundary.
+For a session-owned attempt, `run_synthesis_capability()` persists the complete
+bounded direction handoff as `synthesis_result.json`. It accepts an expanded
+pack supplied by the caller and does not read private stage paths or decide
+whether an experiment should run.
+`SynthesisResult.from_handoff_dict()` restores that `synthesis_result.v1` handoff
+without network or LLM access, including its idea rows, novelty checks, and
+optional research-level experiment contract.
+
+The research-level `ExperimentContract` in `research.contracts` describes a
+grounded hypothesis and proposed change. It is distinct from the execution
+contract with the same historical name in `experiment.contracts`, which carries
+command, metric, resource, dependency, and implementation settings. New code
+should import from the module matching the contract's responsibility.
+`ResearchExperimentContract.from_row()` restores the research-level handoff,
+and `ExperimentRequest` accepts either that typed object or the historical
+mapping form; canonical execution results preserve the contract without
+merging it with the legacy execution contract.
+In the vertical fixture, the restored contract is passed into the explicit
+`ExperimentRequest`, so the execution result records the research-to-experiment
+handoff rather than reconstructing the hypothesis from a private stage path.
+If a typed research contract is supplied without an execution result schema,
+its declared metric names form a minimal expected-metric view for downstream
+analysis; an explicit execution schema always takes precedence. Historical
+mapping inputs retain their previous behavior.
+When that handoff should feed the standalone Experiment boundary, use
+`experiment_request_from_synthesis()`. It restores `synthesis_result.v1`,
+transfers only its existing research-level contract, and requires the caller
+to provide an explicit `RunRequest`; it does not approve `needs_review`, choose
+a command, execute, retry, or select a next stage merely because a contract is
+present.
+
+### Composing A Research Brief
+
+`research.brief.build_research_brief()` is a small vertical composition: it
+calls the Read boundary and passes the resulting evidence cards to the
+Synthesis boundary. It accepts a Search-produced `DocumentBundle`, cached
+documents, or a local-document bundle and returns `ready`, `partial`,
+`needs_review`, or `empty`. Metadata-only input is not reported as sufficient
+evidence, and the function does not call an LLM or write files. This proves that
+capabilities can compose without replacing the existing eight-stage pipeline;
+callers still choose the existing artifact projection when persistence is
+needed.
+
+`research.brief.run_research_brief_capability()` is the opt-in session adapter
+for this composition. A caller registers it under a chosen capability name
+and passes a typed `ResearchBriefRequest`; it writes one `research_brief.json`
+handoff containing structured cards, direction candidates, and source-span
+locations, but not source chunk text. The adapter maps an empty brief to a
+blocked capability result and a partial brief to a partial result, so missing
+evidence is visible to the controller. It does not change the built-in
+lifecycle profiles or register itself implicitly.
+
+For a multi-attempt composition, restore a persisted Read result with
+`ReadResult.from_handoff_dict(..., bundle=...)` and use
+`evidence_pack_from_read()` to form the minimal Synthesis input. Keeping the
+bundle explicit is intentional: it preserves one owner for source text while
+leaving selection and sequencing to the caller.
+The same rule applies downstream: restore the persisted analysis handoff and
+derive report sections from its observed result data before passing them to the
+standalone report assembler. The assembler does not infer or invent analysis
+values from an input reference.
+
+### Reusing The Experiment Boundary
+
+`research.experiment.ExperimentRequest` wraps the existing execution
+`RunRequest` with optional result-schema, contract, artifact, comparison, and
+guard metadata. `run_experiment()` accepts the existing `ExecutionBackend`
+protocol, defaults to `LocalExecutionBackend`, and returns the existing
+`RunResult` together with canonical normalized results. It does not write files
+or decide how an experiment is analyzed. `run_and_analyze()` is the small
+composition when a caller wants both operations: it copies an
+`AnalysisContext`, adds the observed metrics and canonical execution record,
+and delegates to the existing result-analysis service. It preserves failed and
+timed-out executions as analysis inputs, performs no retry or repair, and only
+persists analysis artifacts when an output directory is supplied. The code-task
+implementation therefore remains a backend, not a second experiment API.
+When the request carries primary or required metrics, the composition exposes
+those requirements to analysis without requiring callers to duplicate them in
+the context.
+
+`research.experiment.run_experiment_capability()` is the opt-in session adapter
+for execution. It registers under a caller-chosen name, writes the existing
+canonical result as `results.json`, and stores the captured stdout/stderr under
+the same attempt as declared `execution/stdout.txt` and `execution/stderr.txt`
+artifacts. The canonical `passed`, `failed`, or `timed_out` status remains in
+the result, while the raw streams remain available for diagnosis and alternate
+downstream capabilities. Every non-passed execution maps to a failed
+capability result, so the session layer cannot mistake a timeout for a
+successful experiment. Analysis remains a separate capability and
+`research.analysis.analyze_experiment_capability()` can consume the declared
+result reference explicitly, writing a single `analysis.json` handoff with a
+pointer back to the execution artifact. It returns `completed` only when the
+analysis status is `passed`; missing evidence maps to `partial`, while explicit
+failure and blocking remain visible to the session controller. Consumers that
+cross a process boundary can use `AnalysisHandoff.from_handoff_dict()` to
+restore the execution reference, observed execution status, and
+`AnalysisResult` without rerunning or copying execution artifacts.
+The adapter also reuses the existing result guard and diagnosis functions. It
+writes `guard_report.json`, `diagnosis.json`, and a compact `diagnosis.md` in
+the same attempt; a guard error fails the capability while the canonical result
+keeps the underlying execution status. It does not retry, repair, or choose a
+research transition.
+
+### Reusing The Result-Analysis Boundary
+
+`research.analysis.AnalysisRequest` and `analyze_results()` provide the
+standalone analysis entry point. They reuse the existing metric normalization,
+claim grounding, and audit implementation; deterministic analysis is the
+default and persistence is opt-in through `output_dir`. The boundary does not
+invent metrics, run code, or decide a research transition.
+
+When a caller has two canonical execution results, use
+`research.analysis.compare_experiment_results()` to produce the compact
+`experiment_comparison.v1` mapping. It compares shared numeric metrics using
+explicit directions (or directions embedded in the result schema), preserves
+execution-status changes, and returns `inconclusive` when the required evidence
+is missing or non-directional. The mapping can be supplied through
+`ExperimentRequest.comparisons`; the helper does not retry, select a winner, or
+choose a session transition.
+
+`AnalysisResult.status` is the corresponding evidence-state summary. It is
+derived only from an explicit canonical execution record, its guard, required
+metrics, and explicit comparison verdicts: `passed`, `failed`, `blocked`,
+`incomplete`, or `metric_below_target`. A standalone analysis without an
+execution record remains `incomplete`; the status never chooses a retry or a
+research transition. When persistence is requested, the same small handoff is
+also written to `analysis_status.json`.
+
+When an upper-layer workflow needs to pass an outcome to the session policy,
+use `research.decisions.transition_request_from_synthesis()`,
+`transition_request_from_analysis()`, or `transition_request_from_report_audit()`.
+These pure adapters only create the existing `TransitionRequest`; they do not
+invoke handlers, retry, choose a next capability, or add another decision
+schema. Both typed results and persisted mappings are accepted for cross-process
+handoff. A synthesis `needs_review` result is only marked as insufficient
+evidence; the caller still chooses whether to return to Search, Read, or
+Synthesis.
+
+### Reusing The Report Figure Port
+
+`report.ports.FigureRenderer` is the small substitution point for report
+visuals. `DeterministicFigureRenderer` wraps the existing SVG implementation
+and remains the default used by the report service. A future image or chart
+backend can implement the same render method and consume the existing
+`ReportDocumentPlan`, `ReportFigureConfig`, and `ReportFigureResult`; it does
+not need to change writer, citation audit, or report assembly code. Callers
+that own report orchestration can pass another renderer to
+`execute_report(..., figure_renderer=...)`; the pipeline entry point omits it
+and therefore keeps the existing behavior.
+
+### Using The Report Assembly Boundary
+
+`report.capability.ReportAssemblyRequest` and `run_report_capability()` expose
+the downstream report boundary for callers that already have section drafts.
+The adapter reuses `assemble_report_sections()`, the existing heading
+numbering policy, and the `FigureRenderer` port, then writes one attempt-local
+`report.md`. Each renderer-reported figure is also declared as a local
+`figure` output ref; the optional figure manifest remains an index for readers.
+If a renderer reports a file that is not present, the capability returns
+`partial` with a `missing` ref instead of claiming completion. It does not
+choose an outline, call an LLM, revise prose, or audit citations; those remain
+separate concerns. This makes the report-to-audit handoff explicit without
+introducing a second writer implementation or changing the legacy report stage.
+
+`report.audit.ReportAuditRequest` and `audit_report()` provide the corresponding
+side-effect-free audit boundary. They reuse the existing citation, metric, and
+claim checks; report writing and revision remain orchestration concerns.
+`ReportAuditCapabilityRequest` and `run_report_audit_capability()` are the
+optional session adapter: callers pass explicit report/body artifact refs plus
+the typed report context and memory, and receive one `report_audit.json`
+artifact in the attempt. A warning maps to a partial capability result and a
+failed audit maps to failed; the adapter never retries, rewrites the report, or
+searches for an implicit “latest” artifact.
 
 ## Adding A Pipeline Stage
 
@@ -149,6 +553,10 @@ workspace isolation, patching, validation, and benchmark comparison.
 `experiment.execution.backend.RunResult` is the canonical subprocess result
 model. `experiment.runner.ExperimentRunResult` remains only as a compatibility
 alias, so new execution and analysis code should depend on `RunResult`.
+
+New LLM usage rows also record the number of provider attempts used by a
+successful `ask()` request. Usage summaries expose the derived retry count;
+older rows without this field remain readable and are treated as one attempt.
 
 Top-level run config parsing lives in `src/simple_ar/app/run_config.py`. Keep it as
 a thin TOML-to-runtime-options layer; code-task-specific config semantics should

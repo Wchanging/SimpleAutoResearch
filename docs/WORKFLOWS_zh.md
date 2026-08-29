@@ -20,6 +20,124 @@
 的产物路径。`examples/capability_package_minimal/` 提供最小离线 handoff 示例；
 具体领域的 schema 应属于对应 capability，不应继续堆进共享 core。
 
+session 还可以选择一个可选的 lifecycle profile，限制本次 session 可以执行的
+capability。内置范围包括 `research_brief`、`survey`、`experiment`、`paper_audit`
+和 `full_research`；它们只是 allow-list，不是自动运行器。无法识别的 profile 名称
+仍按旧调用方式兼容处理。
+新建的已知 profile session 如果没有显式预算，controller 会按每个声明能力一次 attempt
+再加两次有界恢复机会分配默认预算；调用方可用 `BudgetState` 覆盖，加载旧 manifest 时则
+继续使用其中持久化的预算。
+
+如果调用方需要串起多个 capability，可以使用 `SessionStep` 和
+`run_session_plan()`。它会在第一个 handler 启动前检查完整的有序序列，持久化每个
+attempt，并在第一次非 accept 决策处停止。进程恢复时应先加载 session、查看状态和
+attempt lineage，再显式构造下一段序列；core 不会静默重跑中断的 attempt，也不会替领域
+规则选择所谓最佳结果。
+如果已经人工确认发生了中断，调用方可以使用
+`SessionController.recover_interrupted()`，先把遗留的 running attempt 收束为明确失败，
+再显式构造 retry 或 repair attempt。该方法不会自动重试，也不会覆盖已有的 result envelope。
+只要前一个 attempt 仍标记为 `running`，controller 就会拒绝新 attempt，避免恢复前悄悄形成第二条活动分支。
+创建后续 attempt 前，controller 还会根据持久化的当前 attempt 检查实际调用的
+capability 是否属于白名单转移。这可以拦住被省略或被替换的路径，同时保留已列出的回退
+以及同能力 repair。
+显式 plan 入口对续跑序列的第一步也执行同样的检查，并在创建新 attempt 前拒绝缺失的
+输入 artifact。
+
+如果后一个 capability 需要使用前一个 attempt 的已声明输出，应调用
+`SessionController.attempt_output_refs()`。它只把 attempt 内的相对路径转换成
+session 根目录引用，不复制或合并产物；使用哪个 attempt、哪个输出仍由调用方决定。
+如果需要从较早的 `completed` 或 `failed` attempt 开始另一条比较路径，可以在
+`SessionController.execute()` 中传入它的 `parent_attempt_id`。controller 会记录该
+父节点，并按父节点的 capability 校验新的转移；不传时仍沿用当前 attempt 的线性行为。
+controller 不会自行推断分支，也不会替调用方选择结果。需要展示某个节点的父链时可使用
+`attempt_lineage()`；它只读取持久化的 attempt manifest，不合并产物或调度新工作。
+
+当前第一条领域纵向切片可以显式注册
+`research.brief.run_research_brief_capability()`。它组合现有的 Read 和 Synthesis 边界，
+并为后续 capability 暴露一个结构化的 `research_brief.json` 输出。这是可选的适配器，
+不是对现有八阶段 research pipeline 的自动替换。
+
+如果应用需要使用内置适配器，也可以调用
+`research.register_research_capabilities(registry, names=...)`。不传
+`names` 时注册完整适配器集合，传入时只注册当前路径需要的能力；注册仍然是
+显式操作，不会创建调度器。该 helper 覆盖确定性的 research planning、Search、
+Document Ingest、Read、Synthesis、Experiment、Analysis、Report、Report Audit
+和 Research Brief。
+独立结果分析能力的规范名称是 `analysis`；为兼容旧调用方，显式选择时仍保留
+`analyze` 这个 registry/session 别名。
+
+其中 `plan` 适配器复用已有的确定性问题、查询和来源预算 builder，写出一个
+`research_plan.v1` handoff；它不增加 LLM 调用，也不替调用方选择下一能力。
+领域专属的 `design`、`code`、`run` 实现仍由调用方提供。
+如果要把该计划交给已有的 `SearchRequest`，可以使用
+`research.planning.search_request_from_plan()` 这个内存适配器；它不会调用 provider，
+也不增加 retry、去重或候选选择策略。
+
+如果调用方已经拥有输入，也可以分别注册
+`research.evidence.reader.run_read_capability()` 或 `research.synthesis.run_synthesis_capability()`：前者
+接收 `DocumentBundle` 并写出 `read_result.json`，后者接收 expanded evidence pack 并写出
+`synthesis_result.json`。两者都不会自行下载文档、调用 LLM 或决定阶段转移。
+
+如果 session 从检索开始，也可以显式注册
+`research.sources.run_search_capability()`。它会在 attempt 目录写出一个
+`search_result.json`，包含规范化论文行以及 provider/query 的响应状态。这只是交接产物，
+不替代旧 Search projection，也不改变候选选择策略。
+
+如果调用方希望从证据综合直接进入独立的执行适配器，有限 recipe 允许
+`synthesize -> experiment -> analysis`。调用方仍需提供 `ExperimentRequest`、执行 backend
+和下一步 decision；core 不会替调用方推断 design 或 repair 策略。
+若该请求来自持久化的 `synthesis_result.v1`，可以使用
+`research.experiment_request_from_synthesis()` 转移已有的 research-level 实验契约；
+`RunRequest`、result schema 和是否执行仍由调用方显式提供。该 helper 不批准
+`needs_review`，也不隐式执行、重试或选择下一阶段。
+
+如果下一步需要全文资源，可以使用 `DocumentIngestRequest` 显式注册
+`research.documents.run_document_ingest_capability()`。它会写出一份可恢复的
+`document_bundle.json`，包含文档记录、section、chunk 和 extraction 状态。后续 Read attempt
+可以通过 `DocumentBundle.from_handoff_dict()` 加载这份声明过的产物；ingest 本身不选择论文，
+也不调用 LLM。
+
+Read attempt 完成后，可以用 `ReadResult.from_handoff_dict(payload, bundle=bundle)`
+恢复 typed cards；调用方必须显式提供原始 document bundle，因此 Read 产物不会再次复制
+source chunk 原文。如果调用方要直接组合 Read 与 Synthesis，可使用
+`research.brief.evidence_pack_from_read()` 这个小型适配器，把 cards 转成 Synthesis 所需的
+最小输入。
+Read 在生成和恢复时会检查 cards 的 `evidence_refs` 是否仍指向 bundle 中的 chunk；失效引用
+会记录诊断并将结果标记为 `partial`，但不会扫描其他文件或阻断 metadata-only 的兼容读取。
+
+执行切片遵循同一规则：session 需要运行 `RunRequest` 时，显式注册
+`research.experiment.run_experiment_capability()`。它把现有 canonical result 暴露为
+`results.json`，并把捕获到的 stdout/stderr 以同一 attempt 下的
+`execution/stdout.txt`、`execution/stderr.txt` 声明。分析步骤可以显式注册
+`research.analysis.analyze_experiment_capability()` 读取该引用；失败或超时执行不会被
+转换为成功 capability，诊断日志仍可供后续 capability 使用。分析缺少必要证据时返回
+`partial`，只有分析状态明确为 `passed` 才返回 `completed`。持久化的
+`analysis_handoff.v1` 可通过 `AnalysisHandoff.from_handoff_dict()` 恢复；恢复只验证结构
+并保留 execution ref，不会重新执行实验。
+如果已有两份完成的结果 mapping，可以使用
+`research.analysis.compare_experiment_results()` 生成状态与指标比较，并作为
+`ExperimentRequest.comparisons` 传入；方向未知或证据不足时保持为 `inconclusive`，后续
+是否继续实验仍由调用方决定。
+对应的 `AnalysisResult` 还提供保守的证据状态：`passed`、`failed`、`blocked`、
+`incomplete` 或 `metric_below_target`。它要求显式的 execution handoff，不会自动安排
+retry 或阶段转移；持久化的独立分析还会写出 `analysis_status.json`。
+需要把领域结果交给有限 session policy 时，可使用
+`research.decisions.transition_request_from_synthesis()`、
+`transition_request_from_analysis()` 或 `transition_request_from_report_audit()`。它们只生成
+已有 transition 输入，不执行下一步、不自动重试，也不覆盖原有 attempt。Synthesis 的
+`needs_review` 只表达证据不足；回到 Search、Read 还是继续综合仍由调用方决定。
+
+如果 session 只需要审查已经组装好的报告，可以显式注册
+`report.audit.run_report_audit_capability()`。调用方传入报告 artifact 引用和 typed report
+状态；适配器保持现有 `report_audit.json` 格式，并把 warning 报告为 partial，不会静默当成
+干净通过。
+
+如果调用方已经拥有完成的 section draft，可以先显式注册
+`report.capability.run_report_capability()`。它复用现有 report assembler、可选标题编号和
+可选的计划图表 renderer，在 attempt 目录生成 `report.md`；生成的图文件也会作为同一 attempt
+的 `figure` 输出引用登记，figure manifest 只是索引，缺失图文件会报告为 `partial`。它不会
+调用 writer，也不会生成 audit。随后把声明出的 report 引用传给独立的 audit capability。
+
 ### 1. Research Report：文献优先
 
 适合想要 literature review、survey 或 DeepResearch-like report，而不强调实验执行的场景。

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from itertools import count
-from typing import Any
+from typing import Any, Mapping
 
+from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
 from simple_ar.report.schema import (
     CitationAudit,
     ClaimAudit,
@@ -17,6 +19,26 @@ from simple_ar.report.schema import (
 
 CITATION_PATTERN = re.compile(r"@([A-Za-z0-9_.:-]+)")
 NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_])(?:\d+\.\d+|\d+)(?:%|ms|s|sec|seconds)?(?![A-Za-z0-9_])")
+
+
+@dataclass(frozen=True, slots=True)
+class ReportAuditRequest:
+    """Inputs for the standalone, side-effect-free report audit."""
+
+    report: str
+    report_body: str
+    context: ReportContext
+    memory: ReportMemory
+
+
+@dataclass(frozen=True, slots=True)
+class ReportAuditCapabilityRequest:
+    """Explicit artifact inputs for a controller-managed report audit."""
+
+    report_ref: ArtifactRef
+    context: ReportContext | Mapping[str, Any]
+    memory: ReportMemory | Mapping[str, Any]
+    report_body_ref: ArtifactRef | None = None
 
 
 def build_report_audit(
@@ -47,6 +69,92 @@ def build_report_audit(
             "V2.4 audit combines local rule gates with Writer/Reviewer findings when agent mode is enabled.",
             "Mechanical checks remain conservative and provenance-focused.",
         ],
+    )
+
+
+def audit_report(request: ReportAuditRequest) -> ReportAudit:
+    """Audit one report without invoking the writer or changing artifacts."""
+
+    return build_report_audit(
+        report=request.report,
+        report_body=request.report_body,
+        context=request.context,
+        memory=request.memory,
+    )
+
+
+def run_report_audit_capability(
+    *,
+    context: CapabilityContext,
+    request: ReportAuditCapabilityRequest,
+) -> CapabilityResult:
+    """Audit explicit report artifacts through the session boundary.
+
+    The adapter preserves the existing ``report_audit.json`` shape and leaves
+    writer/revision policy to the caller. A separate body reference is
+    optional because callers that do not persist a pre-reference report can
+    audit the same text for both the final report and its body.
+    """
+
+    report = context.read_input_text(request.report_ref)
+    report_body = (
+        context.read_input_text(request.report_body_ref)
+        if request.report_body_ref is not None
+        else report
+    )
+    report_context = (
+        request.context
+        if isinstance(request.context, ReportContext)
+        else ReportContext.model_validate(request.context)
+    )
+    report_memory = (
+        request.memory
+        if isinstance(request.memory, ReportMemory)
+        else ReportMemory.model_validate(request.memory)
+    )
+    audit = audit_report(
+        ReportAuditRequest(
+            report=report,
+            report_body=report_body,
+            context=report_context,
+            memory=report_memory,
+        )
+    )
+    output = context.store.write_json(
+        "report_audit.json",
+        audit.model_dump(mode="json"),
+        kind="report_audit",
+        schema="report_audit.v1",
+        producer="report.audit",
+    )
+    warnings = (
+        *audit.citation_audit.warnings,
+        *audit.metric_audit.warnings,
+        *audit.claim_audit.warnings,
+    )
+    capability_status = {
+        "passed": "completed",
+        "warning": "partial",
+        "failed": "failed",
+    }[audit.status]
+    return CapabilityResult(
+        status=capability_status,  # type: ignore[arg-type]
+        artifacts=(output,),
+        diagnostics=tuple(warnings),
+        usage={
+            "audit_status": audit.status,
+            "citation_warning_count": len(audit.citation_audit.warnings),
+            "metric_warning_count": len(audit.metric_audit.warnings),
+            "claim_warning_count": len(audit.claim_audit.warnings),
+        },
+        provenance={
+            "capability": "report_audit",
+            "report_ref": request.report_ref.path,
+            "report_body_ref": (
+                request.report_body_ref.path if request.report_body_ref is not None else ""
+            ),
+            "result_schema": "report_audit.v1",
+        },
     )
 
 

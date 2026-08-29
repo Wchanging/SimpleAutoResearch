@@ -3,7 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from simple_ar.research.contracts import ExperimentContract, IdeaCandidate, NoveltyCheck
+from simple_ar.research.contracts import (
+    IdeaCandidate,
+    NoveltyCheck,
+    ResearchExperimentContract,
+)
 
 
 def build_gap_summary(pack: dict[str, Any]) -> str:
@@ -140,20 +144,20 @@ def build_novelty_checks(
 def build_experiment_contract(
     ideas: list[IdeaCandidate],
     pack: dict[str, Any],
-) -> ExperimentContract:
+) -> ResearchExperimentContract:
     """Turn the top grounded idea into a cautious experiment contract."""
     idea = ideas[0] if ideas else None
     dataset_cards = _list(pack.get("dataset_cards"))
     method_cards = _list(pack.get("method_cards"))
     if idea is None:
-        return ExperimentContract(
+        return ResearchExperimentContract(
             contract_id="experiment-contract-001",
             hypothesis="No experiment is recommended until evidence coverage improves.",
             risks=["No idea candidates were generated."],
             report_claim_plan=["Report insufficient evidence instead of experimental claims."],
         )
     metrics = idea.metrics or _metric_hints(dataset_cards, _list(pack.get("paper_cards")))
-    return ExperimentContract(
+    return ResearchExperimentContract(
         contract_id="experiment-contract-001",
         hypothesis=idea.hypothesis,
         motivation_refs=idea.motivation_refs,
@@ -184,7 +188,7 @@ def build_experiment_contract(
     )
 
 
-def experiment_contract_markdown(contract: ExperimentContract) -> str:
+def experiment_contract_markdown(contract: ResearchExperimentContract) -> str:
     """Render an experiment contract for review."""
     rows = contract.to_row()
     lines = [
@@ -222,7 +226,7 @@ def experiment_contract_markdown(contract: ExperimentContract) -> str:
 def build_tool_context(
     *,
     pack: dict[str, Any],
-    contract: ExperimentContract,
+    contract: ResearchExperimentContract,
     novelty_checks: list[NoveltyCheck],
 ) -> tuple[dict[str, Any], str]:
     """Create a read-only context handoff for future tools/MCP/coding agents."""
@@ -282,7 +286,7 @@ def build_evidence_review(
     pack: dict[str, Any],
     ideas: list[IdeaCandidate],
     novelty_checks: list[NoveltyCheck],
-    contract: ExperimentContract,
+    contract: ResearchExperimentContract,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Create a lightweight HITL review page and machine-readable decisions."""
     decisions = [
@@ -325,7 +329,7 @@ def build_research_eval(
     *,
     pack: dict[str, Any],
     ideas: list[IdeaCandidate],
-    contract: ExperimentContract,
+    contract: ResearchExperimentContract,
 ) -> tuple[dict[str, Any], str]:
     """Build a simple research artifact quality report."""
     counts = _dict(pack.get("counts"))

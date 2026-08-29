@@ -4,6 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
+from simple_ar.app.usage import summarize_usage
 from simple_ar.integrations.llm import (
     LLMClient,
     LLMError,
@@ -16,6 +17,27 @@ from simple_ar.integrations.llm import (
 
 
 class LLMParsingTests(unittest.TestCase):
+    def test_usage_summary_keeps_legacy_rows_and_counts_provider_retries(self) -> None:
+        summary = summarize_usage(
+            [
+                {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                },
+                {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 1,
+                    "total_tokens": 5,
+                    "provider_attempts": 3,
+                },
+            ]
+        )
+
+        self.assertEqual(summary["requests"], 2)
+        self.assertEqual(summary["provider_attempts"], 4)
+        self.assertEqual(summary["retry_count"], 2)
+
     def test_parse_direct_json_object(self) -> None:
         self.assertEqual(parse_json_object('{"a": 1}'), {"a": 1})
 
@@ -101,6 +123,7 @@ class LLMParsingTests(unittest.TestCase):
         openai_call.assert_not_called()
 
     def test_ask_retries_transient_connection_error(self) -> None:
+        usage: list[object] = []
         client = LLMClient(
             LLMSettings(
                 api_key="test-key",
@@ -109,7 +132,8 @@ class LLMParsingTests(unittest.TestCase):
                 retry_attempts=3,
                 retry_base_delay_sec=0.25,
                 retry_max_delay_sec=2.0,
-            )
+            ),
+            usage_callback=usage.append,
         )
         response = {"choices": [{"message": {"content": "ok"}}]}
 
@@ -122,17 +146,21 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(output, "ok")
         self.assertEqual(completion.call_count, 2)
         sleep.assert_called_once_with(0.25)
+        self.assertEqual(len(usage), 1)
+        self.assertEqual(usage[0].provider_attempts, 2)
 
-    def test_responses_transport_error_falls_back_to_chat(self) -> None:
+    def test_auto_transport_error_falls_back_to_chat(self) -> None:
+        usage: list[object] = []
         client = LLMClient(
             LLMSettings(
                 api_key="test-key",
-                api_mode="responses",
+                api_mode="auto",
                 transport_backend="litellm",
                 retry_attempts=2,
                 retry_base_delay_sec=0.25,
                 retry_max_delay_sec=2.0,
-            )
+            ),
+            usage_callback=usage.append,
         )
         response = {"choices": [{"message": {"content": "ok"}}]}
 
@@ -157,6 +185,58 @@ class LLMParsingTests(unittest.TestCase):
             ],
         )
         sleep.assert_not_called()
+        self.assertEqual(len(usage), 1)
+        self.assertEqual(usage[0].provider_attempts, 2)
+
+    def test_responses_transport_error_stays_on_responses(self) -> None:
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                api_mode="responses",
+                transport_backend="litellm",
+                retry_attempts=2,
+                retry_base_delay_sec=0.25,
+                retry_max_delay_sec=2.0,
+            )
+        )
+
+        with patch(
+            "simple_ar.integrations.llm.litellm.responses",
+            side_effect=RuntimeError("503 Service Unavailable"),
+        ) as responses, patch(
+            "simple_ar.integrations.llm.litellm.completion"
+        ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+            with self.assertRaises(LLMError):
+                client.ask("system", "user", label="strict-responses-test")
+
+        self.assertEqual(responses.call_count, 2)
+        completion.assert_not_called()
+        sleep.assert_called_once_with(0.25)
+
+    def test_responses_disconnect_is_retried_in_strict_mode(self) -> None:
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                api_mode="responses",
+                transport_backend="litellm",
+                retry_attempts=2,
+                retry_base_delay_sec=0.25,
+                retry_max_delay_sec=2.0,
+            )
+        )
+
+        with patch(
+            "simple_ar.integrations.llm.litellm.responses",
+            side_effect=RuntimeError("Server disconnected without sending a response."),
+        ) as responses, patch(
+            "simple_ar.integrations.llm.litellm.completion"
+        ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+            with self.assertRaises(LLMError):
+                client.ask("system", "user", label="strict-disconnect-test")
+
+        self.assertEqual(responses.call_count, 2)
+        completion.assert_not_called()
+        sleep.assert_called_once_with(0.25)
 
     def test_default_env_omits_timeout_and_output_cap(self) -> None:
         with patch.dict(

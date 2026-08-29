@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 MetricDirection = Literal["higher", "lower", "resource", "ignore", "unknown"]
 ClaimVerdict = Literal["supported", "partially_supported", "unsupported", "not_evaluated"]
 Confidence = Literal["high", "medium", "low"]
+AnalysisStatus = Literal["passed", "failed", "incomplete", "blocked", "metric_below_target"]
 
 
 class _Model(BaseModel):
@@ -62,6 +63,8 @@ class AnalysisContext(_Model):
 
 class AnalysisResult(_Model):
     readme_markdown: str
+    status: AnalysisStatus = "incomplete"
+    status_reasons: list[str] = Field(default_factory=list)
     claims: list[AnalysisClaim] = Field(default_factory=list)
     claims_payload: dict[str, Any] = Field(default_factory=dict)
     metric_summary: dict[str, Any] = Field(default_factory=dict)

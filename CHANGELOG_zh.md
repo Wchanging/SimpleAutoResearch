@@ -4,6 +4,49 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-08-30
+
+### 变更
+
+- core session attempt 现在可以通过 `parent_attempt_id` 从已有的完成或失败父节点显式创建
+  分支，并提供持久化的根到节点父链查看入口；默认线性执行和旧 manifest 保持不变。
+
+## 2026-08-29
+
+### 变更
+
+- code-task 的原子文件写入现在会在 Windows 目标文件出现短暂锁定时进行少量、有界的重试，
+  重试耗尽后仍会失败，并保持原有的原子替换行为。
+- 增加确定性的 `plan` research capability，以及从 `research_plan.v1` 到
+  `SearchRequest` 的小型交接适配器；它复用已有 planner，不增加 LLM 调用或调度器。
+  session 直接执行时也会在创建 attempt 前拒绝未注册的 capability。
+- LLM 的 `responses` 和 `chat` 模式现在只在选定的接口内重试临时 provider 错误，不再静默切换接口；只有显式使用 `auto` 模式时才会启用跨接口 fallback。
+- 新生成的 LLM usage 记录会保存成功 `ask()` 请求的 provider 调用次数，run 汇总会给出由此计算的重试次数，同时兼容旧记录。
+- 增加显式且按需加载的 research capability 注册 helper，可组合选择的
+  Search/Read/Synthesis/Experiment/Report 适配器，但不会创建调度器。
+- 增加持久化 Read handoff 的 typed 恢复和 Read 到 Synthesis 的小型适配器，并用离线
+  Search 到 Synthesis session fixture 验证显式 attempt lineage。
+- 创建后续 attempt 前，session transition 现在会根据持久化的当前 capability 检查实际
+  下一能力，同时保留白名单内的回退和同能力 repair。
+- 增加无副作用的实验结果比较 helper：消费 canonical baseline/candidate 结果，保留执行
+  状态变化；缺少指标方向证据时保持为 `inconclusive`。
+- 增加保守的 `AnalysisResult` 证据状态和可选的 `analysis_status.json` handoff；它记录
+  execution、guard、metric 与 comparison 状态，但不替调用方选择 retry 或研究阶段转移。
+- 分析 capability 现在只在分析状态为 `passed` 时报告 `completed`；证据/指标不足、失败和
+  阻塞会分别保留为 `partial`、`failed` 或 `blocked`，避免 session 误接受不完整分析。
+- 增加 `AnalysisHandoff` typed 恢复入口；它复用 `analysis_handoff.v1`，只恢复结果和
+  execution ref，不重新执行实验或复制执行产物。
+- 增加 `experiment_request_from_synthesis()`，将持久化 synthesis handoff 中已有的
+  research-level 实验契约显式转给 Experiment；`RunRequest` 和执行决策仍由调用方提供。
+- 增加 research 层的分析/报告审计 transition 适配器；它们复用既有 `TransitionRequest`，
+  只翻译结果状态，不自动执行、重试或调度下一能力。
+- 增加 Synthesis 结果到有限 transition 的无副作用适配器；`needs_review` 只保留为证据不足
+  信号，回退目标仍由调用方决定。
+- Report capability 现在显式声明 renderer 生成的图文件；缺失的图文件会保留为 `partial`，
+  不会被当作成功报告。
+- Read handoff 现在会校验 cards 声明的证据引用是否仍指向原始 document bundle；失效引用会
+  保留诊断并降为 `partial`，不扫描目录也不复制正文。
+
 ## 2026-08-17
 
 ### 变更

@@ -15,6 +15,7 @@ from simple_ar.research.contracts import (
     PaperCard,
     QueryPlan,
     ResearchContract,
+    ResearchExperimentContract,
     ResearchQuestion,
     SourcePlan,
     TextChunk,
@@ -46,6 +47,9 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class ResearchFoundationTests(unittest.TestCase):
+    def test_research_experiment_contract_has_explicit_name_with_compat_alias(self) -> None:
+        self.assertIs(ExperimentContract, ResearchExperimentContract)
+
     def test_research_contract_round_trips_with_defaults(self) -> None:
         contract = ResearchContract.from_row({"topic": "agent simulation", "mode": "not-a-mode"})
 

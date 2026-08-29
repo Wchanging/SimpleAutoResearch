@@ -28,6 +28,158 @@ offline reference package in `examples/capability_package_minimal/` shows the
 smallest supported handoff; domain-specific schemas belong to the capability,
 not to the shared core.
 
+An optional lifecycle profile narrows the capabilities that a session may
+execute. The built-in scopes are `research_brief`, `survey`, `experiment`,
+`paper_audit`, and `full_research`; they are allow-lists rather than automatic
+workflow runners. Unknown profile names remain compatible with older callers.
+For a new named-profile session without an explicit budget, the controller
+allocates one attempt per named capability plus two bounded recovery attempts;
+callers can override this with `BudgetState`, while loaded legacy manifests
+retain their persisted budget.
+
+For a caller-owned multi-capability handoff, use `SessionStep` with
+`run_session_plan()`. It validates the complete ordered sequence before the
+first handler, persists each attempt, and stops at the first non-accept
+decision. A resumed process should load the session, inspect its status and
+attempt lineage, and explicitly construct the next sequence; the core does not
+silently rerun an interrupted attempt or choose a domain-specific best result.
+When an interruption has been manually confirmed, the caller can use
+`SessionController.recover_interrupted()` to close the stale running attempt as
+an explicit failure before constructing a retry or repair attempt. The method
+does not retry or overwrite an existing result envelope.
+The controller rejects any new attempt while a prior attempt is still marked
+`running`, so recovery cannot accidentally create a second active branch.
+Before creating a subsequent attempt, the controller also checks the actual
+capability against the persisted current attempt's allow-listed transitions.
+This catches an omitted or replaced route proposal while retaining listed
+backtracks and same-capability repairs.
+The explicit plan helper applies the same check to the first step of a resumed
+sequence, and rejects missing input artifacts before creating a new attempt.
+
+Use `SessionController.attempt_output_refs()` to pass declared outputs from a
+completed or failed attempt to a later capability. Attempt-local paths are
+converted to session-root references without copying or merging artifacts;
+the caller still decides which attempt and which output to use.
+When an alternative should start from an earlier completed or failed attempt,
+pass its ID as `parent_attempt_id` to `SessionController.execute()`. The
+controller records that parent and validates the new capability against the
+parent's route. Without this explicit argument, attempts continue from the
+current attempt as before; the controller does not infer branches or select a
+winner. Use `attempt_lineage()` to inspect the root-to-node chain for a
+comparison or recovery view; it reads only persisted attempt manifests and
+does not merge artifacts or schedule work.
+
+For the first domain slice, register
+`research.brief.run_research_brief_capability()` explicitly. It composes the
+existing Read and Synthesis boundaries and exposes a single structured
+`research_brief.json` output for the next capability. This is an opt-in adapter,
+not an automatic replacement for the eight-stage research pipeline.
+
+Applications that want the built-in adapters can use
+`research.register_research_capabilities(registry, names=...)`. The `names`
+argument is optional for the complete adapter set or can select only the
+capabilities needed by a path; registration is still explicit and does not
+create a scheduler. The helper covers deterministic research planning,
+Search, Document Ingest, Read, Synthesis, Experiment, Analysis, Report,
+Report Audit, and Research Brief.
+`analysis` is the canonical standalone result-analysis name; `analyze` remains
+available as a legacy registry/session alias when explicitly selected.
+
+The `plan` adapter reuses the existing deterministic question, query, and
+source-budget builders and writes one `research_plan.v1` handoff. It adds no
+LLM call and does not choose the next capability. Domain-specific design, code
+generation, and execution implementations remain caller-owned.
+`research.planning.search_request_from_plan()` is the small in-memory adapter
+for passing that plan to the existing `SearchRequest`; it does not invoke a
+provider or add retry, deduplication, or selection policy.
+
+The individual evidence steps are also available when a caller already owns
+their inputs: register `research.evidence.reader.run_read_capability()` for a
+`DocumentBundle`, or `research.synthesis.run_synthesis_capability()` for an
+expanded evidence pack. They write one `read_result.json` or
+`synthesis_result.json` handoff respectively and leave document fetching,
+LLM policy, and transition decisions to the caller.
+
+For a session that starts at retrieval, register
+`research.sources.run_search_capability()` explicitly. It writes one
+attempt-local `search_result.json` containing normalized paper rows and the
+provider/query response statuses. It is a handoff, not a replacement for the
+legacy Search projection or its candidate-selection policy.
+
+When a caller wants to continue directly from evidence synthesis into the
+standalone execution adapter, the bounded recipe permits
+`synthesize -> experiment -> analysis`. The caller still supplies the
+`ExperimentRequest`, execution backend, and next-step decision; no design or
+repair policy is inferred by the core.
+When the request comes from a persisted `synthesis_result.v1`,
+`research.experiment_request_from_synthesis()` transfers its existing
+research-level experiment contract. The caller still supplies the
+`RunRequest`, result schema, and execution decision; the helper does not
+approve `needs_review` or implicitly execute, retry, or choose the next stage.
+
+When the next step owns full-text access, register
+`research.documents.run_document_ingest_capability()` with a
+`DocumentIngestRequest`. It writes one restorable `document_bundle.json`
+containing document records, sections, chunks, and extraction status. A later
+Read attempt can load that declared artifact with
+`DocumentBundle.from_handoff_dict()`; ingest itself does not select papers or
+call an LLM.
+
+After a Read attempt, `ReadResult.from_handoff_dict(payload, bundle=bundle)`
+restores the typed cards while requiring the original document bundle
+explicitly; source chunk text is therefore not copied into the Read artifact.
+`research.brief.evidence_pack_from_read()` is the small adapter for passing
+those cards to Synthesis when a caller composes the two capabilities directly.
+Read generation and restoration also validate each declared `evidence_refs`
+against the bundle's chunk IDs. Unresolved references remain visible as
+diagnostics and downgrade the result to `partial`; the check does not scan
+other files or block metadata-only compatibility reads.
+
+The execution slice follows the same rule: register
+`research.experiment.run_experiment_capability()` explicitly when a session
+needs to run a `RunRequest`. It exposes the existing canonical result as
+`results.json` and declares the captured streams as
+`execution/stdout.txt` and `execution/stderr.txt` in the same attempt; register
+`research.analysis.analyze_experiment_capability()` for the separate analysis
+step. Failed or timed-out execution is never converted into a successful
+capability, and its diagnostic streams remain available to later capabilities.
+Missing analysis evidence is reported as `partial`; only a `passed` analysis
+is exposed as `completed`. Persisted `analysis_handoff.v1` data can be restored
+with `AnalysisHandoff.from_handoff_dict()` without rerunning or copying the
+execution artifact.
+For two completed result mappings, `research.analysis.compare_experiment_results()`
+provides a small status-and-metric comparison that can be passed as
+`ExperimentRequest.comparisons`; unknown directions and missing evidence remain
+`inconclusive`, and the caller still owns any follow-up decision.
+The resulting `AnalysisResult` also exposes a conservative evidence status
+(`passed`, `failed`, `blocked`, `incomplete`, or `metric_below_target`).
+It requires an explicit execution handoff and never schedules a retry or
+transition; persisted standalone analyses additionally write
+`analysis_status.json`.
+When an upper-layer session needs to consume this status, use
+`research.decisions.transition_request_from_analysis()`; report audits use
+`transition_request_from_report_audit()`. They only build the existing
+transition input and never execute a next step, retry, or overwrite an attempt.
+A synthesis outcome can be passed through
+`research.decisions.transition_request_from_synthesis()` as well. Its
+`needs_review` status becomes an insufficient-evidence signal only; the caller
+still chooses whether to return to Search, Read, or Synthesis.
+
+For an already assembled report, register
+`report.audit.run_report_audit_capability()` when a session needs a standalone
+audit. The caller passes explicit report artifact references and typed report
+state; the adapter writes the existing `report_audit.json` shape and reports
+warnings as partial rather than silently treating them as a clean pass.
+
+When a caller owns completed section drafts, register
+`report.capability.run_report_capability()` first. It assembles those drafts
+with the existing report assembler, optional heading numbering, and optional
+planned figure renderer, producing an attempt-local `report.md`. Generated
+figures are declared as the same attempt's `figure` outputs, while the figure
+manifest remains an index; a missing renderer output is reported as `partial`.
+It does not write an audit or invoke the writer; pass the declared report
+reference to the separate audit capability.
+
 ### 1. Research Report (Literature-First)
 
 Use this when you want a literature review, survey, or DeepResearch-like report without emphasizing experiments.

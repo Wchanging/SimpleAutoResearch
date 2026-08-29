@@ -8,7 +8,13 @@ from typing import Any, Mapping, Protocol
 from simple_ar.integrations.llm import parse_json_object
 
 from .metrics import build_metric_summary
-from .schema import AnalysisAudit, AnalysisClaim, AnalysisContext, AnalysisResult
+from .schema import (
+    AnalysisAudit,
+    AnalysisClaim,
+    AnalysisContext,
+    AnalysisResult,
+    AnalysisStatus,
+)
 
 
 class JsonLLMClient(Protocol):
@@ -63,6 +69,7 @@ def run_result_analysis(
 
     result.raw_llm_response = raw_response
     result.audit = audit_result(result, metric_summary)
+    result.status, result.status_reasons = derive_analysis_status(ctx, metric_summary)
     if output_dir is not None:
         write_analysis_artifacts(output_dir, ctx, result)
     return result
@@ -571,6 +578,54 @@ def audit_result(result: AnalysisResult, metric_summary: dict[str, Any]) -> Anal
     return audit
 
 
+def derive_analysis_status(
+    context: AnalysisContext,
+    metric_summary: Mapping[str, Any],
+) -> tuple[AnalysisStatus, list[str]]:
+    """Classify observed experiment evidence without choosing a next step.
+
+    A standalone analysis has no execution outcome to classify, so it remains
+    ``incomplete``. When a canonical execution record is present, execution
+    failure and blocking are preserved, guard or metric deficiencies are
+    reported as incomplete, and only an explicit comparison verdict can
+    produce ``metric_below_target``. Research policy remains in the
+    caller-owned session layer instead of being inferred from prose or raw
+    metric values.
+    """
+
+    execution = context.project_results.get("execution_result")
+    if not isinstance(execution, Mapping):
+        return "incomplete", ["No canonical execution result was provided."]
+
+    execution_status = str(execution.get("status") or "unknown").strip().lower()
+    if execution_status in {"blocked", "blocked_by_validation"}:
+        return "blocked", [f"Execution was blocked with status `{execution_status}`."]
+    if execution_status not in {"passed", "completed"}:
+        return "failed", [f"Execution did not pass: `{execution_status}`."]
+
+    guard = execution.get("guard")
+    if isinstance(guard, Mapping) and str(guard.get("status") or "").strip().lower() == "failed":
+        return "incomplete", ["The result guard reported blocking errors."]
+    missing = list(metric_summary.get("missing_required_metrics") or [])
+    if missing:
+        return "incomplete", [
+            "Required metrics are missing: " + ", ".join(str(item) for item in missing[:12])
+        ]
+
+    comparisons = execution.get("comparisons")
+    if isinstance(comparisons, list):
+        for comparison in comparisons:
+            if not isinstance(comparison, Mapping):
+                continue
+            verdict = str(comparison.get("verdict") or "").strip().lower()
+            if verdict in {"regressed", "metric_below_target"}:
+                return "metric_below_target", [
+                    f"An explicit experiment comparison returned `{verdict}`."
+                ]
+
+    return "passed", ["Execution passed and required result evidence is present."]
+
+
 def write_analysis_artifacts(output_dir: Path, context: AnalysisContext, result: AnalysisResult) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     write_json(output_dir / "analysis_context.json", context.model_dump(mode="json"))
@@ -579,6 +634,14 @@ def write_analysis_artifacts(output_dir: Path, context: AnalysisContext, result:
     write_json(output_dir / "claims.json", result.claims_payload)
     write_text(output_dir / "analysis_report.md", result.readme_markdown)
     write_json(output_dir / "analysis_audit.json", result.audit.model_dump(mode="json"))
+    write_json(
+        output_dir / "analysis_status.json",
+        {
+            "schema_version": "analysis_status.v1",
+            "status": result.status,
+            "reasons": result.status_reasons,
+        },
+    )
     if result.raw_llm_response is not None:
         write_json(output_dir / "analysis_response.json", result.raw_llm_response)
 

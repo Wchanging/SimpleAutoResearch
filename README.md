@@ -106,6 +106,8 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 For third-party OpenAI-compatible providers, set `OPENAI_BASE_URL` to that
 provider's `/v1` endpoint. Price fields are optional; when unset,
 SimpleAutoResearch records token counts but leaves estimated cost as `null`.
+Each new usage row also records the provider-call count, while legacy usage
+rows remain readable.
 Transient provider failures such as connection resets, rate limits, timeouts,
 and 5xx responses use bounded exponential backoff controlled by the retry
 settings above. JSON-producing calls use prompt-only parsing by default for
@@ -119,9 +121,10 @@ or set them to `0`/`off`/`none` to omit client-side timeout and provider
 output-limit parameters. Set positive values only when you intentionally want
 to bound request time or output size.
 `SIMPLE_AR_LLM_API=responses` uses Responses API-style `instructions` and
-`input`; transient transport failures on compatible gateways automatically
-fall back to Chat Completions-style `messages`. Set it to `chat` when your
-provider should always use Chat Completions directly.
+`input` and retries transient failures on that same API only. Set it to `chat`
+when your provider should always use Chat Completions directly. Use the
+explicit `auto` mode only when you want a compatibility fallback from
+Responses to Chat after the bounded retries.
 
 ## Quickstart
 

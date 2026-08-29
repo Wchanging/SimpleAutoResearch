@@ -93,10 +93,24 @@ def metric_directions(context: AnalysisContext, expected: list[str] | None = Non
 
 
 def normalize_direction(value: Any) -> MetricDirection:
-    text = str(value or "").strip().lower()
-    if text in {"higher", "maximize", "max", "increase", "larger"}:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text in {
+        "higher",
+        "higher_is_better",
+        "maximize",
+        "max",
+        "increase",
+        "larger",
+    }:
         return "higher"
-    if text in {"lower", "minimize", "min", "decrease", "smaller"}:
+    if text in {
+        "lower",
+        "lower_is_better",
+        "minimize",
+        "min",
+        "decrease",
+        "smaller",
+    }:
         return "lower"
     if text in {"resource", "cost", "runtime", "latency", "memory"}:
         return "resource"

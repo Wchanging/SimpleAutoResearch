@@ -3,13 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from simple_ar.research.contracts import ExperimentContract
+from simple_ar.research.contracts import ResearchExperimentContract
 
 
 def build_tool_adapter_contract(
     *,
     pack: dict[str, Any],
-    contract: ExperimentContract,
+    contract: ResearchExperimentContract,
     tool_context: dict[str, Any],
 ) -> dict[str, Any]:
     """Return a read-only adapter contract for future Tool/MCP integrations."""
@@ -141,7 +141,7 @@ def build_tool_trace_rows(contract: dict[str, Any]) -> list[dict[str, Any]]:
 
 def external_agent_backend_markdown(
     *,
-    contract: ExperimentContract,
+    contract: ResearchExperimentContract,
     tool_context: dict[str, Any],
     adapter_contract: dict[str, Any],
 ) -> str:

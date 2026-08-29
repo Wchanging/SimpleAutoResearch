@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from simple_ar.core import (
@@ -99,6 +100,23 @@ class CapabilityBoundaryTests(unittest.TestCase):
             self.assertEqual(manifest_ref.kind, "manifest")
             self.assertEqual(manifest_items[0].path, "result.json")
 
+    def test_capability_result_round_trips_as_an_attempt_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ArtifactStore(Path(tmp))
+            result = CapabilityResult(
+                status="failed",
+                diagnostics=("fixture failure",),
+                usage={"calls": 1},
+                provenance={"producer": "fixture"},
+            )
+
+            ref = store.write_capability_result(result)
+            restored = store.read_capability_result()
+
+            self.assertEqual(ref.kind, "capability_result")
+            self.assertEqual(ref.schema, "capability_result.v1")
+            self.assertEqual(restored, result)
+
     def test_attempt_isolated_from_parent_and_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             parent = ArtifactStore(Path(tmp))
@@ -109,12 +127,14 @@ class CapabilityBoundaryTests(unittest.TestCase):
                 parent_attempt="attempt-000",
                 trigger="repair",
                 profile="experiment",
+                capability="toy-capability",
                 inputs=(parent.ref("result.txt", kind="result"),),
             )
             child.write_text("result.txt", "child\n")
 
             loaded = child.read_attempt_manifest()
 
+            self.assertEqual(loaded.capability, "toy-capability")
             self.assertEqual(loaded.attempt_id, "attempt-001")
             self.assertEqual(loaded.parent_attempt, "attempt-000")
             self.assertEqual(loaded.trigger, "repair")
@@ -153,6 +173,10 @@ class CapabilityBoundaryTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             registry.resolve("missing")
 
+        with self.assertRaises(TypeError):
+            registry.register("not-callable", object())  # type: ignore[arg-type]
+        self.assertEqual(registry.names(), ("fixture",))
+
         registry.register("bad", lambda: "not a result")  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             registry.run("bad")
@@ -182,6 +206,14 @@ class CapabilityBoundaryTests(unittest.TestCase):
             self.assertEqual(loaded.manifest.decisions[0].attempt_id, "attempt-001")
             self.assertEqual(loaded.manifest.budget.attempts, 1)
             self.assertTrue((Path(tmp) / "attempts" / "attempt-001" / "result.json").is_file())
+            persisted = loaded.store.read_capability_result(
+                "attempts/attempt-001/capability_result.json"
+            )
+            self.assertEqual(persisted.status, "completed")
+            self.assertEqual(
+                loaded.manifest.decisions[0].output_paths,
+                ("result.json", "capability_result.json"),
+            )
             self.assertEqual(loaded.store.read_attempt_manifest("attempts/attempt-001/attempt_manifest.json").outputs[0].path, "result.json")
 
     def test_session_controller_resolves_registered_inputs_from_session_store(self) -> None:
@@ -280,6 +312,139 @@ class CapabilityBoundaryTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 controller.execute("partial", attempt_id="attempt-001", trigger="revise")
             self.assertEqual(controller.manifest.budget.attempts, 1)
+
+    def test_session_controller_can_branch_from_an_explicit_completed_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CapabilityRegistry()
+
+            def fixture(*, context: CapabilityContext) -> CapabilityResult:
+                output = context.store.write_text(
+                    "result.txt",
+                    context.attempt.attempt_id,
+                    kind="result",
+                )
+                if context.attempt.attempt_id == "attempt-002":
+                    return CapabilityResult(
+                        status="failed",
+                        artifacts=(output,),
+                        diagnostics=("fixture branch source failed",),
+                    )
+                return CapabilityResult(status="completed", artifacts=(output,))
+
+            registry.register("plan", fixture)
+            registry.register("search", fixture)
+            controller = SessionController.create(
+                tmp,
+                session_id="branching-session",
+                topic="explicit branch",
+                registry=registry,
+            )
+
+            first, _ = controller.execute(
+                "plan",
+                attempt_id="attempt-001",
+                next_capability="search",
+            )
+            second, _ = controller.execute(
+                "search",
+                attempt_id="attempt-002",
+            )
+            branch, decision = controller.execute(
+                "search",
+                attempt_id="attempt-003",
+                parent_attempt_id="attempt-001",
+            )
+
+            self.assertEqual(first.status, "completed")
+            self.assertEqual(second.status, "failed")
+            self.assertEqual(branch.status, "completed")
+            self.assertEqual(decision.action, "accept")
+            self.assertEqual(
+                controller.store.read_attempt_manifest(
+                    "attempts/attempt-003/attempt_manifest.json"
+                ).parent_attempt,
+                "attempt-001",
+            )
+            self.assertEqual(
+                controller.store.read_text("attempts/attempt-002/result.txt"),
+                "attempt-002",
+            )
+            self.assertEqual(
+                controller.store.read_text("attempts/attempt-003/result.txt"),
+                "attempt-003",
+            )
+            self.assertEqual(
+                [item.attempt_id for item in controller.attempt_lineage("attempt-003")],
+                ["attempt-001", "attempt-003"],
+            )
+            self.assertEqual(len(controller.list_attempts()), 3)
+
+    def test_explicit_branch_parent_is_validated_before_handler_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: list[str] = []
+            registry = CapabilityRegistry()
+
+            def fixture(*, context: CapabilityContext) -> CapabilityResult:
+                calls.append(context.attempt.attempt_id)
+                return CapabilityResult(status="completed")
+
+            registry.register("plan", fixture)
+            registry.register("search", fixture)
+            controller = SessionController.create(
+                tmp,
+                session_id="branch-parent-validation",
+                topic="branch parent validation",
+                registry=registry,
+            )
+            controller.execute(
+                "plan",
+                attempt_id="attempt-001",
+                next_capability="search",
+            )
+
+            with self.assertRaisesRegex(KeyError, "Unknown parent attempt"):
+                controller.execute(
+                    "search",
+                    attempt_id="attempt-002",
+                    parent_attempt_id="missing-parent",
+                )
+
+            self.assertEqual(calls, ["attempt-001"])
+            self.assertEqual(
+                [item.attempt_id for item in controller.list_attempts()],
+                ["attempt-001"],
+            )
+
+    def test_attempt_lineage_reports_broken_persisted_parent_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = SessionController.create(
+                tmp,
+                session_id="broken-lineage",
+                topic="broken lineage",
+                registry=CapabilityRegistry(),
+            )
+            controller.store.new_attempt(
+                "attempt-001",
+                parent_attempt="missing-parent",
+            )
+            with self.assertRaisesRegex(ValueError, "references missing parent"):
+                controller.attempt_lineage("attempt-001")
+
+            controller.store.new_attempt(
+                "attempt-002",
+                parent_attempt="attempt-001",
+            )
+            controller.store.write_attempt_manifest(
+                replace(
+                    controller.store.read_attempt_manifest(
+                        "attempts/attempt-001/attempt_manifest.json"
+                    ),
+                    parent_attempt="attempt-002",
+                ),
+                path="attempts/attempt-001/attempt_manifest.json",
+            )
+            with self.assertRaisesRegex(ValueError, "contains a cycle"):
+                controller.attempt_lineage("attempt-002")
 
 
 if __name__ == "__main__":

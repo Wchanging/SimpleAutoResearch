@@ -4,6 +4,66 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-08-30
+
+### Changed
+
+- Core session attempts can now explicitly branch from an existing completed or
+  failed parent through `parent_attempt_id`, and expose its persisted root-to-node
+  lineage for inspection; default linear execution and old manifests remain unchanged.
+
+## 2026-08-29
+
+### Changed
+
+- Atomic code-task file writes now retry a transient Windows destination-file
+  lock a small, bounded number of times before failing, while preserving the
+  original atomic replacement behavior.
+- Added a deterministic `plan` research capability and a small
+  `research_plan.v1` to `SearchRequest` handoff; it reuses existing planners
+  without adding an LLM call or scheduler. Direct session execution now
+  rejects unregistered capabilities before creating an attempt.
+- LLM `responses` and `chat` modes now retry transient provider failures on
+  the selected API without silently switching surfaces. Cross-API fallback is
+  available only through the explicit `auto` mode.
+- New LLM usage rows record provider attempts for successful `ask()` requests,
+  and run summaries expose the derived retry count while preserving legacy rows.
+- Added an explicit, lazy research-capability registration helper for composing
+  selected Search/Read/Synthesis/Experiment/Report adapters without a scheduler.
+- Added typed restoration for persisted Read handoffs and a small Read-to-Synthesis
+  adapter, with an offline Search-to-Synthesis session fixture covering explicit
+  attempt lineage.
+- Session transitions now validate the actual next capability against the
+  persisted current attempt before creating it, while preserving allow-listed
+  backtracks and same-capability repairs.
+- Added a side-effect-free experiment comparison helper that consumes
+  canonical baseline/candidate results, preserves execution-status changes,
+  and stays inconclusive when metric direction evidence is missing.
+- Added a conservative `AnalysisResult` evidence status and optional
+  `analysis_status.json` handoff; it records execution/guard/metric/comparison
+  state without selecting retries or research transitions.
+- Analysis capability status now mirrors the analysis outcome: only `passed`
+  maps to `completed`, while missing evidence, failure, and blocking remain
+  `partial`, `failed`, and `blocked` respectively.
+- Added typed `AnalysisHandoff` restoration for `analysis_handoff.v1`; it keeps
+  the result and execution reference without rerunning or copying artifacts.
+- Added `experiment_request_from_synthesis()` to explicitly transfer the
+  research-level experiment contract from a persisted synthesis handoff to the
+  Experiment boundary; the caller still supplies `RunRequest` and execution
+  policy.
+- Added research-layer adapters that translate analysis and report-audit
+  outcomes into the existing `TransitionRequest` without executing, retrying,
+  or scheduling the next capability.
+- Added a side-effect-free synthesis-to-transition adapter; `needs_review`
+  remains an insufficient-evidence signal and the caller still chooses the
+  backtrack target.
+- Report capability outputs now explicitly declare generated figure files;
+  missing renderer outputs remain visible as `partial` instead of being
+  treated as a successful report.
+- Read handoffs now validate card evidence references against the original
+  document bundle; unresolved references remain diagnostic and downgrade the
+  result to `partial` without directory scans or source-text duplication.
+
 ## 2026-08-17
 
 ### Changed
