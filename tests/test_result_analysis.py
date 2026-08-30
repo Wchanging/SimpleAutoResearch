@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from simple_ar.integrations.llm import LLMError
 from simple_ar.result_analysis import AnalysisContext, run_result_analysis
 
 
@@ -31,6 +32,13 @@ class FakeAnalysisClient:
 
 
 class ResultAnalysisTests(unittest.TestCase):
+    def test_llm_mode_without_client_does_not_fallback(self) -> None:
+        with self.assertRaisesRegex(LLMError, "refusing deterministic fallback"):
+            run_result_analysis(
+                AnalysisContext(task_id="T0", metrics={"score": 1.0}),
+                use_llm=True,
+            )
+
     def test_metric_summary_marks_missing_and_all_zero(self) -> None:
         context = AnalysisContext(
             task_id="T1",

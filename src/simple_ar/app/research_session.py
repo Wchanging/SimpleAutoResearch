@@ -166,6 +166,8 @@ def run_research_session(
         ),
         analysis_next_capability="report",
         backend=backend,
+        analysis_use_llm=request.brief.use_llm,
+        analysis_client=request.brief.llm_client,
     )
     return ResearchSessionResult(
         session_root=request.brief.session_root,

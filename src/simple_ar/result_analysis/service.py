@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
-from simple_ar.integrations.llm import parse_json_object
+from simple_ar.integrations.llm import LLMError, parse_json_object
 
 from .metrics import build_metric_summary
 from .schema import (
@@ -56,16 +56,18 @@ def run_result_analysis(
 
     if use_llm:
         if client is None:
-            result.audit.notes.append("LLM analysis requested but no client was provided; used deterministic fallback.")
-        else:
-            raw_response = request_json_with_diagnostics(
-                client,
-                SYSTEM_PROMPT,
-                build_prompt(ctx, metric_summary, result),
-                label=label,
-                output_dir=output_dir,
+            raise LLMError(
+                "LLM analysis was requested but no client was provided; "
+                "refusing deterministic fallback."
             )
-            result = normalize_llm_result(raw_response, ctx, metric_summary, fallback=result)
+        raw_response = request_json_with_diagnostics(
+            client,
+            SYSTEM_PROMPT,
+            build_prompt(ctx, metric_summary, result),
+            label=label,
+            output_dir=output_dir,
+        )
+        result = normalize_llm_result(raw_response, ctx, metric_summary, fallback=result)
 
     result.raw_llm_response = raw_response
     result.audit = audit_result(result, metric_summary)

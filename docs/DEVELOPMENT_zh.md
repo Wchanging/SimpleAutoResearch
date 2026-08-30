@@ -74,9 +74,10 @@ attempt store 中，controller 会将引用标为 `missing`、追加诊断，并
 内置 research 适配器可以通过
 `research.register_research_capabilities(registry, names=...)` 注册。这个 helper
 只有被调用时才加载实现，支持显式选择子集，也支持替换指定实现；它不会注册旧的
-八阶段 handler，也不会创建 workflow 调度器。确定性的 `plan` 适配器复用已有的
-问题、查询和来源预算 builder，并在不调用 LLM 的情况下写出 `research_plan.v1`
-handoff；领域专属的 `design`、`code`、`run` 实现仍由应用调用方负责，直到它们的
+八阶段 handler，也不会创建 workflow 调度器。`plan` 适配器默认复用已有的
+问题、查询和来源预算 builder 并写出 `research_plan.v1`；调用方显式传入
+`use_llm=True` 和共享 client 时，才会调用 research-planner 生成并规范化模型辅助的计划。
+领域专属的 `design`、`code`、`run` 实现仍由应用调用方负责，直到它们的
 契约足够稳定。
 `research.planning.search_request_from_plan()` 是交给 `SearchRequest` 的对应内存
 适配器；它不调用 provider，也不负责检索策略。
@@ -286,8 +287,9 @@ typed bundle，因此 reader 不需要知道具体 provider 或目录布局。
 
 `research.synthesis.SynthesisRequest` 接收 research pipeline 已经组装好的 expanded evidence pack；
 `synthesize_evidence()` 返回有上限的 `IdeaCandidate`、`NoveltyCheck`、可选的
-`ExperimentContract` 以及证据缺口摘要。它是确定性的，不调用 LLM，也不写入文件；阶段级 LLM
-仍负责自然语言 synthesis。现有 synthesis artifact writer 已通过这个 facade 进行结构化证据推导，
+`ExperimentContract` 以及证据缺口摘要。默认路径是确定性的且不写入文件；调用方显式提供
+`SynthesisRequest(use_llm=True, llm_client=...)` 时，会保留结构化推导并增加有证据依据的模型文本。
+阶段级 policy 仍负责持久化和更大范围的写作流程。现有 synthesis artifact writer 已通过这个 facade 进行结构化证据推导，
 原有阶段产物路径保持不变。持久化的 compact pack 只保存 card 引用，因此调用这个边界前应先恢复
 对应的 card rows。
 `run_synthesis_capability()` 是 session 适配器：它接收调用方提供的 expanded pack，将完整的有界
@@ -316,8 +318,9 @@ research-level contract，并要求调用方显式提供 `RunRequest`；不会�
 `research.brief.build_research_brief()` 是一个小型纵向组合入口：它先调用
 Read 边界，再把返回的 evidence cards 交给 Synthesis 边界。它接受 Search 产出的
 `DocumentBundle`、缓存文档或本地文献 bundle，返回 `ready`、`partial`、
-`needs_review` 或 `empty`，不会把 metadata-only 输入伪装成充分证据，也不会调用
-LLM 或写文件。它只是验证能力之间的输入输出可以组合，不替代现有八阶段 pipeline。
+`needs_review` 或 `empty`，不会把 metadata-only 输入伪装成充分证据。它不搜索、不写文件；
+默认使用确定性 synthesis，调用方显式提供 `use_llm=True` 和共享 client 时才增加有证据依据的
+模型文本。它只是验证能力之间的输入输出可以组合，不替代现有八阶段 pipeline。
 
 `research.brief.run_research_brief_capability()` 是这条组合的可选 session 适配器。
 调用方自行选择名称并注册 handler，再传入 typed 的 `ResearchBriefRequest`；适配器只写出

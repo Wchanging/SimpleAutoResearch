@@ -106,6 +106,14 @@ attempt. `--query`, `--provider`, `--max-results`, `--max-chunks`, and
 `--idea-limit` are the deliberately small controls for this path; more complex
 policies remain application-owned.
 
+The standalone path is explicit about model use. Without `--model` it is an
+offline/deterministic composition: search, parsing, card derivation, and
+structured direction extraction use the supplied inputs. With `--model NAME`,
+the existing LLM client is used for research planning and synthesis, and the
+handoff records `planner: llm` and `generation_mode: llm`. Missing credentials,
+transport failures, or malformed model output fail the relevant attempt; they
+do not silently become a model-generated result.
+
 The next small composition accepts the resulting research direction through
 `simple-ar research-experiment`. It runs one declared command with the
 existing execution backend and sends its canonical `results.json` to the
@@ -113,6 +121,9 @@ existing result-analysis capability. Its input is a persisted
 `research_brief.v1` or `synthesis_result.v1`, so the direction-to-experiment
 handoff is explicit and inspectable. Execution failures are analyzed as
 evidence, but retries, repair, and experiment selection remain caller-owned.
+Passing `--model NAME` also enables the shared LLM result-analysis step;
+omitting it keeps analysis deterministic. The selected mode is recorded in
+the analysis capability provenance.
 
 For a single session that owns both sides of this handoff, use
 `simple-ar research-session`. It reuses the same brief prefix and continues
@@ -211,10 +222,12 @@ Report Audit, and Research Brief.
 `analysis` is the canonical standalone result-analysis name; `analyze` remains
 available as a legacy registry/session alias when explicitly selected.
 
-The `plan` adapter reuses the existing deterministic question, query, and
-source-budget builders and writes one `research_plan.v1` handoff. It adds no
-LLM call and does not choose the next capability. Domain-specific design, code
-generation, and execution implementations remain caller-owned.
+The `plan` adapter reuses the existing question, query, and source-budget
+builders and writes one `research_plan.v1` handoff. It is deterministic by
+default; a caller can explicitly pass `use_llm=True` and the shared client to
+obtain a normalized model-assisted plan. It does not choose the next
+capability. Domain-specific design, code generation, and execution
+implementations remain caller-owned.
 `research.planning.search_request_from_plan()` is the small in-memory adapter
 for passing that plan to the existing `SearchRequest`; it does not invoke a
 provider or add retry, deduplication, or selection policy.

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+from simple_ar.integrations.llm import LLMError
 from simple_ar.research import SynthesisRequest as PublicSynthesisRequest
 from simple_ar.research.synthesis import (
     SynthesisRequest,
@@ -59,6 +60,42 @@ def _pack() -> dict[str, object]:
 
 
 class SynthesisCapabilityTests(unittest.TestCase):
+    def test_capability_can_add_explicit_llm_synthesis(self) -> None:
+        class FakeClient:
+            model = "fake-synthesis-model"
+
+            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                self.label = label
+                return {
+                    "synthesis_markdown": "## Themes\n\nThe evidence describes validation-oriented agents [paper-1].",
+                    "hypothesis_markdown": "## Hypothesis\n\nAdding validation should improve accuracy under the fixture metric.",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = CapabilityContext(
+                store=ArtifactStore(Path(tmp)),
+                attempt=AttemptManifest(
+                    attempt_id="attempt-001",
+                    capability="synthesis",
+                ),
+            )
+            result = run_synthesis_capability(
+                context=context,
+                request=SynthesisRequest(
+                    evidence_pack=_pack(),
+                    use_llm=True,
+                    llm_client=FakeClient(),
+                ),
+            )
+            payload = context.store.read_json(result.artifacts[0])
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.provenance["mode"], "llm")
+        self.assertEqual(payload["generation_mode"], "llm")
+        self.assertGreater(len(payload["synthesis_markdown"]), 0)
+        self.assertIn("Themes", payload["synthesis_markdown"])
+        self.assertIn("Hypothesis", payload["hypothesis_markdown"])
+
     def test_research_package_keeps_capability_exports_lazy_but_compatible(self) -> None:
         self.assertIs(PublicSynthesisRequest, SynthesisRequest)
 
@@ -124,6 +161,20 @@ class SynthesisCapabilityTests(unittest.TestCase):
         self.assertEqual(result.status, "needs_review")
         self.assertTrue(result.diagnostics)
         self.assertTrue(result.ideas)
+
+    def test_llm_mode_rejects_empty_evidence_instead_of_falling_back(self) -> None:
+        class FakeClient:
+            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                raise AssertionError("The model must not be called without evidence.")
+
+        with self.assertRaises(LLMError):
+            synthesize_evidence(
+                SynthesisRequest(
+                    evidence_pack={"topic": "unknown", "counts": {"documents": 0, "chunks": 0}},
+                    use_llm=True,
+                    llm_client=FakeClient(),
+                )
+            )
 
     def test_request_rejects_invalid_limits(self) -> None:
         with self.assertRaises(ValueError):

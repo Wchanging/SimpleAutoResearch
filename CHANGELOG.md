@@ -8,6 +8,12 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Standalone research brief/session flows now accept an explicit `--model`
+  (or library `llm_client`) and use the shared LLM transport for planning and
+  synthesis; experiment sessions can use it for result analysis. Offline mode
+  remains available when no model is supplied, and its provenance is explicit.
+- Result analysis now fails visibly when LLM mode is requested without a
+  client instead of silently returning deterministic output.
 - Core session attempts can now explicitly branch from an existing completed or
   failed parent through `parent_attempt_id`, and expose its persisted root-to-node
   lineage for inspection; default linear execution and old manifests remain unchanged.

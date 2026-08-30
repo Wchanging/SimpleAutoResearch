@@ -113,6 +113,21 @@ ingest, and brief attempts. It does not silently retry or overwrite an attempt;
 `--query`, `--provider`, `--max-results`, `--max-chunks`, and `--idea-limit` are
 the deliberately small controls for this path.
 
+The capability is deterministic when `--model` is omitted. To use the shared
+LLM transport for question/query planning and evidence synthesis, opt in
+explicitly:
+
+```bash
+uv run simple-ar research-brief \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --model gpt-5.4
+```
+
+The run prints and persists the selected mode. LLM mode requires the normal
+`.env` provider settings; a missing key or failed model response is reported
+as a failed attempt rather than replaced by deterministic prose.
+
 ### `simple-ar research-experiment`
 
 **Purpose**: execute one reviewed `research_brief.v1` or `synthesis_result.v1`
@@ -142,6 +157,7 @@ the application does not retry or repair it implicitly.
 | --- | --- | --- |
 | `--topic TEXT` | string | Topic label for the new session. |
 | `--synthesis-file PATH` | path | Persisted `research_brief.v1` or `synthesis_result.v1` input. |
+| `--model NAME` | string | Optional model; enables LLM-backed result analysis. |
 | `--output-root DIR` | path | Parent directory for the timestamped session. |
 | `--cwd DIR` | path | Working directory passed to the execution backend. |
 | `--timeout-sec N` | int | Local execution timeout. |
@@ -187,6 +203,11 @@ For a `research-session` result, `build_research_session_report_inputs()` and
 they derive report inputs from the session's persisted synthesis, paper
 metadata, execution, and analysis evidence, while leaving template, budget,
 and client selection explicit.
+
+Omitting `--model` keeps planning, synthesis, and analysis deterministic. When
+`--model NAME` is supplied, the same shared client is used for planning,
+synthesis, and result analysis; provider failures remain visible and are not
+silently converted into offline output.
 
 ### `simple-ar research-code-task`
 

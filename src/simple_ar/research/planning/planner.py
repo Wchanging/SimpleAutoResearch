@@ -150,8 +150,9 @@ def build_llm_research_plan(
 
     The LLM is allowed to improve question decomposition and terminology, but
     this function keeps schema, budgets, and allowed facets under code control.
-    Invalid or empty responses raise ``ValueError`` so callers can fall back to
-    deterministic planning without leaving half-valid artifacts.
+    Invalid or empty responses raise ``ValueError``. The caller must decide
+    whether to stop or explicitly retry; this normalizer never silently turns
+    a failed LLM request into a deterministic plan.
     """
 
     seed_queries = _unique(_string_list(config.get("research_queries")) or [default_query or topic])

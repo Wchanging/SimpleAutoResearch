@@ -56,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     brief_parser.add_argument("--topic", required=True)
     brief_parser.add_argument(
+        "--model",
+        default=None,
+        help="Optional model override; enables LLM-backed planning and synthesis.",
+    )
+    brief_parser.add_argument(
         "--output-root",
         default="runs/research-brief",
         help="Parent directory for the timestamped brief session.",
@@ -91,6 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_parser.add_argument("--topic", required=True)
     experiment_parser.add_argument("--synthesis-file", required=True)
     experiment_parser.add_argument(
+        "--model",
+        default=None,
+        help="Optional model override; enables LLM-backed result analysis.",
+    )
+    experiment_parser.add_argument(
         "--output-root",
         default="runs/research-experiment",
         help="Parent directory for the timestamped experiment session.",
@@ -125,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run a bounded literature-to-experiment research session.",
     )
     session_parser.add_argument("--topic", required=True)
+    session_parser.add_argument(
+        "--model",
+        default=None,
+        help="Optional model override; enables LLM-backed planning, synthesis, and analysis.",
+    )
     session_parser.add_argument(
         "--output-root",
         default="runs/research-session",

@@ -21,6 +21,55 @@ from simple_ar.research.planning.capability import (
 
 
 class PlanningCapabilityTests(unittest.TestCase):
+    def test_capability_can_use_explicit_llm_planner(self) -> None:
+        class FakeClient:
+            model = "fake-research-model"
+
+            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                self.label = label
+                return {
+                    "questions": [
+                        {
+                            "question": "Which methods improve reliable coding agents?",
+                            "facet": "method",
+                            "rationale": "Compare method families.",
+                            "required": True,
+                            "negative_scope": [],
+                            "success_criteria": ["Find method evidence."],
+                        }
+                    ],
+                    "queries": [
+                        "reliable coding agents benchmark",
+                        "LLM code agent validation",
+                    ],
+                    "required_facets": ["method", "benchmark"],
+                    "negative_terms": [],
+                    "rationale": "Use focused method and benchmark searches.",
+                }
+
+        client = FakeClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            context = CapabilityContext(
+                store=ArtifactStore(Path(tmp)),
+                attempt=AttemptManifest(attempt_id="plan-001", capability="plan"),
+            )
+            result = run_research_plan_capability(
+                context=context,
+                request=ResearchPlanRequest(
+                    topic="reliable coding agents",
+                    config={"research_sources": ["fixture"]},
+                    use_llm=True,
+                    llm_client=client,
+                ),
+            )
+            payload = context.store.read_json(result.artifacts[0])
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.provenance["mode"], "llm")
+        self.assertEqual(result.provenance["model"], "fake-research-model")
+        self.assertEqual(client.label, "research-planner")
+        self.assertEqual(payload["planner"], "llm")
+
     def test_plan_reuses_existing_deterministic_planners(self) -> None:
         result = build_research_plan(
             ResearchPlanRequest(

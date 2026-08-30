@@ -1,21 +1,32 @@
-"""Standalone deterministic research-planning capability.
+"""Standalone research-planning capability.
 
 The capability adapts the existing question, query, and source planners to the
-common session boundary. It does not call an LLM or decide what to execute
-next; callers still own search, design, implementation, and execution policy.
+common session boundary. Deterministic planning remains available for offline
+use, while the session adapter can explicitly provide the existing LLM client
+for model-assisted question and query planning.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import TYPE_CHECKING, Any, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
+from simple_ar.integrations.llm import LLMError
 from simple_ar.research.contracts import QueryPlan, ResearchQuestion, SourcePlan
 from simple_ar.research.outputs.artifacts import build_research_plan_artifact
+from simple_ar.research.prompts import (
+    RESEARCH_PLANNER_SYSTEM,
+    research_planner_user_prompt,
+)
 from simple_ar.research.sources.base import build_source_plan, primary_query
 
-from .planner import build_query_plan, build_research_questions
+from .planner import (
+    build_llm_research_plan,
+    build_query_plan,
+    build_research_questions,
+)
 
 if TYPE_CHECKING:
     from simple_ar.research.sources.capability import SearchRequest
@@ -23,19 +34,28 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class ResearchPlanRequest:
-    """Inputs for one deterministic research-plan attempt."""
+    """Inputs for one research-plan attempt.
+
+    ``use_llm`` is deliberately explicit. The pure ``build_research_plan``
+    function stays deterministic; the capability adapter is the place where a
+    caller may opt into the shared LLM transport.
+    """
 
     topic: str
     problem_markdown: str = ""
     config: Mapping[str, object] = field(default_factory=dict)
     default_query: str = ""
     default_max_results: int = 10
+    use_llm: bool = False
+    llm_client: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.topic.strip():
             raise ValueError("ResearchPlanRequest.topic cannot be empty.")
         if self.default_max_results < 1:
             raise ValueError("default_max_results must be positive.")
+        if self.use_llm and self.llm_client is None:
+            raise ValueError("ResearchPlanRequest.llm_client is required when use_llm is true.")
         object.__setattr__(self, "config", dict(self.config))
 
 
@@ -139,9 +159,9 @@ def run_research_plan_capability(
     context: CapabilityContext,
     request: ResearchPlanRequest,
 ) -> CapabilityResult:
-    """Persist one deterministic planning handoff for a session attempt."""
+    """Persist one planning handoff for a session attempt."""
 
-    result = build_research_plan(request)
+    result = _build_requested_plan(request)
     output = context.store.write_json(
         "research_plan.json",
         result.to_handoff_dict(),
@@ -161,8 +181,76 @@ def run_research_plan_capability(
             "capability": "plan",
             "planner": result.query_plan.planner,
             "result_schema": "research_plan.v1",
+            "mode": "llm" if request.use_llm else "deterministic",
+            "model": str(getattr(request.llm_client, "model", ""))
+            if request.use_llm
+            else "",
         },
     )
+
+
+def _build_requested_plan(request: ResearchPlanRequest) -> ResearchPlanResult:
+    """Build a deterministic or explicitly LLM-assisted plan."""
+
+    baseline = build_research_plan(request)
+    if not request.use_llm:
+        return baseline
+    client = request.llm_client
+    if client is None:
+        raise LLMError("LLM planning was requested but no client was provided.")
+
+    config = dict(request.config)
+    max_queries = _llm_query_budget(config)
+    max_rounds = baseline.query_plan.max_rounds
+    mode = str(config.get("research_mode") or baseline.source_plan.mode)
+    prompt = research_planner_user_prompt(
+        topic=request.topic,
+        problem_markdown=request.problem_markdown,
+        seed_queries_json=json.dumps(
+            baseline.query_plan.seed_queries,
+            ensure_ascii=False,
+        ),
+        required_facets_json=json.dumps(
+            baseline.query_plan.required_facets,
+            ensure_ascii=False,
+        ),
+        max_queries=max_queries,
+        max_rounds=max_rounds,
+        mode=mode,
+    )
+    data = client.ask_json(
+        RESEARCH_PLANNER_SYSTEM,
+        prompt,
+        label="research-planner",
+    )
+    questions, query_plan = build_llm_research_plan(
+        topic=request.topic,
+        problem_markdown=request.problem_markdown,
+        config=config,
+        default_query=request.default_query or request.topic,
+        data=data,
+    )
+    source_plan = build_source_plan(
+        topic=request.topic,
+        problem_markdown=request.problem_markdown,
+        config=config,
+        default_query=primary_query(query_plan) or request.topic,
+        default_max_results=request.default_max_results,
+    )
+    return ResearchPlanResult(
+        questions=tuple(questions),
+        query_plan=query_plan,
+        source_plan=source_plan,
+    )
+
+
+def _llm_query_budget(config: Mapping[str, object]) -> int:
+    """Keep model planning within the same small query budget as offline mode."""
+
+    value = config.get("research_max_queries")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return min(max(1, value), 12)
+    return 6
 
 
 def search_request_from_plan(result: ResearchPlanResult) -> "SearchRequest":

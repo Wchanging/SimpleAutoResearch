@@ -8,6 +8,11 @@
 
 ### 变更
 
+- standalone research brief/session 现在支持显式 `--model`（库调用对应传入
+  `llm_client`），使用共享 LLM transport 完成 planning 和 synthesis；experiment session
+  也可以用它做结果分析。不传模型时仍可使用离线模式，且 provenance 会明确记录实际模式。
+- result analysis 请求 LLM 模式但没有 client 时现在会显式失败，不再静默返回 deterministic
+  结果。
 - core session attempt 现在可以通过 `parent_attempt_id` 从已有的完成或失败父节点显式创建
   分支，并提供持久化的根到节点父链查看入口；默认线性执行和旧 manifest 保持不变。
 - 新增有界的 `research-code-task` 应用入口：它通过现有的 project-style Code-Task 后端消费

@@ -57,7 +57,7 @@ from simple_ar.code_task.orchestration.execute import EXECUTE_STEPS
 from simple_ar.core.console import print_line
 from simple_ar.core.pipeline import Context, PipelineRunner
 from simple_ar.core.reporting import ConsoleReporter
-from simple_ar.integrations.llm import LLMError
+from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.retrieval.index import build_artifact_index
 from simple_ar.retrieval.search import search_artifacts
 from simple_ar.app.run_config import RunConfigError, load_pipeline_run_config
@@ -233,6 +233,7 @@ def _print_research_brief(args: argparse.Namespace) -> None:
 
     if args.max_results < 1 or args.max_chunks < 1 or args.idea_limit < 1:
         raise SystemExit("--max-results, --max-chunks, and --idea-limit must be positive.")
+    llm_client = _optional_research_llm_client(args.model, "research brief")
     session_root = new_research_brief_root(args.output_root, args.topic)
     request = ResearchBriefSessionRequest(
         topic=args.topic,
@@ -243,6 +244,8 @@ def _print_research_brief(args: argparse.Namespace) -> None:
         max_results=args.max_results,
         max_chunks=args.max_chunks,
         idea_limit=args.idea_limit,
+        use_llm=llm_client is not None,
+        llm_client=llm_client,
     )
     try:
         result = run_research_brief_session(request)
@@ -250,6 +253,11 @@ def _print_research_brief(args: argparse.Namespace) -> None:
         raise SystemExit(str(exc)) from exc
     print_line(f"Research brief session: {result.session_root}")
     print_line(f"Status: {result.status}")
+    print_line(f"Mode: {'llm' if llm_client is not None else 'deterministic'}")
+    print_line(f"Planner: {result.plan.query_plan.planner}")
+    print_line(
+        f"Synthesis: {result.brief.synthesis.generation_mode if result.brief.synthesis else 'none'}"
+    )
     print_line(f"Papers: {len(result.search.papers)}")
     print_line(f"Documents: {len(result.documents.records)}")
     print_line(f"Ideas: {len(result.brief.synthesis.ideas) if result.brief.synthesis else 0}")
@@ -271,6 +279,7 @@ def _print_research_experiment(args: argparse.Namespace) -> None:
     synthesis_file = Path(args.synthesis_file)
     if not synthesis_file.is_file():
         raise SystemExit(f"Synthesis handoff not found: {synthesis_file}")
+    llm_client = _optional_research_llm_client(args.model, "research experiment analysis")
     session_root = new_research_session_root(args.output_root, args.topic)
     try:
         result_schema = _experiment_result_schema(args)
@@ -284,12 +293,15 @@ def _print_research_experiment(args: argparse.Namespace) -> None:
                 timeout_sec=args.timeout_sec,
                 result_schema=result_schema,
                 label=args.label,
+                use_llm=llm_client is not None,
+                llm_client=llm_client,
             )
         )
     except ResearchExperimentSessionError as exc:
         raise SystemExit(str(exc)) from exc
     print_line(f"Research experiment session: {result.session_root}")
     print_line(f"Status: {result.status}")
+    print_line(f"Mode: {'llm' if llm_client is not None else 'deterministic'}")
     print_line(f"Execution: {result.execution_path}")
     print_line(f"Analysis: {result.analysis_path}")
 
@@ -338,6 +350,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
             "--max-results, --max-chunks, --idea-limit, and --timeout-sec "
             "must be positive."
         )
+    llm_client = _optional_research_llm_client(args.model, "research session")
     session_root = new_research_session_root(args.output_root, args.topic)
     brief_request = ResearchBriefSessionRequest(
         topic=args.topic,
@@ -348,6 +361,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         max_results=args.max_results,
         max_chunks=args.max_chunks,
         idea_limit=args.idea_limit,
+        use_llm=llm_client is not None,
+        llm_client=llm_client,
     )
     try:
         result = run_research_session(
@@ -364,10 +379,27 @@ def _print_research_session(args: argparse.Namespace) -> None:
         raise SystemExit(str(exc)) from exc
     print_line(f"Research session: {result.session_root}")
     print_line(f"Status: {result.status}")
+    print_line(f"Mode: {'llm' if llm_client is not None else 'deterministic'}")
+    print_line(f"Planner: {result.plan.query_plan.planner}")
+    print_line(f"Synthesis: {result.brief.generation_mode}")
     print_line(f"Papers: {len(result.search.papers)}")
     print_line(f"Documents: {len(result.documents.records)}")
     print_line(f"Execution: {result.session_root / result.execution_ref.path}")
     print_line(f"Analysis: {result.session_root / result.analysis_ref.path}")
+
+
+def _optional_research_llm_client(
+    model: str | None,
+    purpose: str,
+) -> LLMClient | None:
+    """Create the shared client only when a research command opts into LLMs."""
+
+    if not model:
+        return None
+    try:
+        return LLMClient.from_env(model=model)
+    except LLMError as exc:
+        raise SystemExit(f"Cannot enable LLM-backed {purpose}: {exc}") from exc
 
 
 def _print_research_code_task(args: argparse.Namespace) -> None:

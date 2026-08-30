@@ -513,6 +513,8 @@ def analyze_experiment_capability(
             "capability": "analysis",
             "execution_ref": result_ref.path,
             "result_schema": "analysis_handoff.v1",
+            "mode": "llm" if use_llm else "deterministic",
+            "model": str(getattr(client, "model", "")) if use_llm else "",
         },
     )
 

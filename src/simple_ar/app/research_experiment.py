@@ -41,6 +41,8 @@ class ResearchExperimentSessionRequest:
     result_schema: Mapping[str, Any] = field(default_factory=dict)
     label: str = "research-experiment"
     env: Mapping[str, str] | None = None
+    use_llm: bool = False
+    llm_client: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.topic.strip():
@@ -51,6 +53,10 @@ class ResearchExperimentSessionRequest:
             raise ValueError("ResearchExperimentSessionRequest.timeout_sec must be positive.")
         if not self.label.strip():
             raise ValueError("ResearchExperimentSessionRequest.label cannot be empty.")
+        if self.use_llm and self.llm_client is None:
+            raise ValueError(
+                "ResearchExperimentSessionRequest.llm_client is required when use_llm is true."
+            )
         object.__setattr__(self, "session_root", Path(self.session_root))
         object.__setattr__(self, "synthesis_file", Path(self.synthesis_file))
         object.__setattr__(self, "cwd", Path(self.cwd))
@@ -176,6 +182,8 @@ def run_research_experiment_session(
         ),
         analysis_next_capability=None,
         backend=backend,
+        analysis_use_llm=request.use_llm,
+        analysis_client=request.llm_client,
     )
     return ResearchExperimentSessionResult(
         session_root=request.session_root,
@@ -200,6 +208,8 @@ def _run_experiment_steps(
     analysis_context: AnalysisContext,
     analysis_next_capability: str | None,
     backend: ExecutionBackend | None,
+    analysis_use_llm: bool = False,
+    analysis_client: Any | None = None,
 ) -> _ExperimentSteps:
     """Run experiment and analysis attempts in a caller-owned session."""
 
@@ -234,6 +244,8 @@ def _run_experiment_steps(
         next_capability=analysis_next_capability,
         result_ref=execution_ref,
         analysis_context=analysis_context,
+        use_llm=analysis_use_llm,
+        client=analysis_client,
     )
     analysis_ref = controller.attempt_output_ref(
         "analysis-001",

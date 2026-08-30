@@ -7,7 +7,7 @@ artifact persistence remain policies of their callers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
@@ -25,7 +25,12 @@ ResearchBriefStatus = Literal["ready", "partial", "needs_review", "empty"]
 
 @dataclass(frozen=True, slots=True)
 class ResearchBriefRequest:
-    """Inputs for one evidence-backed research brief."""
+    """Inputs for one evidence-backed research brief.
+
+    The default remains deterministic for library compatibility. A caller
+    that wants model-generated synthesis must set ``use_llm`` and provide the
+    shared client explicitly.
+    """
 
     topic: str
     bundle: DocumentBundle
@@ -34,6 +39,8 @@ class ResearchBriefRequest:
     idea_limit: int = 3
     novelty_backend: str = "local"
     include_experiment_contract: bool = True
+    use_llm: bool = False
+    llm_client: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.topic.strip():
@@ -42,6 +49,8 @@ class ResearchBriefRequest:
             raise ValueError("idea_limit must be at least 1.")
         if not self.novelty_backend.strip():
             raise ValueError("novelty_backend cannot be empty.")
+        if self.use_llm and self.llm_client is None:
+            raise ValueError("ResearchBriefRequest.llm_client is required when use_llm is true.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +74,9 @@ class ResearchBriefResult:
             "has_experiment_contract": bool(
                 self.synthesis and self.synthesis.experiment_contract
             ),
+            "generation_mode": (
+                self.synthesis.generation_mode if self.synthesis else "none"
+            ),
             "diagnostics": list(self.diagnostics),
         }
 
@@ -80,21 +92,7 @@ class ResearchBriefResult:
         read_payload = read.to_handoff_dict()
         synthesis_payload: dict[str, Any] | None = None
         if self.synthesis is not None:
-            synthesis_payload = {
-                "schema_version": "synthesis_result.v1",
-                "status": self.synthesis.status,
-                "gap_summary": self.synthesis.gap_summary,
-                "ideas": [idea.to_row() for idea in self.synthesis.ideas],
-                "novelty_checks": [
-                    check.to_row() for check in self.synthesis.novelty_checks
-                ],
-                "experiment_contract": (
-                    self.synthesis.experiment_contract.to_row()
-                    if self.synthesis.experiment_contract is not None
-                    else None
-                ),
-                "diagnostics": list(self.synthesis.diagnostics),
-            }
+            synthesis_payload = self.synthesis.to_handoff_dict()
         return {
             "schema_version": "research_brief.v1",
             "topic": topic,
@@ -138,11 +136,12 @@ class ResearchBriefResult:
 
 
 def build_research_brief(request: ResearchBriefRequest) -> ResearchBriefResult:
-    """Compose deterministic reading and evidence-to-direction synthesis.
+    """Compose reading and evidence-to-direction synthesis.
 
-    The function does not search, call an LLM, write files, or choose a final
-    research claim.  A caller can provide a Search-produced bundle, cached
-    documents, or a local-file bundle through the same boundary.
+    The function does not search or write files. Synthesis is deterministic by
+    default; callers can explicitly set `use_llm` and provide the shared
+    client to add grounded model prose. It never chooses a final research
+    claim or a next workflow stage.
     """
     read = read_documents(
         ReadRequest(
@@ -165,6 +164,8 @@ def build_research_brief(request: ResearchBriefRequest) -> ResearchBriefResult:
             idea_limit=request.idea_limit,
             novelty_backend=request.novelty_backend,
             include_experiment_contract=request.include_experiment_contract,
+            use_llm=request.use_llm,
+            llm_client=request.llm_client,
         )
     )
     diagnostics = tuple((*read.diagnostics, *synthesis.diagnostics))
@@ -222,6 +223,15 @@ def run_research_brief_capability(
         provenance={
             "capability": "research_brief",
             "result_schema": "research_brief.v1",
+            "planner": "llm" if request.use_llm else "deterministic",
+            "generation_mode": (
+                result.synthesis.generation_mode
+                if result.synthesis is not None
+                else "none"
+            ),
+            "model": str(getattr(request.llm_client, "model", ""))
+            if request.use_llm
+            else "",
         },
     )
 

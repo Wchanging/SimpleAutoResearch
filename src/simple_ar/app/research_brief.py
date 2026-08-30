@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 from simple_ar.core import (
     ArtifactRef,
@@ -61,6 +61,8 @@ class ResearchBriefSessionRequest:
     cache_dir: Path | None = None
     extraction_dir: Path | None = None
     config: Mapping[str, object] = field(default_factory=dict)
+    use_llm: bool = False
+    llm_client: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.topic.strip():
@@ -73,6 +75,10 @@ class ResearchBriefSessionRequest:
             raise ValueError("ResearchBriefSessionRequest.max_chunks must be positive.")
         if self.idea_limit < 1:
             raise ValueError("ResearchBriefSessionRequest.idea_limit must be positive.")
+        if self.use_llm and self.llm_client is None:
+            raise ValueError(
+                "ResearchBriefSessionRequest.llm_client is required when use_llm is true."
+            )
         object.__setattr__(self, "session_root", Path(self.session_root))
         object.__setattr__(
             self,
@@ -207,6 +213,8 @@ def _run_research_brief_steps(
         config=_planning_config(request),
         default_query=request.topic,
         default_max_results=request.max_results,
+        use_llm=request.use_llm,
+        llm_client=request.llm_client,
     )
     plan_capability, _ = controller.execute(
         "plan",
@@ -287,6 +295,8 @@ def _run_research_brief_steps(
             topic=request.topic,
             bundle=documents,
             idea_limit=request.idea_limit,
+            use_llm=request.use_llm,
+            llm_client=request.llm_client,
         ),
     )
     if brief_capability.status == "blocked":

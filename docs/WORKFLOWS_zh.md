@@ -85,11 +85,19 @@ uv run simple-ar research-brief --topic "reliable agents" \
 `--max-results`、`--max-chunks` 和 `--idea-limit` 是这条路径保留的少量控制项，更复杂的策略
 仍由上层应用负责。
 
+这条 standalone 路径会明确区分模型模式。省略 `--model` 时，它是离线/确定性组合：搜索、
+解析、card derivation 和结构化方向提取只使用已有输入；传入 `--model NAME` 后，使用现有
+LLM client 完成研究规划和综合，并在 handoff 中记录 `planner: llm` 与
+`generation_mode: llm`。缺少凭据、传输失败或模型返回格式错误时，对应 attempt 会失败，
+不会静默伪造模型结果。
+
 下一条小组合入口是 `simple-ar research-experiment`。它接收前一个入口生成的
 research direction，调用现有执行后端运行一次明确的命令，再把规范化的 `results.json`
 交给现有结果分析能力。输入是持久化的 `research_brief.v1` 或 `synthesis_result.v1`，因此
 方向到实验的交接仍然明确可检查。执行失败也会作为证据进入分析，但 retry、repair 和实验
 选择仍由调用方负责。
+传入 `--model NAME` 会额外启用共享 LLM 的结果分析；省略它时分析保持 deterministic，
+实际使用的模式会记录在 analysis capability 的 provenance 中。
 
 如果希望两段交接保留在同一个 session 中，可以使用
 `simple-ar research-session`。它复用相同的 brief 前缀，再用一个明确提供的
@@ -170,8 +178,9 @@ Document Ingest、Read、Synthesis、Experiment、Analysis、Report、Report Aud
 独立结果分析能力的规范名称是 `analysis`；为兼容旧调用方，显式选择时仍保留
 `analyze` 这个 registry/session 别名。
 
-其中 `plan` 适配器复用已有的确定性问题、查询和来源预算 builder，写出一个
-`research_plan.v1` handoff；它不增加 LLM 调用，也不替调用方选择下一能力。
+其中 `plan` 适配器复用已有的问题、查询和来源预算 builder，写出一个
+`research_plan.v1` handoff；默认使用确定性路径，调用方显式传入
+`use_llm=True` 和共享 client 时才会得到规范化的模型辅助计划。它不替调用方选择下一能力。
 领域专属的 `design`、`code`、`run` 实现仍由调用方提供。
 如果要把该计划交给已有的 `SearchRequest`，可以使用
 `research.planning.search_request_from_plan()` 这个内存适配器；它不会调用 provider，
@@ -180,7 +189,8 @@ Document Ingest、Read、Synthesis、Experiment、Analysis、Report、Report Aud
 如果调用方已经拥有输入，也可以分别注册
 `research.evidence.reader.run_read_capability()` 或 `research.synthesis.run_synthesis_capability()`：前者
 接收 `DocumentBundle` 并写出 `read_result.json`，后者接收 expanded evidence pack 并写出
-`synthesis_result.json`。两者都不会自行下载文档、调用 LLM 或决定阶段转移。
+`synthesis_result.json`。前者不会自行下载文档或调用 LLM；后者默认使用确定性结构推导，
+只有显式传入 client 才调用 LLM。两者都不会决定阶段转移。
 
 如果 session 从检索开始，也可以显式注册
 `research.sources.run_search_capability()`。它会在 attempt 目录写出一个

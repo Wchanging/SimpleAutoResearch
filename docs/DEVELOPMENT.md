@@ -356,8 +356,11 @@ explicit references only; it does not scan files or judge semantic correctness.
 `research.synthesis.SynthesisRequest` accepts the expanded evidence pack already
 assembled by the research pipeline. `synthesize_evidence()` returns bounded
 `IdeaCandidate`, `NoveltyCheck`, and optional `ExperimentContract` objects plus
-an evidence-gap summary. It is deterministic, does not call an LLM, and does
-not write files; the stage-level LLM remains responsible for prose synthesis.
+an evidence-gap summary. It is deterministic by default and does not write
+files. A caller may explicitly provide an LLM client through
+`SynthesisRequest(use_llm=True, llm_client=...)`; that keeps the structured
+derivation and adds model-generated, evidence-grounded prose. The stage-level
+policy still owns persistence and any broader writing workflow.
 The existing synthesis artifact writer uses this facade for its structured
 evidence derivation, while legacy artifact paths remain unchanged. Compact
 persisted packs contain card references, so callers should hydrate the card
@@ -400,10 +403,11 @@ calls the Read boundary and passes the resulting evidence cards to the
 Synthesis boundary. It accepts a Search-produced `DocumentBundle`, cached
 documents, or a local-document bundle and returns `ready`, `partial`,
 `needs_review`, or `empty`. Metadata-only input is not reported as sufficient
-evidence, and the function does not call an LLM or write files. This proves that
-capabilities can compose without replacing the existing eight-stage pipeline;
-callers still choose the existing artifact projection when persistence is
-needed.
+evidence. It does not search or write files; synthesis is deterministic by
+default, while `ResearchBriefRequest(use_llm=True, llm_client=...)` explicitly
+enables the shared LLM for grounded prose. This proves that capabilities can
+compose without replacing the existing eight-stage pipeline; callers still
+choose the existing artifact projection when persistence is needed.
 
 `research.brief.run_research_brief_capability()` is the opt-in session adapter
 for this composition. A caller registers it under a chosen capability name

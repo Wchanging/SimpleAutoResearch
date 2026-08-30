@@ -110,6 +110,19 @@ uv run simple-ar research-brief \
 独立 attempt 中。它不会静默 retry 或覆盖 attempt；`--query`、`--provider`、
 `--max-results`、`--max-chunks` 和 `--idea-limit` 是这条路径保留的少量控制项。
 
+省略 `--model` 时，这条入口使用可复现的 deterministic planning 和 evidence derivation；
+如果希望真实调用共享 LLM transport 完成研究问题/查询规划和证据综合，可以显式传入模型：
+
+```bash
+uv run simple-ar research-brief \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --model gpt-5.4
+```
+
+LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求失败或返回无效结果时，
+对应 attempt 会明确失败，不会偷偷改用 deterministic 正文。
+
 ### `simple-ar research-experiment`
 
 **一句话说明**：接收已经审阅的 `research_brief.v1` 或 `synthesis_result.v1` handoff，
@@ -136,6 +149,7 @@ session 会把输入 handoff、`results.json`、stdout/stderr、guard、diagnosi
 | --- | --- | --- |
 | `--topic TEXT` | string | 新 session 的主题标签。 |
 | `--synthesis-file PATH` | path | 已持久化的 `research_brief.v1` 或 `synthesis_result.v1` 输入。 |
+| `--model NAME` | string | 可选模型；启用 LLM 结果分析。 |
 | `--output-root DIR` | path | 带时间戳 session 的父目录。 |
 | `--cwd DIR` | path | 传给执行后端的工作目录。 |
 | `--timeout-sec N` | int | 本地执行 timeout。 |
@@ -176,6 +190,10 @@ report attempt 的输入，再调用同一套 report/audit capability；不会�
 `build_research_session_report_inputs()` 和 `run_research_session_report_agent()`：它们从
 session 中已经持久化的 synthesis、论文元数据、执行结果和分析证据整理报告输入，同时仍
 由调用方明确选择 template、预算和 client。
+
+省略 `--model` 时，planning、synthesis 和 analysis 都保持 deterministic；传入
+`--model NAME` 后，同一个共享 client 会用于这三部分，provider 失败会保留为可见错误，
+不会静默转换成离线输出。
 
 ### `simple-ar research-code-task`
 

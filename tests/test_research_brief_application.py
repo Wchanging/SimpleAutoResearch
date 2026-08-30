@@ -15,6 +15,58 @@ from simple_ar.cli import main
 
 
 class ResearchBriefApplicationTests(unittest.TestCase):
+    def test_local_document_session_propagates_explicit_llm_mode(self) -> None:
+        class FakeClient:
+            model = "fake-brief-model"
+
+            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                if label == "research-planner":
+                    return {
+                        "questions": [
+                            {
+                                "question": "What validation method is described?",
+                                "facet": "method",
+                                "rationale": "Read the method evidence.",
+                                "required": True,
+                                "negative_scope": [],
+                                "success_criteria": ["Identify the method."],
+                            }
+                        ],
+                        "queries": ["reliable agents validation"],
+                        "required_facets": ["method"],
+                        "negative_terms": [],
+                        "rationale": "Focus on validation.",
+                    }
+                return {
+                    "synthesis_markdown": "## Synthesis\n\nValidation is the main theme [paper-1].",
+                    "hypothesis_markdown": "## Hypothesis\n\nValidation should improve reliability.",
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "reliable_agents.md"
+            paper.write_text(
+                "# Method\n\nValidation improves reliable agent behavior.\n\n"
+                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
+                encoding="utf-8",
+            )
+
+            result = run_research_brief_session(
+                ResearchBriefSessionRequest(
+                    topic="reliable agents",
+                    session_root=root / "session",
+                    local_documents=(paper,),
+                    max_results=2,
+                    max_chunks=20,
+                    use_llm=True,
+                    llm_client=FakeClient(),
+                )
+            )
+
+        self.assertEqual(result.plan.query_plan.planner, "llm")
+        self.assertEqual(result.brief.synthesis.generation_mode, "llm")
+        self.assertTrue(result.brief.synthesis.synthesis_markdown)
+
     def test_local_document_session_persists_each_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
