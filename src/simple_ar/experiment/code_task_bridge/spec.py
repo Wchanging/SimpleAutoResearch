@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from simple_ar.code_task import load_code_task_init_options
 from simple_ar.code_task.runtime.config import DEFAULT_MAX_FILE_BYTES, CodeTaskConfigError

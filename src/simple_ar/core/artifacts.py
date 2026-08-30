@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
-from simple_ar.app.state import WorkspaceState
+if TYPE_CHECKING:
+    from simple_ar.app.state import WorkspaceState
 
 
 def write_text(path: Path, text: str) -> None:
@@ -72,6 +73,8 @@ def load_workspace_state(run_dir: Path) -> WorkspaceState | None:
     path = state_path(run_dir)
     if not path.exists():
         return None
+    from simple_ar.app.state import WorkspaceState
+
     return WorkspaceState.load(path)
 
 

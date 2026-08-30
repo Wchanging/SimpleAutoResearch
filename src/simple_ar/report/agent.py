@@ -12,7 +12,6 @@ from simple_ar.report.assembler import assemble_report_sections
 from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
 from simple_ar.report.schema import (
     AgentReportResult,
-    ClaimEvidenceRecord,
     ReportContext,
     ReportIterationRecord,
     ReportMemory,
@@ -21,7 +20,6 @@ from simple_ar.report.schema import (
     ReportSectionPlan,
     ReportSectionReview,
     ReportTemplateBundle,
-    ReportToolCall,
     ReportToolResult,
     ReviewerFinding,
 )

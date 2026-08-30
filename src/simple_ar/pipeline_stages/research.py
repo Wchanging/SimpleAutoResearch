@@ -33,7 +33,6 @@ from simple_ar.integrations.llm import (
 from simple_ar.core.pipeline import Context
 from simple_ar.research.connectors import (
     ArxivConnector,
-    LocalFileConnector,
     OpenAlexConnector,
     SemanticScholarConnector,
 )

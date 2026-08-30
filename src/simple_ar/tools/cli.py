@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 from simple_ar.core.console import print_line
 from simple_ar.tools.gateway import CommonToolGateway

@@ -10,7 +10,7 @@ import re
 def new_research_session_root(output_root: str | Path, topic: str) -> Path:
     """Create one unique timestamped directory below an application root."""
 
-    parent = Path(output_root)
+    parent = Path(output_root).expanduser().absolute()
     parent.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = _slug(topic)

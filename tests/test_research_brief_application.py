@@ -69,7 +69,7 @@ class ResearchBriefApplicationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             output = io.StringIO()
-            with contextlib.redirect_stdout(output):
+            with contextlib.chdir(root), contextlib.redirect_stdout(output):
                 main(
                     [
                         "research-brief",
@@ -78,7 +78,7 @@ class ResearchBriefApplicationTests(unittest.TestCase):
                         "--local-document",
                         str(paper),
                         "--output-root",
-                        str(root / "runs"),
+                        "runs",
                     ]
                 )
 

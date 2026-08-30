@@ -16,7 +16,6 @@ from simple_ar.app.state import (
     SynthesisState,
 )
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text, relative_to_run
-from simple_ar.literature.models import Paper
 from simple_ar.research.outputs.artifacts import (
     DESIGN_DECISION_LOG,
     DESIGN_EVAL_JSON,

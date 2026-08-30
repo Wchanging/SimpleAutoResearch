@@ -246,7 +246,8 @@ class ArtifactStore:
     """
 
     def __init__(self, root: Path) -> None:
-        self.root = Path(root)
+        # Make relative roots stable without rewriting their filesystem spelling.
+        self.root = Path(root).expanduser().absolute()
 
     def ref(
         self,

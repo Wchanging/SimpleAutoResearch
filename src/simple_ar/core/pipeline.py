@@ -13,8 +13,6 @@ from simple_ar.core.artifacts import (
     load_workspace_state,
     read_json,
     save_workspace_state,
-    stage_contract_path,
-    stage_report_path,
     write_json,
     write_stage_contract,
     write_stage_report,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 import shutil
 from pathlib import Path
@@ -34,7 +33,6 @@ from simple_ar.report.citations import (
     append_references_section as _append_references_section,
     body_citation_ids as _body_citation_ids,
     citation_display_map as _citation_display_map,
-    citation_instruction as _citation_instruction,
     citation_map_artifact as _citation_map_artifact,
     cited_papers as _cited_papers,
     display_citation_numbers as _display_citation_numbers,
@@ -110,7 +108,6 @@ from simple_ar.pipeline_stages.common import (
     _relative_artifact,
     _safe_read_artifact,
     _safe_read_json_artifact,
-    _string_items,
 )
 
 def execute_report(

@@ -26,7 +26,7 @@ from simple_ar.research.planning.capability import ResearchPlanResult
 from simple_ar.research.sources import SearchProviderRegistry, SearchResult
 from simple_ar.research.synthesis import SynthesisResult
 from simple_ar.research.brief import ResearchBriefResult
-from simple_ar.result_analysis.schema import AnalysisContext, AnalysisResult
+from simple_ar.result_analysis.schema import AnalysisResult
 
 from .research_brief import (
     ResearchBriefSessionRequest,

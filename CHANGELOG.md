@@ -24,6 +24,12 @@ This file records user-visible project changes in reverse chronological order. P
 - Added a narrow continuation wrapper for report-ready Code-Task sessions;
   it reuses the generic report agent and audit only when the persisted
   decision explicitly names `report` as the next capability.
+- Removed confirmed-unused imports and made legacy workspace-state loading lazy
+  in the shared artifact helper; no active artifact, compatibility alias, or
+  result format was removed.
+- Made capability session roots absolute before resolving artifact references,
+  so relative output roots work through the same persisted handoff path as
+  absolute roots without changing their filesystem spelling.
 
 ## 2026-08-29
 

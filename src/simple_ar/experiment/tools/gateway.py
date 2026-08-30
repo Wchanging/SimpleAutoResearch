@@ -4,7 +4,6 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-from simple_ar.core.artifacts import read_json
 from simple_ar.experiment.execution.guards import evaluate_result_guard
 from simple_ar.experiment.execution.results import load_optional_json
 from simple_ar.experiment.tools.registry import experiment_tool_spec_map

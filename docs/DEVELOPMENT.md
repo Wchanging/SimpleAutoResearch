@@ -31,6 +31,24 @@ This is an explicit keep decision, not an assumption that every old path is
 permanent. Repeat the scan before a future cleanup and remove only a path whose
 consumers have migrated and whose old-format regression still passes.
 
+### Cleanup Policy
+
+Keep a generated artifact when it is a declared handoff, an audit record, a
+portable user-facing output, or a compatibility input. Rebuildable caches may
+be removed only through the explicit `simple-ar clean` command; the pipeline
+must not silently delete them. Before removing code, search imports, CLI
+dispatch, documentation, fixtures, and historical readers, then add a focused
+regression for the replacement path. Prefer removing dead imports or a proven
+duplicate branch over splitting a large but cohesive adapter into more layers.
+
+The current cleanup pass removed only confirmed unused imports, made the
+legacy workspace-state import lazy inside `core.artifacts`, and made capability
+session roots absolute before resolving persisted handoffs. No domain
+package, stage output, compatibility alias, or result format was removed
+because each still has a live consumer or a compatibility test. Large modules
+remain tracked as refactoring debt rather than being split without a real
+consumer.
+
 ## Ownership Map
 
 Use this map when deciding where a change belongs. The stable entry is the

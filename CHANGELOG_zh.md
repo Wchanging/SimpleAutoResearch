@@ -19,6 +19,10 @@
   analysis handoff 恢复结果，不会重新执行或自行选择其他产物。
 - 增加面向报告就绪 Code-Task session 的窄续接 wrapper；只有持久化 decision 明确把
   `report` 作为下一能力时，才会复用通用 report agent 和 audit。
+- 删除已确认无用的导入，并将共享 artifact helper 中旧 workspace state 的加载改为按需导入；
+  没有删除仍在使用的产物、兼容别名或结果格式。
+- 在解析 artifact 引用前将 capability session root 转为绝对路径，使相对输出目录和绝对输出目录走同一套
+  持久化 handoff 路径，同时不改写原有文件系统路径表示。
 
 ## 2026-08-29
 
