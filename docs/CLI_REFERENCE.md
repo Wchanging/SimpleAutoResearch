@@ -17,6 +17,7 @@ on command syntax, options, outputs, and short operational notes.
 | `simple-ar research-brief` | Build an evidence-backed brief from a topic or local documents. |
 | `simple-ar research-experiment` | Execute and analyze a declared experiment from a research handoff. |
 | `simple-ar research-session` | Run the bounded literature-to-experiment composition in one session. |
+| `simple-ar research-code-task` | Pass a research handoff through the existing project-style Code-Task backend. |
 | `simple-ar resume` | Continue an existing research pipeline run. |
 | `simple-ar status` | Print status for a research run or code-task run. |
 | `simple-ar tools ...` | Export tool schemas, call run-local tools, or serve read-only tools over MCP stdio. |
@@ -176,6 +177,57 @@ When the experiment and analysis prefix completes, its result status is
 `ready_for_report` because the session remains open for an explicit report
 continuation. The report assembler is currently exposed as a Python application
 adapter (`run_research_report_session`) rather than another flag-heavy CLI.
+For an agent-generated continuation, the same application module exposes
+`run_research_report_agent_session()`. It reuses the existing Writer/Reviewer
+implementation, persists its compact trace as an input to the report attempt,
+and then uses the same report/audit capabilities; it does not add a second
+writer or an implicit retry loop.
+For a `research-session` result, `build_research_session_report_inputs()` and
+`run_research_session_report_agent()` provide the corresponding small adapter:
+they derive report inputs from the session's persisted synthesis, paper
+metadata, execution, and analysis evidence, while leaving template, budget,
+and client selection explicit.
+
+### `simple-ar research-code-task`
+
+**Purpose**: run a persisted research direction through the existing isolated
+project-style Code-Task backend, then expose canonical execution and result
+analysis artifacts. This is the first executable research-to-code consumer;
+it does not replace `code-task` or the eight-stage pipeline.
+
+**Usage**:
+
+```bash
+uv run simple-ar research-code-task \
+  --topic "reliable agents" \
+  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
+  --output-root runs/research-code-task
+```
+
+The command requires `[execute].use_llm = true` in the supplied Code-Task TOML
+and creates a new session, so an earlier brief or run is not overwritten. It
+runs one direction by default. `--max-candidates N` explicitly enables at most
+N isolated child sessions; a candidate is accepted only when its execution and
+primary-metric comparison both support improvement. Failed candidates remain
+as evidence and are followed by a bounded stop, not an implicit infinite loop.
+
+| Option | Meaning |
+| --- | --- |
+| `--topic TEXT` | Research topic used for session identity and analysis context. |
+| `--synthesis-file PATH` | Persisted `research_brief.v1` or `synthesis_result.v1` handoff. |
+| `--code-task-config PATH` | Existing project-style Code-Task TOML. |
+| `--output-root DIR` | Parent directory for the new timestamped session. |
+| `--model NAME` | Optional single-model override for the existing backend. |
+| `--timeout-sec N` | Optional override for `[execute].timeout_sec`. |
+| `--baseline-policy POLICY` | Optional override: `auto`, `run`, `skip`, `provided`, or `none`. |
+| `--baseline-metrics-file PATH` | Baseline metrics file for the `provided` policy. |
+| `--max-candidates N` | Explicit bounded idea count; default is one. |
+
+This entry currently covers existing project-style Code-Task only. It does not
+create a managed environment, allocate GPU resources, or claim arbitrary
+greenfield generation. Report continuation remains an explicit application
+adapter because section drafts and writer policy are not inferred here.
 
 ### `simple-ar resume`
 

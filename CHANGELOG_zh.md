@@ -10,6 +10,15 @@
 
 - core session attempt 现在可以通过 `parent_attempt_id` 从已有的完成或失败父节点显式创建
   分支，并提供持久化的根到节点父链查看入口；默认线性执行和旧 manifest 保持不变。
+- 新增有界的 `research-code-task` 应用入口：它通过现有的 project-style Code-Task 后端消费
+  持久化研究综合结果，保留规范化执行/分析证据，并可在隔离子 session 中尝试调用方指定数量的
+  研究候选，不会隐式形成无限循环。
+- 增加从 research session 到 report agent 的轻量交接：从持久化的 synthesis、文献、执行和
+  分析证据确定性整理报告输入，同时继续复用现有 Writer/Reviewer 与 report audit 路径。
+- 增加持久化 Code-Task session 的只读恢复入口：只根据声明的 synthesis、execution 和
+  analysis handoff 恢复结果，不会重新执行或自行选择其他产物。
+- 增加面向报告就绪 Code-Task session 的窄续接 wrapper；只有持久化 decision 明确把
+  `report` 作为下一能力时，才会复用通用 report agent 和 audit。
 
 ## 2026-08-29
 

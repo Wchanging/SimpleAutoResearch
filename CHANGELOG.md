@@ -11,6 +11,19 @@ This file records user-visible project changes in reverse chronological order. P
 - Core session attempts can now explicitly branch from an existing completed or
   failed parent through `parent_attempt_id`, and expose its persisted root-to-node
   lineage for inspection; default linear execution and old manifests remain unchanged.
+- Added the bounded `research-code-task` application entry. It consumes a
+  persisted research synthesis through the existing project-style Code-Task
+  backend, preserves canonical execution/analysis evidence, and can try a
+  caller-selected number of isolated research candidates without implicit loops.
+- Added a thin research-session-to-report-agent handoff that derives report
+  context from persisted synthesis, literature, execution, and analysis
+  evidence while reusing the existing Writer/Reviewer and report audit path.
+- Added read-only restoration for persisted Code-Task sessions through their
+  declared synthesis, execution, and analysis handoffs; restoration never
+  reruns or selects an alternative artifact.
+- Added a narrow continuation wrapper for report-ready Code-Task sessions;
+  it reuses the generic report agent and audit only when the persisted
+  decision explicitly names `report` as the next capability.
 
 ## 2026-08-29
 

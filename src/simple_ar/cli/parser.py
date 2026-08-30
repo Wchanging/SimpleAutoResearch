@@ -178,6 +178,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Command to execute; place this option last.",
     )
 
+    code_research_parser = subparsers.add_parser(
+        "research-code-task",
+        help="Run a bounded research direction through the existing Code-Task backend.",
+    )
+    code_research_parser.add_argument("--topic", required=True)
+    code_research_parser.add_argument("--synthesis-file", required=True)
+    code_research_parser.add_argument(
+        "--code-task-config",
+        required=True,
+        help="Existing-project Code-Task TOML used for source, benchmark, and environment settings.",
+    )
+    code_research_parser.add_argument(
+        "--output-root",
+        default="runs/research-code-task",
+        help="Parent directory for the timestamped research Code-Task session.",
+    )
+    code_research_parser.add_argument(
+        "--model",
+        default=None,
+        help="Optional single-model override for the existing Code-Task backend.",
+    )
+    code_research_parser.add_argument(
+        "--timeout-sec",
+        type=int,
+        default=None,
+        help="Optional benchmark timeout override; otherwise use [execute].timeout_sec.",
+    )
+    code_research_parser.add_argument(
+        "--baseline-policy",
+        choices=("auto", "run", "skip", "provided", "none"),
+        default=None,
+        help="Optional baseline policy override; otherwise use [execute].baseline_policy.",
+    )
+    code_research_parser.add_argument(
+        "--baseline-metrics-file",
+        default=None,
+        help="Optional baseline metrics file when the provided policy is selected.",
+    )
+    code_research_parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=1,
+        help="Try at most this many grounded ideas in isolated child sessions.",
+    )
+    code_research_parser.add_argument("--label", default="research-code-task")
+
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
     resume_parser.add_argument("run_dir")
     resume_parser.add_argument("--config", default=None, help="Optional TOML config overrides.")

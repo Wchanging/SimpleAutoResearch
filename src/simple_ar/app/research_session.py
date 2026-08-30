@@ -11,9 +11,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from simple_ar.core import ArtifactRef, AttemptManifest, BudgetState, DecisionRecord
+from simple_ar.core import (
+    ArtifactRef,
+    AttemptManifest,
+    BudgetState,
+    CapabilityRegistry,
+    DecisionRecord,
+    SessionController,
+)
 from simple_ar.experiment.execution.backend import ExecutionBackend, RunRequest
 from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.analysis import AnalysisHandoff
 from simple_ar.research.planning.capability import ResearchPlanResult
 from simple_ar.research.sources import SearchProviderRegistry, SearchResult
 from simple_ar.research.synthesis import SynthesisResult
@@ -176,9 +184,112 @@ def run_research_session(
     )
 
 
+def load_research_session_result(
+    session_root: str | Path,
+) -> ResearchSessionResult:
+    """Restore a standard research-to-analysis session without rerunning it.
+
+    Restoration uses only the session manifest and the declared typed outputs
+    of the standard attempts.  It deliberately does not scan for a best
+    artifact, infer missing stages, or register executable handlers; callers
+    can therefore use the returned result for an explicit report continuation
+    after the original process has ended.
+    """
+
+    root = Path(session_root)
+    try:
+        controller = SessionController.load(
+            root,
+            registry=CapabilityRegistry(),
+        )
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        raise ResearchSessionError(
+            f"Could not load research session {root}: {exc}"
+        ) from exc
+
+    try:
+        plan_ref = controller.attempt_output_ref(
+            "plan-001",
+            kind="research_plan",
+            schema="research_plan.v1",
+        )
+        plan = ResearchPlanResult.from_handoff_dict(controller.store.read_json(plan_ref))
+
+        search_ref = controller.attempt_output_ref(
+            "search-001",
+            kind="search_result",
+            schema="search_handoff.v1",
+        )
+        search = SearchResult.from_handoff_dict(controller.store.read_json(search_ref))
+
+        document_ref = controller.attempt_output_ref(
+            "document-001",
+            kind="document_bundle",
+            schema="document_bundle.v1",
+        )
+        documents = DocumentBundle.from_handoff_dict(
+            controller.store.read_json(document_ref)
+        )
+
+        brief_ref = controller.attempt_output_ref(
+            "brief-001",
+            kind="research_brief",
+            schema="research_brief.v1",
+        )
+        brief_payload = controller.store.read_json(brief_ref)
+        if not isinstance(brief_payload, Mapping):
+            raise ValueError("Research brief handoff must be a JSON object.")
+        brief_result = ResearchBriefResult.from_handoff_dict(
+            brief_payload,
+            bundle=documents,
+        )
+        if brief_result.synthesis is None:
+            raise ValueError("Research brief handoff has no synthesis result.")
+
+        execution_ref = controller.attempt_output_ref(
+            "experiment-001",
+            kind="experiment_result",
+            schema="canonical_results.2.5",
+        )
+        execution_payload = controller.store.read_json(execution_ref)
+        if not isinstance(execution_payload, Mapping):
+            raise ValueError("Experiment result must be a JSON object.")
+
+        analysis_ref = controller.attempt_output_ref(
+            "analysis-001",
+            kind="analysis_result",
+            schema="analysis_handoff.v1",
+        )
+        analysis_payload = controller.store.read_json(analysis_ref)
+        if not isinstance(analysis_payload, Mapping):
+            raise ValueError("Analysis handoff must be a JSON object.")
+        analysis = AnalysisHandoff.from_handoff_dict(analysis_payload).analysis
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ResearchSessionError(
+            f"Research session {root} is missing a usable typed handoff: {exc}"
+        ) from exc
+
+    return ResearchSessionResult(
+        session_root=root,
+        plan=plan,
+        search=search,
+        documents=documents,
+        brief=brief_result.synthesis,
+        brief_result=brief_result,
+        brief_ref=brief_ref,
+        execution=dict(execution_payload),
+        analysis=analysis,
+        execution_ref=execution_ref,
+        analysis_ref=analysis_ref,
+        attempts=controller.list_attempts(),
+        decisions=tuple(controller.manifest.decisions),
+    )
+
+
 __all__ = [
     "ResearchSessionError",
     "ResearchSessionRequest",
     "ResearchSessionResult",
+    "load_research_session_result",
     "run_research_session",
 ]

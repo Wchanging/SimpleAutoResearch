@@ -101,6 +101,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         _print_research_session(args)
         return
 
+    if args.command == "research-code-task":
+        _print_research_code_task(args)
+        return
+
     if args.command == "resume":
         run_dir = Path(args.run_dir)
         topic = _read_topic(run_dir)
@@ -364,6 +368,92 @@ def _print_research_session(args: argparse.Namespace) -> None:
     print_line(f"Documents: {len(result.documents.records)}")
     print_line(f"Execution: {result.session_root / result.execution_ref.path}")
     print_line(f"Analysis: {result.session_root / result.analysis_ref.path}")
+
+
+def _print_research_code_task(args: argparse.Namespace) -> None:
+    """Run the bounded synthesis-to-Code-Task application composition."""
+
+    from simple_ar.app.research_code_task import (
+        ResearchCodeTaskSessionError,
+        ResearchCodeTaskSessionRequest,
+        run_research_code_task_candidates,
+        run_research_code_task_session,
+    )
+    from simple_ar.app.session_roots import new_research_session_root
+    from simple_ar.code_task.runtime.config import (
+        CodeTaskConfigError,
+        load_code_task_execute_options,
+    )
+    from simple_ar.experiment.code_task_bridge.spec import code_task_project_spec
+
+    if args.max_candidates < 1:
+        raise SystemExit("--max-candidates must be positive.")
+    config_path = _resolve_cli_path(args.code_task_config)
+    try:
+        execute_options = load_code_task_execute_options(config_path=str(config_path))
+        spec = code_task_project_spec(
+            {
+                "code_task_config": str(config_path),
+                "safety_allow_large_edits": execute_options.allow_large_edits,
+            }
+        )
+    except (CodeTaskConfigError, RuntimeError, TypeError, ValueError) as exc:
+        raise SystemExit(f"Invalid research Code-Task configuration: {exc}") from exc
+    if spec.code_root is None or not spec.code_root.exists():
+        raise SystemExit(f"Code-Task project root not found: {spec.code_root}")
+    if execute_options.use_llm is not True:
+        raise SystemExit(
+            "research-code-task requires [execute].use_llm = true because the "
+            "existing Code-Task backend generates the implementation."
+        )
+    timeout_sec = (
+        args.timeout_sec
+        if args.timeout_sec is not None
+        else execute_options.timeout_sec
+    )
+    if timeout_sec < 1:
+        raise SystemExit("--timeout-sec or [execute].timeout_sec must be positive.")
+    baseline_policy = args.baseline_policy or execute_options.baseline_policy
+    baseline_file = args.baseline_metrics_file or execute_options.baseline_metrics_file
+    baseline_metrics_file = _resolve_cli_path(baseline_file) if baseline_file else None
+    session_root = new_research_session_root(args.output_root, args.topic)
+    request = ResearchCodeTaskSessionRequest(
+        topic=args.topic,
+        session_root=session_root,
+        synthesis_file=_resolve_cli_path(args.synthesis_file),
+        spec=spec,
+        model=args.model,
+        use_llm=execute_options.use_llm,
+        timeout_sec=timeout_sec,
+        baseline_policy=baseline_policy,
+        baseline_metrics_file=baseline_metrics_file,
+        label=args.label,
+    )
+    try:
+        if args.max_candidates == 1:
+            result = run_research_code_task_session(request)
+            print_line(f"Research Code-Task session: {result.session_root}")
+            print_line(f"Status: {result.status}")
+            print_line(f"Execution: {result.execution_path}")
+            print_line(f"Analysis: {result.analysis_path}")
+        else:
+            result = run_research_code_task_candidates(
+                request,
+                max_candidates=args.max_candidates,
+            )
+            print_line(f"Research Code-Task candidate session: {result.session_root}")
+            print_line(f"Status: {result.status}")
+            print_line(f"Selected candidate: {result.selected_candidate_id or 'none'}")
+            print_line(f"Summary: {result.summary_path}")
+    except ResearchCodeTaskSessionError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _resolve_cli_path(value: str | Path) -> Path:
+    """Resolve a user-supplied path without changing artifact-relative paths."""
+
+    path = Path(value)
+    return path if path.is_absolute() else Path.cwd() / path
 
 
 def _print_clean(args: argparse.Namespace) -> None:

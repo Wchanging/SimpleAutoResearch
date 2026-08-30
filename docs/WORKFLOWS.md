@@ -130,6 +130,77 @@ artifact. A successful `research-session` prefix therefore reports
 close the session. Supplying drafts explicitly keeps writer/revision policy
 outside the lifecycle controller.
 
+When the existing Writer/Reviewer implementation should own draft generation,
+use `run_research_report_agent_session()` instead. It accepts the same compact
+report context and memory plus the existing template, runtime config, LLM
+client, and tool gateway; it then passes the validated section drafts to the
+same report and audit capabilities. The writer trace is stored as
+`inputs/report_agent_result.json` and referenced by the report attempt, while
+the assembled `report.md` remains the single report body. This is an adapter
+over the current report agent, not a second prompt or a new report pipeline.
+
+For the standard literature-to-experiment path,
+`build_research_session_report_inputs()` derives that compact context and
+memory directly from a `ResearchSessionResult`: the persisted synthesis,
+selected paper metadata, execution result, and result-analysis claims remain
+the sources of the report inputs. `run_research_session_report_agent()` is the
+small convenience wrapper for this path. It still requires the caller to
+choose the template, runtime budget, and LLM client; it is a report handoff,
+not an automatic research scheduler.
+
+After the process ends, `load_research_session_result()` restores the same
+typed result from `session_manifest.json` and the declared `plan-001`,
+`search-001`, `document-001`, `brief-001`, `experiment-001`, and `analysis-001`
+outputs. It performs no network request, execution, retry, or result
+selection, so a caller can explicitly continue an existing session into
+Report/Audit without rerunning its earlier stages. Missing or malformed
+handoffs fail closed with `ResearchSessionError`.
+
+When a research direction should enter a real code experiment, the application
+layer exposes `simple_ar.app.research_code_task.run_research_code_task_session()`.
+It reads a persisted `synthesis_result.v1` or `research_brief.v1`, reuses the
+existing Code-Task backend for workspace isolation, generation, validation,
+execution, and result analysis, and retains execution/analysis refs in the same
+session. `run_research_code_task_candidates()` is an optional bounded policy:
+each idea gets an isolated child session, and only a candidate with an explicit
+improved primary metric is accepted; failures and no-progress decisions remain
+recorded before the policy continues or stops. This is not a second code
+generator or an unrestricted scheduler. It is currently an application API,
+and the same narrow path is available from the command line while reusing an
+existing Code-Task TOML:
+
+```bash
+uv run simple-ar research-code-task --topic "reliable agents" \
+  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
+  --output-root runs/research-code-task
+```
+
+The command runs one direction by default; `--max-candidates N` explicitly
+enables at most N isolated child sessions. The configuration must set
+`[execute].use_llm = true`. This first consumer covers the existing project-style
+Code-Task backend; it does not create a GPU environment or claim arbitrary
+greenfield generation.
+
+A finished or failed single Code-Task session can be restored in a later
+process with `load_research_code_task_session_result(session_root)`. The
+loader reads the session manifest, the declared synthesis input, and the
+`canonical_results.2.5` plus `analysis_handoff.v1` outputs. It does not run
+Code-Task, contact a provider, retry, or choose among artifacts; a missing or
+inconsistent handoff raises `ResearchCodeTaskSessionError`.
+
+To continue a session that was intentionally opened for reporting, first load
+it with the restoration function and then call
+`run_research_code_task_report_agent(session, ...)`. The wrapper requires the
+persisted final decision to name `report` as the next capability, then reuses
+the generic Writer/Reviewer and Report/Audit path.
+
+`simple_ar.app.research_code_task_report` can then pass the session's execution
+and analysis evidence to the generic Report/Audit boundary. It derives compact
+context, metric sources, and claim evidence before reusing the existing report
+assembler and audit. Section drafts are still supplied by the caller, so this
+adapter should not be read as an automatic paper writer.
+
 Applications that want the built-in adapters can use
 `research.register_research_capabilities(registry, names=...)`. The `names`
 argument is optional for the complete adapter set or can select only the

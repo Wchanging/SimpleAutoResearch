@@ -16,6 +16,7 @@
 | `simple-ar research-brief` | 从主题或本地文献构建有证据支持的 research brief。 |
 | `simple-ar research-experiment` | 从 research handoff 执行并分析一个已声明的实验。 |
 | `simple-ar research-session` | 在同一个 session 中运行有界的文献到实验组合流程。 |
+| `simple-ar research-code-task` | 将 research handoff 交给已有的 project-style Code-Task backend。 |
 | `simple-ar resume` | 继续已有 research pipeline run。 |
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
 | `simple-ar tools ...` | 导出 tool schema、调用 run-local tool，或通过 MCP stdio 暴露只读 tools。 |
@@ -167,6 +168,51 @@ uv run simple-ar research-session \
 实验与分析前缀完成后，结果状态为 `ready_for_report`，因为 session 仍会为显式报告 continuation
 保持打开。目前报告装配通过 Python 应用适配器 `run_research_report_session` 提供，而不是继续
 增加一组参数繁多的 CLI 开关。
+如果需要由 agent 生成 continuation 草稿，同一模块还提供
+`run_research_report_agent_session()`。它复用现有 Writer/Reviewer 实现，把紧凑的轨迹保存为
+report attempt 的输入，再调用同一套 report/audit capability；不会增加第二个 writer，也
+不会隐式 retry。
+对于 `research-session` 的结果，还可以使用
+`build_research_session_report_inputs()` 和 `run_research_session_report_agent()`：它们从
+session 中已经持久化的 synthesis、论文元数据、执行结果和分析证据整理报告输入，同时仍
+由调用方明确选择 template、预算和 client。
+
+### `simple-ar research-code-task`
+
+**一句话说明**：将持久化的研究方向交给已有的隔离 project-style Code-Task backend，
+再输出规范化执行结果和结果分析产物。这是第一条可执行的 research-to-code 消费路径，
+不会替换 `code-task` 或八阶段 pipeline。
+
+**语法用法**：
+
+```bash
+uv run simple-ar research-code-task \
+  --topic "reliable agents" \
+  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
+  --output-root runs/research-code-task
+```
+
+传入的 Code-Task TOML 必须设置 `[execute].use_llm = true`。命令会创建新的 session，
+不会覆盖之前的 brief 或 run；默认只执行一个方向。显式加入 `--max-candidates N` 后，
+才会在最多 N 个隔离子 session 中尝试不同 idea；只有真实执行成功且主指标比较明确为
+改善的候选才会接受，失败候选会作为证据保留，最终按预算停止，不会无限循环。
+
+| 参数 | 含义 |
+| --- | --- |
+| `--topic TEXT` | 用于 session 标识和分析上下文的研究主题。 |
+| `--synthesis-file PATH` | 持久化的 `research_brief.v1` 或 `synthesis_result.v1` handoff。 |
+| `--code-task-config PATH` | 现有 project-style Code-Task TOML。 |
+| `--output-root DIR` | 新的带时间戳 session 的父目录。 |
+| `--model NAME` | 可选的单模型 override，交给现有 backend。 |
+| `--timeout-sec N` | 可选的 `[execute].timeout_sec` 覆盖值。 |
+| `--baseline-policy POLICY` | 可选覆盖：`auto`、`run`、`skip`、`provided` 或 `none`。 |
+| `--baseline-metrics-file PATH` | `provided` policy 使用的 baseline 指标文件。 |
+| `--max-candidates N` | 显式的有界 idea 数量，默认是一个。 |
+
+当前入口只接入已有 project-style Code-Task，不会创建托管环境、分配 GPU 或声称支持
+任意 greenfield 生成。报告 continuation 仍是显式 Python 应用适配器，因为 section drafts
+和 writer 策略不能在这里凭空推断。
 
 ### `simple-ar resume`
 

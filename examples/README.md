@@ -61,3 +61,9 @@ Use `capability_package_minimal` when adding a replaceable V2.8 capability. It
 is offline, has no domain-specific schema, and demonstrates the expected
 `CapabilityContext` -> `ArtifactStore` -> `CapabilityResult` handoff. Its
 contract test is included in `uv run simple-ar-checks core`.
+
+For the first bounded research-to-code consumer, run `research-brief` first and
+pass its `research_brief.json` to `research-code-task` together with an existing
+Code-Task TOML. The latter reuses the normal isolated Code-Task backend and keeps
+execution and analysis artifacts in a new session. Use `--max-candidates N` only
+for an explicit bounded comparison of several synthesis ideas.

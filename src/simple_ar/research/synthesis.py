@@ -8,7 +8,7 @@ evidence pack already assembled by the pipeline, or with a small fixture.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
@@ -87,6 +87,36 @@ class SynthesisResult:
             ),
             "diagnostics": list(self.diagnostics),
         }
+
+    def for_idea(self, idea_id: str) -> "SynthesisResult":
+        """Return a handoff whose experiment contract follows one idea.
+
+        Synthesis may expose several grounded ideas while the historical
+        contract builder keeps the first one as the default.  Candidate
+        execution must make that choice explicit; it must not silently run
+        every candidate against the same hypothesis and proposed change.
+        """
+
+        wanted = idea_id.strip()
+        if not wanted:
+            raise ValueError("idea_id cannot be empty.")
+        idea = next((item for item in self.ideas if item.idea_id == wanted), None)
+        if idea is None:
+            raise KeyError(f"Unknown synthesis idea: {wanted}")
+        contract = self.experiment_contract
+        if contract is None:
+            return self
+        selected_contract = replace(
+            contract,
+            contract_id=f"{contract.contract_id}/{idea.idea_id}",
+            hypothesis=idea.hypothesis or contract.hypothesis,
+            motivation_refs=list(idea.motivation_refs or contract.motivation_refs),
+            dataset=(idea.required_datasets[0] if idea.required_datasets else contract.dataset),
+            metrics=list(idea.metrics or contract.metrics),
+            proposed_change=idea.proposed_change or contract.proposed_change,
+            risks=list(idea.risks or contract.risks),
+        )
+        return replace(self, experiment_contract=selected_contract)
 
     @classmethod
     def from_handoff_dict(cls, data: Mapping[str, Any]) -> "SynthesisResult":

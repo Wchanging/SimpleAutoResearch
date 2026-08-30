@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from rich.console import Console
 
@@ -141,6 +142,107 @@ class CliTests(unittest.TestCase):
             self.assertFalse((run_dir / "05-design" / "stage_meta.json").exists())
             self.assertFalse((run_dir / "06-code" / "stage_meta.json").exists())
             self.assertFalse((run_dir / "07-run" / "stage_meta.json").exists())
+
+    def test_research_code_task_cli_builds_request_from_existing_config(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            task_file = root / "task.md"
+            task_file.write_text("Improve the fixture.", encoding="utf-8")
+            synthesis_file = root / "synthesis.json"
+            synthesis_file.write_text("{}", encoding="utf-8")
+            config = root / "code_task.toml"
+            config.write_text(
+                "[code_task]\n"
+                f'code_root = "{project.as_posix()}"\n'
+                f'task_file = "{task_file.as_posix()}"\n'
+                "[benchmark]\n"
+                'command = "python benchmark.py"\n'
+                'primary_metric = "accuracy"\n'
+                "[benchmark.metric_directions]\n"
+                'accuracy = "higher"\n'
+                "[execute]\n"
+                "use_llm = true\n"
+                "timeout_sec = 7\n"
+                'baseline_policy = "skip"\n',
+                encoding="utf-8",
+            )
+            fake_result = SimpleNamespace(
+                session_root=root / "session",
+                status="partial",
+                execution_path=root / "session" / "execution.json",
+                analysis_path=root / "session" / "analysis.json",
+            )
+            with patch(
+                "simple_ar.app.research_code_task.run_research_code_task_session",
+                return_value=fake_result,
+            ) as runner:
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    main(
+                        [
+                            "research-code-task",
+                            "--topic",
+                            "fixture research",
+                            "--synthesis-file",
+                            str(synthesis_file),
+                            "--code-task-config",
+                            str(config),
+                            "--output-root",
+                            str(root / "runs"),
+                        ]
+                    )
+
+            request = runner.call_args.args[0]
+            self.assertEqual(request.topic, "fixture research")
+            self.assertEqual(request.spec.code_root, project)
+            self.assertEqual(request.spec.task_file, task_file)
+            self.assertEqual(request.timeout_sec, 7)
+            self.assertEqual(request.baseline_policy, "skip")
+            self.assertIn("Status: partial", stdout.getvalue())
+
+    def test_research_code_task_cli_rejects_non_positive_timeout_override(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            task_file = root / "task.md"
+            task_file.write_text("Improve the fixture.", encoding="utf-8")
+            synthesis_file = root / "synthesis.json"
+            synthesis_file.write_text("{}", encoding="utf-8")
+            config = root / "code_task.toml"
+            config.write_text(
+                "[code_task]\n"
+                f'code_root = "{project.as_posix()}"\n'
+                f'task_file = "{task_file.as_posix()}"\n'
+                "[benchmark]\n"
+                'command = "python benchmark.py"\n'
+                'primary_metric = "accuracy"\n'
+                "[benchmark.metric_directions]\n"
+                'accuracy = "higher"\n'
+                "[execute]\n"
+                "use_llm = true\n"
+                "timeout_sec = 7\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "research-code-task",
+                        "--topic",
+                        "fixture research",
+                        "--synthesis-file",
+                        str(synthesis_file),
+                        "--code-task-config",
+                        str(config),
+                        "--timeout-sec",
+                        "0",
+                    ]
+                )
+            self.assertIn("must be positive", str(raised.exception))
 
     def test_inspect_and_search_artifacts_commands_write_retrieval_files(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

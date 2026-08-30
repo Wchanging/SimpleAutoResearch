@@ -103,6 +103,64 @@ research direction，调用现有执行后端运行一次明确的命令，再�
 完成后 session 才会关闭。section drafts 仍由调用方明确提供，writer/revision 策略不会被
 塞进生命周期 controller。
 
+如果希望由现有的 Writer/Reviewer 实现负责生成草稿，可以使用
+`run_research_report_agent_session()`。它仍然只接收紧凑的 report context 和 memory，
+另外显式接收已有的 template、runtime config、LLM client 与 tool gateway，然后把通过
+校验的 section drafts 交给同一套 report 和 audit capability。Writer 轨迹会保存为
+`inputs/report_agent_result.json`，并作为 report attempt 的输入引用；最终 `report.md`
+仍是唯一的成稿正文。这个入口只是复用当前 report agent 的适配器，不复制 prompt，也
+不新增另一套报告 pipeline。
+
+对于标准的“文献到实验”路径，`build_research_session_report_inputs()` 会从
+`ResearchSessionResult` 确定性整理紧凑的 context 和 memory：持久化的 synthesis、选中的
+论文元数据、真实执行结果和结果分析 claims 都会保留为报告输入来源。
+`run_research_session_report_agent()` 是这条路径的轻量便捷入口，但 template、运行预算和
+LLM client 仍由调用方选择；它只是报告交接，不是自动研究调度器。
+
+进程结束后，如果需要从已有 session 继续报告阶段，可以调用
+`load_research_session_result()`。它只根据 `session_manifest.json` 以及声明的
+`plan-001`、`search-001`、`document-001`、`brief-001`、`experiment-001` 和
+`analysis-001` typed handoff 恢复同一个结果，不会联网、执行命令、重试或自行挑选“最好”的
+结果。因此，调用方可以明确地把一个已完成的实验 session 交给 Report/Audit，而不必重跑
+前面的阶段；缺失或格式错误的 handoff 会以 `ResearchSessionError` 失败。
+
+如果需要把研究方向交给真实的代码实验，可以在应用层调用
+`simple_ar.app.research_code_task.run_research_code_task_session()`。它读取持久化的
+`synthesis_result.v1` 或 `research_brief.v1`，复用现有 Code-Task backend 完成隔离、代码
+生成、验证、执行和结果分析，并把真实 execution/analysis refs 留在同一个 session 中。
+`run_research_code_task_candidates()` 是可选的有界策略：每个候选使用独立子 session，只有
+明确改善 primary metric 的候选才接受，否则记录 decision 后继续或停止。它不是第二套
+代码生成器，也不是无限 scheduler。
+
+需要从命令行运行这一窄路径时，可以直接复用已有 Code-Task TOML：
+
+```bash
+uv run simple-ar research-code-task --topic "reliable agents" \
+  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
+  --output-root runs/research-code-task
+```
+
+该命令默认只执行一个研究方向；只有显式加入 `--max-candidates N` 才会在独立子 session
+中尝试至多 N 个方向。它要求配置中的 `[execute].use_llm = true`，并且当前只接入已有
+project-style Code-Task，不会替用户自动创建 GPU 环境或任意 greenfield 工程。
+
+完成或失败的单个 Code-Task session 可以在后续进程中通过
+`load_research_code_task_session_result(session_root)` 恢复。该入口只读取 session manifest、
+声明的 synthesis input，以及 `canonical_results.2.5` 和 `analysis_handoff.v1` 输出；不会重新
+执行 Code-Task、访问 provider、重试或在多个产物中自行选优。handoff 缺失或引用不一致时会以
+`ResearchCodeTaskSessionError` 明确失败。
+
+如果 session 在运行时显式为报告阶段保留了下一能力，可以先用上述恢复函数读取它，
+再调用 `run_research_code_task_report_agent(session, ...)` 继续。这个 wrapper 要求持久化的
+最后一条 decision 明确把 `report` 作为下一能力，然后复用通用 Writer/Reviewer 与
+Report/Audit 路径；已经收束的 session 不会被偷偷重新打开。
+
+`simple_ar.app.research_code_task_report` 可以继续把上述 session 的 execution 和 analysis
+证据交给通用 Report/Audit。它只生成紧凑的 context、metric sources 和 claim evidence，
+再复用现有 report assembler/audit；section drafts 仍需由调用方提供，不能把这条适配器
+误解为自动论文 writer。
+
 如果应用需要使用内置适配器，也可以调用
 `research.register_research_capabilities(registry, names=...)`。不传
 `names` 时注册完整适配器集合，传入时只注册当前路径需要的能力；注册仍然是

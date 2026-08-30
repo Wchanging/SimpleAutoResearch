@@ -80,6 +80,7 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
             "tests.test_research_brief_application",
             "tests.test_research_session_application",
             "tests.test_research_report_application",
+            "tests.test_research_code_task_application",
             "tests.test_analysis_capability",
             "tests.test_research_decisions",
             "tests.test_experiment_capability",

@@ -9,6 +9,8 @@ from pathlib import Path
 from simple_ar.app.research_brief import ResearchBriefSessionRequest
 from simple_ar.app.research_session import (
     ResearchSessionRequest,
+    ResearchSessionError,
+    load_research_session_result,
     run_research_session,
 )
 
@@ -73,6 +75,22 @@ class ResearchSessionApplicationTests(unittest.TestCase):
             )
             self.assertEqual(manifest["profile"], "full_research")
             self.assertEqual(manifest["status"], "running")
+
+            restored = load_research_session_result(root / "session")
+            self.assertEqual(restored.status, result.status)
+            self.assertEqual(restored.brief_ref, result.brief_ref)
+            self.assertEqual(restored.execution_ref, result.execution_ref)
+            self.assertEqual(restored.analysis_ref, result.analysis_ref)
+            self.assertEqual(restored.execution, result.execution)
+            self.assertEqual(restored.analysis, result.analysis)
+            self.assertEqual(restored.attempts, result.attempts)
+            self.assertEqual(restored.decisions, result.decisions)
+
+    def test_restore_rejects_a_missing_typed_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "missing-session"
+            with self.assertRaises(ResearchSessionError):
+                load_research_session_result(root)
 
 
 if __name__ == "__main__":
