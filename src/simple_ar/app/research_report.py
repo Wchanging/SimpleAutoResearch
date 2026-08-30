@@ -128,7 +128,12 @@ def build_research_session_report_inputs(
     a second report-specific synthesis path.
     """
 
-    contract = session.brief.experiment_contract
+    design = getattr(session, "design", None)
+    contract = (
+        design.contract
+        if design is not None and design.contract is not None
+        else session.brief.experiment_contract
+    )
     if contract is None:
         raise ResearchReportSessionError(
             "Research session has no experiment contract; report input is incomplete."
@@ -215,7 +220,16 @@ def run_research_session_report_agent(
         config=config,
         client=client,
         gateway=gateway,
-        source_refs=(session.brief_ref, session.execution_ref, session.analysis_ref),
+        source_refs=tuple(
+            ref
+            for ref in (
+                session.brief_ref,
+                getattr(session, "design_ref", None),
+                session.execution_ref,
+                session.analysis_ref,
+            )
+            if ref is not None
+        ),
         emit=emit,
     )
 
@@ -335,6 +349,17 @@ def _research_source_handles(session: "ResearchSessionResult") -> list[SourceHan
             summary=f"Analysis status: {session.analysis.status}.",
         ),
     ]
+    design_ref = getattr(session, "design_ref", None)
+    if design_ref is not None:
+        handles.insert(
+            1,
+            SourceHandle(
+                handle="artifact:research_design",
+                kind="research_design",
+                artifact=design_ref.path,
+                summary="Selected research direction and executable contract.",
+            ),
+        )
     handles.extend(
         SourceHandle(
             handle=f"paper:{paper.id}",

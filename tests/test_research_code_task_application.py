@@ -56,8 +56,10 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
             )
             self.assertEqual(
                 [decision.action for decision in result.decisions],
-                ["accept", "accept"],
+                ["accept", "accept", "accept"],
             )
+            self.assertIsNotNone(result.design)
+            self.assertEqual(result.design_ref.path, "attempts/design-001/research_design.json")
 
             restored = load_research_code_task_session_result(result.session_root)
             self.assertEqual(restored.status, result.status)
@@ -103,7 +105,7 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
             )
             self.assertEqual(error["error_type"], "RuntimeError")
             self.assertIn("candidate generation failed", error["message"])
-            self.assertEqual(result.decisions[0].action, "repair")
+            self.assertEqual(result.decisions[1].action, "repair")
 
     def test_candidates_use_isolated_sessions_and_stop_on_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

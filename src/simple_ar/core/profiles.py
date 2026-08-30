@@ -50,6 +50,7 @@ _LIFECYCLE_PROFILES: tuple[LifecycleProfile, ...] = (
         "experiment",
         (
             "synthesize",
+            "research_design",
             "design",
             "code",
             "run",
@@ -71,6 +72,7 @@ _LIFECYCLE_PROFILES: tuple[LifecycleProfile, ...] = (
             "document_ingest",
             "read",
             "synthesize",
+            "research_design",
             "design",
             "code",
             "run",

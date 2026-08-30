@@ -50,6 +50,11 @@ __all__ = [
     "SynthesisStatus",
     "synthesize_evidence",
     "run_synthesis_capability",
+    "ResearchDesignRequest",
+    "ResearchDesignResult",
+    "ResearchDesignStatus",
+    "build_research_design",
+    "run_research_design_capability",
     "ReadRequest",
     "ReadResult",
     "ReadStatus",
@@ -71,6 +76,8 @@ __all__ = [
     "transition_request_from_analysis",
     "transition_request_from_synthesis",
     "transition_request_from_report_audit",
+    "ResearchIterationLimits",
+    "ResearchIterationPolicy",
     "ResearchBriefRequest",
     "ResearchBriefResult",
     "ResearchBriefStatus",
@@ -132,6 +139,26 @@ _LAZY_EXPORTS = {
         "simple_ar.research.synthesis",
         "run_synthesis_capability",
     ),
+    "ResearchDesignRequest": (
+        "simple_ar.research.design",
+        "ResearchDesignRequest",
+    ),
+    "ResearchDesignResult": (
+        "simple_ar.research.design",
+        "ResearchDesignResult",
+    ),
+    "ResearchDesignStatus": (
+        "simple_ar.research.design",
+        "ResearchDesignStatus",
+    ),
+    "build_research_design": (
+        "simple_ar.research.design",
+        "build_research_design",
+    ),
+    "run_research_design_capability": (
+        "simple_ar.research.design",
+        "run_research_design_capability",
+    ),
     "ReadRequest": ("simple_ar.research.evidence.reader", "ReadRequest"),
     "ReadResult": ("simple_ar.research.evidence.reader", "ReadResult"),
     "ReadStatus": ("simple_ar.research.evidence.reader", "ReadStatus"),
@@ -179,6 +206,14 @@ _LAZY_EXPORTS = {
     "transition_request_from_report_audit": (
         "simple_ar.research.decisions",
         "transition_request_from_report_audit",
+    ),
+    "ResearchIterationLimits": (
+        "simple_ar.research.decisions",
+        "ResearchIterationLimits",
+    ),
+    "ResearchIterationPolicy": (
+        "simple_ar.research.decisions",
+        "ResearchIterationPolicy",
     ),
     "ResearchBriefRequest": ("simple_ar.research.brief", "ResearchBriefRequest"),
     "ResearchBriefResult": ("simple_ar.research.brief", "ResearchBriefResult"),

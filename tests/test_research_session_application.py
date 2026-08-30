@@ -55,6 +55,7 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                 [
                     "analysis",
                     "research_brief",
+                    "research_design",
                     "document_ingest",
                     "experiment",
                     "plan",
@@ -63,11 +64,16 @@ class ResearchSessionApplicationTests(unittest.TestCase):
             )
             self.assertEqual(
                 [decision.action for decision in result.decisions],
-                ["accept"] * 6,
+                ["accept"] * 7,
             )
             self.assertTrue(
                 (root / "session" / "attempts" / "brief-001" / "research_brief.json").is_file()
             )
+            self.assertTrue(
+                (root / "session" / "attempts" / "design-001" / "research_design.json").is_file()
+            )
+            self.assertIsNotNone(result.design)
+            self.assertIsNotNone(result.design_ref)
             self.assertTrue(str(result.execution_ref.path).startswith("attempts/"))
             self.assertTrue(str(result.analysis_ref.path).startswith("attempts/"))
             manifest = json.loads(
@@ -79,6 +85,8 @@ class ResearchSessionApplicationTests(unittest.TestCase):
             restored = load_research_session_result(root / "session")
             self.assertEqual(restored.status, result.status)
             self.assertEqual(restored.brief_ref, result.brief_ref)
+            self.assertEqual(restored.design_ref, result.design_ref)
+            self.assertEqual(restored.design, result.design)
             self.assertEqual(restored.execution_ref, result.execution_ref)
             self.assertEqual(restored.analysis_ref, result.analysis_ref)
             self.assertEqual(restored.execution, result.execution)

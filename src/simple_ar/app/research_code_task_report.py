@@ -65,7 +65,11 @@ def build_code_task_report_inputs(
 ) -> tuple[ReportContext, ReportMemory]:
     """Build compact report context and memory from real session evidence."""
 
-    contract = session.synthesis.experiment_contract
+    contract = (
+        session.design.contract
+        if session.design is not None and session.design.contract is not None
+        else session.synthesis.experiment_contract
+    )
     if contract is None:
         raise ValueError("Code-task session has no experiment contract.")
 

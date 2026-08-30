@@ -52,6 +52,11 @@ session 根目录引用，不复制或合并产物；使用哪个 attempt、哪�
 controller 不会自行推断分支，也不会替调用方选择结果。需要展示某个节点的父链时可使用
 `attempt_lineage()`；它只读取持久化的 attempt manifest，不合并产物或调度新工作。
 
+研究领域的调用方可以在执行 controller 前，用 `ResearchIterationPolicy` 包装已经明确目标的
+`TransitionRequest`。它基于持久化的 `DecisionRecord` 限制总步数、单个 capability 的访问次数
+和重复失败次数；目标选择和是否继续仍由调用方负责。该 policy 不调用 LLM、不执行 handler、
+不自动重试，也不会选择所谓最佳结果。
+
 当前第一条领域纵向切片可以显式注册
 `research.brief.run_research_brief_capability()`。它组合现有的 Read 和 Synthesis 边界，
 并为后续 capability 暴露一个结构化的 `research_brief.json` 输出。这是可选的适配器，
@@ -100,8 +105,9 @@ research direction，调用现有执行后端运行一次明确的命令，再�
 实际使用的模式会记录在 analysis capability 的 provenance 中。
 
 如果希望两段交接保留在同一个 session 中，可以使用
-`simple-ar research-session`。它复用相同的 brief 前缀，再用一个明确提供的
-`ExperimentRequest` 进入现有 Analysis capability；实验命令仍由调用方给出，因此这是
+`simple-ar research-session`。它复用相同的 brief 前缀，记录一个
+`research_design.v1` handoff，再用一个明确提供的 `ExperimentRequest` 进入现有 Analysis
+capability；实验命令仍由调用方给出，因此这是
 受控组合，不是自动生成代码或不受限制的研究循环。
 
 同一个 session 还可以通过 `run_research_report_session()` 继续进入现有 Report 边界。
@@ -127,8 +133,8 @@ LLM client 仍由调用方选择；它只是报告交接，不是自动研究调
 
 进程结束后，如果需要从已有 session 继续报告阶段，可以调用
 `load_research_session_result()`。它只根据 `session_manifest.json` 以及声明的
-`plan-001`、`search-001`、`document-001`、`brief-001`、`experiment-001` 和
-`analysis-001` typed handoff 恢复同一个结果，不会联网、执行命令、重试或自行挑选“最好”的
+`plan-001`、`search-001`、`document-001`、`brief-001`、可选的 `design-001`、`experiment-001`
+和 `analysis-001` typed handoff 恢复同一个结果，不会联网、执行命令、重试或自行挑选“最好”的
 结果。因此，调用方可以明确地把一个已完成的实验 session 交给 Report/Audit，而不必重跑
 前面的阶段；缺失或格式错误的 handoff 会以 `ResearchSessionError` 失败。
 
@@ -173,7 +179,7 @@ Report/Audit 路径；已经收束的 session 不会被偷偷重新打开。
 `research.register_research_capabilities(registry, names=...)`。不传
 `names` 时注册完整适配器集合，传入时只注册当前路径需要的能力；注册仍然是
 显式操作，不会创建调度器。该 helper 覆盖确定性的 research planning、Search、
-Document Ingest、Read、Synthesis、Experiment、Analysis、Report、Report Audit
+Document Ingest、Read、Synthesis、Research Design、Experiment、Analysis、Report、Report Audit
 和 Research Brief。
 独立结果分析能力的规范名称是 `analysis`；为兼容旧调用方，显式选择时仍保留
 `analyze` 这个 registry/session 别名。
@@ -181,7 +187,10 @@ Document Ingest、Read、Synthesis、Experiment、Analysis、Report、Report Aud
 其中 `plan` 适配器复用已有的问题、查询和来源预算 builder，写出一个
 `research_plan.v1` handoff；默认使用确定性路径，调用方显式传入
 `use_llm=True` 和共享 client 时才会得到规范化的模型辅助计划。它不替调用方选择下一能力。
-领域专属的 `design`、`code`、`run` 实现仍由调用方提供。
+窄的 `research_design` 适配器接收持久化的 synthesis，选择调用方指定的研究方向，并写出
+包含已有 `ResearchExperimentContract` 的 `research_design.v1` handoff。它只检查契约是否具备
+最小可执行字段，不会自行创造 command、metric value、实验矩阵、代码或执行计划；领域专属
+的代码生成和执行实现仍由调用方提供。
 如果要把该计划交给已有的 `SearchRequest`，可以使用
 `research.planning.search_request_from_plan()` 这个内存适配器；它不会调用 provider，
 也不增加 retry、去重或候选选择策略。

@@ -8,6 +8,15 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Added a narrow `research_design` handoff that selects an existing synthesis
+  idea and reuses its `ResearchExperimentContract` in the existing Experiment
+  and Code-Task application paths, including the standard research-session
+  composition; it does not create a second experiment schema or an LLM
+  scheduler.
+- Added `ResearchIterationPolicy` and bounded research iteration limits for
+  caller-proposed transitions. It reads persisted decisions and blocks excess
+  steps, capability visits, or repeated failures without executing or retrying
+  work itself.
 - Standalone research brief/session flows now accept an explicit `--model`
   (or library `llm_client`) and use the shared LLM transport for planning and
   synthesis; experiment sessions can use it for result analysis. Offline mode

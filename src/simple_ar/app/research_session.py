@@ -22,6 +22,7 @@ from simple_ar.core import (
 from simple_ar.experiment.execution.backend import ExecutionBackend, RunRequest
 from simple_ar.research.documents.ingest import DocumentBundle
 from simple_ar.research.analysis import AnalysisHandoff
+from simple_ar.research.design import ResearchDesignRequest, ResearchDesignResult
 from simple_ar.research.planning.capability import ResearchPlanResult
 from simple_ar.research.sources import SearchProviderRegistry, SearchResult
 from simple_ar.research.synthesis import SynthesisResult
@@ -85,6 +86,8 @@ class ResearchSessionResult:
     analysis_ref: ArtifactRef
     attempts: tuple[AttemptManifest, ...]
     decisions: tuple[DecisionRecord, ...]
+    design: ResearchDesignResult | None = None
+    design_ref: ArtifactRef | None = None
 
     @property
     def status(self) -> str:
@@ -112,7 +115,7 @@ def run_research_session(
     search_registry: SearchProviderRegistry | None = None,
     backend: ExecutionBackend | None = None,
 ) -> ResearchSessionResult:
-    """Run literature, synthesis, one execution, and result analysis."""
+    """Run literature, design handoff, one execution, and result analysis."""
 
     request.brief.session_root.mkdir(parents=True, exist_ok=True)
     controller = _new_controller(
@@ -124,16 +127,17 @@ def run_research_session(
             "search",
             "document_ingest",
             "research_brief",
+            "research_design",
             "experiment",
             "analysis",
         ),
-        budget=BudgetState(max_attempts=8, max_no_progress=3),
+        budget=BudgetState(max_attempts=9, max_no_progress=3),
     )
     steps = _run_research_brief_steps(
         request.brief,
         controller,
         search_registry=search_registry,
-        next_capability="experiment",
+        next_capability="research_design",
     )
     if steps.brief.status != "ready":
         raise ResearchSessionError(
@@ -144,11 +148,38 @@ def run_research_session(
             f"Research brief has no experiment contract; inspect {request.brief.session_root}."
         )
 
+    controller.execute(
+        "research_design",
+        attempt_id="design-001",
+        inputs=(steps.brief_ref,),
+        next_capability="experiment",
+        request=ResearchDesignRequest(synthesis=steps.brief.synthesis),
+    )
+    design_ref = controller.attempt_output_ref(
+        "design-001",
+        kind="research_design",
+        schema="research_design.v1",
+    )
+    design_payload = controller.store.read_json(design_ref)
+    if not isinstance(design_payload, Mapping):
+        raise ResearchSessionError(
+            "Research design output is not a JSON object; inspect "
+            f"{request.brief.session_root}."
+        )
+    design = ResearchDesignResult.from_handoff_dict(design_payload)
+    if design.status != "ready" or design.contract is None:
+        raise ResearchSessionError(
+            "Research design is not executable: "
+            + "; ".join(design.diagnostics or ("no diagnostic was recorded",))
+        )
+
     source_path = request.brief.session_root / steps.brief_ref.path
     experiment = _run_experiment_steps(
         controller,
         source_ref=steps.brief_ref,
         synthesis=steps.brief.synthesis,
+        design=design,
+        design_ref=design_ref,
         run_request=RunRequest(
             command=list(request.command),
             cwd=request.cwd,
@@ -163,6 +194,7 @@ def run_research_session(
             source_file=source_path,
             synthesis=steps.brief.synthesis,
             result_schema=request.result_schema,
+            contract=design.contract,
         ),
         analysis_next_capability="report",
         backend=backend,
@@ -183,6 +215,8 @@ def run_research_session(
         analysis_ref=experiment.analysis_ref,
         attempts=controller.list_attempts(),
         decisions=tuple(controller.manifest.decisions),
+        design=design,
+        design_ref=design_ref,
     )
 
 
@@ -248,6 +282,21 @@ def load_research_session_result(
         if brief_result.synthesis is None:
             raise ValueError("Research brief handoff has no synthesis result.")
 
+        design: ResearchDesignResult | None = None
+        design_ref: ArtifactRef | None = None
+        if any(item.attempt_id == "design-001" for item in controller.list_attempts()):
+            design_ref = controller.attempt_output_ref(
+                "design-001",
+                kind="research_design",
+                schema="research_design.v1",
+            )
+            design_payload = controller.store.read_json(design_ref)
+            if not isinstance(design_payload, Mapping):
+                raise ValueError("Research design handoff must be a JSON object.")
+            design = ResearchDesignResult.from_handoff_dict(design_payload)
+            if design.status != "ready" or design.contract is None:
+                raise ValueError("Research design handoff is not executable.")
+
         execution_ref = controller.attempt_output_ref(
             "experiment-001",
             kind="experiment_result",
@@ -285,6 +334,8 @@ def load_research_session_result(
         analysis_ref=analysis_ref,
         attempts=controller.list_attempts(),
         decisions=tuple(controller.manifest.decisions),
+        design=design,
+        design_ref=design_ref,
     )
 
 

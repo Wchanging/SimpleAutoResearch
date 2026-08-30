@@ -169,7 +169,7 @@ the application does not retry or repair it implicitly.
 ### `simple-ar research-session`
 
 **Purpose**: run the small end-to-end composition
-`plan -> search -> document_ingest -> research_brief -> experiment -> analysis`
+`plan -> search -> document_ingest -> research_brief -> research_design -> experiment -> analysis`
 in one `full_research` session. The experiment command is supplied explicitly;
 code generation and autonomous iteration are outside this entry point.
 

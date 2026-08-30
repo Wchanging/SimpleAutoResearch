@@ -69,6 +69,13 @@ winner. Use `attempt_lineage()` to inspect the root-to-node chain for a
 comparison or recovery view; it reads only persisted attempt manifests and
 does not merge artifacts or schedule work.
 
+Research-domain callers can wrap a proposed `TransitionRequest` with
+`ResearchIterationPolicy` before invoking the controller. It enforces a small
+step budget, per-capability visit limit, and repeated-failure limit over the
+persisted `DecisionRecord` list. The caller still supplies the target and
+decides whether to continue; the policy does not call an LLM, execute a
+handler, retry work, or choose a winner.
+
 For the first domain slice, register
 `research.brief.run_research_brief_capability()` explicitly. It composes the
 existing Read and Synthesis boundaries and exposes a single structured
@@ -126,8 +133,9 @@ omitting it keeps analysis deterministic. The selected mode is recorded in
 the analysis capability provenance.
 
 For a single session that owns both sides of this handoff, use
-`simple-ar research-session`. It reuses the same brief prefix and continues
-with one explicit `ExperimentRequest` and the existing Analysis capability;
+`simple-ar research-session`. It reuses the same brief prefix, records a
+`research_design.v1` handoff, and continues with one explicit `ExperimentRequest`
+and the existing Analysis capability;
 the command is still supplied by the caller, so this is a controlled
 composition rather than automatic code generation or an unrestricted research
 loop.
@@ -161,8 +169,8 @@ not an automatic research scheduler.
 
 After the process ends, `load_research_session_result()` restores the same
 typed result from `session_manifest.json` and the declared `plan-001`,
-`search-001`, `document-001`, `brief-001`, `experiment-001`, and `analysis-001`
-outputs. It performs no network request, execution, retry, or result
+`search-001`, `document-001`, `brief-001`, optional `design-001`, `experiment-001`,
+and `analysis-001` outputs. It performs no network request, execution, retry, or result
 selection, so a caller can explicitly continue an existing session into
 Report/Audit without rerunning its earlier stages. Missing or malformed
 handoffs fail closed with `ResearchSessionError`.
@@ -217,7 +225,7 @@ Applications that want the built-in adapters can use
 argument is optional for the complete adapter set or can select only the
 capabilities needed by a path; registration is still explicit and does not
 create a scheduler. The helper covers deterministic research planning,
-Search, Document Ingest, Read, Synthesis, Experiment, Analysis, Report,
+Search, Document Ingest, Read, Synthesis, Research Design, Experiment, Analysis, Report,
 Report Audit, and Research Brief.
 `analysis` is the canonical standalone result-analysis name; `analyze` remains
 available as a legacy registry/session alias when explicitly selected.
@@ -226,8 +234,12 @@ The `plan` adapter reuses the existing question, query, and source-budget
 builders and writes one `research_plan.v1` handoff. It is deterministic by
 default; a caller can explicitly pass `use_llm=True` and the shared client to
 obtain a normalized model-assisted plan. It does not choose the next
-capability. Domain-specific design, code generation, and execution
-implementations remain caller-owned.
+capability. The narrow `research_design` adapter consumes a persisted synthesis,
+selects an explicit idea, and writes a `research_design.v1` handoff containing
+the already-derived `ResearchExperimentContract`. It checks whether that
+contract is minimally executable, but it does not invent a command, metric
+value, experiment matrix, code, or execution plan. Domain-specific code
+generation and execution implementations remain caller-owned.
 `research.planning.search_request_from_plan()` is the small in-memory adapter
 for passing that plan to the existing `SearchRequest`; it does not invoke a
 provider or add retry, deduplication, or selection policy.

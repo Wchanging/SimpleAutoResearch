@@ -48,7 +48,19 @@ _DEFAULT_EDGES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("read", ("synthesize", "search", "read", "report")),
     (
         "synthesize",
-        ("design", "experiment", "search", "read", "synthesize", "report"),
+        (
+            "research_design",
+            "design",
+            "experiment",
+            "search",
+            "read",
+            "synthesize",
+            "report",
+        ),
+    ),
+    (
+        "research_design",
+        ("experiment", "design", "research_design", "synthesize"),
     ),
     ("design", ("code", "synthesize", "design")),
     ("code", ("run", "design", "code")),
@@ -58,7 +70,10 @@ _DEFAULT_EDGES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("analysis", ("report", "run", "design", "analysis", "analyze", "experiment")),
     ("analyze", ("report", "run", "design", "analyze", "analysis")),
     ("report", ("report", "report_audit", "read", "search", "synthesize", "design")),
-    ("research_brief", ("experiment", "report", "research_brief")),
+    (
+        "research_brief",
+        ("research_design", "experiment", "report", "research_brief"),
+    ),
     ("experiment", ("analysis", "experiment", "report")),
     ("report_audit", ("report_audit", "report", "read", "search", "synthesize")),
 )

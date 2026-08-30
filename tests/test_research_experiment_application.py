@@ -43,16 +43,19 @@ class ResearchExperimentApplicationTests(unittest.TestCase):
             self.assertEqual(result.analysis.status, "passed")
             self.assertEqual(
                 [attempt.capability for attempt in result.attempts],
-                ["analysis", "experiment"],
+                ["analysis", "research_design", "experiment"],
             )
             self.assertEqual(
                 [decision.action for decision in result.decisions],
-                ["accept", "accept"],
+                ["accept", "accept", "accept"],
             )
             self.assertTrue(result.execution_path.is_file())
             self.assertTrue(result.analysis_path.is_file())
             self.assertTrue(
                 (root / "session" / "inputs" / "synthesis.json").is_file()
+            )
+            self.assertTrue(
+                (root / "session" / "attempts" / "design-001" / "research_design.json").is_file()
             )
 
     def test_failed_execution_is_retained_for_analysis(self) -> None:
@@ -76,7 +79,7 @@ class ResearchExperimentApplicationTests(unittest.TestCase):
 
             self.assertEqual(result.execution["status"], "failed")
             self.assertTrue(result.analysis_path.is_file())
-            self.assertEqual(result.decisions[0].action, "repair")
+            self.assertEqual(result.decisions[1].action, "repair")
             analysis_payload = json.loads(result.analysis_path.read_text(encoding="utf-8"))
             self.assertEqual(analysis_payload["execution_status"], "failed")
 

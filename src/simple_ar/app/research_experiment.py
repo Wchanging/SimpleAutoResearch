@@ -22,6 +22,8 @@ from simple_ar.core import (
 )
 from simple_ar.experiment.execution.backend import ExecutionBackend, RunRequest
 from simple_ar.research.analysis import AnalysisHandoff
+from simple_ar.research.contracts import ResearchExperimentContract
+from simple_ar.research.design import ResearchDesignRequest, ResearchDesignResult
 from simple_ar.research.experiment import ExperimentRequest
 from simple_ar.research.registry import register_research_capabilities
 from simple_ar.research.synthesis import SynthesisResult
@@ -82,6 +84,8 @@ class ResearchExperimentSessionResult:
     analysis_ref: ArtifactRef
     attempts: tuple[AttemptManifest, ...]
     decisions: tuple[DecisionRecord, ...]
+    design: ResearchDesignResult | None = None
+    design_ref: ArtifactRef | None = None
 
     @property
     def status(self) -> str:
@@ -139,7 +143,10 @@ def run_research_experiment_session(
 
     request.session_root.mkdir(parents=True, exist_ok=True)
     registry = CapabilityRegistry()
-    register_research_capabilities(registry, names=("experiment", "analysis"))
+    register_research_capabilities(
+        registry,
+        names=("research_design", "experiment", "analysis"),
+    )
     controller = SessionController.create(
         request.session_root,
         session_id=request.session_root.name,
@@ -161,10 +168,36 @@ def run_research_experiment_session(
         schema="experiment_input.v1",
         producer="research.experiment.session",
     )
+    controller.execute(
+        "research_design",
+        attempt_id="design-001",
+        inputs=(source_ref,),
+        next_capability="experiment",
+        request=ResearchDesignRequest(synthesis=synthesis),
+    )
+    design_ref = controller.attempt_output_ref(
+        "design-001",
+        kind="research_design",
+        schema="research_design.v1",
+    )
+    design_payload = controller.store.read_json(design_ref)
+    if not isinstance(design_payload, Mapping):
+        raise ResearchExperimentSessionError(
+            "Research design output is not a JSON object; inspect "
+            f"{controller.store.root}."
+        )
+    design = ResearchDesignResult.from_handoff_dict(design_payload)
+    if design.status != "ready" or design.contract is None:
+        raise ResearchExperimentSessionError(
+            "Research design is not executable: "
+            + "; ".join(design.diagnostics or ("no diagnostic was recorded",))
+        )
     steps = _run_experiment_steps(
         controller,
         source_ref=source_ref,
         synthesis=synthesis,
+        design=design,
+        design_ref=design_ref,
         run_request=RunRequest(
             command=list(request.command),
             cwd=request.cwd,
@@ -179,6 +212,7 @@ def run_research_experiment_session(
             source_file=request.synthesis_file,
             synthesis=synthesis,
             result_schema=request.result_schema,
+            contract=design.contract,
         ),
         analysis_next_capability=None,
         backend=backend,
@@ -195,6 +229,8 @@ def run_research_experiment_session(
         analysis_ref=steps.analysis_ref,
         attempts=controller.list_attempts(),
         decisions=tuple(controller.manifest.decisions),
+        design=design,
+        design_ref=design_ref,
     )
 
 
@@ -203,6 +239,8 @@ def _run_experiment_steps(
     *,
     source_ref: ArtifactRef,
     synthesis: SynthesisResult,
+    design: ResearchDesignResult | None = None,
+    design_ref: ArtifactRef | None = None,
     run_request: RunRequest,
     result_schema: Mapping[str, Any],
     analysis_context: AnalysisContext,
@@ -213,15 +251,20 @@ def _run_experiment_steps(
 ) -> _ExperimentSteps:
     """Run experiment and analysis attempts in a caller-owned session."""
 
+    experiment_contract = design.contract if design is not None else synthesis.experiment_contract
+    if experiment_contract is None:
+        raise ResearchExperimentSessionError(
+            "No executable research contract is available for the experiment."
+        )
     experiment_request = ExperimentRequest(
         run=run_request,
         result_schema=result_schema,
-        experiment_contract=synthesis.experiment_contract,
+        experiment_contract=experiment_contract,
     )
     controller.execute(
         "experiment",
         attempt_id="experiment-001",
-        inputs=(source_ref,),
+        inputs=(design_ref or source_ref,),
         next_capability="analysis",
         request=experiment_request,
         backend=backend,
@@ -297,9 +340,11 @@ def build_experiment_analysis_context(
     source_file: Path,
     synthesis: SynthesisResult,
     result_schema: Mapping[str, Any],
+    contract: ResearchExperimentContract | None = None,
 ) -> AnalysisContext:
-    contract = synthesis.experiment_contract
-    assert contract is not None
+    experiment_contract = contract or synthesis.experiment_contract
+    if experiment_contract is None:
+        raise ValueError("An experiment contract is required for analysis context.")
     schema = dict(result_schema)
     required = schema.get("required_metrics")
     required_names = [
@@ -325,8 +370,8 @@ def build_experiment_analysis_context(
         title=topic,
         hypotheses=[
             {
-                "id": contract.contract_id or "hypothesis-1",
-                "statement": contract.hypothesis,
+                "id": experiment_contract.contract_id or "hypothesis-1",
+                "statement": experiment_contract.hypothesis,
             }
         ],
         expected_metrics=expected_metrics,
@@ -334,7 +379,7 @@ def build_experiment_analysis_context(
             name: _normalize_direction(directions.get(name) or schema.get("direction"))
             for name in metric_names
         },
-        task_contract={"experiment_contract": contract.to_row()},
+        task_contract={"experiment_contract": experiment_contract.to_row()},
         metadata={"synthesis_file": str(source_file)},
     )
 

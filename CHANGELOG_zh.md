@@ -8,6 +8,12 @@
 
 ### 变更
 
+- 增加窄的 `research_design` handoff：选择 synthesis 中已有的研究方向，并在现有
+  Experiment、Code-Task 以及标准 research-session 组合路径中复用其
+  `ResearchExperimentContract`；不会新增第二套实验 schema，也不会创建 LLM 调度器。
+- 增加 `ResearchIterationPolicy` 和有界研究迭代限制，用于约束调用方提出的 transition。
+  它读取持久化 decision，在超出总步数、能力访问次数或重复失败上限时阻断，但不会自行执行
+  或重试工作。
 - standalone research brief/session 现在支持显式 `--model`（库调用对应传入
   `llm_client`），使用共享 LLM transport 完成 planning 和 synthesis；experiment session
   也可以用它做结果分析。不传模型时仍可使用离线模式，且 provenance 会明确记录实际模式。

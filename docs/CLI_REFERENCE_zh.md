@@ -161,7 +161,7 @@ session 会把输入 handoff、`results.json`、stdout/stderr、guard、diagnosi
 ### `simple-ar research-session`
 
 **一句话说明**：在同一个 `full_research` session 中运行小型端到端组合：
-`plan -> search -> document_ingest -> research_brief -> experiment -> analysis`。
+`plan -> search -> document_ingest -> research_brief -> research_design -> experiment -> analysis`。
 实验命令仍由调用方明确提供；代码生成和自主迭代不属于这条入口。
 
 **语法用法**（`--command` 必须放在最后）：

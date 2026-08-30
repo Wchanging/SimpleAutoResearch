@@ -35,6 +35,12 @@ from simple_ar.research.analysis import (
     analyze_experiment_capability,
     compare_experiment_results,
 )
+from simple_ar.research.contracts import ResearchExperimentContract
+from simple_ar.research.design import (
+    ResearchDesignRequest,
+    ResearchDesignResult,
+    run_research_design_capability,
+)
 from simple_ar.research.synthesis import SynthesisResult
 from simple_ar.result_analysis.metrics import normalize_direction
 from simple_ar.result_analysis.schema import AnalysisContext, AnalysisResult
@@ -53,6 +59,7 @@ class ResearchCodeTaskSessionRequest:
     synthesis_file: Path
     spec: CodeTaskExperimentSpec
     model: str | None = None
+    idea_id: str | None = None
     use_llm: bool = True
     timeout_sec: int = 300
     baseline_policy: str = "auto"
@@ -68,6 +75,8 @@ class ResearchCodeTaskSessionRequest:
             raise ValueError("ResearchCodeTaskSessionRequest.timeout_sec must be positive.")
         if not self.label.strip():
             raise ValueError("ResearchCodeTaskSessionRequest.label cannot be empty.")
+        if self.idea_id is not None and not self.idea_id.strip():
+            raise ValueError("ResearchCodeTaskSessionRequest.idea_id cannot be blank.")
         object.__setattr__(self, "session_root", Path(self.session_root))
         object.__setattr__(self, "synthesis_file", Path(self.synthesis_file))
         if self.baseline_metrics_file is not None:
@@ -92,6 +101,8 @@ class ResearchCodeTaskSessionResult:
     analysis_ref: ArtifactRef
     attempts: tuple[AttemptManifest, ...]
     decisions: tuple[DecisionRecord, ...]
+    design: ResearchDesignResult | None = None
+    design_ref: ArtifactRef | None = None
 
     @property
     def status(self) -> str:
@@ -237,6 +248,7 @@ def run_research_code_task_session(
 
     request.session_root.mkdir(parents=True, exist_ok=True)
     registry = CapabilityRegistry()
+    registry.register("research_design", run_research_design_capability)
     registry.register("experiment", _run_code_task_capability)
     registry.register("analysis", analyze_experiment_capability)
     controller = SessionController.create(
@@ -246,7 +258,7 @@ def run_research_code_task_session(
         profile="experiment",
         registry=registry,
         budget=BudgetState(
-            max_attempts=4 if next_capability is not None else 3,
+            max_attempts=5 if next_capability is not None else 3,
             max_no_progress=2,
         ),
     )
@@ -264,11 +276,34 @@ def run_research_code_task_session(
         producer="research.code_task.session",
     )
     result_schema = _result_schema(request.spec)
+    controller.execute(
+        "research_design",
+        attempt_id="design-001",
+        inputs=(source_ref,),
+        next_capability="experiment",
+        request=ResearchDesignRequest(synthesis=synthesis, idea_id=request.idea_id),
+    )
+    design_ref = controller.attempt_output_ref(
+        "design-001",
+        kind="research_design",
+        schema="research_design.v1",
+    )
+    design_payload = controller.store.read_json(design_ref)
+    if not isinstance(design_payload, Mapping):
+        raise ResearchCodeTaskSessionError(
+            f"Research design output is not a JSON object; inspect {request.session_root}."
+        )
+    design = ResearchDesignResult.from_handoff_dict(design_payload)
+    if design.status != "ready" or design.contract is None:
+        raise ResearchCodeTaskSessionError(
+            "Research design is not executable: "
+            + "; ".join(design.diagnostics or ("no diagnostic was recorded",))
+        )
     try:
         controller.execute(
             "experiment",
             attempt_id="experiment-001",
-            inputs=(source_ref,),
+            inputs=(source_ref, design_ref),
             next_capability="analysis",
             request=_CodeTaskCapabilityRequest(
                 spec=request.spec,
@@ -294,6 +329,7 @@ def run_research_code_task_session(
             request=request,
             synthesis=synthesis,
             result_schema=result_schema,
+            contract=design.contract,
         )
         controller.execute(
             "analysis",
@@ -331,6 +367,8 @@ def run_research_code_task_session(
         analysis_ref=analysis_ref,
         attempts=controller.list_attempts(),
         decisions=tuple(controller.manifest.decisions),
+        design=design,
+        design_ref=design_ref,
     )
 
 
@@ -351,9 +389,9 @@ def load_research_code_task_session_result(
             registry=CapabilityRegistry(),
         )
         experiment_attempt = _attempt_by_id(controller, "experiment-001")
-        if len(experiment_attempt.inputs) != 1:
+        if len(experiment_attempt.inputs) not in {1, 2}:
             raise ValueError(
-                "Code-task experiment must declare exactly one synthesis input."
+                "Code-task experiment must declare one synthesis input and an optional design input."
             )
         source_ref = experiment_attempt.inputs[0]
         source_payload = controller.store.read_json(source_ref)
@@ -363,6 +401,17 @@ def load_research_code_task_session_result(
         if not isinstance(synthesis_payload, Mapping):
             raise ValueError("Code-task synthesis input has no synthesis handoff.")
         synthesis = SynthesisResult.from_handoff_dict(synthesis_payload)
+
+        design: ResearchDesignResult | None = None
+        design_ref: ArtifactRef | None = None
+        if len(experiment_attempt.inputs) == 2:
+            design_ref = experiment_attempt.inputs[1]
+            design_payload = controller.store.read_json(design_ref)
+            if not isinstance(design_payload, Mapping):
+                raise ValueError("Code-task design input must be a JSON object.")
+            design = ResearchDesignResult.from_handoff_dict(design_payload)
+            if design.status != "ready" or design.contract is None:
+                raise ValueError("Code-task design handoff is not executable.")
 
         execution_ref = controller.attempt_output_ref(
             "experiment-001",
@@ -402,6 +451,8 @@ def load_research_code_task_session_result(
         analysis_ref=analysis_ref,
         attempts=controller.list_attempts(),
         decisions=tuple(controller.manifest.decisions),
+        design=design,
+        design_ref=design_ref,
     )
 
 
@@ -586,6 +637,7 @@ def _run_candidate_capability(
             synthesis_file=context.store.resolve(synthesis_ref),
             spec=candidate_spec,
             label=f"{request.base_request.label}-{request.candidate_id}",
+            idea_id=request.idea_id,
         )
         result = run_research_code_task_session(inner_request)
         captured[request.candidate_id] = result
@@ -772,12 +824,22 @@ def _run_code_task_capability(
 ) -> CapabilityResult:
     """Run the existing bridge and retain a canonical result on every path."""
 
-    if len(context.inputs) != 1:
-        raise ValueError("Code-task capability expects exactly one synthesis input.")
+    if len(context.inputs) not in {1, 2}:
+        raise ValueError(
+            "Code-task capability expects one synthesis input and an optional design input."
+        )
     source = context.read_input_json(context.inputs[0])
     if not isinstance(source, Mapping) or not isinstance(source.get("synthesis"), Mapping):
         raise ValueError("Research code-task input has no synthesis handoff.")
     synthesis = SynthesisResult.from_handoff_dict(source["synthesis"])
+    if len(context.inputs) == 2:
+        design_payload = context.read_input_json(context.inputs[1])
+        if not isinstance(design_payload, Mapping):
+            raise ValueError("Research code-task input has no design handoff.")
+        design = ResearchDesignResult.from_handoff_dict(design_payload)
+        if design.status != "ready" or design.contract is None:
+            raise ValueError("Research code-task design handoff is not executable.")
+        synthesis = replace(synthesis, experiment_contract=design.contract)
 
     task_ref: ArtifactRef | None = None
     code_task_run_dir = context.store.root / "code_task_run"
@@ -1039,9 +1101,11 @@ def _analysis_context(
     request: ResearchCodeTaskSessionRequest,
     synthesis: SynthesisResult,
     result_schema: Mapping[str, Any],
+    contract: ResearchExperimentContract | None = None,
 ) -> AnalysisContext:
-    contract = synthesis.experiment_contract
-    assert contract is not None
+    experiment_contract = contract or synthesis.experiment_contract
+    if experiment_contract is None:
+        raise ValueError("An experiment contract is required for analysis context.")
     metric_names = list(result_schema.get("required_metrics") or [])
     directions = result_schema.get("metric_directions")
     directions = directions if isinstance(directions, Mapping) else {}
@@ -1053,14 +1117,17 @@ def _analysis_context(
         task_id=request.session_root.name,
         title=request.topic,
         hypotheses=[
-            {"id": contract.contract_id or "hypothesis-1", "statement": contract.hypothesis}
+            {
+                "id": experiment_contract.contract_id or "hypothesis-1",
+                "statement": experiment_contract.hypothesis,
+            }
         ],
         expected_metrics=[
             {"name": name, "direction": normalized_directions[name]}
             for name in metric_names
         ],
         metric_directions=normalized_directions,
-        task_contract={"experiment_contract": contract.to_row()},
+        task_contract={"experiment_contract": experiment_contract.to_row()},
         metadata={"synthesis_file": str(request.synthesis_file), "backend": "code_task"},
     )
 

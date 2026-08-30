@@ -10,15 +10,16 @@ from simple_ar.core import CapabilityRegistry, CapabilityResult
 
 CapabilityHandler = Callable[..., CapabilityResult]
 
-# These are opt-in adapters, not an automatic workflow. The deterministic
-# research-plan adapter is reusable; domain-specific design, code generation,
-# and execution remain caller-owned until their contracts are shared safely.
+# These are opt-in adapters, not an automatic workflow. Legacy domain-specific
+# design, code generation, and execution remain caller-owned; the small
+# research-design handoff only selects an existing research contract.
 _HANDLER_NAMES = (
     "plan",
     "search",
     "document_ingest",
     "read",
     "synthesize",
+    "research_design",
     "experiment",
     "analysis",
     "analyze",
@@ -106,6 +107,10 @@ def _load_handlers(names: tuple[str, ...]) -> dict[str, CapabilityHandler]:
         from simple_ar.research.synthesis import run_synthesis_capability
 
         handlers["synthesize"] = run_synthesis_capability
+    if "research_design" in names:
+        from simple_ar.research.design import run_research_design_capability
+
+        handlers["research_design"] = run_research_design_capability
     if "experiment" in names:
         from simple_ar.research.experiment import run_experiment_capability
 

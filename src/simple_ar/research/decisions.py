@@ -10,12 +10,150 @@ behalf.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
-from simple_ar.core.transitions import TransitionRequest
+from simple_ar.core.session import DecisionRecord
+from simple_ar.core.transitions import (
+    TransitionDecision,
+    TransitionPolicy,
+    TransitionRequest,
+)
 from simple_ar.report.schema import ReportAudit
 from simple_ar.result_analysis.schema import AnalysisResult
 from simple_ar.research.synthesis import SynthesisResult
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchIterationLimits:
+    """Small limits for caller-owned cross-stage iteration."""
+
+    max_steps: int = 8
+    max_visits_per_capability: int = 2
+    max_repeated_failure: int = 2
+
+    def __post_init__(self) -> None:
+        if self.max_steps < 1:
+            raise ValueError("max_steps must be at least 1.")
+        if self.max_visits_per_capability < 1:
+            raise ValueError("max_visits_per_capability must be at least 1.")
+        if self.max_repeated_failure < 1:
+            raise ValueError("max_repeated_failure must be at least 1.")
+
+
+class ResearchIterationPolicy:
+    """Bound a proposed research transition using persisted decisions.
+
+    The policy does not execute, retry, or select a target.  A caller first
+    builds a normal ``TransitionRequest`` with an explicit target, then passes
+    the current session decisions here before invoking ``SessionController``.
+    The existing core ``TransitionPolicy`` remains the source of route rules.
+    """
+
+    def __init__(
+        self,
+        *,
+        transition_policy: TransitionPolicy | None = None,
+        limits: ResearchIterationLimits | None = None,
+    ) -> None:
+        self.transition_policy = transition_policy or TransitionPolicy()
+        self.limits = limits or ResearchIterationLimits()
+
+    def decide(
+        self,
+        request: TransitionRequest,
+        *,
+        prior_decisions: tuple[DecisionRecord, ...] = (),
+    ) -> TransitionDecision:
+        """Return the normal decision unless a research limit blocks it."""
+
+        decision = self.transition_policy.decide(request)
+        if decision.action == "block":
+            return decision
+        if len(prior_decisions) >= self.limits.max_steps:
+            return _blocked_iteration_decision(
+                decision,
+                f"Research step budget exhausted ({self.limits.max_steps}).",
+            )
+
+        source = request.source.strip()
+        source_visits = sum(
+            1 for item in prior_decisions if item.capability.strip() == source
+        )
+        if source_visits >= self.limits.max_visits_per_capability:
+            return _blocked_iteration_decision(
+                decision,
+                f"Capability visit limit exhausted for {source!r}.",
+            )
+
+        target = decision.target
+        if target is not None:
+            target_visits = sum(
+                1
+                for item in prior_decisions
+                if item.capability.strip() == target.strip()
+            )
+            if target_visits >= self.limits.max_visits_per_capability:
+                return _blocked_iteration_decision(
+                    decision,
+                    f"Capability visit limit exhausted for {target.strip()!r}.",
+                )
+
+        if decision.failure_kind != "none":
+            repeated = sum(
+                1
+                for item in prior_decisions
+                if _decision_matches_failure(item, request, decision.failure_kind)
+            )
+            if repeated >= self.limits.max_repeated_failure:
+                return _blocked_iteration_decision(
+                    decision,
+                    "Repeated failure limit exhausted for "
+                    + _failure_label(request, decision.failure_kind)
+                    + ".",
+                )
+        return decision
+
+
+def _blocked_iteration_decision(
+    decision: TransitionDecision,
+    reason: str,
+) -> TransitionDecision:
+    return TransitionDecision(
+        action="block",
+        failure_kind=decision.failure_kind,
+        target=None,
+        reason=f"{reason} {decision.reason}",
+        expected_delta=decision.expected_delta,
+    )
+
+
+def _failure_label(
+    request: TransitionRequest,
+    failure_kind: str,
+) -> str:
+    return f"{request.source.strip().lower()}:{failure_kind.strip().lower()}"
+
+
+def _decision_matches_failure(
+    decision: DecisionRecord,
+    request: TransitionRequest,
+    failure_kind: str,
+) -> bool:
+    """Match persisted failures without depending on generated reason text."""
+
+    if decision.capability.strip().lower() != request.source.strip().lower():
+        return False
+    if decision.failure_kind.strip().lower() != failure_kind.strip().lower():
+        return False
+    signal = next(
+        (str(item).strip().lower() for item in request.signals if str(item).strip()),
+        "",
+    )
+    if not signal:
+        return True
+    reason = decision.reason.strip().lower()
+    return bool(reason) and (reason.startswith(signal) or signal.startswith(reason[:160]))
 
 
 def transition_request_from_analysis(
@@ -159,6 +297,8 @@ def _audit_signals(audit: ReportAudit) -> tuple[str, ...]:
 
 
 __all__ = [
+    "ResearchIterationLimits",
+    "ResearchIterationPolicy",
     "transition_request_from_analysis",
     "transition_request_from_synthesis",
     "transition_request_from_report_audit",
