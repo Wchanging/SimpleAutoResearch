@@ -27,8 +27,6 @@ from simple_ar.app.research_report import (
     run_research_report_session,
 )
 from simple_ar.report.schema import (
-    ClaimEvidenceRecord,
-    MetricSource,
     ReportContext,
     ReportDocumentPlan,
     ReportMemory,
@@ -75,7 +73,10 @@ def build_code_task_report_inputs(
 
     execution = dict(session.execution)
     source_handles = _source_handles(session, execution)
-    metric_sources = _metric_sources(session, execution)
+    metric_sources = metric_sources_from_execution(
+        execution,
+        artifact=session.execution_ref.path,
+    )
     context = ReportContext(
         topic=session.topic,
         report_mode="experiment",
@@ -91,7 +92,10 @@ def build_code_task_report_inputs(
         objective=contract.hypothesis,
         template="experiment",
         report_mode="experiment",
-        claims_evidence_matrix=[_claim_record(claim) for claim in session.analysis.claims],
+        claims_evidence_matrix=[
+            claim_evidence_record_from_analysis(claim)
+            for claim in session.analysis.claims
+        ],
         source_handles=source_handles,
         metric_sources=metric_sources,
         limitations=[*session.analysis.audit.limitations, *contract.risks],
@@ -147,6 +151,11 @@ def run_research_code_task_report_agent(
             "Code-task session did not leave the report continuation open. "
             "Run it with next_capability='report' before restoring it."
         )
+    if session.status != "completed":
+        raise ResearchCodeTaskSessionError(
+            "Code-task session is not ready for a formal report: "
+            f"status={session.status!r}; execution and analysis must pass first."
+        )
     context, memory = build_code_task_report_inputs(session)
     return run_research_report_agent_session(
         session_root=session.session_root,
@@ -194,20 +203,6 @@ def _source_handles(
             },
         ),
     ]
-
-
-def _metric_sources(
-    session: ResearchCodeTaskSessionResult,
-    execution: Mapping[str, Any],
-) -> list[MetricSource]:
-    return metric_sources_from_execution(
-        execution,
-        artifact=session.execution_ref.path,
-    )
-
-
-def _claim_record(claim: Any) -> ClaimEvidenceRecord:
-    return claim_evidence_record_from_analysis(claim)
 
 
 def _metric_summary(metrics: Mapping[str, Any]) -> str:

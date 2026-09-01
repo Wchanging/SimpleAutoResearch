@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from simple_ar.core import CapabilityResult
 from simple_ar.app.research_code_task import (
     ResearchCodeTaskSessionError,
     ResearchCodeTaskSessionRequest,
@@ -34,6 +36,29 @@ from simple_ar.report.schema import (
 
 
 class ResearchCodeTaskApplicationTests(unittest.TestCase):
+    def test_failed_design_surfaces_capability_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def failed_design(*, context: object, request: object) -> CapabilityResult:
+                del context, request
+                return CapabilityResult(
+                    status="failed",
+                    diagnostics=("design backend unavailable",),
+                )
+
+            with patch(
+                "simple_ar.app.research_code_task.run_research_design_capability",
+                failed_design,
+            ):
+                with self.assertRaisesRegex(
+                    ResearchCodeTaskSessionError,
+                    "design backend unavailable",
+                ):
+                    run_research_code_task_session(
+                        _request(root, _write_synthesis(root))
+                    )
+
     def test_existing_code_task_backend_reaches_result_analysis(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -77,6 +102,33 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
             self.assertEqual(execution["metrics"]["accuracy"], 0.8)
             self.assertEqual(execution["baseline"]["metrics"]["accuracy"], 0.7)
             self.assertEqual(execution["comparisons"][0]["verdict"], "improved")
+
+    def test_existing_task_receives_the_selected_research_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            synthesis_file = _write_synthesis(root)
+            source_task = root / "task.md"
+            source_task.write_text(
+                "# Original task\n\nKeep the public benchmark command.\n",
+                encoding="utf-8",
+            )
+            request = _request(root, synthesis_file)
+            request = replace(
+                request,
+                spec=replace(request.spec, task_file=source_task),
+            )
+            with patch(
+                "simple_ar.app.research_code_task.prepare_code_task_experiment",
+                side_effect=_fake_prepare,
+            ) as prepare:
+                run_research_code_task_session(request)
+
+            received_spec = prepare.call_args.kwargs["spec"]
+            materialized = received_spec.task_file.read_text(encoding="utf-8")
+            self.assertIn("# Original task", materialized)
+            self.assertIn("## Research handoff", materialized)
+            self.assertIn("Validation improves reliable agent accuracy.", materialized)
+            self.assertIn("add validation", materialized)
 
     def test_backend_failure_is_retained_as_canonical_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,6 +214,31 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
             self.assertEqual(summary["selected_candidate_id"], "candidate-002")
             self.assertEqual(len(summary["candidates"]), 2)
 
+    def test_candidate_report_continuation_is_opened_only_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            synthesis_file = _write_synthesis_with_ideas(root)
+            with patch(
+                "simple_ar.app.research_code_task.prepare_code_task_experiment",
+                side_effect=_fake_candidate_prepare,
+            ):
+                result = run_research_code_task_candidates(
+                    _request(root, synthesis_file),
+                    max_candidates=2,
+                    open_report=True,
+                )
+
+            self.assertEqual(result.status, "completed")
+            self.assertIsNotNone(result.selected)
+            assert result.selected is not None
+            assert result.selected.session is not None
+            self.assertEqual(
+                result.selected.session.decisions[-1].next_capability,
+                "report",
+            )
+            summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+            self.assertTrue(summary["report_continuation_open"])
+
     def test_candidate_summary_uses_store_relative_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -225,6 +302,37 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
                 continue_report.call_args.kwargs["source_refs"],
                 (restored.execution_ref, restored.analysis_ref),
             )
+
+    def test_report_continuation_rejects_incomplete_code_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            synthesis_file = _write_synthesis(root)
+            with patch(
+                "simple_ar.app.research_code_task.prepare_code_task_experiment",
+                side_effect=_fake_prepare_failed,
+            ):
+                session = run_research_code_task_session(
+                    _request(root, synthesis_file),
+                    next_capability="report",
+                )
+            with self.assertRaisesRegex(
+                ResearchCodeTaskSessionError,
+                "not ready for a formal report",
+            ):
+                run_research_code_task_report_agent(
+                    session,
+                    title="Reliable agents experiment",
+                    template=ReportTemplateBundle(
+                        name="experiment",
+                        mode="experiment",
+                        template_path="template.md",
+                        criteria_path="criteria.md",
+                        template_markdown="# Results",
+                        criteria_markdown="Use evidence.",
+                    ),
+                    config=ReportRuntimeConfig(reviewer="disabled"),
+                    client=object(),
+                )
 
     def test_candidates_block_after_bounded_exhaustion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -434,6 +542,24 @@ def _fake_prepare(
         work_item_id="improve-model",
         summary_path=summary,
     )
+
+
+def _fake_prepare_failed(
+    **kwargs: object,
+) -> CodeTaskExperimentResult:
+    result = _fake_prepare(**kwargs)  # type: ignore[arg-type]
+    report_path = (
+        result.code_task_run_dir
+        / "code_task"
+        / "run"
+        / "patched"
+        / "execution_report.json"
+    )
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    payload["status"] = "failed"
+    payload["returncode"] = 1
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+    return result
 
 
 def _fake_candidate_prepare(

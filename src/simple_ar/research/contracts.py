@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 
 ResearchMode = Literal["lite", "standard", "strong"]
@@ -387,6 +387,40 @@ class IdeaCandidate:
         )
 
 
+def rank_idea_candidates(ideas: Iterable[IdeaCandidate]) -> tuple[IdeaCandidate, ...]:
+    """Order candidates by grounded execution readiness.
+
+    The ordering is deliberately small and deterministic.  It rewards the
+    fields needed to turn a direction into a reviewable experiment, while
+    preserving the input order for ties so an upstream planner can still
+    provide a meaningful preference.
+    """
+
+    return tuple(sorted(tuple(ideas), key=_idea_readiness_key, reverse=True))
+
+
+def _idea_readiness_key(idea: IdeaCandidate) -> tuple[int, int, int]:
+    populated = sum(
+        bool(value)
+        for value in (
+            idea.hypothesis.strip(),
+            idea.proposed_change.strip(),
+            idea.expected_outcome.strip(),
+            idea.motivation_refs,
+            idea.required_baselines,
+            idea.required_datasets,
+            idea.metrics,
+        )
+    )
+    feasibility = {
+        "high": 3,
+        "medium": 2,
+        "unknown": 1,
+        "low": 0,
+    }.get(idea.feasibility.strip().lower(), 1)
+    return populated, feasibility, len(idea.motivation_refs)
+
+
 @dataclass(frozen=True)
 class NoveltyCheck:
     """Lightweight novelty and overlap assessment for one idea."""
@@ -427,6 +461,7 @@ class ResearchExperimentContract:
     dataset: str = "unknown"
     metrics: list[str] = field(default_factory=list)
     proposed_change: str = ""
+    expected_outcome: str = ""
     implementation_scope: list[str] = field(default_factory=list)
     validation_hints: list[str] = field(default_factory=list)
     resource_budget: dict[str, Any] = field(default_factory=dict)
@@ -450,6 +485,7 @@ class ResearchExperimentContract:
             dataset=str(row.get("dataset") or "unknown"),
             metrics=_string_list(row.get("metrics")),
             proposed_change=str(row.get("proposed_change") or ""),
+            expected_outcome=str(row.get("expected_outcome") or ""),
             implementation_scope=_string_list(row.get("implementation_scope")),
             validation_hints=_string_list(row.get("validation_hints")),
             resource_budget=_dict(row.get("resource_budget")),

@@ -28,6 +28,7 @@ from simple_ar.report.audit import (
     ReportAuditCapabilityRequest,
 )
 from simple_ar.report.capability import ReportAssemblyRequest
+from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.schema import (
     ReportContext,
     ReportDocumentPlan,
@@ -115,6 +116,38 @@ class ResearchReportSessionResult:
 
 class ResearchReportSessionError(RuntimeError):
     """Raised when an existing session cannot accept a report continuation."""
+
+
+def _ensure_report_continuation_available(session_root: Path) -> None:
+    """Reject a used or closed report slot before invoking a Writer."""
+
+    try:
+        controller = SessionController.load(
+            session_root,
+            registry=CapabilityRegistry(),
+        )
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        raise ResearchReportSessionError(
+            f"Could not load research session {session_root}: {exc}"
+        ) from exc
+
+    existing = {attempt.attempt_id for attempt in controller.list_attempts()}
+    conflicts = tuple(
+        attempt_id
+        for attempt_id in ("report-001", "report-audit-001")
+        if attempt_id in existing
+    )
+    if conflicts:
+        raise ResearchReportSessionError(
+            "Research report continuation already exists: "
+            + ", ".join(conflicts)
+            + ". Use a new session for another report variant."
+        )
+    if controller.manifest.status in {"completed", "blocked"}:
+        raise ResearchReportSessionError(
+            f"Research session {session_root} is already {controller.manifest.status}; "
+            "the report continuation is closed."
+        )
 
 
 def build_research_session_report_inputs(
@@ -211,6 +244,11 @@ def run_research_session_report_agent(
     client; report writing, review, assembly, and audit remain shared code.
     """
 
+    if not session.report_ready:
+        raise ResearchReportSessionError(
+            "Research session is not ready for formal report generation: "
+            f"status={session.status!r}; execution and analysis must pass first."
+        )
     context, memory = build_research_session_report_inputs(session)
     return run_research_report_agent_session(
         session_root=session.session_root,
@@ -262,6 +300,7 @@ def run_research_report_agent_session(
         )
     if client is None:
         raise ResearchReportSessionError("An LLM client is required for agent report generation.")
+    _ensure_report_continuation_available(root)
     report_context = (
         context
         if isinstance(context, ReportContext)
@@ -277,6 +316,14 @@ def run_research_report_agent_session(
         if isinstance(config, ReportRuntimeConfig)
         else ReportRuntimeConfig.model_validate(config)
     )
+    if not report_memory.section_plan:
+        template_memory = initialize_report_memory(
+            context=report_context,
+            template=template,
+        )
+        report_memory = report_memory.model_copy(
+            update={"section_plan": template_memory.section_plan}
+        )
     agent_result = run_report_agent(
         client=client,
         context=report_context,
@@ -474,6 +521,7 @@ def run_research_report_session(
 ) -> ResearchReportSessionResult:
     """Append report assembly and audit attempts to an existing session."""
 
+    _ensure_report_continuation_available(Path(request.session_root))
     registry = CapabilityRegistry()
     register_research_capabilities(
         registry,
@@ -494,18 +542,28 @@ def run_research_report_session(
         template_name=request.template_name,
     )
     try:
-        controller.execute(
+        report_result, _ = controller.execute(
             "report",
             attempt_id="report-001",
             inputs=request.source_refs,
             next_capability="report_audit",
             request=report_request,
         )
-        report_ref = controller.attempt_output_ref(
-            "report-001",
-            kind="report",
-            schema="report.v1",
-        )
+        try:
+            report_ref = controller.attempt_output_ref(
+                "report-001",
+                kind="report",
+                schema="report.v1",
+            )
+        except (KeyError, OSError, ValueError) as exc:
+            details = "; ".join(
+                item for item in report_result.diagnostics if item.strip()
+            )
+            raise ResearchReportSessionError(
+                "report capability did not provide its typed output: "
+                f"{exc}"
+                + (f" Diagnostics: {details}" if details else "")
+            ) from exc
         report_context = (
             request.context
             if isinstance(request.context, ReportContext)
@@ -526,12 +584,22 @@ def run_research_report_session(
                 memory=report_memory,
             ),
         )
-        audit_ref = controller.attempt_output_ref(
-            "report-audit-001",
-            kind="report_audit",
-            schema="report_audit.v1",
-        )
-        audit_payload = controller.store.read_json(audit_ref)
+        try:
+            audit_ref = controller.attempt_output_ref(
+                "report-audit-001",
+                kind="report_audit",
+                schema="report_audit.v1",
+            )
+            audit_payload = controller.store.read_json(audit_ref)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            details = "; ".join(
+                item for item in audit_result.diagnostics if item.strip()
+            )
+            raise ResearchReportSessionError(
+                "report_audit capability did not provide its typed output: "
+                f"{exc}"
+                + (f" Diagnostics: {details}" if details else "")
+            ) from exc
         if not isinstance(audit_payload, Mapping):
             raise ResearchReportSessionError(
                 f"Report audit output is not a JSON object; inspect {request.session_root}."

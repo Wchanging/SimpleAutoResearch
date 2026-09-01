@@ -35,7 +35,7 @@ from simple_ar.research.analysis import (
     analyze_experiment_capability,
     compare_experiment_results,
 )
-from simple_ar.research.contracts import ResearchExperimentContract
+from simple_ar.research.contracts import ResearchExperimentContract, rank_idea_candidates
 from simple_ar.research.design import (
     ResearchDesignRequest,
     ResearchDesignResult,
@@ -213,6 +213,7 @@ class _CandidateCapabilityRequest:
     synthesis: SynthesisResult
     candidate_id: str
     idea_id: str
+    open_report: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,19 +276,37 @@ def run_research_code_task_session(
         schema="research_code_task_input.v1",
         producer="research.code_task.session",
     )
-    result_schema = _result_schema(request.spec)
-    controller.execute(
+    result_schema = request.spec.result_schema()
+    design_result, _ = controller.execute(
         "research_design",
         attempt_id="design-001",
         inputs=(source_ref,),
         next_capability="experiment",
-        request=ResearchDesignRequest(synthesis=synthesis, idea_id=request.idea_id),
+        request=ResearchDesignRequest(
+            synthesis=synthesis,
+            topic=request.topic,
+            idea_id=request.idea_id,
+            execution_schema=result_schema,
+        ),
     )
-    design_ref = controller.attempt_output_ref(
-        "design-001",
-        kind="research_design",
-        schema="research_design.v1",
-    )
+    if design_result.status in {"failed", "blocked"}:
+        details = "; ".join(item for item in design_result.diagnostics if item.strip())
+        raise ResearchCodeTaskSessionError(
+            "research_design capability returned "
+            f"{design_result.status!r}"
+            + (f": {details}" if details else ".")
+        )
+    try:
+        design_ref = controller.attempt_output_ref(
+            "design-001",
+            kind="research_design",
+            schema="research_design.v1",
+        )
+    except (KeyError, OSError, ValueError) as exc:
+        raise ResearchCodeTaskSessionError(
+            "research_design capability did not provide its typed output: "
+            f"{exc}"
+        ) from exc
     design_payload = controller.store.read_json(design_ref)
     if not isinstance(design_payload, Mapping):
         raise ResearchCodeTaskSessionError(
@@ -300,7 +319,7 @@ def run_research_code_task_session(
             + "; ".join(design.diagnostics or ("no diagnostic was recorded",))
         )
     try:
-        controller.execute(
+        experiment_result, _ = controller.execute(
             "experiment",
             attempt_id="experiment-001",
             inputs=(source_ref, design_ref),
@@ -314,12 +333,22 @@ def run_research_code_task_session(
                 baseline_metrics_file=request.baseline_metrics_file,
             ),
         )
-        execution_ref = controller.attempt_output_ref(
-            "experiment-001",
-            kind="experiment_result",
-            schema="canonical_results.2.5",
-        )
-        execution_payload = controller.store.read_json(execution_ref)
+        try:
+            execution_ref = controller.attempt_output_ref(
+                "experiment-001",
+                kind="experiment_result",
+                schema="canonical_results.2.5",
+            )
+            execution_payload = controller.store.read_json(execution_ref)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            details = "; ".join(
+                item for item in experiment_result.diagnostics if item.strip()
+            )
+            raise ResearchCodeTaskSessionError(
+                "experiment capability did not provide its typed output: "
+                f"{exc}"
+                + (f" Diagnostics: {details}" if details else "")
+            ) from exc
         if not isinstance(execution_payload, Mapping):
             raise ResearchCodeTaskSessionError(
                 f"Code-task output is not a JSON object; inspect {request.session_root}."
@@ -331,7 +360,7 @@ def run_research_code_task_session(
             result_schema=result_schema,
             contract=design.contract,
         )
-        controller.execute(
+        analysis_result, _ = controller.execute(
             "analysis",
             attempt_id="analysis-001",
             inputs=(execution_ref,),
@@ -339,12 +368,22 @@ def run_research_code_task_session(
             analysis_context=analysis_context,
             next_capability=next_capability,
         )
-        analysis_ref = controller.attempt_output_ref(
-            "analysis-001",
-            kind="analysis_result",
-            schema="analysis_handoff.v1",
-        )
-        analysis_payload = controller.store.read_json(analysis_ref)
+        try:
+            analysis_ref = controller.attempt_output_ref(
+                "analysis-001",
+                kind="analysis_result",
+                schema="analysis_handoff.v1",
+            )
+            analysis_payload = controller.store.read_json(analysis_ref)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            details = "; ".join(
+                item for item in analysis_result.diagnostics if item.strip()
+            )
+            raise ResearchCodeTaskSessionError(
+                "analysis capability did not provide its typed output: "
+                f"{exc}"
+                + (f" Diagnostics: {details}" if details else "")
+            ) from exc
         if not isinstance(analysis_payload, Mapping):
             raise ResearchCodeTaskSessionError(
                 f"Analysis output is not a JSON object; inspect {request.session_root}."
@@ -460,6 +499,7 @@ def run_research_code_task_candidates(
     request: ResearchCodeTaskSessionRequest,
     *,
     max_candidates: int = 3,
+    open_report: bool = False,
 ) -> ResearchCodeTaskCandidatesResult:
     """Try grounded ideas in separate Code-Task sessions until one improves.
 
@@ -512,6 +552,14 @@ def run_research_code_task_candidates(
 
     outcomes: list[ResearchCodeTaskCandidateResult] = []
     selected_candidate_id: str | None = None
+    summary_path = _write_candidate_summary(
+        controller,
+        request=request,
+        max_candidates=max_candidates,
+        outcomes=outcomes,
+        selected_candidate_id=selected_candidate_id,
+        open_report=open_report,
+    )
     for candidate_id, idea_id, title, selected_synthesis in candidates:
         try:
             controller.execute(
@@ -524,6 +572,7 @@ def run_research_code_task_candidates(
                     synthesis=selected_synthesis,
                     candidate_id=candidate_id,
                     idea_id=idea_id,
+                    open_report=open_report,
                 ),
                 expected_delta=(
                     "Accept only a passed candidate with an improved primary metric; "
@@ -543,6 +592,14 @@ def run_research_code_task_candidates(
                     accepted=False,
                     error=str(exc),
                 )
+            )
+            summary_path = _write_candidate_summary(
+                controller,
+                request=request,
+                max_candidates=max_candidates,
+                outcomes=outcomes,
+                selected_candidate_id=selected_candidate_id,
+                open_report=open_report,
             )
             break
 
@@ -566,6 +623,14 @@ def run_research_code_task_candidates(
                 error="" if session is not None else "Candidate session failed.",
             )
         )
+        summary_path = _write_candidate_summary(
+            controller,
+            request=request,
+            max_candidates=max_candidates,
+            outcomes=outcomes,
+            selected_candidate_id=selected_candidate_id,
+            open_report=open_report,
+        )
         if accepted or controller.manifest.status == "blocked":
             break
 
@@ -576,11 +641,44 @@ def run_research_code_task_candidates(
         if controller.manifest.status == "blocked"
         else "partial"
     )
+    summary_path = _write_candidate_summary(
+        controller,
+        request=request,
+        max_candidates=max_candidates,
+        outcomes=outcomes,
+        selected_candidate_id=selected_candidate_id,
+        open_report=open_report,
+        status=summary_status,
+    )
+    return ResearchCodeTaskCandidatesResult(
+        session_root=request.session_root,
+        synthesis=synthesis,
+        candidates=tuple(outcomes),
+        selected_candidate_id=selected_candidate_id,
+        attempts=controller.list_attempts(),
+        decisions=tuple(controller.manifest.decisions),
+        summary_path=summary_path,
+    )
+
+
+def _write_candidate_summary(
+    controller: SessionController,
+    *,
+    request: ResearchCodeTaskSessionRequest,
+    max_candidates: int,
+    outcomes: list[ResearchCodeTaskCandidateResult],
+    selected_candidate_id: str | None,
+    open_report: bool,
+    status: str = "partial",
+) -> Path:
+    """Persist the bounded candidate checkpoint without copying child outputs."""
+
     summary = {
         "schema_version": "research_code_task_candidates.v1",
-        "status": summary_status,
+        "status": status,
         "topic": request.topic,
         "max_candidates": max_candidates,
+        "report_continuation_open": open_report,
         "selected_candidate_id": selected_candidate_id,
         "candidates": [
             item.to_summary_dict(root=request.session_root) for item in outcomes
@@ -595,16 +693,7 @@ def run_research_code_task_candidates(
         schema="research_code_task_candidates.v1",
         producer="research.code_task.candidates",
     )
-    summary_path = controller.store.resolve(summary_ref)
-    return ResearchCodeTaskCandidatesResult(
-        session_root=request.session_root,
-        synthesis=synthesis,
-        candidates=tuple(outcomes),
-        selected_candidate_id=selected_candidate_id,
-        attempts=controller.list_attempts(),
-        decisions=tuple(controller.manifest.decisions),
-        summary_path=summary_path,
-    )
+    return controller.store.resolve(summary_ref)
 
 
 def _run_candidate_capability(
@@ -639,7 +728,10 @@ def _run_candidate_capability(
             label=f"{request.base_request.label}-{request.candidate_id}",
             idea_id=request.idea_id,
         )
-        result = run_research_code_task_session(inner_request)
+        result = run_research_code_task_session(
+            inner_request,
+            next_capability="report" if request.open_report else None,
+        )
         captured[request.candidate_id] = result
         comparison = _candidate_comparison(result)
         accepted = _candidate_is_accepted(result, comparison)
@@ -754,7 +846,7 @@ def _candidate_ideas(
     synthesis: SynthesisResult,
     limit: int,
 ) -> tuple[tuple[str, str, str, SynthesisResult], ...]:
-    """Return stable candidate ids and contracts without ranking by score."""
+    """Return stable candidates in shared readiness order, not model-score order."""
 
     if not synthesis.ideas:
         return (
@@ -772,7 +864,7 @@ def _candidate_ideas(
             idea.title or idea.idea_id,
             synthesis.for_idea(idea.idea_id),
         )
-        for index, idea in enumerate(synthesis.ideas[:limit], start=1)
+        for index, idea in enumerate(rank_idea_candidates(synthesis.ideas)[:limit], start=1)
     )
 
 
@@ -821,8 +913,13 @@ def _run_code_task_capability(
     *,
     context: CapabilityContext,
     request: _CodeTaskCapabilityRequest,
+    backend: Any | None = None,
 ) -> CapabilityResult:
     """Run the existing bridge and retain a canonical result on every path."""
+
+    # Registry handlers share the experiment adapter's optional backend slot;
+    # Code-Task owns its backend selection in ``spec``.
+    del backend
 
     if len(context.inputs) not in {1, 2}:
         raise ValueError(
@@ -951,6 +1048,10 @@ def _materialize_task(
 ) -> ArtifactRef:
     if source_task_file is not None:
         task_text = source_task_file.read_text(encoding="utf-8")
+        if synthesis.experiment_contract is not None:
+            task_text = task_text.rstrip() + "\n\n" + _research_handoff_text(
+                synthesis.experiment_contract
+            )
     else:
         if synthesis.experiment_contract is None:
             raise ValueError("Synthesis handoff has no experiment contract.")
@@ -996,6 +1097,34 @@ def _generated_task_text(synthesis: SynthesisResult) -> str:
     return "\n".join(lines)
 
 
+def _research_handoff_text(contract: ResearchExperimentContract) -> str:
+    """Append the selected research direction without replacing the task."""
+
+    lines = [
+        "## Research handoff",
+        "",
+        "The following context comes from the evidence-to-design handoff. The",
+        "original task, configured benchmark, and project interfaces remain the",
+        "acceptance authority.",
+        "",
+        "### Hypothesis",
+        contract.hypothesis,
+        "",
+        "### Proposed change",
+        contract.proposed_change or "Use the smallest evidence-supported change.",
+        "",
+        "### Experimental context",
+        f"- Baseline: {contract.baseline}",
+        f"- Dataset: {contract.dataset}",
+        f"- Metrics: {', '.join(contract.metrics) or 'use configured metrics'}",
+        "",
+        "### Validation guidance",
+        *[f"- {item}" for item in contract.validation_hints],
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _canonical_code_task_result(
     result: CodeTaskExperimentResult,
     *,
@@ -1012,7 +1141,7 @@ def _canonical_code_task_result(
     comparison = _read_json(comparison_path)
     patched_run = _run_result_from_report(root, patched_report, patched_report_path)
     baseline_run = _run_result_from_report(root, baseline_report, baseline_report_path)
-    result_schema = _result_schema(spec)
+    result_schema = spec.result_schema()
     artifacts = _code_task_artifact_paths(store, result, baseline_report_path, patched_report_path, comparison_path)
     canonical = build_canonical_results(
         patched_run,
@@ -1054,7 +1183,7 @@ def _failed_canonical_result(
     )
     canonical = build_canonical_results(
         run,
-        result_schema=_result_schema(spec),
+        result_schema=spec.result_schema(),
         experiment_contract=(
             synthesis.experiment_contract.to_row()
             if synthesis.experiment_contract is not None
@@ -1130,22 +1259,6 @@ def _analysis_context(
         task_contract={"experiment_contract": experiment_contract.to_row()},
         metadata={"synthesis_file": str(request.synthesis_file), "backend": "code_task"},
     )
-
-
-def _result_schema(spec: CodeTaskExperimentSpec) -> dict[str, Any]:
-    primary = str(spec.primary_metric or "").strip()
-    directions = {
-        str(name): str(direction)
-        for name, direction in spec.metric_directions.items()
-        if str(name).strip()
-    }
-    required = list(dict.fromkeys(([primary] if primary else []) + list(directions)))
-    schema: dict[str, Any] = {"required_metrics": required}
-    if primary:
-        schema["primary_metric"] = primary
-    if directions:
-        schema["metric_directions"] = directions
-    return schema
 
 
 def _code_task_artifact_paths(

@@ -41,6 +41,23 @@ class CodeTaskExperimentSpec:
     allow_large_edits: bool = False
     approval_note: str = "Auto-approved inside isolated 8-stage code-task workspace."
 
+    def result_schema(self) -> dict[str, object]:
+        """Return the metric contract enforced by the Code-Task configuration."""
+
+        primary = str(self.primary_metric or "").strip()
+        directions = {
+            str(name): str(direction)
+            for name, direction in self.metric_directions.items()
+            if str(name).strip()
+        }
+        required = list(dict.fromkeys(([primary] if primary else []) + list(directions)))
+        schema: dict[str, object] = {"required_metrics": required}
+        if primary:
+            schema["primary_metric"] = primary
+        if directions:
+            schema["metric_directions"] = directions
+        return schema
+
 
 @dataclass(frozen=True)
 class CodeTaskExperimentResult:

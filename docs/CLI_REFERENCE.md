@@ -17,6 +17,8 @@ on command syntax, options, outputs, and short operational notes.
 | `simple-ar research-brief` | Build an evidence-backed brief from a topic or local documents. |
 | `simple-ar research-experiment` | Execute and analyze a declared experiment from a research handoff. |
 | `simple-ar research-session` | Run the bounded literature-to-experiment composition in one session. |
+| `simple-ar research-session-continue` | Append one explicit recovery experiment to a failed research session. |
+| `simple-ar research-report` | Generate and audit a report from a completed research session. |
 | `simple-ar research-code-task` | Pass a research handoff through the existing project-style Code-Task backend. |
 | `simple-ar resume` | Continue an existing research pipeline run. |
 | `simple-ar status` | Print status for a research run or code-task run. |
@@ -111,7 +113,9 @@ uv run simple-ar research-brief \
 The command creates a timestamped session with separate plan, search, document
 ingest, and brief attempts. It does not silently retry or overwrite an attempt;
 `--query`, `--provider`, `--max-results`, `--max-chunks`, and `--idea-limit` are
-the deliberately small controls for this path.
+the deliberately small controls for this path. Pass the same optional
+`--cache-dir` to later sessions to reuse downloaded full-text files; when it is
+omitted, the cache stays inside the current session.
 
 The capability is deterministic when `--model` is omitted. To use the shared
 LLM transport for question/query planning and evidence synthesis, opt in
@@ -170,8 +174,10 @@ the application does not retry or repair it implicitly.
 
 **Purpose**: run the small end-to-end composition
 `plan -> search -> document_ingest -> research_brief -> research_design -> experiment -> analysis`
-in one `full_research` session. The experiment command is supplied explicitly;
-code generation and autonomous iteration are outside this entry point.
+in one `full_research` session. By default the experiment command is supplied
+explicitly. With `--code-task-config`, the experiment attempt instead delegates
+implementation to the existing project-style Code-Task backend; this is still
+one bounded experiment, not autonomous iteration.
 
 **Usage** (the command must be the final option):
 
@@ -185,14 +191,40 @@ uv run simple-ar research-session \
   --command python -c "print('accuracy: 0.75')"
 ```
 
+To use the existing Code-Task implementation backend in the same session,
+omit `--command` and provide a Code-Task TOML plus a model:
+
+```bash
+uv run simple-ar research-session \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
+  --model gpt-5.4 \
+  --output-root runs/research-session
+```
+
+The TOML remains the source of Code-Task project, benchmark, workspace,
+baseline, and execution settings. The generated code-task artifacts are kept
+under the session's `experiment-001` attempt and are normalized into the same
+canonical result consumed by Analysis; no second code generator is introduced.
+
+The optional `--cache-dir` is forwarded to document ingest. Valid cached
+full-text files are reused on later sessions; the default remains session-local
+for backward compatibility.
+
 It preserves the same attempt-local artifacts as the individual entries and
 adds no implicit retry or repair policy. Use `research-brief` when execution
 is not yet ready, or `research-experiment` when a persisted direction should
 be executed in a separate session.
 When the experiment and analysis prefix completes, its result status is
 `ready_for_report` because the session remains open for an explicit report
-continuation. The report assembler is currently exposed as a Python application
-adapter (`run_research_report_session`) rather than another flag-heavy CLI.
+continuation. Use the narrow `simple-ar research-report` command for that
+handoff; it delegates to the existing Python report adapter rather than adding
+another report engine or scheduler.
+For a single explicit invocation, add `--model NAME --with-report` before the
+final `--command`; this runs the same report continuation after the prefix
+passes. `--report-reviewer` and `--max-review-iterations` control only that
+report continuation.
 For an agent-generated continuation, the same application module exposes
 `run_research_report_agent_session()`. It reuses the existing Writer/Reviewer
 implementation, persists its compact trace as an input to the report attempt,
@@ -204,10 +236,75 @@ they derive report inputs from the session's persisted synthesis, paper
 metadata, execution, and analysis evidence, while leaving template, budget,
 and client selection explicit.
 
-Omitting `--model` keeps planning, synthesis, and analysis deterministic. When
-`--model NAME` is supplied, the same shared client is used for planning,
-synthesis, and result analysis; provider failures remain visible and are not
-silently converted into offline output.
+Omitting `--model` keeps planning, synthesis, design selection, and analysis
+deterministic. When `--model NAME` is supplied, the same shared client is used
+for planning, synthesis, selection among grounded research ideas, and result
+analysis; provider failures remain visible and are not silently converted into
+offline output.
+
+To inspect a persisted capability session without rerunning it, use the existing
+status command:
+
+```bash
+uv run simple-ar status runs/research-session/<session>
+```
+
+When the directory contains `session_manifest.json`, status prints the session
+state, current attempt, bounded budget, attempt counts, and last decision. It
+does not read or rewrite capability outputs. Existing pipeline and Code-Task
+directories with `manifest.json` keep their original status behavior.
+
+When an open session has no active attempt, status may also print
+`Handoff: ready_for_report` or `Continuation: explicit ...`. These are persisted
+next-step hints only; they do not mean a background process is running, and the
+caller must invoke the next operation explicitly.
+
+### `simple-ar research-session-continue`
+
+**Purpose**: run one caller-supplied recovery experiment in an existing session
+whose latest analysis points back to the experiment boundary. Literature,
+research design, and the failed parent attempt are reused; no search or
+automatic repair policy is added.
+
+**Usage** (the command must be the final option):
+
+```bash
+uv run simple-ar research-session-continue \
+  --session-root runs/research-session/<session> \
+  --cwd examples/research_brief/fixtures \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --command python -c "print('accuracy: 0.90')"
+```
+
+The command appends `experiment-002` and `analysis-002` with
+`experiment-001` as parent and refuses a second recovery branch in the same
+session. It reuses the parent's result schema unless metric options override
+it. A successful result is ready for `research-report`; a failed result is
+persisted and causes a non-zero exit so the caller cannot mistake it for a
+successful continuation. The original attempt and all literature artifacts
+remain unchanged.
+
+### `simple-ar research-report`
+
+**Purpose**: continue an existing `research-session` whose analysis handoff
+is ready for reporting. The command uses the existing report Writer/Reviewer,
+assembler, and audit implementations; it does not rerun search or the
+experiment.
+
+**Usage**:
+
+```bash
+uv run simple-ar research-report \
+  --session-root runs/research-session/<session> \
+  --model gpt-5.4
+```
+
+The report and audit are appended as new attempts under the same session. A
+second invocation with the same session is rejected when those attempt IDs
+already exist, so it cannot silently replace the previous report. Use
+`--reviewer disabled` only when an explicit writer-only comparison is wanted;
+the final audit still runs.
 
 ### `simple-ar research-code-task`
 
@@ -232,6 +329,12 @@ runs one direction by default. `--max-candidates N` explicitly enables at most
 N isolated child sessions; a candidate is accepted only when its execution and
 primary-metric comparison both support improvement. Failed candidates remain
 as evidence and are followed by a bounded stop, not an implicit infinite loop.
+Pass `--with-report` to continue a passed Code-Task session through the existing
+Writer/Reviewer, report assembly, and audit path. With the default single
+candidate it continues that session; with `--max-candidates N` it opens the
+continuation only for the selected candidate. This is an explicit continuation,
+not a second report engine; failed, partial, and unselected candidates are not
+presented as formal reports.
 
 | Option | Meaning |
 | --- | --- |
@@ -244,11 +347,13 @@ as evidence and are followed by a bounded stop, not an implicit infinite loop.
 | `--baseline-policy POLICY` | Optional override: `auto`, `run`, `skip`, `provided`, or `none`. |
 | `--baseline-metrics-file PATH` | Baseline metrics file for the `provided` policy. |
 | `--max-candidates N` | Explicit bounded idea count; default is one. |
+| `--with-report` | Append the standard report and audit to the passed session; in multi-candidate mode, use the selected candidate only. |
 
 This entry currently covers existing project-style Code-Task only. It does not
 create a managed environment, allocate GPU resources, or claim arbitrary
-greenfield generation. Report continuation remains an explicit application
-adapter because section drafts and writer policy are not inferred here.
+greenfield generation. `--with-report` requires `--model` and uses the standard
+experiment template. Multi-candidate selection remains bounded and sequential;
+only its selected passed session can continue to the report.
 
 ### `simple-ar resume`
 

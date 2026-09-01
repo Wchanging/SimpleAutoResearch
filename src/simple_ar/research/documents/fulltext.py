@@ -251,6 +251,18 @@ def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int) -
     cache_dir.mkdir(parents=True, exist_ok=True)
     suffix = _cache_suffix(hint)
     cache_path = cache_dir / f"{_safe_name(hint.document_id)}-{_safe_name(hint.source)}{suffix}"
+    if _usable_cache_file(cache_path, kind=hint.kind):
+        return FulltextHint(
+            document_id=hint.document_id,
+            kind=hint.kind,
+            source=hint.source,
+            url=hint.url,
+            local_path=str(cache_path),
+            access=hint.access,
+            status="cached",
+            reason="cache_hit",
+            size_bytes=cache_path.stat().st_size,
+        )
     request = urllib.request.Request(
         str(hint.url),
         headers={"User-Agent": "SimpleAutoResearch/0.1"},
@@ -303,6 +315,20 @@ def _fetch_remote_hint(hint: FulltextHint, *, cache_dir: Path, max_bytes: int) -
         reason="remote_fulltext_cached",
         size_bytes=bytes_written,
     )
+
+
+def _usable_cache_file(path: Path, *, kind: str) -> bool:
+    """Accept a prior cache entry without adding a content-hash requirement."""
+
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+        if kind == "pdf":
+            with path.open("rb") as handle:
+                return _bytes_look_like_pdf(handle.read(1024))
+        return True
+    except OSError:
+        return False
 
 
 def _content_type_may_be_pdf(content_type: str) -> bool:

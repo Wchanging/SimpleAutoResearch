@@ -5,7 +5,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from simple_ar.core.artifacts import read_json, read_text
 from simple_ar.cli.code_task_view import (
@@ -99,6 +99,14 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "research-session":
         _print_research_session(args)
+        return
+
+    if args.command == "research-session-continue":
+        _print_research_session_continue(args)
+        return
+
+    if args.command == "research-report":
+        _print_research_report(args)
         return
 
     if args.command == "research-code-task":
@@ -244,6 +252,7 @@ def _print_research_brief(args: argparse.Namespace) -> None:
         max_results=args.max_results,
         max_chunks=args.max_chunks,
         idea_limit=args.idea_limit,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         use_llm=llm_client is not None,
         llm_client=llm_client,
     )
@@ -304,6 +313,11 @@ def _print_research_experiment(args: argparse.Namespace) -> None:
     print_line(f"Mode: {'llm' if llm_client is not None else 'deterministic'}")
     print_line(f"Execution: {result.execution_path}")
     print_line(f"Analysis: {result.analysis_path}")
+    _ensure_research_cli_success(
+        result.status,
+        operation="Research experiment",
+        root=result.session_root,
+    )
 
 
 def _experiment_result_schema(args: argparse.Namespace) -> dict[str, object]:
@@ -340,17 +354,58 @@ def _print_research_session(args: argparse.Namespace) -> None:
     )
     from simple_ar.app.session_roots import new_research_session_root
 
-    if (
-        args.max_results < 1
-        or args.max_chunks < 1
-        or args.idea_limit < 1
-        or args.timeout_sec < 1
-    ):
+    if args.max_results < 1 or args.max_chunks < 1 or args.idea_limit < 1:
         raise SystemExit(
-            "--max-results, --max-chunks, --idea-limit, and --timeout-sec "
-            "must be positive."
+            "--max-results, --max-chunks, and --idea-limit must be positive."
         )
+    if args.timeout_sec is not None and args.timeout_sec < 1:
+        raise SystemExit("--timeout-sec must be positive when provided.")
+    if args.max_review_iterations < 0:
+        raise SystemExit("--max-review-iterations cannot be negative.")
+    command = tuple(args.command_argv or ())
+    code_task_spec = None
+    code_task_baseline_policy = "auto"
+    code_task_baseline_file = None
+    code_task_config = getattr(args, "code_task_config", None)
+    if code_task_config:
+        if command:
+            raise SystemExit(
+                "Use either --command or --code-task-config for research-session, not both."
+            )
+        if not args.model:
+            raise SystemExit("--code-task-config requires --model for Code-Task generation.")
+        try:
+            code_task_spec, execute_options = _load_code_task_spec_for_cli(
+                _resolve_cli_path(code_task_config)
+            )
+        except (CodeTaskConfigError, RuntimeError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Invalid research Code-Task configuration: {exc}") from exc
+        if not code_task_spec.code_root.exists():
+            raise SystemExit(f"Code-Task project root not found: {code_task_spec.code_root}")
+        if execute_options.use_llm is not True:
+            raise SystemExit(
+                "--code-task-config requires [execute].use_llm = true because "
+                "the existing Code-Task backend generates the implementation."
+            )
+        code_task_baseline_policy = execute_options.baseline_policy
+        baseline_file = execute_options.baseline_metrics_file
+        code_task_baseline_file = (
+            _resolve_cli_path(baseline_file) if baseline_file else None
+        )
+        timeout_sec = (
+            args.timeout_sec
+            if args.timeout_sec is not None
+            else execute_options.timeout_sec
+        )
+    else:
+        if not command:
+            raise SystemExit(
+                "research-session requires --command or --code-task-config."
+            )
+        timeout_sec = args.timeout_sec if args.timeout_sec is not None else 300
     llm_client = _optional_research_llm_client(args.model, "research session")
+    if args.with_report and llm_client is None:
+        raise SystemExit("--with-report requires --model for report generation.")
     session_root = new_research_session_root(args.output_root, args.topic)
     brief_request = ResearchBriefSessionRequest(
         topic=args.topic,
@@ -361,6 +416,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         max_results=args.max_results,
         max_chunks=args.max_chunks,
         idea_limit=args.idea_limit,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         use_llm=llm_client is not None,
         llm_client=llm_client,
     )
@@ -368,11 +424,15 @@ def _print_research_session(args: argparse.Namespace) -> None:
         result = run_research_session(
             ResearchSessionRequest(
                 brief=brief_request,
-                command=tuple(args.command_argv),
+                command=command,
                 cwd=Path(args.cwd),
-                timeout_sec=args.timeout_sec,
+                timeout_sec=timeout_sec,
                 result_schema=_experiment_result_schema(args),
                 label=args.label,
+                code_task_spec=code_task_spec,
+                code_task_model=args.model,
+                baseline_policy=code_task_baseline_policy,
+                baseline_metrics_file=code_task_baseline_file,
             )
         )
     except (ResearchSessionError, ResearchBriefSessionError) as exc:
@@ -384,8 +444,130 @@ def _print_research_session(args: argparse.Namespace) -> None:
     print_line(f"Synthesis: {result.brief.generation_mode}")
     print_line(f"Papers: {len(result.search.papers)}")
     print_line(f"Documents: {len(result.documents.records)}")
+    print_line(
+        "Implementation: "
+        + ("existing Code-Task backend" if code_task_spec is not None else "explicit command")
+    )
     print_line(f"Execution: {result.session_root / result.execution_ref.path}")
     print_line(f"Analysis: {result.session_root / result.analysis_ref.path}")
+    recommendation = getattr(result, "recommended_transition", None)
+    if recommendation is not None:
+        print_line(
+            "Recommendation: "
+            f"{recommendation.action}"
+            + (f" -> {recommendation.target}" if recommendation.target else " -> stop")
+        )
+    _ensure_research_cli_success(
+        result.status,
+        operation="Research session",
+        root=result.session_root,
+        accepted={"ready_for_report"},
+    )
+    if not args.with_report:
+        return
+
+    from simple_ar.app.research_report import (
+        ResearchReportSessionError,
+        run_research_session_report_agent,
+    )
+    from simple_ar.report.schema import ReportRuntimeConfig
+    from simple_ar.report.templates import (
+        ReportTemplateError,
+        load_report_template_bundle,
+    )
+
+    config = ReportRuntimeConfig(
+        mode="experiment",
+        template=args.report_template,
+        reviewer=args.report_reviewer,
+        max_review_iterations=args.max_review_iterations,
+    )
+    try:
+        template = load_report_template_bundle(
+            report_mode="experiment",
+            config=config,
+        )
+        report = run_research_session_report_agent(
+            result,
+            template=template,
+            config=config,
+            client=llm_client,
+        )
+    except (
+        ResearchReportSessionError,
+        ReportTemplateError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise SystemExit(str(exc)) from exc
+    print_line(f"Report: {report.session_root / report.report_ref.path}")
+    print_line(f"Audit: {report.session_root / report.audit_ref.path}")
+    _ensure_research_cli_success(
+        report.status,
+        operation="Research session report",
+        root=report.session_root,
+    )
+
+
+def _print_research_session_continue(args: argparse.Namespace) -> None:
+    """Run one explicit recovery experiment on an existing research session."""
+
+    from simple_ar.app.research_session import (
+        ResearchSessionContinuationRequest,
+        ResearchSessionError,
+        continue_research_session,
+    )
+
+    if args.timeout_sec < 1:
+        raise SystemExit("--timeout-sec must be positive.")
+    command = tuple(args.command_argv or ())
+    if not command:
+        raise SystemExit("research-session-continue requires a non-empty --command.")
+    client = _optional_research_llm_client(args.model, "research session recovery")
+    session_root = Path(args.session_root)
+    try:
+        result = continue_research_session(
+            ResearchSessionContinuationRequest(
+                session_root=session_root,
+                command=command,
+                cwd=Path(args.cwd),
+                timeout_sec=args.timeout_sec,
+                result_schema=_experiment_result_schema(args),
+                label=args.label,
+                parent_attempt_id=args.parent_attempt_id,
+                use_llm=client is not None,
+                llm_client=client,
+            )
+        )
+    except (
+        ResearchSessionError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print_line(f"Research session: {result.session_root}")
+    print_line(f"Status: {result.status}")
+    print_line(f"Mode: {'llm' if client is not None else 'deterministic'}")
+    print_line(f"Recovery parent: {args.parent_attempt_id}")
+    print_line(f"Execution: {result.session_root / result.execution_ref.path}")
+    print_line(f"Analysis: {result.session_root / result.analysis_ref.path}")
+    recommendation = result.recommended_transition
+    print_line(
+        "Recommendation: "
+        f"{recommendation.action}"
+        + (f" -> {recommendation.target}" if recommendation.target else " -> stop")
+    )
+    _ensure_research_cli_success(
+        result.status,
+        operation="Research session recovery",
+        root=result.session_root,
+        accepted={"ready_for_report"},
+    )
 
 
 def _optional_research_llm_client(
@@ -402,6 +584,68 @@ def _optional_research_llm_client(
         raise SystemExit(f"Cannot enable LLM-backed {purpose}: {exc}") from exc
 
 
+def _print_research_report(args: argparse.Namespace) -> None:
+    """Generate a report from an existing research-session handoff."""
+
+    from simple_ar.app.research_report import (
+        ResearchReportSessionError,
+        run_research_session_report_agent,
+    )
+    from simple_ar.app.research_session import (
+        ResearchSessionError,
+        load_research_session_result,
+    )
+    from simple_ar.report.schema import ReportRuntimeConfig
+    from simple_ar.report.templates import (
+        ReportTemplateError,
+        load_report_template_bundle,
+    )
+
+    if args.max_review_iterations < 0:
+        raise SystemExit("--max-review-iterations cannot be negative.")
+    session_root = Path(args.session_root)
+    client = _optional_research_llm_client(args.model, "research report")
+    if client is None:
+        raise SystemExit("--model is required for research-report.")
+    config = ReportRuntimeConfig(
+        mode="experiment",
+        template=args.template,
+        reviewer=args.reviewer,
+        max_review_iterations=args.max_review_iterations,
+    )
+    try:
+        session = load_research_session_result(session_root)
+        template = load_report_template_bundle(
+            report_mode="experiment",
+            config=config,
+        )
+        result = run_research_session_report_agent(
+            session,
+            template=template,
+            config=config,
+            client=client,
+        )
+    except (
+        ResearchSessionError,
+        ResearchReportSessionError,
+        ReportTemplateError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise SystemExit(str(exc)) from exc
+    print_line(f"Research report session: {result.session_root}")
+    print_line(f"Status: {result.status}")
+    print_line(f"Report: {result.session_root / result.report_ref.path}")
+    print_line(f"Audit: {result.session_root / result.audit_ref.path}")
+    _ensure_research_cli_success(
+        result.status,
+        operation="Research report",
+        root=result.session_root,
+    )
+
+
 def _print_research_code_task(args: argparse.Namespace) -> None:
     """Run the bounded synthesis-to-Code-Task application composition."""
 
@@ -411,23 +655,24 @@ def _print_research_code_task(args: argparse.Namespace) -> None:
         run_research_code_task_candidates,
         run_research_code_task_session,
     )
+    from simple_ar.app.research_code_task_report import (
+        run_research_code_task_report_agent,
+    )
     from simple_ar.app.session_roots import new_research_session_root
     from simple_ar.code_task.runtime.config import (
         CodeTaskConfigError,
-        load_code_task_execute_options,
     )
-    from simple_ar.experiment.code_task_bridge.spec import code_task_project_spec
+    from simple_ar.report.schema import ReportRuntimeConfig
+    from simple_ar.report.templates import (
+        ReportTemplateError,
+        load_report_template_bundle,
+    )
 
     if args.max_candidates < 1:
         raise SystemExit("--max-candidates must be positive.")
-    config_path = _resolve_cli_path(args.code_task_config)
     try:
-        execute_options = load_code_task_execute_options(config_path=str(config_path))
-        spec = code_task_project_spec(
-            {
-                "code_task_config": str(config_path),
-                "safety_allow_large_edits": execute_options.allow_large_edits,
-            }
+        spec, execute_options = _load_code_task_spec_for_cli(
+            _resolve_cli_path(args.code_task_config)
         )
     except (CodeTaskConfigError, RuntimeError, TypeError, ValueError) as exc:
         raise SystemExit(f"Invalid research Code-Task configuration: {exc}") from exc
@@ -461,23 +706,85 @@ def _print_research_code_task(args: argparse.Namespace) -> None:
         baseline_metrics_file=baseline_metrics_file,
         label=args.label,
     )
+
+    def append_report(session: Any) -> None:
+        """Continue one passed Code-Task session through the shared report path."""
+
+        client = _optional_research_llm_client(args.model, "research report")
+        if client is None:
+            raise SystemExit(
+                "--with-report requires --model for the report Writer/Reviewer."
+            )
+        report_config = ReportRuntimeConfig(
+            mode="experiment",
+            template="experiment",
+        )
+        template = load_report_template_bundle(
+            report_mode="experiment",
+            config=report_config,
+        )
+        report = run_research_code_task_report_agent(
+            session,
+            title=args.topic,
+            template=template,
+            config=report_config,
+            client=client,
+        )
+        print_line(f"Report: {report.session_root / report.report_ref.path}")
+        print_line(f"Audit: {report.session_root / report.audit_ref.path}")
+        _ensure_research_cli_success(
+            report.status,
+            operation="Research Code-Task report",
+            root=report.session_root,
+        )
+
     try:
         if args.max_candidates == 1:
-            result = run_research_code_task_session(request)
+            result = run_research_code_task_session(
+                request,
+                next_capability="report" if args.with_report else None,
+            )
             print_line(f"Research Code-Task session: {result.session_root}")
             print_line(f"Status: {result.status}")
             print_line(f"Execution: {result.execution_path}")
             print_line(f"Analysis: {result.analysis_path}")
+            _ensure_research_cli_success(
+                result.status,
+                operation="Research Code-Task session",
+                root=result.session_root,
+            )
+            if args.with_report:
+                append_report(result)
         else:
             result = run_research_code_task_candidates(
                 request,
                 max_candidates=args.max_candidates,
+                open_report=args.with_report,
             )
             print_line(f"Research Code-Task candidate session: {result.session_root}")
             print_line(f"Status: {result.status}")
             print_line(f"Selected candidate: {result.selected_candidate_id or 'none'}")
             print_line(f"Summary: {result.summary_path}")
-    except ResearchCodeTaskSessionError as exc:
+            _ensure_research_cli_success(
+                result.status,
+                operation="Research Code-Task candidate session",
+                root=result.session_root,
+            )
+            if args.with_report:
+                selected = result.selected
+                if selected is None or selected.session is None:
+                    raise SystemExit(
+                        "--with-report requires an accepted candidate with a passed session."
+                    )
+                append_report(selected.session)
+    except (
+        ResearchCodeTaskSessionError,
+        ReportTemplateError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise SystemExit(str(exc)) from exc
 
 
@@ -486,6 +793,37 @@ def _resolve_cli_path(value: str | Path) -> Path:
 
     path = Path(value)
     return path if path.is_absolute() else Path.cwd() / path
+
+
+def _ensure_research_cli_success(
+    status: str,
+    *,
+    operation: str,
+    root: Path,
+    accepted: set[str] | None = None,
+) -> None:
+    """Make non-success application results visible to shell callers."""
+
+    allowed = accepted or {"completed"}
+    if status not in allowed:
+        raise SystemExit(
+            f"{operation} ended with status {status!r}; inspect {root}."
+        )
+
+
+def _load_code_task_spec_for_cli(config_path: Path):
+    """Load one Code-Task spec consistently across research CLI consumers."""
+
+    from simple_ar.experiment.code_task_bridge.spec import code_task_project_spec
+
+    execute_options = load_code_task_execute_options(config_path=str(config_path))
+    spec = code_task_project_spec(
+        {
+            "code_task_config": str(config_path),
+            "safety_allow_large_edits": execute_options.allow_large_edits,
+        }
+    )
+    return spec, execute_options
 
 
 def _print_clean(args: argparse.Namespace) -> None:
@@ -804,6 +1142,11 @@ def _next_stage_from_state(run_dir: Path) -> str | None:
 
 
 def _print_status(run_dir: Path) -> None:
+    session_manifest_path = run_dir / "session_manifest.json"
+    if session_manifest_path.exists():
+        _print_research_session_status(run_dir)
+        return
+
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.exists():
         raise SystemExit(f"Missing manifest.json in {run_dir}")
@@ -841,6 +1184,92 @@ def _print_status(run_dir: Path) -> None:
             print_line(f"- report.md: {report_path}")
         if report_manifest_path.exists():
             print_line(f"- manifest.json: {report_manifest_path}")
+
+
+def _print_research_session_status(run_dir: Path) -> None:
+    """Print the persisted checkpoint for a capability-oriented session."""
+
+    from simple_ar.core.capabilities import CapabilityRegistry
+    from simple_ar.core.session import SessionController
+
+    try:
+        controller = SessionController.load(
+            run_dir,
+            registry=CapabilityRegistry(),
+        )
+        snapshot = controller.status_snapshot()
+        attempts = controller.list_attempts()
+    except (FileNotFoundError, KeyError, OSError, TypeError, ValueError) as exc:
+        raise SystemExit(f"Could not read research session {run_dir}: {exc}") from exc
+
+    print_line(f"Session: {run_dir}")
+    print_line(f"Session ID: {snapshot['session_id']}")
+    print_line(f"Topic: {snapshot['topic']}")
+    print_line(f"Profile: {snapshot.get('profile') or 'none'}")
+    print_line(
+        "Status: "
+        f"{snapshot['status']} "
+        f"(current={snapshot.get('current_attempt') or 'none'}, "
+        f"attempts={snapshot['attempt_count']})"
+    )
+
+    # A session intentionally remains open after a successful analysis so a
+    # caller can append the report attempt. Make that handoff visible without
+    # changing the domain-neutral controller status.
+    decision = snapshot.get("last_decision")
+    if (
+        snapshot.get("status") == "running"
+        and snapshot.get("running_attempts") == 0
+        and isinstance(decision, dict)
+        and decision.get("action") == "accept"
+        and decision.get("result_status") == "completed"
+        and decision.get("next_capability") == "report"
+    ):
+        print_line("Handoff: ready_for_report (next=report)")
+    elif (
+        snapshot.get("status") == "running"
+        and snapshot.get("running_attempts") == 0
+        and isinstance(decision, dict)
+        and decision.get("action") in {"repair", "revise"}
+        and decision.get("next_capability")
+    ):
+        print_line(
+            "Continuation: explicit "
+            f"{decision['action']} -> {decision['next_capability']}"
+        )
+
+    budget = snapshot["budget"]
+    print_line(
+        "Budget: "
+        f"{budget['attempts']}/{budget['max_attempts']} attempts, "
+        f"{budget['no_progress']}/{budget['max_no_progress']} no-progress"
+    )
+
+    print_line(
+        "Attempt summary: "
+        f"{snapshot['completed_attempts']} completed, "
+        f"{snapshot['failed_attempts']} failed, "
+        f"{snapshot['blocked_attempts']} blocked, "
+        f"{snapshot['running_attempts']} running"
+    )
+    print_line("Attempts:")
+    if not attempts:
+        print_line("- none")
+    else:
+        for attempt in attempts:
+            capability = attempt.capability or "unknown"
+            parent = f", parent={attempt.parent_attempt}" if attempt.parent_attempt else ""
+            print_line(
+                f"- {attempt.attempt_id}: {capability} {attempt.status}{parent}"
+            )
+
+    if isinstance(decision, dict):
+        target = decision.get("next_capability") or "stop"
+        print_line(
+            "Last decision: "
+            f"{decision.get('action', 'unknown')} -> {target} "
+            f"({decision.get('result_status', 'unknown')})"
+        )
 
 
 def _print_code_task_status(run_dir: Path, manifest: dict[str, object]) -> None:

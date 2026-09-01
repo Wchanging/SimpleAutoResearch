@@ -66,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parent directory for the timestamped brief session.",
     )
     brief_parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Optional shared full-text cache directory; omitted uses the session directory.",
+    )
+    brief_parser.add_argument(
         "--local-document",
         action="append",
         default=[],
@@ -146,6 +151,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Parent directory for the timestamped research session.",
     )
     session_parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Optional shared full-text cache directory; omitted uses the session directory.",
+    )
+    session_parser.add_argument(
         "--local-document",
         action="append",
         default=[],
@@ -169,7 +179,12 @@ def build_parser() -> argparse.ArgumentParser:
     session_parser.add_argument("--max-chunks", type=int, default=300)
     session_parser.add_argument("--idea-limit", type=int, default=3)
     session_parser.add_argument("--cwd", default=".")
-    session_parser.add_argument("--timeout-sec", type=int, default=300)
+    session_parser.add_argument(
+        "--timeout-sec",
+        type=int,
+        default=None,
+        help="Experiment timeout; for --code-task-config, overrides [execute].timeout_sec.",
+    )
     session_parser.add_argument("--label", default="research-session")
     session_parser.add_argument("--primary-metric", default=None)
     session_parser.add_argument(
@@ -186,11 +201,120 @@ def build_parser() -> argparse.ArgumentParser:
         help="Metric direction, such as accuracy=higher; may be repeated.",
     )
     session_parser.add_argument(
+        "--with-report",
+        action="store_true",
+        help="After a passed session, append the existing report and audit attempts.",
+    )
+    session_parser.add_argument(
+        "--report-template",
+        default="experiment",
+        help="Report template used with --with-report; defaults to experiment.",
+    )
+    session_parser.add_argument(
+        "--report-reviewer",
+        choices=("llm", "disabled"),
+        default="llm",
+        help="Report reviewer used with --with-report.",
+    )
+    session_parser.add_argument(
+        "--max-review-iterations",
+        type=int,
+        default=1,
+        help="Maximum report revision cycles per section with --with-report.",
+    )
+    session_parser.add_argument(
+        "--code-task-config",
+        default=None,
+        help=(
+            "Optional Code-Task TOML. When supplied, the existing Code-Task "
+            "backend implements the selected research direction in this session."
+        ),
+    )
+    session_parser.add_argument(
+        "--command",
+        dest="command_argv",
+        nargs=argparse.REMAINDER,
+        required=False,
+        help=(
+            "Command to execute; place this option last. Omit it when using "
+            "--code-task-config."
+        ),
+    )
+
+    continuation_parser = subparsers.add_parser(
+        "research-session-continue",
+        help="Run one bounded recovery experiment in an existing research session.",
+    )
+    continuation_parser.add_argument(
+        "--session-root",
+        required=True,
+        help="Existing research-session directory with a failed experiment handoff.",
+    )
+    continuation_parser.add_argument(
+        "--parent-attempt-id",
+        default="experiment-001",
+        help="Failed experiment attempt to branch from; defaults to experiment-001.",
+    )
+    continuation_parser.add_argument(
+        "--model",
+        default=None,
+        help="Optional model override for the recovery result-analysis step.",
+    )
+    continuation_parser.add_argument("--cwd", default=".")
+    continuation_parser.add_argument("--timeout-sec", type=int, default=300)
+    continuation_parser.add_argument("--label", default="research-session-recovery")
+    continuation_parser.add_argument("--primary-metric", default=None)
+    continuation_parser.add_argument(
+        "--metric",
+        action="append",
+        default=[],
+        help="Required metric name; may be repeated.",
+    )
+    continuation_parser.add_argument(
+        "--metric-direction",
+        action="append",
+        default=[],
+        metavar="NAME=DIRECTION",
+        help="Metric direction, such as accuracy=higher; may be repeated.",
+    )
+    continuation_parser.add_argument(
         "--command",
         dest="command_argv",
         nargs=argparse.REMAINDER,
         required=True,
-        help="Command to execute; place this option last.",
+        help="Revised command to execute; place this option last.",
+    )
+
+    report_parser = subparsers.add_parser(
+        "research-report",
+        help="Generate and audit a report from a completed research session.",
+    )
+    report_parser.add_argument(
+        "--session-root",
+        required=True,
+        help="Existing research-session directory with a ready-for-report handoff.",
+    )
+    report_parser.add_argument(
+        "--model",
+        required=True,
+        help="Model used by the existing report Writer/Reviewer agent.",
+    )
+    report_parser.add_argument(
+        "--template",
+        default="experiment",
+        help="Report template name or Markdown path; defaults to experiment.",
+    )
+    report_parser.add_argument(
+        "--reviewer",
+        choices=("llm", "disabled"),
+        default="llm",
+        help="Keep the existing reviewer loop or disable revision while retaining audit.",
+    )
+    report_parser.add_argument(
+        "--max-review-iterations",
+        type=int,
+        default=1,
+        help="Maximum Writer revision cycles per section.",
     )
 
     code_research_parser = subparsers.add_parser(
@@ -236,6 +360,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Try at most this many grounded ideas in isolated child sessions.",
+    )
+    code_research_parser.add_argument(
+        "--with-report",
+        action="store_true",
+        help="After a passed session, generate and audit its experiment report; multi-candidate mode uses the selected candidate.",
     )
     code_research_parser.add_argument("--label", default="research-code-task")
 

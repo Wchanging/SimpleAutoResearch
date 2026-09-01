@@ -6,18 +6,54 @@ import io
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from simple_ar.app.research_experiment import (
+    ResearchExperimentSessionError,
     ResearchExperimentSessionRequest,
     run_research_experiment_session,
 )
+from simple_ar.core import CapabilityResult
 from simple_ar.cli import main
 from simple_ar.research.contracts import ResearchExperimentContract
 from simple_ar.research.synthesis import SynthesisResult
 
 
 class ResearchExperimentApplicationTests(unittest.TestCase):
+    def test_failed_design_reports_capability_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def register_failed_design(registry: object, *, names: object) -> None:
+                del names
+                registry.register(
+                    "research_design",
+                    lambda **_: CapabilityResult(
+                        status="failed",
+                        diagnostics=("design backend unavailable",),
+                    ),
+                )
+
+            with patch(
+                "simple_ar.app.research_experiment.register_research_capabilities",
+                side_effect=register_failed_design,
+            ):
+                with self.assertRaisesRegex(
+                    ResearchExperimentSessionError,
+                    "design backend unavailable",
+                ):
+                    run_research_experiment_session(
+                        ResearchExperimentSessionRequest(
+                            topic="reliable agents",
+                            session_root=root / "session",
+                            synthesis_file=_write_synthesis(root),
+                            command=(sys.executable, "-c", "print('accuracy: 0.75')"),
+                            cwd=root,
+                            timeout_sec=5,
+                        )
+                    )
+
     def test_synthesis_handoff_runs_and_analyzes_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

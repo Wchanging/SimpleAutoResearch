@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import tempfile
+import time
 from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:
@@ -18,7 +21,40 @@ def read_text(path: Path) -> str:
 
 
 def write_json(path: Path, data: Any) -> None:
-    write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    """Write one JSON artifact without exposing a partially written file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(payload)
+        _replace_file(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _replace_file(source: Path, target: Path) -> None:
+    """Replace a file, tolerating short Windows antivirus/indexer locks."""
+
+    for attempt in range(4):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == 3:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def read_json(path: Path) -> Any:

@@ -7,6 +7,7 @@ from simple_ar.research.contracts import (
     IdeaCandidate,
     NoveltyCheck,
     ResearchExperimentContract,
+    rank_idea_candidates,
 )
 
 
@@ -146,7 +147,7 @@ def build_experiment_contract(
     pack: dict[str, Any],
 ) -> ResearchExperimentContract:
     """Turn the top grounded idea into a cautious experiment contract."""
-    idea = ideas[0] if ideas else None
+    idea = rank_idea_candidates(ideas)[0] if ideas else None
     dataset_cards = _list(pack.get("dataset_cards"))
     method_cards = _list(pack.get("method_cards"))
     if idea is None:
@@ -161,10 +162,15 @@ def build_experiment_contract(
         contract_id="experiment-contract-001",
         hypothesis=idea.hypothesis,
         motivation_refs=idea.motivation_refs,
-        baseline=_first_nonempty(_baseline_hints(method_cards), "existing baseline or user-provided project"),
+        baseline=_join_nonempty(
+            idea.required_baselines,
+            _baseline_hints(method_cards),
+            "existing baseline or user-provided project",
+        ),
         dataset=_first_nonempty(idea.required_datasets, "dataset to be selected by the code task"),
         metrics=metrics,
         proposed_change=idea.proposed_change,
+        expected_outcome=idea.expected_outcome,
         implementation_scope=[
             "Use the Code Workspace Engine or an external coding agent to inspect the target repository.",
             "Keep changes bounded to the files required by the approved task and workspace edit scope.",
@@ -203,6 +209,10 @@ def experiment_contract_markdown(contract: ResearchExperimentContract) -> str:
         "## Proposed Change",
         "",
         contract.proposed_change or "unknown",
+        "",
+        "## Expected Outcome",
+        "",
+        contract.expected_outcome or "unknown",
         "",
         "## Setup",
         "",
@@ -466,6 +476,18 @@ def _first_nonempty(values: list[str], fallback: str) -> str:
         if value.strip():
             return value
     return fallback
+
+
+def _join_nonempty(*values: object) -> str:
+    """Join the first available baseline hints without inventing new ones."""
+
+    items: list[str] = []
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            items.extend(str(item).strip() for item in value if str(item).strip())
+        elif isinstance(value, str) and value.strip():
+            items.append(value.strip())
+    return "; ".join(dict.fromkeys(items))
 
 
 def _sentence(value: object) -> str:

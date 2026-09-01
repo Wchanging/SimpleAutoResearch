@@ -16,6 +16,8 @@
 | `simple-ar research-brief` | 从主题或本地文献构建有证据支持的 research brief。 |
 | `simple-ar research-experiment` | 从 research handoff 执行并分析一个已声明的实验。 |
 | `simple-ar research-session` | 在同一个 session 中运行有界的文献到实验组合流程。 |
+| `simple-ar research-session-continue` | 在失败的 research session 中追加一次显式恢复实验。 |
+| `simple-ar research-report` | 从已完成的 research session 生成并审查报告。 |
 | `simple-ar research-code-task` | 将 research handoff 交给已有的 project-style Code-Task backend。 |
 | `simple-ar resume` | 继续已有 research pipeline run。 |
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
@@ -109,6 +111,7 @@ uv run simple-ar research-brief \
 命令会创建带时间戳的 session，并把 plan、search、document ingest 和 brief 分别记录在
 独立 attempt 中。它不会静默 retry 或覆盖 attempt；`--query`、`--provider`、
 `--max-results`、`--max-chunks` 和 `--idea-limit` 是这条路径保留的少量控制项。
+后续 session 可以传入同一个可选的 `--cache-dir` 来复用已下载的全文；省略时缓存仍保留在当前 session 内。
 
 省略 `--model` 时，这条入口使用可复现的 deterministic planning 和 evidence derivation；
 如果希望真实调用共享 LLM transport 完成研究问题/查询规划和证据综合，可以显式传入模型：
@@ -162,7 +165,9 @@ session 会把输入 handoff、`results.json`、stdout/stderr、guard、diagnosi
 
 **一句话说明**：在同一个 `full_research` session 中运行小型端到端组合：
 `plan -> search -> document_ingest -> research_brief -> research_design -> experiment -> analysis`。
-实验命令仍由调用方明确提供；代码生成和自主迭代不属于这条入口。
+默认由调用方明确提供实验命令。传入 `--code-task-config` 时，experiment attempt
+会改由已有的 project-style Code-Task backend 负责实现；它仍然是一次有界实验，
+不表示开启自主迭代。
 
 **语法用法**（`--command` 必须放在最后）：
 
@@ -176,12 +181,34 @@ uv run simple-ar research-session \
   --command python -c "print('accuracy: 0.75')"
 ```
 
+如果希望在同一个 session 中使用已有的 Code-Task 实现后端，可以省略 `--command`，
+改为提供 Code-Task TOML 和模型：
+
+```bash
+uv run simple-ar research-session \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
+  --model gpt-5.4 \
+  --output-root runs/research-session
+```
+
+TOML 仍然是 Code-Task 项目、benchmark、workspace、baseline 和执行设置的来源。
+生成的 code-task 产物会保留在 session 的 `experiment-001` attempt 下，并规范化为
+同一份 Analysis 消费的 canonical result；不会新增第二套代码生成器。
+
+可选的 `--cache-dir` 会传给 document ingest。后续 session 会复用有效的全文缓存文件；默认值仍是
+session-local，以保持旧命令兼容。
+
 它保留与两个独立入口相同的 attempt-local 产物，并且不隐式 retry 或 repair。
 如果还没有可执行实验，使用 `research-brief`；如果已经有持久化 direction 需要在
 单独 session 中执行，使用 `research-experiment`。
 实验与分析前缀完成后，结果状态为 `ready_for_report`，因为 session 仍会为显式报告 continuation
-保持打开。目前报告装配通过 Python 应用适配器 `run_research_report_session` 提供，而不是继续
-增加一组参数繁多的 CLI 开关。
+保持打开。可以使用窄的 `simple-ar research-report` 命令完成这次交接；它只是委托给现有的
+Python 报告适配器，不新增另一套报告引擎或 scheduler。
+如果希望一次显式调用完成前缀和报告，可以在最后的 `--command` 之前加入
+`--model NAME --with-report`；前缀通过后会接着执行同一条报告路径。
+`--report-reviewer` 和 `--max-review-iterations` 只控制这次报告 continuation。
 如果需要由 agent 生成 continuation 草稿，同一模块还提供
 `run_research_report_agent_session()`。它复用现有 Writer/Reviewer 实现，把紧凑的轨迹保存为
 report attempt 的输入，再调用同一套 report/audit capability；不会增加第二个 writer，也
@@ -191,9 +218,56 @@ report attempt 的输入，再调用同一套 report/audit capability；不会�
 session 中已经持久化的 synthesis、论文元数据、执行结果和分析证据整理报告输入，同时仍
 由调用方明确选择 template、预算和 client。
 
-省略 `--model` 时，planning、synthesis 和 analysis 都保持 deterministic；传入
-`--model NAME` 后，同一个共享 client 会用于这三部分，provider 失败会保留为可见错误，
-不会静默转换成离线输出。
+省略 `--model` 时，planning、synthesis、design 选择和 analysis 都保持 deterministic；传入
+`--model NAME` 后，同一个共享 client 会用于 planning、synthesis、在已有研究方向中进行选择
+以及结果分析。provider 失败会保留为可见错误，不会静默转换成离线输出。
+
+如果只想查看已经持久化的 capability session，而不重新运行任何阶段，可以继续使用已有的
+status 命令：
+
+```bash
+uv run simple-ar status runs/research-session/<session>
+```
+
+当目录包含 `session_manifest.json` 时，status 会显示 session 状态、当前 attempt、有限预算、
+各类 attempt 计数和最后一次决策；不会读取或改写 capability 产物。仍包含 `manifest.json` 的旧
+pipeline 和 Code-Task 目录继续使用原来的 status 行为。
+
+如果开放的 session 没有 active attempt，status 还可能显示
+`Handoff: ready_for_report` 或 `Continuation: explicit ...`。这只是持久化的下一步提示，
+不表示后台仍有进程运行；下一步必须由调用方显式执行。
+
+### `simple-ar research-session-continue`
+
+**一句话说明**：在已有 session 的实验失败且 analysis 建议回到 experiment 时，显式追加一次恢复实验。
+它复用文献、research design 和失败的父 attempt，不重新检索，也不增加自动修复策略。
+
+**用法**（`--command` 必须放在最后）：
+
+```bash
+uv run simple-ar research-session-continue \
+  --session-root runs/research-session/<session> \
+  --cwd examples/research_brief/fixtures \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --command python -c "print('accuracy: 0.90')"
+```
+
+命令会追加 `experiment-002` 和 `analysis-002`，并记录 `experiment-001` 为父节点；同一个 session
+拒绝第二次恢复分支。默认复用父实验保存的 result schema，也可以用 metric 参数显式补充或覆盖。恢复成功
+后可以继续 `research-report`；恢复失败仍会保存产物并返回非零状态，原有 attempt 和文献产物不会被覆盖。
+
+### `simple-ar research-report`
+
+**一句话说明**：继续一个分析结果已经可以进入报告阶段的 `research-session`。该命令复用现有的 Writer/Reviewer、装配器和审查实现，不会重新检索文献或重新运行实验。
+
+```bash
+uv run simple-ar research-report \
+  --session-root runs/research-session/<session> \
+  --model gpt-5.4
+```
+
+报告和审查会作为新的 attempt 写入原 session。相同 session 再次调用时，如果对应 attempt 已经存在会直接拒绝，避免静默替换已有报告。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit 仍会运行。
 
 ### `simple-ar research-code-task`
 
@@ -215,6 +289,9 @@ uv run simple-ar research-code-task \
 不会覆盖之前的 brief 或 run；默认只执行一个方向。显式加入 `--max-candidates N` 后，
 才会在最多 N 个隔离子 session 中尝试不同 idea；只有真实执行成功且主指标比较明确为
 改善的候选才会接受，失败候选会作为证据保留，最终按预算停止，不会无限循环。
+加入 `--with-report` 后，单候选模式会接续这个通过的 Code-Task session；多候选模式只会
+为最终选中的通过候选打开报告 continuation。两者都复用已有 Writer/Reviewer、报告组装和
+audit 路径，不会为失败、部分完成或未选中的候选生成正式报告。
 
 | 参数 | 含义 |
 | --- | --- |
@@ -227,10 +304,11 @@ uv run simple-ar research-code-task \
 | `--baseline-policy POLICY` | 可选覆盖：`auto`、`run`、`skip`、`provided` 或 `none`。 |
 | `--baseline-metrics-file PATH` | `provided` policy 使用的 baseline 指标文件。 |
 | `--max-candidates N` | 显式的有界 idea 数量，默认是一个。 |
+| `--with-report` | 为通过的 session 追加标准报告和 audit；多候选时只处理最终选中的候选。 |
 
-当前入口只接入已有 project-style Code-Task，不会创建托管环境、分配 GPU 或声称支持
-任意 greenfield 生成。报告 continuation 仍是显式 Python 应用适配器，因为 section drafts
-和 writer 策略不能在这里凭空推断。
+当前入口只接入已有 project-style Code-Task，不会创建托管环境、分配 GPU 或声称支持任意
+greenfield 生成。`--with-report` 需要 `--model`，使用标准 experiment 模板；多候选选择仍是
+有界顺序步骤，只有选中的通过 session 可以进入报告。
 
 ### `simple-ar resume`
 

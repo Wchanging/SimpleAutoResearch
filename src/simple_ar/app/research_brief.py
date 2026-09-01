@@ -15,6 +15,7 @@ from simple_ar.core import (
     ArtifactRef,
     AttemptManifest,
     BudgetState,
+    CapabilityResult,
     CapabilityRegistry,
     DecisionRecord,
     SessionController,
@@ -222,7 +223,7 @@ def _run_research_brief_steps(
         next_capability="search",
         request=plan_request,
     )
-    _require_completed(plan_capability.status, "plan", request.session_root)
+    _require_completed(plan_capability, "plan", request.session_root)
     plan_ref = controller.attempt_output_ref(
         "plan-001", kind="research_plan", schema="research_plan.v1"
     )
@@ -242,7 +243,7 @@ def _run_research_brief_steps(
         registry=provider_registry,
     )
     _require_completed(
-        search_capability.status,
+        search_capability,
         "search",
         request.session_root,
         allow_partial=True,
@@ -270,7 +271,7 @@ def _run_research_brief_steps(
         ),
     )
     _require_completed(
-        document_capability.status,
+        document_capability,
         "document_ingest",
         request.session_root,
         allow_partial=True,
@@ -299,10 +300,8 @@ def _run_research_brief_steps(
             llm_client=request.llm_client,
         ),
     )
-    if brief_capability.status == "blocked":
-        raise ResearchBriefSessionError(
-            f"Research brief was blocked; inspect {request.session_root}."
-        )
+    if brief_capability.status in {"failed", "blocked"}:
+        _require_completed(brief_capability, "research_brief", request.session_root)
     brief_ref = controller.attempt_output_ref(
         "brief-001", kind="research_brief", schema="research_brief.v1"
     )
@@ -336,16 +335,19 @@ def _planning_config(request: ResearchBriefSessionRequest) -> dict[str, object]:
 
 
 def _require_completed(
-    status: str,
+    result: CapabilityResult,
     capability: str,
     session_root: Path,
     *,
     allow_partial: bool = False,
 ) -> None:
     accepted = {"completed", "partial"} if allow_partial else {"completed"}
-    if status not in accepted:
+    if result.status not in accepted:
+        details = "; ".join(item for item in result.diagnostics if item.strip())
         raise ResearchBriefSessionError(
-            f"{capability} returned {status}; inspect {session_root}."
+            f"{capability} returned {result.status!r}"
+            + (f": {details}" if details else ".")
+            + f" Inspect {session_root}."
         )
 
 

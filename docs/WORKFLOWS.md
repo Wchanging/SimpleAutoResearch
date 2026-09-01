@@ -76,6 +76,13 @@ persisted `DecisionRecord` list. The caller still supplies the target and
 decides whether to continue; the policy does not call an LLM, execute a
 handler, retry work, or choose a winner.
 
+The `research-session` application exposes this boundary through its
+read-only `recommended_transition` property. A passed execution and analysis
+recommend continuing to `report`; any other result is returned to the
+`experiment` boundary for an explicit caller-owned repair or redesign. The
+recommendation is bounded by the same persisted decisions and never creates an
+attempt, reruns a command, or turns a failed session into a success.
+
 For the first domain slice, register
 `research.brief.run_research_brief_capability()` explicitly. It composes the
 existing Read and Synthesis boundaries and exposes a single structured
@@ -135,10 +142,33 @@ the analysis capability provenance.
 For a single session that owns both sides of this handoff, use
 `simple-ar research-session`. It reuses the same brief prefix, records a
 `research_design.v1` handoff, and continues with one explicit `ExperimentRequest`
-and the existing Analysis capability;
-the command is still supplied by the caller, so this is a controlled
-composition rather than automatic code generation or an unrestricted research
-loop.
+and the existing Analysis capability. By default the command is still supplied
+by the caller. Passing `--code-task-config` selects the existing project-style
+Code-Task backend for that experiment attempt instead: its project, benchmark,
+workspace, baseline, and execution settings remain owned by the TOML, and its
+output is normalized into the same canonical result. This is a controlled
+composition rather than an unrestricted research loop.
+
+If that session ends with a failed experiment but retains its design and
+analysis handoffs, one explicit recovery can reuse the same literature and
+design without rebuilding them:
+
+```bash
+uv run simple-ar research-session-continue \
+  --session-root runs/research-session/<session> \
+  --cwd examples/research_brief/fixtures \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --command python -c "print('accuracy: 0.90')"
+```
+
+This creates only `experiment-002` and `analysis-002`, with the failed
+`experiment-001` as their explicit parent. The revised command is supplied by
+the caller; search, design, and code generation are not repeated. The session
+reserves the existing report handoff slots, permits one recovery per session,
+and leaves the original artifacts untouched. After a successful recovery,
+continue with `simple-ar research-report`; a failed recovery remains persisted
+for inspection and returns a non-zero shell status.
 
 The same session can be continued into the existing report boundary with
 `run_research_report_session()`. The caller supplies section drafts,
@@ -148,6 +178,12 @@ artifact. A successful `research-session` prefix therefore reports
 `ready_for_report`, while the report continuation is the operation that can
 close the session. Supplying drafts explicitly keeps writer/revision policy
 outside the lifecycle controller.
+
+The existing `simple-ar status <session-root>` command also understands a
+capability session's `session_manifest.json`. It reports the persisted session
+checkpoint, attempt states, bounded budget, and last decision without rerunning
+or rewriting any capability. The legacy `manifest.json` status path is
+unchanged.
 
 When the existing Writer/Reviewer implementation should own draft generation,
 use `run_research_report_agent_session()` instead. It accepts the same compact
@@ -165,7 +201,10 @@ selected paper metadata, execution result, and result-analysis claims remain
 the sources of the report inputs. `run_research_session_report_agent()` is the
 small convenience wrapper for this path. It still requires the caller to
 choose the template, runtime budget, and LLM client; it is a report handoff,
-not an automatic research scheduler.
+not an automatic research scheduler. It accepts only a session whose
+execution and analysis both passed (`report_ready=True`). For failure or
+partial-result reports, call the lower-level explicit report boundary with
+the caller's chosen drafts and evidence instead.
 
 After the process ends, `load_research_session_result()` restores the same
 typed result from `session_manifest.json` and the declared `plan-001`,
@@ -188,6 +227,12 @@ generator or an unrestricted scheduler. It is currently an application API,
 and the same narrow path is available from the command line while reusing an
 existing Code-Task TOML:
 
+The candidate pool writes `candidate_summary.json` at startup and after each
+candidate completes. If the process is interrupted, that checkpoint and the
+session manifest show the completed candidates and any active attempt; they
+are inspection data, not an automatic resume or a replacement for the child
+workspaces.
+
 ```bash
 uv run simple-ar research-code-task --topic "reliable agents" \
   --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
@@ -195,8 +240,20 @@ uv run simple-ar research-code-task --topic "reliable agents" \
   --output-root runs/research-code-task
 ```
 
+`--with-report` continues a passed session through the existing experiment
+report Writer/Reviewer and audit path. In multi-candidate mode, only the
+selected candidate receives that continuation:
+
+```bash
+uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model gpt-5.4 --with-report
+```
+
+The continuation is accepted only after execution and result analysis pass; it
+does not retry or turn a failed run into a formal report.
+
 The command runs one direction by default; `--max-candidates N` explicitly
-enables at most N isolated child sessions. The configuration must set
+enables at most N isolated child sessions. Add `--with-report` when the selected
+passed session should be handed to Report/Audit. The configuration must set
 `[execute].use_llm = true`. This first consumer covers the existing project-style
 Code-Task backend; it does not create a GPU environment or claim arbitrary
 greenfield generation.
@@ -235,11 +292,15 @@ builders and writes one `research_plan.v1` handoff. It is deterministic by
 default; a caller can explicitly pass `use_llm=True` and the shared client to
 obtain a normalized model-assisted plan. It does not choose the next
 capability. The narrow `research_design` adapter consumes a persisted synthesis,
-selects an explicit idea, and writes a `research_design.v1` handoff containing
-the already-derived `ResearchExperimentContract`. It checks whether that
-contract is minimally executable, but it does not invent a command, metric
-value, experiment matrix, code, or execution plan. Domain-specific code
-generation and execution implementations remain caller-owned.
+selects an explicit idea by default, or selects among the persisted candidates
+when the caller explicitly enables its shared LLM client, and writes a
+`research_design.v1` handoff containing the already-derived
+`ResearchExperimentContract`. Without an explicit idea id, deterministic mode
+considers candidates in shared evidence/execution-readiness order, preserving
+input order for ties. It checks whether the selected contract is minimally
+executable, but it does not invent a command, metric value, experiment matrix,
+code, or execution plan. Domain-specific code generation and execution
+implementations remain caller-owned.
 `research.planning.search_request_from_plan()` is the small in-memory adapter
 for passing that plan to the existing `SearchRequest`; it does not invoke a
 provider or add retry, deduplication, or selection policy.
@@ -465,7 +526,7 @@ Current status:
 | `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question (LLM-backed when enabled). |
 | `search` | `papers.jsonl`, `search_meta.json`, `documents/`, `research_index/` | Retrieve and ingest metadata/full text, record provider provenance, and build local chunks. It may select candidates within budget but does not perform semantic review. |
 | `read` | `review/`, `paper_notes.json`, `notes.md` | Screen and prioritize retrieved papers, then convert the shortlist into canonical Paper Briefs (LLM-backed when enabled). Larger LLM runs use coarse title/abstract batches before reranking the kept set. |
-| `synthesize` | `synthesis_brief.json`, `synthesis.md`, `hypothesis.md` | Analyze read-stage Paper Briefs into themes, gaps, bounded ideas, and testable hypotheses (LLM-backed when enabled). |
+| `synthesize` | `synthesis_brief.json`, `synthesis.md`, `hypothesis.md` | Analyze read-stage Paper Briefs into themes, gaps, bounded ideas, and testable hypotheses. The default derivation is deterministic; an explicitly enabled LLM may propose a bounded candidate list, but every motivation reference is checked against the supplied evidence. |
 | `design` | `experiment_plan.json`, `experiment_contract.json`, `result_schema.json`, `resource_plan.json`, `dependency_plan.json`, `domain_profile.json`, `contract_validation.json` | Select a safe experiment template and write the executable contract, metric schema, resource/dependency budget, domain profile, and pre-code validation. |
 | `code` | `code_task_run/`, `generated_project/`, `experiment.py`, or template code | Prepare an embedded existing-code task, run unified greenfield code-task generation, or write a whitelisted template experiment from the design contract. |
 | `run` | `results.json`, `guard_report.json`, `stdout.txt`, `stderr.txt` | Execute the experiment, normalize canonical results, and guard against missing/invalid metrics before reporting. |

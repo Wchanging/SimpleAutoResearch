@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from rich.console import Console
 
 from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.cli import _resume_config, main
+from simple_ar.cli.parser import build_parser
 from simple_ar.cli.code_task_view import confirm_review_gate, render_execute_message
 from simple_ar.core.reporting import style_progress_message
 
@@ -21,6 +23,48 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_research_session_parser_accepts_shared_cache_dir(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "research-session",
+                "--topic",
+                "reliable agents",
+                "--cache-dir",
+                "shared-cache",
+                "--command",
+                sys.executable,
+                "-c",
+                "print('accuracy: 0.9')",
+            ]
+        )
+
+        self.assertEqual(args.cache_dir, "shared-cache")
+        self.assertEqual(args.command, "research-session")
+
+    def test_research_session_continue_parser_keeps_revised_command(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "research-session-continue",
+                "--session-root",
+                "runs/session",
+                "--primary-metric",
+                "accuracy",
+                "--metric-direction",
+                "accuracy=higher",
+                "--command",
+                sys.executable,
+                "-c",
+                "print('accuracy: 0.9')",
+            ]
+        )
+
+        self.assertEqual(args.command, "research-session-continue")
+        self.assertEqual(args.parent_attempt_id, "experiment-001")
+        self.assertEqual(
+            args.command_argv,
+            [sys.executable, "-c", "print('accuracy: 0.9')"],
+        )
+
     def test_code_task_execute_messages_use_shared_rich_styles(self) -> None:
         self.assertEqual(style_progress_message("LLM usage greenfield-file-main.py: 1 input"), "gold1")
         self.assertEqual(
@@ -112,6 +156,102 @@ class CliTests(unittest.TestCase):
             self.assertIn("02 search: done", status_text)
             self.assertIn("03 read: pending", status_text)
 
+    def test_status_reports_persisted_research_session_checkpoint(self) -> None:
+        from simple_ar.core.capabilities import CapabilityRegistry
+        from simple_ar.core.session import SessionController
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            session_root = Path(tmp) / "session"
+            SessionController.create(
+                session_root,
+                session_id="session-status-test",
+                topic="checkpoint topic",
+                profile="research_brief",
+                registry=CapabilityRegistry(),
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["status", str(session_root)])
+
+            status_text = stdout.getvalue()
+            self.assertIn("Session: ", status_text)
+            self.assertIn("Topic: checkpoint topic", status_text)
+            self.assertIn("Profile: research_brief", status_text)
+            self.assertIn("Status: created", status_text)
+            self.assertIn("Attempts:\n- none", status_text)
+
+    def test_status_reports_ready_for_report_handoff(self) -> None:
+        from simple_ar.core.capabilities import CapabilityContext, CapabilityRegistry, CapabilityResult
+        from simple_ar.core.session import SessionController
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            session_root = Path(tmp) / "session"
+            registry = CapabilityRegistry()
+
+            def complete(*, context: CapabilityContext) -> CapabilityResult:
+                return CapabilityResult(status="completed")
+
+            registry.register("analysis", complete)
+            controller = SessionController.create(
+                session_root,
+                session_id="session-handoff-test",
+                topic="handoff topic",
+                profile="full_research",
+                registry=registry,
+            )
+            controller.execute(
+                "analysis",
+                attempt_id="analysis-001",
+                next_capability="report",
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["status", str(session_root)])
+
+            self.assertIn("Handoff: ready_for_report (next=report)", stdout.getvalue())
+
+    def test_status_reports_explicit_failure_continuation(self) -> None:
+        from simple_ar.core.capabilities import CapabilityContext, CapabilityRegistry, CapabilityResult
+        from simple_ar.core.session import SessionController
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            session_root = Path(tmp) / "session"
+            registry = CapabilityRegistry()
+
+            def fail(*, context: CapabilityContext) -> CapabilityResult:
+                del context
+                return CapabilityResult(
+                    status="failed",
+                    diagnostics=("temporary provider failure",),
+                )
+
+            registry.register("analysis", fail)
+            controller = SessionController.create(
+                session_root,
+                session_id="session-failure-status-test",
+                topic="failure status topic",
+                registry=registry,
+            )
+            controller.execute(
+                "analysis",
+                attempt_id="analysis-001",
+                next_capability="analysis",
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(["status", str(session_root)])
+
+            status_text = stdout.getvalue()
+            self.assertIn("Status: running", status_text)
+            self.assertIn("Continuation: explicit repair -> analysis", status_text)
+            self.assertIn("0 running", status_text)
+
     def test_research_only_report_run_skips_experiment_stages(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -142,6 +282,207 @@ class CliTests(unittest.TestCase):
             self.assertFalse((run_dir / "05-design" / "stage_meta.json").exists())
             self.assertFalse((run_dir / "06-code" / "stage_meta.json").exists())
             self.assertFalse((run_dir / "07-run" / "stage_meta.json").exists())
+
+    def test_research_report_cli_reads_existing_session_without_rerunning_it(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            paper = root / "reliable_agents.md"
+            paper.write_text(
+                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
+                encoding="utf-8",
+            )
+            output_root = root / "sessions"
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(
+                    [
+                        "research-session",
+                        "--topic",
+                        "reliable agents",
+                        "--local-document",
+                        str(paper),
+                        "--output-root",
+                        str(output_root),
+                        "--cwd",
+                        str(root),
+                        "--primary-metric",
+                        "accuracy",
+                        "--metric-direction",
+                        "accuracy=higher",
+                        "--command",
+                        sys.executable,
+                        "-c",
+                        "print('accuracy: 0.75')",
+                    ]
+                )
+            session_root = next(output_root.iterdir())
+            fake_report = SimpleNamespace(
+                session_root=session_root,
+                status="completed",
+                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
+                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+            )
+            stdout = io.StringIO()
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch(
+                    "simple_ar.app.research_report.run_research_session_report_agent",
+                    return_value=fake_report,
+                ) as runner,
+                contextlib.redirect_stdout(stdout),
+            ):
+                main(
+                    [
+                        "research-report",
+                        "--session-root",
+                        str(session_root),
+                        "--model",
+                        "gpt-5.4",
+                    ]
+                )
+
+            runner.assert_called_once()
+            self.assertIn("Status: completed", stdout.getvalue())
+            self.assertIn(
+                str(session_root / "attempts" / "report-001" / "report.md"),
+                stdout.getvalue(),
+            )
+
+    def test_research_session_cli_can_append_report_in_one_explicit_flow(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            paper = root / "reliable_agents.md"
+            paper.write_text(
+                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
+                encoding="utf-8",
+            )
+            output_root = root / "sessions"
+            session = SimpleNamespace(
+                session_root=output_root / "research-session",
+                status="ready_for_report",
+                plan=SimpleNamespace(query_plan=SimpleNamespace(planner="fixture")),
+                brief=SimpleNamespace(generation_mode="deterministic"),
+                search=SimpleNamespace(papers=[object()]),
+                documents=SimpleNamespace(records=[object()]),
+                execution_ref=SimpleNamespace(path="attempts/experiment-001/results.json"),
+                analysis_ref=SimpleNamespace(path="attempts/analysis-001/analysis.json"),
+            )
+            report = SimpleNamespace(
+                session_root=session.session_root,
+                status="completed",
+                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
+                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+            )
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch(
+                    "simple_ar.app.research_session.run_research_session",
+                    return_value=session,
+                ) as session_runner,
+                patch(
+                    "simple_ar.app.research_report.run_research_session_report_agent",
+                    return_value=report,
+                ) as report_runner,
+                patch(
+                    "simple_ar.report.templates.load_report_template_bundle",
+                    return_value=object(),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main(
+                    [
+                        "research-session",
+                        "--topic",
+                        "reliable agents",
+                        "--local-document",
+                        str(paper),
+                        "--output-root",
+                        str(output_root),
+                        "--cwd",
+                        str(root),
+                        "--model",
+                        "gpt-5.4",
+                        "--with-report",
+                        "--report-reviewer",
+                        "disabled",
+                        "--max-review-iterations",
+                        "0",
+                        "--command",
+                        sys.executable,
+                        "-c",
+                        "print('accuracy: 0.75')",
+                    ]
+                )
+
+            session_runner.assert_called_once()
+            report_runner.assert_called_once()
+
+    def test_research_session_cli_builds_code_task_request_from_config(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            task_file = root / "task.md"
+            task_file.write_text("Improve the fixture.", encoding="utf-8")
+            config = root / "code_task.toml"
+            config.write_text(
+                "[code_task]\n"
+                f'code_root = "{project.as_posix()}"\n'
+                f'task_file = "{task_file.as_posix()}"\n'
+                "[benchmark]\n"
+                'command = "python benchmark.py"\n'
+                'primary_metric = "accuracy"\n'
+                "[benchmark.metric_directions]\n"
+                'accuracy = "higher"\n'
+                "[execute]\n"
+                "use_llm = true\n"
+                "timeout_sec = 7\n"
+                'baseline_policy = "skip"\n',
+                encoding="utf-8",
+            )
+            fake_result = SimpleNamespace(
+                session_root=root / "session",
+                status="ready_for_report",
+                plan=SimpleNamespace(query_plan=SimpleNamespace(planner="fixture")),
+                brief=SimpleNamespace(generation_mode="llm"),
+                search=SimpleNamespace(papers=[]),
+                documents=SimpleNamespace(records=[]),
+                execution_ref=SimpleNamespace(path="attempts/experiment-001/results.json"),
+                analysis_ref=SimpleNamespace(path="attempts/analysis-001/analysis.json"),
+            )
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch(
+                    "simple_ar.app.research_session.run_research_session",
+                    return_value=fake_result,
+                ) as runner,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main(
+                    [
+                        "research-session",
+                        "--topic",
+                        "fixture research",
+                        "--output-root",
+                        str(root / "sessions"),
+                        "--cwd",
+                        str(root),
+                        "--model",
+                        "gpt-5.4",
+                        "--code-task-config",
+                        str(config),
+                    ]
+                )
+
+            request = runner.call_args.args[0]
+            self.assertEqual(request.command, ())
+            self.assertEqual(request.code_task_spec.code_root, project)
+            self.assertEqual(request.code_task_spec.task_file, task_file)
+            self.assertEqual(request.timeout_sec, 7)
+            self.assertEqual(request.baseline_policy, "skip")
+            self.assertEqual(request.code_task_model, "gpt-5.4")
 
     def test_research_code_task_cli_builds_request_from_existing_config(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -181,19 +522,20 @@ class CliTests(unittest.TestCase):
             ) as runner:
                 stdout = io.StringIO()
                 with contextlib.redirect_stdout(stdout):
-                    main(
-                        [
-                            "research-code-task",
-                            "--topic",
-                            "fixture research",
-                            "--synthesis-file",
-                            str(synthesis_file),
-                            "--code-task-config",
-                            str(config),
-                            "--output-root",
-                            str(root / "runs"),
-                        ]
-                    )
+                    with self.assertRaises(SystemExit) as raised:
+                        main(
+                            [
+                                "research-code-task",
+                                "--topic",
+                                "fixture research",
+                                "--synthesis-file",
+                                str(synthesis_file),
+                                "--code-task-config",
+                                str(config),
+                                "--output-root",
+                                str(root / "runs"),
+                            ]
+                        )
 
             request = runner.call_args.args[0]
             self.assertEqual(request.topic, "fixture research")
@@ -202,6 +544,158 @@ class CliTests(unittest.TestCase):
             self.assertEqual(request.timeout_sec, 7)
             self.assertEqual(request.baseline_policy, "skip")
             self.assertIn("Status: partial", stdout.getvalue())
+            self.assertIn("ended with status 'partial'", str(raised.exception))
+
+    def test_research_code_task_cli_can_append_report_after_one_candidate(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            task_file = root / "task.md"
+            task_file.write_text("Improve the fixture.", encoding="utf-8")
+            synthesis_file = root / "synthesis.json"
+            synthesis_file.write_text("{}", encoding="utf-8")
+            config = root / "code_task.toml"
+            config.write_text(
+                "[code_task]\n"
+                f'code_root = "{project.as_posix()}"\n'
+                f'task_file = "{task_file.as_posix()}"\n'
+                "[benchmark]\n"
+                'command = "python benchmark.py"\n'
+                'primary_metric = "accuracy"\n'
+                "[execute]\n"
+                "use_llm = true\n",
+                encoding="utf-8",
+            )
+            session = SimpleNamespace(
+                session_root=root / "session",
+                status="completed",
+                execution_path=root / "session" / "execution.json",
+                analysis_path=root / "session" / "analysis.json",
+            )
+            report = SimpleNamespace(
+                session_root=session.session_root,
+                status="completed",
+                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
+                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+            )
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch(
+                    "simple_ar.app.research_code_task.run_research_code_task_session",
+                    return_value=session,
+                ) as runner,
+                patch(
+                    "simple_ar.app.research_code_task_report.run_research_code_task_report_agent",
+                    return_value=report,
+                ) as report_runner,
+                patch(
+                    "simple_ar.report.templates.load_report_template_bundle",
+                    return_value=object(),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main(
+                    [
+                        "research-code-task",
+                        "--topic",
+                        "fixture research",
+                        "--synthesis-file",
+                        str(synthesis_file),
+                        "--code-task-config",
+                        str(config),
+                        "--output-root",
+                        str(root / "runs"),
+                        "--model",
+                        "gpt-5.4",
+                        "--with-report",
+                    ]
+                )
+
+            self.assertEqual(runner.call_args.kwargs["next_capability"], "report")
+            report_runner.assert_called_once()
+
+    def test_research_code_task_cli_reports_only_selected_multi_candidate(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            task_file = root / "task.md"
+            task_file.write_text("Improve the fixture.", encoding="utf-8")
+            synthesis_file = root / "synthesis.json"
+            synthesis_file.write_text("{}", encoding="utf-8")
+            config = root / "code_task.toml"
+            config.write_text(
+                "[code_task]\n"
+                f'code_root = "{project.as_posix()}"\n'
+                f'task_file = "{task_file.as_posix()}"\n'
+                "[benchmark]\n"
+                'command = "python benchmark.py"\n'
+                'primary_metric = "accuracy"\n'
+                "[execute]\n"
+                "use_llm = true\n",
+                encoding="utf-8",
+            )
+            selected_session = SimpleNamespace(
+                session_root=root / "selected-session",
+                status="completed",
+                execution_path=root / "selected-session" / "execution.json",
+                analysis_path=root / "selected-session" / "analysis.json",
+            )
+            candidates = SimpleNamespace(
+                session_root=root / "candidate-session",
+                status="completed",
+                selected_candidate_id="candidate-002",
+                summary_path=root / "candidate-session" / "candidate_summary.json",
+                selected=SimpleNamespace(session=selected_session),
+            )
+            report = SimpleNamespace(
+                session_root=selected_session.session_root,
+                status="completed",
+                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
+                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+            )
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch(
+                    "simple_ar.app.research_code_task.run_research_code_task_candidates",
+                    return_value=candidates,
+                ) as runner,
+                patch(
+                    "simple_ar.app.research_code_task_report.run_research_code_task_report_agent",
+                    return_value=report,
+                ) as report_runner,
+                patch(
+                    "simple_ar.report.templates.load_report_template_bundle",
+                    return_value=object(),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main(
+                    [
+                        "research-code-task",
+                        "--topic",
+                        "fixture research",
+                        "--synthesis-file",
+                        str(synthesis_file),
+                        "--code-task-config",
+                        str(config),
+                        "--output-root",
+                        str(root / "runs"),
+                        "--model",
+                        "gpt-5.4",
+                        "--max-candidates",
+                        "2",
+                        "--with-report",
+                    ]
+                )
+
+            self.assertEqual(runner.call_args.kwargs["max_candidates"], 2)
+            self.assertTrue(runner.call_args.kwargs["open_report"])
+            report_runner.assert_called_once()
+            self.assertIs(report_runner.call_args.args[0], selected_session)
 
     def test_research_code_task_cli_rejects_non_positive_timeout_override(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

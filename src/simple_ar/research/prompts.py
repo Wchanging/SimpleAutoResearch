@@ -16,6 +16,11 @@ SYNTHESIZE_SYSTEM = (
     "and modest testable hypotheses grounded in cited paper/card evidence."
 )
 
+RESEARCH_DESIGN_SYSTEM = (
+    "You select one evidence-grounded research direction for a bounded experiment. "
+    "You do not invent commands, datasets, metrics, results, or implementation details."
+)
+
 REPORT_SYSTEM = (
     "You are an academic paper author writing a concise, evidence-bound research "
     "report. Write in flowing scholarly prose rather than engineering-log style. "
@@ -346,8 +351,10 @@ def synthesize_user_prompt(
         else ""
     )
     return (
-        "Given literature notes, write JSON with two string fields: "
-        "`synthesis_markdown` and `hypothesis_markdown`. The hypothesis must be "
+        "Given literature notes, write JSON with the required string fields "
+        "`synthesis_markdown` and `hypothesis_markdown`. You may also return "
+        "an `idea_candidates` list containing at most the requested number of "
+        "bounded, evidence-grounded experiment ideas. The hypothesis must be "
         "small enough for a local experiment or code-task follow-up. Prefer "
         "structured Paper Briefs, the synthesis brief, and source-labelled "
         "snippets when they are provided, and do not make claims that cannot "
@@ -359,10 +366,46 @@ def synthesize_user_prompt(
         "- The hypothesis should name a measurable change, likely metric, and "
         "failure condition when supported by the context.\n"
         "- Use paper ids as provenance anchors where possible.\n\n"
+        "If `idea_candidates` is present, each item must contain non-empty "
+        "`idea_id`, `title`, `hypothesis`, `proposed_change`, and "
+        "`motivation_refs`, plus optional `expected_outcome`, "
+        "`required_baselines`, `required_datasets`, `metrics`, `feasibility`, "
+        "and `risks`. Use JSON lists for list fields; a single string is accepted "
+        "for optional list fields for compatibility. Every motivation ref must be copied exactly from an "
+        "evidence/card/chunk identifier in the supplied context. Do not invent "
+        "paper ids, claims, datasets, metrics, commands, or results.\n\n"
         f"Notes Markdown:\n{notes_markdown}\n\n"
         f"Structured Notes JSON:\n{paper_notes_json}"
         f"{structured_block}"
         f"{evidence_block}"
+    )
+
+
+def research_design_user_prompt(
+    *,
+    research_context: str,
+    ideas_json: str,
+    novelty_checks_json: str,
+    contract_json: str,
+) -> str:
+    """Build the bounded model prompt for selecting an existing idea."""
+
+    return (
+        "Select exactly one candidate research idea for the next bounded experiment. "
+        "Return a JSON object with exactly these fields: "
+        "`selected_idea_id` and `rationale`.\n\n"
+        "Rules:\n"
+        "- `selected_idea_id` must be copied exactly from the candidate list.\n"
+        "- Prefer a measurable, feasible direction with clear evidence references "
+        "and lower unresolved risk.\n"
+        "- The rationale must be concise and refer only to supplied candidates, "
+        "novelty checks, and the existing contract.\n"
+        "- Do not create a new idea or change the baseline, dataset, metrics, "
+        "hypothesis, proposed change, or execution command.\n\n"
+        f"Research context:\n{research_context}\n\n"
+        f"Candidate ideas JSON:\n{ideas_json}\n\n"
+        f"Novelty checks JSON:\n{novelty_checks_json}\n\n"
+        f"Existing experiment contract JSON:\n{contract_json}\n"
     )
 
 

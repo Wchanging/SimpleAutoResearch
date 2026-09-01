@@ -129,9 +129,25 @@ class SynthesisResult:
             contract_id=f"{contract.contract_id}/{idea.idea_id}",
             hypothesis=idea.hypothesis or contract.hypothesis,
             motivation_refs=list(idea.motivation_refs or contract.motivation_refs),
-            dataset=(idea.required_datasets[0] if idea.required_datasets else contract.dataset),
+            baseline=(
+                "; ".join(
+                    dict.fromkeys(
+                        item.strip()
+                        for item in idea.required_baselines
+                        if item.strip()
+                    )
+                )
+                if idea.required_baselines
+                else contract.baseline
+            ),
+            dataset=(
+                idea.required_datasets[0]
+                if idea.required_datasets
+                else contract.dataset
+            ),
             metrics=list(idea.metrics or contract.metrics),
             proposed_change=idea.proposed_change or contract.proposed_change,
+            expected_outcome=idea.expected_outcome or contract.expected_outcome,
             risks=list(idea.risks or contract.risks),
         )
         return replace(self, experiment_contract=selected_contract)
@@ -206,8 +222,10 @@ def synthesize_evidence(request: SynthesisRequest) -> SynthesisResult:
 
     The default remains deterministic. When ``request.use_llm`` is true, the
     existing structured derivation is retained and the shared LLM client adds
-    grounded synthesis and hypothesis prose; a missing or malformed model
-    response is an error rather than a silent fallback.
+    grounded synthesis prose and may replace the deterministic idea candidates
+    with a bounded structured list. A missing optional idea list preserves the
+    older response shape; a malformed supplied list is an error rather than a
+    silent fallback.
     """
 
     result = _synthesize_deterministic_evidence(request)
@@ -223,9 +241,10 @@ def run_synthesis_capability(
 ) -> CapabilityResult:
     """Persist one evidence-to-direction handoff.
 
-    The caller supplies the expanded evidence pack. LLM prose is generated
-    only when the request explicitly carries a client; structured ideas and
-    contracts remain produced by the existing evidence derivation functions.
+    The caller supplies the expanded evidence pack. LLM prose and, when
+    returned, structured candidates are generated only when the request
+    explicitly carries a client; all candidate fields remain bounded by the
+    supplied evidence identifiers and the existing handoff schema.
     """
     result = synthesize_evidence(request)
     output = context.store.write_json(
@@ -288,14 +307,202 @@ def _add_llm_synthesis(
         ),
         label="research-synthesis",
     )
+    if not isinstance(response, Mapping):
+        raise LLMError("LLM synthesis response must be a JSON object.")
     synthesis_markdown = _required_text(response, "synthesis_markdown")
     hypothesis_markdown = _required_text(response, "hypothesis_markdown")
+    llm_ideas = _parse_llm_idea_candidates(
+        response,
+        pack,
+        limit=request.idea_limit,
+    )
+    if llm_ideas is None:
+        return replace(
+            result,
+            synthesis_markdown=synthesis_markdown,
+            hypothesis_markdown=hypothesis_markdown,
+            generation_mode="llm",
+        )
+
+    novelty_checks = build_novelty_checks(
+        list(llm_ideas),
+        pack,
+        backend=request.novelty_backend,
+    )
+    experiment_contract = (
+        build_experiment_contract(list(llm_ideas), pack)
+        if request.include_experiment_contract
+        else None
+    )
     return replace(
         result,
+        ideas=llm_ideas,
+        novelty_checks=tuple(novelty_checks),
+        experiment_contract=experiment_contract,
         synthesis_markdown=synthesis_markdown,
         hypothesis_markdown=hypothesis_markdown,
         generation_mode="llm",
+        diagnostics=tuple(_diagnostics(pack, list(llm_ideas))),
     )
+
+
+_IDEA_LIST_FIELDS = (
+    "motivation_refs",
+    "required_baselines",
+    "required_datasets",
+    "metrics",
+    "risks",
+)
+
+
+def _parse_llm_idea_candidates(
+    response: Mapping[str, Any],
+    pack: Mapping[str, Any],
+    *,
+    limit: int,
+) -> tuple[IdeaCandidate, ...] | None:
+    """Validate an optional model candidate list without accepting new refs."""
+
+    raw = response.get("idea_candidates")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise LLMError(
+            "LLM idea_candidates must be a non-empty JSON list when supplied."
+        )
+
+    allowed_refs = _allowed_evidence_refs(pack)
+    ideas: list[IdeaCandidate] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(raw[:limit], start=1):
+        if not isinstance(item, Mapping):
+            raise LLMError(f"LLM idea_candidates[{index - 1}] must be a JSON object.")
+        for key in _IDEA_LIST_FIELDS:
+            value = item.get(key)
+            if value is not None and not isinstance(value, (list, str)):
+                raise LLMError(
+                    f"LLM idea_candidates[{index - 1}].{key} must be a JSON list "
+                    "or string."
+                )
+            if key == "motivation_refs" and value is not None and not isinstance(value, list):
+                raise LLMError(
+                    f"LLM idea_candidates[{index - 1}].motivation_refs must be a JSON list."
+                )
+        idea_id = _required_idea_text(item, "idea_id", index)
+        if idea_id in seen_ids:
+            raise LLMError(
+                f"LLM idea_candidates contains duplicate idea_id {idea_id!r}."
+            )
+        seen_ids.add(idea_id)
+        for key in ("title", "hypothesis", "proposed_change"):
+            _required_idea_text(item, key, index)
+        refs = _idea_string_list(item.get("motivation_refs"), "motivation_refs", index)
+        if not refs:
+            raise LLMError(
+                f"LLM idea_candidates[{index - 1}].motivation_refs must not be empty."
+            )
+        unknown = sorted(set(refs) - allowed_refs)
+        if unknown:
+            raise LLMError(
+                f"LLM idea_candidates[{index - 1}] contains unknown motivation refs: "
+                + ", ".join(unknown)
+            )
+        normalized = dict(item)
+        normalized["idea_id"] = idea_id
+        normalized["motivation_refs"] = refs
+        for key in _IDEA_LIST_FIELDS:
+            if key in normalized:
+                normalized[key] = _idea_string_list(
+                    normalized[key],
+                    key,
+                    index,
+                    allow_scalar=key != "motivation_refs",
+                )
+        ideas.append(IdeaCandidate.from_row(normalized))
+    return tuple(ideas)
+
+
+def _required_idea_text(
+    row: Mapping[str, Any],
+    key: str,
+    index: int,
+) -> str:
+    value = row.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise LLMError(
+            f"LLM idea_candidates[{index - 1}].{key} must be a non-empty string."
+        )
+    return value.strip()
+
+
+def _idea_string_list(
+    value: object,
+    key: str,
+    index: int,
+    *,
+    allow_scalar: bool = False,
+) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        if allow_scalar and value.strip():
+            return [value.strip()]
+        raise LLMError(f"LLM idea_candidates[{index - 1}].{key} must be a JSON list.")
+    if not isinstance(value, list):
+        raise LLMError(
+            f"LLM idea_candidates[{index - 1}].{key} must be a JSON list or string."
+        )
+    values: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise LLMError(
+                f"LLM idea_candidates[{index - 1}].{key} must contain non-empty strings."
+            )
+        values.append(item.strip())
+    return list(dict.fromkeys(values))
+
+
+def _allowed_evidence_refs(pack: Mapping[str, Any]) -> set[str]:
+    """Collect identifiers the model may cite in a candidate motivation."""
+
+    allowed: set[str] = set()
+    for key in (
+        "papers",
+        "chunks",
+        "paper_cards",
+        "claim_cards",
+        "method_cards",
+        "dataset_cards",
+        "code_links",
+    ):
+        rows = pack.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            for id_key in (
+                "id",
+                "document_id",
+                "chunk_id",
+                "paper_id",
+                "claim_id",
+                "method_id",
+                "dataset_id",
+                "link_id",
+                "source_id",
+            ):
+                value = row.get(id_key)
+                if isinstance(value, str) and value.strip():
+                    allowed.add(value.strip())
+            allowed.update(_row_string_list(row.get("evidence_refs")))
+    return allowed
+
+
+def _row_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 def _has_evidence(pack: Mapping[str, Any]) -> bool:

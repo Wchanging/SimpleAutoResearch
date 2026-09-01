@@ -4,10 +4,78 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-01
+
+### Changed
+
+- `research.synthesis` can now accept a bounded structured candidate list from an
+  explicitly enabled LLM. Required fields and evidence references are validated
+  before candidates replace the deterministic set; older prose-only responses
+  remain compatible, and optional scalar list fields are normalized narrowly.
+- `research_design` and the bounded Code-Task candidate path now share a deterministic
+  readiness ordering: candidates with more complete execution fields and evidence
+  are considered first, while explicit idea selection and existing schemas remain unchanged.
+- Selecting a synthesis candidate now carries that candidate's baseline hints and
+  expected outcome into the research experiment contract, preventing stale fields
+  from an earlier candidate from reaching execution.
+- Bounded Code-Task candidate runs can now explicitly continue the selected passed
+  candidate into the existing report and audit path with `--with-report`.
+- `simple-ar status` now reads persisted `research-session` checkpoints and
+  reports attempts, bounded budget, and the last decision without rerunning or
+  rewriting capability artifacts. Legacy pipeline and Code-Task status output
+  is unchanged.
+- Open sessions with a failed or revisable last attempt now show an explicit
+  continuation hint in `status`; the hint does not start a retry or imply that
+  a background process is still running.
+- Bounded Code-Task candidate runs now checkpoint `candidate_summary.json` at
+  startup and after each candidate, so interrupted work remains inspectable
+  without adding an automatic scheduler or resuming a child workspace.
+- `research-brief` and `research-session` now accept an optional `--cache-dir`
+  for reusing valid downloaded full-text files across sessions. The default
+  remains session-local storage, and cached PDF entries receive only a light
+  file-header check before reuse.
+
+## 2026-08-31
+
+### Changed
+
+- `research-session` now exposes a read-only bounded transition recommendation:
+  passed execution and analysis recommend the report handoff, while other
+  outcomes return to the experiment boundary for an explicit caller-owned
+  repair or redesign. It never creates attempts, retries commands, or masks a
+  failed session.
+- `research-session` can now route its single experiment attempt through the
+  existing project-style Code-Task backend when given `--code-task-config`,
+  while retaining the same session, attempt, canonical-result, and analysis
+  boundaries. The default explicit-command path is unchanged.
+- Added an offline regression covering the Code-Task-backed session route and
+  kept its configuration and handoff documentation aligned with the CLI.
+- Added `research-session-continue` for one explicit, auditable recovery
+  experiment. It reuses the persisted literature and design, appends isolated
+  experiment/analysis attempts, preserves the failed parent, and leaves report
+  continuation available without adding an automatic scheduler.
+
 ## 2026-08-30
 
 ### Changed
 
+- Application handoffs now inspect capability status before resolving typed
+  outputs and preserve capability diagnostics when a required handoff is
+  missing. Failed experiment executions still remain available for downstream
+  result analysis when their canonical results artifact exists.
+- Added the explicit `research-report` CLI handoff for report-ready research
+  sessions. It reuses the existing Writer/Reviewer and audit path without
+  rerunning search or experiments, and appends report attempts instead of
+  replacing earlier session artifacts.
+- Added the opt-in `research-session --with-report` convenience path, which
+  runs the same report continuation after a passed literature-to-experiment
+  prefix without adding a second report engine or scheduler.
+- Report continuations now preflight their fixed attempt slots before invoking
+  the Writer, so repeated or closed sessions fail without consuming another
+  model call or replacing the prior writer trace.
+- Research design can now optionally use the shared LLM client to select one
+  existing evidence-grounded idea; the deterministic contract builder remains
+  authoritative and explicit idea selection remains available.
 - Added a narrow `research_design` handoff that selects an existing synthesis
   idea and reuses its `ResearchExperimentContract` in the existing Experiment
   and Code-Task application paths, including the standard research-session
@@ -33,6 +101,9 @@ This file records user-visible project changes in reverse chronological order. P
 - Added a thin research-session-to-report-agent handoff that derives report
   context from persisted synthesis, literature, execution, and analysis
   evidence while reusing the existing Writer/Reviewer and report audit path.
+- Added an explicit `research-code-task --with-report` continuation that
+  reuses the generic report Writer/Reviewer and audit only after a passed
+  single-candidate Code-Task session.
 - Added read-only restoration for persisted Code-Task sessions through their
   declared synthesis, execution, and analysis handoffs; restoration never
   reruns or selects an alternative artifact.

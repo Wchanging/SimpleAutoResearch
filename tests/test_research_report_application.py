@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from simple_ar.app.research_brief import ResearchBriefSessionRequest
 from simple_ar.app.research_report import (
+    ResearchReportSessionError,
     ResearchReportSessionRequest,
     build_research_session_report_inputs,
     run_research_session_report_agent,
@@ -140,7 +141,7 @@ class ResearchReportApplicationTests(unittest.TestCase):
             with patch(
                 "simple_ar.app.research_report.run_report_agent",
                 return_value=agent_result,
-            ):
+            ) as writer:
                 result = run_research_session_report_agent(
                     session,
                     template=ReportTemplateBundle(
@@ -158,6 +159,8 @@ class ResearchReportApplicationTests(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertIsNotNone(result.writer_ref)
             assert result.writer_ref is not None
+            writer.assert_called_once()
+            self.assertTrue(writer.call_args.kwargs["memory"].section_plan)
             writer_path = root / "session" / result.writer_ref.path
             self.assertTrue(writer_path.is_file())
             writer_payload = json.loads(writer_path.read_text(encoding="utf-8"))
@@ -176,6 +179,80 @@ class ResearchReportApplicationTests(unittest.TestCase):
                 result.writer_ref.path,
                 [item["path"] for item in report_attempt["inputs"]],
             )
+
+            trace_before = writer_path.read_text(encoding="utf-8")
+            with patch(
+                "simple_ar.app.research_report.run_report_agent",
+                side_effect=AssertionError("duplicate continuation invoked Writer"),
+            ) as duplicate_writer:
+                with self.assertRaisesRegex(
+                    ResearchReportSessionError,
+                    "continuation already exists",
+                ):
+                    run_research_session_report_agent(
+                        session,
+                        template=ReportTemplateBundle(
+                            name="experiment",
+                            mode="experiment",
+                            template_path="template.md",
+                            criteria_path="criteria.md",
+                            template_markdown="# Findings",
+                            criteria_markdown="Use evidence.",
+                        ),
+                        config=ReportRuntimeConfig(reviewer="disabled"),
+                        client=object(),
+                    )
+            duplicate_writer.assert_not_called()
+            self.assertEqual(trace_before, writer_path.read_text(encoding="utf-8"))
+
+    def test_agent_report_requires_a_passed_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "reliable_agents.md"
+            paper.write_text(
+                "# Results\n\nThe fixture reports accuracy: 0.25.\n",
+                encoding="utf-8",
+            )
+            session = run_research_session(
+                ResearchSessionRequest(
+                    brief=ResearchBriefSessionRequest(
+                        topic="reliable agents",
+                        session_root=root / "session",
+                        local_documents=(paper,),
+                        max_results=2,
+                        max_chunks=20,
+                    ),
+                    command=(
+                        sys.executable,
+                        "-c",
+                        "print('accuracy: 0.25'); raise SystemExit(2)",
+                    ),
+                    cwd=root,
+                    timeout_sec=5,
+                    result_schema={"primary_metric": "accuracy"},
+                )
+            )
+
+            self.assertFalse(session.report_ready)
+            with patch("simple_ar.app.research_report.run_report_agent") as writer:
+                with self.assertRaisesRegex(
+                    ResearchReportSessionError,
+                    "not ready for formal report generation",
+                ):
+                    run_research_session_report_agent(
+                        session,
+                        template=ReportTemplateBundle(
+                            name="experiment",
+                            mode="experiment",
+                            template_path="template.md",
+                            criteria_path="criteria.md",
+                            template_markdown="# Findings",
+                            criteria_markdown="Use evidence.",
+                        ),
+                        config=ReportRuntimeConfig(reviewer="disabled"),
+                        client=object(),
+                    )
+                writer.assert_not_called()
 
     def test_research_session_report_inputs_keep_execution_and_analysis_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -225,7 +302,7 @@ class ResearchReportApplicationTests(unittest.TestCase):
             with patch(
                 "simple_ar.app.research_report.run_report_agent",
                 return_value=None,
-            ):
+            ) as writer:
                 with self.assertRaisesRegex(
                     RuntimeError,
                     "did not return a validated result",
@@ -248,6 +325,8 @@ class ResearchReportApplicationTests(unittest.TestCase):
                         config=ReportRuntimeConfig(reviewer="disabled"),
                         client=object(),
                     )
+
+                self.assertTrue(writer.call_args.kwargs["memory"].section_plan)
 
             self.assertFalse((session_root / "attempts" / "report-001").exists())
 

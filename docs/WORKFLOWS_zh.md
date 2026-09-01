@@ -57,6 +57,10 @@ controller 不会自行推断分支，也不会替调用方选择结果。需要
 和重复失败次数；目标选择和是否继续仍由调用方负责。该 policy 不调用 LLM、不执行 handler、
 不自动重试，也不会选择所谓最佳结果。
 
+`research-session` 应用现在通过只读的 `recommended_transition` 属性消费这个边界：执行和分析
+都通过时建议继续到 `report`，其他结果则返回 `experiment` 边界，由调用方明确决定修复或重新设计。
+这个建议仍受已持久化决策限制，不会创建 attempt、重新运行命令，也不会把失败 session 伪装成成功。
+
 当前第一条领域纵向切片可以显式注册
 `research.brief.run_research_brief_capability()`。它组合现有的 Read 和 Synthesis 边界，
 并为后续 capability 暴露一个结构化的 `research_brief.json` 输出。这是可选的适配器，
@@ -107,8 +111,27 @@ research direction，调用现有执行后端运行一次明确的命令，再�
 如果希望两段交接保留在同一个 session 中，可以使用
 `simple-ar research-session`。它复用相同的 brief 前缀，记录一个
 `research_design.v1` handoff，再用一个明确提供的 `ExperimentRequest` 进入现有 Analysis
-capability；实验命令仍由调用方给出，因此这是
-受控组合，不是自动生成代码或不受限制的研究循环。
+capability。默认实验命令仍由调用方给出；传入 `--code-task-config` 时，experiment attempt
+会改用已有的 project-style Code-Task backend，项目、benchmark、workspace、baseline 和
+执行设置仍由 TOML 管理，最终输出会规范化为同一份 canonical result。这仍是受控组合，
+不是不受限制的研究循环。
+
+如果 session 的实验失败但仍保留了 design 和 analysis handoff，可以显式追加一次恢复实验，
+复用已有文献和研究设计，不重新检索：
+
+```bash
+uv run simple-ar research-session-continue \
+  --session-root runs/research-session/<session> \
+  --cwd examples/research_brief/fixtures \
+  --primary-metric accuracy \
+  --metric-direction accuracy=higher \
+  --command python -c "print('accuracy: 0.90')"
+```
+
+它只会追加 `experiment-002` 和 `analysis-002`，并把失败的 `experiment-001` 记录为显式父节点。
+修正后的命令由调用方提供；不会重复 search、design 或代码生成。每个 session 只允许一次这种恢复，
+同时保留原有 attempt 和报告交接槽位，不覆盖旧产物。恢复成功后继续使用
+`simple-ar research-report`；恢复失败仍会持久化并以非零 shell 状态返回，方便检查。
 
 同一个 session 还可以通过 `run_research_report_session()` 继续进入现有 Report 边界。
 调用方提供 section drafts、`ReportContext` 和需要追踪的 source refs；适配器会追加
@@ -116,6 +139,10 @@ capability；实验命令仍由调用方给出，因此这是
 `research-session` 前缀在实验和分析完成后会报告 `ready_for_report`，真正的报告 continuation
 完成后 session 才会关闭。section drafts 仍由调用方明确提供，writer/revision 策略不会被
 塞进生命周期 controller。
+
+已有的 `simple-ar status <session-root>` 命令也支持 capability session 的
+`session_manifest.json`。它只报告持久化的 session 检查点、attempt 状态、有限预算和最后一次
+决策，不会重新运行或改写任何 capability；旧的 `manifest.json` status 路径保持不变。
 
 如果希望由现有的 Writer/Reviewer 实现负责生成草稿，可以使用
 `run_research_report_agent_session()`。它仍然只接收紧凑的 report context 和 memory，
@@ -129,7 +156,9 @@ capability；实验命令仍由调用方给出，因此这是
 `ResearchSessionResult` 确定性整理紧凑的 context 和 memory：持久化的 synthesis、选中的
 论文元数据、真实执行结果和结果分析 claims 都会保留为报告输入来源。
 `run_research_session_report_agent()` 是这条路径的轻量便捷入口，但 template、运行预算和
-LLM client 仍由调用方选择；它只是报告交接，不是自动研究调度器。
+LLM client 仍由调用方选择；它只是报告交接，不是自动研究调度器。该入口只接受执行和分析
+均通过的 session（`report_ready=True`）。如果需要为失败或部分结果生成诊断报告，应改用
+底层的显式报告边界，由调用方明确提供草稿和证据。
 
 进程结束后，如果需要从已有 session 继续报告阶段，可以调用
 `load_research_session_result()`。它只根据 `session_manifest.json` 以及声明的
@@ -142,9 +171,13 @@ LLM client 仍由调用方选择；它只是报告交接，不是自动研究调
 `simple_ar.app.research_code_task.run_research_code_task_session()`。它读取持久化的
 `synthesis_result.v1` 或 `research_brief.v1`，复用现有 Code-Task backend 完成隔离、代码
 生成、验证、执行和结果分析，并把真实 execution/analysis refs 留在同一个 session 中。
-`run_research_code_task_candidates()` 是可选的有界策略：每个候选使用独立子 session，只有
-明确改善 primary metric 的候选才接受，否则记录 decision 后继续或停止。它不是第二套
+`run_research_code_task_candidates()` 是可选的有界策略：候选先按共享的证据与执行准备度排序，
+每个候选使用独立子 session，只有明确改善 primary metric 的候选才接受，否则记录 decision 后继续或停止。它不是第二套
 代码生成器，也不是无限 scheduler。
+
+候选池会在启动时以及每个候选完成后更新 `candidate_summary.json`。如果进程中断，
+该检查点和 session manifest 可以说明已经完成的候选以及是否存在活动 attempt；它们只用于检查，
+不会自动恢复，也不会替代各候选自己的工作目录。
 
 需要从命令行运行这一窄路径时，可以直接复用已有 Code-Task TOML：
 
@@ -155,9 +188,19 @@ uv run simple-ar research-code-task --topic "reliable agents" \
   --output-root runs/research-code-task
 ```
 
+加入 `--with-report` 后，单候选模式会在同一个成功的 session 上继续使用已有的实验报告
+Writer/Reviewer 和 audit；多候选模式只把最终选中的通过 session 交给这条路径：
+
+```bash
+uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model gpt-5.4 --with-report
+```
+
+只有执行和结果分析都通过时才允许这次接续；它不会重试，也不会把失败 session 伪装成正式报告。
+
 该命令默认只执行一个研究方向；只有显式加入 `--max-candidates N` 才会在独立子 session
-中尝试至多 N 个方向。它要求配置中的 `[execute].use_llm = true`，并且当前只接入已有
-project-style Code-Task，不会替用户自动创建 GPU 环境或任意 greenfield 工程。
+中尝试至多 N 个方向。若同时加入 `--with-report`，只有通过比较并被选中的 session 会进入
+报告阶段。它要求配置中的 `[execute].use_llm = true`，并且当前只接入已有 project-style
+Code-Task，不会替用户自动创建 GPU 环境或任意 greenfield 工程。
 
 完成或失败的单个 Code-Task session 可以在后续进程中通过
 `load_research_code_task_session_result(session_root)` 恢复。该入口只读取 session manifest、
@@ -187,10 +230,11 @@ Document Ingest、Read、Synthesis、Research Design、Experiment、Analysis、R
 其中 `plan` 适配器复用已有的问题、查询和来源预算 builder，写出一个
 `research_plan.v1` handoff；默认使用确定性路径，调用方显式传入
 `use_llm=True` 和共享 client 时才会得到规范化的模型辅助计划。它不替调用方选择下一能力。
-窄的 `research_design` 适配器接收持久化的 synthesis，选择调用方指定的研究方向，并写出
-包含已有 `ResearchExperimentContract` 的 `research_design.v1` handoff。它只检查契约是否具备
-最小可执行字段，不会自行创造 command、metric value、实验矩阵、代码或执行计划；领域专属
-的代码生成和执行实现仍由调用方提供。
+窄的 `research_design` 适配器接收持久化的 synthesis，默认选择调用方指定的研究方向；
+调用方显式提供共享 LLM 时，它也可以只在已有候选方向中选择一个，并写出包含已有
+`ResearchExperimentContract` 的 `research_design.v1` handoff。它只检查契约是否具备最小可执行
+字段，不会自行创造 command、metric value、实验矩阵、代码或执行计划；领域专属的代码生成和
+执行实现仍由调用方提供。
 如果要把该计划交给已有的 `SearchRequest`，可以使用
 `research.planning.search_request_from_plan()` 这个内存适配器；它不会调用 provider，
 也不增加 retry、去重或候选选择策略。
@@ -349,7 +393,7 @@ plan -> search -> read -> synthesize -> design experiment
 | `plan` | `goal.md`, `problem.md` | 把主题收束成具体研究问题；启用 LLM 时由 LLM 支持。 |
 | `search` | `papers.jsonl`、`search_meta.json`、`documents/`、`research_index/` | 检索和摄取 metadata/全文，记录 provider provenance，并构建本地 chunks。它可以为了预算做候选选择，但不做语义阅读审查。 |
 | `read` | `review/`、`paper_notes.json`、`notes.md` | 对检索结果做筛选和阅读优先级排序，再把 shortlist 转成规范化 Paper Brief；启用 LLM 且检索量较大时，先按 title/abstract 小批次粗筛，再重排保留集合。 |
-| `synthesize` | `synthesis_brief.json`、`synthesis.md`、`hypothesis.md` | 基于 read 阶段 Paper Brief 分析主题、gap、有限 ideas 和可测试假设；启用 LLM 时由 LLM 支持。 |
+| `synthesize` | `synthesis_brief.json`、`synthesis.md`、`hypothesis.md` | 基于 read 阶段 Paper Brief 分析主题、gap、有限 ideas 和可测试假设。默认推导保持确定性；显式启用 LLM 时可以提出有界候选，但每条 motivation reference 都会对照输入证据校验。 |
 | `design` | `experiment_plan.json`、`experiment_contract.json`、`result_schema.json`、`resource_plan.json`、`dependency_plan.json`、`domain_profile.json`、`contract_validation.json` | 选择安全实验模板，并写出可执行契约、指标 schema、资源/依赖预算、domain profile 和代码前检查。 |
 | `code` | `code_task_run/`、`generated_project/`、`experiment.py` 或模板代码 | 基于 design contract 准备内嵌已有项目 code-task、运行统一 greenfield code-task 生成，或写出白名单模板实验。 |
 | `run` | `results.json`、`guard_report.json`、`stdout.txt`、`stderr.txt` | 执行实验，写出 canonical results，并在报告前检查缺失/异常指标。 |

@@ -6,8 +6,11 @@ import unittest
 import contextlib
 import io
 from pathlib import Path
+from unittest.mock import patch
 
+from simple_ar.core import CapabilityResult
 from simple_ar.app.research_brief import (
+    ResearchBriefSessionError,
     ResearchBriefSessionRequest,
     run_research_brief_session,
 )
@@ -15,6 +18,36 @@ from simple_ar.cli import main
 
 
 class ResearchBriefApplicationTests(unittest.TestCase):
+    def test_failed_plan_surfaces_capability_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def register_failed_plan(registry: object, *, names: object) -> None:
+                del names
+                registry.register(
+                    "plan",
+                    lambda **_: CapabilityResult(
+                        status="failed",
+                        diagnostics=("planner backend unavailable",),
+                    ),
+                )
+
+            with patch(
+                "simple_ar.app.research_brief.register_research_capabilities",
+                side_effect=register_failed_plan,
+            ):
+                with self.assertRaisesRegex(
+                    ResearchBriefSessionError,
+                    "planner backend unavailable",
+                ):
+                    run_research_brief_session(
+                        ResearchBriefSessionRequest(
+                            topic="reliable agents",
+                            session_root=root / "session",
+                            local_documents=(root / "paper.md",),
+                        )
+                    )
+
     def test_local_document_session_propagates_explicit_llm_mode(self) -> None:
         class FakeClient:
             model = "fake-brief-model"

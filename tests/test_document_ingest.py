@@ -3,19 +3,88 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from simple_ar.core.artifacts import write_jsonl
 from simple_ar.core.pipeline import Context
 from simple_ar.core.stages import Stage
 from simple_ar.literature.models import Paper
 from simple_ar.pipeline_stages.research import _write_read_cards
-from simple_ar.research.contracts import DocumentRecord, TextChunk
+from simple_ar.research.contracts import DocumentRecord, SourcePlan, TextChunk
+from simple_ar.research.documents.fulltext import build_fulltext_manifest
 from simple_ar.research.documents.ingest import build_document_bundle
 from simple_ar.research.sources.base import build_source_plan
 from simple_ar.research.service import load_search_document_bundle
 
 
 class DocumentIngestTests(unittest.TestCase):
+    def test_remote_fulltext_reuses_a_valid_cache_entry(self) -> None:
+        class Response:
+            headers = {"Content-Type": "application/pdf"}
+
+            def __init__(self) -> None:
+                self._read = False
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _size: int = -1) -> bytes:
+                if self._read:
+                    return b""
+                self._read = True
+                return b"%PDF-1.7\nfixture"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = DocumentRecord(
+                document_id="paper-1",
+                title="A paper",
+                source="fixture",
+                metadata={
+                    "fulltext_hints": [
+                        {
+                            "kind": "pdf",
+                            "source": "fixture",
+                            "url": "https://example.test/paper.pdf",
+                        }
+                    ]
+                },
+            )
+            source_plan = SourcePlan(
+                queries=["fixture"],
+                require_fulltext=True,
+                allow_pdf_download=True,
+                budget={
+                    "max_fulltext_documents": 1,
+                    "max_fulltext_fetch_attempts": 1,
+                    "keep_raw_pdf": True,
+                },
+            )
+            with patch(
+                "simple_ar.research.documents.fulltext.urllib.request.urlopen",
+                return_value=Response(),
+            ) as urlopen:
+                first = build_fulltext_manifest(
+                    records=[record],
+                    source_plan=source_plan,
+                    cache_dir=root / "cache",
+                )
+                second = build_fulltext_manifest(
+                    records=[record],
+                    source_plan=source_plan,
+                    cache_dir=root / "cache",
+                )
+
+            first_hint = first["documents"][0]["hints"][0]
+            second_hint = second["documents"][0]["hints"][0]
+            self.assertEqual(first_hint["status"], "cached")
+            self.assertEqual(second_hint["reason"], "cache_hit")
+            self.assertEqual(first_hint["local_path"], second_hint["local_path"])
+            urlopen.assert_called_once()
+
     def test_bundle_preserves_existing_local_document_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

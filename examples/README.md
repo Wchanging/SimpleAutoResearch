@@ -13,6 +13,33 @@ uv run simple-ar research-brief --topic "reliable agents" \
 The session keeps plan, search, document-ingest, and brief handoffs in separate
 attempt directories. The fixture is intentionally small and offline.
 
+After a `research-session` reaches `ready_for_report`, continue it through the
+existing report Writer/Reviewer and audit boundary:
+
+```bash
+uv run simple-ar research-report \
+  --session-root runs/research-session/<session> \
+  --model gpt-5.4
+```
+
+For a new session, `research-session --with-report` is the equivalent explicit
+one-command continuation; it still uses the same persisted attempts and does
+not introduce an automatic retry loop.
+
+The same session can use the existing Code-Task backend for its experiment
+attempt. Omit `--command`, pass a Code-Task TOML, and provide `--model`; the
+session keeps the Code-Task workspace and canonical result under
+`experiment-001` while reusing the normal Analysis handoff:
+
+```bash
+uv run simple-ar research-session \
+  --topic "reliable agents" \
+  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
+  --model gpt-5.4 \
+  --output-root runs/research-session
+```
+
 SimpleAutoResearch keeps a small set of public example entrypoints. Each one mirrors
 a common user workflow and keeps its config next to the project or task it
 drives.
@@ -66,4 +93,5 @@ For the first bounded research-to-code consumer, run `research-brief` first and
 pass its `research_brief.json` to `research-code-task` together with an existing
 Code-Task TOML. The latter reuses the normal isolated Code-Task backend and keeps
 execution and analysis artifacts in a new session. Use `--max-candidates N` only
-for an explicit bounded comparison of several synthesis ideas.
+for an explicit bounded comparison of several synthesis ideas; add `--with-report`
+to pass only the selected successful candidate to the existing report/audit path.

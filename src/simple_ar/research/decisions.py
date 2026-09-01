@@ -70,6 +70,11 @@ class ResearchIterationPolicy:
         decision = self.transition_policy.decide(request)
         if decision.action == "block":
             return decision
+        # A successful handoff to the terminal report boundary may close the
+        # path after bounded work is consumed; intermediate revisits remain
+        # subject to the normal limits.
+        if decision.action == "accept" and decision.target == "report":
+            return decision
         if len(prior_decisions) >= self.limits.max_steps:
             return _blocked_iteration_decision(
                 decision,

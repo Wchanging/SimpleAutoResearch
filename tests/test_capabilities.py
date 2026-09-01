@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from simple_ar.core import (
     ArtifactRef as PublicArtifactRef,
@@ -99,6 +100,43 @@ class CapabilityBoundaryTests(unittest.TestCase):
             self.assertEqual(restored, result)
             self.assertEqual(manifest_ref.kind, "manifest")
             self.assertEqual(manifest_items[0].path, "result.json")
+
+    def test_json_write_cleans_temporary_file_when_commit_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ArtifactStore(Path(tmp))
+            with patch(
+                "simple_ar.core.artifacts.os.replace",
+                side_effect=OSError("simulated commit failure"),
+            ):
+                with self.assertRaises(OSError):
+                    store.write_json("state.json", {"status": "running"})
+
+            self.assertFalse((Path(tmp) / "state.json").exists())
+            self.assertEqual(tuple(Path(tmp).glob(".state.json.*.tmp")), ())
+
+    def test_json_write_retries_a_transient_permission_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ArtifactStore(Path(tmp))
+            import simple_ar.core.artifacts as artifacts
+
+            real_replace = artifacts.os.replace
+            calls = 0
+
+            def replace(source: Path, target: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls < 3:
+                    raise PermissionError("temporary lock")
+                real_replace(source, target)
+
+            with patch(
+                "simple_ar.core.artifacts.os.replace",
+                side_effect=replace,
+            ):
+                store.write_json("state.json", {"status": "running"})
+
+            self.assertEqual(calls, 3)
+            self.assertEqual(store.read_json("state.json"), {"status": "running"})
 
     def test_capability_result_round_trips_as_an_attempt_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

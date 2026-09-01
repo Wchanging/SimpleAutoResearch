@@ -16,6 +16,7 @@ from simple_ar.core import (
     ArtifactRef,
     AttemptManifest,
     BudgetState,
+    CapabilityResult,
     CapabilityRegistry,
     DecisionRecord,
     SessionController,
@@ -168,18 +169,33 @@ def run_research_experiment_session(
         schema="experiment_input.v1",
         producer="research.experiment.session",
     )
-    controller.execute(
+    design_result, _ = controller.execute(
         "research_design",
         attempt_id="design-001",
         inputs=(source_ref,),
         next_capability="experiment",
-        request=ResearchDesignRequest(synthesis=synthesis),
+        request=ResearchDesignRequest(
+            synthesis=synthesis,
+            topic=request.topic,
+            execution_schema=request.result_schema,
+            use_llm=request.use_llm,
+            llm_client=request.llm_client,
+        ),
     )
-    design_ref = controller.attempt_output_ref(
-        "design-001",
-        kind="research_design",
-        schema="research_design.v1",
-    )
+    if design_result.status in {"failed", "blocked"}:
+        raise ResearchExperimentSessionError(
+            _capability_failure("research_design", design_result)
+        )
+    try:
+        design_ref = controller.attempt_output_ref(
+            "design-001",
+            kind="research_design",
+            schema="research_design.v1",
+        )
+    except (KeyError, OSError, ValueError) as exc:
+        raise ResearchExperimentSessionError(
+            _missing_capability_output("research_design", design_result, exc)
+        ) from exc
     design_payload = controller.store.read_json(design_ref)
     if not isinstance(design_payload, Mapping):
         raise ResearchExperimentSessionError(
@@ -248,6 +264,12 @@ def _run_experiment_steps(
     backend: ExecutionBackend | None,
     analysis_use_llm: bool = False,
     analysis_client: Any | None = None,
+    experiment_request: Any | None = None,
+    experiment_inputs: tuple[ArtifactRef, ...] | None = None,
+    experiment_attempt_id: str = "experiment-001",
+    analysis_attempt_id: str = "analysis-001",
+    experiment_parent_attempt_id: str | None = None,
+    experiment_trigger: str = "initial",
 ) -> _ExperimentSteps:
     """Run experiment and analysis attempts in a caller-owned session."""
 
@@ -256,33 +278,41 @@ def _run_experiment_steps(
         raise ResearchExperimentSessionError(
             "No executable research contract is available for the experiment."
         )
-    experiment_request = ExperimentRequest(
-        run=run_request,
-        result_schema=result_schema,
-        experiment_contract=experiment_contract,
-    )
-    controller.execute(
+    if experiment_request is None:
+        experiment_request = ExperimentRequest(
+            run=run_request,
+            result_schema=result_schema,
+            experiment_contract=experiment_contract,
+        )
+    experiment_result, _ = controller.execute(
         "experiment",
-        attempt_id="experiment-001",
-        inputs=(design_ref or source_ref,),
+        attempt_id=experiment_attempt_id,
+        trigger=experiment_trigger,
+        parent_attempt_id=experiment_parent_attempt_id,
+        inputs=experiment_inputs or (design_ref or source_ref,),
         next_capability="analysis",
         request=experiment_request,
         backend=backend,
     )
-    execution_ref = controller.attempt_output_ref(
-        "experiment-001",
-        kind="experiment_result",
-        schema="canonical_results.2.5",
-    )
-    execution = controller.store.read_json(execution_ref)
+    try:
+        execution_ref = controller.attempt_output_ref(
+            experiment_attempt_id,
+            kind="experiment_result",
+            schema="canonical_results.2.5",
+        )
+        execution = controller.store.read_json(execution_ref)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ResearchExperimentSessionError(
+            _missing_capability_output("experiment", experiment_result, exc)
+        ) from exc
     if not isinstance(execution, Mapping):
         raise ResearchExperimentSessionError(
             f"Execution output is not a JSON object; inspect {controller.store.root}."
         )
 
-    controller.execute(
+    analysis_result, _ = controller.execute(
         "analysis",
-        attempt_id="analysis-001",
+        attempt_id=analysis_attempt_id,
         inputs=(execution_ref,),
         next_capability=analysis_next_capability,
         result_ref=execution_ref,
@@ -290,12 +320,17 @@ def _run_experiment_steps(
         use_llm=analysis_use_llm,
         client=analysis_client,
     )
-    analysis_ref = controller.attempt_output_ref(
-        "analysis-001",
-        kind="analysis_result",
-        schema="analysis_handoff.v1",
-    )
-    analysis_payload = controller.store.read_json(analysis_ref)
+    try:
+        analysis_ref = controller.attempt_output_ref(
+            analysis_attempt_id,
+            kind="analysis_result",
+            schema="analysis_handoff.v1",
+        )
+        analysis_payload = controller.store.read_json(analysis_ref)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise ResearchExperimentSessionError(
+            _missing_capability_output("analysis", analysis_result, exc)
+        ) from exc
     if not isinstance(analysis_payload, Mapping):
         raise ResearchExperimentSessionError(
             f"Analysis output is not a JSON object; inspect {controller.store.root}."
@@ -331,6 +366,22 @@ def _load_synthesis(path: Path) -> SynthesisResult:
         raise ResearchExperimentSessionError(
             f"Invalid synthesis handoff {path}: {exc}"
         ) from exc
+
+
+def _capability_failure(name: str, result: CapabilityResult) -> str:
+    details = "; ".join(item for item in result.diagnostics if item.strip())
+    suffix = f": {details}" if details else "."
+    return f"{name} capability returned {result.status!r}{suffix}"
+
+
+def _missing_capability_output(
+    name: str,
+    result: CapabilityResult,
+    error: Exception,
+) -> str:
+    return (
+        f"{_capability_failure(name, result)} Required output was unavailable: {error}"
+    )
 
 
 def build_experiment_analysis_context(

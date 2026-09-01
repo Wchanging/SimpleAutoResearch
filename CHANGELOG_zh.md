@@ -4,10 +4,60 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-09-01
+
+### 变更
+
+- `research.synthesis` 在显式启用 LLM 时现在可以接收有界的结构化候选方向。候选替换确定性
+  集合前会校验必需字段和证据引用；旧的仅返回 prose 的响应仍保持兼容，可选的字符串列表
+  字段只做窄范围的单值规范化。
+- `research_design` 和有界的 Code-Task 候选路径现在共享确定性的执行准备度排序：优先处理
+  执行字段和证据更完整的方向；显式指定的方向和既有数据格式保持不变。
+- 选择 synthesis 候选方向时，现在会把该候选自己的 baseline 提示和预期结果带入研究实验契约，
+  防止更早候选的旧字段错误地传到执行阶段。
+- 有界的 Code-Task 候选运行现在可以显式使用 `--with-report`，只将最终通过并选中的候选接续到
+  既有报告和 audit 路径。
+- `simple-ar status` 现在可以读取持久化的 `research-session` 检查点，显示 attempt、有限预算
+  和最后一次决策，而不会重新运行或改写 capability 产物。旧的 pipeline 和 Code-Task status
+  输出保持不变。
+- 最后一次 attempt 失败或需要修订、但 session 仍开放时，`status` 现在会显示明确的继续提示；
+  该提示不会启动重试，也不表示后台仍有进程运行。
+- 有界 Code-Task 候选运行现在会在启动时及每个候选完成后更新 `candidate_summary.json`，
+  便于检查中断进度；这不会新增自动 scheduler，也不会自动恢复子工作目录。
+- `research-brief` 和 `research-session` 现在支持可选的 `--cache-dir`，用于在不同 session 之间
+  复用已经下载的全文文件。默认仍使用 session-local 存储；复用 PDF 前只做轻量文件头检查。
+
+## 2026-08-31
+
+### 变更
+
+- `research-session` 现在暴露只读的有界 transition 建议：执行和分析都通过时建议交接到
+  `report`，其他结果返回 `experiment` 边界，由调用方明确决定修复或重新设计。它不会创建
+  attempt、重试命令，也不会掩盖失败 session。
+- `research-session` 现在可以在传入 `--code-task-config` 时，把单次 experiment attempt
+  交给已有的 project-style Code-Task backend，同时保留同一套 session、attempt、
+  canonical result 和 analysis 边界。默认的显式命令路径不变。
+- 增加了覆盖 Code-Task session 路由的离线回归，并同步更新 CLI 与 handoff 使用说明。
+- 增加 `research-session-continue`，用于在已有 session 中显式追加一次可审计的恢复实验。它复用
+  已持久化的文献和 research design，追加隔离的 experiment/analysis attempt，保留失败父节点，
+  并继续提供报告交接，不会增加自动 scheduler。
+
 ## 2026-08-30
 
 ### 变更
 
+- 应用层交接现在会在解析 typed output 前检查 capability 状态；所需交接缺失时会保留能力诊断，
+  不再用后续的文件缺失错误掩盖根因。只要规范化 results 产物存在，失败的实验执行仍可继续交给
+  下游结果分析。
+- 增加显式的 `research-report` CLI，用于接续已经可以进入报告阶段的 research session。
+  它复用现有 Writer/Reviewer 和 audit 路径，不重新检索或运行实验，并以新的 report attempt
+  追加结果，不替换已有 session 产物。
+- 增加可选的 `research-session --with-report` 便捷路径：文献到实验前缀通过后，
+  直接复用同一条报告 continuation；不会新增第二套报告引擎或 scheduler。
+- 报告 continuation 现在会在调用 Writer 前检查固定 attempt 槽位；重复或已关闭的
+  session 会直接失败，不再额外消耗模型调用或替换之前的 writer 轨迹。
+- research design 现在可以选择性使用共享 LLM，从已有且带证据的研究方向中选择一个；
+  确定性的 contract 构造仍是权威来源，也继续支持调用方显式指定方向。
 - 增加窄的 `research_design` handoff：选择 synthesis 中已有的研究方向，并在现有
   Experiment、Code-Task 以及标准 research-session 组合路径中复用其
   `ResearchExperimentContract`；不会新增第二套实验 schema，也不会创建 LLM 调度器。
@@ -26,6 +76,8 @@
   研究候选，不会隐式形成无限循环。
 - 增加从 research session 到 report agent 的轻量交接：从持久化的 synthesis、文献、执行和
   分析证据确定性整理报告输入，同时继续复用现有 Writer/Reviewer 与 report audit 路径。
+- 增加显式的 `research-code-task --with-report` 接续入口；只有单候选 Code-Task session 通过后，
+  才复用通用 report Writer/Reviewer 和 audit。
 - 增加持久化 Code-Task session 的只读恢复入口：只根据声明的 synthesis、execution 和
   analysis handoff 恢复结果，不会重新执行或自行选择其他产物。
 - 增加面向报告就绪 Code-Task session 的窄续接 wrapper；只有持久化 decision 明确把

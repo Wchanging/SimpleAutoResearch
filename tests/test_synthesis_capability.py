@@ -96,6 +96,73 @@ class SynthesisCapabilityTests(unittest.TestCase):
         self.assertIn("Themes", payload["synthesis_markdown"])
         self.assertIn("Hypothesis", payload["hypothesis_markdown"])
 
+    def test_llm_can_replace_rule_ideas_with_grounded_candidates(self) -> None:
+        class FakeClient:
+            model = "fake-synthesis-model"
+
+            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                self.user = user
+                return {
+                    "synthesis_markdown": "## Themes\n\nValidation is the main theme.",
+                    "hypothesis_markdown": "## Hypothesis\n\nA focused checker should improve success.",
+                    "idea_candidates": [
+                        {
+                            "idea_id": "idea-llm-001",
+                            "title": "Add a focused validation checker",
+                            "hypothesis": "A focused checker improves the success metric.",
+                            "motivation_refs": ["paper-1#chunk-1"],
+                            "proposed_change": "Add the checker to the validation path.",
+                            "expected_outcome": "The success metric increases.",
+                            "required_baselines": ["existing baseline"],
+                            "required_datasets": ["agent benchmark"],
+                            "metrics": ["success"],
+                            "feasibility": "high",
+                            "risks": "The local fixture may be too small.",
+                        }
+                    ],
+                }
+
+        client = FakeClient()
+        result = synthesize_evidence(
+            SynthesisRequest(
+                evidence_pack=_pack(),
+                use_llm=True,
+                llm_client=client,
+            )
+        )
+
+        self.assertEqual(result.ideas[0].idea_id, "idea-llm-001")
+        self.assertEqual(result.ideas[0].risks, ["The local fixture may be too small."])
+        self.assertEqual(result.experiment_contract.hypothesis, result.ideas[0].hypothesis)
+        self.assertEqual(result.novelty_checks[0].idea_id, "idea-llm-001")
+        self.assertIn("idea_candidates", client.user)
+
+    def test_llm_candidates_reject_unknown_evidence_references(self) -> None:
+        class FakeClient:
+            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                return {
+                    "synthesis_markdown": "Evidence summary.",
+                    "hypothesis_markdown": "Testable hypothesis.",
+                    "idea_candidates": [
+                        {
+                            "idea_id": "idea-llm-001",
+                            "title": "Unverifiable idea",
+                            "hypothesis": "It improves success.",
+                            "motivation_refs": ["invented-paper"],
+                            "proposed_change": "Change the implementation.",
+                        }
+                    ],
+                }
+
+        with self.assertRaisesRegex(LLMError, "unknown motivation refs"):
+            synthesize_evidence(
+                SynthesisRequest(
+                    evidence_pack=_pack(),
+                    use_llm=True,
+                    llm_client=FakeClient(),
+                )
+            )
+
     def test_research_package_keeps_capability_exports_lazy_but_compatible(self) -> None:
         self.assertIs(PublicSynthesisRequest, SynthesisRequest)
 
