@@ -7,6 +7,9 @@ from typing import Any
 from simple_ar.literature.models import Paper
 
 
+_CITATION_PATTERN = r"(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)"
+
+
 def build_report_quality(
     report: str,
     report_body: str,
@@ -138,7 +141,7 @@ def _runtime_limit_status(
 
 def _body_citation_ids(markdown: str, allowed_ids: set[str]) -> set[str]:
     body = _strip_references_section(markdown)
-    found = set(re.findall(r"@([A-Za-z0-9_.:-]+)", body))
+    found = set(re.findall(_CITATION_PATTERN, body))
     return found & allowed_ids
 
 

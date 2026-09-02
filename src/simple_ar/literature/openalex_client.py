@@ -6,7 +6,6 @@ import time
 from typing import Any
 
 import requests
-from pyalex import Works, config as pyalex_config
 
 from simple_ar.literature.models import Paper, normalize_paper_id
 
@@ -18,6 +17,7 @@ class OpenAlexSearchError(RuntimeError):
 _MAX_RESULTS = 25
 _TIMEOUT_SEC = 20
 _REQUEST_GAP_SEC = 0.25
+_OPENALEX_API_URL = "https://api.openalex.org/works"
 _SELECT_FIELDS = (
     "id,title,display_name,authorships,publication_year,publication_date,"
     "primary_location,doi,ids,abstract_inverted_index,open_access,best_oa_location"
@@ -63,15 +63,22 @@ class OpenAlexSearchClient:
             raise OpenAlexSearchError("max_results must be at least 1")
 
         _respect_rate_limit()
-        _configure_pyalex(self.mailto)
         try:
-            results = (
-                Works()
-                .search(query)
-                .select(_SELECT_FIELDS)
-                .get(per_page=min(max_results, _MAX_RESULTS))
+            response = requests.get(
+                _OPENALEX_API_URL,
+                params={
+                    "search": query,
+                    "per-page": min(max_results, _MAX_RESULTS),
+                    "select": _SELECT_FIELDS,
+                    "mailto": self.mailto,
+                },
+                headers={"Accept": "application/json"},
+                timeout=self.timeout_sec,
             )
-        except (requests.RequestException, ValueError, RuntimeError, KeyError) as exc:
+            response.raise_for_status()
+            payload = response.json()
+            results = payload.get("results") if isinstance(payload, dict) else None
+        except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
             raise OpenAlexSearchError(f"OpenAlex search failed: {exc}") from exc
 
         if not isinstance(results, list):
@@ -192,12 +199,3 @@ def _respect_rate_limit() -> None:
         if elapsed < _REQUEST_GAP_SEC:
             time.sleep(_REQUEST_GAP_SEC - elapsed)
         _last_request_at = time.monotonic()
-
-
-def _configure_pyalex(mailto: str) -> None:
-    pyalex_config.email = mailto
-    pyalex_config.max_retries = max(int(pyalex_config.get("max_retries", 0) or 0), 1)
-    pyalex_config.retry_backoff_factor = max(
-        float(pyalex_config.get("retry_backoff_factor", 0.0) or 0.0),
-        0.25,
-    )

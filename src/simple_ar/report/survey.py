@@ -16,6 +16,9 @@ from simple_ar.report.schema import (
 )
 
 
+_CITATION_PATTERN = r"(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)"
+
+
 SURVEY_TEMPLATE_NAMES = {"survey", "survey_long"}
 DEFAULT_SURVEY_FACETS = [
     "foundations_and_scope",
@@ -725,12 +728,12 @@ def _build_citation_coverage_audit(
         for paper in selected
         if isinstance(paper, Mapping) and str(paper.get("citation_key") or "").strip()
     }
-    cited_ids = set(re.findall(r"@([A-Za-z0-9_.:-]+)", report_body))
-    cited_keys = set(re.findall(r"@([A-Za-z0-9_.:-]+)", final_report))
+    cited_ids = set(re.findall(_CITATION_PATTERN, report_body))
+    cited_keys = set(re.findall(_CITATION_PATTERN, final_report))
     sections = _markdown_sections_for_audit(report_body)
     per_section = []
     for heading, body in sections:
-        citations = sorted(set(re.findall(r"@([A-Za-z0-9_.:-]+)", body)))
+        citations = sorted(set(re.findall(_CITATION_PATTERN, body)))
         per_section.append({"heading": heading, "citation_count": len(citations), "citations": citations[:20]})
     table_count = _markdown_table_count(final_report)
     figure_count = len(re.findall(r"!\[[^\]]*\]\([^)]+\)", final_report))

@@ -17,7 +17,7 @@ from simple_ar.report.schema import (
 )
 
 
-CITATION_PATTERN = re.compile(r"@([A-Za-z0-9_.:-]+)")
+CITATION_PATTERN = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)")
 NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_])(?:\d+\.\d+|\d+)(?:%|ms|s|sec|seconds)?(?![A-Za-z0-9_])")
 
 
@@ -258,7 +258,8 @@ def _mechanical_findings(messages: list[str]) -> list[ReviewerFinding]:
 def _unmatched_numbers(report_body: str, context: ReportContext) -> list[str]:
     metric_values = {_format_metric(metric.value) for metric in context.metric_sources}
     allowed = metric_values | {"0", "1", "2", "3", "4", "5", "8", "10"}
-    found = sorted(set(NUMBER_PATTERN.findall(report_body)))
+    citation_free = CITATION_PATTERN.sub("", report_body)
+    found = sorted(set(NUMBER_PATTERN.findall(citation_free)))
     return [value for value in found if value not in allowed][:12]
 
 

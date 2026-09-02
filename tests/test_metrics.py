@@ -25,6 +25,11 @@ class MetricParsingTests(unittest.TestCase):
         self.assertEqual(metrics["train_time_sec"], 0.0012)
         self.assertNotIn("label", metrics)
 
+    def test_parse_common_pass_at_k_metric(self) -> None:
+        metrics = parse_metric_lines("pass@1: 0.75\n")
+
+        self.assertEqual(metrics, {"pass@1": 0.75})
+
 
 if __name__ == "__main__":
     unittest.main()

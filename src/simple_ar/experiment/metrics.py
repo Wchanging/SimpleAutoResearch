@@ -5,7 +5,7 @@ import re
 
 NUMBER_PATTERN = r"-?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
 METRIC_RE = re.compile(
-    rf"^\s*(?:METRIC\s+)?([A-Za-z][A-Za-z0-9_.-]*)\s*(?::|=)\s*({NUMBER_PATTERN})\s*$"
+    rf"^\s*(?:METRIC\s+)?([A-Za-z][A-Za-z0-9_.@-]*)\s*(?::|=)\s*({NUMBER_PATTERN})\s*$"
 )
 
 

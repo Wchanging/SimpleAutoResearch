@@ -7,6 +7,9 @@ class CitationError(RuntimeError):
     """Raised when a report cites a paper outside ``papers.jsonl``."""
 
 
+_CITATION_PATTERN = r"(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)"
+
+
 def find_citation_ids(markdown: str) -> set[str]:
     """Find citation ids in Pandoc-style Markdown citations.
 
@@ -16,7 +19,7 @@ def find_citation_ids(markdown: str) -> set[str]:
     Returns:
         Set of ids referenced as ``[@paper_id]`` or ``@paper_id``.
     """
-    return set(re.findall(r"@([A-Za-z0-9_.:-]+)", markdown))
+    return set(re.findall(_CITATION_PATTERN, markdown))
 
 
 def validate_citations(markdown: str, allowed_ids: set[str]) -> None:

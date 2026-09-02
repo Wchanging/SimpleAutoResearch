@@ -6,6 +6,7 @@ import time
 from typing import Iterable
 
 import arxiv
+import requests
 
 from simple_ar.literature.models import Paper, normalize_paper_id
 
@@ -25,6 +26,18 @@ _rate_limit_count = 0
 _circuit_open_until = 0.0
 
 
+class _TimeoutSession(requests.Session):
+    """Requests session that supplies a bounded default timeout."""
+
+    def __init__(self, timeout_sec: float) -> None:
+        super().__init__()
+        self._timeout_sec = timeout_sec
+
+    def request(self, method: str, url: str, **kwargs: object) -> requests.Response:
+        kwargs.setdefault("timeout", self._timeout_sec)
+        return super().request(method, url, **kwargs)
+
+
 class ArxivSearchClient:
     """Small arXiv metadata search client.
 
@@ -32,6 +45,7 @@ class ArxivSearchClient:
         page_size: Number of records requested per arXiv API page.
         delay_seconds: Delay between arXiv API requests.
         num_retries: Retry count delegated to the ``arxiv`` package.
+        timeout_sec: Maximum time allowed for each HTTP request.
     """
 
     def __init__(
@@ -40,12 +54,19 @@ class ArxivSearchClient:
         page_size: int = 10,
         delay_seconds: float = 3.1,
         num_retries: int = 1,
+        timeout_sec: float = 20.0,
     ) -> None:
+        if timeout_sec <= 0:
+            raise ValueError("timeout_sec must be greater than 0")
         self._client = arxiv.Client(
             page_size=page_size,
             delay_seconds=delay_seconds,
             num_retries=num_retries,
         )
+        # arxiv.Client currently creates a requests.Session internally but does
+        # not expose a timeout setting. Keep its pagination/rate-limit behavior
+        # while injecting a bounded timeout at the session boundary.
+        self._client._session = _TimeoutSession(timeout_sec)
 
     def search(self, query: str, *, max_results: int = 5) -> list[Paper]:
         """Search arXiv and return normalized paper metadata.

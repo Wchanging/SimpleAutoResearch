@@ -7,6 +7,9 @@ from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import find_citation_ids
 
 
+_CITATION_PATTERN = r"(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)"
+
+
 def references_markdown(
     papers: list[Paper],
     citation_map: dict[str, int] | None = None,
@@ -51,7 +54,7 @@ def sanitize_report_citations(markdown_body: str, allowed_ids: set[str]) -> tupl
     sanitized = markdown_body
     for citation_id in invalid:
         sanitized = re.sub(
-            rf"@{re.escape(citation_id)}(?![A-Za-z0-9_.:-])",
+            rf"(?<![A-Za-z0-9_])@{re.escape(citation_id)}(?![A-Za-z0-9_.:-])",
             "",
             sanitized,
         )
@@ -76,7 +79,11 @@ def expand_short_citation_keys(markdown_body: str, citation_key_map: dict[str, s
         paper_id = paper_id_for(match.group(1))
         return f"@{paper_id}" if paper_id else match.group(0)
 
-    expanded = re.sub(r"@([Pp]\d+)(?![A-Za-z0-9_.:-])", replace_pandoc_key, markdown_body)
+    expanded = re.sub(
+        r"(?<![A-Za-z0-9_])@([Pp]\d+)(?![A-Za-z0-9_.:-])",
+        replace_pandoc_key,
+        markdown_body,
+    )
 
     def replace_bare_group(match: re.Match[str]) -> str:
         content = match.group(1).strip()
@@ -150,7 +157,7 @@ def display_citation_numbers(markdown_body: str, citation_map: dict[str, int]) -
         return markdown_body
 
     def replace_group(match: re.Match[str]) -> str:
-        ids = re.findall(r"@([A-Za-z0-9_.:-]+)", match.group(1))
+        ids = re.findall(_CITATION_PATTERN, match.group(1))
         numbers = [citation_map[citation_id] for citation_id in ids if citation_id in citation_map]
         if not numbers:
             return match.group(0)
@@ -158,7 +165,7 @@ def display_citation_numbers(markdown_body: str, citation_map: dict[str, int]) -
         return "[" + ", ".join(str(number) for number in deduped) + "]"
 
     converted = re.sub(
-        r"\[([^\]]*@([A-Za-z0-9_.:-]+)[^\]]*)\]",
+        r"\[([^\]]*(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)[^\]]*)\]",
         replace_group,
         markdown_body,
     )
@@ -168,7 +175,7 @@ def display_citation_numbers(markdown_body: str, citation_map: dict[str, int]) -
         number = citation_map.get(citation_id)
         return f"[{number}]" if number is not None else match.group(0)
 
-    converted = re.sub(r"@([A-Za-z0-9_.:-]+)", replace_standalone, converted)
+    converted = re.sub(_CITATION_PATTERN, replace_standalone, converted)
     return display_bare_source_id_numbers(converted, citation_map)
 
 
@@ -229,7 +236,7 @@ def ordered_body_citation_ids(markdown: str, allowed_ids: set[str]) -> list[str]
     body = strip_references_section(markdown)
     ordered: list[str] = []
     seen: set[str] = set()
-    for paper_id in re.findall(r"@([A-Za-z0-9_.:-]+)", body):
+    for paper_id in re.findall(_CITATION_PATTERN, body):
         if paper_id in allowed_ids and paper_id not in seen:
             ordered.append(paper_id)
             seen.add(paper_id)
@@ -271,7 +278,7 @@ def literature_citation_sentence(papers: list[Paper]) -> str:
 def body_citation_ids(markdown: str, allowed_ids: set[str]) -> set[str]:
     """Return allowed citation ids that appear before the References section."""
     body = strip_references_section(markdown)
-    found = set(re.findall(r"@([A-Za-z0-9_.:-]+)", body))
+    found = set(re.findall(_CITATION_PATTERN, body))
     return found & allowed_ids
 
 
