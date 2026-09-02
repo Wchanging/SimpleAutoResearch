@@ -87,7 +87,7 @@ class ResearchReportApplicationTests(unittest.TestCase):
                     / "report_audit.json"
                 ).is_file()
             )
-            self.assertEqual(len(result.attempts), 9)
+            self.assertEqual(len(result.attempts), 10)
             self.assertEqual(result.decisions[-2].action, "accept")
             self.assertEqual(result.decisions[-1].action, "accept")
             report_text = (

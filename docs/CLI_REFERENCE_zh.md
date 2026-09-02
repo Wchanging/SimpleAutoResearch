@@ -108,8 +108,8 @@ uv run simple-ar research-brief \
   --output-root runs/research-brief
 ```
 
-命令会创建带时间戳的 session，并把 plan、search、document ingest 和 brief 分别记录在
-独立 attempt 中。它不会静默 retry 或覆盖 attempt；`--query`、`--provider`、
+命令会创建带时间戳的 session，并把 plan、search、document ingest、read 和 synthesize
+分别记录在独立 attempt 中。它不会静默 retry 或覆盖 attempt；`--query`、`--provider`、
 `--max-results`、`--max-chunks` 和 `--idea-limit` 是这条路径保留的少量控制项。
 后续 session 可以传入同一个可选的 `--cache-dir` 来复用已下载的全文；省略时缓存仍保留在当前 session 内。
 
@@ -136,7 +136,7 @@ LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求�
 ```bash
 uv run simple-ar research-experiment \
   --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
   --cwd examples/research_brief/fixtures \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
@@ -164,7 +164,7 @@ session 会把输入 handoff、`results.json`、stdout/stderr、guard、diagnosi
 ### `simple-ar research-session`
 
 **一句话说明**：在同一个 `full_research` session 中运行小型端到端组合：
-`plan -> search -> document_ingest -> research_brief -> research_design -> experiment -> analysis`。
+`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`。
 默认由调用方明确提供实验命令。传入 `--code-task-config` 时，experiment attempt
 会改由已有的 project-style Code-Task backend 负责实现；它仍然是一次有界实验，
 不表示开启自主迭代。
@@ -280,18 +280,16 @@ uv run simple-ar research-report \
 ```bash
 uv run simple-ar research-code-task \
   --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
   --code-task-config examples/code_task_medium_review/configs/code_task.toml \
   --output-root runs/research-code-task
 ```
 
 传入的 Code-Task TOML 必须设置 `[execute].use_llm = true`。命令会创建新的 session，
-不会覆盖之前的 brief 或 run；默认只执行一个方向。显式加入 `--max-candidates N` 后，
-才会在最多 N 个隔离子 session 中尝试不同 idea；只有真实执行成功且主指标比较明确为
-改善的候选才会接受，失败候选会作为证据保留，最终按预算停止，不会无限循环。
-加入 `--with-report` 后，单候选模式会接续这个通过的 Code-Task session；多候选模式只会
-为最终选中的通过候选打开报告 continuation。两者都复用已有 Writer/Reviewer、报告组装和
-audit 路径，不会为失败、部分完成或未选中的候选生成正式报告。
+不会覆盖之前的 brief 或 run，并只执行一个明确选定的方向。多候选比较暂时后置，等单方向
+路径在真实准备项目上验证稳定后再考虑。
+加入 `--with-report` 后，会在这个通过的 Code-Task session 上继续使用已有 Writer/Reviewer、
+报告组装和 audit 路径。
 
 | 参数 | 含义 |
 | --- | --- |
@@ -303,12 +301,10 @@ audit 路径，不会为失败、部分完成或未选中的候选生成正式�
 | `--timeout-sec N` | 可选的 `[execute].timeout_sec` 覆盖值。 |
 | `--baseline-policy POLICY` | 可选覆盖：`auto`、`run`、`skip`、`provided` 或 `none`。 |
 | `--baseline-metrics-file PATH` | `provided` policy 使用的 baseline 指标文件。 |
-| `--max-candidates N` | 显式的有界 idea 数量，默认是一个。 |
-| `--with-report` | 为通过的 session 追加标准报告和 audit；多候选时只处理最终选中的候选。 |
+| `--with-report` | 为通过的 session 追加标准报告和 audit。 |
 
 当前入口只接入已有 project-style Code-Task，不会创建托管环境、分配 GPU 或声称支持任意
-greenfield 生成。`--with-report` 需要 `--model`，使用标准 experiment 模板；多候选选择仍是
-有界顺序步骤，只有选中的通过 session 可以进入报告。
+greenfield 生成。`--with-report` 需要 `--model`，使用标准 experiment 模板。
 
 ### `simple-ar resume`
 

@@ -497,7 +497,7 @@ max_proposal_chars = 42000
 | --- | --- |
 | `[run].topic` | 用户的主要研究/实验目标，会影响 planning、默认搜索 query 和报告表述。 |
 | `[run].from_stage` / `[run].to_stage` | 部分运行的阶段范围。可用于停在 `synthesize`、只重跑 `report`，或 resume 某一段。 |
-| `[run].debug_artifacts` | 是否保留详细诊断和草案交接文件，例如 search planning、provider traces、retrieval-selection rows、coverage review、section tables、debug cards、旧 evidence-pack 诊断产物，以及 design 阶段的 tool contracts、evidence review、eval report 和 retention policy。默认 false 会保持精简输出；核心产物仍按阶段保留：`02-search` documents/chunks、`03-read` review/Paper Brief、`04-synthesize` synthesis brief/Markdown、`05-design` experiment contracts。 |
+| `[run].debug_artifacts` | 是否保留详细的 search diagnostics、provider traces、retrieval-selection rows、coverage/section tables、debug cards 和旧 evidence-pack 诊断产物。默认 false 会保持精简输出；核心产物仍按阶段保留：`02-search` documents/chunks、`03-read` review/Paper Brief、`04-synthesize` synthesis brief/Markdown、`05-design` experiment contracts。 |
 | `[run].overwrite_stage_artifacts` | 默认 `false`。从 `06-code` 或 `07-run` 重跑时，会先把旧的关键代码/运行产物复制到 `archives/<timestamp>/`，再写入新产物。只有明确想无归档覆盖旧产物时才设为 `true`。 |
 | `[llm].enabled` | 是否启用 LLM 支持的 planning、notes、synthesis、report 和 code-task 步骤。真实 code-task 通常需要 LLM 才有实际意义。 |
 | `[llm].workers` | 支持并发的 LLM 阶段使用的 worker 数；并不代表所有 pipeline 阶段都会并发。 |

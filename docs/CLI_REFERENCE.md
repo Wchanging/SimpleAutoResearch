@@ -111,7 +111,7 @@ uv run simple-ar research-brief \
 ```
 
 The command creates a timestamped session with separate plan, search, document
-ingest, and brief attempts. It does not silently retry or overwrite an attempt;
+ingest, read, and synthesize attempts. It does not silently retry or overwrite an attempt;
 `--query`, `--provider`, `--max-results`, `--max-chunks`, and `--idea-limit` are
 the deliberately small controls for this path. Pass the same optional
 `--cache-dir` to later sessions to reuse downloaded full-text files; when it is
@@ -143,7 +143,7 @@ result-analysis capabilities.
 ```bash
 uv run simple-ar research-experiment \
   --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
   --cwd examples/research_brief/fixtures \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
@@ -173,7 +173,7 @@ the application does not retry or repair it implicitly.
 ### `simple-ar research-session`
 
 **Purpose**: run the small end-to-end composition
-`plan -> search -> document_ingest -> research_brief -> research_design -> experiment -> analysis`
+`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`
 in one `full_research` session. By default the experiment command is supplied
 explicitly. With `--code-task-config`, the experiment attempt instead delegates
 implementation to the existing project-style Code-Task backend; this is still
@@ -318,23 +318,18 @@ it does not replace `code-task` or the eight-stage pipeline.
 ```bash
 uv run simple-ar research-code-task \
   --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
   --code-task-config examples/code_task_medium_review/configs/code_task.toml \
   --output-root runs/research-code-task
 ```
 
 The command requires `[execute].use_llm = true` in the supplied Code-Task TOML
 and creates a new session, so an earlier brief or run is not overwritten. It
-runs one direction by default. `--max-candidates N` explicitly enables at most
-N isolated child sessions; a candidate is accepted only when its execution and
-primary-metric comparison both support improvement. Failed candidates remain
-as evidence and are followed by a bounded stop, not an implicit infinite loop.
+runs one explicitly selected direction. Multi-candidate comparison is deferred
+until the single-direction path is validated on a real prepared project.
 Pass `--with-report` to continue a passed Code-Task session through the existing
-Writer/Reviewer, report assembly, and audit path. With the default single
-candidate it continues that session; with `--max-candidates N` it opens the
-continuation only for the selected candidate. This is an explicit continuation,
-not a second report engine; failed, partial, and unselected candidates are not
-presented as formal reports.
+Writer/Reviewer, report assembly, and audit path. This is an explicit
+continuation, not a second report engine.
 
 | Option | Meaning |
 | --- | --- |
@@ -346,14 +341,12 @@ presented as formal reports.
 | `--timeout-sec N` | Optional override for `[execute].timeout_sec`. |
 | `--baseline-policy POLICY` | Optional override: `auto`, `run`, `skip`, `provided`, or `none`. |
 | `--baseline-metrics-file PATH` | Baseline metrics file for the `provided` policy. |
-| `--max-candidates N` | Explicit bounded idea count; default is one. |
-| `--with-report` | Append the standard report and audit to the passed session; in multi-candidate mode, use the selected candidate only. |
+| `--with-report` | Append the standard report and audit to the passed session. |
 
 This entry currently covers existing project-style Code-Task only. It does not
 create a managed environment, allocate GPU resources, or claim arbitrary
 greenfield generation. `--with-report` requires `--model` and uses the standard
-experiment template. Multi-candidate selection remains bounded and sequential;
-only its selected passed session can continue to the report.
+experiment template.
 
 ### `simple-ar resume`
 

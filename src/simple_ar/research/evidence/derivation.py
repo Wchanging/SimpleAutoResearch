@@ -233,148 +233,6 @@ def experiment_contract_markdown(contract: ResearchExperimentContract) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def build_tool_context(
-    *,
-    pack: dict[str, Any],
-    contract: ResearchExperimentContract,
-    novelty_checks: list[NoveltyCheck],
-) -> tuple[dict[str, Any], str]:
-    """Create a read-only context handoff for future tools/MCP/coding agents."""
-    context = {
-        "schema_version": "tool_context.v1",
-        "mode": "read_only_research_handoff",
-        "topic": pack.get("topic"),
-        "evidence_pack_schema": pack.get("schema_version"),
-        "experiment_contract_id": contract.contract_id,
-        "novelty_check_count": len(novelty_checks),
-        "novelty_risk_levels": _novelty_risk_counts(novelty_checks),
-        "allowed_actions": [
-            "read evidence artifacts",
-            "summarize cited cards",
-            "prepare a code-task task.md from the experiment contract",
-        ],
-        "forbidden_actions": [
-            "modify repository files without an approved code-task workspace",
-            "claim novelty from local checks alone",
-            "download additional content unless the run config allows it",
-        ],
-        "primary_artifacts": {
-            "evidence_pack": "04-synthesize/evidence/evidence_pack.json",
-            "gap_summary": "04-synthesize/evidence/gap_summary.md",
-            "idea_candidates": "04-synthesize/evidence/idea_candidates.jsonl",
-            "novelty_checks": "04-synthesize/evidence/novelty_checks.jsonl",
-            "experiment_contract": "05-design/evidence/experiment_contract.json",
-        },
-        "human_review_required": True,
-    }
-    markdown = [
-        "# Tool Context",
-        "",
-        "This context is a read-only handoff for later tool, MCP, or coding-agent integration.",
-        "",
-        "## Allowed Actions",
-        "",
-        *[f"- {item}" for item in context["allowed_actions"]],
-        "",
-        "## Forbidden Actions",
-        "",
-        *[f"- {item}" for item in context["forbidden_actions"]],
-        "",
-        "## Primary Artifacts",
-        "",
-        *[f"- {name}: {path}" for name, path in context["primary_artifacts"].items()],
-        "",
-        "## Human Review",
-        "",
-        "- Required before turning this contract into code edits.",
-    ]
-    return context, "\n".join(markdown).rstrip() + "\n"
-
-
-def build_evidence_review(
-    *,
-    pack: dict[str, Any],
-    ideas: list[IdeaCandidate],
-    novelty_checks: list[NoveltyCheck],
-    contract: ResearchExperimentContract,
-) -> tuple[str, list[dict[str, Any]]]:
-    """Create a lightweight HITL review page and machine-readable decisions."""
-    decisions = [
-        {
-            "decision_id": "review-001",
-            "item": "evidence_pack",
-            "status": "pending_user_review",
-            "recommendation": _coverage_recommendation(pack),
-        },
-        {
-            "decision_id": "review-002",
-            "item": "experiment_contract",
-            "status": "pending_user_review",
-            "recommendation": "Approve only after confirming that the target repository and benchmark are available.",
-        },
-    ]
-    lines = [
-        "# Evidence Review",
-        "",
-        "Review this file before using the evidence pack to drive code changes or strong report claims.",
-        "",
-        "## Checklist",
-        "",
-        "- Are the selected papers relevant to the topic?",
-        "- Are full-text and section extraction sufficient for the intended claim strength?",
-        "- Are idea candidates grounded by motivation references?",
-        "- Does the experiment contract fit the available local compute and target repository?",
-        "",
-        "## Idea Candidates",
-        "",
-    ]
-    lines.extend(f"- {idea.idea_id}: {idea.title}" for idea in ideas)
-    lines.extend(["", "## Novelty Risk Hints", ""])
-    lines.extend(f"- {check.idea_id}: {check.risk_level} ({check.status})" for check in novelty_checks)
-    lines.extend(["", "## Proposed Experiment", "", contract.hypothesis])
-    return "\n".join(lines).rstrip() + "\n", decisions
-
-
-def build_research_eval(
-    *,
-    pack: dict[str, Any],
-    ideas: list[IdeaCandidate],
-    contract: ResearchExperimentContract,
-) -> tuple[dict[str, Any], str]:
-    """Build a simple research artifact quality report."""
-    counts = _dict(pack.get("counts"))
-    coverage = _dict(pack.get("coverage"))
-    checks = [
-        _check("has_documents", int(counts.get("documents") or 0) > 0, "At least one document record exists."),
-        _check("has_chunks", int(counts.get("chunks") or 0) > 0, "At least one local evidence chunk exists."),
-        _check("has_cards", int(counts.get("paper_cards") or 0) > 0, "At least one paper card exists."),
-        _check("has_grounded_idea", any(idea.motivation_refs for idea in ideas), "At least one idea has evidence refs."),
-        _check("has_experiment_contract", bool(contract.hypothesis), "Experiment contract was generated."),
-    ]
-    passed = sum(1 for check in checks if check["passed"])
-    status = "passed" if passed == len(checks) and coverage.get("status") != "missing" else "needs_review"
-    report = {
-        "schema_version": "research_eval.v1",
-        "status": status,
-        "passed": passed,
-        "total": len(checks),
-        "checks": checks,
-    }
-    markdown = [
-        "# Research Eval",
-        "",
-        f"Status: {status}",
-        "",
-        "## Checks",
-        "",
-    ]
-    markdown.extend(
-        f"- {'PASS' if check['passed'] else 'REVIEW'} {check['name']}: {check['description']}"
-        for check in checks
-    )
-    return report, "\n".join(markdown).rstrip() + "\n"
-
-
 def _observed_gaps(pack: dict[str, Any]) -> list[str]:
     coverage = _dict(pack.get("coverage"))
     gaps = [f"Missing facet `{facet}` should be resolved before strong claims." for facet in _string_list(coverage.get("missing_facets"))]
@@ -454,19 +312,6 @@ def _risks_from_pack(pack: dict[str, Any]) -> list[str]:
     return risks[:5]
 
 
-def _coverage_recommendation(pack: dict[str, Any]) -> str:
-    status = str(_dict(pack.get("coverage")).get("status") or "unknown")
-    if status == "covered":
-        return "Evidence coverage looks acceptable for a bounded experiment proposal."
-    if status == "partially_covered":
-        return "Proceed only with cautious claims and document missing facets."
-    return "Collect more evidence before experiment planning."
-
-
-def _check(name: str, passed: bool, description: str) -> dict[str, Any]:
-    return {"name": name, "passed": passed, "description": description}
-
-
 def _refs(row: dict[str, Any]) -> list[str]:
     return _string_list(row.get("evidence_refs"))
 
@@ -504,14 +349,6 @@ def _terms(text: str) -> set[str]:
         for word in re.findall(r"[a-z0-9][a-z0-9_+-]{2,}", text.lower())
         if word not in {"and", "are", "for", "from", "the", "that", "this", "with"}
     }
-
-
-def _novelty_risk_counts(checks: list[NoveltyCheck]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for check in checks:
-        key = check.risk_level or "unknown"
-        counts[key] = counts.get(key, 0) + 1
-    return counts
 
 
 def _unique(values: Any) -> list[str]:

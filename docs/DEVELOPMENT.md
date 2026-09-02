@@ -18,18 +18,34 @@ This keeps the project easier to learn, debug, and refactor.
 
 ### Compatibility Audit
 
-The current source-level dependency audit found no safe legacy implementation to
-delete. `core.pipeline` and `core.stage_results` still have direct consumers in
-the pipeline, experiment, report, and test layers. `Context.find_artifact()` is
-still used by compatibility-aware report and stage readers. The private
-`simple_ar._legacy` modules and `pipeline_stages.handlers` contain aliases or a
-small export aggregation rather than a second implementation; they remain for
-older imports. Historical run readers and projections also remain until a
-canonical-artifact migration has a real consumer and regression evidence.
+The repository has two intentionally different execution surfaces:
 
-This is an explicit keep decision, not an assumption that every old path is
-permanent. Repeat the scan before a future cleanup and remove only a path whose
-consumers have migrated and whose old-format regression still passes.
+```text
+research-session / research-brief / research-experiment
+  -> typed research capabilities -> SessionController -> ArtifactStore
+
+simple-ar run
+  -> PipelineRunner -> frozen eight-stage compatibility projection
+```
+
+The first line is the V2.8 direction. The second line remains because existing
+configs, run directories, and tests still consume its stage-shaped artifacts.
+It is not a second place to add new research policy. New capability work belongs
+under `research/`, `experiment/`, or `report/`; `pipeline_stages/` should only
+adapt or project that behavior for the old command.
+
+The September 2026 cleanup removed confirmed speculative or duplicate layers:
+the unused session-plan abstraction, multi-candidate CodeTask scheduler,
+standalone research iteration policy, and research Tool/MCP design-contract
+artifacts. The existing evidence pack/cards were kept because the legacy debug
+path and synthesis tests still consume them. CodeTask's external CLI support is
+also kept as a disabled/explicit backend because the current experiment path
+uses its provider factory; it is not a V2.8 workflow controller.
+
+This is an explicit keep decision, not a promise that every old path is
+permanent. Before deleting another compatibility module, search imports, CLI
+dispatch, docs, fixtures, and historical readers, then preserve the old-format
+regression while migrating its real consumer.
 
 ### Cleanup Policy
 
@@ -41,13 +57,14 @@ dispatch, documentation, fixtures, and historical readers, then add a focused
 regression for the replacement path. Prefer removing dead imports or a proven
 duplicate branch over splitting a large but cohesive adapter into more layers.
 
-The current cleanup pass removed only confirmed unused imports, made the
-legacy workspace-state import lazy inside `core.artifacts`, and made capability
-session roots absolute before resolving persisted handoffs. No domain
-package, stage output, compatibility alias, or result format was removed
-because each still has a live consumer or a compatibility test. Large modules
-remain tracked as refactoring debt rather than being split without a real
-consumer.
+The cleanup rule is deliberately asymmetric: remove code when its production
+consumer is gone, but do not split a cohesive compatibility adapter merely to
+make the line count look smaller. The remaining large files are named debt,
+not new architectural owners: `pipeline_stages/research.py` is the old
+search/read/synthesis adapter, `core/session.py` is the attempt boundary, and
+`report/service.py` is the established report writer. Their next migrations
+must move one real capability at a time and delete the old implementation only
+after the canonical path owns the same behavior and regression evidence.
 
 ## Ownership Map
 
@@ -152,19 +169,14 @@ comparison or recovery view. It reads attempt manifests only, does not merge
 artifacts, choose a best result, or schedule work; missing parents and cycles
 are reported explicitly.
 
-`SessionStep` and `run_session_plan()` provide the smallest multi-capability
-handoff on top of this boundary. The caller owns the ordered steps and
-capability-specific handler arguments, as well as optional controller signals
-such as evidence sufficiency or experiment-needed status; the helper
-preflights registered handlers and allowed transitions before the first
-attempt, then stops at the first non-accept decision. It is deliberately not a
-scheduler, retry loop, or arbitrary DAG executor. A higher-level workflow may
-inspect the returned decision and explicitly construct the next bounded
-sequence. The preflight also checks a resumed plan's first capability against
-the persisted current attempt, so a bad continuation is rejected before any
-new handler runs. Every supplied input must be an existing session artifact;
-missing handoffs fail at this boundary without creating an attempt or spending
-session budget.
+The V2.8 application layer owns the ordered capability sequence and calls
+`SessionController.execute()` explicitly. This keeps the sequence visible in
+the use case instead of hiding it in a generic plan runner. The controller
+still preflights registered handlers, allowed transitions, input artifacts and
+budgets before an attempt is created; a higher-level workflow must inspect the
+returned decision before constructing a bounded continuation. Every supplied
+input must be an existing session artifact; missing handoffs fail at this
+boundary without creating an attempt or spending session budget.
 
 Attempt outputs are local to their attempt directory. Use
 `SessionController.attempt_output_refs()` when a later capability should read
@@ -190,16 +202,16 @@ An attempt may inherit the session profile or omit it; it cannot replace a
 scoped session with another profile.
 Use `SessionController.allowed_targets(source)` when a caller needs to render
 the permitted next steps; do not inspect the recipe or profile internals.
-The composite adapters use the fixed names `research_brief`, `experiment`, and
-`report_audit`, with `analysis` as the canonical result-analysis capability and
-`analyze` retained as a legacy alias, when a profile scope is enabled; arbitrary
-caller-chosen names remain suitable only for an unscoped or legacy session.
+The built-in capability names are the actual stage boundaries: `plan`, `search`,
+`document_ingest`, `read`, `synthesize`, `research_design`, `experiment`,
+`analysis`, `report`, and `report_audit`. `analyze` remains a legacy alias for
+`analysis`. `research_brief` is an application/profile name, not a hidden
+composite capability; arbitrary caller-chosen names remain suitable only for an
+unscoped or legacy session.
 
-The ordered `capabilities` tuple is also the documented conventional path for
-the built-in fixture and for a caller that wants the shortest straight-line
-composition. It is not an implicit execution plan: callers still construct
-`SessionStep` objects, provide capability inputs, and may choose a permitted
-backtrack explicitly.
+The ordered capability sequence is documented by the application workflow and
+is not an implicit scheduler. Callers still provide capability inputs and may
+choose a permitted backtrack explicitly.
 
 The smallest end-to-end reference is
 `examples/capability_package_minimal/`. Run `uv run simple-ar-checks core` to
@@ -398,25 +410,26 @@ present.
 
 ### Composing A Research Brief
 
-`research.brief.build_research_brief()` is a small vertical composition: it
+`research.brief.build_research_brief()` is a small in-memory convenience: it
 calls the Read boundary and passes the resulting evidence cards to the
 Synthesis boundary. It accepts a Search-produced `DocumentBundle`, cached
 documents, or a local-document bundle and returns `ready`, `partial`,
 `needs_review`, or `empty`. Metadata-only input is not reported as sufficient
 evidence. It does not search or write files; synthesis is deterministic by
 default, while `ResearchBriefRequest(use_llm=True, llm_client=...)` explicitly
-enables the shared LLM for grounded prose. This proves that capabilities can
-compose without replacing the existing eight-stage pipeline; callers still
-choose the existing artifact projection when persistence is needed.
+enables the shared LLM for grounded prose.
 
-`research.brief.run_research_brief_capability()` is the opt-in session adapter
-for this composition. A caller registers it under a chosen capability name
-and passes a typed `ResearchBriefRequest`; it writes one `research_brief.json`
-handoff containing structured cards, direction candidates, and source-span
-locations, but not source chunk text. The adapter maps an empty brief to a
-blocked capability result and a partial brief to a partial result, so missing
-evidence is visible to the controller. It does not change the built-in
-lifecycle profiles or register itself implicitly.
+The user-facing `research-brief` and `research-session` applications do not
+hide this composition anymore: they persist separate `read-001` and
+`synthesize-001` attempts. The aggregate helper remains available for library
+callers and old `research_brief.v1` handoffs, but it is not another lifecycle
+stage.
+
+There is intentionally no default session adapter for this aggregate. A
+session must persist the `read` and `synthesize` attempts separately; callers
+that only need an in-memory value can use `build_research_brief()`. Historical
+`research_brief.v1` files remain readable, but they are not a second executable
+lifecycle.
 
 For a multi-attempt composition, restore a persisted Read result with
 `ReadResult.from_handoff_dict(..., bundle=...)` and use
@@ -494,15 +507,12 @@ execution record remains `incomplete`; the status never chooses a retry or a
 research transition. When persistence is requested, the same small handoff is
 also written to `analysis_status.json`.
 
-When an upper-layer workflow needs to pass an outcome to the session policy,
-use `research.decisions.transition_request_from_synthesis()`,
-`transition_request_from_analysis()`, or `transition_request_from_report_audit()`.
-These pure adapters only create the existing `TransitionRequest`; they do not
-invoke handlers, retry, choose a next capability, or add another decision
-schema. Both typed results and persisted mappings are accepted for cross-process
-handoff. A synthesis `needs_review` result is only marked as insufficient
-evidence; the caller still chooses whether to return to Search, Read, or
-Synthesis.
+When an upper-layer workflow needs to pass an analysis outcome to the session
+policy, use `research.decisions.transition_request_from_analysis()`. This pure
+adapter only creates the existing `TransitionRequest`; it does not invoke
+handlers, retry, choose a next capability, or add another decision schema.
+Both typed results and persisted mappings are accepted for cross-process
+handoff. Recovery policy remains with the caller and the core session budget.
 
 ### Reusing The Report Figure Port
 

@@ -76,21 +76,18 @@ from simple_ar.research.outputs.artifacts import (
     write_synthesis_evidence_artifacts,
 )
 from simple_ar.research.prompts import (
-    PLAN_SYSTEM,
     READ_SYSTEM,
-    RESEARCH_PLANNER_SYSTEM,
     SYNTHESIZE_SYSTEM,
     paper_note_user_prompt,
-    plan_user_prompt,
     read_coarse_screening_user_prompt,
     read_rerank_user_prompt,
-    research_planner_user_prompt,
     synthesize_user_prompt,
 )
-from simple_ar.research.planning.planner import (
-    build_llm_research_plan,
-    build_query_plan,
-    build_research_questions,
+from simple_ar.research.planning.capability import (
+    ResearchPlanRequest,
+    build_research_plan,
+    build_requested_research_plan,
+    build_research_scope,
 )
 from simple_ar.research.evidence.retrieval import (
     RetrievalCandidate,
@@ -131,17 +128,10 @@ def execute_plan(ctx: Context) -> None:
     if client is not None:
         try:
             ctx.emit("stage_message", "Calling LLM for research planning.")
-            response = client.ask_json(
-                PLAN_SYSTEM,
-                plan_user_prompt(ctx.topic),
-                label="plan",
-            )
-            goal = _text_field(response, "goal_markdown")
-            problem = _text_field(response, "problem_markdown")
-            if goal and problem:
-                write_text(ctx.artifact_path("goal.md"), _ensure_heading(goal, "Research Goal"))
-                write_text(ctx.artifact_path("problem.md"), _ensure_heading(problem, "Research Problem"))
-                return
+            goal, problem = build_research_scope(ctx.topic, llm_client=client)
+            write_text(ctx.artifact_path("goal.md"), goal)
+            write_text(ctx.artifact_path("problem.md"), problem)
+            return
         except LLMError as exc:
             _handle_llm_failure(ctx, "LLM planning failed", exc)
 
@@ -151,23 +141,9 @@ def execute_plan(ctx: Context) -> None:
             LLMError("response did not contain both goal_markdown and problem_markdown"),
         )
 
-    write_text(
-        ctx.artifact_path("goal.md"),
-        (
-            "# Research Goal\n\n"
-            f"Topic: {ctx.topic}\n\n"
-            "Create a small, reproducible research workflow that can be inspected "
-            "stage by stage.\n"
-        ),
-    )
-    write_text(
-        ctx.artifact_path("problem.md"),
-        (
-            "# Research Problem\n\n"
-            f"How can we study `{ctx.topic}` with a simple literature-backed "
-            "experiment and a transparent artifact pipeline?\n"
-        ),
-    )
+    goal, problem = build_research_scope(ctx.topic)
+    write_text(ctx.artifact_path("goal.md"), goal)
+    write_text(ctx.artifact_path("problem.md"), problem)
 
 def execute_search(
     ctx: Context,
@@ -296,65 +272,37 @@ def _plan_research_retrieval(
     problem: str,
     query: str,
 ) -> tuple[list[ResearchQuestion], QueryPlan]:
-    """Create research questions and query plan, using LLM planning when enabled."""
-    deterministic_questions = build_research_questions(
-        topic=ctx.topic,
-        problem_markdown=problem,
-        config=ctx.config,
-    )
-    deterministic_plan = build_query_plan(
+    """Use the canonical planning capability for the legacy search projection."""
+    planner_mode = _research_planner_mode(ctx.config.get("research_planner"))
+    client = _llm_client(ctx)
+    use_llm = planner_mode != "deterministic" and client is not None
+    request = ResearchPlanRequest(
         topic=ctx.topic,
         problem_markdown=problem,
         config=ctx.config,
         default_query=query,
-        questions=deterministic_questions,
+        default_max_results=_max_papers(ctx),
+        use_llm=use_llm,
+        llm_client=client,
     )
-    planner_mode = _research_planner_mode(ctx.config.get("research_planner"))
-    if planner_mode == "deterministic":
-        return deterministic_questions, deterministic_plan
-    if ctx.config.get("use_llm") is not True:
-        return deterministic_questions, deterministic_plan
-
-    client = _llm_client(ctx)
-    if client is None:
-        return deterministic_questions, deterministic_plan
-
-    ctx.emit("stage_message", "Calling LLM for research question and query planning.")
     try:
-        response = client.ask_json(
-            RESEARCH_PLANNER_SYSTEM,
-            research_planner_user_prompt(
-                topic=ctx.topic,
-                problem_markdown=problem,
-                seed_queries_json=json.dumps(deterministic_plan.seed_queries, ensure_ascii=False),
-                required_facets_json=json.dumps(deterministic_plan.required_facets, ensure_ascii=False),
-                max_queries=_research_query_cap(ctx.config, len(deterministic_plan.queries)),
-                max_rounds=deterministic_plan.max_rounds,
-                mode=str(ctx.config.get("research_mode") or "standard"),
-            ),
-            label="research-planner",
-        )
-        return build_llm_research_plan(
-            topic=ctx.topic,
-            problem_markdown=problem,
-            config=ctx.config,
-            default_query=query,
-            data=response,
-        )
+        result = build_requested_research_plan(request)
     except (LLMError, ValueError) as exc:
         _handle_llm_failure(ctx, "LLM research planning failed", exc)
-        return deterministic_questions, deterministic_plan
+        result = build_research_plan(
+            ResearchPlanRequest(
+                topic=ctx.topic,
+                problem_markdown=problem,
+                config=ctx.config,
+                default_query=query,
+                default_max_results=_max_papers(ctx),
+            )
+        )
+    return list(result.questions), result.query_plan
 
 def _research_planner_mode(value: object) -> str:
     text = str(value or "auto").strip().lower()
     return text if text in {"auto", "llm", "deterministic"} else "auto"
-
-def _research_query_cap(config: dict[str, object], default: int) -> int:
-    value = config.get("research_max_queries")
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return min(value, 12)
-    return min(max(default, 1), 12)
-
 
 def _default_search_provider_registry(
     source_plan: SourcePlan,

@@ -17,15 +17,31 @@ SimpleAutoResearch 现在采用 file-first + state-backed 的形态：
 
 ### 兼容性审计
 
-当前的源代码依赖审计没有发现可以安全删除的遗留实现。`core.pipeline` 和
-`core.stage_results` 仍被 pipeline、experiment、report 以及测试层直接使用；
-`Context.find_artifact()` 仍被需要兼容旧路径的 report 和 stage reader 使用。
-`simple_ar._legacy` 下的模块以及 `pipeline_stages.handlers` 只是别名或很小的
-导出聚合，不是第二套实现，因此继续保留以支持旧 import。历史 run reader 和
-projection 也继续保留，直到 canonical artifact 有真实消费者完成迁移并有回归证据。
+仓库现在有两条明确区分的执行面：
 
-这是一项明确的保留决定，不表示所有旧路径永久不能清理。后续清理前应重新执行
-依赖扫描；只有消费者已经迁移且旧格式回归仍然通过的路径，才可以删除。
+```text
+research-session / research-brief / research-experiment
+  -> typed research capabilities -> SessionController -> ArtifactStore
+
+simple-ar run
+  -> PipelineRunner -> 冻结的八阶段兼容投影
+```
+
+第一条是 V2.8 的主方向。第二条仍然保留，是因为已有配置、run 目录和测试仍然
+依赖它的阶段形态产物；它不是继续新增 research 策略的地方。新的 capability 应
+放在 `research/`、`experiment/` 或 `report/` 中，`pipeline_stages/` 只负责把既有
+能力适配或投影为旧命令所需的格式。
+
+2026 年 9 月的清洗已经删除确认没有生产消费者的超前/重复层：无用的 session-plan
+抽象、多候选 CodeTask 调度器、独立 research iteration policy，以及 research
+Tool/MCP 设计契约产物。旧 debug 路径和 synthesis 测试仍使用 evidence pack/cards，
+所以这些真正的研究证据能力保留。CodeTask 的 external CLI 支持也保留为显式、默认
+禁用的 backend，因为当前实验路径仍使用它的 provider factory；它不是 V2.8 的
+workflow controller。
+
+这是明确的保留决定，并不意味着所有旧路径永久不能清理。删除下一个兼容模块前，
+要重新搜索 import、CLI 分发、文档、fixture 和历史 reader，并保留旧格式回归，
+同时先完成真实消费者的迁移。
 
 ### 清理规则
 
@@ -35,10 +51,12 @@ projection 也继续保留，直到 canonical artifact 有真实消费者完成�
 回归测试。优先删除已经确认的无效导入或有证据的重复分支；不要仅仅因为某个 adapter 较长，
 就在没有真实消费者的情况下继续拆出更多层。
 
-本轮清洗只删除了确认无用的导入，将 `core.artifacts` 对旧 workspace state 的导入改为按需加载，
-并在解析持久化 handoff 前将 capability session root 转为绝对路径。没有删除领域包、阶段产物、兼容别名或
-结果格式，因为它们仍有实际消费者或兼容测试。较大的模块暂时作为后续重构债务记录，不在没有真实
-消费者时强行拆分。
+清理规则有意保持不对称：生产消费者已经消失的代码要删除；但不要为了让行数变小，
+把仍然内聚的兼容 adapter 拆成更多层。剩余的大文件应被视为已标记的债务，而不是
+新的架构中心：`pipeline_stages/research.py` 是旧 search/read/synthesis adapter，
+`core/session.py` 是 attempt 边界，`report/service.py` 是既有 report writer。后续迁移
+必须一次移动一个真实 capability；只有 canonical 路径已经拥有同等行为并且回归通过，
+才能删除旧实现。
 
 ## 职责边界表
 
@@ -121,14 +139,12 @@ capability 检查转移规则。默认行为仍使用持久化的当前 attempt�
 `attempt_lineage()`。它只读取 attempt manifest，不合并产物、不选择最佳结果，也不调度新
 工作；父节点缺失或链路成环时会显式报错。
 
-`SessionStep` 和 `run_session_plan()` 在这层边界之上提供最小的多能力交接入口。
-调用方负责给出有序步骤、领域 handler 参数以及可选的证据充足性或是否需要补实验等
-controller 信号；该入口会在第一次 attempt 之前预检已注册的 handler 以及允许的
-transition，并在第一次非 accept 决策处停止。它刻意不是调度器、重试循环或任意 DAG
-执行器；更高层 workflow 可以读取返回的 decision，再显式构造下一段有界序列。
-对已有 session 继续执行时，预检还会把序列第一步与持久化的当前 attempt 做转移校验，
-因此非法续跑会在任何新 handler 启动前被拒绝。所有传入的 input 都必须是 session 中已经
-存在的 artifact；缺失 handoff 会在边界处失败，不会创建 attempt 或消耗 session 预算。
+V2.8 application 层负责给出有序 capability 序列，并显式调用
+`SessionController.execute()`。这样顺序直接体现在用例代码中，而不是隐藏在通用 plan
+runner 里。controller 仍会在创建 attempt 前检查已注册的 handler、允许的 transition、
+输入 artifact 和预算；更高层 workflow 需要读取返回的 decision，再显式构造有界续跑。
+所有传入的 input 都必须是 session 中已经存在的 artifact；缺失 handoff 会在边界处失败，
+不会创建 attempt 或消耗 session 预算。
 
 attempt manifest 中的输出路径相对于各自的 attempt 目录。若后一个 capability 需要读取前一个
 能力的输出，应使用 `SessionController.attempt_output_refs()`；它会返回例如
@@ -150,12 +166,12 @@ attempt 可以继承 session 的 profile，也可以省略 profile；但不能�
 悄悄改成另一个 profile。
 如果调用方需要展示允许的下一步，应使用 `SessionController.allowed_targets(source)`，
 不要直接读取 recipe 或 profile 的内部结构。
-如果启用了 profile，组合适配器应使用固定名称 `research_brief`、`experiment` 和
-`report_audit`，其中 `analysis` 是结果分析 capability 的规范名称，`analyze` 继续作为
-旧调用方的兼容别名；任意自定义名称只适合未设置范围的旧 session 或兼容场景。
-内置 profile 的有序 `capabilities` 元组同时作为文档化的最短直线路径，供 fixture
-和希望按常规顺序组合的调用方参考；它不是隐式执行计划。调用方仍需显式构造
-`SessionStep`、提供 capability 输入，并在需要时选择白名单内的回退路径。
+内置 capability 名称就是实际阶段边界：`plan`、`search`、`document_ingest`、`read`、
+`synthesize`、`research_design`、`experiment`、`analysis`、`report` 和 `report_audit`。
+`analyze` 仍是 `analysis` 的旧别名。`research_brief` 是应用/profile 名称，不是隐藏的
+组合 capability；任意自定义名称只适合未设置范围的旧 session 或兼容场景。
+内置 profile 的有序 `capabilities` 元组只作为范围和文档参考，不是隐式执行计划。
+调用方仍需提供 capability 输入，并在需要时选择白名单内的回退路径。
 
 最小的端到端参考实现位于 `examples/capability_package_minimal/`。可以运行
 `uv run simple-ar-checks core` 做离线验收。新的能力开发应先遵循这组边界，
@@ -315,18 +331,20 @@ research-level contract，并要求调用方显式提供 `RunRequest`；不会�
 
 ### 组合 Research Brief
 
-`research.brief.build_research_brief()` 是一个小型纵向组合入口：它先调用
-Read 边界，再把返回的 evidence cards 交给 Synthesis 边界。它接受 Search 产出的
-`DocumentBundle`、缓存文档或本地文献 bundle，返回 `ready`、`partial`、
-`needs_review` 或 `empty`，不会把 metadata-only 输入伪装成充分证据。它不搜索、不写文件；
-默认使用确定性 synthesis，调用方显式提供 `use_llm=True` 和共享 client 时才增加有证据依据的
-模型文本。它只是验证能力之间的输入输出可以组合，不替代现有八阶段 pipeline。
+`research.brief.build_research_brief()` 是一个小型内存便捷组合：它先调用 Read 边界，
+再把返回的 evidence cards 交给 Synthesis 边界。它接受 Search 产出的 `DocumentBundle`、
+缓存文档或本地文献 bundle，返回 `ready`、`partial`、`needs_review` 或 `empty`，不会把
+metadata-only 输入伪装成充分证据。它不搜索、不写文件；默认使用确定性 synthesis，调用方
+显式提供 `use_llm=True` 和共享 client 时才增加有证据依据的模型文本。
 
-`research.brief.run_research_brief_capability()` 是这条组合的可选 session 适配器。
-调用方自行选择名称并注册 handler，再传入 typed 的 `ResearchBriefRequest`；适配器只写出
-一个 `research_brief.json` handoff，其中包含结构化 cards、方向候选、实验契约和来源位置，
-不会复制 source chunk 原文。空 brief 会映射为 `blocked`，部分 brief 会映射为 `partial`，
-因此证据不足会被 controller 看见。它不会隐式注册，也不会修改内置 lifecycle profile。
+面向用户的 `research-brief` 和 `research-session` 应用现在会显式持久化独立的
+`read-001` 与 `synthesize-001` attempt，不再把这两个阶段藏在一个组合 attempt 中。
+聚合 helper 仍供库调用方和旧的 `research_brief.v1` handoff 使用，但它不再是另一条
+lifecycle 阶段。
+
+这里刻意不提供这个聚合的默认 session 适配器。session 必须分别持久化 `read` 和
+`synthesize` attempts；只需要内存值的库调用方可以使用 `build_research_brief()`。历史
+`research_brief.v1` 文件仍可读取，但不会再作为第二条可执行 lifecycle。
 
 对于多 attempt 的组合，使用 `ReadResult.from_handoff_dict(..., bundle=...)` 恢复持久化的
 Read 结果，再用 `evidence_pack_from_read()` 形成最小的 Synthesis 输入。显式传入 bundle
@@ -382,13 +400,10 @@ session 层把“写出了分析文件”误认为“分析已经通过”。下
 `incomplete`；这个状态不会替调用方选择 retry 或研究阶段转移。请求持久化时，同一份精简
 状态也会写入 `analysis_status.json`。
 
-如果上层需要把结果交给 session policy，可使用
-`research.decisions.transition_request_from_synthesis()`、
-`transition_request_from_analysis()` 或 `transition_request_from_report_audit()`。
-这些函数只生成已有的 `TransitionRequest`，不执行 handler、不自动重试，也不替调用方选择
-下一个 capability。它们同时接受 typed result 和持久化 mapping，便于跨进程恢复而不复制
-另一套决策 schema；Synthesis 的 `needs_review` 只会被标为证据不足，不会自动决定回到
-Search、Read 还是重新综合。
+如果上层需要把分析结果交给 session policy，可使用
+`research.decisions.transition_request_from_analysis()`。这个函数只生成已有的
+`TransitionRequest`，不执行 handler、不自动重试，也不替调用方选择下一个 capability；恢复策略
+仍由调用方和核心 session budget 负责。
 
 ### 复用 Report Figure 边界
 

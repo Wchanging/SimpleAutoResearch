@@ -378,8 +378,8 @@ def _report_agent_handoff(result: Any) -> dict[str, Any]:
 def _research_source_handles(session: "ResearchSessionResult") -> list[SourceHandle]:
     handles = [
         SourceHandle(
-            handle="artifact:research_brief",
-            kind="research_brief",
+            handle="artifact:synthesis",
+            kind="synthesis",
             artifact=session.brief_ref.path,
             summary="Evidence-derived research direction and experiment contract.",
         ),

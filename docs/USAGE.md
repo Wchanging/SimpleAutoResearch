@@ -319,8 +319,8 @@ synthesis hint. The final decisions are still written to
 `[research].read_screening = "deterministic"` when you want to skip this extra
 LLM review and keep the retrieval order.
 
-Set `[run].debug_artifacts = true` when you also want verbose diagnostics and
-future-tool handoff drafts:
+Set `[run].debug_artifacts = true` when you also want verbose research
+diagnostics and evidence tables:
 
 ```text
 02-search/
@@ -348,22 +348,6 @@ future-tool handoff drafts:
     gap_summary.md
     idea_candidates.jsonl
     novelty_checks.jsonl
-05-design/
-  evidence/
-    tool_context.json
-    tool_context.md
-    evidence_review.md
-    decision_log.jsonl
-    eval_report.json
-    eval_report.md
-  tools/
-    tool_adapter_contract.json
-    tool_adapter_contract.md
-    tool_trace.jsonl
-    external_agent_backend.md
-  governance/
-    artifact_retention_policy.json
-    artifact_retention_policy.md
 ```
 
 Shared accelerator stores are written outside the run by default:
@@ -518,24 +502,8 @@ Key files, grouped by directory:
     when this reports a failed contract.
 - `05-design/evidence/`
   - `experiment_contract.json` / `.md`: compatibility research handoff from
-    V2.3 synthesis artifacts. The executable V2.5 contract lives at
+    synthesis artifacts. The executable contract lives at
     `05-design/experiment_contract.json`.
-  - `tool_context.json` / `.md` (debug-only): read-only handoff for future
-    MCP/tool/agent integrations before any code workspace is opened.
-  - `evidence_review.md`, `decision_log.jsonl`, `eval_report.json` / `.md`
-    (debug-only): human-review checklist and simple research artifact quality
-    checks.
-- `05-design/tools/` (debug-only)
-  - `tool_adapter_contract.json` / `.md`: read-only Tool/MCP adapter contract
-    with allowed artifact reads, trace writes, forbidden actions, request/response
-    shape, and fallback rules.
-  - `tool_trace.jsonl`: append-only tool audit trace.
-  - `external_agent_backend.md`: boundary for Codex, Claude Code, OpenCode, and
-    similar external agent backends.
-- `05-design/governance/` (debug-only)
-  - `artifact_retention_policy.json` / `.md`: classifies stable outputs,
-    evidence tables, cache artifacts, traces, debug diagnostics, and rebuildable
-    files so cleanup stays explicit.
 - `08-report/`
   - `report.md`: final Markdown report assembled from the active report
     template, known evidence, and experiment/code-task results when present.

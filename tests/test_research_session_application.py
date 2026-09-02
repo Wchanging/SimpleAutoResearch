@@ -82,20 +82,24 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                 [attempt.capability for attempt in result.attempts],
                 [
                     "analysis",
-                    "research_brief",
                     "research_design",
                     "document_ingest",
                     "experiment",
                     "plan",
+                    "read",
                     "search",
+                    "synthesize",
                 ],
             )
             self.assertEqual(
                 [decision.action for decision in result.decisions],
-                ["accept"] * 7,
+                ["accept"] * 8,
             )
             self.assertTrue(
-                (root / "session" / "attempts" / "brief-001" / "research_brief.json").is_file()
+                (root / "session" / "attempts" / "read-001" / "read_result.json").is_file()
+            )
+            self.assertTrue(
+                (root / "session" / "attempts" / "synthesize-001" / "synthesis_result.json").is_file()
             )
             self.assertTrue(
                 (root / "session" / "attempts" / "design-001" / "research_design.json").is_file()
@@ -229,13 +233,14 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                 [
                     "analysis-001",
                     "analysis-002",
-                    "brief-001",
                     "design-001",
                     "document-001",
                     "experiment-001",
                     "experiment-002",
                     "plan-001",
+                    "read-001",
                     "search-001",
+                    "synthesize-001",
                 ],
             )
             self.assertEqual(

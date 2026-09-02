@@ -7,15 +7,12 @@ from pathlib import Path
 from simple_ar.core import (
     ArtifactStore,
     AttemptManifest,
-    CapabilityRegistry,
-    SessionController,
 )
 from simple_ar.core.capabilities import CapabilityContext
 from simple_ar.research.brief import (
     ResearchBriefRequest,
     ResearchBriefResult,
     build_research_brief,
-    run_research_brief_capability,
 )
 from simple_ar.research.contracts import DocumentRecord, PaperCard, TextChunk
 from simple_ar.research.documents.ingest import DocumentBundle
@@ -115,70 +112,6 @@ class ResearchBriefCapabilityTests(unittest.TestCase):
         self.assertEqual(payload["read"]["source_spans"][0]["chunk_id"], "paper-1#chunk-1")
         self.assertNotIn("Method: a validation method", str(payload["read"]["source_spans"]))
         self.assertEqual(payload["synthesis"]["ideas"][0]["idea_id"], "idea-001")
-
-    def test_session_adapter_persists_declared_brief_and_can_be_handed_off(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            registry = CapabilityRegistry()
-            registry.register("research_brief", run_research_brief_capability)
-            controller = SessionController.create(
-                tmp,
-                session_id="brief-session",
-                topic="reliable agents",
-                profile="research_brief",
-                registry=registry,
-            )
-
-            result, decision = controller.execute(
-                "research_brief",
-                attempt_id="attempt-001",
-                request=ResearchBriefRequest(
-                    topic="reliable agents",
-                    bundle=self._bundle(),
-                ),
-            )
-
-            self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
-            refs = controller.attempt_output_refs("attempt-001")
-            self.assertEqual(refs[0].path, "attempts/attempt-001/research_brief.json")
-            payload = controller.store.read_json(refs[0])
-            self.assertEqual(payload["schema_version"], "research_brief.v1")
-            self.assertEqual(
-                payload["synthesis"]["experiment_contract"]["contract_id"],
-                "experiment-contract-001",
-            )
-            restored = ResearchBriefResult.from_handoff_dict(
-                payload,
-                bundle=self._bundle(),
-            )
-            self.assertEqual(restored.status, "ready")
-            self.assertEqual(restored.read.paper_cards[0].paper_id, "paper-1")
-            self.assertEqual(
-                restored.synthesis.experiment_contract.contract_id,
-                "experiment-contract-001",
-            )
-
-    def test_empty_brief_is_blocked_but_still_records_diagnostic_artifact(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = CapabilityContext(
-                store=ArtifactStore(Path(tmp)),
-                attempt=AttemptManifest(
-                    attempt_id="attempt-001",
-                    capability="research-brief",
-                ),
-            )
-            result = run_research_brief_capability(
-                context=context,
-                request=ResearchBriefRequest(
-                    topic="empty",
-                    bundle=self._bundle(),
-                    paper_ids=(),
-                ),
-            )
-
-            self.assertEqual(result.status, "blocked")
-            self.assertEqual(result.artifacts[0].path, "research_brief.json")
-            self.assertEqual(context.store.read_json(result.artifacts[0])["status"], "empty")
 
     def test_read_capability_persists_selected_evidence_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

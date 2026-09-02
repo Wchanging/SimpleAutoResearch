@@ -11,8 +11,8 @@ class LifecycleProfile:
 
     A lifecycle profile describes the capabilities that may participate in a
     session; it does not execute them or impose a mandatory start point.
-    ``aliases`` names fixed composite capability adapters that share the
-    profile's scope without changing the stage-oriented capability list.
+    ``aliases`` names legacy capability spellings that share the profile's
+    scope without changing the stage-oriented capability list.
     """
 
     name: str
@@ -39,7 +39,6 @@ _LIFECYCLE_PROFILES: tuple[LifecycleProfile, ...] = (
     LifecycleProfile(
         "research_brief",
         ("plan", "search", "document_ingest", "read", "synthesize"),
-        aliases=("research_brief",),
     ),
     LifecycleProfile(
         "survey",
@@ -79,7 +78,7 @@ _LIFECYCLE_PROFILES: tuple[LifecycleProfile, ...] = (
             "analysis",
             "report",
         ),
-        aliases=("research_brief", "experiment", "analyze", "report_audit"),
+        aliases=("experiment", "analyze", "report_audit"),
     ),
 )
 _PROFILE_BY_NAME = {profile.name: profile for profile in _LIFECYCLE_PROFILES}

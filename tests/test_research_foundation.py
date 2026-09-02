@@ -26,7 +26,6 @@ from simple_ar.research.evidence.derivation import (
     build_experiment_contract,
     build_idea_candidates,
     build_novelty_checks,
-    build_tool_context,
 )
 from simple_ar.research.evidence.pack import build_evidence_pack
 from simple_ar.research.store.chunking import build_text_chunks
@@ -758,16 +757,12 @@ class ResearchFoundationTests(unittest.TestCase):
         ideas = build_idea_candidates(pack)
         novelty_checks = build_novelty_checks(ideas, pack)
         contract = build_experiment_contract(ideas, pack)
-        tool_context, _ = build_tool_context(pack=pack, contract=contract, novelty_checks=novelty_checks)
-
         self.assertEqual(pack["schema_version"], "evidence_pack.v1")
         self.assertNotIn("The method proposes a planner-editor-reviewer", str(pack["papers"]))
         self.assertTrue(ideas)
         self.assertTrue(ideas[0].motivation_refs)
         self.assertTrue(contract.motivation_refs)
         self.assertTrue(novelty_checks)
-        self.assertTrue(tool_context["human_review_required"])
-        self.assertIn("modify repository files without an approved code-task workspace", tool_context["forbidden_actions"])
 
     def test_evidence_card_claim_scope_prefers_limitations(self) -> None:
         document = DocumentRecord(

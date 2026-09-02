@@ -37,11 +37,11 @@ allocates one attempt per named capability plus two bounded recovery attempts;
 callers can override this with `BudgetState`, while loaded legacy manifests
 retain their persisted budget.
 
-For a caller-owned multi-capability handoff, use `SessionStep` with
-`run_session_plan()`. It validates the complete ordered sequence before the
-first handler, persists each attempt, and stops at the first non-accept
-decision. A resumed process should load the session, inspect its status and
-attempt lineage, and explicitly construct the next sequence; the core does not
+For a caller-owned multi-capability handoff, the application layer should call
+`SessionController.execute()` for each explicit capability in the chosen
+sequence. It persists each attempt and stops when the returned decision is not
+accepted. A resumed process should load the session, inspect its status and
+attempt lineage, and explicitly construct the next call; the core does not
 silently rerun an interrupted attempt or choose a domain-specific best result.
 When an interruption has been manually confirmed, the caller can use
 `SessionController.recover_interrupted()` to close the stale running attempt as
@@ -53,8 +53,8 @@ Before creating a subsequent attempt, the controller also checks the actual
 capability against the persisted current attempt's allow-listed transitions.
 This catches an omitted or replaced route proposal while retaining listed
 backtracks and same-capability repairs.
-The explicit plan helper applies the same check to the first step of a resumed
-sequence, and rejects missing input artifacts before creating a new attempt.
+The controller applies the same check to a resumed call, and rejects missing
+input artifacts before creating a new attempt.
 
 Use `SessionController.attempt_output_refs()` to pass declared outputs from a
 completed or failed attempt to a later capability. Attempt-local paths are
@@ -69,31 +69,25 @@ winner. Use `attempt_lineage()` to inspect the root-to-node chain for a
 comparison or recovery view; it reads only persisted attempt manifests and
 does not merge artifacts or schedule work.
 
-Research-domain callers can wrap a proposed `TransitionRequest` with
-`ResearchIterationPolicy` before invoking the controller. It enforces a small
-step budget, per-capability visit limit, and repeated-failure limit over the
-persisted `DecisionRecord` list. The caller still supplies the target and
-decides whether to continue; the policy does not call an LLM, execute a
-handler, retry work, or choose a winner.
-
 The `research-session` application exposes this boundary through its
 read-only `recommended_transition` property. A passed execution and analysis
 recommend continuing to `report`; any other result is returned to the
 `experiment` boundary for an explicit caller-owned repair or redesign. The
-recommendation is bounded by the same persisted decisions and never creates an
-attempt, reruns a command, or turns a failed session into a success.
+recommendation uses the core transition policy and session budget; it never
+creates an attempt, reruns a command, or turns a failed session into a success.
 
-For the first domain slice, register
-`research.brief.run_research_brief_capability()` explicitly. It composes the
-existing Read and Synthesis boundaries and exposes a single structured
-`research_brief.json` output for the next capability. This is an opt-in adapter,
-not an automatic replacement for the eight-stage research pipeline.
+For a library caller that wants one in-memory value, use
+`research.brief.build_research_brief()` is an in-memory compatibility view only.
+The default registry deliberately does not expose a composite `research_brief`
+capability: sessions persist `read` and `synthesize` separately. Historical
+`research_brief.v1` handoffs remain readable, but they are not a second
+executable lifecycle.
 
 The small user-facing composition is available as `simple-ar research-brief`.
 It owns one explicit path:
 
 ```text
-plan -> search -> document_ingest -> research_brief(Read + Synthesis)
+plan -> search -> document_ingest -> read -> synthesize
 ```
 
 For an online topic, the command uses the configured built-in source providers:
@@ -112,13 +106,15 @@ uv run simple-ar research-brief --topic "reliable agents" \
 
 The command creates a timestamped session directory. Each handoff remains in
 its own attempt, normally under `attempts/plan-001/`, `attempts/search-001/`,
-`attempts/document-001/`, and `attempts/brief-001/`. The canonical outputs are
-`research_plan.json`, `search_result.json`, `document_bundle.json`, and
-`research_brief.json`; capability results and attempt manifests record their
+`attempts/document-001/`, `attempts/read-001/`, and
+`attempts/synthesize-001/`. The canonical outputs are `research_plan.json`,
+`search_result.json`, `document_bundle.json`, `read_result.json`, and
+`synthesis_result.json`; capability results and attempt manifests record their
 status and lineage. The command does not silently retry or overwrite a prior
 attempt. `--query`, `--provider`, `--max-results`, `--max-chunks`, and
 `--idea-limit` are the deliberately small controls for this path; more complex
-policies remain application-owned.
+policies remain application-owned. The aggregate `research_brief.v1` format
+is still accepted as an input for older callers.
 
 The standalone path is explicit about model use. Without `--model` it is an
 offline/deterministic composition: search, parsing, card derivation, and
@@ -140,7 +136,8 @@ omitting it keeps analysis deterministic. The selected mode is recorded in
 the analysis capability provenance.
 
 For a single session that owns both sides of this handoff, use
-`simple-ar research-session`. It reuses the same brief prefix, records a
+`simple-ar research-session`. It reuses the same explicit
+`plan -> search -> document_ingest -> read -> synthesize` prefix, records a
 `research_design.v1` handoff, and continues with one explicit `ExperimentRequest`
 and the existing Analysis capability. By default the command is still supplied
 by the caller. Passing `--code-task-config` selects the existing project-style
@@ -208,8 +205,8 @@ the caller's chosen drafts and evidence instead.
 
 After the process ends, `load_research_session_result()` restores the same
 typed result from `session_manifest.json` and the declared `plan-001`,
-`search-001`, `document-001`, `brief-001`, optional `design-001`, `experiment-001`,
-and `analysis-001` outputs. It performs no network request, execution, retry, or result
+`search-001`, `document-001`, `read-001`, `synthesize-001`, optional `design-001`,
+`experiment-001`, and `analysis-001` outputs. It performs no network request, execution, retry, or result
 selection, so a caller can explicitly continue an existing session into
 Report/Audit without rerunning its earlier stages. Missing or malformed
 handoffs fail closed with `ResearchSessionError`.
@@ -219,41 +216,29 @@ layer exposes `simple_ar.app.research_code_task.run_research_code_task_session()
 It reads a persisted `synthesis_result.v1` or `research_brief.v1`, reuses the
 existing Code-Task backend for workspace isolation, generation, validation,
 execution, and result analysis, and retains execution/analysis refs in the same
-session. `run_research_code_task_candidates()` is an optional bounded policy:
-each idea gets an isolated child session, and only a candidate with an explicit
-improved primary metric is accepted; failures and no-progress decisions remain
-recorded before the policy continues or stops. This is not a second code
-generator or an unrestricted scheduler. It is currently an application API,
-and the same narrow path is available from the command line while reusing an
-existing Code-Task TOML:
-
-The candidate pool writes `candidate_summary.json` at startup and after each
-candidate completes. If the process is interrupted, that checkpoint and the
-session manifest show the completed candidates and any active attempt; they
-are inspection data, not an automatic resume or a replacement for the child
-workspaces.
+session. The V2.8 path intentionally runs one explicitly selected research
+direction. Multi-candidate comparison is deferred until the single-direction
+path has been validated on a real prepared project.
 
 ```bash
 uv run simple-ar research-code-task --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json \
+  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
   --code-task-config examples/code_task_medium_review/configs/code_task.toml \
   --output-root runs/research-code-task
 ```
 
 `--with-report` continues a passed session through the existing experiment
-report Writer/Reviewer and audit path. In multi-candidate mode, only the
-selected candidate receives that continuation:
+report Writer/Reviewer and audit path:
 
 ```bash
-uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/brief-001/research_brief.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model gpt-5.4 --with-report
+uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model gpt-5.4 --with-report
 ```
 
 The continuation is accepted only after execution and result analysis pass; it
 does not retry or turn a failed run into a formal report.
 
-The command runs one direction by default; `--max-candidates N` explicitly
-enables at most N isolated child sessions. Add `--with-report` when the selected
-passed session should be handed to Report/Audit. The configuration must set
+The command runs one direction. Add `--with-report` when the passed session
+should be handed to Report/Audit. The configuration must set
 `[execute].use_llm = true`. This first consumer covers the existing project-style
 Code-Task backend; it does not create a GPU environment or claim arbitrary
 greenfield generation.
@@ -369,13 +354,9 @@ It requires an explicit execution handoff and never schedules a retry or
 transition; persisted standalone analyses additionally write
 `analysis_status.json`.
 When an upper-layer session needs to consume this status, use
-`research.decisions.transition_request_from_analysis()`; report audits use
-`transition_request_from_report_audit()`. They only build the existing
-transition input and never execute a next step, retry, or overwrite an attempt.
-A synthesis outcome can be passed through
-`research.decisions.transition_request_from_synthesis()` as well. Its
-`needs_review` status becomes an insufficient-evidence signal only; the caller
-still chooses whether to return to Search, Read, or Synthesis.
+`research.decisions.transition_request_from_analysis()`. It only builds the
+existing transition input and never executes a next step, retries, or
+overwrites an attempt; the caller still owns the recovery choice.
 
 For an already assembled report, register
 `report.audit.run_report_audit_capability()` when a session needs a standalone
@@ -554,13 +535,12 @@ first coarse-screens compact title/abstract batches, then reranks the kept set
 with reading priorities, evidence roles, and synthesis hints. `04-synthesize`
 owns `synthesis_brief.json`, `synthesis.md`, and `hypothesis.md`; legacy
 cards/evidence-pack diagnostics are retained only when
-`[run].debug_artifacts = true`. `05-design` owns the experiment contract and
-optional tool handoff drafts.
+`[run].debug_artifacts = true`. `05-design` owns the experiment contract.
 
 When `[run].debug_artifacts = true`, search also keeps planning files, retrieval
-traces, retrieval-selection rows, coverage-review reports, and section tables. Design
-debug mode may keep read-only tool-context drafts, adapter notes, and governance
-artifacts.
+traces, retrieval-selection rows, coverage-review reports, and section tables.
+The V2.8 research path does not generate speculative Tool/MCP handoff artifacts;
+those belong to the deferred external-Harness phase.
 
 Shared accelerator stores live outside the run by default under
 `.simple_ar_cache/research_index`, keyed by run/source metadata. Run-local cache

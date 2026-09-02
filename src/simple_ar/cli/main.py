@@ -270,7 +270,7 @@ def _print_research_brief(args: argparse.Namespace) -> None:
     print_line(f"Papers: {len(result.search.papers)}")
     print_line(f"Documents: {len(result.documents.records)}")
     print_line(f"Ideas: {len(result.brief.synthesis.ideas) if result.brief.synthesis else 0}")
-    print_line(f"Brief: {result.brief_path}")
+    print_line(f"Synthesis handoff: {result.brief_path}")
 
 
 def _print_research_experiment(args: argparse.Namespace) -> None:
@@ -652,7 +652,6 @@ def _print_research_code_task(args: argparse.Namespace) -> None:
     from simple_ar.app.research_code_task import (
         ResearchCodeTaskSessionError,
         ResearchCodeTaskSessionRequest,
-        run_research_code_task_candidates,
         run_research_code_task_session,
     )
     from simple_ar.app.research_code_task_report import (
@@ -668,8 +667,6 @@ def _print_research_code_task(args: argparse.Namespace) -> None:
         load_report_template_bundle,
     )
 
-    if args.max_candidates < 1:
-        raise SystemExit("--max-candidates must be positive.")
     try:
         spec, execute_options = _load_code_task_spec_for_cli(
             _resolve_cli_path(args.code_task_config)
@@ -739,44 +736,21 @@ def _print_research_code_task(args: argparse.Namespace) -> None:
         )
 
     try:
-        if args.max_candidates == 1:
-            result = run_research_code_task_session(
-                request,
-                next_capability="report" if args.with_report else None,
-            )
-            print_line(f"Research Code-Task session: {result.session_root}")
-            print_line(f"Status: {result.status}")
-            print_line(f"Execution: {result.execution_path}")
-            print_line(f"Analysis: {result.analysis_path}")
-            _ensure_research_cli_success(
-                result.status,
-                operation="Research Code-Task session",
-                root=result.session_root,
-            )
-            if args.with_report:
-                append_report(result)
-        else:
-            result = run_research_code_task_candidates(
-                request,
-                max_candidates=args.max_candidates,
-                open_report=args.with_report,
-            )
-            print_line(f"Research Code-Task candidate session: {result.session_root}")
-            print_line(f"Status: {result.status}")
-            print_line(f"Selected candidate: {result.selected_candidate_id or 'none'}")
-            print_line(f"Summary: {result.summary_path}")
-            _ensure_research_cli_success(
-                result.status,
-                operation="Research Code-Task candidate session",
-                root=result.session_root,
-            )
-            if args.with_report:
-                selected = result.selected
-                if selected is None or selected.session is None:
-                    raise SystemExit(
-                        "--with-report requires an accepted candidate with a passed session."
-                    )
-                append_report(selected.session)
+        result = run_research_code_task_session(
+            request,
+            next_capability="report" if args.with_report else None,
+        )
+        print_line(f"Research Code-Task session: {result.session_root}")
+        print_line(f"Status: {result.status}")
+        print_line(f"Execution: {result.execution_path}")
+        print_line(f"Analysis: {result.analysis_path}")
+        _ensure_research_cli_success(
+            result.status,
+            operation="Research Code-Task session",
+            root=result.session_root,
+        )
+        if args.with_report:
+            append_report(result)
     except (
         ResearchCodeTaskSessionError,
         ReportTemplateError,

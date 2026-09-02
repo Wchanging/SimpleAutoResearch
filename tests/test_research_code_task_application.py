@@ -12,7 +12,6 @@ from simple_ar.app.research_code_task import (
     ResearchCodeTaskSessionError,
     ResearchCodeTaskSessionRequest,
     load_research_code_task_session_result,
-    run_research_code_task_candidates,
     run_research_code_task_session,
 )
 from simple_ar.app.research_code_task_report import (
@@ -26,7 +25,7 @@ from simple_ar.experiment.code_task_bridge import (
     CodeTaskExperimentResult,
     CodeTaskExperimentSpec,
 )
-from simple_ar.research.contracts import IdeaCandidate, ResearchExperimentContract
+from simple_ar.research.contracts import ResearchExperimentContract
 from simple_ar.research.synthesis import SynthesisResult
 from simple_ar.report.schema import (
     ReportRuntimeConfig,
@@ -159,105 +158,6 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
             self.assertIn("candidate generation failed", error["message"])
             self.assertEqual(result.decisions[1].action, "repair")
 
-    def test_candidates_use_isolated_sessions_and_stop_on_improvement(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            synthesis_file = _write_synthesis_with_ideas(root)
-            with patch(
-                "simple_ar.app.research_code_task.prepare_code_task_experiment",
-                side_effect=_fake_candidate_prepare,
-            ):
-                result = run_research_code_task_candidates(
-                    _request(root, synthesis_file),
-                    max_candidates=3,
-                )
-
-            self.assertEqual(result.status, "completed")
-            self.assertEqual(result.selected_candidate_id, "candidate-002")
-            self.assertEqual(len(result.candidates), 2)
-            self.assertEqual(
-                [item.accepted for item in result.candidates],
-                [False, True],
-            )
-            self.assertEqual(
-                [decision.action for decision in result.decisions],
-                ["revise", "accept"],
-            )
-            first_task = (
-                root
-                / "session"
-                / "attempts"
-                / "candidate-001"
-                / "candidate_session"
-                / "attempts"
-                / "experiment-001"
-                / "inputs"
-                / "research_code_task.md"
-            )
-            second_task = (
-                root
-                / "session"
-                / "attempts"
-                / "candidate-002"
-                / "candidate_session"
-                / "attempts"
-                / "experiment-001"
-                / "inputs"
-                / "research_code_task.md"
-            )
-            self.assertIn("keep baseline", first_task.read_text(encoding="utf-8"))
-            self.assertIn("improve validation", second_task.read_text(encoding="utf-8"))
-            self.assertNotEqual(first_task.parent.parent.parent.parent, second_task.parent.parent.parent.parent)
-
-            summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
-            self.assertEqual(summary["status"], "completed")
-            self.assertEqual(summary["selected_candidate_id"], "candidate-002")
-            self.assertEqual(len(summary["candidates"]), 2)
-
-    def test_candidate_report_continuation_is_opened_only_when_requested(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            synthesis_file = _write_synthesis_with_ideas(root)
-            with patch(
-                "simple_ar.app.research_code_task.prepare_code_task_experiment",
-                side_effect=_fake_candidate_prepare,
-            ):
-                result = run_research_code_task_candidates(
-                    _request(root, synthesis_file),
-                    max_candidates=2,
-                    open_report=True,
-                )
-
-            self.assertEqual(result.status, "completed")
-            self.assertIsNotNone(result.selected)
-            assert result.selected is not None
-            assert result.selected.session is not None
-            self.assertEqual(
-                result.selected.session.decisions[-1].next_capability,
-                "report",
-            )
-            summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
-            self.assertTrue(summary["report_continuation_open"])
-
-    def test_candidate_summary_uses_store_relative_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            synthesis_file = _write_synthesis_with_ideas(root)
-            with patch(
-                "simple_ar.app.research_code_task.prepare_code_task_experiment",
-                side_effect=_fake_candidate_prepare,
-            ):
-                result = run_research_code_task_candidates(
-                    _request(root, synthesis_file),
-                    max_candidates=1,
-                )
-
-            self.assertTrue(result.summary_path.is_file())
-            self.assertEqual(
-                result.summary_path,
-                result.session_root / "candidate_summary.json",
-            )
-
     def test_restore_rejects_a_missing_code_task_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ResearchCodeTaskSessionError):
@@ -333,29 +233,6 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
                     config=ReportRuntimeConfig(reviewer="disabled"),
                     client=object(),
                 )
-
-    def test_candidates_block_after_bounded_exhaustion(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            synthesis_file = _write_synthesis_with_ideas(root)
-            with patch(
-                "simple_ar.app.research_code_task.prepare_code_task_experiment",
-                side_effect=_fake_candidate_prepare,
-            ):
-                result = run_research_code_task_candidates(
-                    _request(root, synthesis_file),
-                    max_candidates=1,
-                )
-
-            self.assertEqual(result.status, "blocked")
-            self.assertIsNone(result.selected_candidate_id)
-            self.assertEqual(len(result.candidates), 1)
-            self.assertEqual(result.candidates[0].comparison["verdict"], "unchanged")
-            self.assertEqual([decision.action for decision in result.decisions], ["block"])
-            summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
-            self.assertEqual(summary["status"], "blocked")
-            self.assertEqual(len(summary["attempts"]), 1)
-            self.assertEqual(summary["attempts"][0]["status"], "blocked")
 
     def test_code_task_evidence_reaches_generic_report_and_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -443,45 +320,6 @@ def _write_synthesis(root: Path) -> Path:
     return path
 
 
-def _write_synthesis_with_ideas(root: Path) -> Path:
-    contract = ResearchExperimentContract(
-        contract_id="contract-1",
-        hypothesis="A focused validation change improves accuracy.",
-        baseline="baseline",
-        dataset="fixture",
-        metrics=["accuracy"],
-        proposed_change="evaluate the first grounded idea",
-    )
-    synthesis = SynthesisResult(
-        status="ready",
-        gap_summary="The fixture leaves room for two bounded candidates.",
-        ideas=(
-            IdeaCandidate(
-                idea_id="idea-001",
-                title="Keep baseline",
-                hypothesis="The baseline remains a useful control.",
-                proposed_change="keep baseline",
-                metrics=["accuracy"],
-            ),
-            IdeaCandidate(
-                idea_id="idea-002",
-                title="Improve validation",
-                hypothesis="Validation improves accuracy.",
-                proposed_change="improve validation",
-                metrics=["accuracy"],
-            ),
-        ),
-        novelty_checks=(),
-        experiment_contract=contract,
-    )
-    path = root / "synthesis_candidates.json"
-    path.write_text(
-        json.dumps(synthesis.to_handoff_dict(), ensure_ascii=False),
-        encoding="utf-8",
-    )
-    return path
-
-
 def _fake_prepare(
     *,
     code_task_run_dir: Path,
@@ -559,49 +397,6 @@ def _fake_prepare_failed(
     payload["status"] = "failed"
     payload["returncode"] = 1
     report_path.write_text(json.dumps(payload), encoding="utf-8")
-    return result
-
-
-def _fake_candidate_prepare(
-    *,
-    code_task_run_dir: Path,
-    spec: CodeTaskExperimentSpec,
-    model: str | None,
-    use_llm: bool,
-    timeout_sec: int,
-    baseline_policy: str,
-    baseline_metrics_file: Path | None,
-) -> CodeTaskExperimentResult:
-    task_text = spec.task_file.read_text(encoding="utf-8") if spec.task_file else ""
-    candidate_accuracy = 0.8 if "improve validation" in task_text else 0.7
-    result = _fake_prepare(
-        code_task_run_dir=code_task_run_dir,
-        spec=spec,
-        model=model,
-        use_llm=use_llm,
-        timeout_sec=timeout_sec,
-        baseline_policy=baseline_policy,
-        baseline_metrics_file=baseline_metrics_file,
-    )
-    patched = code_task_run_dir / "code_task" / "run" / "patched" / "execution_report.json"
-    patched_payload = json.loads(patched.read_text(encoding="utf-8"))
-    patched_payload["metric_values"] = {"accuracy": candidate_accuracy}
-    patched.write_text(json.dumps(patched_payload), encoding="utf-8")
-    (patched.parent / "metrics.json").write_text(
-        json.dumps({"accuracy": candidate_accuracy}),
-        encoding="utf-8",
-    )
-    comparison = code_task_run_dir / "code_task" / "comparison.json"
-    comparison.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "status": "ready",
-                "verdict": "improved" if candidate_accuracy > 0.7 else "unchanged",
-            }
-        ),
-        encoding="utf-8",
-    )
     return result
 
 

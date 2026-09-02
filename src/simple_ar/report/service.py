@@ -62,14 +62,8 @@ from simple_ar.report.survey import (
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
 from simple_ar.research.outputs.artifacts import (
-    DESIGN_DECISION_LOG,
-    DESIGN_EVAL_JSON,
-    DESIGN_EVAL_MD,
-    DESIGN_EVIDENCE_REVIEW_MD,
     DESIGN_EXPERIMENT_CONTRACT_JSON,
     DESIGN_EXPERIMENT_CONTRACT_MD,
-    DESIGN_TOOL_CONTEXT_JSON,
-    DESIGN_TOOL_CONTEXT_MD,
     READ_CLAIM_CARDS,
     READ_CODE_LINKS,
     READ_DATASET_CARDS,
@@ -1587,12 +1581,6 @@ def _source_artifacts(ctx: Context) -> dict[str, str]:
         SYNTHESIS_BRIEF_JSON,
         DESIGN_EXPERIMENT_CONTRACT_JSON,
         DESIGN_EXPERIMENT_CONTRACT_MD,
-        DESIGN_TOOL_CONTEXT_JSON,
-        DESIGN_TOOL_CONTEXT_MD,
-        DESIGN_EVIDENCE_REVIEW_MD,
-        DESIGN_DECISION_LOG,
-        DESIGN_EVAL_JSON,
-        DESIGN_EVAL_MD,
         "activity_log.jsonl",
         "evidence_ledger.jsonl",
         "artifact_index.json",

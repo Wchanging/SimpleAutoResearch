@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
-from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.research.evidence.reader import ReadRequest, ReadResult, read_documents
 from simple_ar.research.synthesis import (
     SynthesisRequest,
@@ -61,6 +60,40 @@ class ResearchBriefResult:
     read: ReadResult
     synthesis: SynthesisResult | None
     diagnostics: tuple[str, ...] = ()
+
+    @classmethod
+    def from_parts(
+        cls,
+        read: ReadResult,
+        synthesis: SynthesisResult | None,
+    ) -> "ResearchBriefResult":
+        """Combine explicit Read and Synthesis results into a brief view.
+
+        The aggregate is a compatibility view for callers that want one
+        object.  The canonical session workflow persists Read and Synthesis
+        as separate attempts; it does not need a hidden composite capability.
+        """
+
+        if synthesis is None:
+            return cls(
+                status="empty",
+                read=read,
+                synthesis=None,
+                diagnostics=read.diagnostics,
+            )
+        diagnostics = tuple(dict.fromkeys((*read.diagnostics, *synthesis.diagnostics)))
+        if synthesis.status == "needs_review":
+            status: ResearchBriefStatus = "needs_review"
+        elif read.status == "partial":
+            status = "partial"
+        else:
+            status = "ready"
+        return cls(
+            status=status,
+            read=read,
+            synthesis=synthesis,
+            diagnostics=diagnostics,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a compact handoff summary without copying source text."""
@@ -151,12 +184,7 @@ def build_research_brief(request: ResearchBriefRequest) -> ResearchBriefResult:
         )
     )
     if read.status == "empty":
-        return ResearchBriefResult(
-            status="empty",
-            read=read,
-            synthesis=None,
-            diagnostics=read.diagnostics,
-        )
+        return ResearchBriefResult.from_parts(read, None)
 
     synthesis = synthesize_evidence(
         SynthesisRequest(
@@ -168,72 +196,7 @@ def build_research_brief(request: ResearchBriefRequest) -> ResearchBriefResult:
             llm_client=request.llm_client,
         )
     )
-    diagnostics = tuple((*read.diagnostics, *synthesis.diagnostics))
-    if synthesis.status == "needs_review":
-        status: ResearchBriefStatus = "needs_review"
-    elif read.status == "partial":
-        status = "partial"
-    else:
-        status = "ready"
-    return ResearchBriefResult(
-        status=status,
-        read=read,
-        synthesis=synthesis,
-        diagnostics=diagnostics,
-    )
-
-
-def run_research_brief_capability(
-    *,
-    context: CapabilityContext,
-    request: ResearchBriefRequest,
-) -> CapabilityResult:
-    """Run the brief composition as an explicit session capability.
-
-    Registration stays caller-owned, for example
-    ``registry.register("research_brief", run_research_brief_capability)``.
-    This avoids silently changing the built-in lifecycle profiles while still
-    giving the composed domain operation a standard session result and a
-    declared output artifact.
-    """
-    result = build_research_brief(request)
-    output = context.store.write_json(
-        "research_brief.json",
-        result.to_handoff_dict(topic=request.topic),
-        kind="research_brief",
-        schema="research_brief.v1",
-        producer="research.brief",
-    )
-    capability_status = {
-        "ready": "completed",
-        "partial": "partial",
-        "needs_review": "partial",
-        "empty": "blocked",
-    }[result.status]
-    return CapabilityResult(
-        status=capability_status,  # type: ignore[arg-type]
-        artifacts=(output,),
-        diagnostics=result.diagnostics,
-        usage={
-            "documents": len(result.read.bundle.records),
-            "chunks": len(result.read.bundle.chunks),
-            "paper_cards": len(result.read.paper_cards),
-            "idea_candidates": len(result.synthesis.ideas) if result.synthesis else 0,
-        },
-        provenance={
-            "capability": "research_brief",
-            "result_schema": "research_brief.v1",
-            "planner": "llm" if request.use_llm else "deterministic",
-            "generation_mode": (
-                result.synthesis.generation_mode
-                if result.synthesis is not None
-                else "none"
-            ),
-            "model": str(getattr(request.llm_client, "model", ""))
-            if request.use_llm
-            else "",
-        },
-    )
+    return ResearchBriefResult.from_parts(read, synthesis)
 
 
 def evidence_pack_from_read(topic: str, result: ReadResult) -> dict[str, Any]:
@@ -270,5 +233,4 @@ __all__ = [
     "ResearchBriefStatus",
     "build_research_brief",
     "evidence_pack_from_read",
-    "run_research_brief_capability",
 ]

@@ -356,15 +356,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional baseline metrics file when the provided policy is selected.",
     )
     code_research_parser.add_argument(
-        "--max-candidates",
-        type=int,
-        default=1,
-        help="Try at most this many grounded ideas in isolated child sessions.",
-    )
-    code_research_parser.add_argument(
         "--with-report",
         action="store_true",
-        help="After a passed session, generate and audit its experiment report; multi-candidate mode uses the selected candidate.",
+        help="After a passed session, generate and audit its experiment report.",
     )
     code_research_parser.add_argument("--label", default="research-code-task")
 

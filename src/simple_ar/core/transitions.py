@@ -44,7 +44,7 @@ _FAILURE_KINDS = {
 _DEFAULT_EDGES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("plan", ("search", "plan")),
     ("search", ("document_ingest", "read", "search")),
-    ("document_ingest", ("read", "research_brief", "document_ingest")),
+    ("document_ingest", ("read", "document_ingest")),
     ("read", ("synthesize", "search", "read", "report")),
     (
         "synthesize",
@@ -70,10 +70,6 @@ _DEFAULT_EDGES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("analysis", ("report", "run", "design", "analysis", "analyze", "experiment")),
     ("analyze", ("report", "run", "design", "analyze", "analysis")),
     ("report", ("report", "report_audit", "read", "search", "synthesize", "design")),
-    (
-        "research_brief",
-        ("research_design", "experiment", "report", "research_brief"),
-    ),
     ("experiment", ("analysis", "experiment", "report")),
     ("report_audit", ("report_audit", "report", "read", "search", "synthesize")),
 )

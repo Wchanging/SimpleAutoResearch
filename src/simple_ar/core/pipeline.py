@@ -356,19 +356,11 @@ class PipelineRunner:
         if not isinstance(state, SearchState):
             return
         stage_dir = ctx.stage_dir(Stage.SEARCH)
-        for dirname in ("planning", "traces", "review", "tools", "governance"):
+        for dirname in ("planning", "traces", "review"):
             path = stage_dir / dirname
             if path.exists():
                 shutil.rmtree(path)
-        for relpath in (
-            "documents/sections.jsonl",
-            "evidence/tool_context.json",
-            "evidence/tool_context.md",
-            "evidence/evidence_review.md",
-            "evidence/decision_log.jsonl",
-            "evidence/eval_report.json",
-            "evidence/eval_report.md",
-        ):
+        for relpath in ("documents/sections.jsonl",):
             path = stage_dir / relpath
             if path.exists():
                 path.unlink()
@@ -381,18 +373,6 @@ class PipelineRunner:
                 "retrieval_selection",
                 "coverage_report",
                 "sections",
-                "tool_context",
-                "tool_context_markdown",
-                "evidence_review",
-                "decision_log",
-                "research_eval",
-                "research_eval_markdown",
-                "tool_adapter_contract",
-                "tool_adapter_contract_markdown",
-                "tool_trace",
-                "external_agent_backend",
-                "artifact_retention_policy",
-                "artifact_retention_policy_markdown",
             ):
                 search_meta.pop(key, None)
             search_meta["compact_artifacts"] = True
@@ -404,17 +384,8 @@ class PipelineRunner:
         state.legacy_outputs = {
             key: value
             for key, value in state.legacy_outputs.items()
-            if not key.startswith(("planning/", "traces/", "review/", "tools/", "governance/"))
-            and key
-            not in {
-                "documents/sections.jsonl",
-                "evidence/tool_context.json",
-                "evidence/tool_context.md",
-                "evidence/evidence_review.md",
-                "evidence/decision_log.jsonl",
-                "evidence/eval_report.json",
-                "evidence/eval_report.md",
-            }
+            if not key.startswith(("planning/", "traces/", "review/"))
+            and key != "documents/sections.jsonl"
         }
 
     def _write_stage_meta(self, stage_dir: Path, execution: StageExecution) -> None:

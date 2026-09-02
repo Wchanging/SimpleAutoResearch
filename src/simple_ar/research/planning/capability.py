@@ -17,7 +17,9 @@ from simple_ar.integrations.llm import LLMError
 from simple_ar.research.contracts import QueryPlan, ResearchQuestion, SourcePlan
 from simple_ar.research.outputs.artifacts import build_research_plan_artifact
 from simple_ar.research.prompts import (
+    PLAN_SYSTEM,
     RESEARCH_PLANNER_SYSTEM,
+    plan_user_prompt,
     research_planner_user_prompt,
 )
 from simple_ar.research.sources.base import build_source_plan, primary_query
@@ -124,6 +126,46 @@ class ResearchPlanResult:
         )
 
 
+def build_research_scope(
+    topic: str,
+    *,
+    llm_client: Any | None = None,
+) -> tuple[str, str]:
+    """Build the two human-readable scope artifacts used by the old pipeline.
+
+    The eight-stage runner still writes ``goal.md`` and ``problem.md`` for
+    compatibility.  Keeping their content generation here lets that adapter
+    reuse the canonical planning boundary instead of maintaining a second LLM
+    planning call in ``pipeline_stages``.
+    """
+
+    if not topic.strip():
+        raise ValueError("Research scope topic cannot be empty.")
+    if llm_client is not None:
+        response = llm_client.ask_json(
+            PLAN_SYSTEM,
+            plan_user_prompt(topic),
+            label="plan",
+        )
+        goal = _text_field(response, "goal_markdown")
+        problem = _text_field(response, "problem_markdown")
+        if not goal or not problem:
+            raise LLMError(
+                "Research scope response did not contain both goal_markdown and problem_markdown."
+            )
+        return _ensure_heading(goal, "Research Goal"), _ensure_heading(problem, "Research Problem")
+
+    return (
+        "# Research Goal\n\n"
+        f"Topic: {topic}\n\n"
+        "Create a small, reproducible research workflow that can be inspected "
+        "stage by stage.\n",
+        "# Research Problem\n\n"
+        f"How can we study `{topic}` with a simple literature-backed "
+        "experiment and a transparent artifact pipeline?\n",
+    )
+
+
 def build_research_plan(request: ResearchPlanRequest) -> ResearchPlanResult:
     """Build questions, executable queries, and a source budget deterministically."""
 
@@ -161,7 +203,7 @@ def run_research_plan_capability(
 ) -> CapabilityResult:
     """Persist one planning handoff for a session attempt."""
 
-    result = _build_requested_plan(request)
+    result = build_requested_research_plan(request)
     output = context.store.write_json(
         "research_plan.json",
         result.to_handoff_dict(),
@@ -189,7 +231,7 @@ def run_research_plan_capability(
     )
 
 
-def _build_requested_plan(request: ResearchPlanRequest) -> ResearchPlanResult:
+def build_requested_research_plan(request: ResearchPlanRequest) -> ResearchPlanResult:
     """Build a deterministic or explicitly LLM-assisted plan."""
 
     baseline = build_research_plan(request)
@@ -331,9 +373,20 @@ def _int(value: object, default: int) -> int:
         return default
 
 
+def _text_field(data: Mapping[str, Any], key: str) -> str:
+    value = data.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _ensure_heading(markdown: str, heading: str) -> str:
+    stripped = markdown.strip()
+    return stripped + "\n" if stripped.startswith("#") else f"# {heading}\n\n{stripped}\n"
+
+
 __all__ = [
     "ResearchPlanRequest",
     "ResearchPlanResult",
+    "build_research_scope",
     "build_research_plan",
     "search_request_from_plan",
     "run_research_plan_capability",

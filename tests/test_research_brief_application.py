@@ -122,14 +122,14 @@ class ResearchBriefApplicationTests(unittest.TestCase):
 
             self.assertIn(result.status, {"ready", "partial", "needs_review"})
             self.assertTrue(result.brief_path.is_file())
-            self.assertEqual(len(result.attempts), 4)
+            self.assertEqual(len(result.attempts), 5)
             self.assertEqual(
                 [attempt.capability for attempt in result.attempts],
-                ["research_brief", "document_ingest", "plan", "search"],
+                ["document_ingest", "plan", "read", "search", "synthesize"],
             )
             self.assertEqual(
                 [decision.action for decision in result.decisions],
-                ["accept", "accept", "accept", "accept"],
+                ["accept", "accept", "accept", "accept", "accept"],
             )
             self.assertTrue(
                 (root / "session" / "attempts" / "plan-001" / "research_plan.json").is_file()
@@ -139,6 +139,12 @@ class ResearchBriefApplicationTests(unittest.TestCase):
             )
             self.assertTrue(
                 (root / "session" / "attempts" / "document-001" / "document_bundle.json").is_file()
+            )
+            self.assertTrue(
+                (root / "session" / "attempts" / "read-001" / "read_result.json").is_file()
+            )
+            self.assertTrue(
+                (root / "session" / "attempts" / "synthesize-001" / "synthesis_result.json").is_file()
             )
             manifest = json.loads(
                 (root / "session" / "session_manifest.json").read_text(encoding="utf-8")
@@ -172,7 +178,10 @@ class ResearchBriefApplicationTests(unittest.TestCase):
             sessions = list((root / "runs").iterdir())
             self.assertEqual(len(sessions), 1)
             self.assertTrue(
-                (sessions[0] / "attempts" / "brief-001" / "research_brief.json").is_file()
+                (sessions[0] / "attempts" / "read-001" / "read_result.json").is_file()
+            )
+            self.assertTrue(
+                (sessions[0] / "attempts" / "synthesize-001" / "synthesis_result.json").is_file()
             )
 
 

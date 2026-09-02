@@ -25,7 +25,6 @@ class ResearchCapabilityRegistryTests(unittest.TestCase):
                 "analyze",
                 "report",
                 "report_audit",
-                "research_brief",
             ),
         )
 

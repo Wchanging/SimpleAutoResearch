@@ -28,7 +28,6 @@ from simple_ar.core.profiles import (
     lifecycle_profile_names,
     resolve_lifecycle_profile,
 )
-from simple_ar.core.session_plan import SessionStep, run_session_plan
 
 __all__ = [
     "ArtifactRef",
@@ -51,7 +50,5 @@ __all__ = [
     "LifecycleProfile",
     "lifecycle_profile_names",
     "resolve_lifecycle_profile",
-    "SessionStep",
-    "run_session_plan",
 ]
 

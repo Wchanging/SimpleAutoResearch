@@ -10,13 +10,11 @@ from simple_ar.core import (
     CapabilityResult,
     SessionController,
     SessionManifest,
-    SessionStep,
     TransitionPolicy,
     TransitionRequest,
     classify_failure,
     lifecycle_profile_names,
     resolve_lifecycle_profile,
-    run_session_plan,
 )
 
 
@@ -110,13 +108,18 @@ class SessionTransitionTests(unittest.TestCase):
                 registry=registry,
                 profile="full_research",
             )
-            outcomes = run_session_plan(
-                controller,
-                [
-                    SessionStep(capability, f"attempt-{index:02d}")
-                    for index, capability in enumerate(profile.capabilities, start=1)
-                ],
-            )
+            outcomes = []
+            for index, capability in enumerate(profile.capabilities, start=1):
+                result, decision = controller.execute(
+                    capability,
+                    attempt_id=f"attempt-{index:02d}",
+                    next_capability=(
+                        profile.capabilities[index]
+                        if index < len(profile.capabilities)
+                        else None
+                    ),
+                )
+                outcomes.append((result, decision))
 
             self.assertEqual(len(outcomes), len(profile.capabilities))
             self.assertEqual(controller.manifest.status, "completed")
@@ -260,19 +263,24 @@ class SessionTransitionTests(unittest.TestCase):
                     registry=registry,
                     profile=profile_name,
                 )
-                outcomes = run_session_plan(
-                    controller,
-                    [
-                        SessionStep(capability, f"attempt-{index:02d}")
-                        for index, capability in enumerate(profile.capabilities, start=1)
-                    ],
-                )
+                outcomes = []
+                for index, capability in enumerate(profile.capabilities, start=1):
+                    result, decision = controller.execute(
+                        capability,
+                        attempt_id=f"attempt-{index:02d}",
+                        next_capability=(
+                            profile.capabilities[index]
+                            if index < len(profile.capabilities)
+                            else None
+                        ),
+                    )
+                    outcomes.append((result, decision))
 
                 self.assertEqual(len(outcomes), len(profile.capabilities))
                 self.assertTrue(all(result.status == "completed" for result, _ in outcomes))
                 self.assertEqual(controller.manifest.status, "completed")
 
-    def test_profiles_allow_only_named_composite_capability_aliases(self) -> None:
+    def test_profiles_allow_only_named_legacy_capability_aliases(self) -> None:
         brief = resolve_lifecycle_profile("research_brief")
         experiment = resolve_lifecycle_profile("experiment")
         full = resolve_lifecycle_profile("full_research")
@@ -280,7 +288,9 @@ class SessionTransitionTests(unittest.TestCase):
         assert experiment is not None
         assert full is not None
 
-        self.assertTrue(brief.allows("research_brief"))
+        self.assertTrue(brief.allows("read"))
+        self.assertTrue(brief.allows("synthesize"))
+        self.assertFalse(brief.allows("research_brief"))
         self.assertFalse(brief.allows("report_audit"))
         self.assertTrue(experiment.allows("experiment"))
         self.assertTrue(experiment.allows("analysis"))
@@ -605,218 +615,6 @@ class SessionTransitionTests(unittest.TestCase):
                 ).diagnostics,
                 ("The worker process ended before returning a capability result.",),
             )
-
-    def test_explicit_session_plan_preflights_and_completes_profile_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            registry = CapabilityRegistry()
-
-            def handler(*, context: CapabilityContext, marker: str) -> CapabilityResult:
-                output = context.store.write_text(
-                    f"{context.attempt.capability}.txt",
-                    marker,
-                    kind="fixture_output",
-                )
-                return CapabilityResult(status="completed", artifacts=(output,))
-
-            for name in ("plan", "search", "read", "synthesize"):
-                registry.register(name, handler)
-            controller = SessionController.create(
-                tmp,
-                session_id="explicit-plan",
-                topic="plan fixture",
-                profile="research_brief",
-                registry=registry,
-                budget=BudgetState(max_attempts=4),
-            )
-
-            outcomes = run_session_plan(
-                controller,
-                [
-                    SessionStep("plan", "attempt-001", handler_kwargs={"marker": "p"}),
-                    SessionStep("search", "attempt-002", handler_kwargs={"marker": "s"}),
-                    SessionStep("read", "attempt-003", handler_kwargs={"marker": "r"}),
-                    SessionStep("synthesize", "attempt-004", handler_kwargs={"marker": "y"}),
-                ],
-            )
-
-            self.assertEqual(len(outcomes), 4)
-            self.assertEqual(controller.manifest.status, "completed")
-            self.assertEqual([item[1].next_capability for item in outcomes], [
-                "search",
-                "read",
-                "synthesize",
-                None,
-            ])
-            self.assertEqual(
-                controller.store.read_attempt_manifest(
-                    "attempts/attempt-004/attempt_manifest.json"
-                ).parent_attempt,
-                "attempt-003",
-            )
-
-    def test_explicit_session_plan_stops_after_non_accept(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            registry = CapabilityRegistry()
-            calls: list[str] = []
-
-            def first(*, context: CapabilityContext) -> CapabilityResult:
-                calls.append(context.attempt.capability)
-                return CapabilityResult(status="failed", diagnostics=("fixture failure",))
-
-            def second(*, context: CapabilityContext) -> CapabilityResult:
-                calls.append(context.attempt.capability)
-                return CapabilityResult(status="completed")
-
-            registry.register("plan", first)
-            registry.register("search", second)
-            controller = SessionController.create(
-                tmp,
-                session_id="stopped-plan",
-                topic="stopped plan",
-                registry=registry,
-            )
-
-            outcomes = run_session_plan(
-                controller,
-                [SessionStep("plan", "attempt-001"), SessionStep("search", "attempt-002")],
-            )
-
-            self.assertEqual(len(outcomes), 1)
-            self.assertEqual(calls, ["plan"])
-            self.assertEqual(outcomes[0][1].action, "repair")
-
-    def test_explicit_session_plan_rejects_attempt_conflicts_before_execution(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            calls: list[str] = []
-
-            def handler(*, context: CapabilityContext) -> CapabilityResult:
-                calls.append(context.attempt.attempt_id)
-                return CapabilityResult(status="completed")
-
-            registry = CapabilityRegistry()
-            registry.register("plan", handler)
-            controller = SessionController.create(
-                tmp,
-                session_id="explicit-plan-conflict",
-                topic="plan conflict",
-                registry=registry,
-            )
-
-            with self.assertRaisesRegex(ValueError, "must be unique"):
-                run_session_plan(
-                    controller,
-                    [SessionStep("plan", "attempt-001"), SessionStep("plan", "attempt-001")],
-                )
-            self.assertEqual(calls, [])
-            self.assertEqual(controller.list_attempts(), ())
-
-            controller.execute("plan", attempt_id="attempt-001")
-            with self.assertRaisesRegex(ValueError, "already exist"):
-                run_session_plan(controller, [SessionStep("plan", "attempt-001")])
-            self.assertEqual(calls, ["attempt-001"])
-
-    def test_resumed_session_plan_preflights_from_current_capability(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            registry = CapabilityRegistry()
-            calls: list[str] = []
-
-            def handler(*, context: CapabilityContext) -> CapabilityResult:
-                calls.append(context.attempt.capability or "")
-                return CapabilityResult(status="completed")
-
-            registry.register("plan", handler)
-            registry.register("report", handler)
-            controller = SessionController.create(
-                tmp,
-                session_id="resumed-plan-preflight",
-                topic="resume route",
-                registry=registry,
-            )
-            controller.execute("plan", attempt_id="attempt-001")
-
-            with self.assertRaisesRegex(ValueError, "not allowed"):
-                run_session_plan(
-                    controller,
-                    [SessionStep("report", "attempt-002")],
-                )
-
-            self.assertEqual(calls, ["plan"])
-            self.assertEqual(
-                [item.attempt_id for item in controller.list_attempts()],
-                ["attempt-001"],
-            )
-
-    def test_session_plan_can_create_an_explicit_bounded_branch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            registry = CapabilityRegistry()
-
-            def handler(*, context: CapabilityContext) -> CapabilityResult:
-                return CapabilityResult(status="completed")
-
-            registry.register("plan", handler)
-            registry.register("search", handler)
-            controller = SessionController.create(
-                tmp,
-                session_id="session-plan-branch",
-                topic="bounded branch",
-                registry=registry,
-            )
-            controller.execute("plan", attempt_id="attempt-001", next_capability="search")
-
-            outcomes = run_session_plan(
-                controller,
-                [
-                    SessionStep(
-                        "search",
-                        "attempt-002",
-                        parent_attempt_id="attempt-001",
-                    )
-                ],
-            )
-
-            self.assertEqual(len(outcomes), 1)
-            self.assertEqual(outcomes[0][1].action, "accept")
-            self.assertEqual(
-                controller.store.read_attempt_manifest(
-                    "attempts/attempt-002/attempt_manifest.json"
-                ).parent_attempt,
-                "attempt-001",
-            )
-            self.assertEqual(controller.manifest.status, "completed")
-
-    def test_explicit_session_plan_passes_transition_signals_to_controller(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            registry = CapabilityRegistry()
-
-            def handler(*, context: CapabilityContext) -> CapabilityResult:
-                return CapabilityResult(status="completed")
-
-            registry.register("read", handler)
-            registry.register("synthesize", handler)
-            controller = SessionController.create(
-                tmp,
-                session_id="explicit-plan-signals",
-                topic="transition signals",
-                profile="research_brief",
-                registry=registry,
-            )
-
-            outcomes = run_session_plan(
-                controller,
-                [
-                    SessionStep(
-                        "read",
-                        "attempt-001",
-                        evidence_sufficient=False,
-                    ),
-                    SessionStep("synthesize", "attempt-002"),
-                ],
-            )
-
-            self.assertEqual(len(outcomes), 1)
-            self.assertEqual(outcomes[0][1].action, "revise")
-            self.assertEqual(outcomes[0][1].next_capability, "synthesize")
-            self.assertEqual(controller.manifest.status, "running")
 
     def test_controller_records_transition_and_lists_attempts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

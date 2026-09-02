@@ -25,8 +25,7 @@ from simple_ar.research.outputs.artifacts import (
     SYNTHESIS_BRIEF_JSON,
     SYNTHESIS_EVIDENCE_PACK_JSON,
     SYNTHESIS_IDEA_CANDIDATES,
-    SYNTHESIS_NOVELTY_CHECKS,
-    write_design_handoff_artifacts,
+    write_design_contract_artifact,
 )
 from simple_ar.research.service import load_hypothesis_markdown
 from simple_ar.pipeline_stages.common import (
@@ -184,17 +183,10 @@ def _write_design_handoff(ctx: Context) -> None:
         evidence_pack = _evidence_pack_from_synthesis_brief(synthesis_brief)
     if not evidence_pack:
         return
-    source_plan = _downstream_source_plan(ctx)
-    budget = source_plan.get("budget") if isinstance(source_plan, dict) else {}
-    compact_artifacts = ctx.config.get("debug_artifacts") is not True
-    if isinstance(budget, dict) and "compact_artifacts" in budget:
-        compact_artifacts = bool(budget.get("compact_artifacts"))
-    meta = write_design_handoff_artifacts(
+    meta = write_design_contract_artifact(
         stage_dir=ctx.stage_dir(),
         evidence_pack=evidence_pack,
         idea_candidates=_idea_candidates_for_design(ctx, synthesis_brief),
-        novelty_checks=_novelty_checks_for_design(ctx, synthesis_brief),
-        compact_artifacts=compact_artifacts,
     )
     ctx.emit(
         "stage_message",
@@ -235,11 +227,3 @@ def _idea_candidates_for_design(ctx: Context, synthesis_brief: dict[str, Any]) -
         if ideas:
             return [row for row in ideas if isinstance(row, dict)]
     return _read_jsonl_artifact(ctx, SYNTHESIS_IDEA_CANDIDATES)
-
-
-def _novelty_checks_for_design(ctx: Context, synthesis_brief: dict[str, Any]) -> list[dict[str, Any]]:
-    if synthesis_brief:
-        checks = _list_value(synthesis_brief.get("novelty_checks"))
-        if checks:
-            return [row for row in checks if isinstance(row, dict)]
-    return _read_jsonl_artifact(ctx, SYNTHESIS_NOVELTY_CHECKS)

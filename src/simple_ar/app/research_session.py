@@ -20,10 +20,11 @@ from simple_ar.core import (
     DecisionRecord,
     SessionController,
 )
-from simple_ar.core.transitions import TransitionDecision, TransitionRequest
+from simple_ar.core.transitions import TransitionDecision, TransitionPolicy, TransitionRequest
 from simple_ar.experiment.code_task_bridge import CodeTaskExperimentSpec
 from simple_ar.experiment.execution.backend import ExecutionBackend, RunRequest
 from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.evidence.reader import ReadResult
 from simple_ar.research.analysis import AnalysisHandoff
 from simple_ar.research.design import ResearchDesignRequest, ResearchDesignResult
 from simple_ar.research.experiment import ExperimentRequest
@@ -33,7 +34,6 @@ from simple_ar.research.sources import SearchProviderRegistry, SearchResult
 from simple_ar.research.synthesis import SynthesisResult
 from simple_ar.research.brief import ResearchBriefResult
 from simple_ar.research.decisions import (
-    ResearchIterationPolicy,
     transition_request_from_analysis,
 )
 from simple_ar.result_analysis.schema import AnalysisResult
@@ -233,10 +233,7 @@ class ResearchSessionResult:
                 expected_delta=expected_delta,
                 signals=(execution_signal, *self.analysis.status_reasons),
             )
-        return ResearchIterationPolicy().decide(
-            request,
-            prior_decisions=self.decisions,
-        )
+        return TransitionPolicy().decide(request)
 
 
 class ResearchSessionError(RuntimeError):
@@ -260,12 +257,13 @@ def run_research_session(
             "plan",
             "search",
             "document_ingest",
-            "research_brief",
+            "read",
+            "synthesize",
             "research_design",
             "experiment",
             "analysis",
         ),
-        budget=BudgetState(max_attempts=9, max_no_progress=3),
+        budget=BudgetState(max_attempts=10, max_no_progress=3),
     )
     code_task_request_cls: Any | None = None
     if request.code_task_spec is not None:
@@ -663,18 +661,45 @@ def load_research_session_result(
             controller.store.read_json(document_ref)
         )
 
-        brief_ref = controller.attempt_output_ref(
-            "brief-001",
-            kind="research_brief",
-            schema="research_brief.v1",
-        )
-        brief_payload = controller.store.read_json(brief_ref)
-        if not isinstance(brief_payload, Mapping):
-            raise ValueError("Research brief handoff must be a JSON object.")
-        brief_result = ResearchBriefResult.from_handoff_dict(
-            brief_payload,
-            bundle=documents,
-        )
+        # New sessions expose Read and Synthesis as separate attempts. Keep
+        # the old aggregate handoff readable so historical sessions remain
+        # usable after this migration.
+        if any(item.attempt_id == "read-001" for item in attempts):
+            read_ref = controller.attempt_output_ref(
+                "read-001",
+                kind="read_result",
+                schema="read_result.v1",
+            )
+            read_payload = controller.store.read_json(read_ref)
+            if not isinstance(read_payload, Mapping):
+                raise ValueError("Read handoff must be a JSON object.")
+            read_result = ReadResult.from_handoff_dict(
+                read_payload,
+                bundle=documents,
+            )
+            brief_ref = controller.attempt_output_ref(
+                "synthesize-001",
+                kind="synthesis_result",
+                schema="synthesis_result.v1",
+            )
+            synthesis_payload = controller.store.read_json(brief_ref)
+            if not isinstance(synthesis_payload, Mapping):
+                raise ValueError("Synthesis handoff must be a JSON object.")
+            synthesis = SynthesisResult.from_handoff_dict(synthesis_payload)
+            brief_result = ResearchBriefResult.from_parts(read_result, synthesis)
+        else:
+            brief_ref = controller.attempt_output_ref(
+                "brief-001",
+                kind="research_brief",
+                schema="research_brief.v1",
+            )
+            brief_payload = controller.store.read_json(brief_ref)
+            if not isinstance(brief_payload, Mapping):
+                raise ValueError("Research brief handoff must be a JSON object.")
+            brief_result = ResearchBriefResult.from_handoff_dict(
+                brief_payload,
+                bundle=documents,
+            )
         if brief_result.synthesis is None:
             raise ValueError("Research brief handoff has no synthesis result.")
 

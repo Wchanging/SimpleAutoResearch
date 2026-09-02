@@ -17,20 +17,8 @@ from simple_ar.app.state import (
 )
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text, relative_to_run
 from simple_ar.research.outputs.artifacts import (
-    DESIGN_DECISION_LOG,
-    DESIGN_EVAL_JSON,
-    DESIGN_EVAL_MD,
-    DESIGN_EVIDENCE_REVIEW_MD,
     DESIGN_EXPERIMENT_CONTRACT_JSON,
     DESIGN_EXPERIMENT_CONTRACT_MD,
-    DESIGN_EXTERNAL_AGENT_BACKEND,
-    DESIGN_RETENTION_POLICY_JSON,
-    DESIGN_RETENTION_POLICY_MD,
-    DESIGN_TOOL_ADAPTER_CONTRACT_JSON,
-    DESIGN_TOOL_ADAPTER_CONTRACT_MD,
-    DESIGN_TOOL_CONTEXT_JSON,
-    DESIGN_TOOL_CONTEXT_MD,
-    DESIGN_TOOL_TRACE,
     READ_CLAIM_CARDS,
     READ_CODE_LINKS,
     READ_DATASET_CARDS,
@@ -334,18 +322,6 @@ def _collect_design(ctx: "Context") -> CollectedStageResult:
                 {
                     DESIGN_EXPERIMENT_CONTRACT_JSON: _rel(ctx, experiment_contract_path),
                     DESIGN_EXPERIMENT_CONTRACT_MD: _rel(ctx, ctx.artifact_path(DESIGN_EXPERIMENT_CONTRACT_MD)),
-                    DESIGN_TOOL_CONTEXT_JSON: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_CONTEXT_JSON)),
-                    DESIGN_TOOL_CONTEXT_MD: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_CONTEXT_MD)),
-                    DESIGN_EVIDENCE_REVIEW_MD: _rel(ctx, ctx.artifact_path(DESIGN_EVIDENCE_REVIEW_MD)),
-                    DESIGN_DECISION_LOG: _rel(ctx, ctx.artifact_path(DESIGN_DECISION_LOG)),
-                    DESIGN_EVAL_JSON: _rel(ctx, ctx.artifact_path(DESIGN_EVAL_JSON)),
-                    DESIGN_EVAL_MD: _rel(ctx, ctx.artifact_path(DESIGN_EVAL_MD)),
-                    DESIGN_TOOL_ADAPTER_CONTRACT_JSON: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_ADAPTER_CONTRACT_JSON)),
-                    DESIGN_TOOL_ADAPTER_CONTRACT_MD: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_ADAPTER_CONTRACT_MD)),
-                    DESIGN_TOOL_TRACE: _rel(ctx, ctx.artifact_path(DESIGN_TOOL_TRACE)),
-                    DESIGN_EXTERNAL_AGENT_BACKEND: _rel(ctx, ctx.artifact_path(DESIGN_EXTERNAL_AGENT_BACKEND)),
-                    DESIGN_RETENTION_POLICY_JSON: _rel(ctx, ctx.artifact_path(DESIGN_RETENTION_POLICY_JSON)),
-                    DESIGN_RETENTION_POLICY_MD: _rel(ctx, ctx.artifact_path(DESIGN_RETENTION_POLICY_MD)),
                 }
                 if experiment_contract_path.exists()
                 else {}

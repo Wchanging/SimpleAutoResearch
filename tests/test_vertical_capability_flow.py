@@ -13,7 +13,7 @@ from simple_ar.core import (
 from simple_ar.experiment.execution.backend import RunRequest
 from simple_ar.literature.models import Paper
 from simple_ar.research import register_research_capabilities
-from simple_ar.research.brief import ResearchBriefRequest, evidence_pack_from_read
+from simple_ar.research.brief import evidence_pack_from_read
 from simple_ar.research.contracts import DocumentRecord, SourcePlan, TextChunk
 from simple_ar.research.documents.ingest import DocumentBundle, DocumentIngestRequest
 from simple_ar.research.evidence.reader import ReadRequest, ReadResult
@@ -38,7 +38,7 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
             registry = CapabilityRegistry()
             register_research_capabilities(
                 registry,
-                names=("research_brief", "experiment", "analysis", "report", "report_audit"),
+                names=("read", "synthesize", "experiment", "analysis", "report", "report_audit"),
             )
             controller = SessionController.create(
                 root / "session",
@@ -46,24 +46,43 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 topic="reliable agents",
                 profile="full_research",
                 registry=registry,
-                budget=BudgetState(max_attempts=5),
+                budget=BudgetState(max_attempts=6),
             )
 
             result, decision = controller.execute(
-                "research_brief",
+                "read",
                 attempt_id="attempt-001",
+                next_capability="synthesize",
+                request=ReadRequest(bundle=_bundle()),
+            )
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(decision.action, "accept")
+            read_ref = controller.attempt_output_refs("attempt-001")[0]
+            read_result = ReadResult.from_handoff_dict(
+                controller.store.read_json(read_ref),
+                bundle=_bundle(),
+            )
+
+            result, decision = controller.execute(
+                "synthesize",
+                attempt_id="attempt-002",
+                inputs=(read_ref,),
                 next_capability="experiment",
-                request=ResearchBriefRequest(
-                    topic="reliable agents",
-                    bundle=_bundle(),
+                request=SynthesisRequest(
+                    evidence_pack=evidence_pack_from_read(
+                        "reliable agents",
+                        read_result,
+                    )
                 ),
             )
             self.assertEqual(result.status, "completed")
             self.assertEqual(decision.action, "accept")
+            synthesis_ref = controller.attempt_output_refs("attempt-002")[0]
 
             result, decision = controller.execute(
                 "experiment",
-                attempt_id="attempt-002",
+                attempt_id="attempt-003",
+                inputs=(synthesis_ref,),
                 next_capability="analysis",
                 request=ExperimentRequest(
                     run=RunRequest(
@@ -79,11 +98,11 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "completed")
             self.assertEqual(decision.action, "accept")
-            result_ref = controller.attempt_output_refs("attempt-002")[0]
+            result_ref = controller.attempt_output_refs("attempt-003")[0]
 
             result, decision = controller.execute(
                 "analysis",
-                attempt_id="attempt-003",
+                attempt_id="attempt-004",
                 inputs=(result_ref,),
                 next_capability="report",
                 result_ref=result_ref,
@@ -94,7 +113,7 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
 
             result, decision = controller.execute(
                 "report",
-                attempt_id="attempt-004",
+                attempt_id="attempt-005",
                 next_capability="report_audit",
                 request=ReportAssemblyRequest(
                     title="Reliable agents",
@@ -109,11 +128,11 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "completed")
             self.assertEqual(decision.action, "accept")
-            report_ref = controller.attempt_output_refs("attempt-004")[0]
+            report_ref = controller.attempt_output_refs("attempt-005")[0]
 
             result, decision = controller.execute(
                 "report_audit",
-                attempt_id="attempt-005",
+                attempt_id="attempt-006",
                 inputs=(report_ref,),
                 request=ReportAuditCapabilityRequest(
                     report_ref=report_ref,
@@ -130,7 +149,7 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
             self.assertEqual(controller.status_snapshot()["status"], "completed")
             self.assertEqual(
                 controller.store.read_json(
-                    "attempts/attempt-005/report_audit.json"
+                    "attempts/attempt-006/report_audit.json"
                 )["status"],
                 "passed",
             )

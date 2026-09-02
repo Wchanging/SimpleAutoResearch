@@ -262,7 +262,7 @@ novelty_backend = "local"
 
 启用 LLM 时，`03-read` 会走两步式 review：先把 title/abstract 组织成小批次并发粗筛，再对保留下来的集合做重排，输出阅读优先级、证据角色和给 `04-synthesize` 使用的简短提示。最终仍然只写入 `03-read/review/screening_decisions.jsonl`，并由 `shortlist.jsonl` 决定哪些论文进入 notes、cards 和 synthesis。如果希望完全跳过这层 LLM review，可以设置 `[research].read_screening = "deterministic"`。
 
-如果需要查看详细诊断、section tables 和未来 Tool/MCP 接入草案，可以设置 `[run].debug_artifacts = true`：
+如果需要查看详细诊断、section tables 和 evidence tables，可以设置 `[run].debug_artifacts = true`：
 
 ```text
 02-search/
@@ -290,22 +290,6 @@ novelty_backend = "local"
     gap_summary.md
     idea_candidates.jsonl
     novelty_checks.jsonl
-05-design/
-  evidence/
-    tool_context.json
-    tool_context.md
-    evidence_review.md
-    decision_log.jsonl
-    eval_report.json
-    eval_report.md
-  tools/
-    tool_adapter_contract.json
-    tool_adapter_contract.md
-    tool_trace.jsonl
-    external_agent_backend.md
-  governance/
-    artifact_retention_policy.json
-    artifact_retention_policy.md
 ```
 
 共享加速索引默认写在 run 目录外：
@@ -407,14 +391,6 @@ literature provider、重新构建本地检索加速索引，并且不再保留�
   - `contract_validation.json`：进入 code 前的契约检查；如果它报告失败，`06-code` 会停止。
 - `05-design/evidence/`
   - `experiment_contract.json` / `.md`：来自 V2.3 synthesis artifacts 的兼容 research handoff。可执行的 V2.5 contract 位于 `05-design/experiment_contract.json`。
-  - `tool_context.json` / `.md`（debug-only）：给未来 MCP/tool/agent 的只读 handoff，在打开代码 workspace 前只允许读取和规划。
-  - `evidence_review.md`、`decision_log.jsonl`、`eval_report.json` / `.md`（debug-only）：人工审核清单和简单 research artifact quality checks。
-- `05-design/tools/`（debug-only）
-  - `tool_adapter_contract.json` / `.md`：只读 Tool/MCP adapter 契约，定义输入、输出、权限边界、错误/fallback 和 trace 规则。
-  - `tool_trace.jsonl`：工具审计 trace。
-  - `external_agent_backend.md`：Codex、Claude Code、OpenCode 等外部 agent backend 的接入边界说明。
-- `05-design/governance/`（debug-only）
-  - `artifact_retention_policy.json` / `.md`：把 search artifacts 分为稳定产物、evidence table、cache、trace、debug 和可重建文件，避免无边界新增 JSON/JSONL。
 - `08-report/`
   - `report.md`：基于当前报告模板、已知证据以及可用的实验/code-task 结果组装最终 Markdown 报告。
   - `references.bib`：只为正文实际引用的论文生成有界 bibliography，不保留模型随口给出的外部引用。

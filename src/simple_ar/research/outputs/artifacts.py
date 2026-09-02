@@ -7,6 +7,7 @@ from typing import Any
 from simple_ar.core.artifacts import write_json, write_jsonl, write_text
 from simple_ar.literature.models import Paper
 from simple_ar.research.contracts import (
+    ClaimCard,
     CodeLink,
     DatasetCard,
     DocumentRecord,
@@ -15,18 +16,14 @@ from simple_ar.research.contracts import (
     MethodCard,
     NoveltyCheck,
     PaperCard,
-    ClaimCard,
     QueryPlan,
     ResearchQuestion,
     SourcePlan,
     TextChunk,
 )
 from simple_ar.research.evidence.derivation import (
-    build_evidence_review,
     build_experiment_contract,
     build_gap_summary,
-    build_research_eval,
-    build_tool_context,
     experiment_contract_markdown,
 )
 from simple_ar.research.evidence.pack import (
@@ -36,17 +33,9 @@ from simple_ar.research.evidence.pack import (
 )
 from simple_ar.research.synthesis import SynthesisRequest, synthesize_evidence
 from simple_ar.research.documents.ingest import build_document_bundle
-from simple_ar.research.evidence.reader import ReadRequest, ReadResult, read_documents
 from simple_ar.research.documents.records import build_cache_manifest
+from simple_ar.research.evidence.reader import ReadResult
 from simple_ar.research.store.index import write_research_index
-from simple_ar.research.tools.contract import (
-    artifact_retention_policy_markdown,
-    build_artifact_retention_policy,
-    build_tool_adapter_contract,
-    build_tool_trace_rows,
-    external_agent_backend_markdown,
-    tool_adapter_contract_markdown,
-)
 
 
 SEARCH_RESEARCH_PLAN = "planning/research_plan.json"
@@ -80,18 +69,6 @@ SYNTHESIS_BRIEF_JSON = "synthesis_brief.json"
 
 DESIGN_EXPERIMENT_CONTRACT_JSON = "evidence/experiment_contract.json"
 DESIGN_EXPERIMENT_CONTRACT_MD = "evidence/experiment_contract.md"
-DESIGN_TOOL_CONTEXT_JSON = "evidence/tool_context.json"
-DESIGN_TOOL_CONTEXT_MD = "evidence/tool_context.md"
-DESIGN_EVIDENCE_REVIEW_MD = "evidence/evidence_review.md"
-DESIGN_DECISION_LOG = "evidence/decision_log.jsonl"
-DESIGN_EVAL_JSON = "evidence/eval_report.json"
-DESIGN_EVAL_MD = "evidence/eval_report.md"
-DESIGN_TOOL_ADAPTER_CONTRACT_JSON = "tools/tool_adapter_contract.json"
-DESIGN_TOOL_ADAPTER_CONTRACT_MD = "tools/tool_adapter_contract.md"
-DESIGN_TOOL_TRACE = "tools/tool_trace.jsonl"
-DESIGN_EXTERNAL_AGENT_BACKEND = "tools/external_agent_backend.md"
-DESIGN_RETENTION_POLICY_JSON = "governance/artifact_retention_policy.json"
-DESIGN_RETENTION_POLICY_MD = "governance/artifact_retention_policy.md"
 
 SEARCH_PAPERS = "papers.jsonl"
 SEARCH_META = "search_meta.json"
@@ -293,25 +270,16 @@ def write_read_review_artifacts(
     }
 
 
-def write_read_card_artifacts(
-    *,
-    stage_dir: Path,
-    documents: list[dict[str, Any]],
-    chunks: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Compatibility wrapper for the reusable Read boundary."""
-    result = read_documents(
-        ReadRequest(bundle=DocumentBundle.from_rows(documents=documents, chunks=chunks))
-    )
-    return write_read_card_artifacts_from_result(stage_dir=stage_dir, result=result)
-
-
 def write_read_card_artifacts_from_result(
     *,
     stage_dir: Path,
     result: ReadResult,
 ) -> dict[str, Any]:
-    """Project a typed Read result into the existing JSONL card artifacts."""
+    """Project a typed Read result into legacy JSONL card artifacts.
+
+    The canonical Read capability owns card construction. This projection is
+    retained only for the frozen ``simple-ar run --debug-artifacts`` facade.
+    """
     paper_cards = result.paper_cards
     claim_cards = result.claim_cards
     method_cards = result.method_cards
@@ -433,6 +401,67 @@ def build_synthesis_brief(
     }
 
 
+def write_synthesis_evidence_artifacts(
+    *,
+    stage_dir: Path,
+    topic: str,
+    source_plan: dict[str, Any],
+    papers: list[dict[str, Any]],
+    documents: list[dict[str, Any]],
+    sections: list[dict[str, Any]],
+    chunks: list[dict[str, Any]],
+    index_meta: dict[str, Any],
+    paper_cards: list[dict[str, Any]],
+    claim_cards: list[dict[str, Any]],
+    method_cards: list[dict[str, Any]],
+    dataset_cards: list[dict[str, Any]],
+    code_links: list[dict[str, Any]],
+    coverage_report: dict[str, Any] | None,
+    fulltext_manifest: dict[str, Any],
+    fulltext_extraction: dict[str, Any],
+) -> dict[str, Any]:
+    """Write rich evidence artifacts for the legacy debug projection."""
+    source_plan_obj = _from_row(SourcePlan, source_plan)
+    evidence_pack = build_evidence_pack(
+        topic=topic,
+        source_plan=source_plan_obj,
+        papers=[Paper.from_row(row) for row in papers],
+        documents=[_from_row(DocumentRecord, row) for row in documents],
+        sections=[_from_row(DocumentSection, row) for row in sections],
+        chunks=[_from_row(TextChunk, row) for row in chunks],
+        index_meta=index_meta,
+        paper_cards=[_from_row(PaperCard, row) for row in paper_cards],
+        claim_cards=[_from_row(ClaimCard, row) for row in claim_cards],
+        method_cards=[_from_row(MethodCard, row) for row in method_cards],
+        dataset_cards=[_from_row(DatasetCard, row) for row in dataset_cards],
+        code_links=[_from_row(CodeLink, row) for row in code_links],
+        coverage_report=coverage_report,
+        fulltext_manifest=fulltext_manifest,
+        fulltext_extraction=fulltext_extraction,
+    )
+    synthesis = synthesize_evidence(
+        SynthesisRequest(
+            evidence_pack=evidence_pack,
+            novelty_backend=str(source_plan_obj.budget.get("novelty_backend") or "local"),
+        )
+    )
+    stored_evidence_pack = compact_evidence_pack_for_storage(evidence_pack)
+    write_json(stage_dir / SYNTHESIS_EVIDENCE_PACK_JSON, stored_evidence_pack)
+    write_text(stage_dir / SYNTHESIS_EVIDENCE_PACK_MD, evidence_pack_markdown(stored_evidence_pack))
+    write_text(stage_dir / SYNTHESIS_GAP_SUMMARY, build_gap_summary(evidence_pack))
+    write_jsonl(stage_dir / SYNTHESIS_IDEA_CANDIDATES, [idea.to_row() for idea in synthesis.ideas])
+    write_jsonl(stage_dir / SYNTHESIS_NOVELTY_CHECKS, [check.to_row() for check in synthesis.novelty_checks])
+    return {
+        "evidence_pack": SYNTHESIS_EVIDENCE_PACK_JSON,
+        "evidence_pack_markdown": SYNTHESIS_EVIDENCE_PACK_MD,
+        "gap_summary": SYNTHESIS_GAP_SUMMARY,
+        "idea_candidates": SYNTHESIS_IDEA_CANDIDATES,
+        "novelty_checks": SYNTHESIS_NOVELTY_CHECKS,
+        "idea_candidate_count": len(synthesis.ideas),
+        "novelty_check_count": len(synthesis.novelty_checks),
+    }
+
+
 def _optional_int(value: object) -> int | None:
     try:
         return int(value)  # type: ignore[arg-type]
@@ -467,150 +496,21 @@ def _reading_table_markdown(shortlist: list[dict[str, Any]], coverage_report: di
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_synthesis_evidence_artifacts(
-    *,
-    stage_dir: Path,
-    topic: str,
-    source_plan: dict[str, Any],
-    papers: list[dict[str, Any]],
-    documents: list[dict[str, Any]],
-    sections: list[dict[str, Any]],
-    chunks: list[dict[str, Any]],
-    index_meta: dict[str, Any],
-    paper_cards: list[dict[str, Any]],
-    claim_cards: list[dict[str, Any]],
-    method_cards: list[dict[str, Any]],
-    dataset_cards: list[dict[str, Any]],
-    code_links: list[dict[str, Any]],
-    coverage_report: dict[str, Any] | None,
-    fulltext_manifest: dict[str, Any],
-    fulltext_extraction: dict[str, Any],
-) -> dict[str, Any]:
-    """Write synthesis-owned evidence pack, gaps, ideas, and novelty hints."""
-    source_plan_obj = _from_row(SourcePlan, source_plan)
-    paper_rows = [Paper.from_row(row) for row in papers]
-    evidence_pack = build_evidence_pack(
-        topic=topic,
-        source_plan=source_plan_obj,
-        papers=paper_rows,
-        documents=[_from_row(DocumentRecord, row) for row in documents],
-        sections=[_from_row(DocumentSection, row) for row in sections],
-        chunks=[_from_row(TextChunk, row) for row in chunks],
-        index_meta=index_meta,
-        paper_cards=[_from_row(PaperCard, row) for row in paper_cards],
-        claim_cards=[_from_row(ClaimCard, row) for row in claim_cards],
-        method_cards=[_from_row(MethodCard, row) for row in method_cards],
-        dataset_cards=[_from_row(DatasetCard, row) for row in dataset_cards],
-        code_links=[_from_row(CodeLink, row) for row in code_links],
-        coverage_report=coverage_report,
-        fulltext_manifest=fulltext_manifest,
-        fulltext_extraction=fulltext_extraction,
-    )
-    synthesis = synthesize_evidence(
-        SynthesisRequest(
-            evidence_pack=evidence_pack,
-            novelty_backend=str(source_plan_obj.budget.get("novelty_backend") or "local"),
-        )
-    )
-    idea_candidates = list(synthesis.ideas)
-    novelty_checks = list(synthesis.novelty_checks)
-    stored_evidence_pack = compact_evidence_pack_for_storage(evidence_pack)
-    write_json(stage_dir / SYNTHESIS_EVIDENCE_PACK_JSON, stored_evidence_pack)
-    write_text(stage_dir / SYNTHESIS_EVIDENCE_PACK_MD, evidence_pack_markdown(stored_evidence_pack))
-    write_text(stage_dir / SYNTHESIS_GAP_SUMMARY, build_gap_summary(evidence_pack))
-    write_jsonl(stage_dir / SYNTHESIS_IDEA_CANDIDATES, [idea.to_row() for idea in idea_candidates])
-    write_jsonl(stage_dir / SYNTHESIS_NOVELTY_CHECKS, [check.to_row() for check in novelty_checks])
-    return {
-        "evidence_pack": SYNTHESIS_EVIDENCE_PACK_JSON,
-        "evidence_pack_markdown": SYNTHESIS_EVIDENCE_PACK_MD,
-        "gap_summary": SYNTHESIS_GAP_SUMMARY,
-        "idea_candidates": SYNTHESIS_IDEA_CANDIDATES,
-        "novelty_checks": SYNTHESIS_NOVELTY_CHECKS,
-        "idea_candidate_count": len(idea_candidates),
-        "novelty_check_count": len(novelty_checks),
-    }
-
-
-def write_design_handoff_artifacts(
+def write_design_contract_artifact(
     *,
     stage_dir: Path,
     evidence_pack: dict[str, Any],
     idea_candidates: list[dict[str, Any]],
-    novelty_checks: list[dict[str, Any]],
-    compact_artifacts: bool = True,
 ) -> dict[str, Any]:
-    """Write design-owned experiment contract and optional tool handoff drafts."""
+    """Write the one evidence-grounded contract consumed by experiment design."""
     ideas = [_from_row(IdeaCandidate, row) for row in idea_candidates]
-    checks = [_from_row(type_hint=NoveltyCheck, row=row) for row in novelty_checks]
     experiment_contract = build_experiment_contract(ideas, evidence_pack)
     write_json(stage_dir / DESIGN_EXPERIMENT_CONTRACT_JSON, experiment_contract.to_row())
     write_text(stage_dir / DESIGN_EXPERIMENT_CONTRACT_MD, experiment_contract_markdown(experiment_contract))
-    meta = {
+    return {
         "experiment_contract": DESIGN_EXPERIMENT_CONTRACT_JSON,
         "experiment_contract_markdown": DESIGN_EXPERIMENT_CONTRACT_MD,
     }
-    if not compact_artifacts:
-        tool_context, tool_context_markdown = build_tool_context(
-            pack=evidence_pack,
-            contract=experiment_contract,
-            novelty_checks=checks,
-        )
-        evidence_review_markdown, decision_log = build_evidence_review(
-            pack=evidence_pack,
-            ideas=ideas,
-            novelty_checks=checks,
-            contract=experiment_contract,
-        )
-        eval_report, eval_markdown = build_research_eval(
-            pack=evidence_pack,
-            ideas=ideas,
-            contract=experiment_contract,
-        )
-        tool_adapter_contract = build_tool_adapter_contract(
-            pack=evidence_pack,
-            contract=experiment_contract,
-            tool_context=tool_context,
-        )
-        retention_policy = build_artifact_retention_policy(
-            compact_artifacts=compact_artifacts,
-            source_plan=evidence_pack.get("source_plan", {}),
-        )
-        write_json(stage_dir / DESIGN_TOOL_CONTEXT_JSON, tool_context)
-        write_text(stage_dir / DESIGN_TOOL_CONTEXT_MD, tool_context_markdown)
-        write_text(stage_dir / DESIGN_EVIDENCE_REVIEW_MD, evidence_review_markdown)
-        write_jsonl(stage_dir / DESIGN_DECISION_LOG, decision_log)
-        write_json(stage_dir / DESIGN_EVAL_JSON, eval_report)
-        write_text(stage_dir / DESIGN_EVAL_MD, eval_markdown)
-        write_json(stage_dir / DESIGN_TOOL_ADAPTER_CONTRACT_JSON, tool_adapter_contract)
-        write_text(stage_dir / DESIGN_TOOL_ADAPTER_CONTRACT_MD, tool_adapter_contract_markdown(tool_adapter_contract))
-        write_jsonl(stage_dir / DESIGN_TOOL_TRACE, build_tool_trace_rows(tool_adapter_contract))
-        write_text(
-            stage_dir / DESIGN_EXTERNAL_AGENT_BACKEND,
-            external_agent_backend_markdown(
-                contract=experiment_contract,
-                tool_context=tool_context,
-                adapter_contract=tool_adapter_contract,
-            ),
-        )
-        write_json(stage_dir / DESIGN_RETENTION_POLICY_JSON, retention_policy)
-        write_text(stage_dir / DESIGN_RETENTION_POLICY_MD, artifact_retention_policy_markdown(retention_policy))
-        meta.update(
-            {
-                "tool_context": DESIGN_TOOL_CONTEXT_JSON,
-                "tool_context_markdown": DESIGN_TOOL_CONTEXT_MD,
-                "evidence_review": DESIGN_EVIDENCE_REVIEW_MD,
-                "decision_log": DESIGN_DECISION_LOG,
-                "research_eval": DESIGN_EVAL_JSON,
-                "research_eval_markdown": DESIGN_EVAL_MD,
-                "tool_adapter_contract": DESIGN_TOOL_ADAPTER_CONTRACT_JSON,
-                "tool_adapter_contract_markdown": DESIGN_TOOL_ADAPTER_CONTRACT_MD,
-                "tool_trace": DESIGN_TOOL_TRACE,
-                "external_agent_backend": DESIGN_EXTERNAL_AGENT_BACKEND,
-                "artifact_retention_policy": DESIGN_RETENTION_POLICY_JSON,
-                "artifact_retention_policy_markdown": DESIGN_RETENTION_POLICY_MD,
-            }
-        )
-    return meta
 
 
 def _compact_paper_note(note: dict[str, Any], paper_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:

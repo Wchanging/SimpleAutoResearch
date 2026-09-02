@@ -10,8 +10,8 @@ uv run simple-ar research-brief --topic "reliable agents" \
   --output-root runs/research-brief
 ```
 
-The session keeps plan, search, document-ingest, and brief handoffs in separate
-attempt directories. The fixture is intentionally small and offline.
+The session keeps plan, search, document-ingest, read, and synthesis handoffs in
+separate attempt directories. The fixture is intentionally small and offline.
 
 After a `research-session` reaches `ready_for_report`, continue it through the
 existing report Writer/Reviewer and audit boundary:
@@ -90,8 +90,9 @@ is offline, has no domain-specific schema, and demonstrates the expected
 contract test is included in `uv run simple-ar-checks core`.
 
 For the first bounded research-to-code consumer, run `research-brief` first and
-pass its `research_brief.json` to `research-code-task` together with an existing
+pass its `synthesis_result.json` to `research-code-task` together with an existing
 Code-Task TOML. The latter reuses the normal isolated Code-Task backend and keeps
-execution and analysis artifacts in a new session. Use `--max-candidates N` only
-for an explicit bounded comparison of several synthesis ideas; add `--with-report`
-to pass only the selected successful candidate to the existing report/audit path.
+execution and analysis artifacts in a new session. The V2.8 path intentionally
+runs one selected direction; multi-candidate comparison is deferred until this
+single-direction path is validated on a real prepared project. Add `--with-report`
+to pass the successful session to the existing report/audit path.

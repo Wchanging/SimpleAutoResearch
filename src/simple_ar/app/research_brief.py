@@ -22,13 +22,14 @@ from simple_ar.core import (
 )
 from simple_ar.app.session_roots import new_research_session_root
 from simple_ar.research.brief import (
-    ResearchBriefRequest,
     ResearchBriefResult,
+    evidence_pack_from_read,
 )
 from simple_ar.research.documents.ingest import (
     DocumentBundle,
     DocumentIngestRequest,
 )
+from simple_ar.research.evidence.reader import ReadRequest, ReadResult
 from simple_ar.research.planning.capability import (
     ResearchPlanRequest,
     ResearchPlanResult,
@@ -40,6 +41,7 @@ from simple_ar.research.sources import (
     SearchResult,
     default_search_provider_registry,
 )
+from simple_ar.research.synthesis import SynthesisRequest, SynthesisResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +120,8 @@ class ResearchBriefSessionResult:
 
     @property
     def brief_path(self) -> Path:
+        """Return the final direction handoff (the Synthesis artifact)."""
+
         return self.session_root / self.brief_ref.path
 
 
@@ -160,8 +164,8 @@ def run_research_brief_session(
         request.session_root,
         topic=request.topic,
         profile="research_brief",
-        names=("plan", "search", "document_ingest", "research_brief"),
-        budget=BudgetState(max_attempts=6, max_no_progress=2),
+        names=("plan", "search", "document_ingest", "read", "synthesize"),
+        budget=BudgetState(max_attempts=7, max_no_progress=2),
     )
     steps = _run_research_brief_steps(
         request,
@@ -261,7 +265,7 @@ def _run_research_brief_steps(
         "document_ingest",
         attempt_id="document-001",
         inputs=(search_ref,),
-        next_capability="research_brief",
+        next_capability="read",
         request=DocumentIngestRequest(
             papers=search.papers,
             source_plan=plan.source_plan,
@@ -287,28 +291,60 @@ def _run_research_brief_steps(
             f"Document ingest produced no usable documents; inspect {request.session_root}."
         )
 
-    brief_capability, _ = controller.execute(
-        "research_brief",
-        attempt_id="brief-001",
+    read_capability, _ = controller.execute(
+        "read",
+        attempt_id="read-001",
         inputs=(document_ref,),
+        next_capability="synthesize",
+        request=ReadRequest(bundle=documents),
+    )
+    _require_completed(
+        read_capability,
+        "read",
+        request.session_root,
+        allow_partial=True,
+    )
+    read_ref = controller.attempt_output_ref(
+        "read-001", kind="read_result", schema="read_result.v1"
+    )
+    read_payload = controller.store.read_json(read_ref)
+    if not isinstance(read_payload, Mapping):
+        raise ResearchBriefSessionError(
+            f"Read handoff is not a JSON object; inspect {request.session_root}."
+        )
+    read = ReadResult.from_handoff_dict(read_payload, bundle=documents)
+
+    synthesis_capability, _ = controller.execute(
+        "synthesize",
+        attempt_id="synthesize-001",
+        inputs=(read_ref,),
         next_capability=next_capability,
-        request=ResearchBriefRequest(
-            topic=request.topic,
-            bundle=documents,
+        request=SynthesisRequest(
+            evidence_pack=evidence_pack_from_read(request.topic, read),
             idea_limit=request.idea_limit,
             use_llm=request.use_llm,
             llm_client=request.llm_client,
         ),
     )
-    if brief_capability.status in {"failed", "blocked"}:
-        _require_completed(brief_capability, "research_brief", request.session_root)
-    brief_ref = controller.attempt_output_ref(
-        "brief-001", kind="research_brief", schema="research_brief.v1"
+    _require_completed(
+        synthesis_capability,
+        "synthesize",
+        request.session_root,
+        allow_partial=True,
     )
-    brief = ResearchBriefResult.from_handoff_dict(
-        controller.store.read_json(brief_ref),
-        bundle=documents,
+    synthesis_ref = controller.attempt_output_ref(
+        "synthesize-001", kind="synthesis_result", schema="synthesis_result.v1"
     )
+    synthesis_payload = controller.store.read_json(synthesis_ref)
+    if not isinstance(synthesis_payload, Mapping):
+        raise ResearchBriefSessionError(
+            f"Synthesis handoff is not a JSON object; inspect {request.session_root}."
+        )
+    synthesis = SynthesisResult.from_handoff_dict(synthesis_payload)
+    brief = ResearchBriefResult.from_parts(read, synthesis)
+    # ``brief_ref`` is the historical field name for the final direction
+    # handoff. It now points to the explicit Synthesis attempt.
+    brief_ref = synthesis_ref
     return _ResearchBriefSteps(
         controller=controller,
         plan=plan,

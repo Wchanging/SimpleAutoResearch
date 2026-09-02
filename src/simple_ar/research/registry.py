@@ -25,7 +25,6 @@ _HANDLER_NAMES = (
     "analyze",
     "report",
     "report_audit",
-    "research_brief",
 )
 
 
@@ -130,10 +129,6 @@ def _load_handlers(names: tuple[str, ...]) -> dict[str, CapabilityHandler]:
         from simple_ar.report.audit import run_report_audit_capability
 
         handlers["report_audit"] = run_report_audit_capability
-    if "research_brief" in names:
-        from simple_ar.research.brief import run_research_brief_capability
-
-        handlers["research_brief"] = run_research_brief_capability
     return handlers
 
 
