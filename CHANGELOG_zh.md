@@ -4,6 +4,32 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-09-05
+
+### 变更
+
+- canonical `research-session` 现在接入了一个显式启用且有界的模型辅助 Read 阶段。配置模型后，
+  LLM 可以筛选、重排检索到的论文并生成结构化 paper notes；确定性的证据和来源校验仍然是权威边界，
+  不提供模型时的离线和无模型行为继续可用。
+- Read handoff 现在会保留可检查的筛选决策、paper notes 和来源片段引用，供下游 synthesis 使用，
+  不复制整篇文档，也不增加自动 scheduler。
+- 增加 `examples/research_session_smoke.py` 以及 Linux/AutoDL 辅助脚本
+  `examples/autodl_low_resource_smoke.sh`，用于本地和低资源验收，覆盖有界的 research-to-report
+  流程及报告 audit。
+- 更新公开 README、工作流、CLI、使用、开发和 examples 文档，说明 canonical 模型辅助 Read 路径
+  以及显式的在线资源限制。
+
+## 2026-09-02
+
+### 变更
+
+- 围绕 canonical `research-session` 收紧 V2.8 capability 路径。原来的单体 research pipeline
+  现在作为冻结的 legacy 兼容实现保留；活动中的应用编排改用共享 core、research、experiment 和
+  report 边界。
+- 在既有行为已经由 canonical capability 路径覆盖后，移除重复的 V2.8 session-plan、decision、
+  tool-contract 和 service 层；已有 CLI 入口和 artifact 兼容性仍在边界处明确保留。
+- 增加架构边界回归测试，并同步精简后的结构更新公开 workflow、配置、开发和 CLI 文档。
+
 ## 2026-09-01
 
 ### 变更

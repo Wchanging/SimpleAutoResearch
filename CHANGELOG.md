@@ -4,6 +4,41 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-05
+
+### Changed
+
+- The canonical `research-session` path now connects an explicitly enabled,
+  bounded model-assisted Read step. The model can screen and rerank retrieved
+  papers and produce structured paper notes, while deterministic evidence and
+  provenance checks remain authoritative; no-model and offline behavior remain
+  available.
+- Read handoffs now preserve inspectable screening decisions, paper notes, and
+  source-snippet references for the downstream synthesis stage without copying
+  whole documents or adding an autonomous scheduler.
+- Added `examples/research_session_smoke.py` and the Linux/AutoDL helper
+  `examples/autodl_low_resource_smoke.sh` for local and low-resource acceptance
+  checks covering the bounded research-to-report path and report audit.
+- Updated the public README, workflow, CLI, usage, development, and examples
+  documentation to describe the canonical model-assisted Read path and its
+  explicit online limits.
+
+## 2026-09-02
+
+### Changed
+
+- Slimmed the V2.8 capability paths around the canonical `research-session`
+  composition. The former monolithic research pipeline is now a frozen legacy
+  compatibility implementation, while active application orchestration uses
+  the shared core, research, experiment, and report boundaries.
+- Removed redundant V2.8 session-plan, decision, tool-contract, and service
+  layers after their behavior was covered by the canonical capability paths;
+  existing CLI entrypoints and artifact compatibility remain explicit at the
+  boundary.
+- Added architecture-boundary regression coverage and aligned the public
+  workflow, configuration, development, and CLI documentation with the slim
+  structure.
+
 ## 2026-09-01
 
 ### Changed
