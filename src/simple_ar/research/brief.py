@@ -199,7 +199,13 @@ def build_research_brief(request: ResearchBriefRequest) -> ResearchBriefResult:
     return ResearchBriefResult.from_parts(read, synthesis)
 
 
-def evidence_pack_from_read(topic: str, result: ReadResult) -> dict[str, Any]:
+def evidence_pack_from_read(
+    topic: str,
+    result: ReadResult,
+    *,
+    coverage: Mapping[str, Any] | None = None,
+    source_plan: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Adapt a typed Read result to the minimal synthesis input shape.
 
     This is a domain handoff, not a replacement for the full evidence-pack
@@ -210,6 +216,7 @@ def evidence_pack_from_read(topic: str, result: ReadResult) -> dict[str, Any]:
     return {
         "schema_version": "evidence_pack.v1",
         "topic": topic,
+        "source_plan": dict(source_plan or {}),
         "counts": {
             "documents": len(result.bundle.records),
             "chunks": len(result.bundle.chunks),
@@ -218,13 +225,40 @@ def evidence_pack_from_read(topic: str, result: ReadResult) -> dict[str, Any]:
             "method_cards": len(result.method_cards),
             "dataset_cards": len(result.dataset_cards),
         },
-        "coverage": {"status": "unknown"},
+        "coverage": dict(coverage or {"status": "unknown"}),
+        "papers": [record.to_row() for record in result.bundle.records],
         "paper_cards": [card.to_row() for card in result.paper_cards],
         "claim_cards": [card.to_row() for card in result.claim_cards],
         "method_cards": [card.to_row() for card in result.method_cards],
         "dataset_cards": [card.to_row() for card in result.dataset_cards],
+        "evidence_refs": [chunk.chunk_id for chunk in result.bundle.chunks],
+        "evidence_snippets": _evidence_snippets(result),
         "limitations": list(result.diagnostics),
     }
+
+
+def _evidence_snippets(result: ReadResult, *, max_chunks: int = 12, max_chars: int = 900) -> str:
+    """Render bounded source snippets for LLM synthesis provenance.
+
+    The document bundle remains the source of truth.  This short prompt view
+    replaces the old stage-wide retrieval lookup without copying an entire
+    document into the synthesis handoff or allowing unbounded context growth.
+    """
+
+    lines: list[str] = []
+    for chunk in result.bundle.chunks[:max_chunks]:
+        text = " ".join(chunk.text.split())
+        if len(text) > max_chars:
+            text = text[: max_chars - 3].rstrip() + "..."
+        if not text:
+            continue
+        location = chunk.source_path or chunk.document_id
+        if chunk.line_start is not None:
+            location += f":{chunk.line_start}"
+            if chunk.line_end is not None and chunk.line_end != chunk.line_start:
+                location += f"-{chunk.line_end}"
+        lines.append(f"[{chunk.chunk_id}] {location}: {text}")
+    return "\n".join(lines)
 
 
 __all__ = [

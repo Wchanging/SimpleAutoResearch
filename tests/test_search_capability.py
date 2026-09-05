@@ -5,12 +5,16 @@ import unittest
 from pathlib import Path
 
 from simple_ar.core import CapabilityRegistry, SessionController
+from simple_ar.literature.cache import put_cache
 from simple_ar.literature.models import Paper
+from simple_ar.research.contracts import QueryPlan, ResearchQuestion
 from simple_ar.research.sources import (
     SearchProviderRegistry,
     SearchRequest,
+    SearchSelectionPolicy,
     SearchResult,
     run_search_capability,
+    select_search_result,
     search_sources,
 )
 from simple_ar.research.sources.base import SearchQuery, SearchResponse
@@ -118,6 +122,91 @@ class SearchCapabilityTests(unittest.TestCase):
         self.assertEqual(result.status, "empty")
         self.assertEqual(result.to_dict()["schema_version"], "search_result.v1")
 
+    def test_optional_cache_recovers_provider_failure_without_hiding_it(self) -> None:
+        paper = Paper(
+            id="cached-paper",
+            title="Cached reliable agents",
+            authors=[],
+            abstract="Cached metadata for a bounded search.",
+            url="https://example.test/cached",
+            source="fixture",
+        )
+
+        class FailingConnector:
+            source_name = "fixture"
+
+            def search(self, request: SearchQuery) -> SearchResponse:
+                raise RuntimeError("provider unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "literature"
+            put_cache(
+                "query",
+                "fixture",
+                10,
+                [paper.to_row()],
+                cache_dir=cache_dir,
+            )
+            result = search_sources(
+                SearchRequest(
+                    queries=("query",),
+                    providers=("fixture",),
+                    cache_dir=cache_dir,
+                ),
+                registry=SearchProviderRegistry({"fixture": FailingConnector}),
+            )
+
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.responses[0].status, "cached")
+        self.assertEqual(result.responses[0].papers[0].id, "cached-paper")
+        self.assertIn("provider unavailable", result.responses[0].message)
+
+    def test_optional_cache_persists_successful_metadata(self) -> None:
+        paper = Paper(
+            id="fresh-paper",
+            title="Fresh reliable agents",
+            authors=[],
+            abstract="Fresh metadata.",
+            url="https://example.test/fresh",
+            source="fixture",
+        )
+
+        class Connector:
+            source_name = "fixture"
+
+            def search(self, request: SearchQuery) -> SearchResponse:
+                return SearchResponse(
+                    source=self.source_name,
+                    query=request.query,
+                    papers=[paper],
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "literature"
+            result = search_sources(
+                SearchRequest(
+                    queries=("query",),
+                    providers=("fixture",),
+                    cache_dir=cache_dir,
+                ),
+                registry=SearchProviderRegistry({"fixture": Connector}),
+            )
+            cached = search_sources(
+                SearchRequest(
+                    queries=("query",),
+                    providers=("fixture",),
+                    cache_dir=cache_dir,
+                ),
+                registry=SearchProviderRegistry(
+                    {"fixture": lambda: (_ for _ in ()).throw(RuntimeError("offline"))}
+                ),
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(cached.status, "partial")
+        self.assertEqual(cached.responses[0].status, "cached")
+        self.assertEqual(cached.papers[0].id, "fresh-paper")
+
     def test_search_capability_persists_full_handoff_without_duplicate_rows(self) -> None:
         paper = Paper(
             id="paper-1",
@@ -188,6 +277,120 @@ class SearchCapabilityTests(unittest.TestCase):
         self.assertEqual(restored.status, "partial")
         self.assertFalse(restored.responses[0].papers)
         self.assertIn("missing-paper", restored.diagnostics[0])
+
+    def test_selection_policy_persists_deduplication_and_coverage(self) -> None:
+        first = Paper(
+            id="paper-1",
+            title="Reliable agent method",
+            authors=[],
+            abstract="A method improves benchmark accuracy.",
+            url="https://example.test/one",
+            source="fixture",
+        )
+        duplicate = Paper(
+            id="paper-duplicate",
+            title="Reliable agent method",
+            authors=[],
+            abstract="A method improves accuracy.",
+            url="https://example.test/two",
+            source="fixture",
+        )
+        second = Paper(
+            id="paper-2",
+            title="Reliable agent benchmark",
+            authors=[],
+            abstract="A benchmark measures accuracy.",
+            url="https://example.test/three",
+            source="fixture",
+        )
+
+        class Connector:
+            source_name = "fixture"
+
+            def search(self, request: SearchQuery) -> SearchResponse:
+                papers = [first, duplicate] if request.query == "method" else [second]
+                return SearchResponse(
+                    source=self.source_name,
+                    query=request.query,
+                    papers=papers,
+                )
+
+        raw = search_sources(
+            SearchRequest(
+                queries=("method", "benchmark"),
+                providers=("fixture",),
+            ),
+            registry=SearchProviderRegistry({"fixture": Connector}),
+        )
+        selected = select_search_result(
+            raw,
+            policy=SearchSelectionPolicy(
+                topic="reliable agents",
+                questions=(
+                    ResearchQuestion(
+                        question_id="RQ1",
+                        question="What method is used?",
+                        facet="method",
+                    ),
+                    ResearchQuestion(
+                        question_id="RQ2",
+                        question="How is it evaluated?",
+                        facet="benchmark",
+                    ),
+                ),
+                query_plan=QueryPlan(
+                    topic="reliable agents",
+                    seed_queries=["method", "benchmark"],
+                    queries=["method", "benchmark"],
+                    query_specs=[
+                        {"query": "method", "facet": "method"},
+                        {"query": "benchmark", "facet": "benchmark"},
+                    ],
+                    required_facets=["method", "benchmark"],
+                ),
+                max_documents=2,
+            ),
+        )
+
+        self.assertEqual(len(raw.papers), 3)
+        self.assertEqual([paper.id for paper in selected.selected_papers], ["paper-1", "paper-2"])
+        self.assertEqual(selected.coverage_report["status"], "covered")
+        self.assertTrue(any(row["reason"] == "duplicate_lower_score" for row in selected.selection_rows))
+        restored = SearchResult.from_handoff_dict(selected.to_handoff_dict())
+        self.assertEqual([paper.id for paper in restored.selected_papers], ["paper-1", "paper-2"])
+        self.assertEqual(restored.coverage_report["covered_facets"], ["benchmark", "method"])
+
+    def test_explicit_empty_selection_is_not_widened_to_raw_papers(self) -> None:
+        raw = Paper(
+            id="paper-raw",
+            title="Out-of-scope paper",
+            authors=[],
+            abstract="A paper intentionally rejected by the selection policy.",
+            url="https://example.test/raw",
+            source="fixture",
+            source_id="raw",
+        )
+        result = SearchResult(
+            status="completed",
+            responses=(
+                SearchResponse(
+                    source="fixture",
+                    query="topic",
+                    papers=[raw],
+                ),
+            ),
+            papers=(raw,),
+            selected_papers=(),
+            selection_rows=(
+                {"paper_id": raw.id, "decision": "drop", "reason": "out of scope"},
+            ),
+            coverage_report={"status": "partial"},
+        )
+
+        restored = SearchResult.from_handoff_dict(result.to_handoff_dict())
+
+        self.assertEqual([paper.id for paper in restored.papers], [raw.id])
+        self.assertEqual(restored.selected_papers, ())
 
     def test_request_rejects_empty_queries_providers_and_limits(self) -> None:
         with self.assertRaises(ValueError):

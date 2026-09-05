@@ -6,6 +6,10 @@ from pathlib import Path
 
 from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
 from simple_ar.integrations.llm import LLMError
+from simple_ar.research.brief import evidence_pack_from_read
+from simple_ar.research.contracts import DocumentRecord, TextChunk
+from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.evidence.reader import ReadRequest, read_documents
 from simple_ar.research import SynthesisRequest as PublicSynthesisRequest
 from simple_ar.research.synthesis import (
     SynthesisRequest,
@@ -60,6 +64,45 @@ def _pack() -> dict[str, object]:
 
 
 class SynthesisCapabilityTests(unittest.TestCase):
+    def test_evidence_pack_keeps_bounded_source_snippets_and_search_coverage(self) -> None:
+        bundle = DocumentBundle(
+            records=[
+                DocumentRecord(
+                    document_id="paper-1",
+                    title="Reliable agents",
+                    source="fixture",
+                    abstract="Validation improves reliability.",
+                )
+            ],
+            fulltext_manifest={},
+            fulltext_extraction={},
+            sections=[],
+            chunks=[
+                TextChunk(
+                    chunk_id="paper-1#chunk-1",
+                    document_id="paper-1",
+                    text="Validation improves reliability under the benchmark.",
+                    source_path="paper.md",
+                    line_start=4,
+                    line_end=4,
+                )
+            ],
+        )
+        read = read_documents(ReadRequest(bundle=bundle))
+
+        pack = evidence_pack_from_read(
+            "reliable agents",
+            read,
+            coverage={"status": "covered", "covered_facets": ["method"]},
+            source_plan={"sources": ["fixture"]},
+        )
+
+        self.assertEqual(pack["coverage"]["status"], "covered")
+        self.assertEqual(pack["source_plan"]["sources"], ["fixture"])
+        self.assertEqual(pack["evidence_refs"], ["paper-1#chunk-1"])
+        self.assertIn("paper-1#chunk-1", pack["evidence_snippets"])
+        self.assertIn("paper.md:4", pack["evidence_snippets"] if isinstance(pack["evidence_snippets"], str) else "")
+
     def test_capability_can_add_explicit_llm_synthesis(self) -> None:
         class FakeClient:
             model = "fake-synthesis-model"

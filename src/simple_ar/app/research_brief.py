@@ -7,7 +7,7 @@ useful path from a topic or local documents to an evidence-backed brief.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -39,6 +39,7 @@ from simple_ar.research.registry import register_research_capabilities
 from simple_ar.research.sources import (
     SearchProviderRegistry,
     SearchResult,
+    SearchSelectionPolicy,
     default_search_provider_registry,
 )
 from simple_ar.research.synthesis import SynthesisRequest, SynthesisResult
@@ -238,13 +239,26 @@ def _run_research_brief_steps(
     provider_registry = search_registry or default_search_provider_registry(
         local_documents=(str(path) for path in request.local_documents)
     )
+    search_request = search_request_from_plan(plan)
+    if request.cache_dir is not None:
+        search_request = replace(
+            search_request,
+            cache_dir=request.cache_dir / "literature",
+            cache_enabled=plan.source_plan.cache_enabled,
+        )
     search_capability, _ = controller.execute(
         "search",
         attempt_id="search-001",
         inputs=(plan_ref,),
         next_capability="document_ingest",
-        request=search_request_from_plan(plan),
+        request=search_request,
         registry=provider_registry,
+        selection_policy=SearchSelectionPolicy(
+            topic=request.topic,
+            questions=plan.questions,
+            query_plan=plan.query_plan,
+            max_documents=_search_document_limit(request, plan),
+        ),
     )
     _require_completed(
         search_capability,
@@ -256,7 +270,12 @@ def _run_research_brief_steps(
         "search-001", kind="search_result", schema="search_handoff.v1"
     )
     search = SearchResult.from_handoff_dict(controller.store.read_json(search_ref))
-    if not search.papers:
+    # ``SearchResult.from_handoff_dict`` already handles old handoffs that do
+    # not declare ``selected_paper_ids``. Once the canonical selection fields
+    # exist, an empty selection is meaningful and must not be widened back to
+    # the raw provider output.
+    selected_papers = search.selected_papers
+    if not selected_papers:
         raise ResearchBriefSessionError(
             f"Search produced no usable papers; inspect {request.session_root}."
         )
@@ -267,7 +286,7 @@ def _run_research_brief_steps(
         inputs=(search_ref,),
         next_capability="read",
         request=DocumentIngestRequest(
-            papers=search.papers,
+            papers=selected_papers,
             source_plan=plan.source_plan,
             cache_dir=request.cache_dir or request.session_root / "cache",
             extraction_dir=request.extraction_dir or request.session_root / "documents",
@@ -320,7 +339,12 @@ def _run_research_brief_steps(
         inputs=(read_ref,),
         next_capability=next_capability,
         request=SynthesisRequest(
-            evidence_pack=evidence_pack_from_read(request.topic, read),
+            evidence_pack=evidence_pack_from_read(
+                request.topic,
+                read,
+                coverage=search.coverage_report,
+                source_plan=plan.source_plan.to_row(),
+            ),
             idea_limit=request.idea_limit,
             use_llm=request.use_llm,
             llm_client=request.llm_client,
@@ -368,6 +392,18 @@ def _planning_config(request: ResearchBriefSessionRequest) -> dict[str, object]:
         config.setdefault("research_use_fulltext", True)
         config.setdefault("research_allow_pdf_download", False)
     return config
+
+
+def _search_document_limit(
+    request: ResearchBriefSessionRequest,
+    plan: ResearchPlanResult,
+) -> int:
+    """Resolve one explicit paper budget for canonical search selection."""
+
+    configured = plan.source_plan.budget.get("max_documents")
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+        return configured
+    return max(1, request.max_results)
 
 
 def _require_completed(

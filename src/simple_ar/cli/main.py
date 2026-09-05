@@ -61,7 +61,6 @@ from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.retrieval.index import build_artifact_index
 from simple_ar.retrieval.search import search_artifacts
 from simple_ar.app.run_config import RunConfigError, load_pipeline_run_config
-from simple_ar.pipeline_stages.registry import HANDLERS
 from simple_ar.core.stages import Stage, parse_stage
 from simple_ar.cli.parser import build_parser
 from simple_ar.tools.cli import call_tool, print_tool_schema, serve_mcp
@@ -403,8 +402,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 "research-session requires --command or --code-task-config."
             )
         timeout_sec = args.timeout_sec if args.timeout_sec is not None else 300
+    if args.with_report and args.no_report:
+        raise SystemExit("Use either --with-report or --no-report for research-session, not both.")
     llm_client = _optional_research_llm_client(args.model, "research session")
-    if args.with_report and llm_client is None:
+    report_requested = bool(args.with_report or (llm_client is not None and not args.no_report))
+    if report_requested and llm_client is None:
         raise SystemExit("--with-report requires --model for report generation.")
     session_root = new_research_session_root(args.output_root, args.topic)
     brief_request = ResearchBriefSessionRequest(
@@ -442,7 +444,13 @@ def _print_research_session(args: argparse.Namespace) -> None:
     print_line(f"Mode: {'llm' if llm_client is not None else 'deterministic'}")
     print_line(f"Planner: {result.plan.query_plan.planner}")
     print_line(f"Synthesis: {result.brief.generation_mode}")
-    print_line(f"Papers: {len(result.search.papers)}")
+    selected_papers = (
+        getattr(result.search, "selected_papers", ())
+        or result.search.papers
+    )
+    print_line(
+        f"Papers: {len(selected_papers)} selected / {len(result.search.papers)} raw"
+    )
     print_line(f"Documents: {len(result.documents.records)}")
     print_line(
         "Implementation: "
@@ -463,7 +471,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         root=result.session_root,
         accepted={"ready_for_report"},
     )
-    if not args.with_report:
+    if not report_requested:
         return
 
     from simple_ar.app.research_report import (
@@ -838,6 +846,11 @@ def _print_clean(args: argparse.Namespace) -> None:
 
 def _stage_handlers():
     """Return the mapping of stages to their respective handler functions."""
+    # The 8-stage path is a frozen compatibility entrypoint. Keep its heavy
+    # research implementation out of the import graph for research-session,
+    # research-report, and other canonical capability commands.
+    from simple_ar.pipeline_stages.registry import HANDLERS
+
     return {Stage(number): handler for number, handler in HANDLERS.items()}
 
 

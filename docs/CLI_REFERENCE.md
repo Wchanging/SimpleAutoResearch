@@ -125,7 +125,7 @@ explicitly:
 uv run simple-ar research-brief \
   --topic "reliable agents" \
   --local-document examples/research_brief/fixtures/reliable_agents.md \
-  --model gpt-5.4
+  --model "$SIMPLE_AR_MODEL"
 ```
 
 The run prints and persists the selected mode. LLM mode requires the normal
@@ -199,7 +199,7 @@ uv run simple-ar research-session \
   --topic "reliable agents" \
   --local-document examples/research_brief/fixtures/reliable_agents.md \
   --code-task-config examples/code_task_medium_review/configs/code_task.toml \
-  --model gpt-5.4 \
+  --model "$SIMPLE_AR_MODEL" \
   --output-root runs/research-session
 ```
 
@@ -207,6 +207,12 @@ The TOML remains the source of Code-Task project, benchmark, workspace,
 baseline, and execution settings. The generated code-task artifacts are kept
 under the session's `experiment-001` attempt and are normalized into the same
 canonical result consumed by Analysis; no second code generator is introduced.
+
+The embedded bridge merges a strict serial dependency chain into one bounded
+batch (at most three work items and four target files). If that batch requires
+the `large` budget, `[execute].allow_large_edits = true` must be set explicitly
+in the Code-Task TOML after reviewing the proposal; otherwise the session
+preserves its artifacts and stops at the approval boundary.
 
 The optional `--cache-dir` is forwarded to document ingest. Valid cached
 full-text files are reused on later sessions; the default remains session-local
@@ -297,7 +303,7 @@ experiment.
 ```bash
 uv run simple-ar research-report \
   --session-root runs/research-session/<session> \
-  --model gpt-5.4
+  --model "$SIMPLE_AR_MODEL"
 ```
 
 The report and audit are appended as new attempts under the same session. A

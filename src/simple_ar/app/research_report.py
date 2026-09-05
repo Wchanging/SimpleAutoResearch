@@ -180,8 +180,12 @@ def build_research_session_report_inputs(
     source_handles = _research_source_handles(session)
     metric_sources = _research_metric_sources(session)
     synthesis_markdown = _synthesis_markdown(session.brief)
+    # The restored SearchResult owns legacy fallback semantics. An explicitly
+    # empty canonical selection must remain empty in report context.
+    selected_papers = session.search.selected_papers
     evidence_summary = (
-        f"Search returned {len(session.search.papers)} paper record(s); "
+        f"Search returned {len(session.search.papers)} raw paper record(s) and retained "
+        f"{len(selected_papers)} selected paper(s); "
         f"document ingest retained {len(session.documents.records)} document(s) and "
         f"{len(session.documents.chunks)} text chunk(s). "
         f"Execution status={execution.get('status', 'unknown')}; "
@@ -196,12 +200,14 @@ def build_research_session_report_inputs(
         search_meta={
             "status": session.search.status,
             "paper_count": len(session.search.papers),
+            "selected_paper_count": len(selected_papers),
             "response_count": len(session.search.responses),
+            "coverage": dict(session.search.coverage_report),
             "diagnostics": list(session.search.diagnostics),
         },
         experiment_plan=contract.to_row(),
         results=execution,
-        papers=[paper.to_row() for paper in session.search.papers],
+        papers=[paper.to_row() for paper in selected_papers],
         source_handles=source_handles,
         metric_sources=metric_sources,
     )
@@ -421,7 +427,7 @@ def _research_source_handles(session: "ResearchSessionResult") -> list[SourceHan
                 "published": paper.published,
             },
         )
-        for paper in session.search.papers
+        for paper in session.search.selected_papers
     )
     return handles
 

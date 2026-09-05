@@ -1,6 +1,6 @@
-"""Pipeline stage adapters.
+"""Frozen 8-stage compatibility adapters.
 
-Import ``simple_ar.pipeline_stages.registry`` when the full default handler
-registry is needed. Keeping package import side-effect free prevents domain
-services from pulling every stage into memory and avoids circular imports.
+Import ``simple_ar.pipeline_stages.registry`` only for the legacy ``run`` or
+``resume`` commands. The canonical V2.8 ``research-session`` path uses the
+capability modules directly, so this package stays out of its import graph.
 """

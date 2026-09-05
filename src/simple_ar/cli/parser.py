@@ -203,7 +203,15 @@ def build_parser() -> argparse.ArgumentParser:
     session_parser.add_argument(
         "--with-report",
         action="store_true",
-        help="After a passed session, append the existing report and audit attempts.",
+        help=(
+            "After a passed session, append the existing report and audit attempts. "
+            "This is the default when --model is supplied."
+        ),
+    )
+    session_parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Skip report generation for a model-backed session (debug/fast mode).",
     )
     session_parser.add_argument(
         "--report-template",

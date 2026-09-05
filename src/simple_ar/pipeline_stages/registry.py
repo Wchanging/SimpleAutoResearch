@@ -1,4 +1,9 @@
-"""Default pipeline stage registry."""
+"""Frozen 8-stage compatibility registry.
+
+New V2.8 work belongs in the capability-oriented research-session path. This
+registry remains only for the legacy ``run``/``resume`` commands and their
+historical artifact layout.
+"""
 
 from simple_ar.pipeline_stages.experiment import execute_code, execute_design, execute_run
 from simple_ar.pipeline_stages.report import execute_report

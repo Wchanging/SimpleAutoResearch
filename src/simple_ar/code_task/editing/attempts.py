@@ -98,8 +98,8 @@ def create_code_task_batch(
             active attempt from ``manifest.json`` is reused or ``attempt-001``
             is created.
         merge_dependent_chain: When true, merge a narrow serial dependency
-            chain into one execution batch. Disable this for fully automated
-            embedded pipeline runs that should prefer small reviewable steps.
+            chain into one execution batch. Set this to false when an explicit
+            caller wants to execute only one work-plan item at a time.
         force: Recreate a batch for the same work item even when one already
             exists in the active attempt.
 

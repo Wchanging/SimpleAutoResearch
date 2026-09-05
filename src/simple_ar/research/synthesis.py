@@ -568,14 +568,11 @@ def _generation_mode(value: object) -> Literal["deterministic", "llm"]:
 def _diagnostics(pack: Mapping[str, Any], ideas: list[IdeaCandidate]) -> list[str]:
     """Report evidence gaps without blocking conservative synthesis."""
     diagnostics: list[str] = []
-    coverage = pack.get("coverage")
-    if isinstance(coverage, Mapping):
-        missing_facets = coverage.get("missing_facets")
-        if isinstance(missing_facets, list) and missing_facets:
-            diagnostics.append(
-                "Missing evidence facets: "
-                + ", ".join(str(item) for item in missing_facets)
-            )
+    # Facet gaps remain visible in ``gap_summary`` and the evidence pack.  They
+    # are not, by themselves, a reason to block a bounded experiment: a small
+    # user-provided baseline may intentionally test one method before the
+    # literature search covers every planned facet.  Blocking is reserved for
+    # an actually empty or untraceable evidence surface below.
     counts = pack.get("counts")
     if isinstance(counts, Mapping):
         if int(counts.get("documents") or 0) <= 0:

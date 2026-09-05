@@ -18,7 +18,39 @@ from simple_ar.report.schema import (
 
 
 CITATION_PATTERN = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)")
-NUMBER_PATTERN = re.compile(r"(?<![A-Za-z0-9_])(?:\d+\.\d+|\d+)(?:%|ms|s|sec|seconds)?(?![A-Za-z0-9_])")
+NUMBER_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])[-+]?(?:\d+\.\d+|\d+)(?:[eE][-+]?\d+)?"
+    r"(?:%|ms|s|sec|seconds)?(?![A-Za-z0-9_])"
+)
+NUMBER_WORD_PATTERN = re.compile(
+    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+    r"eighteen|nineteen|twenty)\b",
+    re.IGNORECASE,
+)
+NUMBER_WORDS = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+    "thirteen": "13",
+    "fourteen": "14",
+    "fifteen": "15",
+    "sixteen": "16",
+    "seventeen": "17",
+    "eighteen": "18",
+    "nineteen": "19",
+    "twenty": "20",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,8 +227,7 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
     matched: list[str] = []
     unmatched: list[str] = []
     for metric in context.metric_sources:
-        value_text = _format_metric(metric.value)
-        if metric.name.lower() in lower and (value_text in report_body or str(metric.value) in report_body):
+        if _metric_is_visible(report_body, lower, metric):
             matched.append(metric.metric_id)
         else:
             unmatched.append(metric.metric_id)
@@ -207,7 +238,9 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
         status = "warning"
     unmatched_numbers = _unmatched_numbers(report_body, context)
     if unmatched_numbers:
-        warnings.append("Report contains numbers that are not obviously tied to metric sources.")
+        warnings.append(
+            "Report contains numeric values not found in experiment metrics or selected source metadata."
+        )
         if status == "passed":
             status = "warning"
     return MetricAudit(
@@ -256,11 +289,103 @@ def _mechanical_findings(messages: list[str]) -> list[ReviewerFinding]:
 
 
 def _unmatched_numbers(report_body: str, context: ReportContext) -> list[str]:
-    metric_values = {_format_metric(metric.value) for metric in context.metric_sources}
-    allowed = metric_values | {"0", "1", "2", "3", "4", "5", "8", "10"}
+    metric_values = {
+        value_text
+        for metric in context.metric_sources
+        for value_text in _metric_value_variants(metric.value)
+    }
+    allowed = (
+        metric_values
+        | _source_number_values(context)
+        | {"0", "1", "2", "3", "4", "5", "8", "10"}
+    )
     citation_free = CITATION_PATTERN.sub("", report_body)
     found = sorted(set(NUMBER_PATTERN.findall(citation_free)))
     return [value for value in found if value not in allowed][:12]
+
+
+def _metric_is_visible(report_body: str, lower_report: str, metric: Any) -> bool:
+    """Check a metric using readable names as well as machine identifiers."""
+
+    names = _metric_name_variants(str(metric.name))
+    if not any(_contains_phrase(lower_report, name) for name in names):
+        return False
+    return any(
+        _contains_phrase(lower_report, value_text.lower())
+        for value_text in _metric_value_variants(metric.value)
+    )
+
+
+def _metric_name_variants(name: str) -> set[str]:
+    normalized = re.sub(r"[_-]+", " ", name.lower()).strip()
+    if not normalized:
+        return set()
+    variants = {normalized}
+    words = normalized.split()
+    if words and words[-1] in {
+        "s",
+        "sec",
+        "secs",
+        "second",
+        "seconds",
+        "ms",
+        "millisecond",
+        "milliseconds",
+    }:
+        variants.add(" ".join(words[:-1]))
+    aliases = {
+        "train time": "training time",
+        "eval examples": "evaluation examples",
+        "evaluation examples": "eval examples",
+    }
+    for variant in tuple(variants):
+        alias = aliases.get(variant)
+        if alias:
+            variants.add(alias)
+    if normalized == "eval examples":
+        variants.add("evaluation set")
+    return {variant for variant in variants if variant}
+
+
+def _metric_value_variants(value: Any) -> set[str]:
+    variants = {_format_metric(value), str(value)}
+    if isinstance(value, float):
+        variants.add(format(value, ".12g"))
+        if value.is_integer():
+            variants.add(str(int(value)))
+    return {variant for variant in variants if variant}
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    return re.search(
+        rf"(?<![A-Za-z0-9_]){re.escape(phrase)}(?![A-Za-z0-9_])",
+        text,
+    ) is not None
+
+
+def _source_number_values(context: ReportContext) -> set[str]:
+    """Return numeric values explicitly present in selected source metadata.
+
+    Reports routinely restate source facts such as "twelve papers" or a
+    publication's sample size. Those values are source-grounded even when
+    they are not experiment metrics. Keep the mechanical metric gate focused
+    on numbers that are absent from both the measured results and the
+    selected evidence surface.
+    """
+
+    values: set[str] = set()
+    for paper in context.papers:
+        for field in ("title", "abstract", "published"):
+            text = paper.get(field)
+            if not isinstance(text, str):
+                continue
+            values.update(NUMBER_PATTERN.findall(text))
+            values.update(
+                NUMBER_WORDS[word.lower()]
+                for word in NUMBER_WORD_PATTERN.findall(text)
+                if word.lower() in NUMBER_WORDS
+            )
+    return values
 
 
 def _format_metric(value: Any) -> str:

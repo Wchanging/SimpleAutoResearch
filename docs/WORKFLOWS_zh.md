@@ -183,7 +183,7 @@ uv run simple-ar research-code-task --topic "reliable agents" \
 Writer/Reviewer 和 audit：
 
 ```bash
-uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model gpt-5.4 --with-report
+uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model "$SIMPLE_AR_MODEL" --with-report
 ```
 
 只有执行和结果分析都通过时才允许这次接续；它不会重试，也不会把失败 session 伪装成正式报告。
@@ -359,7 +359,7 @@ plan -> search -> read -> synthesize -> design experiment
 - 内嵌生成任务会包含来自 synthesis/design artifacts 的 Research-to-Code Bridge，让 code-task planning 能看到方法迁移线索、实现假设、指标契约、消融目标、资源约束和风险提示。
 - `simple-ar run --config ...` 是保持多参数 research/code-task run 可读、可复现的推荐方式。
 - `--experiment-template llm_code_task_toy_spam` 仍保留为 bundled smoke-test template。
-- 内嵌路径是端到端的：它会构建和 standalone code-task 一致的 repo map / context pack、work plan、attempt/batch 证据，然后在准备好的 workspace 内自动批准 patch plan。standalone code-task 仍是更安全的人工审核路径。
+- 内嵌路径是端到端的：它会构建和 standalone code-task 一致的 repo map / context pack、work plan、attempt/batch 证据，然后在准备好的 workspace 内自动批准 patch plan。严格的串行依赖链会合并为一个有界 batch（最多 3 个 work item、4 个目标文件），避免实现、接线和配置被静默拆到不同 attempt。此类 batch 通常使用 `large` budget；内嵌路径会读取 Code-Task TOML 的 `[execute].allow_large_edits`，没有显式批准时会保留产物并以清晰的失败状态结束。需要人工检查较大 proposal 时，standalone code-task 仍然是更合适的入口。
 - Report generation 有保护：只有 citation、metric visibility、fixture disclosure 和 toy-demo boundary 检查通过时，才接受 LLM draft。
 
 ## 默认 8 阶段 Pipeline

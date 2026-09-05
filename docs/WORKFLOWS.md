@@ -231,7 +231,7 @@ uv run simple-ar research-code-task --topic "reliable agents" \
 report Writer/Reviewer and audit path:
 
 ```bash
-uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model gpt-5.4 --with-report
+uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model "$SIMPLE_AR_MODEL" --with-report
 ```
 
 The continuation is accepted only after execution and result analysis pass; it
@@ -481,9 +481,14 @@ Current status:
 - `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
 - The embedded path is end-to-end: it builds the same repo-map/context-pack,
   work-plan, and attempt/batch evidence as standalone code tasks, then
-  auto-approves the patch plan inside the prepared workspace. Embedded runs keep
-  the active batch to the first concrete work item by default; standalone
-  code-task remains the better place for large merged batches and human review.
+  auto-approves the patch plan inside the prepared workspace. A strict serial
+  dependency chain is merged into one bounded batch (at most three work items
+  and four target files) so implementation, wiring, and configuration are not
+  silently split across separate attempts. Such a batch normally uses the
+  `large` budget; the embedded path reads `[execute].allow_large_edits` from
+  the Code-Task TOML and preserves the run with a clear failure if explicit
+  approval is absent. Standalone code-task remains the better place for a
+  human to inspect a larger proposal interactively.
 - The final report receives the nested code-task comparison as experiment
   evidence, so before/after metrics can appear in the Code Task Evidence section
   instead of being hidden inside `06-code/`.

@@ -88,7 +88,8 @@ Notes:
   value only when you deliberately want to bound response size.
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` and the retry delay settings control bounded
   exponential backoff for transient provider errors such as connection resets,
-  rate limits, timeouts, and 5xx responses.
+  rate limits, timeouts, 5xx responses, and gateway errors such as Cloudflare
+  524 origin timeouts.
 - Online pipeline stages fail after those retries by default. Set
   `[llm].allow_fallback = true` only when you explicitly want deterministic
   fallback artifacts; `--no-llm` remains the clear offline path.
@@ -1430,9 +1431,12 @@ approval, asks for controlled edits, applies them inside the prepared
 workspace, validates the result, and runs the patched benchmark once before
 leaving `06-code`. If that verification benchmark fails, the bridge records a
 failure analysis and attempts one bounded repair from the execution evidence.
-To keep unattended pipeline runs small and reviewable, the embedded path
-executes the first concrete work item as a single batch instead of automatically
-merging a serial dependency chain into a large patch. During `07-run`, the
+The embedded path merges a strict serial dependency chain into one bounded
+batch (at most three work items and four target files) so coupled
+implementation, wiring, and configuration are not silently split. Such a
+batch normally uses the `large` budget; the embedded path reads
+`[execute].allow_large_edits` from the Code-Task TOML and preserves the run
+with a clear failure when explicit approval is absent. During `07-run`, the
 harness reruns the verified patched benchmark, writes `comparison.json` when
 baseline and patched metrics are both available, and exposes code-task metrics
 through canonical `07-run/results.json`.

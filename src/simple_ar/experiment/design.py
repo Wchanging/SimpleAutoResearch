@@ -28,12 +28,11 @@ from simple_ar.research.outputs.artifacts import (
     write_design_contract_artifact,
 )
 from simple_ar.research.service import load_hypothesis_markdown
-from simple_ar.pipeline_stages.common import (
-    _downstream_source_plan,
-    _list_value,
-    _read_jsonl_artifact,
-    _relative_artifact,
-    _safe_read_json_artifact,
+from simple_ar.core.runtime import (
+    list_value as _list_value,
+    read_jsonl_artifact as _read_jsonl_artifact,
+    relative_artifact as _relative_artifact,
+    safe_read_json_artifact as _safe_read_json_artifact,
 )
 
 
@@ -62,6 +61,7 @@ def _write_code_task_design(ctx: Context, *, template: str, hypothesis: str) -> 
         "metric_directions": dict(spec.metric_directions),
         "workspace_mode": spec.workspace_mode,
         "env_mode": spec.env_mode,
+        "allow_large_edits": spec.allow_large_edits,
     }
     _write_v25_design_package(ctx, hypothesis=hypothesis, template=template, code_task=code_task_contract)
     write_json(
@@ -106,6 +106,8 @@ def _write_code_task_design(ctx: Context, *, template: str, hypothesis: str) -> 
                 "max_file_bytes": spec.max_file_bytes,
                 "approval": "auto_approved_inside_isolated_pipeline_workspace",
                 "allow_test_changes": spec.allow_test_changes,
+                "allow_large_edits": spec.allow_large_edits,
+                "batch_policy": "merge_strict_dependent_chain",
                 "scope": "user_project" if is_generic else "bundled_demo",
             },
         },

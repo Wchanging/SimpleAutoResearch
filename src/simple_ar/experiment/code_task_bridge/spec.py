@@ -5,7 +5,11 @@ from pathlib import Path
 from typing import Callable
 
 from simple_ar.code_task import load_code_task_init_options
-from simple_ar.code_task.runtime.config import DEFAULT_MAX_FILE_BYTES, CodeTaskConfigError
+from simple_ar.code_task.runtime.config import (
+    DEFAULT_MAX_FILE_BYTES,
+    CodeTaskConfigError,
+    load_code_task_execute_options,
+)
 
 
 CODE_TASK_TOY_SPAM_TEMPLATE = "llm_code_task_toy_spam"
@@ -39,7 +43,7 @@ class CodeTaskExperimentSpec:
     name: str | None = None
     allow_test_changes: bool = False
     allow_large_edits: bool = False
-    approval_note: str = "Auto-approved inside isolated 8-stage code-task workspace."
+    approval_note: str = "Auto-approved inside the isolated research-session workspace."
 
     def result_schema(self) -> dict[str, object]:
         """Return the metric contract enforced by the Code-Task configuration."""
@@ -107,7 +111,7 @@ def code_task_toy_spam_spec(repo_root: Path) -> CodeTaskExperimentSpec:
         task_file=root / "tests" / "fixtures" / "code_tasks" / "improve_toy_spam_baseline.md",
         benchmark_command=CODE_TASK_TOY_SPAM_BENCHMARK,
         allow_test_changes=False,
-        approval_note="Auto-approved inside isolated 8-stage demo workspace.",
+        approval_note="Auto-approved inside the isolated research-session demo workspace.",
     )
 
 
@@ -118,9 +122,10 @@ def code_task_project_spec(
 ) -> CodeTaskExperimentSpec:
     """Resolve a generic user-project code-task spec from pipeline config."""
 
+    config_path = _config_string(config.get("code_task_config"))
     try:
         options = load_code_task_init_options(
-            config_path=_config_string(config.get("code_task_config")),
+            config_path=config_path,
             code_root=_config_string(config.get("code_task_code_root")),
             task_file=_config_string(config.get("code_task_task_file")),
             output_root=None,
@@ -140,6 +145,15 @@ def code_task_project_spec(
         )
     except CodeTaskConfigError as exc:
         raise RuntimeError(f"Invalid code-task experiment configuration: {exc}") from exc
+
+    configured_allow_large_edits = _config_bool(config.get("safety_allow_large_edits"))
+    if configured_allow_large_edits is None and config_path:
+        try:
+            configured_allow_large_edits = load_code_task_execute_options(
+                config_path=config_path
+            ).allow_large_edits
+        except CodeTaskConfigError as exc:
+            raise RuntimeError(f"Invalid code-task execute configuration: {exc}") from exc
 
     task_file = task_file_override
     if task_file is None and options.task_file:
@@ -165,7 +179,7 @@ def code_task_project_spec(
         config_path=options.config_path,
         name=options.name,
         allow_test_changes=False,
-        allow_large_edits=_config_bool(config.get("safety_allow_large_edits")) or False,
+        allow_large_edits=configured_allow_large_edits or False,
     )
 
 

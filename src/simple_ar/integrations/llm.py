@@ -1056,6 +1056,8 @@ def _is_transient_llm_error(exc: Exception) -> bool:
         "internal server error",
         "bad gateway",
         "gateway timeout",
+        "origin timeout",
+        "origin time-out",
         "server disconnected",
         "remote protocol error",
         "httpstatuserror",
@@ -1064,6 +1066,7 @@ def _is_transient_llm_error(exc: Exception) -> bool:
         "502",
         "503",
         "504",
+        "524",
     )
     permanent_markers = (
         "authentication",

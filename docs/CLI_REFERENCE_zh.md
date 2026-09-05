@@ -120,7 +120,7 @@ uv run simple-ar research-brief \
 uv run simple-ar research-brief \
   --topic "reliable agents" \
   --local-document examples/research_brief/fixtures/reliable_agents.md \
-  --model gpt-5.4
+  --model "$SIMPLE_AR_MODEL"
 ```
 
 LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求失败或返回无效结果时，
@@ -189,13 +189,17 @@ uv run simple-ar research-session \
   --topic "reliable agents" \
   --local-document examples/research_brief/fixtures/reliable_agents.md \
   --code-task-config examples/code_task_medium_review/configs/code_task.toml \
-  --model gpt-5.4 \
+  --model "$SIMPLE_AR_MODEL" \
   --output-root runs/research-session
 ```
 
 TOML 仍然是 Code-Task 项目、benchmark、workspace、baseline 和执行设置的来源。
 生成的 code-task 产物会保留在 session 的 `experiment-001` attempt 下，并规范化为
 同一份 Analysis 消费的 canonical result；不会新增第二套代码生成器。
+
+内嵌 bridge 会把严格的串行依赖链合并为一个有界 batch（最多 3 个 work item、4 个目标文件）。
+如果该 batch 需要 `large` budget，检查 proposal 后必须在 Code-Task TOML 中显式设置
+`[execute].allow_large_edits = true`；否则 session 会保留产物，并在审批边界停止。
 
 可选的 `--cache-dir` 会传给 document ingest。后续 session 会复用有效的全文缓存文件；默认值仍是
 session-local，以保持旧命令兼容。
@@ -264,7 +268,7 @@ uv run simple-ar research-session-continue \
 ```bash
 uv run simple-ar research-report \
   --session-root runs/research-session/<session> \
-  --model gpt-5.4
+  --model "$SIMPLE_AR_MODEL"
 ```
 
 报告和审查会作为新的 attempt 写入原 session。相同 session 再次调用时，如果对应 attempt 已经存在会直接拒绝，避免静默替换已有报告。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit 仍会运行。

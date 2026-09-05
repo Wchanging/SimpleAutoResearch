@@ -25,13 +25,17 @@ experimentation, and gradual extension.
 
 ## What Works Today
 
-- **Research reports**: run a visible staged pipeline from topic to literature
-  notes, synthesis, and report artifacts.
-- **Research source planning**: plan OpenAlex/Semantic Scholar/arXiv/local-file
-  retrieval with optional LLM-backed query planning, facet-driven expansion,
-  screening, coverage checks, follow-up rounds, document records, cache policy,
-  and lightweight budgets. Normal runs keep compact evidence artifacts; set
-  `debug_artifacts = true` when you also need planning/traces/coverage files.
+- **V2.8 canonical research session**: run the bounded
+  `plan -> search -> document_ingest -> read -> synthesize -> research_design
+  -> experiment -> analysis -> report -> report_audit` path. The mainline uses
+  explicit provider, artifact, metric, timeout, and continuation boundaries;
+  the model-backed CLI requests the report by default.
+- **Research sources**: the canonical session can search
+  OpenAlex/Semantic Scholar/arXiv/local files through the provider-neutral
+  connector boundary, with bounded document extraction and evidence cards.
+  Optional LLM planning and synthesis are explicit. The older facet expansion,
+  multi-round retrieval, and screening behavior still belongs to the frozen
+  `simple-ar run/resume` compatibility path and is not a second V2.8 mainline.
 - **Code tasks**: improve an existing codebase or generate a bounded
   greenfield project inside an isolated editable workspace with LLM planning,
   task memory, review gates, controlled patch/generation artifacts,
@@ -39,13 +43,15 @@ experimentation, and gradual extension.
 - **Workspace strategies**: use `copy` for the safest isolated copy,
   `git_worktree` for larger git repositories where full copying is wasteful,
   or experimental `sparse_copy` for small allowlisted subsets.
-- **Research-to-code runs**: embed a code task inside the 8-stage pipeline with
-  repo maps, context packs, work plans, patch evidence, benchmark metrics, and
-  report evidence.
-- **Tool and external-agent boundaries**: export real read-only tool schemas,
-  serve run-local tools over MCP stdio, and optionally hand off bounded
-  greenfield generation/repair to external CLI agents such as Codex while still
-  routing returned files through SimpleAutoResearch review and run guards.
+- **Research-to-code runs**: the canonical session can explicitly route one
+  prepared project and one Code-Task TOML through the isolated Code-Task
+  backend, then reuse the normal experiment, analysis, report, and audit
+  handoffs. Candidate matrices and autonomous repair loops are out of scope
+  for V2.8.
+- **Deferred integrations**: read-only tool schemas, MCP exposure, and external
+  Agent/Harness adapters exist as boundaries or compatibility surfaces, but are
+  frozen for now. Claude Code, Codex, OpenCode, and similar Harness paths are
+  post-V2.8 work, not required for the current acceptance target.
 - **Reviewable artifacts**: each run writes inspectable files under `runs/`
   instead of hiding decisions inside process memory.
 - **Capability boundary for contributors**: new modules can use the small
@@ -128,7 +134,24 @@ Responses to Chat after the bounded retries.
 
 ## Quickstart
 
-### 1. Research Report
+### 1. V2.8 canonical research session
+
+The mainline is `research-session`: it keeps one bounded handoff from
+planning and network/local search through document evidence, one prepared
+experiment, result analysis, report writing, and audit. Start with the
+laptop-safe complete fixture:
+
+```bash
+uv run python examples/research_session_smoke.py
+```
+
+For the real network + LLM path, use the bounded command in
+`examples/README.md`. It requires a valid OpenAI-compatible model/gateway and
+does not replace provider failures with fixture output. A prepared existing
+project can be added with `--code-task-config`; V2.8 runs one direction at a
+time.
+
+### 2. Compatibility research report
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
@@ -156,7 +179,7 @@ variants, and either full-source drafting or batch-refine drafting for larger
 paper sets. See `examples/research_report/configs/research_report.toml` and
 [Usage And Configuration](docs/USAGE.md) for practical commands.
 
-### 2. Existing-Code Code Task
+### 3. Existing-Code Code Task
 
 Use this when you already have a project and want the model to propose a
 reviewable improvement. First write a small task file, for example
@@ -209,7 +232,7 @@ The bundled standalone code-task example is
 `examples/code_task_medium_review/configs/code_task.toml`; it is documented in
 [Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
 
-### 3. Research With Experiment
+### 4. Compatibility 8-stage research with experiment
 
 Use this when you want the research pipeline to produce literature context,
 derive or use a code task, run an experiment, and include the code evidence in
@@ -289,7 +312,7 @@ Set `[implementation].task_handoff = "merge"` when you want an existing
 `task.md` to stay authoritative while `05-design` enriches it with the earlier
 research context before entering code-task execution.
 
-### 4. Greenfield Experiment
+### 5. Greenfield Experiment
 
 Use this when the task has no existing source project yet. The current path
 uses the same code-task engine as existing-code tasks: `05-design` writes an

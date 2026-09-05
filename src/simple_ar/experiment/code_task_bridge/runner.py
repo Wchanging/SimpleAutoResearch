@@ -51,7 +51,7 @@ def prepare_code_task_experiment(
     baseline_metrics_file: str | Path | None = None,
     message_callback: MessageCallback | None = None,
 ) -> CodeTaskExperimentResult:
-    """Prepare an LLM-assisted code-task experiment inside an 8-stage run."""
+    """Prepare an LLM-assisted code-task experiment inside a session run."""
 
     if not use_llm:
         raise RuntimeError(
@@ -153,14 +153,18 @@ def prepare_code_task_experiment(
     if work_plan.mode != "llm":
         raise RuntimeError(
             "Code-task work planning did not use the LLM. "
-            "Check SIMPLE_AR_API_KEY, SIMPLE_AR_BASE_URL, and SIMPLE_AR_MODEL."
+            "Check OPENAI_API_KEY, OPENAI_BASE_URL, and SIMPLE_AR_MODEL."
         )
     work_item_id = _first_executable_work_item_id(work_plan.work_plan_path)
     _emit(message_callback, f"Creating code-task attempt/batch state for {work_item_id}.")
     batch = create_code_task_batch(
         run_dir,
         work_item_id=work_item_id,
-        merge_dependent_chain=False,
+        # A planned direction may be split into a strict W1 -> W2 -> W3
+        # chain (implementation, wiring, configuration). Keep it one bounded
+        # reviewable batch so the embedded path does not stop after a valid
+        # but incomplete first subtask.
+        merge_dependent_chain=True,
     )
 
     _emit(message_callback, "Calling LLM for code-task patch plan.")
@@ -173,7 +177,7 @@ def prepare_code_task_experiment(
     if plan.mode != "llm":
         raise RuntimeError(
             "Code-task patch planning did not use the LLM. "
-            "Check SIMPLE_AR_API_KEY, SIMPLE_AR_BASE_URL, and SIMPLE_AR_MODEL."
+            "Check OPENAI_API_KEY, OPENAI_BASE_URL, and SIMPLE_AR_MODEL."
         )
 
     record_plan_decision(

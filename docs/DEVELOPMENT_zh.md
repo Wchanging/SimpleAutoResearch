@@ -431,30 +431,31 @@ draft 的调用方提供下游报告边界。该适配器复用 `assemble_report
 中写出一个 `report_audit.json`。warning 映射为 partial，failed 映射为 failed；它不会隐式
 重试、改写报告，也不会自行寻找所谓的“最新”产物。
 
-## 添加 Pipeline Stage
+## 添加 Canonical Capability
 
-向默认 research pipeline 添加 stage 时，需要一起更新：
+新的 V2.8 能力应进入 capability/session 主线，而不是继续写入已经冻结的八阶段实现。
+建议按以下顺序添加：
 
-1. 在 `src/simple_ar/core/stages.py` 中添加 enum value。
-2. 在 `src/simple_ar/app/state.py` 和 `src/simple_ar/core/contracts.py`
-   中添加或扩展 typed state/contract models。
-3. 在对应领域 service 中实现阶段行为，例如
-   `src/simple_ar/research/service.py` 或 `src/simple_ar/experiment/service.py`。
-4. 在 `src/simple_ar/pipeline_stages/` 的对应模块中添加 stage controller。
-   这里应负责阶段编排和产物衔接，不要重新变成新的大杂烩实现层。
-5. 在 `HANDLERS` 中注册 handler。
-6. 添加聚焦测试，检查 state update 和 declared outputs。
+1. 在所属领域包中定义 typed request/result 和稳定的 handoff schema。
+2. 让领域行为独立于 CLI 参数、`Context` 和 run 目录扫描；外部副作用放到显式 adapter
+   或 port 后面。
+3. 添加 session adapter，在一个 attempt 目录中写出产物，并把领域状态映射为
+   `CapabilityResult`。
+4. 在对应 capability registry（例如 `research.registry`）中注册，再由 `app/` 用例以
+   显式输入、输出、预算和 transition 进行组合。
+5. 按需要补充 contract、application、失败/恢复以及 CLI/example 测试。
 
-新的 stage 应优先使用显式 `ctx.state.<stage>` 指针和紧凑 stage contract，
-而不是反向扫描 run 目录。`ctx.find_artifact(...)` 仅作为 legacy fallback 保留。
+Canonical capability 应使用显式 artifact 引用和紧凑 handoff。`ctx.find_artifact(...)`、
+`Stage` 和 `HANDLERS` 只属于旧路径兼容机制。只有在维护现有 `simple-ar run/resume` 输入/输出
+契约时才修改 `pipeline_stages/`，不要把新的 research 行为继续堆在那里。
 
 ## 添加 Experiment Template
 
 固定脚本模板主要位于 `src/simple_ar/experiment/templates.py`。内嵌 8 阶段
 code-task templates 位于 `src/simple_ar/experiment/code_task_bridge/`，
 因为它们会在写 run harness 前准备已有 workspace。旧的
-`src/simple_ar/experiment/code_task_experiment.py` 只作为兼容 facade 保留；
-新代码应直接从 `code_task_bridge` 导入。
+`src/simple_ar/experiment/code_task_experiment.py` facade 已删除；新代码和兼容
+适配层都应直接从 `code_task_bridge` 导入。
 
 `src/simple_ar/experiment/runner.py` 用于固定模板生成脚本的 subprocess 运行。
 `src/simple_ar/code_task/` 则负责 LLM-guided 项目编辑、workspace 隔离、patch、

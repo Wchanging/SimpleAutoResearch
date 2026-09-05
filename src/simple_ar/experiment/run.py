@@ -26,7 +26,7 @@ from simple_ar.experiment.rerun import preserve_stage_outputs
 from simple_ar.experiment.runner import run_experiment
 from simple_ar.experiment.service import load_experiment_script_path
 from simple_ar.experiment.stage_common import design_json, experiment_timeout, relative_or_string
-from simple_ar.pipeline_stages.common import _llm_client
+from simple_ar.core.runtime import llm_client as _llm_client
 
 
 def execute_run(ctx: Context) -> None:

@@ -31,6 +31,7 @@ class CliTests(unittest.TestCase):
                 "reliable agents",
                 "--cache-dir",
                 "shared-cache",
+                "--no-report",
                 "--command",
                 sys.executable,
                 "-c",
@@ -39,6 +40,7 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.cache_dir, "shared-cache")
+        self.assertTrue(args.no_report)
         self.assertEqual(args.command, "research-session")
 
     def test_research_session_continue_parser_keeps_revised_command(self) -> None:
@@ -418,6 +420,71 @@ class CliTests(unittest.TestCase):
             session_runner.assert_called_once()
             report_runner.assert_called_once()
 
+    def test_research_session_cli_defaults_to_report_with_model(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            paper = root / "reliable_agents.md"
+            paper.write_text(
+                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
+                encoding="utf-8",
+            )
+            output_root = root / "sessions"
+            session = SimpleNamespace(
+                session_root=output_root / "research-session",
+                status="ready_for_report",
+                plan=SimpleNamespace(query_plan=SimpleNamespace(planner="fixture")),
+                brief=SimpleNamespace(generation_mode="llm"),
+                search=SimpleNamespace(papers=[object()]),
+                documents=SimpleNamespace(records=[object()]),
+                execution_ref=SimpleNamespace(path="attempts/experiment-001/results.json"),
+                analysis_ref=SimpleNamespace(path="attempts/analysis-001/analysis.json"),
+            )
+            report = SimpleNamespace(
+                session_root=session.session_root,
+                status="completed",
+                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
+                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+            )
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch(
+                    "simple_ar.app.research_session.run_research_session",
+                    return_value=session,
+                ) as session_runner,
+                patch(
+                    "simple_ar.app.research_report.run_research_session_report_agent",
+                    return_value=report,
+                ) as report_runner,
+                patch(
+                    "simple_ar.report.templates.load_report_template_bundle",
+                    return_value=object(),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main(
+                    [
+                        "research-session",
+                        "--topic",
+                        "reliable agents",
+                        "--local-document",
+                        str(paper),
+                        "--output-root",
+                        str(output_root),
+                        "--cwd",
+                        str(root),
+                        "--model",
+                        "gpt-5.4",
+                        "--command",
+                        sys.executable,
+                        "-c",
+                        "print('accuracy: 0.75')",
+                    ]
+                )
+
+            session_runner.assert_called_once()
+            report_runner.assert_called_once()
+
     def test_research_session_cli_builds_code_task_request_from_config(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -471,6 +538,7 @@ class CliTests(unittest.TestCase):
                         str(root),
                         "--model",
                         "gpt-5.4",
+                        "--no-report",
                         "--code-task-config",
                         str(config),
                     ]

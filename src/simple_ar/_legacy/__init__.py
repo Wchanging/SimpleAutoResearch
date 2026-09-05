@@ -1,6 +1,6 @@
-"""Private compatibility aliases for pre-refactor import paths.
+"""Private compatibility implementations for pre-refactor import paths.
 
-The large CLI and stage-handler implementations were moved into
-``simple_ar.cli`` and ``simple_ar.pipeline_stages``. This package remains only
-to keep older imports working while downstream users migrate.
+The canonical V2.8 path lives under ``simple_ar.app`` and the domain packages.
+This package contains only frozen legacy CLI/stage compatibility code until
+its external consumers and artifact projections have a replacement.
 """

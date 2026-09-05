@@ -316,6 +316,7 @@ def search_request_from_plan(result: ResearchPlanResult) -> "SearchRequest":
         providers=providers,
         max_results_per_query=result.source_plan.max_results_per_query,
         filters=dict(result.source_plan.filters),
+        cache_enabled=result.source_plan.cache_enabled,
     )
 
 

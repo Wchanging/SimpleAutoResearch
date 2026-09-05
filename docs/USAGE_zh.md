@@ -72,7 +72,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `SIMPLE_AR_LLM_API` 控制请求形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`，临时错误只在同一接口内有限重试；`chat` 会直接发送 Chat Completions 风格的 `messages`。已有的 `auto` 模式才会在 Responses 重试后再尝试 Chat，用于兼容只暴露其中一种接口的网关。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传客户端超时。只有你确实想限制单次请求等待时间时才设置正数。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传输出上限。只有你确实想限制模型输出长度时才设置正数。
-- `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时和 5xx 响应。
+- `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时、5xx 响应和 Cloudflare 524 origin timeout。
 - 在线 pipeline 阶段在这些重试耗尽后默认失败，并保留可恢复状态。只有明确设置
   `[llm].allow_fallback = true` 才会写入 deterministic fallback；`--no-llm` 仍然是清晰的离线路径。
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `off` 表示只靠 prompt 和本地解析，兼容性最好；`auto` 会尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；`json_object` 表示强制发送。
@@ -1045,7 +1045,7 @@ uv run simple-ar run \
 如果你已经写好了精确的 `task.md`，但仍希望 8 阶段前面的 goal/problem/synthesis/hypothesis 帮助收束实现优先级，可以在 pipeline config 里设置 `[implementation].task_handoff = "merge"`。这时用户任务会作为硬约束保留，`05-design` 会额外生成融合后的 `generated_code_task.md`，再交给内嵌 code-task 执行。
 生成任务里还会包含一段紧凑的 Research-to-Code Bridge，来自 synthesis brief、experiment contract、metric schema 和 resource plan。这样 `06-code` 能看到方法迁移线索、实现假设、消融目标、指标方向和已知风险，而不是只拿到一个普通 task.md。
 
-`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、按配置的 baseline policy 处理 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁、静态验证，并先运行一次 patched benchmark 做阶段内验证。如果这个验证 benchmark 失败，bridge 会基于 failure evidence 写出诊断并尝试一次受控 repair。`07-run` 会重新运行已验证的 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 canonical `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
+`code_task_project` 会产生正常 pipeline run，同时在 `06-code/code_task_run/` 下产生嵌套 code-task 产物。`06-code` 会准备项目、探测环境、按配置的 baseline policy 处理 baseline、构建 repo map / context pack、生成批次式 work plan、创建 attempt/batch 状态、生成 patch plan、记录自动 pipeline approval、请求受控 edits、应用补丁、静态验证，并先运行一次 patched benchmark 做阶段内验证。如果这个验证 benchmark 失败，bridge 会基于 failure evidence 写出诊断并尝试一次受控 repair。内嵌路径会把严格的串行依赖链合并为一个有界 batch（最多 3 个 work item、4 个目标文件），避免耦合的实现、接线和配置被静默拆开；此类 batch 通常需要 `large` budget，执行时读取 Code-Task TOML 的 `[execute].allow_large_edits`，没有显式批准会保留产物并失败。`07-run` 会重新运行已验证的 patched benchmark，必要时写入 `comparison.json`，并把 code-task metrics 暴露到 canonical `07-run/results.json`。`08-report` 会加入 deterministic Code Task Evidence 部分，指向嵌套 work plan、batch state、summary、diff 和 comparison artifacts。
 
 内嵌产物结构大致是：
 

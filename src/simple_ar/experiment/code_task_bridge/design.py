@@ -15,13 +15,13 @@ from simple_ar.research.prompts import (
     code_task_design_user_prompt,
     merged_code_task_design_user_prompt,
 )
-from simple_ar.pipeline_stages.common import (
-    _ensure_heading,
-    _handle_llm_failure,
-    _llm_client,
-    _markdown_body,
-    _safe_read_artifact,
-    _text_field,
+from simple_ar.core.runtime import (
+    ensure_heading as _ensure_heading,
+    handle_llm_failure as _handle_llm_failure,
+    llm_client as _llm_client,
+    markdown_body as _markdown_body,
+    safe_read_artifact as _safe_read_artifact,
+    text_field as _text_field,
 )
 
 

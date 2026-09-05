@@ -550,33 +550,37 @@ artifact in the attempt. A warning maps to a partial capability result and a
 failed audit maps to failed; the adapter never retries, rewrites the report, or
 searches for an implicit “latest” artifact.
 
-## Adding A Pipeline Stage
+## Adding A Canonical Capability
 
-To add a stage to the default research pipeline, update these places together:
+New V2.8 work belongs to the capability/session path, not to the frozen
+eight-stage implementation. Add a capability in this order:
 
-1. Add the enum value in `src/simple_ar/core/stages.py`.
-2. Add or extend the typed state/contract models in `src/simple_ar/app/state.py`
-   and `src/simple_ar/core/contracts.py`.
-3. Implement stage behavior in the responsible domain service, for example
-   `src/simple_ar/research/service.py` or `src/simple_ar/experiment/service.py`.
-4. Add the stage controller to the appropriate module under
-   `src/simple_ar/pipeline_stages/`. Keep it as orchestration over domain
-   services, not a new all-purpose implementation dump.
-5. Register the handler in `HANDLERS`.
-6. Add a focused test that checks state updates and declared outputs.
+1. Define a typed request/result and its stable handoff schema in the owning
+   domain package.
+2. Keep domain behavior independent of CLI arguments, `Context`, and run-folder
+   scanning; put external effects behind an explicit adapter or port.
+3. Add the session adapter that writes one attempt-local artifact and maps
+   domain status to `CapabilityResult`.
+4. Register it in the relevant capability registry (for example
+   `research.registry`) and compose it in an `app/` use case with explicit
+   inputs, outputs, budget, and transition.
+5. Add contract, application, failure/recovery, and CLI/example coverage as
+   appropriate.
 
-A new stage should prefer explicit `ctx.state.<stage>` pointers and compact
-stage contracts over reverse-scanning run folders. `ctx.find_artifact(...)`
-exists for legacy fallback only.
+Canonical capabilities should use explicit artifact references and compact
+   handoffs. `ctx.find_artifact(...)`, `Stage`, and `HANDLERS` are legacy
+   compatibility mechanisms only. Modify `pipeline_stages/` only when keeping
+   an existing `simple-ar run/resume` input/output contract; do not add new
+   research behavior there.
 
 ## Adding An Experiment Template
 
 Fixed script templates primarily live in `src/simple_ar/experiment/templates.py`.
 Embedded 8-stage code-task templates live under
 `src/simple_ar/experiment/code_task_bridge/` because they prepare an existing
-workspace before writing the run harness. The older
-`src/simple_ar/experiment/code_task_experiment.py` module is a compatibility
-facade only; new code should import from `code_task_bridge`.
+workspace before writing the run harness. The former
+`src/simple_ar/experiment/code_task_experiment.py` facade has been removed;
+new code and compatibility adapters should import from `code_task_bridge`.
 
 Use `src/simple_ar/experiment/runner.py` for fixed generated-template
 subprocesses. Use `src/simple_ar/code_task/` for LLM-guided project editing,

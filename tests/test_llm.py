@@ -149,6 +149,37 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(len(usage), 1)
         self.assertEqual(usage[0].provider_attempts, 2)
 
+    def test_ask_retries_timeout_and_cloudflare_524_with_capped_backoff(self) -> None:
+        usage: list[object] = []
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                api_mode="chat",
+                transport_backend="litellm",
+                retry_attempts=3,
+                retry_base_delay_sec=0.25,
+                retry_max_delay_sec=0.5,
+            ),
+            usage_callback=usage.append,
+        )
+        response = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch(
+            "simple_ar.integrations.llm.litellm.completion",
+            side_effect=[
+                RuntimeError("Request timed out."),
+                RuntimeError("Cloudflare 524 Origin Time-out."),
+                response,
+            ],
+        ) as completion, patch("simple_ar.integrations.llm.time.sleep") as sleep:
+            output = client.ask("system", "user", label="timeout-524-retry")
+
+        self.assertEqual(output, "ok")
+        self.assertEqual(completion.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.25, 0.5])
+        self.assertEqual(len(usage), 1)
+        self.assertEqual(usage[0].provider_attempts, 3)
+
     def test_auto_transport_error_falls_back_to_chat(self) -> None:
         usage: list[object] = []
         client = LLMClient(

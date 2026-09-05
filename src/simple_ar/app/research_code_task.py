@@ -421,9 +421,7 @@ def _run_code_task_capability(
             "Code-task capability expects one synthesis input and an optional design input."
         )
     source = context.read_input_json(context.inputs[0])
-    if not isinstance(source, Mapping) or not isinstance(source.get("synthesis"), Mapping):
-        raise ValueError("Research code-task input has no synthesis handoff.")
-    synthesis = SynthesisResult.from_handoff_dict(source["synthesis"])
+    synthesis = SynthesisResult.from_handoff_dict(_synthesis_payload(source))
     if len(context.inputs) == 2:
         design_payload = context.read_input_json(context.inputs[1])
         if not isinstance(design_payload, Mapping):
@@ -534,6 +532,27 @@ def _run_code_task_capability(
                 "failure_artifact": error_ref.path,
             },
         )
+
+
+def _synthesis_payload(source: object) -> Mapping[str, Any]:
+    """Normalize the canonical synthesis input and legacy session wrapper.
+
+    The full research session passes the synthesis capability's own
+    ``synthesis_result.v1`` artifact. The standalone code-task composition
+    historically stores the same handoff under an ``inputs.synthesis``
+    wrapper. Accepting both at this boundary keeps one code-task backend while
+    avoiding a second synthesis schema or a caller-specific copy of the
+    adapter.
+    """
+
+    if not isinstance(source, Mapping):
+        raise ValueError("Research code-task input must be a JSON object.")
+    if str(source.get("schema_version") or "") == "synthesis_result.v1":
+        return source
+    nested = source.get("synthesis")
+    if isinstance(nested, Mapping):
+        return nested
+    raise ValueError("Research code-task input has no synthesis handoff.")
 
 
 def _materialize_task(

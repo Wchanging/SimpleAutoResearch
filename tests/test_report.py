@@ -1089,6 +1089,98 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(audit.metric_audit.unmatched_numbers, [])
         self.assertEqual(audit.citation_audit.unknown_citations, [])
 
+    def test_report_audit_allows_numbers_grounded_in_selected_source_metadata(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="We audited twelve benchmark papers.",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="experiment",
+            goal="",
+            problem="",
+            search_meta={},
+            synthesis="",
+            hypothesis="",
+            plan={},
+            results={"metrics": {"accuracy": 0.75}},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="",
+        )
+        template = load_report_template_bundle(
+            report_mode="experiment",
+            config=ReportRuntimeConfig(template="experiment"),
+            project_root=Path.cwd(),
+        )
+        memory = initialize_report_memory(context=context, template=template)
+        body = "# Results\n\nWe reviewed 12 benchmark papers [@paper-1]. Accuracy was 0.75.\n"
+
+        audit = build_report_audit(
+            report=body,
+            report_body=body,
+            context=context,
+            memory=memory,
+        )
+
+        self.assertEqual(audit.metric_audit.status, "passed")
+        self.assertEqual(audit.metric_audit.unmatched_numbers, [])
+
+    def test_report_audit_accepts_readable_metric_names_and_scientific_values(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="experiment",
+            goal="",
+            problem="",
+            search_meta={},
+            synthesis="",
+            hypothesis="",
+            plan={},
+            results={
+                "metrics": {
+                    "accuracy": 0.75,
+                    "train_time_sec": 5.4e-05,
+                    "model_size": 24.0,
+                    "eval_examples": 14.0,
+                }
+            },
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="",
+        )
+        template = load_report_template_bundle(
+            report_mode="experiment",
+            config=ReportRuntimeConfig(template="experiment"),
+            project_root=Path.cwd(),
+        )
+        memory = initialize_report_memory(context=context, template=template)
+        body = (
+            "# Results\n\n"
+            "Accuracy was 0.75. Training time was 5.4e-05 seconds, "
+            "model size was 24.0, and the evaluation set contained 14 examples.\n"
+        )
+
+        audit = build_report_audit(
+            report=body,
+            report_body=body,
+            context=context,
+            memory=memory,
+        )
+
+        self.assertEqual(audit.metric_audit.status, "passed")
+        self.assertEqual(audit.metric_audit.unmatched_metrics, [])
+        self.assertEqual(audit.metric_audit.unmatched_numbers, [])
+
     def test_model_written_references_are_replaced_with_known_papers(self) -> None:
         draft = (
             "# A Draft\n\n"

@@ -17,12 +17,21 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
 
 ## 当前可用能力
 
-- **研究报告**：从主题出发，运行可见的阶段式流程，生成文献笔记、综合分析和报告产物。
-- **研究源规划**：支持 OpenAlex/Semantic Scholar/arXiv/本地文件源、可选 LLM-backed query planning、facet-driven query expansion、筛选、覆盖度检查、follow-up retrieval rounds、document records、cache 策略和轻量预算。普通运行默认保留精简 evidence 产物；需要 planning/traces/coverage 文件时再设置 `debug_artifacts = true`。
+- **V2.8 canonical research-session**：运行有界的
+  `plan -> search -> document_ingest -> read -> synthesize -> research_design
+  -> experiment -> analysis -> report -> report_audit` 主流程。主线明确约束
+  provider、artifact、指标、超时和 continuation；模型模式的 CLI 默认请求报告。
+- **研究源**：canonical session 可以通过统一连接器访问
+  OpenAlex/Semantic Scholar/arXiv/本地文件，并执行有界文档摄取和证据卡片生成；
+  LLM 规划和综合需要显式开启。旧的 facet 扩展、多轮检索和筛选仍属于冻结的
+  `simple-ar run/resume` 兼容路径，不是第二条 V2.8 主线。
 - **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
-- **研究到代码实验**：可以把 code task 嵌入 8 阶段流程，生成 repo map、context pack、work plan、patch 证据、benchmark 指标和报告证据。
-- **Tool 与外部 Agent 边界**：可以导出真实只读 tool schema，通过 MCP stdio 暴露 run-local tools，并可选把受控 greenfield generation/repair handoff 给 Codex 等外部 CLI agent；外部返回文件仍必须经过 SimpleAutoResearch 的 review 和 run guard。
+- **研究到代码实验**：canonical session 可以显式把一个准备好的项目和一份 Code-Task TOML
+  交给隔离的 Code-Task backend，再复用同一套 experiment、analysis、report 和 audit handoff。
+  V2.8 不包含候选矩阵或自主修复循环。
+- **延期的集成边界**：只读 tool schema、MCP 暴露和外部 Agent/Harness 适配器目前只作为边界或
+  兼容面冻结。Claude Code、Codex、OpenCode 等 Harness 属于 V2.8 之后的工作，不是当前验收条件。
 - **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
 - **面向贡献者的能力边界**：新的模块可以使用轻量的
   `ArtifactStore`、`CapabilityResult` 和有界 attempt API，而不必改动已经存在的
@@ -79,7 +88,20 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 
 ## 快速开始
 
-### 1. Research Report：文献优先报告
+### 1. V2.8 canonical research-session 主线
+
+当前主线是 `research-session`：从计划、网络/本地检索、文档证据，到一个准备好的实验、
+结果分析、报告和审计，沿一条有界 handoff 完成。先运行适合笔记本的完整 fixture：
+
+```bash
+uv run python examples/research_session_smoke.py
+```
+
+真实网络 + LLM 的低预算命令见 `examples/README.md`。它要求可用的 OpenAI 兼容模型/网关，
+provider 失败时不会用 fixture 结果冒充成功；如果提供 `--code-task-config`，可以接入一个
+准备好的项目，但 V2.8 每次只执行一个研究方向。
+
+### 2. 兼容路径 Research Report：文献优先报告
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
@@ -100,7 +122,7 @@ uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research
 
 V2.4 的报告路径使用 Markdown 报告模板和 LLM Writer/Reviewer loop，支持短 citation key、报告审计产物、独立 variant 重跑，以及面向较大论文集合的 full-source / batch-refine 起草策略。实际命令可以参考 `examples/research_report/configs/research_report.toml` 和 [使用与配置](docs/USAGE_zh.md)。
 
-### 2. Code Task：已有代码库修改
+### 3. Code Task：已有代码库修改
 
 当你已经有一个项目，希望模型提出可审核的改进时，先写一个简短任务文件，例如 `tasks/improve_model.md`，说明希望修改什么、用什么 benchmark 判断效果。然后为自己的项目创建一个 TOML 配置：
 
@@ -141,7 +163,7 @@ uv run simple-ar status runs/<run-id>
 
 内置 standalone code-task 示例是 `examples/code_task_medium_review/configs/code_task.toml`，放在 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中作为辅助示例。
 
-### 3. Research With Experiment：研究流程衔接代码实验
+### 4. 兼容路径 Research With Experiment：研究流程衔接代码实验
 
 当你希望研究流程先收集文献上下文，再衔接已有代码项目完成实验修改，并把代码证据写入最终报告时，使用这个模式。针对自己的项目，可以创建一个顶层 run config：
 
@@ -202,7 +224,7 @@ uv run simple-ar run --config path/to/your_pipeline.toml
 
 内嵌路径的目标是端到端跑完，因此会在隔离 workspace 中自动批准 patch plan。如果你希望每一步都先人工审核，应使用 standalone `code-task` 命令。内置 demo 配置在 `examples/full_pipeline_tiny_mlp/configs/pipeline.toml`；完整说明见 [使用与配置](docs/USAGE_zh.md#8-阶段流程中的内嵌-code-task)。如果想保留用户写好的 `task.md` 作为硬约束，同时让 `05-design` 融合前面研究上下文，可以设置 `[implementation].task_handoff = "merge"`。
 
-### 4. Greenfield Experiment：从零生成受控实验项目
+### 5. Greenfield Experiment：从零生成受控实验项目
 
 当任务还没有现成源码项目时，可以使用 greenfield 路径。当前实现会复用和已有代码任务相同的 code-task 引擎：`05-design` 先写出 experiment contract，`06-code` 在 `06-code/code_task_run/` 下创建 `kind = "greenfield"` 的嵌套 code-task run，再把生成项目投影回 `06-code/generated_project/` 供 `07-run` 兼容使用。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
 
