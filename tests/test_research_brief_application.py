@@ -75,6 +75,26 @@ class ResearchBriefApplicationTests(unittest.TestCase):
                     "hypothesis_markdown": "## Hypothesis\n\nValidation should improve reliability.",
                 }
 
+            def ask_json_many(
+                self,
+                requests: list[object],
+                *,
+                max_workers: int,
+            ) -> list[dict[str, object]]:
+                del max_workers
+                return [
+                    {
+                        "paper_id": str(getattr(request, "label", "")),
+                        "one_sentence_summary": "Validation is the main theme.",
+                        "problem": "Reliable agent behavior.",
+                        "method": "Validation.",
+                        "limitation": "Small fixture.",
+                        "relation_to_topic": "Directly relevant.",
+                        "confidence": "medium",
+                    }
+                    for request in requests
+                ]
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paper = root / "reliable_agents.md"
