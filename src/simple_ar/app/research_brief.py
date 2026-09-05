@@ -8,6 +8,7 @@ useful path from a topic or local documents to an evidence-backed brief.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -315,7 +316,19 @@ def _run_research_brief_steps(
         attempt_id="read-001",
         inputs=(document_ref,),
         next_capability="synthesize",
-        request=ReadRequest(bundle=documents),
+        request=ReadRequest(
+            bundle=documents,
+            topic=request.topic,
+            problem_markdown=f"# Research Problem\n\nStudy `{request.topic}` with the configured evidence and experiment budget.\n",
+            research_plan_json=json.dumps(
+                plan.to_handoff_dict(),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            config=request.config,
+            use_llm=request.use_llm,
+            llm_client=request.llm_client,
+        ),
     )
     _require_completed(
         read_capability,

@@ -318,6 +318,26 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                     }
                 raise AssertionError(f"Unexpected JSON LLM label: {label}")
 
+            def ask_json_many(
+                self,
+                requests: list[object],
+                *,
+                max_workers: int,
+            ) -> list[dict[str, object]]:
+                del max_workers
+                return [
+                    {
+                        "paper_id": str(getattr(request, "label", "")),
+                        "one_sentence_summary": "A small validation fixture.",
+                        "problem": "Reliable agent behavior.",
+                        "method": "Validation.",
+                        "limitation": "Small fixture.",
+                        "relation_to_topic": "Directly relevant.",
+                        "confidence": "medium",
+                    }
+                    for request in requests
+                ]
+
             def ask(
                 self,
                 _system: str,
@@ -407,6 +427,7 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                             max_chunks=20,
                             use_llm=True,
                             llm_client=FakeClient(),
+                            config={"read_screening": "deterministic"},
                         ),
                         command=(),
                         cwd=root,
@@ -585,6 +606,26 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                     }
                 raise AssertionError(f"Unexpected JSON LLM label: {label}")
 
+            def ask_json_many(
+                self,
+                requests: list[object],
+                *,
+                max_workers: int,
+            ) -> list[dict[str, object]]:
+                del max_workers
+                return [
+                    {
+                        "paper_id": str(getattr(request, "label", "")),
+                        "one_sentence_summary": "A small validation fixture.",
+                        "problem": "Reliable agent behavior.",
+                        "method": "Validation.",
+                        "limitation": "Small fixture.",
+                        "relation_to_topic": "Directly relevant.",
+                        "confidence": "medium",
+                    }
+                    for request in requests
+                ]
+
             def ask(
                 self,
                 _system: str,
@@ -687,6 +728,7 @@ class ResearchSessionApplicationTests(unittest.TestCase):
                             max_chunks=20,
                             use_llm=True,
                             llm_client=client,
+                            config={"read_screening": "deterministic"},
                         ),
                         command=(),
                         cwd=root,

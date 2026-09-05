@@ -539,6 +539,11 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
         ("claim_cards", "Claims", ("claim_id", "paper_id", "claim")),
         ("method_cards", "Methods", ("method_id", "paper_id", "name")),
         ("dataset_cards", "Datasets", ("dataset_id", "paper_id", "name")),
+        (
+            "paper_notes",
+            "Model Reading Notes",
+            ("paper_id", "title", "method", "relation_to_topic", "synthesis_hint"),
+        ),
     ):
         rows = pack.get(key)
         if not isinstance(rows, list) or not rows:

@@ -10,7 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
-from simple_ar.research.evidence.reader import ReadRequest, ReadResult, read_documents
+from simple_ar.research.evidence.reader import (
+    ReadRequest,
+    ReadResult,
+    format_bundle_evidence_snippets,
+    read_documents,
+)
 from simple_ar.research.synthesis import (
     SynthesisRequest,
     SynthesisResult,
@@ -27,8 +32,8 @@ class ResearchBriefRequest:
     """Inputs for one evidence-backed research brief.
 
     The default remains deterministic for library compatibility. A caller
-    that wants model-generated synthesis must set ``use_llm`` and provide the
-    shared client explicitly.
+    that wants model-assisted reading and synthesis must set ``use_llm`` and
+    provide the shared client explicitly.
     """
 
     topic: str
@@ -181,6 +186,9 @@ def build_research_brief(request: ResearchBriefRequest) -> ResearchBriefResult:
             bundle=request.bundle,
             document_ids=request.document_ids,
             paper_ids=request.paper_ids,
+            topic=request.topic,
+            use_llm=request.use_llm,
+            llm_client=request.llm_client,
         )
     )
     if read.status == "empty":
@@ -224,6 +232,8 @@ def evidence_pack_from_read(
             "claim_cards": len(result.claim_cards),
             "method_cards": len(result.method_cards),
             "dataset_cards": len(result.dataset_cards),
+            "screening_decisions": len(result.screening_decisions),
+            "paper_notes": len(result.paper_notes),
         },
         "coverage": dict(coverage or {"status": "unknown"}),
         "papers": [record.to_row() for record in result.bundle.records],
@@ -231,6 +241,9 @@ def evidence_pack_from_read(
         "claim_cards": [card.to_row() for card in result.claim_cards],
         "method_cards": [card.to_row() for card in result.method_cards],
         "dataset_cards": [card.to_row() for card in result.dataset_cards],
+        "screening_decisions": [dict(row) for row in result.screening_decisions],
+        "paper_notes": [dict(note) for note in result.paper_notes],
+        "notes_markdown": result.notes_markdown,
         "evidence_refs": [chunk.chunk_id for chunk in result.bundle.chunks],
         "evidence_snippets": _evidence_snippets(result),
         "limitations": list(result.diagnostics),
@@ -245,20 +258,11 @@ def _evidence_snippets(result: ReadResult, *, max_chunks: int = 12, max_chars: i
     document into the synthesis handoff or allowing unbounded context growth.
     """
 
-    lines: list[str] = []
-    for chunk in result.bundle.chunks[:max_chunks]:
-        text = " ".join(chunk.text.split())
-        if len(text) > max_chars:
-            text = text[: max_chars - 3].rstrip() + "..."
-        if not text:
-            continue
-        location = chunk.source_path or chunk.document_id
-        if chunk.line_start is not None:
-            location += f":{chunk.line_start}"
-            if chunk.line_end is not None and chunk.line_end != chunk.line_start:
-                location += f"-{chunk.line_end}"
-        lines.append(f"[{chunk.chunk_id}] {location}: {text}")
-    return "\n".join(lines)
+    return format_bundle_evidence_snippets(
+        result.bundle,
+        max_chunks=max_chunks,
+        max_chars=max_chars,
+    )
 
 
 __all__ = [

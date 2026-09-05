@@ -462,13 +462,14 @@ def _rerank_input_papers(
         for row in coarse_decisions
     }
     limit = max(max_shortlist, min(max_shortlist * 2, 48))
-    return sorted(
-        papers,
-        key=lambda paper: (
-            -score_by_id.get(str(paper.get("id") or paper.get("paper_id") or ""), 0),
-            str(paper.get("id") or paper.get("paper_id") or ""),
-        ),
-    )[:limit]
+    indexed = list(enumerate(papers, start=1))
+    indexed.sort(
+        key=lambda item: (
+            -score_by_id.get(_paper_id(item[1], item[0]), 0),
+            _paper_id(item[1], item[0]),
+        )
+    )
+    return [paper for _, paper in indexed[:limit]]
 
 
 def _coarse_decisions_with_priorities(
