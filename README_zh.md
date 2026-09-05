@@ -23,8 +23,8 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
   provider、artifact、指标、超时和 continuation；模型模式的 CLI 默认请求报告。
 - **研究源**：canonical session 可以通过统一连接器访问
   OpenAlex/Semantic Scholar/arXiv/本地文件，并执行有界文档摄取和证据卡片生成；
-  LLM 规划和综合需要显式开启。旧的 facet 扩展、多轮检索和筛选仍属于冻结的
-  `simple-ar run/resume` 兼容路径，不是第二条 V2.8 主线。
+  LLM 规划、有界阅读/筛选、paper notes 和综合需要显式开启。旧的 facet 扩展和多轮检索
+  仍属于冻结的 `simple-ar run/resume` 兼容路径，不是第二条 V2.8 主线。
 - **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：canonical session 可以显式把一个准备好的项目和一份 Code-Task TOML

@@ -242,11 +242,12 @@ they derive report inputs from the session's persisted synthesis, paper
 metadata, execution, and analysis evidence, while leaving template, budget,
 and client selection explicit.
 
-Omitting `--model` keeps planning, synthesis, design selection, and analysis
-deterministic. When `--model NAME` is supplied, the same shared client is used
-for planning, synthesis, selection among grounded research ideas, and result
-analysis; provider failures remain visible and are not silently converted into
-offline output.
+Omitting `--model` keeps planning, reading, synthesis, design selection, and
+analysis deterministic. When `--model NAME` is supplied, the same shared
+client is used for planning, bounded reading/screening and paper notes,
+synthesis, selection among grounded research ideas, and result analysis;
+provider failures remain visible and are not silently converted into offline
+output.
 
 To inspect a persisted capability session without rerunning it, use the existing
 status command:

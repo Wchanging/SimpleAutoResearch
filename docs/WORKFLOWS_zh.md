@@ -91,9 +91,9 @@ uv run simple-ar research-brief --topic "reliable agents" \
 
 这条 standalone 路径会明确区分模型模式。省略 `--model` 时，它是离线/确定性组合：搜索、
 解析、card derivation 和结构化方向提取只使用已有输入；传入 `--model NAME` 后，使用现有
-LLM client 完成研究规划和综合，并在 handoff 中记录 `planner: llm` 与
-`generation_mode: llm`。缺少凭据、传输失败或模型返回格式错误时，对应 attempt 会失败，
-不会静默伪造模型结果。
+LLM client 完成研究规划、有界 Read 筛选/重排、paper notes 和综合，并在 handoff 中记录
+Read provenance、`planner: llm` 与 `generation_mode: llm`。缺少凭据、传输失败或模型返回格式
+错误时，对应 attempt 会失败，不会静默伪造模型结果。
 
 下一条小组合入口是 `simple-ar research-experiment`。它接收前一个入口生成的
 research direction，调用现有执行后端运行一次明确的命令，再把规范化的 `results.json`

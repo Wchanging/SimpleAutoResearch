@@ -119,8 +119,9 @@ is still accepted as an input for older callers.
 The standalone path is explicit about model use. Without `--model` it is an
 offline/deterministic composition: search, parsing, card derivation, and
 structured direction extraction use the supplied inputs. With `--model NAME`,
-the existing LLM client is used for research planning and synthesis, and the
-handoff records `planner: llm` and `generation_mode: llm`. Missing credentials,
+the existing LLM client is used for research planning, bounded Read screening/
+reranking and paper notes, and synthesis; the handoff records the Read
+provenance plus `planner: llm` and `generation_mode: llm`. Missing credentials,
 transport failures, or malformed model output fail the relevant attempt; they
 do not silently become a model-generated result.
 

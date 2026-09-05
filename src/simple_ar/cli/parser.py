@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     brief_parser.add_argument(
         "--model",
         default=None,
-        help="Optional model override; enables LLM-backed planning and synthesis.",
+        help="Optional model override; enables LLM-backed planning, reading, and synthesis.",
     )
     brief_parser.add_argument(
         "--output-root",
@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     session_parser.add_argument(
         "--model",
         default=None,
-        help="Optional model override; enables LLM-backed planning, synthesis, and analysis.",
+        help="Optional model override; enables LLM-backed planning, reading, synthesis, and analysis.",
     )
     session_parser.add_argument(
         "--output-root",

@@ -67,8 +67,8 @@ uv run simple-ar research-session \
 ```
 
 The model name must be available from the configured OpenAI-compatible
-gateway. This command makes a bounded sequence of planning, synthesis,
-design, analysis, and report calls; a gateway/model error is a failed smoke,
+gateway. This command makes a bounded sequence of planning, reading,
+synthesis, design, analysis, and report calls; a gateway/model error is a failed smoke,
 not permission to silently switch to fixture output.
 
 The same session can use the existing Code-Task backend for its experiment

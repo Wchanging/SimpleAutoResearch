@@ -222,9 +222,10 @@ report attempt 的输入，再调用同一套 report/audit capability；不会�
 session 中已经持久化的 synthesis、论文元数据、执行结果和分析证据整理报告输入，同时仍
 由调用方明确选择 template、预算和 client。
 
-省略 `--model` 时，planning、synthesis、design 选择和 analysis 都保持 deterministic；传入
-`--model NAME` 后，同一个共享 client 会用于 planning、synthesis、在已有研究方向中进行选择
-以及结果分析。provider 失败会保留为可见错误，不会静默转换成离线输出。
+省略 `--model` 时，planning、reading、synthesis、design 选择和 analysis 都保持
+deterministic；传入 `--model NAME` 后，同一个共享 client 会用于 planning、有界 reading/
+screening 与 paper notes、synthesis、在已有研究方向中进行选择以及结果分析。provider 失败会
+保留为可见错误，不会静默转换成离线输出。
 
 如果只想查看已经持久化的 capability session，而不重新运行任何阶段，可以继续使用已有的
 status 命令：

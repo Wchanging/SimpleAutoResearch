@@ -33,9 +33,10 @@ experimentation, and gradual extension.
 - **Research sources**: the canonical session can search
   OpenAlex/Semantic Scholar/arXiv/local files through the provider-neutral
   connector boundary, with bounded document extraction and evidence cards.
-  Optional LLM planning and synthesis are explicit. The older facet expansion,
-  multi-round retrieval, and screening behavior still belongs to the frozen
-  `simple-ar run/resume` compatibility path and is not a second V2.8 mainline.
+  Optional LLM planning, bounded reading/screening, paper notes, and synthesis
+  are explicit. The older facet expansion and multi-round retrieval behavior
+  still belongs to the frozen `simple-ar run/resume` compatibility path and is
+  not a second V2.8 mainline.
 - **Code tasks**: improve an existing codebase or generate a bounded
   greenfield project inside an isolated editable workspace with LLM planning,
   task memory, review gates, controlled patch/generation artifacts,
