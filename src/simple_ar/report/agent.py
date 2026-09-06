@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from pydantic import ValidationError
@@ -30,6 +30,8 @@ from simple_ar.report.tool_gateway import ReportToolGateway
 WRITER_SYSTEM = """You are the SimpleAutoResearch report Writer.
 Write only evidence-bounded Markdown sections for the current run.
 Do not invent citations, metrics, datasets, methods, or external references.
+Treat the supplied verified execution results as authoritative for local
+baseline, candidate, comparison, and resource claims.
 Use short citation keys exactly as provided, in Pandoc-style form like [@P1].
 Write survey prose, not a pipeline run log: do not mention artifact paths,
 stage names, JSON files, tool traces, or search/debug internals unless the
@@ -50,6 +52,10 @@ Return one JSON object matching the requested schema."""
 REVIEWER_SYSTEM = """You are the SimpleAutoResearch report Reviewer.
 Review independently against the provided criteria, source handles, metrics, and current-run boundaries.
 Do not rewrite prose unless asked. Return structured findings and optional bounded context requests.
+Treat the supplied verified execution results as authoritative for local
+baseline, candidate, comparison, and resource claims. Do not flag a claim as
+unsupported merely because the deterministic execution appendix is assembled
+after the Writer/Reviewer pass.
 Flag operational/provenance sections in research-only reports when they make
 the report read like a pipeline log instead of an academic survey.
 Flag any section that is one huge paragraph or mixes many unrelated claims
@@ -1115,6 +1121,7 @@ def _writer_prompt(
         "global_research_context": {
             "evidence_summary": context.evidence_summary[:3000],
             "execution_context": context.execution_context[:8000],
+            "verified_execution_results": _compact_execution_results(context.results),
             "synthesis": context.synthesis_markdown[:3000],
             "hypothesis": context.hypothesis_markdown[:1500],
         },
@@ -1152,6 +1159,8 @@ def _writer_prompt(
             "Draft front-matter as if it is written after the body: Abstract and Introduction should summarize the actual synthesis, not generic background.",
             "For each strong conclusion, add a boundary condition or uncertainty statement.",
             "When a prepared execution context is supplied, treat its project, dataset, benchmark, and runtime limits as authoritative; do not repeat a conflicting literature setting as if it were the executed experiment.",
+            "Use verified_execution_results for local baseline/candidate metrics, comparison verdicts, deltas, and resource changes. Do not use literature citations to support local benchmark outcomes.",
+            "If verified_execution_results shows that more than one implementation factor changed, describe that as a limitation or scope boundary rather than presenting a single-factor causal claim.",
             "Keep paragraphs under roughly 120 words; split dense synthesis into short paragraphs or concise bullets.",
             "Use only `cite_as` values such as [@P1] for body citations; never cite long source handles or raw paper ids.",
             "The final renderer will map short citation keys back to verified source ids and numeric citations.",
@@ -1285,6 +1294,7 @@ def _reviewer_prompt(
         "known_limitations": memory.limitations[:8],
         "allowed_sources": _handles_for_section(memory, section),
         "metric_sources": [metric.model_dump(mode="json") for metric in memory.metric_sources[:12]],
+        "verified_execution_results": _compact_execution_results(context.results),
         "draft": draft.model_dump(mode="json"),
         "tool_policy": {
             "allowed_tools": [
@@ -1313,6 +1323,9 @@ def _reviewer_prompt(
             "When visual_requirements.tables is non-empty, does this section realize every required table with its planned caption, meaningful columns, and evidence-supported cells? Request revision for a missing or placeholder table.",
             "Does Evaluation include an evidence-quality map or equivalent compact comparison when useful?",
             "Are benchmark limitations and transfer boundaries stated near empirical claims?",
+            "Use verified_execution_results as the authoritative local benchmark record. Do not request a missing comparison table or metric merely because the deterministic execution evidence is appended after this review.",
+            "If verified_execution_results shows multiple implementation changes or resource changes, ensure the draft states that limitation; do not treat the presence of those changes alone as an unsupported causal claim.",
+            "Do not require literature citations for local baseline/candidate metrics; those values are supported by verified execution results and metric sources.",
             "Is it free of prompt residue such as Hint, Use this paper as, Paper Brief, or Additional synthesis detail?",
         ],
         "output_schema": {
@@ -1350,6 +1363,81 @@ def _json_prompt(payload: dict[str, Any]) -> str:
         "Return exactly one JSON object. Do not wrap it in Markdown fences.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+
+
+def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str, Any]:
+    """Expose bounded, authoritative experiment evidence to report agents.
+
+    The deterministic report assembly already appends execution evidence after
+    the agent pass.  Giving the Writer and Reviewer the same compact result
+    projection prevents them from treating a real comparison as missing while
+    keeping raw stdout, paths, and unrelated run metadata out of the prompt.
+    """
+    if not isinstance(results, Mapping):
+        return {}
+
+    def _mapping(value: object) -> Mapping[str, Any] | None:
+        return value if isinstance(value, Mapping) else None
+
+    def _metrics(value: object) -> dict[str, Any]:
+        mapping = _mapping(value)
+        if mapping is None:
+            return {}
+        blocked = {"stdout", "stderr", "command", "logs", "trace", "raw_output"}
+        return {
+            str(key): item
+            for key, item in list(mapping.items())[:32]
+            if str(key).lower() not in blocked
+            and (item is None or isinstance(item, (bool, int, float, str)))
+            and (not isinstance(item, str) or len(item) <= 200)
+        }
+
+    compact: dict[str, Any] = {}
+    for key in ("status", "primary_metric"):
+        if key in results:
+            compact[key] = results[key]
+    if "metrics" in results:
+        compact["metrics"] = _metrics(results.get("metrics"))
+
+    for label in ("baseline", "patched", "candidate"):
+        run = _mapping(results.get(label))
+        if run is None:
+            continue
+        compact[label] = {
+            key: run[key]
+            for key in ("status", "returncode", "timed_out")
+            if key in run
+        }
+        compact[label]["metrics"] = _metrics(run.get("metrics"))
+
+    comparisons = results.get("comparisons")
+    if isinstance(comparisons, list):
+        compact["comparisons"] = []
+        for item in comparisons[:4]:
+            comparison = _mapping(item)
+            if comparison is None:
+                continue
+            row: dict[str, Any] = {
+                key: comparison[key]
+                for key in ("status", "verdict", "name", "condition", "reasons")
+                if key in comparison
+            }
+            if "metrics" in comparison:
+                metric_rows = comparison.get("metrics")
+                if isinstance(metric_rows, list):
+                    row["metrics"] = [
+                        {
+                            key: metric[key]
+                            for key in ("name", "baseline", "patched", "candidate", "delta", "direction", "status")
+                            if key in metric
+                        }
+                        for metric in metric_rows[:16]
+                        if isinstance(metric, Mapping)
+                    ]
+                else:
+                    row["metrics"] = _metrics(metric_rows)
+            compact["comparisons"].append(row)
+    return compact
 
 
 def _compact_survey_contract(contract: dict[str, Any]) -> dict[str, Any]:

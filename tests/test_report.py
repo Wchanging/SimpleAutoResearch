@@ -12,6 +12,7 @@ from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
 from simple_ar.core.pipeline import Context
 from simple_ar.report.agent import (
+    _compact_execution_results,
     _is_claim_record_response,
     _merge_revision_draft,
     _normalize_draft_response,
@@ -209,6 +210,39 @@ def _extract_prompt_value(prompt: str, key: str) -> str:
 
 
 class ReportSafetyTests(unittest.TestCase):
+    def test_report_agents_receive_bounded_verified_execution_comparison(self) -> None:
+        compact = _compact_execution_results(
+            {
+                "status": "passed",
+                "primary_metric": "accuracy",
+                "metrics": {"accuracy": 0.89, "stdout": "should not be copied"},
+                "baseline": {"status": "passed", "metrics": {"accuracy": 0.77}},
+                "comparisons": [
+                    {
+                        "verdict": "improved",
+                        "reasons": ["accuracy increased"],
+                        "metrics": [
+                            {
+                                "name": "accuracy",
+                                "baseline": 0.77,
+                                "patched": 0.89,
+                                "delta": 0.12,
+                                "direction": "higher",
+                            }
+                        ],
+                        "stdout": "should not be copied",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(compact["primary_metric"], "accuracy")
+        self.assertEqual(compact["baseline"]["metrics"]["accuracy"], 0.77)
+        self.assertEqual(compact["comparisons"][0]["verdict"], "improved")
+        self.assertEqual(compact["comparisons"][0]["metrics"][0]["delta"], 0.12)
+        self.assertNotIn("stdout", compact["metrics"])
+        self.assertNotIn("stdout", compact["comparisons"][0])
+
     def test_report_runtime_config_accepts_zero_revision_cycles(self) -> None:
         config = _report_runtime_config(
             Context(Path("run"), "Agent Simulation", config={"report_max_review_iterations": 0})
