@@ -27,6 +27,10 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
   OpenAlex/Semantic Scholar/arXiv/本地文件，并执行有界文档摄取和证据卡片生成；
   LLM 规划、有界阅读/筛选、paper notes 和综合需要显式开启。旧的 facet 扩展和多轮检索
   仍属于冻结的 `simple-ar run/resume` 兼容路径，不是第二条 V2.8 主线。
+- **入口层级**：普通用户在 V2.8 只需要记住 `simple-ar research-session`；
+  `research-session-continue` 和 `research-report` 是同一 session 的恢复/报告子命令。
+  `research-brief`、`research-experiment` 和 `research-code-task` 保留为分段、开发和诊断接口，
+  `simple-ar run/resume` 保留为旧八阶段兼容入口，均不再作为并行产品主线。
 - **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：canonical session 可以显式把一个准备好的项目和一份 Code-Task TOML
@@ -36,8 +40,9 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
   兼容面冻结。Claude Code、Codex、OpenCode 等 Harness 属于 V2.8 之后的工作，不是当前验收条件。
 - **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
 - **面向贡献者的能力边界**：新的模块可以使用轻量的
-  `ArtifactStore`、`CapabilityResult` 和有界 attempt API，而不必改动已经存在的
-  8 阶段与 code-task 入口。离线参考实现位于 `examples/capability_package_minimal/`。
+  `ArtifactStore`、`CapabilityResult` 和有界 attempt API，内部保持模块化，但正式研究流程
+  统一由 `research-session` 编排。旧八阶段和 code-task 入口只在迁移完成前作为兼容/开发面
+  存在。离线参考实现位于 `examples/capability_package_minimal/`。
 - **成熟库基础设施**：pipeline/code-task TOML 配置通过 Pydantic 校验，LLM 调用默认使用 OpenAI Python SDK，并保留 LiteLLM 兼容层；OpenAlex 访问通过 pyalex，终端进度输出开始走 Rich，为后续更清晰的 human-in-the-loop 审核打基础。
 
 ## 安装与配置
@@ -103,7 +108,10 @@ uv run python examples/research_session_smoke.py
 provider 失败时不会用 fixture 结果冒充成功；如果提供 `--code-task-config`，可以接入一个
 准备好的项目，但 V2.8 每次只执行一个研究方向。
 
-### 2. 兼容路径 Research Report：文献优先报告
+以下命令是分段或兼容入口，不是第二条 V2.8 完整主线。只有在调试、恢复已有 handoff、
+验证旧配置或运行历史 benchmark 时才需要使用它们。
+
+### 2. 旧兼容路径 Research Report：文献优先报告
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
@@ -165,7 +173,7 @@ uv run simple-ar status runs/<run-id>
 
 内置 standalone code-task 示例是 `examples/code_task_medium_review/configs/code_task.toml`，放在 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中作为辅助示例。
 
-### 4. 兼容路径 Research With Experiment：研究流程衔接代码实验
+### 4. 旧兼容路径 Research With Experiment：研究流程衔接代码实验
 
 当你希望研究流程先收集文献上下文，再衔接已有代码项目完成实验修改，并把代码证据写入最终报告时，使用这个模式。针对自己的项目，可以创建一个顶层 run config：
 
@@ -226,7 +234,7 @@ uv run simple-ar run --config path/to/your_pipeline.toml
 
 内嵌路径的目标是端到端跑完，因此会在隔离 workspace 中自动批准 patch plan。如果你希望每一步都先人工审核，应使用 standalone `code-task` 命令。内置 demo 配置在 `examples/full_pipeline_tiny_mlp/configs/pipeline.toml`；完整说明见 [使用与配置](docs/USAGE_zh.md#8-阶段流程中的内嵌-code-task)。如果想保留用户写好的 `task.md` 作为硬约束，同时让 `05-design` 融合前面研究上下文，可以设置 `[implementation].task_handoff = "merge"`。
 
-### 5. Greenfield Experiment：从零生成受控实验项目
+### 5. 兼容/高级路径 Greenfield Experiment：从零生成受控实验项目
 
 当任务还没有现成源码项目时，可以使用 greenfield 路径。当前实现会复用和已有代码任务相同的 code-task 引擎：`05-design` 先写出 experiment contract，`06-code` 在 `06-code/code_task_run/` 下创建 `kind = "greenfield"` 的嵌套 code-task run，再把生成项目投影回 `06-code/generated_project/` 供 `07-run` 兼容使用。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
 
@@ -263,8 +271,12 @@ SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它�
 - [CLI 参考](docs/CLI_REFERENCE_zh.md)：命令组和参数表。
 - [配置参考](docs/CONFIG_REFERENCE_zh.md)：TOML section、完整配置示例和 workspace 模式变体。
 - [工作流与产物](docs/WORKFLOWS_zh.md)：预设工作流、8 阶段流程和产物布局。
-- [开发指南](docs/DEVELOPMENT_zh.md)：如何扩展 stage、template 和 code-task 模块。
+- [开发指南](docs/DEVELOPMENT_zh.md)：如何扩展 capability、template 和 code-task 模块。
 - [Changelog](CHANGELOG_zh.md)：按时间记录的开发进展。
+
+V2.8 的当前收口计划、版本边界和兼容退出条件维护在本地 `MDfiles/` 规划文档中；该目录
+按项目约定保持 Git 忽略，不作为 GitHub 的公开计划来源。贡献代码时以开发指南、工作流文档
+和 CLI 参考中的正式入口边界为准。
 
 ## 参考项目
 

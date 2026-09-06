@@ -78,9 +78,27 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `off` 表示只靠 prompt 和本地解析，兼容性最好；`auto` 会尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；`json_object` 表示强制发送。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
 
-## Research Pipeline：从主题到报告
+## V2.8 Research Session：从主题到报告
 
-运行默认 8 阶段流程：
+V2.8 的正式用户入口是 `research-session`。它在同一个 session 中按固定顺序执行
+`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment
+-> analysis`，在模型可用且未关闭报告时继续完成 `report -> report_audit`。实验命令、baseline、
+数据集、代码范围和资源限制仍由用户或配置明确提供；它是有界闭环，不是无限自主研究循环。
+
+适合笔记本的离线完整 smoke：
+
+```bash
+uv run python examples/research_session_smoke.py
+```
+
+真实网络、LLM 和准备好的代码项目的低资源示例见 `examples/README.md`。遇到失败时，保留
+session 目录并检查具体 attempt；不要用 fixture 结果覆盖真实失败。
+
+## 旧八阶段兼容 Pipeline
+
+下面的 `simple-ar run/resume` 只用于旧配置、旧阶段目录和历史 artifact 的兼容读取/运行，
+不再是 V2.8 的正式主线，也不会继续增加新的 research 业务逻辑。待真实消费者迁移后，按
+V2.8 Phase 3B 收缩或删除。
 
 ```bash
 uv run simple-ar run --topic "toy topic" --to-stage report

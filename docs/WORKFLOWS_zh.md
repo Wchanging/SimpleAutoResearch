@@ -6,7 +6,25 @@
 
 ## 工作流预设
 
-当前 8 阶段 pipeline 只是一个预设，不是整个架构本身。SimpleAutoResearch 保持 module-first，这样 literature review、code improvement、experiment execution 和 report writing 可以重新组合。
+V2.8 面向普通用户的正式工作流只有 `research-session`：它把 research-to-report 的阶段
+按固定顺序串起来，并在同一个 session 中保存 handoff、attempt、artifact 和审计结果。
+当前 8 阶段 pipeline 是旧入口的兼容投影，不是第二条正在演进的产品路线。
+SimpleAutoResearch 仍保持 module-first，但模块化发生在内部 capability 和应用层；它让
+测试、恢复、开发者接口以及后续 workflow 可以复用能力，不意味着普通用户需要在多条入口
+之间自行拼接完整流程。
+
+```text
+正式用户入口
+research-session
+  -> plan -> search -> document_ingest -> read -> synthesize
+  -> research_design -> experiment -> analysis -> report -> report_audit
+
+内部可复用/分段接口
+research-brief / research-experiment / research-code-task
+
+临时兼容入口
+simple-ar run/resume -> 旧八阶段 artifact projection
+```
 
 ## Capability 运行
 
@@ -60,7 +78,9 @@ session 伪装成成功。
 暴露聚合的 `research_brief` capability：session 分别持久化 `read` 与 `synthesize`。
 历史 `research_brief.v1` handoff 仍可读取，但不会再成为第二条可执行 lifecycle。
 
-面向用户的最小组合入口是 `simple-ar research-brief`，它只负责一条明确的路径：
+下面的 `research-brief` 是分段/开发入口，不是 V2.8 完整主线。面向普通用户的完整流程应
+优先使用 `simple-ar research-session`；需要只构建研究 handoff、调试阅读或从已有 handoff
+开始时，才使用这些较小的组合入口。`research-brief` 只负责一条明确的路径：
 
 ```text
 plan -> search -> document_ingest -> read -> synthesize
@@ -103,7 +123,7 @@ research direction，调用现有执行后端运行一次明确的命令，再�
 传入 `--model NAME` 会额外启用共享 LLM 的结果分析；省略它时分析保持 deterministic，
 实际使用的模式会记录在 analysis capability 的 provenance 中。
 
-如果希望两段交接保留在同一个 session 中，可以使用
+如果希望把完整流程保留在同一个 session 中，应使用唯一正式主线
 `simple-ar research-session`。它复用相同的
 `plan -> search -> document_ingest -> read -> synthesize` 前缀，记录一个
 `research_design.v1` handoff，再用一个明确提供的 `ExperimentRequest` 进入现有 Analysis
@@ -292,9 +312,10 @@ retry 或阶段转移；持久化的独立分析还会写出 `analysis_status.js
 的 `figure` 输出引用登记，figure manifest 只是索引，缺失图文件会报告为 `partial`。它不会
 调用 writer，也不会生成 audit。随后把声明出的 report 引用传给独立的 audit capability。
 
-### 1. Research Report：文献优先
+### 1. Research Report：文献优先（分段/高级用例）
 
 适合想要 literature review、survey 或 DeepResearch-like report，而不强调实验执行的场景。
+普通用户的完整 V2.8 主线仍应使用 `research-session`；这里描述的是可复用的分段能力边界。
 
 概念流程：
 
@@ -341,7 +362,7 @@ init workspace -> index code -> map repo -> probe environment
 - `examples/code_task_medium_review/`：standalone code-task 流程，目标是一个多模块 review classifier，入口是 `main.py`，使用 JSON config，运行时有进度输出，任务自然涉及 feature extraction、model scoring 和配置文件之间的联动。
 - `examples/full_pipeline_tiny_mlp/`：完整 8 阶段流程，目标是轻量 NumPy MLP benchmark，适合不依赖 GPU 的端到端本地检查。
 
-### 3. Research With Experiment：研究衔接实验
+### 3. Research With Experiment：研究衔接实验（兼容/高级用例）
 
 适合希望从研究想法走到可执行实验和有结果支撑的报告。
 
@@ -357,12 +378,18 @@ plan -> search -> read -> synthesize -> design experiment
 - `06-code` 可以生成白名单 template experiment、为已有项目准备内嵌 code-task workspace，也可以在没有现成源码时调用统一 code-task greenfield engine。greenfield 情况下，真实嵌套 run 位于 `06-code/code_task_run/`，兼容产物会再投影回 `06-code/generated_project/`。
 - `--experiment-template code_task_project` 是通用内嵌 handoff，会接入 code-task workflow。它接受 `--code-task-config`，也接受显式 `--code-root`、可选 `--task-file` 和 `--benchmark-command`。如果没有 task file，`05-design` 会基于前面研究产物和紧凑代码摘要生成 `generated_code_task.md`。
 - 内嵌生成任务会包含来自 synthesis/design artifacts 的 Research-to-Code Bridge，让 code-task planning 能看到方法迁移线索、实现假设、指标契约、消融目标、资源约束和风险提示。
-- `simple-ar run --config ...` 是保持多参数 research/code-task run 可读、可复现的推荐方式。
+- 旧入口 `simple-ar run --config ...` 仍适合保持多参数兼容 run 可读、可复现；V2.8 普通用户
+  应优先使用 `simple-ar research-session`，不要把旧配置当作新的研究能力入口。
 - `--experiment-template llm_code_task_toy_spam` 仍保留为 bundled smoke-test template。
 - 内嵌路径是端到端的：它会构建和 standalone code-task 一致的 repo map / context pack、work plan、attempt/batch 证据，然后在准备好的 workspace 内自动批准 patch plan。严格的串行依赖链会合并为一个有界 batch（最多 3 个 work item、4 个目标文件），避免实现、接线和配置被静默拆到不同 attempt。此类 batch 通常使用 `large` budget；内嵌路径会读取 Code-Task TOML 的 `[execute].allow_large_edits`，没有显式批准时会保留产物并以清晰的失败状态结束。需要人工检查较大 proposal 时，standalone code-task 仍然是更合适的入口。
 - Report generation 有保护：只有 citation、metric visibility、fixture disclosure 和 toy-demo boundary 检查通过时，才接受 LLM draft。
 
-## 默认 8 阶段 Pipeline
+## 旧八阶段兼容投影
+
+旧的 8 阶段 pipeline 仍然是一个可复现的兼容 workflow preset，但不再是 V2.8 的正式主线：
+它保留旧配置、阶段目录和历史 reader 所需的 artifact 形态；新的研究规则只能进入 canonical
+capability，旧入口不再新增业务逻辑。待真实消费者迁移并通过历史格式回归后，兼容投影按主计划
+删除。
 
 ```text
 01 plan        限定主题和研究问题
@@ -457,13 +484,15 @@ tests、benchmarks、环境文件、secrets 和用户配置的 protected paths �
 
 默认应保持保守：依赖安装必须显式、可审核，并且不应默默把用户项目包安装进 SimpleAutoResearch 自己的环境。
 
-## 为什么要拆分工作流
+## 为什么内部要拆分能力
 
-拆分能避免项目变成一个僵硬的大 pipeline：
+内部拆分能力并不等于把普通用户暴露到多条并行主线。它的作用是避免实现变成一个无法维护的
+大 pipeline，同时让正式入口保持简单：
 
 - 用户只想写 survey 时，不应强制运行代码阶段。
 - 用户只想优化已有代码时，文献阶段应可选。
-- 用户想做完整 automatic-research loop 时，可以组合模块。
-- 每个模块都可以独立升级。
+- `research-session` 可以按任务配置选择是否接入准备好的代码实验，但流程边界仍然固定。
+- 测试、恢复、开发者和未来 workflow 可以组合模块；普通用户不需要理解内部组合细节。
+- 每个模块可以独立升级，但不得形成第二套 session 状态、artifact 或报告核心。
 
 这也来自 AutoResearchClaw 的一个实践启发：复杂行为如果暴露成 workflow modes 和 capabilities，会比塞进一条不断膨胀的 flag 序列更可控。

@@ -8,6 +8,12 @@
 
 ### 变更
 
+- 重新梳理 V2.8/V2.9 版本边界：`research-session` 明确为唯一正式用户主线，分段 capability
+  命令和旧 `run/resume` 分别归入开发/诊断接口与临时兼容面。AutoDL v13 证明的是 V2.8
+  业务闭环，入口统一、真实消费者迁移、冗余清理和迁移后回归仍属于 V2.8 工程收口；报告
+  工程、模块升级、有限 continuation 和外部 Agent Harness 不提前进入本阶段。
+- 同步更新中文 README、使用、CLI、配置、工作流和开发文档，明确普通用户路径与内部模块化
+  的区别，并保留 `MDfiles/` 作为本地规划文档而不恢复 GitHub 跟踪。
 - 恢复本地规划笔记的仓库边界：`MDfiles/` 重新整体忽略，不再进入 GitHub 工作树。主计划、handoff
   和长期愿景仍保留在本地供协作使用，但不再作为版本化项目文件。
 - 收束 V2.8 Phase 3 的 research prefix：历史入口

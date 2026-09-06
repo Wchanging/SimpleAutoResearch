@@ -5,6 +5,13 @@
 This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
 
+For ordinary V2.8 use, `simple-ar research-session` is the only formal user
+entrypoint for the bounded research-to-report flow. `research-session-continue`
+and `research-report` continue the same session; `research-brief`,
+`research-experiment`, and `research-code-task` are segmented development or
+diagnostic interfaces. `simple-ar run/resume` is retained only as a frozen
+compatibility surface for the old eight-stage artifacts.
+
 - Installation and walkthroughs: [Usage And Configuration](USAGE.md)
 - Workflow concepts and artifacts: [Workflows And Artifacts](WORKFLOWS.md)
 - TOML schema and examples: [Configuration Reference](CONFIG_REFERENCE.md)
@@ -13,14 +20,14 @@ on command syntax, options, outputs, and short operational notes.
 
 | Command | Purpose |
 | --- | --- |
-| `simple-ar run` | Start a new 8-stage research pipeline run. |
-| `simple-ar research-brief` | Build an evidence-backed brief from a topic or local documents. |
-| `simple-ar research-experiment` | Execute and analyze a declared experiment from a research handoff. |
-| `simple-ar research-session` | Run the bounded literature-to-experiment composition in one session. |
+| `simple-ar research-session` | **V2.8 formal mainline**: run the bounded research-to-report flow in one session. |
 | `simple-ar research-session-continue` | Append one explicit recovery experiment to a failed research session. |
 | `simple-ar research-report` | Generate and audit a report from a completed research session. |
+| `simple-ar research-brief` | Segmented/development interface for an evidence-backed research brief. |
+| `simple-ar research-experiment` | Segmented/development interface for one declared experiment handoff. |
 | `simple-ar research-code-task` | Pass a research handoff through the existing project-style Code-Task backend. |
-| `simple-ar resume` | Continue an existing research pipeline run. |
+| `simple-ar run` | Frozen old eight-stage compatibility entrypoint. |
+| `simple-ar resume` | Continue an old compatibility pipeline run. |
 | `simple-ar status` | Print status for a research run or code-task run. |
 | `simple-ar tools ...` | Export tool schemas, call run-local tools, or serve read-only tools over MCP stdio. |
 | `simple-ar inspect` | Build a local artifact index for a run. |
@@ -32,7 +39,12 @@ on command syntax, options, outputs, and short operational notes.
 
 ### `simple-ar run`
 
-**Purpose**: start a new 8-stage research pipeline run.
+**Purpose**: start an old eight-stage compatibility run. Ordinary V2.8 users
+should prefer `simple-ar research-session`.
+
+This command preserves legacy configs, stage directories, and historical artifact
+readers. It receives no new research policy and will be removed or reduced to a
+read-only importer after the real consumers migrate under V2.8 Phase 3B.
 
 **Usage**:
 
@@ -96,7 +108,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 Use a TOML config for real runs with many options. See the
 [Configuration Reference](CONFIG_REFERENCE.md#complete-pipeline-config).
 
-### `simple-ar research-brief`
+### `simple-ar research-brief` (segmented/development interface)
 
 **Purpose**: build a small evidence-backed brief from a topic or local
 Markdown/text documents.
@@ -132,7 +144,7 @@ The run prints and persists the selected mode. LLM mode requires the normal
 `.env` provider settings; a missing key or failed model response is reported
 as a failed attempt rather than replaced by deterministic prose.
 
-### `simple-ar research-experiment`
+### `simple-ar research-experiment` (segmented/development interface)
 
 **Purpose**: execute one reviewed `research_brief.v1` or `synthesis_result.v1`
 handoff and analyze the observed result through the existing execution and
@@ -170,14 +182,19 @@ the application does not retry or repair it implicitly.
 | `--metric-direction NAME=DIRECTION` | repeatable | Direction such as `accuracy=higher` or `loss=lower`. |
 | `--command ...` | command | Command passed to the local backend; place it last. |
 
-### `simple-ar research-session`
+### `simple-ar research-session` (V2.8 formal mainline)
 
-**Purpose**: run the small end-to-end composition
+**Purpose**: run the V2.8 formal end-to-end composition
 `plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`
 in one `full_research` session. By default the experiment command is supplied
 explicitly. With `--code-task-config`, the experiment attempt instead delegates
 implementation to the existing project-style Code-Task backend; this is still
 one bounded experiment, not autonomous iteration.
+
+When a model is available, the mainline continues through `report` and
+`report_audit`; `--no-report` is for debugging or prefix-only inspection. Use
+`research-session-continue` or `research-report` for recovery/report continuation
+within the same session rather than switching to another research mainline.
 
 **Usage** (the command must be the final option):
 

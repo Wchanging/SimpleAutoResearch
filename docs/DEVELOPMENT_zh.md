@@ -17,17 +17,24 @@ SimpleAutoResearch 现在采用 file-first + state-backed 的形态：
 
 ### 兼容性审计
 
-仓库现在有两条明确区分的执行面：
+仓库现在有一条正式执行面和一段冻结的兼容执行面：
 
 ```text
-research-session / research-brief / research-experiment
+research-session（正式用户主线）
   -> typed research capabilities -> SessionController -> ArtifactStore
 
-simple-ar run
+research-brief / research-experiment / research-code-task（分段/开发接口）
+  -> typed research capabilities -> SessionController -> ArtifactStore
+
+simple-ar run/resume（临时兼容面）
   -> PipelineRunner -> 冻结的八阶段兼容投影
 ```
 
-第一条是 V2.8 的主方向。第二条仍然保留，是因为已有配置、run 目录和测试仍然
+`research-session` 是 V2.8 唯一正式用户入口，负责完整的
+`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment
+-> analysis -> report -> report_audit`。`research-brief`、`research-experiment` 和
+`research-code-task` 仍保留，但只用于分段调试、已有 handoff 接续和库级组合，不与完整主线
+并列作为产品入口。`simple-ar run/resume` 仍然保留，是因为已有配置、run 目录和测试仍然
 依赖它的阶段形态产物；它不是继续新增 research 策略的地方。新的 capability 应
 放在 `research/`、`experiment/` 或 `report/` 中，`pipeline_stages/` 只负责把既有
 能力适配或投影为旧命令所需的格式。
@@ -39,9 +46,26 @@ Tool/MCP 设计契约产物。旧 debug 路径和 synthesis 测试仍使用 evid
 禁用的 backend，因为当前实验路径仍使用它的 provider factory；它不是 V2.8 的
 workflow controller。
 
-这是明确的保留决定，并不意味着所有旧路径永久不能清理。删除下一个兼容模块前，
-要重新搜索 import、CLI 分发、文档、fixture 和历史 reader，并保留旧格式回归，
-同时先完成真实消费者的迁移。
+这是当前 V2.8 收口期间的临时保留决定，并不意味着所有旧路径永久不能清理。下一步是
+逐项迁移 SurveyBench、ARC-Bench、历史 reader、旧配置和测试；删除下一个兼容模块前，
+要重新搜索 import、CLI 分发、文档、fixture 和历史 reader，并保留旧格式回归。若真实
+消费者已经退出，旧 facade、registry 分支和 projection 应直接删除，不继续保留“以后可能有用”
+的整套入口。
+
+### V2.8 收口顺序
+
+V2.8 的业务闭环已经通过，但工程发布还差入口统一和兼容退出。贡献者按下面顺序推进：
+
+1. 只把新研究行为放入 canonical `research/`、`experiment/`、`report/` 和 `code_task/`；
+2. 让 README、默认 example 和普通用户文档只指向 `research-session`；
+3. 把仍使用 `run/resume` 的真实消费者迁移到 typed handoff 或明确的只读导入边界；
+4. 删除已无消费者的旧 handler、registry、projection、临时输出和重复测试；
+5. 通过聚焦回归、fixture、CLI/历史格式回归、全量测试和低资源 smoke 后，才冻结 V2.8；
+6. V2.9 再处理报告工程、模块质量升级、有限 repair/continuation 和 Overleaf-ready 输出，
+   外部 Claude Code/Codex/OpenCode Harness 更晚接入。
+
+这里的“一个入口”指用户正式入口只有 `research-session`；内部 capability 仍然保持模块化，
+供测试、恢复、开发者和未来其他 workflow 组合使用。
 
 ### 清理规则
 

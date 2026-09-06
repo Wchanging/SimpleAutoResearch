@@ -18,17 +18,24 @@ This keeps the project easier to learn, debug, and refactor.
 
 ### Compatibility Audit
 
-The repository has two intentionally different execution surfaces:
+The repository has one formal execution surface and one frozen compatibility
+surface:
 
 ```text
-research-session / research-brief / research-experiment
+research-session (formal user mainline)
   -> typed research capabilities -> SessionController -> ArtifactStore
 
-simple-ar run
+research-brief / research-experiment / research-code-task (segmented/development)
+  -> typed research capabilities -> SessionController -> ArtifactStore
+
+simple-ar run/resume (temporary compatibility surface)
   -> PipelineRunner -> frozen eight-stage compatibility projection
 ```
 
-The first line is the V2.8 direction. The second line remains because existing
+`research-session` is the only formal V2.8 user entrypoint and owns the complete
+bounded research-to-report sequence. The segmented commands remain useful for
+development, diagnostics, and persisted handoff continuation, but are not a
+parallel product workflow. `simple-ar run/resume` remains because existing
 configs, run directories, and tests still consume its stage-shaped artifacts.
 It is not a second place to add new research policy. New capability work belongs
 under `research/`, `experiment/`, or `report/`; `pipeline_stages/` should only
@@ -42,10 +49,36 @@ path and synthesis tests still consume them. CodeTask's external CLI support is
 also kept as a disabled/explicit backend because the current experiment path
 uses its provider factory; it is not a V2.8 workflow controller.
 
-This is an explicit keep decision, not a promise that every old path is
-permanent. Before deleting another compatibility module, search imports, CLI
+This is a temporary V2.8 keep decision, not a promise that every old path is
+permanent. Migrate SurveyBench, ARC-Bench, historical readers, old configs, and
+tests; before deleting another compatibility module, search imports, CLI
 dispatch, docs, fixtures, and historical readers, then preserve the old-format
-regression while migrating its real consumer.
+regression while migrating its real consumer. Delete a facade or projection
+once its consumers are gone instead of keeping a complete legacy entrypoint
+for hypothetical future use.
+
+### V2.8 Closure Order
+
+The business closure has passed, but the engineering release gate still requires
+entrypoint unification and compatibility exit:
+
+1. Put new behavior only in the canonical research, experiment, report, and
+   Code-Task modules.
+2. Point the README, default examples, and normal-user documentation only to
+   `research-session`.
+3. Migrate real `run/resume` consumers to typed handoffs or an explicit
+   read-only legacy importer.
+4. Remove dead handlers, registry branches, projections, temporary outputs, and
+   duplicate tests after focused and historical-format regressions pass.
+5. Run the fixture, full suite, CLI checks, and bounded AutoDL smoke before
+   freezing V2.8.
+6. Start V2.9 only after that gate, with report engineering, module upgrades,
+   bounded repair/continuation, and Overleaf-ready output; external Harness
+   adapters come later.
+
+The public “one entrypoint” rule does not remove internal modularity. Capabilities
+remain independently testable and composable for developers, recovery, and
+future workflows.
 
 ### Cleanup Policy
 

@@ -8,6 +8,16 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Clarified the V2.8/V2.9 boundary: `research-session` is the only formal
+  user-facing mainline, segmented capability commands are development/diagnostic
+  interfaces, and `run/resume` is a temporary compatibility surface. AutoDL v13
+  proves the V2.8 business closure; entrypoint unification, real-consumer
+  migration, duplicate cleanup, and post-migration regression remain V2.8
+  engineering work. Report engineering, module upgrades, bounded continuation,
+  and external Agent Harness integration stay deferred.
+- Synchronized the README, usage, CLI, configuration, workflow, and development
+  documentation to distinguish the public mainline from internal modularity while
+  keeping `MDfiles/` local and ignored.
 - Restored the repository boundary for local planning notes: `MDfiles/` is
   ignored again and is no longer part of the GitHub working tree. The local
   plan, handoff, and long-term vision remain available for collaboration but

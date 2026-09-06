@@ -11,7 +11,28 @@ duplicating the full artifact manual; for concrete commands and file trees, see
 
 ## Workflow Presets
 
-The current 8-stage pipeline is one preset, not the whole architecture. SimpleAutoResearch stays module-first so literature review, code improvement, experiment execution, and report writing can be recombined.
+For ordinary V2.8 users, the formal workflow is only `research-session`: it
+connects the research-to-report stages in a fixed order and keeps handoffs,
+attempts, artifacts, and audits in one session. The current 8-stage pipeline is
+the frozen compatibility projection for the old entrypoint, not a second product
+mainline.
+
+The project remains module-first internally. Capabilities can be reused by tests,
+recovery, developer APIs, and future workflows, but ordinary users should not
+have to assemble the complete flow across multiple public entrypoints.
+
+```text
+formal user entrypoint
+research-session
+  -> plan -> search -> document_ingest -> read -> synthesize
+  -> research_design -> experiment -> analysis -> report -> report_audit
+
+segmented/development interfaces
+research-brief / research-experiment / research-code-task
+
+temporary compatibility entrypoint
+simple-ar run/resume -> old eight-stage artifact projection
+```
 
 ## Capability Runs
 
@@ -374,9 +395,11 @@ manifest remains an index; a missing renderer output is reported as `partial`.
 It does not write an audit or invoke the writer; pass the declared report
 reference to the separate audit capability.
 
-### 1. Research Report (Literature-First)
+### 1. Research Report (Literature-First, Segmented/Advanced)
 
 Use this when you want a literature review, survey, or DeepResearch-like report without emphasizing experiments.
+For the ordinary complete V2.8 flow, use `research-session`; this section describes a reusable
+capability boundary.
 
 Conceptual flow:
 
@@ -455,7 +478,7 @@ Bundled examples:
 - `examples/full_pipeline_tiny_mlp/`: full 8-stage pipeline over a lightweight
   NumPy MLP benchmark, useful for end-to-end local checks without GPU.
 
-### 3. Research With Experiment
+### 3. Research With Experiment (Legacy/Advanced)
 
 Use this when you want a research idea to become an executable experiment and a result-backed report.
 
@@ -495,7 +518,13 @@ Current status:
   instead of being hidden inside `06-code/`.
 - Report generation is guarded: LLM drafts are accepted only when citations, metric visibility, fixture disclosure, and toy-demo boundaries pass rule-based checks.
 
-## Default 8-Stage Pipeline
+## Legacy Eight-Stage Compatibility Projection
+
+The old eight-stage pipeline remains a reproducible compatibility preset, but
+it is no longer the V2.8 mainline. It preserves the stage-shaped artifacts
+needed by old configs and historical readers; new research policy belongs only
+to canonical capabilities. After its real consumers migrate and the historical
+format regressions remain green, this projection will be removed.
 
 ```text
 01 plan        Scope the topic and research question
@@ -638,13 +667,19 @@ The default should remain conservative: dependency installation must be explicit
 and reviewable, and user project packages should not be silently installed into
 SimpleAutoResearch's own environment.
 
-## Why This Split Matters
+## Why Split Capabilities Internally
 
-The split keeps the project from becoming one rigid pipeline.
+Internal capability boundaries do not mean exposing parallel product mainlines.
+They keep the implementation from becoming one rigid pipeline while keeping
+the formal entrypoint simple.
 
 - If the user wants a survey, code stages should be skipped.
 - If the user wants to optimize existing code, literature stages should be optional.
-- If the user wants a full automatic-research loop, modules can be composed.
-- Each module can be upgraded independently.
+- `research-session` can include a prepared code experiment while keeping a
+  fixed lifecycle boundary.
+- Tests, recovery, developers, and future workflows can compose modules without
+  making ordinary users understand the internal assembly.
+- Each module can be upgraded independently, but there must not be a second
+  session state, artifact contract, or report core.
 
 This follows one practical lesson from AutoResearchClaw: complex behavior is easier to control when it is exposed as workflow modes and capabilities, not as one ever-growing sequence of flags.

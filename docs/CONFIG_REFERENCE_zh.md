@@ -19,9 +19,17 @@
 - 顶层 run config 中，相对路径会在解析器支持的字段上相对配置文件解析，例如 `[experiment].code_task_config` 和 `[research].local_documents`。
 - 当 run config 包含 `[code_task]`、`[benchmark]`、`[metrics]`、`[environment]`、`[safety]` 或 `[edit_scope]` 这类旧 code-task section 时，同一文件可被复用为 embedded code-task config。`[workspace]` 也会被新的统一任务配置使用，因此不会再单独作为 code-task 信号。
 
-## 完整 Pipeline Config
+V2.8 普通用户的完整入口是 `simple-ar research-session`。它的研究主题、来源和预算使用
+CLI 参数，准备好的代码项目、benchmark、workspace、baseline 和执行设置继续使用 Code-Task
+TOML；这能让一次完整 session 保持边界清楚。下面的顶层 `[run]` 配置描述的是旧八阶段
+`simple-ar run/resume` 兼容路径，仍用于历史配置和阶段 artifact 回归，不是新的研究能力落点。
 
-这是带内嵌 code-task 实验的 8 阶段 run 完整形状。实际使用时，可以从这个模板删掉不需要的 section。
+<a id="完整-pipeline-config"></a>
+
+## 旧八阶段兼容 Pipeline Config
+
+这是带内嵌 code-task 实验的旧 8 阶段兼容 run 完整形状。实际使用时，可以从这个模板删掉
+不需要的 section；新的 research 行为不要继续写入旧 registry 或 stage handler。
 
 ```toml
 [run]

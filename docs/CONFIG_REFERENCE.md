@@ -22,10 +22,19 @@ outer research pipeline config and standalone/embedded code-task config.
 - Relative paths in top-level run config are resolved relative to the config file when the parser explicitly supports path resolution, such as `[experiment].code_task_config` and `[research].local_documents`.
 - When a run config contains legacy code-task sections such as `[code_task]`, `[benchmark]`, `[metrics]`, `[environment]`, `[safety]`, or `[edit_scope]`, the same file can be reused as the embedded code-task config. `[workspace]` is also used by the newer unified task config, so it is not treated as a code-task signal by itself.
 
-## Complete Pipeline Config
+For ordinary V2.8 use, the complete entrypoint is `simple-ar research-session`. Its research topic,
+source, and budget controls are passed through the CLI, while the prepared code project, benchmark,
+workspace, baseline, and execution settings continue to come from a Code-Task TOML. The top-level
+`[run]` configuration below describes the legacy `simple-ar run/resume` compatibility path and is
+kept for historical configurations and stage-artifact regressions, not as a new research-policy owner.
 
-This is a complete shape for an 8-stage run with an embedded code-task
-experiment. Start with this pattern, then remove sections you do not need.
+<a id="complete-pipeline-config"></a>
+
+## Legacy Eight-Stage Compatibility Pipeline Config
+
+This is a complete shape for the legacy 8-stage compatibility run with an embedded
+code-task experiment. Start with this pattern, then remove sections you do not need;
+new research behavior must not be added to the old registry or stage handlers.
 
 ```toml
 [run]

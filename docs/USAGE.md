@@ -99,9 +99,30 @@ Notes:
   and falls back if the provider rejects it; `json_object` always sends it.
 - Price fields are optional and only affect cost estimates in usage summaries.
 
-## Research Pipeline (Topic To Report)
+## V2.8 Research Session (Topic To Report)
 
-Run the default 8-stage pipeline:
+The formal V2.8 user entrypoint is `research-session`. It runs
+`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment
+-> analysis` in one session, then continues through `report -> report_audit` when a model is
+available and reporting is not disabled. The experiment command, baseline, dataset, code scope,
+and resource limits remain explicit user/configuration inputs; this is a bounded workflow, not an
+unlimited autonomous loop.
+
+For a laptop-safe offline complete smoke:
+
+```bash
+uv run python examples/research_session_smoke.py
+```
+
+See `examples/README.md` for the bounded network, LLM, and prepared-project path. On failure,
+preserve the session directory and inspect the attempt; do not replace a real failure with fixture
+output.
+
+## Legacy Eight-Stage Compatibility Pipeline
+
+The `simple-ar run/resume` commands below are retained for old configurations, stage directories,
+and historical artifact readers. They are not the V2.8 mainline and receive no new research policy;
+they will be reduced or removed after the real consumers migrate under V2.8 Phase 3B.
 
 ```bash
 uv run simple-ar run --topic "toy topic" --to-stage report

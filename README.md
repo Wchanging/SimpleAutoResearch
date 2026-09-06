@@ -33,6 +33,12 @@ experimentation, and gradual extension.
   one real AutoDL prepared-project run with 60 raw and 10 selected/documents
   across network/LLM/CodeTask/experiment/report; this proves the bounded
   foundation, not autonomous research for arbitrary tasks.
+- **Entrypoint hierarchy**: for normal V2.8 use, remember only
+  `simple-ar research-session`. `research-session-continue` and
+  `research-report` continue the same session; `research-brief`,
+  `research-experiment`, and `research-code-task` are segmented development or
+  diagnostic interfaces. `simple-ar run/resume` remains only as a frozen
+  compatibility surface for the old eight-stage artifacts.
 - **Research sources**: the canonical session can search
   OpenAlex/Semantic Scholar/arXiv/local files through the provider-neutral
   connector boundary, with bounded document extraction and evidence cards.
@@ -59,8 +65,10 @@ experimentation, and gradual extension.
 - **Reviewable artifacts**: each run writes inspectable files under `runs/`
   instead of hiding decisions inside process memory.
 - **Capability boundary for contributors**: new modules can use the small
-  `ArtifactStore`/`CapabilityResult`/bounded-attempt API without changing the
-  established 8-stage and code-task entry points. The offline reference is in
+  `ArtifactStore`/`CapabilityResult`/bounded-attempt API while the formal
+  research flow stays orchestrated by `research-session`. The old eight-stage
+  and segmented code-task surfaces remain only for compatibility or development
+  until migration is complete. The offline reference is in
   `examples/capability_package_minimal/`.
 - **Mature library foundation**: pipeline/code-task TOML configs are validated
   through Pydantic, LLM calls use the OpenAI Python SDK by default with a
@@ -155,7 +163,11 @@ does not replace provider failures with fixture output. A prepared existing
 project can be added with `--code-task-config`; V2.8 runs one direction at a
 time.
 
-### 2. Compatibility research report
+The commands below are segmented or compatibility surfaces, not a second V2.8
+full workflow. Use them for debugging, persisted handoff continuation, legacy
+configuration, or historical benchmark checks.
+
+### 2. Legacy compatibility research report
 
 ```bash
 uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
@@ -236,7 +248,7 @@ The bundled standalone code-task example is
 `examples/code_task_medium_review/configs/code_task.toml`; it is documented in
 [Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
 
-### 4. Compatibility 8-stage research with experiment
+### 4. Legacy compatibility 8-stage research with experiment
 
 Use this when you want the research pipeline to produce literature context,
 derive or use a code task, run an experiment, and include the code evidence in
@@ -316,7 +328,7 @@ Set `[implementation].task_handoff = "merge"` when you want an existing
 `task.md` to stay authoritative while `05-design` enriches it with the earlier
 research context before entering code-task execution.
 
-### 5. Greenfield Experiment
+### 5. Advanced/compatibility Greenfield Experiment
 
 Use this when the task has no existing source project yet. The current path
 uses the same code-task engine as existing-code tasks: `05-design` writes an
@@ -389,11 +401,16 @@ still intentionally conservative.
 - [CLI Reference](docs/CLI_REFERENCE.md): command groups and option tables.
 - [Configuration Reference](docs/CONFIG_REFERENCE.md): TOML sections, complete
   config examples, and workspace-mode variants.
-- [Workflows And Artifacts](docs/WORKFLOWS.md): workflow presets, the 8-stage
-  pipeline, and artifact layouts.
-- [Development Guide](docs/DEVELOPMENT.md): how to extend stages, templates, and
+- [Workflows And Artifacts](docs/WORKFLOWS.md): the formal session workflow,
+  legacy eight-stage projection, and artifact layouts.
+- [Development Guide](docs/DEVELOPMENT.md): how to extend capabilities, templates, and
   code-task modules.
 - [Changelog](CHANGELOG.md): chronological development progress.
+
+The current V2.8 closure plan and version boundaries live in local `MDfiles/`
+planning notes. That directory remains ignored by project policy and is not the
+public GitHub roadmap; contributors should follow the formal-entrypoint boundary
+in the development, workflow, and CLI documents above.
 
 ## Reference
 

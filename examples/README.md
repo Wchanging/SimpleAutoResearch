@@ -1,5 +1,10 @@
 # Examples
 
+V2.8 的正式用户主线是 `research-session`，它把检索、阅读、研究设计、代码/实验、分析、
+报告和审计保留在同一个 session 中。下面的 `research-brief`、`research-experiment` 和
+`research-code-task` 主要用于分段开发、诊断或已有 handoff 接续；旧 `simple-ar run` 示例
+只用于兼容旧八阶段配置，不是另一条正在演进的产品路线。
+
 ## Research Brief
 
 Build a small evidence-backed brief from a topic and local Markdown/TXT input:
@@ -184,12 +189,12 @@ examples/
     task.md                         requested code change
 
   full_pipeline_tiny_mlp/
-    configs/pipeline.toml           full 8-stage pipeline with embedded code-task
+    configs/pipeline.toml           legacy 8-stage compatibility run with embedded code-task
     project/                        editable example repository
     task.md                         embedded code-task request
 
   greenfield_lightweight_training/
-    configs/greenfield_training.toml full 8-stage greenfield generation workflow
+    configs/greenfield_training.toml advanced/compatibility greenfield generation workflow
     task.md                         from-scratch local training task
 
   code_task_greenfield_ml_suite/
@@ -201,10 +206,11 @@ examples/
     capability.py                   context -> artifact -> result example
 ```
 
-Use `research_report` when you want a research-only survey, `code_task_medium_review`
-when you want to test automated code edits in an isolated workspace, and
-`full_pipeline_tiny_mlp` when you want the whole pipeline around an existing
-project. Use `greenfield_lightweight_training` when you want a bounded from-zero
+Use `research_session_smoke.py` or the `research-session` commands above for the
+formal V2.8 mainline. Use `research_report` when you want a research-only survey,
+`code_task_medium_review` when you want to test automated code edits in an
+isolated workspace, and `full_pipeline_tiny_mlp` when you need the legacy
+stage-shaped pipeline around an existing project. Use `greenfield_lightweight_training` when you want a bounded from-zero
 implementation task that exercises a medium-light CPU-only experiment suite with
 multiple model conditions, parseable metrics, review, and run diagnosis.
 Use `code_task_greenfield_ml_suite` when you want a larger pure code-task
@@ -215,9 +221,10 @@ is offline, has no domain-specific schema, and demonstrates the expected
 `CapabilityContext` -> `ArtifactStore` -> `CapabilityResult` handoff. Its
 contract test is included in `uv run simple-ar-checks core`.
 
-For the first bounded research-to-code consumer, run `research-brief` first and
-pass its `synthesis_result.json` to `research-code-task` together with an existing
-Code-Task TOML. The latter reuses the normal isolated Code-Task backend and keeps
+For a split research-to-code experiment, `research-brief` can be run first and
+its `synthesis_result.json` passed to `research-code-task` together with an existing
+Code-Task TOML. For normal V2.8 use, prefer `research-session` with the same Code-Task
+configuration so the complete handoff stays in one session. Both paths reuse the normal isolated Code-Task backend and keep
 execution and analysis artifacts in a new session. The V2.8 path intentionally
 runs one selected direction; multi-candidate comparison is deferred until this
 single-direction path is validated on a real prepared project. Add `--with-report`

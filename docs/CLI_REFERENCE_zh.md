@@ -4,6 +4,12 @@
 
 本文是 SimpleAutoResearch 的命令速查手册，只关注命令语法、参数、产物和少量边界说明。
 
+V2.8 的正式用户入口只有 `simple-ar research-session`，它负责从研究问题到
+`report/report_audit` 的完整有界流程。`research-session-continue` 和 `research-report` 是
+同一 session 的恢复/报告子命令；`research-brief`、`research-experiment` 和
+`research-code-task` 是分段、开发或诊断接口。`simple-ar run/resume` 只作为旧八阶段的
+冻结兼容入口，新的研究能力不会再进入其中。
+
 - 安装和实践流程：[使用与配置](USAGE_zh.md)
 - 工作流概念和产物结构：[工作流与产物](WORKFLOWS_zh.md)
 - TOML 配置规范和示例：[配置参考](CONFIG_REFERENCE_zh.md)
@@ -12,14 +18,14 @@
 
 | 命令 | 用途 |
 | --- | --- |
-| `simple-ar run` | 启动新的 8 阶段 research pipeline。 |
-| `simple-ar research-brief` | 从主题或本地文献构建有证据支持的 research brief。 |
-| `simple-ar research-experiment` | 从 research handoff 执行并分析一个已声明的实验。 |
-| `simple-ar research-session` | 在同一个 session 中运行有界的文献到实验组合流程。 |
+| `simple-ar research-session` | **V2.8 正式主入口**：在同一个 session 中运行完整的有界 research-to-report 流程。 |
 | `simple-ar research-session-continue` | 在失败的 research session 中追加一次显式恢复实验。 |
 | `simple-ar research-report` | 从已完成的 research session 生成并审查报告。 |
+| `simple-ar research-brief` | 分段/开发接口：从主题或本地文献构建有证据支持的 research brief。 |
+| `simple-ar research-experiment` | 分段/开发接口：从 research handoff 执行并分析一个已声明的实验。 |
 | `simple-ar research-code-task` | 将 research handoff 交给已有的 project-style Code-Task backend。 |
-| `simple-ar resume` | 继续已有 research pipeline run。 |
+| `simple-ar run` | 旧八阶段兼容入口；不再作为 V2.8 正式主线。 |
+| `simple-ar resume` | 继续旧的 research pipeline 兼容 run。 |
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
 | `simple-ar tools ...` | 导出 tool schema、调用 run-local tool，或通过 MCP stdio 暴露只读 tools。 |
 | `simple-ar inspect` | 为某次 run 构建本地 artifact index。 |
@@ -31,7 +37,11 @@
 
 ### `simple-ar run`
 
-**一句话说明**：启动一次新的 8 阶段科研流程。
+**一句话说明**：启动一次旧八阶段兼容流程；V2.8 普通用户应优先使用
+`simple-ar research-session`。
+
+该命令保留旧配置、阶段目录和历史 artifact 读取能力。它不会获得新的 research 策略，
+待真实消费者迁移并完成历史格式回归后，按 V2.8 Phase 3B 删除或进一步收缩为只读兼容入口。
 
 **语法用法**：
 
@@ -95,7 +105,7 @@ uv run simple-ar run --config examples/research_report/configs/research_report.t
 真实运行参数较多时，优先使用 TOML。完整字段见
 [配置参考](CONFIG_REFERENCE_zh.md#完整-pipeline-config)。
 
-### `simple-ar research-brief`
+### `simple-ar research-brief`（分段/开发接口）
 
 **一句话说明**：从主题或本地 Markdown/TXT 文献构建一个有证据支持的 research brief。
 
@@ -126,7 +136,7 @@ uv run simple-ar research-brief \
 LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求失败或返回无效结果时，
 对应 attempt 会明确失败，不会偷偷改用 deterministic 正文。
 
-### `simple-ar research-experiment`
+### `simple-ar research-experiment`（分段/开发接口）
 
 **一句话说明**：接收已经审阅的 `research_brief.v1` 或 `synthesis_result.v1` handoff，
 通过现有执行后端运行一次实验，并把真实结果交给结果分析能力。
@@ -161,13 +171,17 @@ session 会把输入 handoff、`results.json`、stdout/stderr、guard、diagnosi
 | `--metric-direction NAME=DIRECTION` | repeatable | 指标方向，例如 `accuracy=higher` 或 `loss=lower`。 |
 | `--command ...` | command | 交给本地执行后端的命令，必须放在最后。 |
 
-### `simple-ar research-session`
+### `simple-ar research-session`（V2.8 正式唯一主入口）
 
-**一句话说明**：在同一个 `full_research` session 中运行小型端到端组合：
+**一句话说明**：在同一个 `full_research` session 中运行 V2.8 正式端到端主线：
 `plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`。
 默认由调用方明确提供实验命令。传入 `--code-task-config` 时，experiment attempt
 会改由已有的 project-style Code-Task backend 负责实现；它仍然是一次有界实验，
 不表示开启自主迭代。
+
+模型可用时，主线会继续进入 `report -> report_audit`；`--no-report` 仅用于调试或只检查
+前缀 handoff。若需要恢复或单独生成报告，应使用同一 session 的
+`research-session-continue` / `research-report` 子命令，而不是切换到另一条研究主线。
 
 **语法用法**（`--command` 必须放在最后）：
 
@@ -204,9 +218,9 @@ TOML 仍然是 Code-Task 项目、benchmark、workspace、baseline 和执行设�
 可选的 `--cache-dir` 会传给 document ingest。后续 session 会复用有效的全文缓存文件；默认值仍是
 session-local，以保持旧命令兼容。
 
-它保留与两个独立入口相同的 attempt-local 产物，并且不隐式 retry 或 repair。
-如果还没有可执行实验，使用 `research-brief`；如果已经有持久化 direction 需要在
-单独 session 中执行，使用 `research-experiment`。
+它复用分段接口的 attempt-local 产物，但这些接口不再构成第二条完整主线，并且主线不隐式
+retry 或 repair。若还没有准备好的可执行实验，`research-brief` 只能作为提前准备 handoff
+的开发工具；如果已经有持久化 direction 需要单独验证，才使用 `research-experiment`。
 实验与分析前缀完成后，结果状态为 `ready_for_report`，因为 session 仍会为显式报告 continuation
 保持打开。可以使用窄的 `simple-ar research-report` 命令完成这次交接；它只是委托给现有的
 Python 报告适配器，不新增另一套报告引擎或 scheduler。
