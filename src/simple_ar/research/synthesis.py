@@ -545,6 +545,11 @@ def _bounded_pack_json(pack: Mapping[str, Any]) -> str:
         "topic": pack.get("topic", ""),
         "coverage": pack.get("coverage", {}),
         "counts": pack.get("counts", {}),
+        # Make the closed provenance boundary explicit in the model-facing
+        # context.  The validator remains authoritative, but an exact
+        # allowlist reduces avoidable retries when a model remembers a nearby
+        # paper from the search pool instead of citing the selected evidence.
+        "allowed_motivation_refs": sorted(_allowed_evidence_refs(pack)),
     }
     execution_context = _execution_context_text(pack)
     if execution_context:

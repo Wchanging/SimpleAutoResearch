@@ -14,6 +14,7 @@ from simple_ar.research import SynthesisRequest as PublicSynthesisRequest
 from simple_ar.research.synthesis import (
     SynthesisRequest,
     SynthesisResult,
+    _bounded_pack_json,
     run_synthesis_capability,
     synthesize_evidence,
 )
@@ -169,6 +170,12 @@ class SynthesisCapabilityTests(unittest.TestCase):
         self.assertEqual(result.execution_context, context_text)
         self.assertIn("sklearn digits", client.user)
         self.assertIn("do not substitute a dataset or task", client.user.lower())
+
+    def test_llm_synthesis_context_exposes_closed_evidence_allowlist(self) -> None:
+        context = _bounded_pack_json(_pack())
+
+        self.assertIn('"allowed_motivation_refs"', context)
+        self.assertIn("paper-1#chunk-1", context)
 
     def test_llm_can_replace_rule_ideas_with_grounded_candidates(self) -> None:
         class FakeClient:
