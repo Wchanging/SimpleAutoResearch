@@ -1151,11 +1151,31 @@ def _ensure_code_task_evidence_section(ctx: Context, plan: dict[str, Any], markd
     if not is_code_task_experiment_template(plan.get("template")):
         return markdown
     if "## Code Task Evidence" in markdown:
+        section = _code_task_evidence_markdown(ctx, plan)
+        table = _markdown_table_lines(section)
+        if table and not all(line in markdown for line in table):
+            return (
+                markdown.rstrip()
+                + "\n\n### Verified Comparison Metrics\n\n"
+                + "\n".join(table)
+                + "\n"
+            )
         return markdown
     section = _code_task_evidence_markdown(ctx, plan)
     if not section:
         return markdown
     return markdown.strip() + "\n\n## Code Task Evidence\n\n" + section.strip() + "\n"
+
+
+def _markdown_table_lines(markdown: str) -> list[str]:
+    """Return Markdown table rows used for deterministic evidence completion."""
+
+    return [
+        line.strip()
+        for line in markdown.splitlines()
+        if line.strip().startswith("|")
+    ]
+
 
 def _code_task_evidence_markdown(ctx: Context, plan: dict[str, Any]) -> str:
     """Summarize nested code-task artifacts for the final report."""
@@ -1166,9 +1186,18 @@ def _code_task_evidence_markdown(ctx: Context, plan: dict[str, Any]) -> str:
     if not isinstance(meta, dict):
         return ""
     run_dir_value = meta.get("code_task_run_dir")
-    code_task_run_dir = Path(str(run_dir_value)) if run_dir_value else meta_path.parent / "code_task_run"
+    code_task_run_dir = _resolve_code_task_path(
+        ctx,
+        meta_path,
+        run_dir_value,
+        default=meta_path.parent / "code_task_run",
+    )
     summary_path = code_task_run_dir / "code_task" / "summary.md"
-    comparison_path = code_task_run_dir / "code_task" / "run" / "comparison.json"
+    comparison_ref = meta.get("comparison")
+    if isinstance(comparison_ref, str) and comparison_ref.strip():
+        comparison_path = _resolve_code_task_path(ctx, meta_path, comparison_ref)
+    else:
+        comparison_path = code_task_run_dir / "code_task" / "run" / "comparison.json"
     comparison = read_json(comparison_path) if comparison_path.exists() else {}
     changed_files = meta.get("changed_files", [])
     changed_text = ", ".join(f"`{path}`" for path in changed_files) if isinstance(changed_files, list) else ""
@@ -1226,6 +1255,27 @@ def _code_task_evidence_markdown(ctx: Context, plan: dict[str, Any]) -> str:
     if summary_path.exists():
         lines.append("The consolidated code-task summary is stored at `06-code/code_task_run/code_task/summary.md`.")
     return "\n\n".join(lines)
+
+
+def _resolve_code_task_path(
+    ctx: Context,
+    meta_path: Path,
+    value: object,
+    *,
+    default: Path | None = None,
+) -> Path:
+    """Resolve code-task metadata stored relative to either its stage or run."""
+
+    if not isinstance(value, str) or not value.strip():
+        return default if default is not None else meta_path.parent
+    raw = Path(value)
+    if raw.is_absolute():
+        return raw
+    candidates = (meta_path.parent / raw, ctx.run_dir / raw, raw)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _code_task_comparison_table(comparison: dict[str, Any]) -> str:

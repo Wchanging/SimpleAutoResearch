@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from itertools import count
 from typing import Any, Mapping
 
@@ -301,7 +302,20 @@ def _unmatched_numbers(report_body: str, context: ReportContext) -> list[str]:
     )
     citation_free = CITATION_PATTERN.sub("", report_body)
     found = sorted(set(NUMBER_PATTERN.findall(citation_free)))
-    return [value for value in found if value not in allowed][:12]
+    allowed_numeric = {
+        numeric
+        for value in allowed
+        if (numeric := _numeric_token_key(value)) is not None
+    }
+    unmatched: list[str] = []
+    for value in found:
+        if value in allowed:
+            continue
+        numeric = _numeric_token_key(value)
+        if numeric is not None and numeric in allowed_numeric:
+            continue
+        unmatched.append(value)
+    return unmatched[:12]
 
 
 def _metric_is_visible(report_body: str, lower_report: str, metric: Any) -> bool:
@@ -310,9 +324,21 @@ def _metric_is_visible(report_body: str, lower_report: str, metric: Any) -> bool
     names = _metric_name_variants(str(metric.name))
     if not any(_contains_phrase(lower_report, name) for name in names):
         return False
+    value_variants = _metric_value_variants(metric.value)
+    if any(_contains_phrase(lower_report, value_text.lower()) for value_text in value_variants):
+        return True
+    expected_numeric = {
+        numeric
+        for value_text in value_variants
+        if (numeric := _numeric_token_key(value_text)) is not None
+    }
+    if not expected_numeric:
+        return False
+    citation_free = CITATION_PATTERN.sub("", report_body)
     return any(
-        _contains_phrase(lower_report, value_text.lower())
-        for value_text in _metric_value_variants(metric.value)
+        (numeric := _numeric_token_key(value_text)) is not None
+        and numeric in expected_numeric
+        for value_text in NUMBER_PATTERN.findall(citation_free)
     )
 
 
@@ -354,6 +380,26 @@ def _metric_value_variants(value: Any) -> set[str]:
         if value.is_integer():
             variants.add(str(int(value)))
     return {variant for variant in variants if variant}
+
+
+def _numeric_token_key(value: object) -> tuple[Decimal, str] | None:
+    """Normalize a report number while preserving an optional display unit."""
+
+    match = re.fullmatch(
+        r"\s*([-+]?(?:\d+\.\d+|\d+)(?:[eE][-+]?\d+)?)(%|ms|s|sec|seconds)?\s*",
+        str(value),
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    try:
+        number = Decimal(match.group(1))
+    except InvalidOperation:
+        return None
+    unit = (match.group(2) or "").lower()
+    if unit == "seconds":
+        unit = "sec"
+    return number, unit
 
 
 def _contains_phrase(text: str, phrase: str) -> bool:

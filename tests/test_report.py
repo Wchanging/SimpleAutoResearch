@@ -4,8 +4,10 @@ import unittest
 import json
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
+from simple_ar.experiment.code_task_bridge import CODE_TASK_PROJECT_TEMPLATE
 from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
 from simple_ar.core.pipeline import Context
@@ -44,6 +46,7 @@ from simple_ar.report.schema import ReportSectionReview
 from simple_ar.report.service import (
     _build_research_report,
     _build_report,
+    _ensure_code_task_evidence_section,
     _report_runtime_config,
     _report_bound_errors,
     _validated_agent_report,
@@ -1149,7 +1152,7 @@ class ReportSafetyTests(unittest.TestCase):
             results={
                 "metrics": {
                     "accuracy": 0.75,
-                    "train_time_sec": 5.4e-05,
+                    "train_time_sec": 4e-05,
                     "model_size": 24.0,
                     "eval_examples": 14.0,
                 }
@@ -1166,7 +1169,7 @@ class ReportSafetyTests(unittest.TestCase):
         memory = initialize_report_memory(context=context, template=template)
         body = (
             "# Results\n\n"
-            "Accuracy was 0.75. Training time was 5.4e-05 seconds, "
+            "Accuracy was 0.75. Training time was 4.0e-05 seconds, "
             "model size was 24.0, and the evaluation set contained 14 examples.\n"
         )
 
@@ -1180,6 +1183,62 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(audit.metric_audit.status, "passed")
         self.assertEqual(audit.metric_audit.unmatched_metrics, [])
         self.assertEqual(audit.metric_audit.unmatched_numbers, [])
+
+    def test_code_task_evidence_completes_an_existing_partial_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            report_dir = run_dir / "08-report"
+            comparison_path = (
+                report_dir / "code_task_run" / "code_task" / "run" / "comparison.json"
+            )
+            comparison_path.parent.mkdir(parents=True)
+            (report_dir / "code_task_experiment.json").write_text(
+                json.dumps({"code_task_run_dir": "code_task_run"}),
+                encoding="utf-8",
+            )
+            comparison_path.write_text(
+                json.dumps(
+                    {
+                        "verdict": "improved",
+                        "reasons": ["improved `accuracy`"],
+                        "baseline": {
+                            "metrics": {"accuracy": 0.7, "feature_family_count": 1.0}
+                        },
+                        "patched": {
+                            "metrics": {"accuracy": 0.8, "feature_family_count": 2.0}
+                        },
+                        "metrics": [
+                            {
+                                "name": "accuracy",
+                                "baseline": 0.7,
+                                "patched": 0.8,
+                                "delta": 0.1,
+                                "interpretation": "improved",
+                            },
+                            {
+                                "name": "feature_family_count",
+                                "baseline": 1.0,
+                                "patched": 2.0,
+                                "delta": 1.0,
+                                "interpretation": "increased",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            context = Context(run_dir, "reliable agents")
+            partial = "## Code Task Evidence\n\nThe writer covered accuracy only.\n"
+            report = _ensure_code_task_evidence_section(
+                context,
+                {"template": CODE_TASK_PROJECT_TEMPLATE},
+                partial,
+            )
+
+        self.assertIn("### Verified Comparison Metrics", report)
+        self.assertIn("`feature_family_count`", report)
+        self.assertIn("| 2 | 1 | increased |", report)
 
     def test_model_written_references_are_replaced_with_known_papers(self) -> None:
         draft = (

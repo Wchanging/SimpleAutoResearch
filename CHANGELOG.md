@@ -4,6 +4,18 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-06
+
+### Changed
+
+- Report metric audit now treats equivalent decimal and scientific-notation values
+  as the same numeric evidence while preserving optional units and citation-number
+  filtering, avoiding false warnings such as `4e-05` versus `4.0e-05`.
+- Code-Task report handoff now resolves run-relative and stage-relative nested
+  artifact references and supplements an incomplete writer section with a
+  deterministic baseline/patched comparison table, so all recorded comparison
+  metrics remain visible in the final report.
+
 ## 2026-09-05
 
 ### Changed
