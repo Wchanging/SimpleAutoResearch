@@ -2,7 +2,7 @@
 
 > 文档级别：**V2.8 唯一有效的施工计划**。
 >
-> 更新时间：2026-09-06。代码验证基线：`4a19b5e`（`feat/v2.8-system-evolution`）。
+> 更新时间：2026-09-06。Phase 3 清理起点：`29f212f`（`feat/v2.8-system-evolution`）。
 >
 > 本文描述 V2.8 要做什么、当前真实差距、最终结构、能力迁移规则和退出条件。不表示所有目标已经实现。
 
@@ -141,15 +141,17 @@ simple-ar run
 ```
 
 新路径已经有 session、attempt、artifact、typed handoff、有限 transition 和多个 capability。
-当前状态已经完成了一次边界收口，但还没有完成旧实现的最终清除：
+当前状态已经完成了研究前缀的边界收口，但兼容入口仍有明确的历史消费者：
 
 - 提供 `CodeTaskExperimentSpec` 时，`code_task` 已作为明确的实现模式进入 canonical
   `experiment` attempt；它不是没有代码任务时的默认步骤；
 - CLI 的模型驱动 `research-session` 现在默认继续执行 `report -> report_audit`，`--no-report`
   只作为调试/快速模式；无模型的 deterministic session 仍停在分析结果；
-- 旧 Search/Read/Synthesis 实现已归档到私有 `simple_ar/_legacy/research_stages.py`，
-  `pipeline_stages/research.py` 现在只是供旧 `simple-ar run/resume` 使用的兼容 alias；
-  这份 legacy 实现仍有重复业务，尚未满足最终删除门槛；
+- 旧 `pipeline_stages/research.py` 现在只是指向
+  `simple_ar/_legacy/research_stages.py` 的兼容 alias；后者已经收缩为
+  `Context`/旧 artifact 适配门面，Search、Read、Synthesis 的 provider 调用、筛选、阅读和
+  综合均委托给 canonical capability。它仍保留旧检索 trace、根目录 evidence ledger、旧文件
+  projection、测试注入点以及一次有界 coverage follow-up；这些是兼容行为，不是第二套主线；
 - canonical `search` 已吸收旧检索中确定性且可复用的去重、相关性/预算筛选和 facet coverage
   行为；原始 provider 响应、`selected_paper_ids`、selection rows 和 coverage 均保存在同一个
   `search_handoff.v1` 中，canonical ingest 使用筛选后的论文；
@@ -159,6 +161,9 @@ simple-ar run
 - 真实网络 + 真实 LLM + 用户准备项目的低预算正式 smoke 已完成；上面 2.1 所定义的正常
   用户规模验收也已通过一次：60 条 raw、10 篇 selected/document、中等但受控实验和完整
   Markdown report/audit 均有持久化证据；
+- `pipeline_stages/experiment.py` 与 `pipeline_stages/report.py` 也只是旧 registry 的薄转发；
+  实际实验、CodeTask 和 report writer 由 `experiment/`、`code_task/`、`report/` 承担。旧
+  `run/resume`、SurveyBench、历史 artifact reader 仍消费这些 Context 适配，所以暂不删除；
 - 不能把现有接口数量等同于任意主题上的完整 AutoResearch 能力。
 
 ### 3.2 已确认有价值的基础
@@ -264,7 +269,7 @@ simple_ar/
 
 工作内容：
 
-- 以 `09df140` 作为历史清理基线，并以 `21eac85` 作为当前可回退基线；
+- 以 `09df140` 作为历史清理基线，并以 `29f212f` 作为本轮 Phase 3 清理起点和可回退基线；
 - 不再向旧 `simple-ar run` 增加新功能；
 - 为一个小型真实项目准备 baseline、dataset、code task 和实验命令；
 - 固化 example、artifact 树、状态变化和失败/恢复行为；
@@ -306,11 +311,11 @@ simple_ar/
 
 退出条件：新主线使用 canonical 实现；`simple-ar run` 只负责旧输入/输出转换和兼容调用。
 
-### Phase 3：清除旧重复实现（核心主线已收口，最终尾项待审计）
+### Phase 3：清除旧重复实现（研究前缀已收口，兼容尾项审计中）
 
 目标：完成一次有终点的清理，而不是无限期“以后再迁移”。
 
-- 将 `pipeline_stages/research.py` 收缩为适配器后删除重复业务逻辑；
+- 将 `pipeline_stages/research.py` 收缩为适配器，并删除 Search/Read/Synthesis 重复业务逻辑；
 - 统一 `literature` 与 `research/sources` 的真实消费者；
 - 统一 `retrieval` 与 `research/store/evidence` 的真实消费者；
 - 清理没有独特消费者的 tools、projection、schema 和 wrapper；
@@ -318,9 +323,9 @@ simple_ar/
 - 更新文档、example、测试和 CLI 帮助。
 
 退出条件：不存在两套同时演进的 Search/Read/Synthesis/Report 核心实现，新增功能只能进入
-canonical 路径。
+canonical 路径；旧入口中仍保留的代码必须能明确归类为输入/输出转换、历史读取或兼容测试。
 
-### 6.3 本轮 Phase 3 收口记录（2026-09-05）
+### 6.3 本轮 Phase 3 收口记录（2026-09-06）
 
 已完成的切换动作：
 
@@ -340,8 +345,19 @@ canonical 路径。
 - 报告 numeric audit 已改为识别 selected source metadata、可读指标名和科学计数法，避免把
   `twelve papers`、`training time`、`5.4e-05 seconds` 误判为未绑定数字；
 - `research-session` 的报告默认行为已经写入 CLI 帮助、example 和测试；
-- `pipeline_stages/research.py` 已收缩为 alias，冻结实现归档到 `_legacy`；旧 Search/Pipeline/
-  Document Ingest 回归 31 项通过；
+- `pipeline_stages/research.py` 已收缩为 alias，`_legacy/research_stages.py` 已由原先约
+  1,292 行的旧 Search/Read/Synthesis 实现改为 compatibility facade；旧入口的 provider 调用、
+  cache 注入、失败状态、bounded coverage follow-up、legacy trace、evidence ledger 和
+  artifact projection 均保留，但业务规则委托给 `research.sources`、`research.evidence`、
+  `research.documents` 和 `research.synthesis`；旧 Search/Pipeline/Document Ingest 回归 31 项
+  以及本轮针对 facade 的聚焦回归通过；
+- canonical `SearchRequest` 增加显式的 `stop_after_papers` 预算和可注入 cache callbacks；
+  兼容入口可以保留旧的调用替换点，但 bounded stop、cache 和 provider 状态归 canonical
+  source capability 所有；
+- canonical planning 现在把 LLM 规范化后的 query list 传入实际 `SourcePlan`，不会再被默认
+  seed query 静默覆盖；
+- 增加架构边界回归：导入 `app.research_session`、canonical source/reader/synthesis 不会加载
+  `pipeline_stages` 或 `_legacy`；Search capability 也有 provider query stop 的预算回归；
 - canonical `read` 已接入共享的 bounded LLM screening/rerank 和 paper-note policy；模型阅读
   会接收有界 source chunks，并把 screening decisions、paper notes、notes markdown 和来源定位
   写入 `read_result.v1`，再由 `evidence_pack_from_read` 交给 synthesis；deterministic Read
@@ -351,13 +367,17 @@ canonical 路径。
 
 尚未宣称完成的部分：
 
-- `simple_ar/_legacy/research_stages.py` 仍需按 Search/Synthesis 的能力矩阵拆出并合并剩余
-  成熟行为，随后才能删除；Read 的 screening、paper notes 和 evidence 定位已进入 canonical
-  owner，但旧八阶段 projection 仍需保留到兼容消费者退出；
-- `literature`、`retrieval`、多个 tools 和 projection 的最终 canonical owner 仍需逐项确认；
-- 旧 legacy 实现的最终删除、AutoDL 用户项目回归和 CodeTask 依赖链修复后的稳定真实复跑仍是
-  后续退出条件；本轮已经取得真实 provider/LLM 和一次真实 CodeTask 证据，但不能把一次
-  `objective_inconclusive` 或网关超时记为研究改进成功。
+- `_legacy/research_stages.py` 仍不能删除，因为 `simple-ar run/resume`、SurveyBench、历史
+  reader 和旧测试仍需要它生成的 Context 产物；后续只需在这些消费者退出或完成迁移后删除
+  facade，不再继续拆出第三套模块；
+- `pipeline_stages/registry.py`、`pipeline_stages/experiment.py`、`pipeline_stages/report.py`
+  和 `core.pipeline` 仍是旧命令的兼容面。它们当前没有独立的 Search/Read/Synthesis/Report
+  业务实现，但旧 experiment/run/report Context 适配仍需维持；
+- `literature`、`retrieval`、tools 和 report/experiment 的消费者已确认并记录，但它们的
+  目录级重命名不是 Phase 3 的必要退出条件；除非出现无消费者的具体文件，否则不再为目录
+  形态做机械迁移；
+- 本轮代码变更完成后仍需执行本地全量回归、AutoDL 分支同步和一次低资源 canonical smoke；
+  真实运行失败必须作为失败证据保留，不能用 fixture 结果覆盖。
 
 ### 6.4 当前目录消费者审计（2026-09-05）
 
@@ -372,11 +392,12 @@ canonical 路径。
 | `retrieval/` | 旧 run artifact 的本地索引/搜索、CLI inspect/search，以及 CodeTask 分析的路径分类 | 暂不删除；它是兼容/运维检索，不替代论文 source search |
 | `tools/` | 通用工具权限、trace、CLI/MCP schema 和 agent handoff；仍有公开 CLI/外部执行器消费者 | 冻结，不在 V2.8 扩展为 Harness |
 | `experiment/tools/` | 实验命令工具 gateway 和 OpenAI schema；与通用工具权限生命周期不同 | 保留，不与 `tools/` 强行合并 |
-| `pipeline_stages/` + `_legacy/` | 旧 `run/resume`、历史 artifact projection、旧测试和外部 adapter | 只作兼容；`research_stages.py` 待消费者替代后删除 |
+| `pipeline_stages/` + `_legacy/` | 旧 `run/resume` 的 registry、Context 适配、历史 artifact projection、旧测试和外部 adapter；研究前缀已委托 canonical | 只作兼容；不新增业务；消费者迁移后删除 facade |
 
-因此本轮没有删除 `literature`、`retrieval` 或 tools：它们均有可定位消费者。下一次删除只
-针对 `_legacy/research_stages.py` 中已由 canonical capability 替代、且满足本计划 5.2
-删除门槛的函数和产物；新功能不得回流这些目录。
+因此本轮没有删除 `literature`、`retrieval` 或 tools：它们均有可定位消费者；也没有删除
+experiment/report wrapper，因为它们仍是旧 `run/resume` 的唯一 Context 入口。研究前缀中已由
+canonical capability 替代的逻辑已经移除，剩余 facade 仅在兼容消费者仍存在时保留；新功能不得
+回流 `pipeline_stages` 或 `_legacy`。
 
 ### 6.5 真实 provider/LLM、CodeTask 与 AutoDL 记录（2026-09-06）
 
@@ -398,8 +419,9 @@ canonical 路径。
 - v4 的长请求曾偶发超时，v5 暴露了 comparison artifact 路径解析问题；`21eac85` 修复后 v6
   成功，说明当前 retry、artifact handoff 和 report evidence appendix 已经通过一次真实远程
   验收。该结果证明“工程闭环”成立，不证明模型一定带来指标提升，也不证明正常用户规模已达标。
-- AutoDL `598 tests` 全量测试通过；测试和验收均采用受控命令，没有启动长训练、并行候选或
-  高 GPU 占用任务。
+- 上一 checkpoint 的 AutoDL `598 tests` 全量测试已通过；本轮本地 `600 tests` 全量测试已
+  通过。新 checkpoint 同步后还需在 AutoDL 复核新增的两项边界回归；测试和验收均采用受控
+  命令，没有启动长训练、并行候选或高 GPU 占用任务。
 - AutoDL v13 规模验收已通过：`60 raw -> 10 selected -> 10 documents -> LLM
   plan/read/synthesis/design -> CodeTask -> baseline/modified experiment -> analysis
   -> report -> report_audit`；report 状态为 `completed`，audit 的 citation/metric/claim
@@ -420,20 +442,21 @@ canonical 路径。
 - 当调用方显式提供 `cache_dir` 且 source plan 允许缓存时，canonical source 会缓存成功的元数据，
   provider 失败时才读取同一 query/source/limit 的缓存；命中状态为 `cached`，原始失败原因仍在
   response message 中，不会把缓存伪装成 fresh provider 成功；
-- 该 handoff 已有 capability 单测和 brief/session 回归，旧 legacy Search 的 provider/cache/多轮
-  兼容逻辑仍未删除，后续必须继续按保留矩阵审计。
+- 该 handoff 已有 capability 单测和 brief/session 回归；旧 facade 只保留旧 `run/resume`
+  所需的 bounded multi-round trace/projection 和 cache injection，不再复制 provider、筛选或
+  阅读/综合规则。
 
 ### 6.7 Search/Read/Synthesis 保留矩阵（2026-09-05）
 
 | 旧行为 | canonical 状态 | 当前决定 | 删除旧实现的前提 |
 |---|---|---|---|
-| provider 调用、失败响应归一化 | `research/sources/capability.py` 已覆盖 | 已迁移 | 旧 CLI projection 完成回归后删除重复调用 |
-| 去重、相关性排序、论文预算、facet coverage | `research/evidence/retrieval.py` + `evidence/coverage.py` 已接入 Search handoff | 已迁移 | 旧 Search 不再是唯一消费者后删除重复编排 |
-| 成功元数据缓存、失败后的显式 cached recovery | `SearchRequest.cache_dir` 可选支持 | 已迁移 | 完成真实 provider/cache smoke 后删除旧专用分支 |
-| 多轮 coverage follow-up 查询 | 仍在 `_legacy/research_stages.py` | 暂留兼容；不是 V2.8 单轮主线验收条件 | 证明 canonical 单轮预算不足以满足目标，或将其作为明确 bounded policy 迁移 |
-| LLM coarse screening/rerank | canonical `research.evidence.screening` 被 Read 调用；旧 facade 复用同一 policy | 已迁移；旧 artifact 仍是 projection | CLI projection 完成回归后删除旧编排 |
+| provider 调用、失败响应归一化 | `research/sources/capability.py` 已覆盖 | 已迁移，旧 facade 仅转接 | 旧 CLI/benchmark 消费者退出后删除 facade |
+| 去重、相关性排序、论文预算、facet coverage | `research/evidence/retrieval.py` + `evidence/coverage.py` 已接入 Search handoff | 已迁移，旧 facade 仅转接 | 保持 canonical 回归；不在旧路径加规则 |
+| 成功元数据缓存、失败后的显式 cached recovery | `SearchRequest.cache_dir` 和 cache callbacks | 已迁移，旧 facade 只保留历史注入点 | 兼容消费者退出后删除注入点 |
+| 多轮 coverage follow-up 查询 | `_legacy/research_stages.py` 的 bounded compatibility policy | 暂留兼容；不是 canonical 主线调度器 | 旧 `run/resume` 消费者退出后随 facade 删除 |
+| LLM coarse screening/rerank | canonical `research.evidence.screening` 被 Read 调用；旧 facade 复用同一 policy | 已迁移；旧 artifact 仍是 projection | 历史 reader/CLI 退出后删除 projection |
 | LLM paper notes / `notes.md` | canonical Read 的 `paper_notes`、`notes_markdown`；旧 facade 继续落地历史文件 | 已迁移 typed 行为；保留旧 projection | 历史 reader/CLI 退出后删除旧写出 |
-| source chunks、coverage、cards 到 synthesis 的证据定位 | canonical Read handoff + `evidence_pack_from_read` 提供 bounded snippets/refs/notes | 已迁移 | 保持 snippet 上限、notes 和引用回归 |
+| source chunks、coverage、cards 到 synthesis 的证据定位 | canonical Read handoff + `evidence_pack_from_read` 提供 bounded snippets/refs/notes | 已迁移；cards 仅按旧 debug 配置投影 | 保持 snippet 上限、notes 和引用回归 |
 
 这张矩阵的原则是：V2.8 主线只吸收能改善正式闭环且不引入额外调度复杂度的行为；旧 CLI
 仍需要的输出先留在冻结 compatibility 层，不再作为新能力的落点。
@@ -591,18 +614,20 @@ V2.8 的正式验收报告必须同时记录：
 
 ## 9. 当前下一步
 
-V2.8 的基础闭环已经通过，当前不再新增顶层能力。后续按以下顺序推进：
+V2.8 的业务闭环已经通过；本轮工作仍在 Phase 3 的代码收口验收，不再新增顶层能力。按
+以下顺序结束本轮：
 
-1. 冻结 `research-session` 的 canonical 主线和 `full_pipeline_tiny_mlp` 验收基线；只有真实
-   运行暴露出配置、预算、重试、artifact handoff 或报告事实问题时才做小修；
-2. 完成 Phase 3 最后一次消费者审计：对 `_legacy`、旧 projection、`literature`、`retrieval`
-   和 tools 逐项确认。已被 canonical 行为替代且无真实消费者的实现直接删除；仍被旧 CLI、
-   benchmark 或历史 reader 使用的部分只保留薄 compatibility 层；
-3. 把 v12 这类 Reviewer warning 作为报告质量回归样本，继续改善 Writer/Reviewer 对本地
-   实验事实、文献动机和因果边界的区分，但不把 Reviewer 随机输出变成闭环状态机；
-4. V2.8 冻结后进入 V2.9：先稳定一个 Markdown/Overleaf-ready 模板和有限 continuation，再
-   评估多模板、复杂 repair；Claude Code、Codex、OpenCode 等外部 Harness 最后接入；
-5. 每次修改继续更新本计划、handoff、长期愿景和中英文 changelog，并提交可复核 checkpoint。
+1. 以 `29f212f` 为清理起点，完成本轮 source facade、planning query handoff、架构边界测试和
+   文档同步；
+2. 运行目标聚焦回归、fixture smoke、compileall、diff 检查和本地全量测试；
+3. 将当前分支提交并推送到 GitHub，再让 AutoDL 工作树切换到同一 commit；
+4. 在 AutoDL 上先执行离线/低资源 canonical smoke，再根据环境与网关可用性执行一次受控
+   online smoke。不得启动长训练、并行候选或无限 repair；
+5. 根据运行结果确认 Phase 3 退出：canonical 主线只有一条，旧入口只保留明确兼容职责，
+   无消费者的重复/临时实现已删除。若旧 `run/resume`、SurveyBench 或历史 reader 仍消费
+   facade，则记录为有意保留的兼容边界，而不是把它误报成“未清理”；
+6. 本轮验收完成后冻结 V2.8，进入 V2.9 的 Markdown/Overleaf-ready 报告工程化和有限
+   continuation；外部 Claude Code/Codex/OpenCode Harness 放到更后面。
 
-V2.8 冻结阶段不新增 scheduler、任意 DAG、外部 Harness、通用模板适配或新的顶层抽象；
-V2.9 再进入 Markdown/Overleaf 工程化与有限恢复设计。
+V2.8 冻结阶段不新增 scheduler、任意 DAG、外部 Harness、通用模板适配或新的顶层抽象；只
+   修复真实验收暴露的配置、预算、重试、artifact handoff、兼容或报告事实问题。

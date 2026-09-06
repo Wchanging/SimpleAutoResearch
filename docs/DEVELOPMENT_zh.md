@@ -53,10 +53,11 @@ workflow controller。
 
 清理规则有意保持不对称：生产消费者已经消失的代码要删除；但不要为了让行数变小，
 把仍然内聚的兼容 adapter 拆成更多层。剩余的大文件应被视为已标记的债务，而不是
-新的架构中心：`pipeline_stages/research.py` 是旧 search/read/synthesis adapter，
-`core/session.py` 是 attempt 边界，`report/service.py` 是既有 report writer。后续迁移
-必须一次移动一个真实 capability；只有 canonical 路径已经拥有同等行为并且回归通过，
-才能删除旧实现。
+新的架构中心：`pipeline_stages/research.py` 只是指向旧 research compatibility facade 的
+alias，`core/session.py` 是 attempt 边界，`report/service.py` 是 canonical report application
+和旧 projection 共用的 report writer。当前 facade 已将 Search/Read/Synthesis 规则委托给
+canonical 模块，只保留 Context/artifact projection 和有界兼容行为。只有 `run/resume`、
+benchmark、历史 reader 等真实消费者迁移且旧格式回归通过后，才能删除 facade。
 
 ## 职责边界表
 
@@ -182,10 +183,11 @@ attempt 可以继承 session 的 profile，也可以省略 profile；但不能�
 `CapabilityResult` 的状态、输出引用、诊断、usage 和 provenance。它用于进程结束后恢复
 失败原因和结果边界，不复制全文或原始日志；旧八阶段不会因此改变产物布局。
 
-旧的巨型 CLI 和 stage handler 模块已经从 `src/simple_ar/_legacy/` 迁出。
-该包现在只保留兼容旧 import path 的别名。新的行为应优先实现到
-`core/`、`research/`、`experiment/`、`report/` 和 `code_task/`
-这些领域模块中。
+旧的巨型 research 实现已经移到 `src/simple_ar/_legacy/research_stages.py` 背后的兼容门面，
+公开的 `pipeline_stages/research.py` 仍作为旧调用方的 import alias。该门面负责适配 `Context`、
+保留旧 artifact 名称和有界检索 trace，并把研究行为委托给 canonical 模块；`_legacy` 也继续
+保留旧 import path 的别名。新的行为应优先实现到 `core/`、`research/`、`experiment/`、
+`report/` 和 `code_task/` 这些领域模块中。
 
 CLI 代码按职责拆分：
 
@@ -199,10 +201,10 @@ Pipeline stage 编排按工作流区域拆分：
 
 ```text
 src/simple_ar/pipeline_stages/
-  research.py    01-04 阶段：plan、search、read、synthesize
-  experiment.py  05-07 阶段：design、code、run
-  report.py      08 阶段：report packaging 与安全审查
-  common.py      LLM access、artifact reads 等共享 stage helpers
+  research.py    指向兼容 research facade 的 alias（01-04 阶段）
+  experiment.py  05-07 阶段的旧 Context 适配器
+  report.py      08 阶段的旧 Context 适配器
+  common.py      仅兼容 artifact/evidence 辅助
   registry.py    PipelineRunner 使用的 HANDLERS registry
   handlers.py    仅兼容聚合；不要在这里继续添加新逻辑
 ```
@@ -543,9 +545,10 @@ src/simple_ar/report/
 - 模板和审查标准放在 `templates/report/`，不要硬编码成长 prompt；
 - `service.py` 只保留 stage-level coordinator 和 artifact writer 的职责。
 
-`report/service.py`、`pipeline_stages/research.py` 和 `cli/main.py` 仍然偏大，
-需要视为黄灯。不要继续往这些文件里添加无关行为；新的工作应该迁移到对应领域模块，
-或者顺手减少这些文件的职责。这是维护规则，不是要求把每个小 helper 都拆成独立文件。
+`report/service.py`、私有 legacy research facade 和 `cli/main.py` 仍然偏大，
+需要视为黄灯；`pipeline_stages/research.py` 本身现在只是 alias。不要继续往这些文件里添加
+无关行为；新的工作应该迁移到对应领域模块，或者在兼容消费者退出后减少边界职责。这是维护
+规则，不是要求把每个小 helper 都拆成独立文件。
 
 ## 扩展 Tools 和外部 Agent Backend
 

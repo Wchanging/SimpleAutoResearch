@@ -8,6 +8,16 @@
 
 ### 变更
 
+- 收束 V2.8 Phase 3 的 research prefix：历史入口
+  `pipeline_stages/research.py` 现在进入兼容 facade，由 canonical research 模块负责 Search、
+  Read 和 Synthesis 行为。旧 Context 产物、有界检索 trace、cache 注入点和 `run/resume` 契约
+  继续为现有消费者保留，但 facade 不再是一套并行的 research 实现。
+- 增加有界的 `SearchRequest.stop_after_papers` 策略、兼容集成可注入的 cache callbacks，并补充
+  回归以保证 LLM 扩展后的 query 会进入实际执行的 source plan。架构测试现在明确检查导入
+  canonical session/source/reader/synthesis 路径不会加载 `pipeline_stages` 或 `_legacy`。
+- 完成 `literature`、`retrieval`、tools、experiment/report adapter、SurveyBench 和历史 run reader
+  的消费者审计。仍有真实消费者的模块按基础设施或兼容层有意保留；V2.8 不再向这些位置增加新行为。
+
 - Report Writer 和 Reviewer 现在都会收到一份有界的权威实验结果投影，包含
   baseline/candidate 指标、comparison delta、verdict 和资源变化。这样模型生成的本地实验
   结论会与确定性 report appendix 对齐，同时不会把原始 stdout 或无关运行元数据塞进提示词。

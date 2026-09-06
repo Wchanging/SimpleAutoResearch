@@ -57,6 +57,27 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
 
+    def test_canonical_research_modules_do_not_load_compatibility_layers(self) -> None:
+        probe = (
+            "import sys; "
+            "import simple_ar.app.research_session; "
+            "import simple_ar.research.sources.capability; "
+            "import simple_ar.research.evidence.reader; "
+            "import simple_ar.research.synthesis; "
+            "forbidden = sorted(name for name in sys.modules "
+            "if name.startswith('simple_ar.pipeline_stages') or "
+            "name.startswith('simple_ar._legacy')); "
+            "assert not forbidden, forbidden"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+
     def test_embedded_code_task_spec_reads_large_edit_approval_from_toml(self) -> None:
         test_tmp_root = Path(__file__).resolve().parents[1] / ".tmp_tests"
         test_tmp_root.mkdir(exist_ok=True)

@@ -67,6 +67,42 @@ class SearchCapabilityTests(unittest.TestCase):
             [("one", "first", 3), ("one", "second", 3), ("two", "first", 3), ("two", "second", 3)],
         )
 
+    def test_stop_after_papers_bounds_provider_queries(self) -> None:
+        calls: list[str] = []
+
+        class Connector:
+            source_name = "fixture"
+
+            def search(self, request: SearchQuery) -> SearchResponse:
+                calls.append(request.query)
+                return SearchResponse(
+                    source=self.source_name,
+                    query=request.query,
+                    papers=[
+                        Paper(
+                            id=f"paper-{request.query}",
+                            title=f"Paper for {request.query}",
+                            authors=[],
+                            abstract="bounded search fixture",
+                            url=f"https://example.test/{request.query}",
+                            source=self.source_name,
+                        )
+                    ],
+                )
+
+        result = search_sources(
+            SearchRequest(
+                queries=("first", "second", "third"),
+                providers=("fixture",),
+                stop_after_papers=2,
+            ),
+            registry=SearchProviderRegistry({"fixture": Connector}),
+        )
+
+        self.assertEqual(calls, ["first", "second"])
+        self.assertEqual(len(result.papers), 2)
+        self.assertEqual(result.status, "completed")
+
     def test_partial_failure_is_not_reported_as_empty_success(self) -> None:
         class FailingConnector:
             source_name = "broken"

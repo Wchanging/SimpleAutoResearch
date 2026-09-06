@@ -8,6 +8,22 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Closed the V2.8 Phase 3 research-prefix cleanup: the historical
+  `pipeline_stages/research.py` entry now reaches a compatibility facade that
+  delegates Search, Read, and Synthesis behavior to the canonical research
+  modules. Legacy Context artifacts, bounded retrieval traces, cache injection
+  points, and the old `run/resume` contract remain available for existing
+  consumers, but the facade is no longer a second research implementation.
+- Added a bounded `SearchRequest.stop_after_papers` policy, injectable cache
+  callbacks for compatibility integrations, and a regression check that keeps
+  LLM-expanded queries in the executable source plan. Architecture tests now
+  assert that importing the canonical session/source/reader/synthesis path does
+  not load `pipeline_stages` or `_legacy`.
+- Completed a consumer audit for `literature`, `retrieval`, tools,
+  experiment/report adapters, SurveyBench, and historical run readers. Items
+  with real consumers remain deliberately scoped compatibility or infrastructure
+  modules; no new V2.8 behavior is added to them.
+
 - Report Writer and Reviewer prompts now receive a bounded projection of the
   authoritative execution result, including baseline/candidate metrics,
   comparison deltas, verdicts, and resource changes. This keeps the model's

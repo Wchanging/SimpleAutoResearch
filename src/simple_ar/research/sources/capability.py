@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.literature.cache import get_cached, put_cache
@@ -34,6 +34,17 @@ class SearchRequest:
     filters: dict[str, object] = field(default_factory=dict)
     cache_dir: Path | None = None
     cache_enabled: bool = True
+    stop_after_papers: int | None = None
+    cache_get: Callable[..., list[dict[str, Any]] | None] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    cache_put: Callable[..., object] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         queries = tuple(query.strip() for query in self.queries if query.strip())
@@ -44,6 +55,8 @@ class SearchRequest:
             raise ValueError("SearchRequest requires at least one provider.")
         if self.max_results_per_query < 1:
             raise ValueError("max_results_per_query must be positive.")
+        if self.stop_after_papers is not None and self.stop_after_papers < 1:
+            raise ValueError("stop_after_papers must be positive when provided.")
         object.__setattr__(self, "queries", queries)
         object.__setattr__(self, "providers", providers)
         if self.cache_dir is not None:
@@ -65,12 +78,15 @@ class SearchSelectionPolicy:
     questions: tuple[ResearchQuestion, ...]
     query_plan: QueryPlan
     max_documents: int
+    next_query_limit: int = 0
 
     def __post_init__(self) -> None:
         if not self.topic.strip():
             raise ValueError("SearchSelectionPolicy.topic cannot be empty.")
         if self.max_documents < 1:
             raise ValueError("SearchSelectionPolicy.max_documents must be positive.")
+        if self.next_query_limit < 0:
+            raise ValueError("SearchSelectionPolicy.next_query_limit cannot be negative.")
         object.__setattr__(self, "questions", tuple(self.questions))
 
 
@@ -230,6 +246,7 @@ def search_sources(
     papers: list[Paper] = []
     diagnostics: list[str] = []
 
+    stop = False
     for provider_name in request.providers:
         for query in request.queries:
             response = _run_provider(
@@ -252,6 +269,13 @@ def search_sources(
                 papers.extend(response.papers)
             elif response.message:
                 diagnostics.append(response.message)
+            if request.stop_after_papers is not None:
+                unique_paper_ids = {paper.id for paper in papers}
+                if len(unique_paper_ids) >= request.stop_after_papers:
+                    stop = True
+                    break
+        if stop:
+            break
 
     return SearchResult(
         status=_result_status(responses, papers),
@@ -280,7 +304,7 @@ def _apply_optional_cache(
         return response
     if _response_succeeded(response) and response.papers:
         try:
-            put_cache(
+            (request.cache_put or put_cache)(
                 query,
                 provider_name,
                 request.max_results_per_query,
@@ -294,7 +318,7 @@ def _apply_optional_cache(
     if _response_succeeded(response):
         return response
     try:
-        cached_rows = get_cached(
+        cached_rows = (request.cache_get or get_cached)(
             query,
             provider_name,
             request.max_results_per_query,
@@ -453,7 +477,7 @@ def select_search_result(
         selection_rows=selection_rows,
         retrieval_rows=retrieval_rows,
         max_documents=policy.max_documents,
-        next_query_limit=0,
+        next_query_limit=policy.next_query_limit,
     )
     return replace(
         result,

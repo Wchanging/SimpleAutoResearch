@@ -1,262 +1,192 @@
+"""Compatibility facade for the historical eight-stage research prefix.
+
+The V2.8 application path lives under :mod:`simple_ar.app` and the reusable
+capabilities under :mod:`simple_ar.research`.  This module deliberately keeps
+the old ``Context`` and ``01-plan`` ... ``04-synthesize`` artifact contract
+working for ``simple-ar run`` and SurveyBench, but it no longer owns a second
+Search/Read/Synthesis implementation.
+
+The functions below do three things only:
+
+* adapt the old ``Context`` to canonical planning and source capabilities;
+* preserve the old artifact names and bounded legacy retrieval trace;
+* project canonical Read/Synthesis results into the old stage directories.
+
+New behavior must be added to the canonical modules, never here.
+"""
+
 from __future__ import annotations
 
+from dataclasses import replace
 import json
-from typing import Any
-from simple_ar.core.artifacts import (
-    write_json,
-    write_jsonl,
-    write_text,
-)
-from simple_ar.literature.arxiv_client import (
-    ArxivRateLimitError,
-    ArxivSearchClient,
-    LiteratureSearchError,
-)
-from simple_ar.literature.cache import (
-    get_cached,
-    put_cache,
-)
-from simple_ar.literature.models import Paper
-from simple_ar.literature.openalex_client import (
-    OpenAlexSearchClient,
-    OpenAlexSearchError,
-)
-from simple_ar.literature.semantic_scholar_client import (
-    SemanticScholarSearchClient,
-    SemanticScholarSearchError,
-)
-from simple_ar.integrations.llm import (
-    LLMClient,
-    LLMError,
-)
+from pathlib import Path
+from typing import Any, Mapping
+
+from simple_ar.core.artifacts import write_json, write_jsonl, write_text
 from simple_ar.core.pipeline import Context
-from simple_ar.research.connectors import (
-    ArxivConnector,
-    OpenAlexConnector,
-    SemanticScholarConnector,
-)
-from simple_ar.research.contracts import (
-    QueryPlan,
-    ResearchQuestion,
-    SourcePlan,
-)
-from simple_ar.research.evidence.coverage import (
-    build_coverage_report,
-    coverage_report_markdown,
-)
-from simple_ar.research.outputs.artifacts import (
-    READ_CLAIM_CARDS,
-    READ_CODE_LINKS,
-    READ_DATASET_CARDS,
-    READ_METHOD_CARDS,
-    READ_PAPER_CARDS,
-    READ_SCREENING_DECISIONS,
-    READ_SHORTLIST,
-    SEARCH_CHUNKS,
-    SEARCH_COVERAGE_JSON,
-    SEARCH_COVERAGE_MD,
-    SEARCH_DOCUMENTS,
-    SEARCH_FULLTEXT_EXTRACTION,
-    SEARCH_FULLTEXT_MANIFEST,
-    SEARCH_SECTIONS,
-    SEARCH_INDEX_META,
-    SEARCH_META,
-    SEARCH_PAPERS,
-    SEARCH_RESEARCH_PLAN,
-    SEARCH_RETRIEVAL_ROUNDS,
-    SEARCH_RETRIEVAL_SELECTION,
-    SYNTHESIS_EVIDENCE_PACK_JSON,
-    SYNTHESIS_BRIEF_JSON,
-    build_research_plan_artifact,
-    write_read_card_artifacts_from_result,
-    write_read_review_artifacts,
-    write_search_document_artifacts,
-    write_synthesis_brief_artifact,
-    write_synthesis_evidence_artifacts,
-)
-from simple_ar.research.prompts import (
-    SYNTHESIZE_SYSTEM,
-    synthesize_user_prompt,
-)
-from simple_ar.research.planning.capability import (
-    ResearchPlanRequest,
-    build_research_plan,
-    build_requested_research_plan,
-    build_research_scope,
-)
-from simple_ar.research.evidence.retrieval import (
-    RetrievalCandidate,
-    select_retrieval_candidates,
-)
-from simple_ar.research.service import (
-    load_search_document_bundle,
-    load_notes_markdown,
-    load_paper_notes_json,
-    load_problem_markdown,
-    load_search_paper_rows,
-)
-from simple_ar.research.sources.base import (
-    SearchQuery,
-    build_source_plan,
-    primary_query,
-)
-from simple_ar.research.evidence.reader import ReadRequest, read_documents
-from simple_ar.research.evidence.screening import (
-    read_paper_notes_with_llm,
-    render_paper_notes_markdown,
-    screen_papers_with_llm,
-)
-from simple_ar.research.sources.registry import (
-    SearchProviderRegistry,
-    default_search_provider_registry,
-)
-from simple_ar.retrieval.evidence import format_evidence_snippets
 from simple_ar.core.runtime import (
     ensure_heading as _ensure_heading,
     handle_llm_failure as _handle_llm_failure,
     llm_client as _llm_client,
     read_jsonl_artifact as _read_jsonl_artifact,
     safe_read_json_artifact as _safe_read_json_artifact,
-    text_field as _text_field,
 )
-from simple_ar.pipeline_stages.common import (
-    _downstream_source_plan,
-    _stage_evidence,
+from simple_ar.integrations.llm import LLMError
+from simple_ar.literature.arxiv_client import ArxivSearchClient, LiteratureSearchError
+from simple_ar.literature.cache import DEFAULT_CACHE_DIR, get_cached, put_cache
+from simple_ar.literature.models import Paper
+from simple_ar.literature.openalex_client import OpenAlexSearchClient
+from simple_ar.literature.semantic_scholar_client import SemanticScholarSearchClient
+from simple_ar.research.brief import evidence_pack_from_read
+from simple_ar.research.connectors import (
+    ArxivConnector,
+    OpenAlexConnector,
+    SemanticScholarConnector,
 )
+from simple_ar.research.contracts import QueryPlan, SourcePlan
+from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.evidence.coverage import build_coverage_report, coverage_report_markdown
+from simple_ar.research.evidence.reader import ReadRequest, ReadResult, read_documents
+from simple_ar.research.outputs.artifacts import (
+    READ_SHORTLIST,
+    SEARCH_COVERAGE_JSON,
+    SEARCH_COVERAGE_MD,
+    SEARCH_FULLTEXT_EXTRACTION,
+    SEARCH_FULLTEXT_MANIFEST,
+    SEARCH_INDEX_META,
+    SEARCH_META,
+    SEARCH_PAPERS,
+    SEARCH_RESEARCH_PLAN,
+    SEARCH_RETRIEVAL_ROUNDS,
+    SEARCH_RETRIEVAL_SELECTION,
+    write_read_card_artifacts_from_result,
+    write_read_review_artifacts,
+    write_search_document_artifacts,
+    write_synthesis_brief_artifact,
+    write_synthesis_evidence_artifacts,
+)
+from simple_ar.research.planning.capability import (
+    ResearchPlanRequest,
+    ResearchPlanResult,
+    build_research_plan,
+    build_requested_research_plan,
+    build_research_scope,
+)
+from simple_ar.research.service import (
+    load_notes_markdown,
+    load_paper_notes_json,
+    load_problem_markdown,
+    load_search_document_bundle,
+    load_search_paper_rows,
+)
+from simple_ar.research.sources import SearchProviderRegistry, default_search_provider_registry
+from simple_ar.research.sources.base import SearchResponse, primary_query
+from simple_ar.research.sources.capability import (
+    SearchRequest,
+    SearchResult,
+    SearchSelectionPolicy,
+    search_sources,
+    select_search_result,
+)
+from simple_ar.research.synthesis import SynthesisRequest, synthesize_evidence
+from simple_ar.retrieval.evidence import collect_stage_evidence, ensure_source_plan
+
 
 def execute_plan(ctx: Context) -> None:
+    """Project the canonical scope planner into the old plan directory."""
+
     client = _llm_client(ctx)
     if client is not None:
         try:
             ctx.emit("stage_message", "Calling LLM for research planning.")
             goal, problem = build_research_scope(ctx.topic, llm_client=client)
-            write_text(ctx.artifact_path("goal.md"), goal)
-            write_text(ctx.artifact_path("problem.md"), problem)
-            return
         except LLMError as exc:
             _handle_llm_failure(ctx, "LLM planning failed", exc)
-
-        _handle_llm_failure(
-            ctx,
-            "LLM planning returned no usable goal/problem",
-            LLMError("response did not contain both goal_markdown and problem_markdown"),
-        )
-
-    goal, problem = build_research_scope(ctx.topic)
+            goal, problem = build_research_scope(ctx.topic)
+    else:
+        goal, problem = build_research_scope(ctx.topic)
     write_text(ctx.artifact_path("goal.md"), goal)
     write_text(ctx.artifact_path("problem.md"), problem)
+
 
 def execute_search(
     ctx: Context,
     *,
     provider_registry: SearchProviderRegistry | None = None,
 ) -> None:
+    """Run canonical search and project its result into ``02-search``."""
+
     problem = load_problem_markdown(ctx)
     query = _search_query(ctx, problem)
-    max_papers = _max_papers(ctx)
-    research_questions, query_plan = _plan_research_retrieval(ctx, problem, query)
-    source_config = dict(ctx.config)
-    if query_plan.queries:
-        source_config["research_queries"] = list(query_plan.queries)
-    source_plan = build_source_plan(
-        topic=ctx.topic,
-        problem_markdown=problem,
-        config=source_config,
-        default_query=query,
-        default_max_results=max_papers,
-    )
-    write_json(
-        ctx.artifact_path(SEARCH_RESEARCH_PLAN),
-        build_research_plan_artifact(
-            questions=research_questions,
-            query_plan=query_plan,
-            source_plan=source_plan,
-        ),
-    )
-    planned_query = primary_query(source_plan) or query
+    plan = _plan_research(ctx, problem, query)
+    source_plan = plan.source_plan
+    write_json(ctx.artifact_path(SEARCH_RESEARCH_PLAN), plan.to_handoff_dict())
 
-    papers: list[Paper]
+    max_documents = _research_document_cap(source_plan, _max_papers(ctx))
+    used_fixture_fallback = False
+    if _should_use_source_plan(ctx, source_plan):
+        result, retrieval_rows = _run_compat_search(
+            ctx,
+            plan,
+            max_documents=max_documents,
+            provider_registry=provider_registry,
+        )
+        if not result.selected_papers:
+            if not _allow_fixture_fallback(ctx):
+                write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
+                write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), [])
+                raise LiteratureSearchError(_live_search_failure_message(result))
+            ctx.emit(
+                "stage_message",
+                "No live or cached literature metadata available; using explicit fixture fallback.",
+            )
+            result, retrieval_rows = _fixture_search(plan, ctx.topic, max_documents)
+            used_fixture_fallback = True
+    else:
+        ctx.emit(
+            "stage_message",
+            "Using fixture paper metadata because --offline-search is enabled.",
+        )
+        result, retrieval_rows = _fixture_search(plan, ctx.topic, max_documents)
+
+    coverage = result.coverage_report
+    write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
+    write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), list(result.selection_rows))
+    write_json(ctx.artifact_path(SEARCH_COVERAGE_JSON), coverage)
+    write_text(ctx.artifact_path(SEARCH_COVERAGE_MD), coverage_report_markdown(coverage))
+
+    papers = list(result.selected_papers)
     meta: dict[str, object] = {
-        "query": planned_query,
+        "query": primary_query(source_plan) or query,
         "queries": list(source_plan.queries),
-        "max_papers": max_papers,
+        "max_papers": _max_papers(ctx),
         "sources": list(source_plan.sources),
-        "source": "arxiv" if ctx.config.get("use_arxiv") is True else "fixture",
+        "source": _result_source(papers),
+        "sources_used": sorted({paper.source for paper in papers}),
         "source_plan": source_plan.to_row(),
         "research_plan": SEARCH_RESEARCH_PLAN,
-        "research_planner": query_plan.planner,
-        "query_plan_max_rounds": query_plan.max_rounds,
-        "query_plan_auto_expansion": query_plan.auto_expansion,
-        "required_facets": list(query_plan.required_facets),
-        "status": "pending",
+        "research_planner": plan.query_plan.planner,
+        "query_plan_max_rounds": plan.query_plan.max_rounds,
+        "query_plan_auto_expansion": plan.query_plan.auto_expansion,
+        "required_facets": list(plan.query_plan.required_facets),
+        "status": (
+            "fixture_fallback"
+            if used_fixture_fallback
+            else ("offline_fixture" if _all_fixture(papers) else ("ok" if papers else result.status))
+        ),
+        "allow_fixture_fallback": used_fixture_fallback,
+        "returned": len(papers),
+        "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
+        "retrieval_selection": SEARCH_RETRIEVAL_SELECTION,
+        "coverage_report": SEARCH_COVERAGE_JSON,
+        "coverage_status": coverage.get("status", "unknown"),
+        "missing_facets": coverage.get("missing_facets", []),
+        "attempt_count": len(retrieval_rows),
+        "candidate_selection_count": len(result.selection_rows),
+        "kept_after_retrieval_selection": len(papers),
+        "executed_retrieval_rounds": _executed_rounds(coverage),
+        "planned_retrieval_rounds": plan.query_plan.max_rounds,
     }
-    if _should_use_source_plan(ctx, source_plan):
-        registry = provider_registry or _default_search_provider_registry(source_plan, max_papers)
-        papers, meta_update = _live_literature_search(
-            ctx,
-            source_plan,
-            problem,
-            query_plan,
-            research_questions,
-            provider_registry=registry,
-        )
-        meta.update(meta_update)
-    else:
-        ctx.emit("stage_message", "Using fixture paper metadata because --offline-search is enabled.")
-        papers = _fixture_papers(problem)
-        retrieval_rows = [
-            _retrieval_round_row(
-                round_index=1,
-                query_index=1,
-                query=planned_query,
-                source="fixture",
-                status="offline_fixture",
-                returned=len(papers),
-            )
-        ]
-        candidates = [
-            RetrievalCandidate(
-                paper=paper,
-                source="fixture",
-                query=planned_query,
-                query_index=1,
-                round_index=1,
-                returned_source="fixture",
-            )
-            for paper in papers
-        ]
-        papers, selection_rows = select_retrieval_candidates(
-            candidates,
-            max_documents=max_papers,
-            negative_terms=query_plan.negative_terms,
-            priority_facets=query_plan.required_facets,
-        )
-        coverage_report = build_coverage_report(
-            topic=ctx.topic,
-            questions=research_questions,
-            query_plan=query_plan,
-            selection_rows=selection_rows,
-            retrieval_rows=retrieval_rows,
-            max_documents=max_papers,
-            next_query_limit=0,
-        )
-        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
-        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), selection_rows)
-        _write_coverage_artifacts(ctx, coverage_report)
-        meta.update(
-            {
-                "source": "fixture",
-                "status": "offline_fixture",
-                "returned": len(papers),
-                "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
-                "retrieval_selection": SEARCH_RETRIEVAL_SELECTION,
-                "coverage_report": SEARCH_COVERAGE_JSON,
-                "attempt_count": len(retrieval_rows),
-                "candidate_selection_count": len(selection_rows),
-                "kept_after_retrieval_selection": len(papers),
-            }
-        )
-
     meta.update(
         write_search_document_artifacts(
             stage_dir=ctx.stage_dir(),
@@ -268,29 +198,171 @@ def execute_search(
     write_jsonl(ctx.artifact_path(SEARCH_PAPERS), [paper.to_row() for paper in papers])
     write_json(ctx.artifact_path(SEARCH_META), meta)
 
-def _plan_research_retrieval(
-    ctx: Context,
-    problem: str,
-    query: str,
-) -> tuple[list[ResearchQuestion], QueryPlan]:
-    """Use the canonical planning capability for the legacy search projection."""
-    planner_mode = _research_planner_mode(ctx.config.get("research_planner"))
+
+def execute_read(ctx: Context) -> None:
+    """Read the canonical document bundle and project old read artifacts."""
+
+    papers = load_search_paper_rows(ctx)
+    bundle = load_search_document_bundle(ctx)
     client = _llm_client(ctx)
-    use_llm = planner_mode != "deterministic" and client is not None
+    existing_shortlist = _existing_shortlist_ids(ctx)
+    read_result = read_documents(
+        ReadRequest(
+            bundle=bundle,
+            paper_ids=None if client is not None else existing_shortlist,
+            topic=ctx.topic,
+            problem_markdown=load_problem_markdown(ctx),
+            research_plan_json=json.dumps(
+                _safe_read_json_artifact(ctx, SEARCH_RESEARCH_PLAN),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            config=ctx.config,
+            use_llm=client is not None,
+            llm_client=client,
+        )
+    )
+    review_meta = write_read_review_artifacts(
+        stage_dir=ctx.stage_dir(),
+        papers=papers,
+        retrieval_selection=_read_jsonl_artifact(ctx, SEARCH_RETRIEVAL_SELECTION),
+        coverage_report=_safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
+        llm_decisions=list(read_result.screening_decisions) or None,
+    )
+    _stage_evidence(ctx, "read")
+    ctx.emit(
+        "stage_message",
+        "Built read-stage shortlist and reading table.",
+        shortlist_count=review_meta.get("shortlist_count", 0),
+    )
+
+    notes = list(read_result.paper_notes)
+    if not notes and read_result.bundle.records:
+        notes = _fallback_notes(_papers_for_bundle(papers, read_result.bundle))
+    write_json(ctx.artifact_path("paper_notes.json"), notes)
+    write_text(
+        ctx.artifact_path("notes.md"),
+        read_result.notes_markdown or _render_fallback_notes(notes),
+    )
+    if _debug_artifacts_enabled(ctx) and read_result.bundle.records:
+        meta = write_read_card_artifacts_from_result(
+            stage_dir=ctx.stage_dir(),
+            result=read_result,
+        )
+        ctx.emit(
+            "stage_message",
+            "Built reading cards from the canonical Read result.",
+            paper_card_count=meta.get("paper_card_count", 0),
+            claim_card_count=meta.get("claim_card_count", 0),
+        )
+
+
+def _write_read_cards(ctx: Context) -> None:
+    """Keep the old debug-card helper as a projection-only compatibility API."""
+
+    bundle = load_search_document_bundle(ctx)
+    if not bundle.records:
+        return
+    result = read_documents(
+        ReadRequest(bundle=bundle, paper_ids=_existing_shortlist_ids(ctx))
+    )
+    meta = write_read_card_artifacts_from_result(
+        stage_dir=ctx.stage_dir(),
+        result=result,
+    )
+    ctx.emit(
+        "stage_message",
+        "Built reading cards from the canonical Read result.",
+        paper_card_count=meta.get("paper_card_count", 0),
+        claim_card_count=meta.get("claim_card_count", 0),
+    )
+
+
+def execute_synthesize(ctx: Context) -> None:
+    """Synthesize the canonical Read result and project old handoff files."""
+
+    papers = load_search_paper_rows(ctx)
+    bundle = load_search_document_bundle(ctx)
+    read_result = read_documents(
+        ReadRequest(bundle=bundle, paper_ids=_existing_shortlist_ids(ctx))
+    )
+    notes = load_paper_notes_json(ctx)
+    if notes:
+        read_result = replace(
+            read_result,
+            paper_notes=tuple(notes),
+            notes_markdown=load_notes_markdown(ctx),
+        )
+    source_plan = _downstream_source_plan(ctx)
+    coverage = _safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON)
+    _stage_evidence(ctx, "synthesize")
+    evidence_pack = evidence_pack_from_read(
+        ctx.topic,
+        read_result,
+        coverage=coverage,
+        source_plan=source_plan,
+        execution_context=str(ctx.config.get("research_execution_context") or ""),
+    )
+    client = _llm_client(ctx)
+    try:
+        synthesis = synthesize_evidence(
+            SynthesisRequest(
+                evidence_pack=evidence_pack,
+                idea_limit=_idea_limit(ctx),
+                novelty_backend=str(source_plan.get("budget", {}).get("novelty_backend") or "local"),
+                use_llm=client is not None,
+                llm_client=client,
+            )
+        )
+    except LLMError as exc:
+        _handle_llm_failure(ctx, "LLM synthesis failed", exc)
+        synthesis = synthesize_evidence(
+            SynthesisRequest(
+                evidence_pack=evidence_pack,
+                idea_limit=_idea_limit(ctx),
+                novelty_backend="local",
+            )
+        )
+
+    _write_legacy_synthesis_projection(
+        ctx,
+        source_plan=source_plan,
+        papers=papers,
+        read_result=read_result,
+        coverage=coverage,
+    )
+    synthesis_markdown = synthesis.synthesis_markdown.strip() or _fallback_synthesis_markdown(
+        ctx.topic,
+        notes,
+    )
+    hypothesis_markdown = synthesis.hypothesis_markdown.strip() or (
+        "# Hypothesis\n\n"
+        "A bounded, evidence-grounded change can be evaluated against the prepared "
+        "baseline without changing the task boundary.\n"
+    )
+    write_text(ctx.artifact_path("synthesis.md"), _ensure_heading(synthesis_markdown, "Synthesis"))
+    write_text(ctx.artifact_path("hypothesis.md"), _ensure_heading(hypothesis_markdown, "Hypothesis"))
+
+
+def _plan_research(ctx: Context, problem: str, query: str) -> ResearchPlanResult:
+    """Build one canonical research plan, retaining old failure semantics."""
+
+    mode = str(ctx.config.get("research_planner") or "auto").strip().lower()
+    client = _llm_client(ctx)
     request = ResearchPlanRequest(
         topic=ctx.topic,
         problem_markdown=problem,
         config=ctx.config,
         default_query=query,
         default_max_results=_max_papers(ctx),
-        use_llm=use_llm,
+        use_llm=mode != "deterministic" and client is not None,
         llm_client=client,
     )
     try:
-        result = build_requested_research_plan(request)
+        return build_requested_research_plan(request)
     except (LLMError, ValueError) as exc:
         _handle_llm_failure(ctx, "LLM research planning failed", exc)
-        result = build_research_plan(
+        return build_research_plan(
             ResearchPlanRequest(
                 topic=ctx.topic,
                 problem_markdown=problem,
@@ -299,303 +371,473 @@ def _plan_research_retrieval(
                 default_max_results=_max_papers(ctx),
             )
         )
-    return list(result.questions), result.query_plan
 
-def _research_planner_mode(value: object) -> str:
-    text = str(value or "auto").strip().lower()
-    return text if text in {"auto", "llm", "deterministic"} else "auto"
 
-def _default_search_provider_registry(
-    source_plan: SourcePlan,
-    max_papers: int,
-) -> SearchProviderRegistry:
-    """Build the default registry while preserving legacy client injection.
-
-    The client aliases remain in this module for compatibility with existing
-    tests and integrations that replace them at runtime. The registry still
-    owns connector construction; this helper only supplies those legacy
-    factories to it.
-    """
-    return default_search_provider_registry(
-        local_documents=source_plan.local_documents,
-        arxiv_page_size=max_papers,
-        connector_factories={
-            "openalex": lambda: OpenAlexConnector(OpenAlexSearchClient()),
-            "semantic_scholar": lambda: SemanticScholarConnector(SemanticScholarSearchClient()),
-            "arxiv": lambda: ArxivConnector(ArxivSearchClient(page_size=max_papers)),
-        },
-    )
-
-def _live_literature_search(
+def _run_compat_search(
     ctx: Context,
-    source_plan: SourcePlan,
-    problem: str,
-    query_plan: QueryPlan,
-    research_questions: list[ResearchQuestion],
+    plan: ResearchPlanResult,
     *,
-    provider_registry: SearchProviderRegistry | None = None,
-) -> tuple[list[Paper], dict[str, object]]:
-    """Search real literature sources before considering explicit fixture fallback.
+    max_documents: int,
+    provider_registry: SearchProviderRegistry | None,
+) -> tuple[SearchResult, list[dict[str, object]]]:
+    """Use canonical search with the old bounded trace policy.
 
-    Args:
-        ctx: Current pipeline context.
-        source_plan: Planned queries, providers, local documents, and budget.
-        problem: Problem artifact used only for explicit fixture fallback.
-
-    Returns:
-        ``(papers, metadata_update)`` for the selected source.
-
-    Raises:
-        LiteratureSearchError: If no live or cached metadata is available and
-            fixture fallback has not been explicitly enabled.
+    The old facade historically stopped after a useful source filled the
+    budget and could spend one extra round on missing facets. That policy is
+    retained only here as a compatibility concern; provider invocation,
+    caching, failure normalization, ranking, and selection remain canonical.
     """
-    max_papers = source_plan.max_results_per_query
-    max_documents = _research_document_cap(source_plan, max_papers)
+
+    registry = provider_registry or _default_search_provider_registry(plan.source_plan)
+    initial_queries = _planned_queries(plan.query_plan, plan.source_plan)
     candidate_cap = _candidate_collection_cap(max_documents)
-    provider_registry = provider_registry or _default_search_provider_registry(source_plan, max_papers)
-    retrieval_rows: list[dict[str, object]] = []
-    candidates: list[RetrievalCandidate] = []
-    query_specs = _query_specs_by_query(query_plan)
-    query_attempts = _planned_query_attempts(source_plan)
-
-    _collect_retrieval_round(
+    initial = _search_round(
         ctx,
-        source_plan,
-        queries=query_attempts,
-        query_specs=query_specs,
-        retrieval_rows=retrieval_rows,
-        candidates=candidates,
-        round_index=1,
-        max_documents=candidate_cap,
-        provider_registry=provider_registry,
+        plan.source_plan,
+        queries=initial_queries,
+        provider_registry=registry,
+        stop_after_papers=candidate_cap,
     )
+    policy = SearchSelectionPolicy(
+        topic=ctx.topic,
+        questions=plan.questions,
+        query_plan=plan.query_plan,
+        max_documents=max_documents,
+        next_query_limit=_follow_up_query_limit(plan.source_plan),
+    )
+    selected = select_search_result(initial, policy=policy)
+    retrieval_rows = _retrieval_rows(initial, plan.query_plan, round_index=1)
 
-    if candidates:
-        papers, selection_rows = select_retrieval_candidates(
-            candidates,
-            max_documents=max_documents,
-            negative_terms=query_plan.negative_terms,
-            priority_facets=query_plan.required_facets,
-        )
-        coverage_report = build_coverage_report(
-            topic=ctx.topic,
-            questions=research_questions,
-            query_plan=query_plan,
-            selection_rows=selection_rows,
-            retrieval_rows=retrieval_rows,
-            max_documents=max_documents,
-            next_query_limit=_follow_up_query_limit(source_plan),
-        )
-        follow_up_queries = _coverage_follow_up_queries(coverage_report)
-        if len(papers) < max_documents and query_plan.max_rounds > 1 and follow_up_queries:
+    if len(selected.selected_papers) < max_documents and plan.query_plan.max_rounds > 1:
+        followups = _coverage_follow_up_queries(selected.coverage_report)
+        if followups:
             ctx.emit(
                 "stage_message",
-                f"Coverage gaps remain; running {len(follow_up_queries)} follow-up query attempt(s).",
+                f"Coverage gaps remain; running {len(followups)} bounded follow-up query attempt(s).",
             )
-            follow_up_specs = _coverage_follow_up_specs(coverage_report)
-            _collect_retrieval_round(
+            augmented_plan = replace(
+                plan.query_plan,
+                queries=_unique_strings([*initial_queries, *followups]),
+                query_specs=[
+                    *plan.query_plan.query_specs,
+                    *_coverage_follow_up_specs(selected.coverage_report),
+                ],
+            )
+            followup = _search_round(
                 ctx,
-                source_plan,
-                queries=follow_up_queries,
-                query_specs=follow_up_specs,
-                retrieval_rows=retrieval_rows,
-                candidates=candidates,
-                round_index=2,
-                max_documents=candidate_cap,
-                start_query_index=len(query_attempts) + 1,
-                provider_registry=provider_registry,
+                plan.source_plan,
+                queries=followups,
+                provider_registry=registry,
+                stop_after_papers=candidate_cap,
             )
-            papers, selection_rows = select_retrieval_candidates(
-                candidates,
-                max_documents=max_documents,
-                negative_terms=query_plan.negative_terms,
-                priority_facets=query_plan.required_facets,
+            combined = _merge_search_results(initial, followup)
+            selected = select_search_result(
+                combined,
+                policy=replace(
+                    policy,
+                    query_plan=augmented_plan,
+                    next_query_limit=0,
+                ),
             )
-            coverage_report = build_coverage_report(
-                topic=ctx.topic,
-                questions=research_questions,
-                query_plan=query_plan,
-                selection_rows=selection_rows,
-                retrieval_rows=retrieval_rows,
-                max_documents=max_documents,
-                next_query_limit=0,
+            retrieval_rows.extend(
+                _retrieval_rows(followup, augmented_plan, round_index=2)
             )
-        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
-        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), selection_rows)
-        _write_coverage_artifacts(ctx, coverage_report)
-        selected_sources = sorted({paper.source for paper in papers}) or ["unknown"]
-        return papers, {
-            "source": selected_sources[0] if len(selected_sources) == 1 else "mixed",
-            "sources_used": selected_sources,
-            "status": "ok",
-            "returned": len(papers),
-            "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
-            "retrieval_selection": SEARCH_RETRIEVAL_SELECTION,
-            "coverage_report": SEARCH_COVERAGE_JSON,
-            "coverage_status": coverage_report.get("status"),
-            "missing_facets": coverage_report.get("missing_facets", []),
-            "attempt_count": len(retrieval_rows),
-            "candidate_selection_count": len(selection_rows),
-            "kept_after_retrieval_selection": len(papers),
-            "executed_retrieval_rounds": coverage_report.get("retrieval", {}).get("executed_rounds", 1)
-            if isinstance(coverage_report.get("retrieval"), dict)
-            else 1,
-            "planned_retrieval_rounds": query_plan.max_rounds,
-        }
+            selection_rows = _annotate_selection_rounds(
+                selected.selection_rows,
+                retrieval_rows,
+            )
+            selected = replace(
+                selected,
+                selection_rows=tuple(selection_rows),
+                coverage_report=build_coverage_report(
+                    topic=ctx.topic,
+                    questions=list(plan.questions),
+                    query_plan=augmented_plan,
+                    selection_rows=selection_rows,
+                    retrieval_rows=retrieval_rows,
+                    max_documents=max_documents,
+                    next_query_limit=0,
+                ),
+            )
+    return selected, retrieval_rows
 
-    if _allow_fixture_fallback(ctx):
-        ctx.emit(
-            "stage_message",
-            "No live or cached literature metadata available; using fixture metadata because "
-            "--allow-fixture-fallback is enabled.",
-        )
-        fixture_papers = _fixture_papers(problem)
-        fixture_query = primary_query(source_plan)
-        fixture_candidates = [
-            RetrievalCandidate(
-                paper=paper,
-                source="fixture",
-                query=fixture_query,
-                query_index=1,
-                round_index=1,
-                returned_source="fixture",
-            )
-            for paper in fixture_papers
-        ]
-        papers, selection_rows = select_retrieval_candidates(
-            fixture_candidates,
-            max_documents=max_documents,
-            negative_terms=query_plan.negative_terms,
-            priority_facets=query_plan.required_facets,
-        )
-        retrieval_rows.append(
-            _retrieval_round_row(
-                round_index=1,
-                query_index=1,
-                query=fixture_query,
-                source="fixture",
-                status="fixture_fallback",
-                returned=len(fixture_papers),
-            )
-        )
-        coverage_report = build_coverage_report(
-            topic=ctx.topic,
-            questions=research_questions,
-            query_plan=query_plan,
-            selection_rows=selection_rows,
-            retrieval_rows=retrieval_rows,
-            max_documents=max_documents,
-            next_query_limit=0,
-        )
-        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
-        write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), selection_rows)
-        _write_coverage_artifacts(ctx, coverage_report)
-        return papers, {
-            "source": "fixture",
-            "status": "fixture_fallback",
-            "allow_fixture_fallback": True,
-            "returned": len(papers),
-            "retrieval_rounds": SEARCH_RETRIEVAL_ROUNDS,
-            "retrieval_selection": SEARCH_RETRIEVAL_SELECTION,
-            "coverage_report": SEARCH_COVERAGE_JSON,
-            "coverage_status": coverage_report.get("status"),
-            "missing_facets": coverage_report.get("missing_facets", []),
-            "attempt_count": len(retrieval_rows),
-            "candidate_selection_count": len(selection_rows),
-            "kept_after_retrieval_selection": len(papers),
-        }
 
-    write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_ROUNDS), retrieval_rows)
-    write_jsonl(ctx.artifact_path(SEARCH_RETRIEVAL_SELECTION), [])
-    raise LiteratureSearchError(_live_search_failure_message(retrieval_rows))
-
-def _collect_retrieval_round(
+def _search_round(
     ctx: Context,
     source_plan: SourcePlan,
     *,
     queries: list[str],
-    query_specs: dict[str, dict[str, object]],
-    retrieval_rows: list[dict[str, object]],
-    candidates: list[RetrievalCandidate],
-    round_index: int,
-    max_documents: int,
-    start_query_index: int = 1,
     provider_registry: SearchProviderRegistry,
-) -> None:
-    """Run one bounded retrieval round and append traces/candidates in place."""
-    unique_seen = {candidate.paper.id for candidate in candidates}
-    for offset, query in enumerate(queries):
-        query_index = start_query_index + offset
-        query_spec = query_specs.get(query, {})
-        facet = str(query_spec.get("facet") or "")
-        for source in source_plan.sources:
-            papers, attempt = _search_source_once(
-                ctx,
-                source_plan,
-                source=source,
+    stop_after_papers: int,
+) -> SearchResult:
+    providers = tuple(source for source in source_plan.sources if source != "fixture")
+    if not providers:
+        return SearchResult(
+            status="empty",
+            responses=(),
+            papers=(),
+            diagnostics=("No live source provider was configured.",),
+        )
+    for query in queries:
+        ctx.emit("stage_message", f"Searching {', '.join(providers)} for `{query}`.")
+    return search_sources(
+        SearchRequest(
+            queries=tuple(queries),
+            providers=providers,
+            max_results_per_query=source_plan.max_results_per_query,
+            filters=dict(source_plan.filters),
+            cache_dir=_cache_dir(ctx),
+            cache_enabled=source_plan.cache_enabled,
+            stop_after_papers=stop_after_papers,
+            cache_get=get_cached,
+            cache_put=put_cache,
+        ),
+        registry=provider_registry,
+    )
+
+
+def _fixture_search(
+    plan: ResearchPlanResult,
+    topic: str,
+    max_documents: int,
+) -> tuple[SearchResult, list[dict[str, object]]]:
+    query = primary_query(plan.source_plan) or topic
+    papers = _fixture_papers()
+    result = SearchResult(
+        status="completed",
+        responses=(
+            SearchResponse(
+                source="fixture",
                 query=query,
-                query_index=query_index,
-                round_index=round_index,
-                provider_registry=provider_registry,
-            )
-            _attach_query_trace(attempt, query_spec)
-            retrieval_rows.append(attempt)
-            added_count = 0
-            for paper in papers:
-                if paper.id in unique_seen:
-                    continue
-                candidates.append(
-                    RetrievalCandidate(
-                        paper=paper,
-                        source=str(attempt.get("source") or source),
-                        query=query,
-                        query_index=query_index,
-                        round_index=round_index,
-                        facet=facet,
-                        returned_source=str(attempt.get("returned_source") or attempt.get("source") or source),
-                    )
-                )
-                unique_seen.add(paper.id)
-                added_count += 1
-            if added_count and len(unique_seen) >= max_documents:
-                break
-        if len(unique_seen) >= max_documents:
-            break
+                papers=papers,
+                status="offline_fixture",
+            ),
+        ),
+        papers=tuple(papers),
+    )
+    selected = select_search_result(
+        result,
+        policy=SearchSelectionPolicy(
+            topic=topic,
+            questions=plan.questions,
+            query_plan=plan.query_plan,
+            max_documents=max_documents,
+        ),
+    )
+    return selected, _retrieval_rows(selected, plan.query_plan, round_index=1)
 
-def _write_coverage_artifacts(ctx: Context, report: dict[str, object]) -> None:
-    write_json(ctx.artifact_path(SEARCH_COVERAGE_JSON), report)
-    write_text(ctx.artifact_path(SEARCH_COVERAGE_MD), coverage_report_markdown(report))
 
-def _coverage_follow_up_queries(report: dict[str, object]) -> list[str]:
+def _merge_search_results(first: SearchResult, second: SearchResult) -> SearchResult:
+    papers: list[Paper] = []
+    seen: set[str] = set()
+    for paper in (*first.papers, *second.papers):
+        if paper.id in seen:
+            continue
+        papers.append(paper)
+        seen.add(paper.id)
+    responses = (*first.responses, *second.responses)
+    failed = [
+        response
+        for response in responses
+        if response.status.lower() in {"failed", "error", "blocked"}
+    ]
+    status = "failed" if responses and len(failed) == len(responses) else (
+        "partial" if failed else ("completed" if papers else "empty")
+    )
+    return SearchResult(
+        status=status,  # type: ignore[arg-type]
+        responses=responses,
+        papers=tuple(papers),
+        diagnostics=tuple((*first.diagnostics, *second.diagnostics)),
+    )
+
+
+def _retrieval_rows(
+    result: SearchResult,
+    query_plan: QueryPlan,
+    *,
+    round_index: int,
+) -> list[dict[str, object]]:
+    query_numbers = {
+        query: index
+        for index, query in enumerate(query_plan.queries, start=1)
+        if query.strip()
+    }
+    specs = {
+        str(row.get("query") or "").strip(): row
+        for row in query_plan.query_specs
+        if isinstance(row, Mapping) and str(row.get("query") or "").strip()
+    }
+    rows: list[dict[str, object]] = []
+    for index, response in enumerate(result.responses, start=1):
+        query = response.query.strip()
+        spec = specs.get(query, {})
+        row: dict[str, object] = {
+            "schema_version": "retrieval_round.v1",
+            "round": round_index,
+            "query_index": query_numbers.get(query, index),
+            "query": query,
+            "source": response.source,
+            "status": "error" if response.status.lower() == "failed" else response.status,
+            "returned": len(response.papers),
+        }
+        if response.message:
+            row["error"] = response.message
+        facet = str(spec.get("facet") or "").strip()
+        rationale = str(spec.get("rationale") or "").strip()
+        if facet:
+            row["facet"] = facet
+        if rationale:
+            row["query_rationale"] = rationale[:240]
+        for key, limit in (("title_keywords", 5), ("abstract_keywords", 8)):
+            value = spec.get(key)
+            if isinstance(value, list) and value:
+                row[key] = [str(item) for item in value[:limit]]
+        rows.append(row)
+    return rows
+
+
+def _annotate_selection_rounds(
+    rows: tuple[dict[str, Any], ...],
+    retrieval_rows: list[dict[str, object]],
+) -> list[dict[str, Any]]:
+    rounds = {
+        (str(row.get("source") or ""), str(row.get("query") or "")): int(row.get("round") or 1)
+        for row in retrieval_rows
+    }
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        value = dict(row)
+        key = (str(value.get("source") or ""), str(value.get("query") or ""))
+        value["round"] = rounds.get(key, value.get("round", 1))
+        result.append(value)
+    return result
+
+
+def _default_search_provider_registry(source_plan: SourcePlan) -> SearchProviderRegistry:
+    """Build canonical connectors while retaining old test injection points."""
+
+    max_results = source_plan.max_results_per_query
+    return default_search_provider_registry(
+        local_documents=source_plan.local_documents,
+        arxiv_page_size=max_results,
+        connector_factories={
+            "openalex": lambda: OpenAlexConnector(OpenAlexSearchClient()),
+            "semantic_scholar": lambda: SemanticScholarConnector(SemanticScholarSearchClient()),
+            "arxiv": lambda: ArxivConnector(ArxivSearchClient(page_size=max_results)),
+        },
+    )
+
+
+def _write_legacy_synthesis_projection(
+    ctx: Context,
+    *,
+    source_plan: dict[str, Any],
+    papers: list[dict[str, Any]],
+    read_result: ReadResult,
+    coverage: dict[str, Any],
+) -> None:
+    """Write old debug/brief files from canonical typed results."""
+
+    meta = _safe_read_json_artifact(ctx, SEARCH_INDEX_META)
+    fulltext_manifest = _safe_read_json_artifact(ctx, SEARCH_FULLTEXT_MANIFEST)
+    fulltext_extraction = _safe_read_json_artifact(ctx, SEARCH_FULLTEXT_EXTRACTION)
+    paper_notes = list(read_result.paper_notes) or _fallback_notes(
+        _papers_for_bundle(papers, read_result.bundle)
+    )
+    brief_meta = write_synthesis_brief_artifact(
+        stage_dir=ctx.stage_dir(),
+        topic=ctx.topic,
+        source_plan=source_plan,
+        papers=papers,
+        paper_notes=paper_notes,
+        coverage_report=coverage,
+        index_meta=meta,
+        fulltext_manifest=fulltext_manifest,
+        fulltext_extraction=fulltext_extraction,
+    )
+    ctx.emit(
+        "stage_message",
+        "Built compact synthesis brief from the canonical evidence handoff.",
+        idea_candidate_count=brief_meta.get("idea_candidate_count", 0),
+    )
+    if not _debug_artifacts_enabled(ctx):
+        return
+    write_synthesis_evidence_artifacts(
+        stage_dir=ctx.stage_dir(),
+        topic=ctx.topic,
+        source_plan=source_plan,
+        papers=papers,
+        documents=[record.to_row() for record in read_result.bundle.records],
+        sections=[section.to_row() for section in read_result.bundle.sections],
+        chunks=[chunk.to_row() for chunk in read_result.bundle.chunks],
+        index_meta=meta,
+        paper_cards=[card.to_row() for card in read_result.paper_cards],
+        claim_cards=[card.to_row() for card in read_result.claim_cards],
+        method_cards=[card.to_row() for card in read_result.method_cards],
+        dataset_cards=[card.to_row() for card in read_result.dataset_cards],
+        code_links=[link.to_row() for link in read_result.code_links],
+        coverage_report=coverage,
+        fulltext_manifest=fulltext_manifest,
+        fulltext_extraction=fulltext_extraction,
+    )
+
+
+def _downstream_source_plan(ctx: Context) -> dict[str, Any]:
+    plan = _safe_read_json_artifact(ctx, SEARCH_RESEARCH_PLAN)
+    if isinstance(plan.get("source_plan"), dict):
+        return dict(plan["source_plan"])
+    meta = _safe_read_json_artifact(ctx, SEARCH_META)
+    if isinstance(meta.get("source_plan"), dict):
+        return dict(meta["source_plan"])
+    return {
+        "schema_version": "source_plan.reconstructed.v1",
+        "queries": list(meta.get("queries") or [meta.get("query") or ctx.topic]),
+        "sources": list(meta.get("sources") or meta.get("sources_used") or []),
+        "mode": str(ctx.config.get("research_mode") or "standard"),
+        "budget": {},
+    }
+
+
+def _stage_evidence(ctx: Context, stage: str) -> list[dict[str, Any]]:
+    """Retain the old run-level evidence ledger as a compatibility projection."""
+
+    if ctx.config.get("use_retrieval", True) is False:
+        return []
+    ensure_source_plan(ctx.run_dir, ctx.topic)
+    try:
+        rows = collect_stage_evidence(
+            ctx.run_dir,
+            ctx.topic,
+            stage,
+            top_k=_retrieval_top_k(ctx),
+        )
+        ledger = ctx.run_dir / "evidence_ledger.jsonl"
+        if not ledger.exists():
+            write_text(ledger, "")
+        return rows
+    except Exception as exc:
+        ctx.emit("stage_message", f"Legacy retrieval projection failed for {stage}; continuing. {exc}")
+        ledger = ctx.run_dir / "evidence_ledger.jsonl"
+        if not ledger.exists():
+            write_text(ledger, "")
+        return []
+
+
+def _retrieval_top_k(ctx: Context) -> int:
+    try:
+        value = int(ctx.config.get("retrieval_top_k", 4))
+    except (TypeError, ValueError):
+        value = 4
+    return min(max(1, value), 20)
+
+
+def _existing_shortlist_ids(ctx: Context) -> tuple[str, ...] | None:
+    path = ctx.artifact_path(READ_SHORTLIST)
+    if not path.exists():
+        return None
+    return tuple(
+        str(row.get("paper_id") or "").strip()
+        for row in _read_jsonl_artifact(ctx, READ_SHORTLIST)
+        if str(row.get("paper_id") or "").strip()
+    )
+
+
+def _papers_for_bundle(
+    papers: list[dict[str, Any]],
+    bundle: DocumentBundle,
+) -> list[dict[str, Any]]:
+    by_id = {str(paper.get("id") or ""): paper for paper in papers}
+    result: list[dict[str, Any]] = []
+    for record in bundle.records:
+        identifiers = {
+            record.document_id,
+            str(record.source_id or ""),
+            str(record.metadata.get("paper_id") or ""),
+        }
+        paper = next((by_id[item] for item in identifiers if item in by_id), None)
+        if paper is not None and paper not in result:
+            result.append(paper)
+    return result
+
+
+def _fallback_notes(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "paper_id": str(paper.get("id") or ""),
+            "title": str(paper.get("title") or ""),
+            "evidence_role": "other",
+            "one_sentence_summary": "Metadata-only fallback note; no deeper interpretation was generated.",
+            "problem": "unknown from available metadata",
+            "method": "unknown from available metadata",
+            "datasets": [],
+            "metrics": [],
+            "key_claims": [],
+            "limitations": ["Offline reading fallback only saw metadata."],
+            "relation_to_topic": "Kept within the bounded search selection.",
+            "synthesis_hint": "Use only as a cautious metadata reference.",
+            "possible_experiment_hooks": [],
+            "open_questions": ["Use full text or LLM reading before making strong claims."],
+            "confidence": "low",
+        }
+        for paper in papers
+    ]
+
+
+def _render_fallback_notes(notes: list[dict[str, Any]]) -> str:
+    lines = ["# Literature Notes", ""]
+    for note in notes:
+        lines.extend(
+            [
+                f"## {note.get('paper_id') or 'unknown'}",
+                f"- Summary: {note.get('one_sentence_summary') or 'Not specified.'}",
+                f"- Method: {note.get('method') or 'Not specified.'}",
+                f"- Limitations: {', '.join(str(item) for item in note.get('limitations', [])) or 'Not specified.'}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _fallback_synthesis_markdown(topic: str, notes: list[dict[str, Any]]) -> str:
+    excerpt = json.dumps(notes[:3], ensure_ascii=False, indent=2)[:1200]
+    return (
+        "# Synthesis\n\n"
+        f"The canonical evidence boundary produced a bounded synthesis for `{topic}`.\n\n"
+        "Available evidence was insufficient for model-generated prose; the retained metadata is:\n\n"
+        f"```json\n{excerpt}\n```\n"
+    )
+
+
+def _coverage_follow_up_queries(report: Mapping[str, Any]) -> list[str]:
     rows = report.get("follow_up_queries")
     if not isinstance(rows, list):
         return []
-    queries: list[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        query = str(row.get("query") or "").strip()
-        if query:
-            queries.append(query)
-    return queries
+    return [
+        query
+        for row in rows
+        if isinstance(row, Mapping)
+        for query in [str(row.get("query") or "").strip()]
+        if query
+    ]
 
-def _coverage_follow_up_specs(report: dict[str, object]) -> dict[str, dict[str, object]]:
+
+def _coverage_follow_up_specs(report: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows = report.get("follow_up_queries")
     if not isinstance(rows, list):
-        return {}
-    specs: dict[str, dict[str, object]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        query = str(row.get("query") or "").strip()
-        if not query:
-            continue
-        specs[query] = {
+        return []
+    return [
+        {
             "query": query,
             "facet": str(row.get("facet") or ""),
             "rationale": str(row.get("reason") or "coverage_follow_up"),
         }
-    return specs
+        for row in rows
+        if isinstance(row, Mapping)
+        for query in [str(row.get("query") or "").strip()]
+        if query
+    ]
+
 
 def _follow_up_query_limit(source_plan: SourcePlan) -> int:
     value = source_plan.budget.get("max_follow_up_queries")
@@ -603,740 +845,109 @@ def _follow_up_query_limit(source_plan: SourcePlan) -> int:
         return min(value, 5)
     return 3
 
-def _search_source_once(
-    ctx: Context,
-    source_plan: SourcePlan,
-    *,
-    source: str,
-    query: str,
-    query_index: int,
-    round_index: int,
-    provider_registry: SearchProviderRegistry,
-) -> tuple[list[Paper], dict[str, object]]:
-    max_papers = source_plan.max_results_per_query
-    if not provider_registry.has(source):
-        return [], _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source=source,
-            status="unsupported",
-            returned=0,
-            reason="provider not registered",
-        )
-    if source == "local_files":
-        return _search_local_files_once(
-            ctx,
-            source_plan,
-            query,
-            query_index,
-            round_index,
-            provider_registry=provider_registry,
-        )
-    if source == "openalex":
-        return _search_openalex_once(
-            ctx,
-            query,
-            max_papers,
-            query_index=query_index,
-            round_index=round_index,
-            cache_enabled=source_plan.cache_enabled,
-            provider_registry=provider_registry,
-        )
-    if source == "semantic_scholar":
-        return _search_semantic_scholar_once(
-            ctx,
-            query,
-            max_papers,
-            query_index=query_index,
-            round_index=round_index,
-            cache_enabled=source_plan.cache_enabled,
-            provider_registry=provider_registry,
-        )
-    if source == "arxiv":
-        return _search_arxiv_once(
-            ctx,
-            query,
-            max_papers,
-            query_index=query_index,
-            round_index=round_index,
-            cache_enabled=source_plan.cache_enabled,
-            provider_registry=provider_registry,
-        )
-    return _search_registered_source_once(
-        ctx,
-        source_plan,
-        source=source,
-        query=query,
-        query_index=query_index,
-        round_index=round_index,
-        provider_registry=provider_registry,
-    )
+
+def _planned_queries(query_plan: QueryPlan, source_plan: SourcePlan) -> list[str]:
+    queries = [query.strip() for query in query_plan.queries if query.strip()]
+    if queries:
+        return queries
+    return [query.strip() for query in source_plan.queries if query.strip()] or [query_plan.topic]
 
 
-def _search_registered_source_once(
-    ctx: Context,
-    source_plan: SourcePlan,
-    *,
-    source: str,
-    query: str,
-    query_index: int,
-    round_index: int,
-    provider_registry: SearchProviderRegistry,
-) -> tuple[list[Paper], dict[str, object]]:
-    """Run a connector registered outside the built-in provider set.
+def _search_query(ctx: Context, problem: str) -> str:
+    configured = ctx.config.get("search_query")
+    if isinstance(configured, str) and configured.strip():
+        return configured.strip()
+    return (ctx.topic.strip() or " ".join(problem.split()))[:240]
 
-    Built-in sources keep their existing exception-specific cache behavior.
-    Extensions have only the source-agnostic connector contract, so failures
-    are converted into a normal retrieval trace at this boundary.
-    """
+
+def _max_papers(ctx: Context) -> int:
     try:
-        ctx.emit(
-            "stage_message",
-            f"Searching {source} for up to {source_plan.max_results_per_query} paper(s) with `{query}`.",
-        )
-        response = provider_registry.resolve(source).search(
-            SearchQuery(query=query, max_results=source_plan.max_results_per_query)
-        )
-        papers = response.papers
-        if papers and source_plan.cache_enabled:
-            put_cache(
-                query,
-                source,
-                source_plan.max_results_per_query,
-                [paper.to_row() for paper in papers],
-            )
-        status = str(response.status or ("ok" if papers else "empty"))
-        return papers, _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source=source,
-            status=status,
-            returned=len(papers),
-        )
-    except Exception as exc:
-        ctx.emit("stage_message", f"{source} search failed. {exc}")
-        return [], _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source=source,
-            status="error",
-            returned=0,
-            error=str(exc),
-        )
+        value = int(ctx.config.get("max_papers", 5))
+    except (TypeError, ValueError):
+        value = 5
+    return min(max(1, value), 20)
 
-def _search_local_files_once(
-    ctx: Context,
-    source_plan: SourcePlan,
-    query: str,
-    query_index: int,
-    round_index: int,
-    *,
-    provider_registry: SearchProviderRegistry,
-) -> tuple[list[Paper], dict[str, object]]:
-    if not source_plan.local_documents:
-        return [], _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source="local_files",
-            status="skipped",
-            returned=0,
-            reason="no local_documents",
-        )
-    ctx.emit(
-        "stage_message",
-        f"Searching {len(source_plan.local_documents)} local document(s) for `{query}`.",
-    )
-    response = provider_registry.resolve("local_files").search(
-        SearchQuery(query=query, max_results=source_plan.max_results_per_query)
-    )
-    status = "ok" if response.papers else "empty"
-    return response.papers, _retrieval_round_row(
-        round_index=round_index,
-        query_index=query_index,
-        query=query,
-        source="local_files",
-        status=status,
-        returned=len(response.papers),
-    )
-
-def _search_openalex_once(
-    ctx: Context,
-    query: str,
-    max_papers: int,
-    *,
-    query_index: int,
-    round_index: int,
-    cache_enabled: bool,
-    provider_registry: SearchProviderRegistry,
-) -> tuple[list[Paper], dict[str, object]]:
-    try:
-        ctx.emit("stage_message", f"Searching OpenAlex for up to {max_papers} paper(s) with `{query}`.")
-        response = provider_registry.resolve("openalex").search(
-            SearchQuery(query=query, max_results=max_papers)
-        )
-        papers = response.papers
-        if papers:
-            put_cache(query, "openalex", max_papers, [paper.to_row() for paper in papers])
-        return papers, _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source="openalex",
-            status="ok" if papers else "empty",
-            returned=len(papers),
-        )
-    except OpenAlexSearchError as exc:
-        ctx.emit("stage_message", f"OpenAlex search failed. {exc}")
-        if ctx.config.get("strict_search") is not True and cache_enabled:
-            cached = _cached_papers(ctx, query, max_papers, source="openalex")
-            if cached is not None:
-                return cached, _retrieval_round_row(
-                    round_index=round_index,
-                    query_index=query_index,
-                    query=query,
-                    source="openalex",
-                    returned_source="openalex_cache",
-                    status="cache",
-                    returned=len(cached),
-                )
-        return [], _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source="openalex",
-            status="error",
-            returned=0,
-            error=str(exc),
-        )
-
-def _search_semantic_scholar_once(
-    ctx: Context,
-    query: str,
-    max_papers: int,
-    *,
-    query_index: int,
-    round_index: int,
-    cache_enabled: bool,
-    provider_registry: SearchProviderRegistry,
-) -> tuple[list[Paper], dict[str, object]]:
-    try:
-        ctx.emit("stage_message", f"Searching Semantic Scholar for up to {max_papers} paper(s) with `{query}`.")
-        response = provider_registry.resolve("semantic_scholar").search(
-            SearchQuery(query=query, max_results=max_papers)
-        )
-        papers = response.papers
-        if papers:
-            put_cache(query, "semantic_scholar", max_papers, [paper.to_row() for paper in papers])
-        return papers, _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source="semantic_scholar",
-            status="ok" if papers else "empty",
-            returned=len(papers),
-        )
-    except SemanticScholarSearchError as exc:
-        ctx.emit("stage_message", f"Semantic Scholar search failed. {exc}")
-        if ctx.config.get("strict_search") is not True and cache_enabled:
-            cached = _cached_papers(ctx, query, max_papers, source="semantic_scholar")
-            if cached is not None:
-                return cached, _retrieval_round_row(
-                    round_index=round_index,
-                    query_index=query_index,
-                    query=query,
-                    source="semantic_scholar",
-                    returned_source="semantic_scholar_cache",
-                    status="cache",
-                    returned=len(cached),
-                )
-        return [], _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source="semantic_scholar",
-            status="error",
-            returned=0,
-            error=str(exc),
-        )
-
-def _search_arxiv_once(
-    ctx: Context,
-    query: str,
-    max_papers: int,
-    *,
-    query_index: int,
-    round_index: int,
-    cache_enabled: bool,
-    provider_registry: SearchProviderRegistry,
-) -> tuple[list[Paper], dict[str, object]]:
-    try:
-        ctx.emit("stage_message", f"Searching arXiv for up to {max_papers} paper(s) with `{query}`.")
-        response = provider_registry.resolve("arxiv").search(
-            SearchQuery(query=query, max_results=max_papers)
-        )
-        papers = response.papers
-        if papers:
-            put_cache(query, "arxiv", max_papers, [paper.to_row() for paper in papers])
-        return papers, _retrieval_round_row(
-            round_index=round_index,
-            query_index=query_index,
-            query=query,
-            source="arxiv",
-            status="ok" if papers else "empty",
-            returned=len(papers),
-        )
-    except ArxivRateLimitError as exc:
-        ctx.emit("stage_message", "arXiv rate limit hit; checking local cache.")
-        status = "rate_limited"
-        error = str(exc)
-    except LiteratureSearchError as exc:
-        ctx.emit("stage_message", f"arXiv search failed. {exc}")
-        status = "error"
-        error = str(exc)
-    if ctx.config.get("strict_search") is not True and cache_enabled:
-        cached = _cached_papers(ctx, query, max_papers, source="arxiv")
-        if cached is not None:
-            return cached, _retrieval_round_row(
-                round_index=round_index,
-                query_index=query_index,
-                query=query,
-                source="arxiv",
-                returned_source="arxiv_cache",
-                status="cache",
-                returned=len(cached),
-            )
-    return [], _retrieval_round_row(
-        round_index=round_index,
-        query_index=query_index,
-        query=query,
-        source="arxiv",
-        status=status,
-        returned=0,
-        error=error,
-    )
-
-def _retrieval_round_row(
-    *,
-    round_index: int,
-    query_index: int,
-    query: str,
-    source: str,
-    status: str,
-    returned: int,
-    returned_source: str | None = None,
-    reason: str | None = None,
-    error: str | None = None,
-) -> dict[str, object]:
-    row: dict[str, object] = {
-        "schema_version": "retrieval_round.v1",
-        "round": round_index,
-        "query_index": query_index,
-        "query": query,
-        "source": source,
-        "status": status,
-        "returned": returned,
-    }
-    if returned_source:
-        row["returned_source"] = returned_source
-    if reason:
-        row["reason"] = reason
-    if error:
-        row["error"] = error
-    return row
 
 def _research_document_cap(source_plan: SourcePlan, default: int) -> int:
     value = source_plan.budget.get("max_documents")
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return max(1, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else max(1, default)
+
 
 def _candidate_collection_cap(max_documents: int) -> int:
-    """Return a bounded raw-candidate cap before final retrieval selection."""
+    return 1 if max_documents <= 1 else min(max_documents * 2, max_documents + 10)
 
-    if max_documents <= 1:
-        return 1
-    return min(max_documents * 2, max_documents + 10)
 
-def _planned_query_attempts(source_plan: SourcePlan) -> list[str]:
-    queries = [query.strip() for query in source_plan.queries if query.strip()]
-    return queries or [primary_query(source_plan)]
+def _cache_dir(ctx: Context) -> Path:
+    value = ctx.config.get("research_cache_dir")
+    return Path(value) if isinstance(value, str) and value.strip() else DEFAULT_CACHE_DIR
 
-def _query_specs_by_query(query_plan: QueryPlan) -> dict[str, dict[str, object]]:
-    specs: dict[str, dict[str, object]] = {}
-    for spec in query_plan.query_specs:
-        if not isinstance(spec, dict):
-            continue
-        query = str(spec.get("query") or "").strip()
-        if query:
-            specs[query] = spec
-    return specs
-
-def _attach_query_trace(row: dict[str, object], query_spec: dict[str, object]) -> None:
-    """Add compact query-intent metadata to a retrieval attempt row."""
-    if not query_spec:
-        return
-    facet = str(query_spec.get("facet") or "").strip()
-    if facet:
-        row["facet"] = facet
-    title_keywords = query_spec.get("title_keywords")
-    if isinstance(title_keywords, list) and title_keywords:
-        row["title_keywords"] = [str(item) for item in title_keywords[:5]]
-    abstract_keywords = query_spec.get("abstract_keywords")
-    if isinstance(abstract_keywords, list) and abstract_keywords:
-        row["abstract_keywords"] = [str(item) for item in abstract_keywords[:8]]
-    rationale = str(query_spec.get("rationale") or "").strip()
-    if rationale:
-        row["query_rationale"] = rationale[:240]
-
-def _cached_papers(
-    ctx: Context,
-    query: str,
-    max_papers: int,
-    *,
-    source: str,
-) -> list[Paper] | None:
-    """Return cached papers after live search failure.
-
-    Args:
-        ctx: Current pipeline context for progress messages.
-        query: Query used for the live search attempt.
-        max_papers: Search result limit.
-        source: Cache namespace, such as ``openalex`` or ``arxiv``.
-
-    Returns:
-        Cached papers, or ``None`` when no cache entry is available.
-    """
-    cached_rows = get_cached(query, source, max_papers)
-    if cached_rows:
-        ctx.emit(
-            "stage_message",
-            f"Using {len(cached_rows)} cached {source} paper(s) after live search failed.",
-        )
-        return [Paper.from_row(row) for row in cached_rows]
-
-    ctx.emit(
-        "stage_message",
-        f"No cached {source} metadata available.",
-    )
-    return None
 
 def _allow_fixture_fallback(ctx: Context) -> bool:
-    """Return whether live search failures may fall back to fixture metadata."""
     return ctx.config.get("allow_fixture_fallback") is True
 
+
 def _should_use_source_plan(ctx: Context, source_plan: SourcePlan) -> bool:
-    """Return whether search should execute planned sources instead of fixture rows."""
     if ctx.config.get("use_arxiv") is True:
         return True
     if any(source == "local_files" for source in source_plan.sources):
         return True
-    configured_sources = ctx.config.get("research_sources")
-    if isinstance(configured_sources, list):
-        return any(str(source).strip() and str(source).strip() != "fixture" for source in configured_sources)
-    return False
+    configured = ctx.config.get("research_sources")
+    return isinstance(configured, list) and any(
+        str(source).strip() and str(source).strip() != "fixture" for source in configured
+    )
 
-def _live_search_failure_message(attempts: list[dict[str, object]]) -> str:
-    """Explain why live search failed without silently substituting fixture rows."""
-    attempt_summary = "; ".join(
-        f"{item.get('source')}={item.get('status')}" for item in attempts
+
+def _live_search_failure_message(result: SearchResult) -> str:
+    attempts = "; ".join(
+        f"{response.source}={response.status}" for response in result.responses
     ) or "no provider attempts recorded"
     return (
-        "No live or cached literature metadata is available. Default runs do not "
-        "use fixture metadata because that would make the report look literature-backed "
-        "when it is not. Retry later, lower --max-papers, run with --offline-search "
-        "for tests, or add --allow-fixture-fallback for demos. "
-        f"Provider attempts: {attempt_summary}"
+        "No live or cached literature metadata is available. Default runs do not use fixture metadata "
+        "because that would make the report look literature-backed when it is not. Retry later, lower "
+        "--max-papers, run with --offline-search for tests, or add --allow-fixture-fallback for demos. "
+        f"Provider attempts: {attempts}"
     )
 
-def execute_read(ctx: Context) -> None:
-    papers = load_search_paper_rows(ctx)
-    client = _llm_client(ctx)
-    _write_read_review(ctx, papers, client)
-    reading_papers = _shortlisted_papers(ctx, papers)
-    evidence = _stage_evidence(ctx, "read")
-    evidence_snippets = format_evidence_snippets(evidence)
-    if client is not None and reading_papers:
-        try:
-            notes = read_paper_notes_with_llm(
-                client,
-                papers=reading_papers,
-                evidence_snippets=evidence_snippets,
-                config=ctx.config,
-                emit=lambda message: ctx.emit("stage_message", message),
-            )
-            write_json(ctx.artifact_path("paper_notes.json"), notes)
-            write_text(ctx.artifact_path("notes.md"), render_paper_notes_markdown(notes))
-            if _debug_artifacts_enabled(ctx):
-                _write_read_cards(ctx)
-            return
-        except LLMError as exc:
-            _handle_llm_failure(ctx, "LLM reading failed", exc)
 
-    notes = [
-        {
-            "paper_id": paper["id"],
-            "title": paper.get("title", ""),
-            "evidence_role": _shortlist_value(ctx, str(paper.get("id") or ""), "evidence_role") or "other",
-            "one_sentence_summary": "Metadata-only fallback note; no deeper interpretation was generated.",
-            "problem": "unknown from available metadata",
-            "method": "unknown from available metadata",
-            "datasets": [],
-            "metrics": [],
-            "key_claims": [],
-            "limitations": ["Offline reading fallback only saw metadata and generated no LLM interpretation."],
-            "relation_to_topic": "Kept for structured reading because it was retrieved within the search budget.",
-            "synthesis_hint": _shortlist_value(ctx, str(paper.get("id") or ""), "synthesis_hint"),
-            "possible_experiment_hooks": [],
-            "open_questions": ["Use LLM reading or full-text parsing before making strong claims."],
-            "confidence": "low",
-        }
-        for paper in reading_papers
-    ]
-    write_json(ctx.artifact_path("paper_notes.json"), notes)
-    write_text(ctx.artifact_path("notes.md"), render_paper_notes_markdown(notes))
-    if _debug_artifacts_enabled(ctx):
-        _write_read_cards(ctx)
+def _result_source(papers: list[Paper]) -> str:
+    sources = sorted({paper.source for paper in papers if paper.source})
+    return sources[0] if len(sources) == 1 else ("mixed" if sources else "unknown")
 
-def _write_read_review(ctx: Context, papers: list[dict[str, Any]], client: LLMClient | None) -> None:
-    """Write read-stage paper review, shortlist, and reading table artifacts."""
-    llm_decisions: list[dict[str, Any]] | None = None
-    if client is not None and papers and _read_screening_mode(ctx) != "deterministic":
-        try:
-            llm_decisions = screen_papers_with_llm(
-                client,
-                topic=ctx.topic,
-                problem_markdown=load_problem_markdown(ctx),
-                research_plan_json=json.dumps(
-                    _safe_read_json_artifact(ctx, SEARCH_RESEARCH_PLAN),
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                papers=papers,
-                config=ctx.config,
-                emit=lambda message: ctx.emit("stage_message", message),
-            )
-        except LLMError as exc:
-            _handle_llm_failure(ctx, "LLM read screening failed", exc)
-    meta = write_read_review_artifacts(
-        stage_dir=ctx.stage_dir(),
-        papers=papers,
-        retrieval_selection=_read_jsonl_artifact(ctx, SEARCH_RETRIEVAL_SELECTION),
-        coverage_report=_safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
-        llm_decisions=llm_decisions,
-    )
-    ctx.emit(
-        "stage_message",
-        "Built read-stage shortlist and reading table.",
-        shortlist_count=meta.get("shortlist_count", 0),
-    )
 
-def _read_screening_mode(ctx: Context) -> str:
-    value = str(ctx.config.get("read_screening") or ctx.config.get("research_read_screening") or "auto")
-    return value if value in {"auto", "llm", "deterministic"} else "auto"
+def _all_fixture(papers: list[Paper]) -> bool:
+    return bool(papers) and all(paper.source == "fixture" for paper in papers)
 
-def _shortlisted_papers(ctx: Context, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return papers selected by read-stage shortlist, preserving shortlist order."""
-    if not ctx.artifact_path(READ_SHORTLIST).exists():
-        return papers
-    shortlist = _read_jsonl_artifact(ctx, READ_SHORTLIST)
-    paper_by_id = {str(paper.get("id") or ""): paper for paper in papers}
-    selected: list[dict[str, Any]] = []
-    for row in shortlist:
-        paper = paper_by_id.get(str(row.get("paper_id") or ""))
-        if paper is not None:
-            selected.append(paper)
-    return selected
 
-def _shortlisted_document_ids(ctx: Context) -> set[str]:
-    return {str(row.get("paper_id") or "") for row in _read_jsonl_artifact(ctx, READ_SHORTLIST) if row.get("paper_id")}
+def _executed_rounds(coverage: Mapping[str, Any]) -> int:
+    retrieval = coverage.get("retrieval")
+    return int(retrieval.get("executed_rounds") or 0) if isinstance(retrieval, Mapping) else 0
 
-def _shortlist_value(ctx: Context, paper_id: str, key: str) -> str:
-    for row in _read_jsonl_artifact(ctx, READ_SHORTLIST):
-        if str(row.get("paper_id") or "") == paper_id:
-            return str(row.get(key) or "")
-    return ""
+
+def _idea_limit(ctx: Context) -> int:
+    value = ctx.config.get("research_idea_limit", 3)
+    try:
+        return min(max(1, int(value)), 8)
+    except (TypeError, ValueError):
+        return 3
+
 
 def _debug_artifacts_enabled(ctx: Context) -> bool:
     value = ctx.config.get("debug_artifacts", False)
     return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
 
-def _write_read_cards(ctx: Context) -> None:
-    """Write semantic reading cards from retrieved documents and chunks."""
-    bundle = load_search_document_bundle(ctx)
-    if not bundle.records:
-        return
-    paper_ids = None
-    if ctx.artifact_path(READ_SHORTLIST).exists():
-        paper_ids = tuple(_shortlisted_document_ids(ctx))
-    result = read_documents(
-        ReadRequest(bundle=bundle, paper_ids=paper_ids)
-    )
-    meta = write_read_card_artifacts_from_result(stage_dir=ctx.stage_dir(), result=result)
-    ctx.emit(
-        "stage_message",
-        "Built reading cards from retrieved documents.",
-        paper_card_count=meta.get("paper_card_count", 0),
-        claim_card_count=meta.get("claim_card_count", 0),
-    )
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = value.strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            result.append(text)
+    return result
 
 
-def execute_synthesize(ctx: Context) -> None:
-    notes = load_notes_markdown(ctx)
-    paper_notes = json.dumps(load_paper_notes_json(ctx), indent=2, ensure_ascii=False)
-    _write_synthesis_evidence(ctx)
-    evidence = _stage_evidence(ctx, "synthesize")
-    evidence_snippets = format_evidence_snippets(evidence)
-    client = _llm_client(ctx)
-    if client is not None:
-        try:
-            ctx.emit("stage_message", "Calling LLM for synthesis.")
-            response = client.ask_json(
-                SYNTHESIZE_SYSTEM,
-                synthesize_user_prompt(
-                    notes,
-                    paper_notes,
-                    evidence_snippets=evidence_snippets,
-                    structured_context_json=_synthesis_structured_context(ctx),
-                ),
-                label="synthesize",
-            )
-            synthesis = _text_field(response, "synthesis_markdown")
-            hypothesis = _text_field(response, "hypothesis_markdown")
-            if synthesis and hypothesis:
-                write_text(ctx.artifact_path("synthesis.md"), _ensure_heading(synthesis, "Synthesis"))
-                write_text(ctx.artifact_path("hypothesis.md"), _ensure_heading(hypothesis, "Hypothesis"))
-                return
-        except LLMError as exc:
-            _handle_llm_failure(ctx, "LLM synthesis failed", exc)
-
-        _handle_llm_failure(
-            ctx,
-            "LLM synthesis returned incomplete output",
-            LLMError("response did not contain both synthesis_markdown and hypothesis_markdown"),
-        )
-
-    write_text(
-        ctx.artifact_path("synthesis.md"),
-        "# Synthesis\n\n"
-        "The current skeleton confirms that stage outputs can become later inputs.\n\n"
-        f"Notes excerpt:\n\n{notes[:500]}\n",
-    )
-    write_text(
-        ctx.artifact_path("hypothesis.md"),
-        "# Hypothesis\n\n"
-        "A file-first staged pipeline makes auto-research behavior easier to inspect "
-        "and resume than a hidden monolithic agent loop.\n",
-    )
-
-def _synthesis_structured_context(ctx: Context) -> str:
-    """Return compact JSON context for LLM synthesis."""
-    context = {
-        "schema_version": "synthesis_prompt_context.v1",
-        "reading": {
-            "shortlist": _read_jsonl_artifact(ctx, READ_SHORTLIST)[:12],
-            "screening_decisions": _read_jsonl_artifact(ctx, READ_SCREENING_DECISIONS)[:24],
-            "paper_briefs": load_paper_notes_json(ctx)[:12],
-        },
-        "retrieval_coverage": _safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
-        "synthesis_brief": _safe_read_json_artifact(ctx, SYNTHESIS_BRIEF_JSON),
-    }
-    if _debug_artifacts_enabled(ctx):
-        context["debug_cards"] = {
-            "paper_cards": _read_jsonl_artifact(ctx, READ_PAPER_CARDS)[:12],
-            "claim_cards": _read_jsonl_artifact(ctx, READ_CLAIM_CARDS)[:24],
-            "method_cards": _read_jsonl_artifact(ctx, READ_METHOD_CARDS)[:12],
-            "dataset_cards": _read_jsonl_artifact(ctx, READ_DATASET_CARDS)[:12],
-            "code_links": _read_jsonl_artifact(ctx, READ_CODE_LINKS)[:12],
-        }
-        context["debug_synthesis_evidence_pack"] = _safe_read_json_artifact(ctx, SYNTHESIS_EVIDENCE_PACK_JSON)
-    return json.dumps(context, ensure_ascii=False, indent=2)
-
-def _write_synthesis_evidence(ctx: Context) -> None:
-    """Write synthesis-owned compact brief and optional debug evidence tables."""
-    documents = _read_jsonl_artifact(ctx, SEARCH_DOCUMENTS)
-    chunks = _read_jsonl_artifact(ctx, SEARCH_CHUNKS)
-    if not documents:
-        return
-    source_plan = _downstream_source_plan(ctx)
-    paper_notes = load_paper_notes_json(ctx)
-    meta = write_synthesis_brief_artifact(
-        stage_dir=ctx.stage_dir(),
-        topic=ctx.topic,
-        source_plan=source_plan,
-        papers=load_search_paper_rows(ctx),
-        paper_notes=paper_notes,
-        coverage_report=_safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
-        index_meta=_safe_read_json_artifact(ctx, SEARCH_INDEX_META),
-        fulltext_manifest=_safe_read_json_artifact(ctx, SEARCH_FULLTEXT_MANIFEST),
-        fulltext_extraction=_safe_read_json_artifact(ctx, SEARCH_FULLTEXT_EXTRACTION),
-    )
-    ctx.emit(
-        "stage_message",
-        "Built compact synthesis brief from paper notes.",
-        idea_candidate_count=meta.get("idea_candidate_count", 0),
-    )
-    if not _debug_artifacts_enabled(ctx):
-        return
-    paper_cards = _read_jsonl_artifact(ctx, READ_PAPER_CARDS)
-    claim_cards = _read_jsonl_artifact(ctx, READ_CLAIM_CARDS)
-    debug_meta = write_synthesis_evidence_artifacts(
-        stage_dir=ctx.stage_dir(),
-        topic=ctx.topic,
-        source_plan=source_plan,
-        papers=load_search_paper_rows(ctx),
-        documents=documents,
-        sections=_read_jsonl_artifact(ctx, SEARCH_SECTIONS),
-        chunks=chunks,
-        index_meta=_safe_read_json_artifact(ctx, SEARCH_INDEX_META),
-        paper_cards=paper_cards,
-        claim_cards=claim_cards,
-        method_cards=_read_jsonl_artifact(ctx, READ_METHOD_CARDS),
-        dataset_cards=_read_jsonl_artifact(ctx, READ_DATASET_CARDS),
-        code_links=_read_jsonl_artifact(ctx, READ_CODE_LINKS),
-        coverage_report=_safe_read_json_artifact(ctx, SEARCH_COVERAGE_JSON),
-        fulltext_manifest=_safe_read_json_artifact(ctx, SEARCH_FULLTEXT_MANIFEST),
-        fulltext_extraction=_safe_read_json_artifact(ctx, SEARCH_FULLTEXT_EXTRACTION),
-    )
-    ctx.emit(
-        "stage_message",
-        "Built debug synthesis evidence pack and bounded idea candidates.",
-        idea_candidate_count=debug_meta.get("idea_candidate_count", 0),
-    )
-
-def _search_query(ctx: Context, problem: str) -> str:
-    """Build the literature search query for the current run.
-
-    Args:
-        ctx: Current pipeline context.
-        problem: Research problem Markdown from the plan stage.
-
-    Returns:
-        User-provided search query when configured, otherwise a compact query
-        derived from the original topic.
-    """
-    configured = ctx.config.get("search_query")
-    if isinstance(configured, str) and configured.strip():
-        return configured.strip()
-    topic = ctx.topic.strip()
-    if topic:
-        return topic[:240]
-    return " ".join(problem.split())[:240]
-
-def _max_papers(ctx: Context) -> int:
-    """Read the configured paper limit with a conservative default."""
-    value = ctx.config.get("max_papers", 5)
-    try:
-        limit = int(value)
-    except (TypeError, ValueError):
-        limit = 5
-    return min(max(1, limit), 20)
-
-def _fixture_papers(problem: str) -> list[Paper]:
-    """Return deterministic paper metadata for offline tests and demos."""
+def _fixture_papers() -> list[Paper]:
     return [
         Paper(
             id="fixture-001",
@@ -1351,9 +962,11 @@ def _fixture_papers(problem: str) -> list[Paper]:
         )
     ]
 
+
 __all__ = [
     "execute_plan",
     "execute_search",
     "execute_read",
     "execute_synthesize",
+    "_write_read_cards",
 ]

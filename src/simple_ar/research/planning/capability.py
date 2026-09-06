@@ -182,10 +182,16 @@ def build_research_plan(request: ResearchPlanRequest) -> ResearchPlanResult:
         default_query=request.default_query,
         questions=questions,
     )
+    # A caller may provide seed queries in the config, but once the LLM has
+    # returned a normalized query plan, the executable source plan must carry
+    # those normalized queries. Otherwise the old seed list silently wins and
+    # the canonical handoff loses the planner's query expansion.
+    source_config = dict(config)
+    source_config["research_queries"] = list(query_plan.queries)
     source_plan = build_source_plan(
         topic=request.topic,
         problem_markdown=request.problem_markdown,
-        config=config,
+        config=source_config,
         default_query=primary_query(query_plan) or request.topic,
         default_max_results=request.default_max_results,
     )
@@ -272,10 +278,12 @@ def build_requested_research_plan(request: ResearchPlanRequest) -> ResearchPlanR
         default_query=request.default_query or request.topic,
         data=data,
     )
+    source_config = dict(config)
+    source_config["research_queries"] = list(query_plan.queries)
     source_plan = build_source_plan(
         topic=request.topic,
         problem_markdown=request.problem_markdown,
-        config=config,
+        config=source_config,
         default_query=primary_query(query_plan) or request.topic,
         default_max_results=request.default_max_results,
     )

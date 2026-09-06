@@ -60,11 +60,14 @@ duplicate branch over splitting a large but cohesive adapter into more layers.
 The cleanup rule is deliberately asymmetric: remove code when its production
 consumer is gone, but do not split a cohesive compatibility adapter merely to
 make the line count look smaller. The remaining large files are named debt,
-not new architectural owners: `pipeline_stages/research.py` is the old
-search/read/synthesis adapter, `core/session.py` is the attempt boundary, and
-`report/service.py` is the established report writer. Their next migrations
-must move one real capability at a time and delete the old implementation only
-after the canonical path owns the same behavior and regression evidence.
+not new architectural owners: `pipeline_stages/research.py` points to the
+legacy research facade, `core/session.py` is the attempt boundary, and
+`report/service.py` is the established report writer used by the canonical
+report application as well as the old projection. The research facade now
+delegates Search/Read/Synthesis rules to canonical modules and keeps only old
+Context/artifact projection and bounded compatibility behavior. Delete it
+only after its run/resume, benchmark, and historical-reader consumers have
+been migrated and the old-format regressions remain green.
 
 ## Ownership Map
 
@@ -225,10 +228,14 @@ usage, and provenance. This preserves the result boundary after the process
 ends without copying full text or raw logs; the legacy eight-stage artifact
 layout is unchanged.
 
-The old monolithic CLI and stage handler modules have been moved out of
-`src/simple_ar/_legacy/`. That package now only contains compatibility aliases
-for older imports. New behavior should be implemented in the domain modules
-under `core/`, `research/`, `experiment/`, `report/`, and `code_task/`.
+The old monolithic research implementation has been moved behind
+`src/simple_ar/_legacy/research_stages.py`, while the public
+`pipeline_stages/research.py` path remains an import alias for old callers.
+That private module is now a compatibility facade: it adapts `Context`, keeps
+legacy artifact names and bounded retrieval traces, and delegates research
+behavior to canonical modules. The `_legacy` package also keeps aliases for
+older imports. New behavior should be implemented in the domain modules under
+`core/`, `research/`, `experiment/`, `report/`, and `code_task/`.
 
 CLI code is split by responsibility:
 
@@ -242,10 +249,10 @@ Pipeline-stage orchestration is split by workflow area:
 
 ```text
 src/simple_ar/pipeline_stages/
-  research.py    stages 01-04: plan, search, read, synthesize
-  experiment.py  stages 05-07: design, code, run
-  report.py      stage 08 report packaging and safety checks
-  common.py      shared stage helpers such as LLM access and artifact reads
+  research.py    alias to the compatibility research facade (stages 01-04)
+  experiment.py  old Context adapters for stages 05-07
+  report.py      old Context adapter for stage 08
+  common.py      compatibility-only artifact/evidence helpers
   registry.py    HANDLERS registry used by PipelineRunner
   handlers.py    compatibility aggregation only; do not add new logic here
 ```
@@ -687,11 +694,12 @@ When adding report behavior:
   strings;
 - keep `service.py` as the stage-level coordinator and artifact writer.
 
-`report/service.py`, `pipeline_stages/research.py`, and `cli/main.py` are still
-large enough to be treated as yellow lights. Do not add unrelated behavior to
-them. New work should either move logic into the owning domain module or reduce
-these files. This is a maintenance rule, not a demand to split every small
-helper into a separate file.
+`report/service.py`, the private legacy research facade, and `cli/main.py` are
+still large enough to be treated as yellow lights. `pipeline_stages/research.py`
+itself is only an alias now. Do not add unrelated behavior to these files. New
+work should either move logic into the owning domain module or reduce a
+compatibility boundary when its consumers are gone. This is a maintenance rule,
+not a demand to split every small helper into a separate file.
 
 ## Extending Tools And External Agent Backends
 

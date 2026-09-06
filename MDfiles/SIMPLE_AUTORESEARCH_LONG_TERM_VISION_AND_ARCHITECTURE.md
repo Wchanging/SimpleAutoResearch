@@ -2,7 +2,8 @@
 
 > 文档性质：项目长期方向、产品边界和架构原则，不是某个版本的施工清单。
 >
-> 更新时间：2026-09-06。代码验证基线：`4a19b5e`。
+> 更新时间：2026-09-06。Phase 3 清理起点：`29f212f`；当前 checkpoint 以主计划和 handoff
+> 中记录的测试、提交和远端验收结果为准。
 >
 > V2.8 的唯一施工计划见 `SIMPLE_AUTORESEARCH_V2_8_SYSTEM_EVOLUTION_PLAN.md`；本文只保留长期视角和版本边界。
 
@@ -205,8 +206,8 @@ compatibility 的物理实现，但不能继续接收新的核心业务逻辑。
 
 ## 6. 当前判断
 
-`09df140` 是一次有效的瘦身 checkpoint，`4a19b5e` 是本次代码验证基线。随后已经完成一次主线
-边界收口和工程闭环验收：
+`09df140` 是一次有效的瘦身 checkpoint，`29f212f` 是本轮 Phase 3 清理起点。随后已经完成
+一次主线边界收口和工程闭环验收：
 
 - 模型驱动的 `research-session` 默认到达 report/audit，`--no-report` 只用于调试；
 - code-task 已以明确 bridge 进入同一 session 的 canonical experiment attempt；
@@ -216,12 +217,15 @@ compatibility 的物理实现，但不能继续接收新的核心业务逻辑。
   AutoDL 真实 CodeTask v6 也完成了隔离修改、baseline/patched comparison、analysis、report
   和 audit，1 组 comparison 的 7 个指标均保留在产物中；指标没有提升时仍正确记录
   `objective_inconclusive`，不把“流程完成”冒充为“研究改进成功”；
-- AutoDL 低负载 CUDA smoke 和 `598 tests` 全量回归已通过；当前没有启动长训练、并行候选或
-  GPU 自动编排；
+- AutoDL 低负载 CUDA smoke 和上一 checkpoint 的全量回归已通过；本轮本地 `600 tests`
+  全量回归也已通过。当前没有启动长训练、并行候选或 GPU 自动编排；
 - 无生产消费者的 code-task 兼容 facade 和确认无价值的根目录临时产物已删除；
-- 旧八阶段搜索/阅读/综合实现已私有归档并冻结，公开 `pipeline_stages/research.py` 只剩
-  alias；legacy 业务本体仍按消费者矩阵保留最后的 compatibility 尾项；正常用户规模的
-  检索/阅读/中等实验/完整论文式 Markdown 报告验收已由 AutoDL v13 完成。
+- 旧八阶段搜索/阅读/综合实现已经收缩为私有 compatibility facade：公开
+  `pipeline_stages/research.py` 只剩 alias，`_legacy/research_stages.py` 委托 canonical
+  research capability，仅保留旧 Context/artifact projection、bounded retrieval trace、
+  一次 coverage follow-up 和历史注入点；experiment/report wrapper 也只是旧 registry 到共享
+  实现的转发。正常用户规模的检索/阅读/中等实验/完整论文式 Markdown 报告验收已由 AutoDL
+  v13 完成。
 
 当前主线是 V2.8 冻结和最后的兼容尾项审计：
 
@@ -233,6 +237,7 @@ V2.8 基础闭环（已通过）
   -> 最后接入外部 Agent Harness
 ```
 
-V2.8 通过后仍不能跳过 Phase 3 的最后删除审计，但这一步只处理已经确认无消费者且有
-canonical 替代的重复实现；旧 CLI、benchmark 或历史 reader 仍需的内容继续作为薄兼容层。
-完成这次收口后，再进入 V2.9 的 Report/Overleaf 工程化和有限恢复，最后才接入外部 Harness。
+V2.8 通过后仍要完成 Phase 3 的最后删除审计，但审计对象是具体的无消费者文件，而不是
+为了目录整齐机械搬迁。旧 CLI、benchmark 或历史 reader 仍需的内容继续作为薄兼容层，不能
+再承载新业务。完成这次收口后，再进入 V2.9 的 Report/Overleaf 工程化和有限恢复，最后才
+接入外部 Harness。
