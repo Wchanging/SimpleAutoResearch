@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,6 +57,64 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             self.assertIn("Evidence-backed claim", controller.store.read_text(
                 "attempts/attempt-001/report.md"
             ))
+
+    def test_report_capability_persists_verified_reference_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CapabilityRegistry()
+            registry.register("report", run_report_capability)
+            controller = SessionController.create(
+                tmp,
+                session_id="report-reference-session",
+                topic="offline report",
+                profile="paper_audit",
+                registry=registry,
+            )
+
+            result, _ = controller.execute(
+                "report",
+                attempt_id="attempt-001",
+                request=ReportAssemblyRequest(
+                    title="Offline report",
+                    papers=(
+                        {"id": "paper-1", "title": "Unused paper"},
+                        {
+                            "id": "paper-2",
+                            "title": "Used paper",
+                            "url": "https://example.test/paper-2",
+                        },
+                    ),
+                    sections=(
+                        ReportSectionDraft(
+                            section_id="findings",
+                            heading="Findings",
+                            draft_markdown="The result is supported [@paper-2].",
+                        ),
+                    ),
+                ),
+            )
+
+            self.assertEqual(result.status, "completed")
+            attempt_root = Path(tmp) / "attempts" / "attempt-001"
+            report = (attempt_root / "report.md").read_text(encoding="utf-8")
+            body = (attempt_root / "report_body.md").read_text(encoding="utf-8")
+            citation_map = json.loads(
+                (attempt_root / "citation_map.json").read_text(encoding="utf-8")
+            )
+
+            self.assertIn("## References", report)
+            self.assertIn("[1] Used paper", report)
+            self.assertNotIn("Unused paper", report)
+            self.assertIn("[@paper-2]", body)
+            self.assertNotIn("## References", body)
+            self.assertEqual(citation_map["entries"][0]["paper_id"], "paper-2")
+            self.assertIn(
+                "@misc{paper-2",
+                (attempt_root / "references.bib").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                [artifact.kind for artifact in result.artifacts[:4]],
+                ["report", "report_body", "report_references", "citation_map"],
+            )
 
     def test_report_capability_renders_only_planned_figures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

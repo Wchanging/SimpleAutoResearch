@@ -8,6 +8,10 @@
 
 ### 变更
 
+- canonical report 组装现在会把选定论文元数据沿 `research-session` continuation 传递下去，
+  归一化模型生成的 citation key，并写入经过校验的 report body、确定性的 `References`、
+  `references.bib` 和 `citation_map.json` 产物。Report audit 现在读取去除 References 后的正文，
+  不会把自动生成的参考文献列表误当成正文证据。
 - 收束 V2.8 文档管理：V2.8 主计划、session handoff 和长期愿景三份活动文档现在随 Git
   版本管理，其他历史/临时 `MDfiles/` 笔记继续保持本地忽略，避免再次形成并行计划。
 - 将 V2.8 正式规模验收写清为第二层闸门：约 30–50 条 raw papers、10–20 篇 bounded Read、

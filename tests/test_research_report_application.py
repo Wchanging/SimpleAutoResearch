@@ -367,9 +367,26 @@ class ResearchReportApplicationTests(unittest.TestCase):
             report_text = result.report_ref.path
             report_path = session.session_root / report_text
             report = report_path.read_text(encoding="utf-8")
+            report_attempt_root = session.session_root / "attempts" / "report-001"
+            report_body = (report_attempt_root / "report_body.md").read_text(
+                encoding="utf-8"
+            )
+            citation_map = json.loads(
+                (report_attempt_root / "citation_map.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            references_bib = (report_attempt_root / "references.bib").read_text(
+                encoding="utf-8"
+            )
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.audit.status, "passed")
+        self.assertIn("## References", report)
+        self.assertIn(f"[@{paper_id}]", report_body)
+        self.assertNotIn("## References", report_body)
+        self.assertEqual(citation_map["entries"][0]["paper_id"], paper_id)
+        self.assertIn("@misc{", references_bib)
         self.assertIn("## Verified Experiment Metrics", report)
         self.assertIn("| Metric | Baseline | Patched | Delta | Interpretation |", report)
         self.assertIn("`feature_family_count`", report)

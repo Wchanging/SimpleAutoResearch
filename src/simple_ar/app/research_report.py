@@ -698,6 +698,8 @@ def run_research_report_session(
             config=request.config,
             document_plan=request.document_plan,
             template_name=request.template_name,
+            papers=tuple(report_context.papers),
+            citation_key_map=report_context.citation_key_map,
         )
         report_result, _ = controller.execute(
             "report",
@@ -721,12 +723,26 @@ def run_research_report_session(
                 f"{exc}"
                 + (f" Diagnostics: {details}" if details else "")
             ) from exc
+        try:
+            report_body_ref = controller.attempt_output_ref(
+                "report-001",
+                kind="report_body",
+                schema="report_body.v1",
+            )
+        except (KeyError, OSError, ValueError):
+            # Keep compatibility with older report attempts that only wrote
+            # report.md; those audits fall back to the final report text.
+            report_body_ref = None
+        audit_inputs = (report_ref,)
+        if report_body_ref is not None:
+            audit_inputs = (report_ref, report_body_ref)
         audit_result, _ = controller.execute(
             "report_audit",
             attempt_id="report-audit-001",
-            inputs=(report_ref,),
+            inputs=audit_inputs,
             request=ReportAuditCapabilityRequest(
                 report_ref=report_ref,
+                report_body_ref=report_body_ref,
                 context=report_context,
                 memory=report_memory,
             ),

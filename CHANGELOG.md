@@ -8,6 +8,12 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Canonical report assembly now carries the selected paper metadata through the
+  `research-session` continuation, normalizes model citation keys, and writes a
+  verified report body plus deterministic `References`, `references.bib`, and
+  `citation_map.json` artifacts. Report audit now receives the pre-reference
+  body, so citation checks do not mistake the generated reference list for
+  body evidence.
 - Tightened V2.8 document management: the V2.8 system plan, session handoff,
   and long-term vision are now versioned as the three active planning documents;
   historical and temporary `MDfiles/` notes remain ignored so they cannot form

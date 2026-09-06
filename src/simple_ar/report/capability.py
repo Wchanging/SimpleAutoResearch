@@ -14,7 +14,21 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
+from simple_ar.literature.bibtex import papers_to_bibtex
+from simple_ar.literature.models import Paper
+from simple_ar.literature.verify import CitationError, validate_citations
 from simple_ar.report.assembler import apply_section_numbering, assemble_report_sections
+from simple_ar.report.citations import (
+    append_references_section,
+    cited_papers,
+    citation_display_map,
+    citation_map_artifact,
+    display_citation_numbers,
+    expand_short_citation_keys,
+    normalize_bare_source_id_citations,
+    sanitize_report_citations,
+    strip_references_section,
+)
 from simple_ar.report.figures import ReportFigureRecord
 from simple_ar.report.ports import DeterministicFigureRenderer, FigureRenderer
 from simple_ar.report.schema import (
@@ -35,18 +49,23 @@ class ReportAssemblyRequest:
     )
     document_plan: ReportDocumentPlan | Mapping[str, Any] | None = None
     template_name: str = ""
+    papers: tuple[Mapping[str, Any], ...] = ()
+    citation_key_map: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.title.strip():
             raise ValueError("ReportAssemblyRequest.title cannot be empty.")
         object.__setattr__(self, "sections", tuple(self.sections))
+        object.__setattr__(self, "papers", tuple(dict(paper) for paper in self.papers))
+        object.__setattr__(self, "citation_key_map", dict(self.citation_key_map))
 
 
 @dataclass(frozen=True, slots=True)
 class ReportAssemblyResult:
-    """Rendered report text and the figure records produced for it."""
+    """Rendered report text, auditable body, and figure records produced for it."""
 
     report_markdown: str
+    report_body_markdown: str = ""
     figures: tuple[ReportFigureRecord, ...] = ()
 
 
@@ -81,9 +100,20 @@ def assemble_report_document(
             else None
         )
     )
-    report = assemble_report_sections(
+    report_body = assemble_report_sections(
         title=request.title,
         sections=_order_sections(sections, document_plan),
+    )
+    report_body, cited = _prepare_report_citations(
+        report_body,
+        request.papers,
+        request.citation_key_map,
+    )
+    citation_map = citation_display_map(cited)
+    report = append_references_section(
+        display_citation_numbers(report_body, citation_map),
+        cited,
+        citation_map,
     )
     renderer = figure_renderer or DeterministicFigureRenderer()
     rendered = renderer.render(
@@ -101,8 +131,31 @@ def assemble_report_document(
     )
     return ReportAssemblyResult(
         report_markdown=report,
+        report_body_markdown=report_body,
         figures=tuple(rendered.figures),
     )
+
+
+def _prepare_report_citations(
+    report_body: str,
+    paper_rows: tuple[Mapping[str, Any], ...],
+    citation_key_map: Mapping[str, str],
+) -> tuple[str, list[Paper]]:
+    """Normalize the writer-facing body and select its verified references."""
+
+    papers = [Paper.from_row(dict(row)) for row in paper_rows]
+    if not papers:
+        return strip_references_section(report_body), []
+    allowed_ids = {paper.id for paper in papers}
+    body = strip_references_section(report_body)
+    body = expand_short_citation_keys(body, dict(citation_key_map))
+    body = normalize_bare_source_id_citations(body, allowed_ids)
+    body, _ = sanitize_report_citations(body, allowed_ids)
+    validate_citations(body, allowed_ids)
+    cited = cited_papers(body, papers)
+    if not cited:
+        raise CitationError("Report body did not cite any paper from papers.jsonl")
+    return body, cited
 
 
 def _order_sections(
@@ -152,7 +205,30 @@ def run_report_capability(
         schema="report.v1",
         producer="report.assembly",
     )
-    artifacts: list[ArtifactRef] = [report_ref]
+    body_ref = context.store.write_text(
+        "report_body.md",
+        result.report_body_markdown,
+        kind="report_body",
+        schema="report_body.v1",
+        producer="report.assembly",
+    )
+    cited = _cited_papers_from_request(result.report_body_markdown, request)
+    citation_map = citation_display_map(cited)
+    references_ref = context.store.write_text(
+        "references.bib",
+        papers_to_bibtex(cited),
+        kind="report_references",
+        schema="references.bib.v1",
+        producer="report.assembly",
+    )
+    citation_map_ref = context.store.write_json(
+        "citation_map.json",
+        citation_map_artifact(citation_map, cited, dict(request.citation_key_map)),
+        kind="citation_map",
+        schema="citation_map.v1",
+        producer="report.assembly",
+    )
+    artifacts: list[ArtifactRef] = [report_ref, body_ref, references_ref, citation_map_ref]
     diagnostics: list[str] = []
     figure_refs: list[ArtifactRef] = []
     for figure in result.figures:
@@ -187,12 +263,30 @@ def run_report_capability(
         status="partial" if diagnostics else "completed",
         artifacts=tuple(artifacts),
         diagnostics=tuple(diagnostics),
-        usage={"section_count": len(request.sections), "figure_count": len(result.figures)},
+        usage={
+            "section_count": len(request.sections),
+            "figure_count": len(result.figures),
+            "cited_paper_count": len(cited),
+        },
         provenance={
             "capability": "report",
             "assembly": "section_drafts",
             "result_schema": "report.v1",
         },
+    )
+
+
+def _cited_papers_from_request(
+    report_body: str,
+    request: ReportAssemblyRequest,
+) -> list[Paper]:
+    """Reconstruct the deterministic reference set for persisted artifacts."""
+
+    if not request.papers:
+        return []
+    return cited_papers(
+        report_body,
+        [Paper.from_row(dict(row)) for row in request.papers],
     )
 
 
