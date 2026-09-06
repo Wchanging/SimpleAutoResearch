@@ -2,7 +2,8 @@
 
 > 文档级别：**V2.8 唯一有效的施工计划**。
 >
-> 更新时间：2026-09-06。Phase 3 清理起点：`29f212f`（`feat/v2.8-system-evolution`）。
+> 更新时间：2026-09-06。Phase 3 清理起点：`29f212f`；当前验收 checkpoint：`3c575d4`
+>（`feat/v2.8-system-evolution`）。
 >
 > 本文描述 V2.8 要做什么、当前真实差距、最终结构、能力迁移规则和退出条件。不表示所有目标已经实现。
 
@@ -376,8 +377,8 @@ canonical 路径；旧入口中仍保留的代码必须能明确归类为输入/
 - `literature`、`retrieval`、tools 和 report/experiment 的消费者已确认并记录，但它们的
   目录级重命名不是 Phase 3 的必要退出条件；除非出现无消费者的具体文件，否则不再为目录
   形态做机械迁移；
-- 本轮代码变更完成后仍需执行本地全量回归、AutoDL 分支同步和一次低资源 canonical smoke；
-  真实运行失败必须作为失败证据保留，不能用 fixture 结果覆盖。
+- 本轮代码变更后的本地全量回归、AutoDL 分支同步和低资源 canonical smoke 已完成；真实
+  provider/LLM 复测中出现的超时和人工中止也已作为失败证据保留，未用 fixture 结果覆盖。
 
 ### 6.4 当前目录消费者审计（2026-09-05）
 
@@ -427,6 +428,13 @@ canonical capability 替代的逻辑已经移除，剩余 facade 仅在兼容消
   -> report -> report_audit`；report 状态为 `completed`，audit 的 citation/metric/claim
   均为 `passed`。v12 的 reviewer warning 和 v11 的 reviewer-passed 结果也保留在远程 runs
   中，作为报告质量随机性和审阅策略的对照证据。
+- `3c575d4` 同步到 AutoDL 后，远端 40 项 Phase 3 聚焦回归、fixture 完整 smoke 和 600 项
+  全量回归均通过，工作树与 `origin/feat/v2.8-system-evolution` 一致；3090 仅完成环境
+  检查和受控 smoke，结束后保持空闲。随后按有限预算尝试了两次当前在线网关 smoke：第一次
+  在 plan 请求超时，第二次完成 plan/search/document 后在 Read 的批量模型请求阶段等待过久，
+  为控制资源而人工中止；两次失败 session 分别保存在
+  `runs/verification/phase3-online-timeout-3c575d4/` 和
+  `runs/verification/phase3-online-retry-3c575d4/`，不能把它们记为新的闭环成功。
 
 ### 6.6 canonical Search 筛选迁移记录（2026-09-05）
 
@@ -614,20 +622,22 @@ V2.8 的正式验收报告必须同时记录：
 
 ## 9. 当前下一步
 
-V2.8 的业务闭环已经通过；本轮工作仍在 Phase 3 的代码收口验收，不再新增顶层能力。按
-以下顺序结束本轮：
+V2.8 的业务闭环和本轮 Phase 3 代码收口均已通过；不再新增顶层能力。当前 checkpoint
+`3c575d4` 已提交、推送 GitHub，并在 AutoDL 以同一 commit 完成代码与分支同步。验证结果为：
+本地和远端全量测试各 600 项通过，远端 40 项聚焦回归和 fixture smoke 通过，canonical 主线
+导入边界通过，3090 受控检查后保持空闲。
 
-1. 以 `29f212f` 为清理起点，完成本轮 source facade、planning query handoff、架构边界测试和
-   文档同步；
-2. 运行目标聚焦回归、fixture smoke、compileall、diff 检查和本地全量测试；
-3. 将当前分支提交并推送到 GitHub，再让 AutoDL 工作树切换到同一 commit；
-4. 在 AutoDL 上先执行离线/低资源 canonical smoke，再根据环境与网关可用性执行一次受控
-   online smoke。不得启动长训练、并行候选或无限 repair；
-5. 根据运行结果确认 Phase 3 退出：canonical 主线只有一条，旧入口只保留明确兼容职责，
-   无消费者的重复/临时实现已删除。若旧 `run/resume`、SurveyBench 或历史 reader 仍消费
-   facade，则记录为有意保留的兼容边界，而不是把它误报成“未清理”；
-6. 本轮验收完成后冻结 V2.8，进入 V2.9 的 Markdown/Overleaf-ready 报告工程化和有限
-   continuation；外部 Claude Code/Codex/OpenCode Harness 放到更后面。
+Phase 3 的结构退出条件也已满足：Search/Read/Synthesis 的业务规则只有 canonical 实现；
+旧 `run/resume`、SurveyBench、历史 reader 和测试继续需要的 facade 已明确冻结为兼容层，
+不再新增功能；确认无消费者的旧研究实现已删除。后续如果这些消费者退出，只删除 facade 和
+投影，不再重新设计研究主链。
 
-V2.8 冻结阶段不新增 scheduler、任意 DAG、外部 Harness、通用模板适配或新的顶层抽象；只
-   修复真实验收暴露的配置、预算、重试、artifact handoff、兼容或报告事实问题。
+在线 provider smoke 的两次失败证据已保留，原因是当前网关请求超时/Read 批量等待过久，
+不是 fixture 成功；此前 v13 已提供一次真实网络、真实 LLM、CodeTask、实验、报告和审计的
+成功验收证据。网关恢复后可以单独重跑同一低预算命令，但不应以此为理由扩大 V2.8 范围或
+启动长训练。
+
+下一阶段冻结 V2.8，进入 V2.9 的 Markdown/Overleaf-ready 报告工程化和有限 continuation；
+外部 Claude Code/Codex/OpenCode Harness 放到更后面。V2.8 冻结阶段只修复真实验收暴露的
+配置、预算、重试、artifact handoff、兼容或报告事实问题，不新增 scheduler、任意 DAG、
+外部 Harness、通用模板适配或新的顶层抽象。

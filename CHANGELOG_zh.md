@@ -17,6 +17,9 @@
   canonical session/source/reader/synthesis 路径不会加载 `pipeline_stages` 或 `_legacy`。
 - 完成 `literature`、`retrieval`、tools、experiment/report adapter、SurveyBench 和历史 run reader
   的消费者审计。仍有真实消费者的模块按基础设施或兼容层有意保留；V2.8 不再向这些位置增加新行为。
+- 完成本轮 checkpoint 在 AutoDL 上的同步后验收：40 项聚焦回归、fixture research-to-report
+  smoke 和 600 项全量测试均通过；受控检查结束后 RTX 3090 保持空闲。随后两次低预算在线网关
+  尝试的超时/中止产物按失败证据保留，没有把 fixture 结果或不完整运行记为成功。
 
 - Report Writer 和 Reviewer 现在都会收到一份有界的权威实验结果投影，包含
   baseline/candidate 指标、comparison delta、verdict 和资源变化。这样模型生成的本地实验

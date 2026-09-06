@@ -23,6 +23,11 @@ This file records user-visible project changes in reverse chronological order. P
   experiment/report adapters, SurveyBench, and historical run readers. Items
   with real consumers remain deliberately scoped compatibility or infrastructure
   modules; no new V2.8 behavior is added to them.
+- Verified the Phase 3 checkpoint on AutoDL after synchronization: the focused
+  40-test regression, fixture research-to-report smoke, and full 600-test suite
+  all pass; the RTX 3090 remains idle after the controlled checks. Two later
+  low-budget online gateway attempts were retained as timeout/interruption
+  evidence rather than being counted as successful fixture-backed runs.
 
 - Report Writer and Reviewer prompts now receive a bounded projection of the
   authoritative execution result, including baseline/candidate metrics,

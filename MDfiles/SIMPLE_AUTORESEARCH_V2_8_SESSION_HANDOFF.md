@@ -4,7 +4,8 @@
 >
 > **唯一施工计划**：`MDfiles/SIMPLE_AUTORESEARCH_V2_8_SYSTEM_EVOLUTION_PLAN.md`
 >
-> 状态快照：2026-09-06。Phase 3 清理起点：`29f212f`（`feat/v2.8-system-evolution`）；当前本地
+> 状态快照：2026-09-06。Phase 3 清理起点：`29f212f`；当前 checkpoint：`3c575d4`
+>（`feat/v2.8-system-evolution`）；当前本地
 > `.env` 使用 `gpt-5.4-mini` 和网关可用的 `chat` 模式。V2.8 有界基础闭环已完成，完整
 > AutoResearch 仍按长期路线推进。
 
@@ -49,13 +50,13 @@ bounded retrieval trace、一次 coverage follow-up 和历史注入点。它暂�
   清理起点；该提交之前已将权威的
   baseline/candidate/comparison 投影同时交给 Writer 和 Reviewer，避免真实实验已存在却被
   报告审阅误判为缺失；
-- 远端：AutoDL 在上一 checkpoint 上保持干净；本轮代码和文档 checkpoint 待本地验证后推送，
-  然后让 AutoDL 切换到同一 commit；
+- 远端：AutoDL 工作树已切换到 `3c575d4`，与 `origin/feat/v2.8-system-evolution` 一致且
+  干净；远端仓库仍是浅 clone，但不影响当前代码和分支同步；
 - 工作树：本轮 canonical research facade、planning query handoff、bounded source stop 和
-  架构回归修改待提交；前一 checkpoint 的 canonical Read、实验边界和报告回归均已通过；
+  架构回归修改已提交并推送；旧 research 实现已收缩为冻结兼容 facade；
 - 本地全量回归：`uv run --no-sync python -m unittest discover -s tests -p 'test_*.py'`，600 项
-  通过（204.764 秒）；本轮边界聚焦回归 40 项通过；AutoDL 上一 checkpoint 的 598 项结果
-  仍保留，待本轮 checkpoint 同步后复核；
+  通过（204.764 秒）；本轮边界聚焦回归 40 项通过。AutoDL 同一 checkpoint 的 40 项聚焦回归、
+  fixture smoke 和 600 项全量回归也均通过（全量 29.476 秒）；
 - 入口修复后补跑的边界/CLI、session/public API/search、report 和 synthesis 聚焦回归均通过；
 - 本轮已通过 code-task/report、report/audit、CLI 默认行为和 LLM fallback 的聚焦回归；
 - AutoDL 真实 CodeTask v6 已通过：同一 session 中完成 LLM plan/read/synthesis/design、隔离 workspace、baseline、受限 patch、validation、patched benchmark、comparison、analysis、report/audit；comparison 为 1 组、7 个指标，report audit 三项通过；
@@ -175,7 +176,8 @@ ARC-Bench、SurveyBench、历史 run reader 和部分旧 artifact projection 仍
   均为 `passed`，session manifest 为 `completed`。v11（reviewer passed）和 v12（reviewer
   warning）也保留在 AutoDL `runs/`，用于后续报告质量回归；
 - `600 tests in 204.764s — OK`；本轮 40 项边界聚焦回归、compileall 和 `git diff --check`
-  均已通过；AutoDL 全量回归将在本轮 commit 同步后复核。
+  均已通过；AutoDL 同一 checkpoint 的全量回归和 fixture smoke 已复核通过，3090 在受控
+  检查结束后保持空闲。
 
 仍未证明：
 
@@ -187,22 +189,27 @@ ARC-Bench、SurveyBench、历史 run reader 和部分旧 artifact projection 仍
 - AutoDL/3090 上真实中等数据/模型实验的资源边界和复现性；
 - publication-ready 论文、LaTeX 编译和模板自适应；
 - 外部 Claude Code/Codex/OpenCode Harness 的成熟接入。
+- 当前 checkpoint 的两次在线 provider smoke 未形成新的成功运行：一次在 plan 请求超时，
+  一次完成 plan/search/document 后在 Read 批量模型请求阶段等待过久而人工中止。失败 session
+  保存在 `runs/verification/phase3-online-timeout-3c575d4/` 和
+  `runs/verification/phase3-online-retry-3c575d4/`，这属于网关可用性/批量耗时观察，不覆盖
+  之前 v13 的真实闭环成功证据。
 
 ## 6. 当前下一步
 
-V2.8 业务闭环已完成，当前会话的剩余目标是把 Phase 3 代码清理正式验收完；不再新增顶层
-能力：
+V2.8 业务闭环和 Phase 3 代码清理均已验收；当前 checkpoint `3c575d4` 已提交、推送 GitHub，
+并在 AutoDL 完成同 commit 同步。canonical 主线只有一条，旧路径只保留明确的 Context、旧
+artifact、历史 reader 和 benchmark 兼容职责；旧 facade 不再承载新研究规则。
 
-1. 以 `29f212f` 为清理起点，完成本轮 canonical source stop、planning query handoff、旧
-   research facade 和架构边界测试；
-2. 运行目标聚焦回归、fixture smoke、compileall、diff 检查和本地全量测试；
-3. 将本地 checkpoint 提交并推送 GitHub，再让 AutoDL 工作树切换到相同 commit；
-4. 在 AutoDL 先跑离线/低资源 canonical smoke，再视网关可用性执行一次受控 online smoke；
-   不启动长训练、并行候选或无限 repair；
-5. 以消费者证据确认 Phase 3 退出：canonical 主线只有一条，旧路径只保留明确的 Context/旧
-   artifact/历史 reader/benchmark 兼容职责；
-6. 验收后冻结 V2.8，进入 V2.9 的 Markdown/Overleaf-ready 报告工程化和有限 continuation，
-   外部 Claude Code/Codex/OpenCode Harness 放到更后面。
+本轮验证已完成：本地/远端全量测试各 600 项通过，远端 40 项边界回归和 fixture smoke 通过，
+compileall、`git diff --check`、canonical 导入边界也通过；3090 只做受控环境检查和低资源
+验证，结束后保持空闲。当前在线网关的两次低预算复测失败证据已经保留；网关恢复后可重跑同一
+命令，但不应扩大 V2.8 范围或启动长训练。
+
+后续冻结 V2.8，进入 V2.9 的 Markdown/Overleaf-ready 报告工程化和有限 continuation；外部
+Claude Code/Codex/OpenCode Harness 放到更后面。V2.8 冻结阶段只修复真实验收暴露的配置、预算、
+重试、artifact handoff、兼容或报告事实问题，不新增 scheduler、任意 DAG、外部 Harness、
+通用模板适配或新的顶层抽象。
 
 Search/Read/Synthesis 的逐项状态见主计划 6.7：Search 的筛选、coverage、可选缓存和 Read 的
 bounded screening/notes/snippets 已进入 canonical；旧多轮 follow-up、retrieval ledger 和
