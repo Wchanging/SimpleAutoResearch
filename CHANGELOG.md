@@ -15,6 +15,10 @@ This file records user-visible project changes in reverse chronological order. P
   artifact references and supplements an incomplete writer section with a
   deterministic baseline/patched comparison table, so all recorded comparison
   metrics remain visible in the final report.
+- The canonical `research-session` report continuation now appends a compact,
+  deterministic experiment-evidence appendix after Writer assembly, including
+  comparison deltas and metric provenance; this keeps Code-Task evidence intact
+  even when the model-generated sections omit a recorded metric.
 
 ## 2026-09-05
 

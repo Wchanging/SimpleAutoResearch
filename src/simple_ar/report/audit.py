@@ -343,10 +343,11 @@ def _metric_is_visible(report_body: str, lower_report: str, metric: Any) -> bool
 
 
 def _metric_name_variants(name: str) -> set[str]:
-    normalized = re.sub(r"[_-]+", " ", name.lower()).strip()
+    raw = name.lower().strip()
+    normalized = re.sub(r"[_-]+", " ", raw).strip()
     if not normalized:
         return set()
-    variants = {normalized}
+    variants = {normalized, raw}
     words = normalized.split()
     if words and words[-1] in {
         "s",

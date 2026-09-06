@@ -12,6 +12,8 @@
   同时保留单位区分和 citation 数字过滤，避免把 `4e-05` 与 `4.0e-05` 之类的格式差异误报为 warning。
 - Code-Task 到报告的 handoff 现在可以解析相对于 run 或 stage 的嵌套 artifact 路径；当 Writer 已生成同名但不完整的章节时，
   会补充确定性的 baseline/patched 对照表，确保最终报告展示全部已记录的对照指标。
+- canonical `research-session` 的报告 continuation 现在会在 Writer 组装后追加紧凑的确定性实验证据附录，包含对照 delta 和指标 provenance；
+  即使模型生成的章节遗漏某个已记录指标，Code-Task 证据仍会完整保留。
 
 ## 2026-09-05
 

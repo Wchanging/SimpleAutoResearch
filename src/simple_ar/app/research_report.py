@@ -444,7 +444,7 @@ def metric_sources_from_execution(
     *,
     artifact: str,
 ) -> list[MetricSource]:
-    """Convert candidate/baseline metrics into report provenance rows."""
+    """Convert candidate, baseline, and comparison metrics into provenance rows."""
 
     result_schema = execution.get("result_schema")
     directions = result_schema.get("metric_directions", {}) if isinstance(result_schema, Mapping) else {}
@@ -464,6 +464,31 @@ def metric_sources_from_execution(
                     direction=str(directions.get(name) or ""),
                 )
             )
+    comparisons = execution.get("comparisons")
+    if isinstance(comparisons, list):
+        for index, comparison in enumerate(comparisons):
+            if not isinstance(comparison, Mapping):
+                continue
+            metric_rows = comparison.get("metrics")
+            if not isinstance(metric_rows, list):
+                continue
+            for metric_row in metric_rows:
+                if not isinstance(metric_row, Mapping):
+                    continue
+                name = str(metric_row.get("name") or "").strip()
+                value = metric_row.get("delta")
+                if not name or isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                    continue
+                rows.append(
+                    MetricSource(
+                        metric_id=f"metric:comparison:{index}:{name}",
+                        name=name,
+                        value=value,
+                        artifact=artifact,
+                        label="comparison_delta",
+                        direction=str(metric_row.get("direction") or ""),
+                    )
+                )
     return rows
 
 
@@ -477,6 +502,118 @@ def _metric_groups(execution: Mapping[str, Any]) -> list[tuple[str, Mapping[str,
     if isinstance(baseline_metrics, Mapping):
         groups.append(("baseline", baseline_metrics))
     return groups
+
+
+def _append_verified_experiment_evidence(
+    sections: tuple[ReportSectionDraft | Mapping[str, Any], ...],
+    context: ReportContext,
+) -> tuple[ReportSectionDraft | Mapping[str, Any], ...]:
+    """Append a deterministic metric appendix to canonical experiment reports."""
+
+    if context.report_mode != "experiment":
+        return sections
+    evidence = _verified_experiment_evidence(context)
+    if not evidence:
+        return sections
+    return (
+        *sections,
+        ReportSectionDraft(
+            section_id="verified_experiment_metrics",
+            heading="Verified Experiment Metrics",
+            draft_markdown=evidence,
+            metric_ids=[metric.metric_id for metric in context.metric_sources],
+        ),
+    )
+
+
+def _verified_experiment_evidence(context: ReportContext) -> str:
+    """Render persisted metrics and comparisons without asking the Writer."""
+
+    if not context.metric_sources:
+        return ""
+    lines = [
+        "The following values are copied from the persisted experiment evidence "
+        "and are included to keep the quantitative record complete.",
+    ]
+    comparisons = (
+        context.results.get("comparisons")
+        if isinstance(context.results, Mapping)
+        else None
+    )
+    if isinstance(comparisons, list):
+        for comparison in comparisons:
+            if not isinstance(comparison, Mapping):
+                continue
+            table = _comparison_markdown(comparison)
+            if table:
+                lines.extend(["", "### Baseline and Patched Comparison", "", table])
+                break
+    ledger = _metric_ledger(context.metric_sources)
+    if ledger:
+        lines.extend(["", "### Metric Provenance", "", ledger])
+    return "\n".join(lines)
+
+
+def _comparison_markdown(comparison: Mapping[str, Any]) -> str:
+    metric_rows = comparison.get("metrics")
+    if not isinstance(metric_rows, list):
+        return ""
+    table = [
+        "| Metric | Baseline | Patched | Delta | Interpretation |",
+        "| --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in metric_rows:
+        if not isinstance(row, Mapping):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        table.append(
+            "| "
+            + " | ".join(
+                (
+                    f"`{_markdown_cell(name)}`",
+                    _format_report_metric(row.get("baseline")),
+                    _format_report_metric(row.get("patched")),
+                    _format_report_metric(row.get("delta")),
+                    _markdown_cell(str(row.get("interpretation") or "recorded")),
+                )
+            )
+            + " |"
+        )
+    return "\n".join(table) if len(table) > 2 else ""
+
+
+def _metric_ledger(metrics: list[MetricSource]) -> str:
+    table = [
+        "| Source | Metric | Value |",
+        "| --- | --- | ---: |",
+    ]
+    for metric in metrics:
+        table.append(
+            "| "
+            + " | ".join(
+                (
+                    _markdown_cell(metric.label or "experiment"),
+                    f"`{_markdown_cell(metric.name)}`",
+                    _format_report_metric(metric.value),
+                )
+            )
+            + " |"
+        )
+    return "\n".join(table) if len(table) > 2 else ""
+
+
+def _format_report_metric(value: object) -> str:
+    if value is None:
+        return "not recorded"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return _markdown_cell(str(value))
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "/").replace("\n", " ").strip()
 
 
 def claim_evidence_record_from_analysis(claim: Any) -> ClaimEvidenceRecord:
@@ -540,14 +677,28 @@ def run_research_report_session(
             f"Could not load research session {request.session_root}: {exc}"
         ) from exc
 
-    report_request = ReportAssemblyRequest(
-        title=request.title,
-        sections=request.sections,
-        config=request.config,
-        document_plan=request.document_plan,
-        template_name=request.template_name,
-    )
     try:
+        report_context = (
+            request.context
+            if isinstance(request.context, ReportContext)
+            else ReportContext.model_validate(request.context)
+        )
+        report_memory = (
+            request.memory
+            if isinstance(request.memory, ReportMemory)
+            else ReportMemory.model_validate(request.memory)
+        )
+        sections = _append_verified_experiment_evidence(
+            request.sections,
+            report_context,
+        )
+        report_request = ReportAssemblyRequest(
+            title=request.title,
+            sections=sections,
+            config=request.config,
+            document_plan=request.document_plan,
+            template_name=request.template_name,
+        )
         report_result, _ = controller.execute(
             "report",
             attempt_id="report-001",
@@ -570,16 +721,6 @@ def run_research_report_session(
                 f"{exc}"
                 + (f" Diagnostics: {details}" if details else "")
             ) from exc
-        report_context = (
-            request.context
-            if isinstance(request.context, ReportContext)
-            else ReportContext.model_validate(request.context)
-        )
-        report_memory = (
-            request.memory
-            if isinstance(request.memory, ReportMemory)
-            else ReportMemory.model_validate(request.memory)
-        )
         audit_result, _ = controller.execute(
             "report_audit",
             attempt_id="report-audit-001",

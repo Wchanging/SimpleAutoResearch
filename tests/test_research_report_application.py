@@ -12,6 +12,7 @@ from simple_ar.app.research_report import (
     ResearchReportSessionError,
     ResearchReportSessionRequest,
     build_research_session_report_inputs,
+    metric_sources_from_execution,
     run_research_session_report_agent,
     run_research_report_agent_session,
     run_research_report_session,
@@ -287,6 +288,91 @@ class ResearchReportApplicationTests(unittest.TestCase):
             self.assertEqual(context.results["status"], "passed")
             self.assertTrue(any(item.name == "accuracy" for item in context.metric_sources))
             self.assertTrue(any(item.kind == "analysis" for item in memory.source_handles))
+
+    def test_canonical_report_appends_complete_experiment_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "reliable_agents.md"
+            paper.write_text(
+                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
+                encoding="utf-8",
+            )
+            session = run_research_session(
+                ResearchSessionRequest(
+                    brief=ResearchBriefSessionRequest(
+                        topic="reliable agents",
+                        session_root=root / "session",
+                        local_documents=(paper,),
+                        max_results=2,
+                        max_chunks=20,
+                    ),
+                    command=(sys.executable, "-c", "print('accuracy: 0.75')"),
+                    cwd=root,
+                    timeout_sec=5,
+                    result_schema={"primary_metric": "accuracy"},
+                )
+            )
+            paper_id = session.search.papers[0].id
+            execution = {
+                "status": "passed",
+                "metrics": {"accuracy": 0.8, "feature_family_count": 2.0},
+                "baseline": {
+                    "metrics": {"accuracy": 0.7, "feature_family_count": 1.0}
+                },
+                "comparisons": [
+                    {
+                        "metrics": [
+                            {
+                                "name": "accuracy",
+                                "baseline": 0.7,
+                                "patched": 0.8,
+                                "delta": 0.1,
+                                "interpretation": "improved",
+                            },
+                            {
+                                "name": "feature_family_count",
+                                "baseline": 1.0,
+                                "patched": 2.0,
+                                "delta": 1.0,
+                                "interpretation": "increased",
+                            },
+                        ]
+                    }
+                ],
+            }
+            result = run_research_report_session(
+                ResearchReportSessionRequest(
+                    session_root=session.session_root,
+                    title="Reliable agents",
+                    sections=(
+                        ReportSectionDraft(
+                            section_id="findings",
+                            heading="Findings",
+                            draft_markdown=f"The candidate improved [@{paper_id}].",
+                        ),
+                    ),
+                    source_refs=(session.analysis_ref,),
+                    context=ReportContext(
+                        topic="reliable agents",
+                        report_mode="experiment",
+                        papers=[{"id": paper_id}],
+                        results=execution,
+                        metric_sources=metric_sources_from_execution(
+                            execution,
+                            artifact="results.json",
+                        ),
+                    ),
+                )
+            )
+            report_text = result.report_ref.path
+            report_path = session.session_root / report_text
+            report = report_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.audit.status, "passed")
+        self.assertIn("## Verified Experiment Metrics", report)
+        self.assertIn("| Metric | Baseline | Patched | Delta | Interpretation |", report)
+        self.assertIn("`feature_family_count`", report)
 
     def test_agent_writer_failure_does_not_assemble_a_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
