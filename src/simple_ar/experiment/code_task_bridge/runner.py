@@ -449,6 +449,7 @@ def _record_repair_failure(
     try:
         manifest = load_code_task_manifest(run_dir)
         repair = manifest_section(manifest, "repair")
+        manifest["repair"] = repair
         repair["status"] = "repair_failed_preserved"
         repair["failure_reason"] = reason
         repair["failure_artifact"] = "code_task/meta/repair_failure.json"

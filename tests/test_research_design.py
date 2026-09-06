@@ -86,6 +86,32 @@ class ResearchDesignTests(unittest.TestCase):
         self.assertEqual(restored.contract, result.contract)
         self.assertEqual(restored.novelty_check.idea_id, "idea-002")
 
+    def test_prepared_execution_boundary_replaces_literature_setup_fields(self) -> None:
+        result = build_research_design(
+            ResearchDesignRequest(
+                synthesis=self._synthesis(),
+                idea_id="idea-002",
+                execution_schema={
+                    "primary_metric": "accuracy",
+                    "required_metrics": ["accuracy", "macro_f1"],
+                },
+                execution_context=(
+                    "Prepared project: examples/full_pipeline_tiny_mlp/project."
+                ),
+            )
+        )
+
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(
+            result.contract.baseline,
+            "prepared project baseline (see execution boundary)",
+        )
+        self.assertEqual(
+            result.contract.dataset,
+            "prepared project dataset (see execution boundary)",
+        )
+        self.assertEqual(result.contract.metrics, ["accuracy", "macro_f1"])
+
     def test_default_selection_prefers_a_more_executable_candidate(self) -> None:
         synthesis = SynthesisResult(
             status="ready",

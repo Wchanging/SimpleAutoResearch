@@ -7,7 +7,7 @@ synthesis-to-experiment boundary explicit and inspectable.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from typing import Any, Literal, Mapping
 
@@ -190,6 +190,12 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
                 diagnostics=("Selected idea has no experiment contract.",),
             )
 
+    contract = _apply_execution_boundary(
+        contract,
+        execution_schema=request.execution_schema,
+        execution_context=request.execution_context,
+    )
+
     diagnostics = _contract_diagnostics(
         contract,
         execution_schema=request.execution_schema,
@@ -204,6 +210,38 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
         generation_mode=generation_mode,
         selection_rationale=selection_rationale,
         diagnostics=tuple(diagnostics),
+    )
+
+
+def _apply_execution_boundary(
+    contract: ResearchExperimentContract,
+    *,
+    execution_schema: Mapping[str, Any],
+    execution_context: str,
+) -> ResearchExperimentContract:
+    """Make a prepared project the execution contract's source of truth.
+
+    Literature-derived baseline and dataset hints are useful during synthesis,
+    but they are not executable configuration once a caller supplies a
+    prepared project boundary.  Keep the research hypothesis and provenance;
+    replace only the fields that otherwise invite a downstream agent to
+    substitute the prepared task.  The detailed boundary remains in the
+    synthesis handoff for prompts and audit.
+    """
+
+    if not execution_context.strip():
+        return contract
+    raw_metrics = execution_schema.get("required_metrics")
+    metrics = (
+        [str(item).strip() for item in raw_metrics if str(item).strip()]
+        if isinstance(raw_metrics, list)
+        else []
+    )
+    return replace(
+        contract,
+        baseline="prepared project baseline (see execution boundary)",
+        dataset="prepared project dataset (see execution boundary)",
+        metrics=list(dict.fromkeys(metrics or contract.metrics)),
     )
 
 

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json, write_text
@@ -53,6 +54,7 @@ from simple_ar.experiment.code_task_bridge import (
     prepare_code_task_experiment,
     write_code_task_experiment_meta,
 )
+from simple_ar.experiment.code_task_bridge.runner import _verify_or_repair_patch
 from simple_ar.integrations.llm import LLMError
 
 
@@ -2779,6 +2781,66 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("repo_map", meta)
             self.assertIn("context_pack", meta)
             self.assertIn("comparison", meta)
+
+    def test_invalid_embedded_repair_preserves_initial_benchmark_evidence(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nRepair the classifier if the benchmark fails.\n")
+            run_dir = root / "runs" / "embedded-code-task"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            first_report = run_dir / "code_task" / "run" / "patched" / "execution_report.json"
+            repair_proposal = run_dir / "code_task" / "repairs" / "repair-001" / "proposed_edits.json"
+            first_report.parent.mkdir(parents=True, exist_ok=True)
+            repair_proposal.parent.mkdir(parents=True, exist_ok=True)
+
+            with (
+                patch(
+                    "simple_ar.experiment.code_task_bridge.runner.run_code_task_benchmark",
+                    return_value=SimpleNamespace(status="failed", report_path=first_report),
+                ),
+                patch(
+                    "simple_ar.experiment.code_task_bridge.runner.analyze_code_task_failure",
+                    return_value=SimpleNamespace(status="actionable"),
+                ),
+                patch(
+                    "simple_ar.experiment.code_task_bridge.runner.propose_repair_edits",
+                    return_value=SimpleNamespace(edit_count=1, proposal_path=repair_proposal),
+                ),
+                patch(
+                    "simple_ar.experiment.code_task_bridge.runner.apply_patch_edits",
+                    side_effect=PatchValidationError("new text must be non-empty"),
+                ),
+            ):
+                changed = _verify_or_repair_patch(
+                    run_dir,
+                    spec=CodeTaskExperimentSpec(
+                        template="code_task_project",
+                        code_root=code_root,
+                        task_file=task_file,
+                        benchmark_command="python -m unittest discover -s tests",
+                    ),
+                    model="fake-model",
+                    use_llm=True,
+                    timeout_sec=10,
+                    changed_files=("spam_model.py",),
+                    message_callback=None,
+                )
+
+            self.assertEqual(changed, ("spam_model.py",))
+            failure = read_json(run_dir / "code_task" / "meta" / "repair_failure.json")
+            self.assertEqual(failure["status"], "preserved_initial_result")
+            self.assertEqual(failure["reason"], "repair_patch_validation")
+            manifest = read_json(run_dir / "manifest.json")
+            self.assertEqual(manifest["repair"]["status"], "repair_failed_preserved")
 
     def test_patch_plan_includes_baseline_and_environment_context(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
