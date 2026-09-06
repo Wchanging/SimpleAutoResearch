@@ -8,6 +8,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Restored the repository boundary for local planning notes: `MDfiles/` is
+  ignored again and is no longer part of the GitHub working tree. The local
+  plan, handoff, and long-term vision remain available for collaboration but
+  are not treated as versioned project files.
 - Closed the V2.8 Phase 3 research-prefix cleanup: the historical
   `pipeline_stages/research.py` entry now reaches a compatibility facade that
   delegates Search, Read, and Synthesis behavior to the canonical research

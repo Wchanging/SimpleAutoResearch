@@ -8,6 +8,8 @@
 
 ### 变更
 
+- 恢复本地规划笔记的仓库边界：`MDfiles/` 重新整体忽略，不再进入 GitHub 工作树。主计划、handoff
+  和长期愿景仍保留在本地供协作使用，但不再作为版本化项目文件。
 - 收束 V2.8 Phase 3 的 research prefix：历史入口
   `pipeline_stages/research.py` 现在进入兼容 facade，由 canonical research 模块负责 Search、
   Read 和 Synthesis 行为。旧 Context 产物、有界检索 trace、cache 注入点和 `run/resume` 契约
