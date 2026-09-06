@@ -20,7 +20,8 @@ from simple_ar.report.schema import (
 
 CITATION_PATTERN = re.compile(r"(?<![A-Za-z0-9_])@([A-Za-z0-9_.:-]+)")
 NUMBER_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_])[-+]?(?:\d+\.\d+|\d+)(?:[eE][-+]?\d+)?"
+    r"(?<![A-Za-z0-9_])[-+]?(?:(?:\d{1,3}(?:,\d{3})+)|(?:\d+(?:\.\d+)?))"
+    r"(?:[eE][-+]?\d+)?"
     r"(?:%|ms|s|sec|seconds)?(?![A-Za-z0-9_])"
 )
 NUMBER_WORD_PATTERN = re.compile(
@@ -389,14 +390,15 @@ def _numeric_token_key(value: object) -> tuple[Decimal, str] | None:
     """Normalize a report number while preserving an optional display unit."""
 
     match = re.fullmatch(
-        r"\s*([-+]?(?:\d+\.\d+|\d+)(?:[eE][-+]?\d+)?)(%|ms|s|sec|seconds)?\s*",
+        r"\s*([-+]?(?:(?:\d{1,3}(?:,\d{3})+)|(?:\d+(?:\.\d+)?))"
+        r"(?:[eE][-+]?\d+)?)(%|ms|s|sec|seconds)?\s*",
         str(value),
         flags=re.IGNORECASE,
     )
     if match is None:
         return None
     try:
-        number = Decimal(match.group(1))
+        number = Decimal(match.group(1).replace(",", ""))
     except InvalidOperation:
         return None
     unit = (match.group(2) or "").lower()

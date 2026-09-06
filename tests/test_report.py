@@ -36,6 +36,7 @@ from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.quality import build_report_quality
 from simple_ar.report.schema import (
+    MetricSource,
     ReportMemory,
     ReportRuntimeConfig,
     ReportSectionDraft,
@@ -1176,6 +1177,49 @@ class ReportSafetyTests(unittest.TestCase):
         audit = build_report_audit(
             report=body,
             report_body=body,
+            context=context,
+            memory=memory,
+        )
+
+        self.assertEqual(audit.metric_audit.status, "passed")
+        self.assertEqual(audit.metric_audit.unmatched_metrics, [])
+        self.assertEqual(audit.metric_audit.unmatched_numbers, [])
+
+    def test_report_audit_accepts_thousands_separators(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=[],
+            abstract="",
+            url="https://example.com/paper-1",
+        )
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="experiment",
+            goal="",
+            problem="",
+            search_meta={},
+            synthesis="",
+            hypothesis="",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row()],
+            papers=[paper],
+            research_evidence_summary="",
+        )
+        context.metric_sources = [
+            MetricSource(
+                metric_id="metric:parameter_count",
+                name="parameter_count",
+                value=1810,
+                artifact="results.json",
+            )
+        ]
+        memory = ReportMemory()
+
+        audit = build_report_audit(
+            report="# Results\n\nThe parameter count is 1,810.\n",
+            report_body="# Results\n\nThe parameter count is 1,810.\n",
             context=context,
             memory=memory,
         )
