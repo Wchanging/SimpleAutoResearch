@@ -206,6 +206,7 @@ class ReportContext(ReportModel):
     synthesis_markdown: str = ""
     hypothesis_markdown: str = ""
     evidence_summary: str = ""
+    execution_context: str = ""
     search_meta: dict[str, Any] = Field(default_factory=dict)
     experiment_plan: dict[str, Any] = Field(default_factory=dict)
     results: dict[str, Any] = Field(default_factory=dict)

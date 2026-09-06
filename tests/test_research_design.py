@@ -49,6 +49,7 @@ class ResearchDesignTests(unittest.TestCase):
             ResearchDesignRequest(
                 synthesis=self._synthesis(),
                 topic="reliable agents",
+                execution_context="Dataset: prepared digits benchmark; do not substitute another task.",
                 use_llm=True,
                 llm_client=client,
             )
@@ -63,6 +64,7 @@ class ResearchDesignTests(unittest.TestCase):
         )
         self.assertEqual(client.labels, ["research-design"])
         self.assertIn("Topic: reliable agents", client.users[0])
+        self.assertIn("prepared digits benchmark", client.users[0])
         restored = ResearchDesignResult.from_handoff_dict(result.to_handoff_dict())
         self.assertEqual(restored.selection_rationale, result.selection_rationale)
 

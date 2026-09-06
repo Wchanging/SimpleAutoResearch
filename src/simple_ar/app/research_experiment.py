@@ -178,6 +178,7 @@ def run_research_experiment_session(
             synthesis=synthesis,
             topic=request.topic,
             execution_schema=request.result_schema,
+            execution_context=synthesis.execution_context,
             use_llm=request.use_llm,
             llm_client=request.llm_client,
         ),

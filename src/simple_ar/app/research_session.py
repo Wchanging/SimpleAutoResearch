@@ -8,7 +8,7 @@ directions already present in the synthesis handoff.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -282,8 +282,21 @@ def run_research_session(
             _run_code_task_capability,
             replace=True,
         )
+    brief_request = request.brief
+    if request.code_task_spec is not None:
+        # A prepared project is the executable boundary for this composition.
+        # Carry its small, human-authored task contract into research planning
+        # and synthesis so literature cannot silently replace the configured
+        # dataset, benchmark, or runtime constraints.
+        brief_config = dict(brief_request.config)
+        brief_config.setdefault(
+            "research_execution_context",
+            _prepared_experiment_context(request.code_task_spec),
+        )
+        brief_request = replace(brief_request, config=brief_config)
+
     steps = _run_research_brief_steps(
-        request.brief,
+        brief_request,
         controller,
         search_registry=search_registry,
         next_capability="research_design",
@@ -309,6 +322,7 @@ def run_research_session(
             execution_schema=result_schema,
             use_llm=request.brief.use_llm,
             llm_client=request.brief.llm_client,
+            execution_context=_research_execution_context(brief_request),
         ),
     )
     if design_result.status in {"failed", "blocked"}:
@@ -406,6 +420,43 @@ def run_research_session(
         design=design,
         design_ref=design_ref,
     )
+
+
+def _research_execution_context(request: ResearchBriefSessionRequest) -> str:
+    """Return the optional prepared-project boundary carried by the brief."""
+
+    value = request.config.get("research_execution_context")
+    return str(value or "").strip()
+
+
+def _prepared_experiment_context(spec: CodeTaskExperimentSpec) -> str:
+    """Render a small hard boundary for a prepared Code-Task project."""
+
+    lines = [
+        "The downstream experiment uses this prepared project and task as its hard executable boundary.",
+        "Use literature to motivate a compatible change; do not substitute another dataset, task, benchmark, or runtime.",
+        f"- Project root: {spec.code_root}",
+        f"- Benchmark command: {spec.benchmark_command or 'configured benchmark'}",
+        f"- Primary metric: {spec.primary_metric or 'configured benchmark metric'}",
+        f"- Metric directions: {spec.metric_directions or 'configured benchmark directions'}",
+        f"- Environment mode: {spec.env_mode}",
+    ]
+    if spec.edit_scope_allowed_patterns:
+        lines.append(
+            "- Editable patterns: " + ", ".join(spec.edit_scope_allowed_patterns)
+        )
+    if spec.task_file is None:
+        lines.append("- Task file: none was supplied; infer no additional project requirements.")
+        return "\n".join(lines)
+    lines.append(f"- Task file: {spec.task_file}")
+    try:
+        task = spec.task_file.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as exc:
+        lines.append(f"- Task contents unavailable: {exc}")
+        return "\n".join(lines)
+    if task:
+        lines.extend(["", "Task file contents:", task[:8000]])
+    return "\n".join(lines)
 
 
 def continue_research_session(

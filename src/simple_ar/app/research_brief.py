@@ -217,6 +217,7 @@ def _run_research_brief_steps(
 
     plan_request = ResearchPlanRequest(
         topic=request.topic,
+        problem_markdown=_research_problem_markdown(request),
         config=_planning_config(request),
         default_query=request.topic,
         default_max_results=request.max_results,
@@ -319,7 +320,7 @@ def _run_research_brief_steps(
         request=ReadRequest(
             bundle=documents,
             topic=request.topic,
-            problem_markdown=f"# Research Problem\n\nStudy `{request.topic}` with the configured evidence and experiment budget.\n",
+            problem_markdown=_research_problem_markdown(request),
             research_plan_json=json.dumps(
                 plan.to_handoff_dict(),
                 ensure_ascii=False,
@@ -357,6 +358,7 @@ def _run_research_brief_steps(
                 read,
                 coverage=search.coverage_report,
                 source_plan=plan.source_plan.to_row(),
+                execution_context=_research_execution_context(request),
             ),
             idea_limit=request.idea_limit,
             use_llm=request.use_llm,
@@ -405,6 +407,31 @@ def _planning_config(request: ResearchBriefSessionRequest) -> dict[str, object]:
         config.setdefault("research_use_fulltext", True)
         config.setdefault("research_allow_pdf_download", False)
     return config
+
+
+def _research_execution_context(request: ResearchBriefSessionRequest) -> str:
+    """Read the optional hard boundary for a prepared downstream experiment."""
+
+    value = request.config.get("research_execution_context")
+    return str(value or "").strip()
+
+
+def _research_problem_markdown(request: ResearchBriefSessionRequest) -> str:
+    """Expose prepared experiment limits to planning and reading prompts."""
+
+    base = (
+        f"# Research Problem\n\nStudy `{request.topic}` with the configured "
+        "evidence and experiment budget.\n"
+    )
+    context = _research_execution_context(request)
+    if not context:
+        return base
+    return (
+        base
+        + "\n## Prepared Experiment Boundary (hard)\n\n"
+        + context[:8000]
+        + "\n"
+    )
 
 
 def _search_document_limit(

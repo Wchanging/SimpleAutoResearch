@@ -37,6 +37,7 @@ class ResearchDesignRequest:
     topic: str = ""
     idea_id: str | None = None
     execution_schema: Mapping[str, Any] = field(default_factory=dict)
+    execution_context: str = ""
     use_llm: bool = False
     llm_client: Any | None = None
 
@@ -46,6 +47,7 @@ class ResearchDesignRequest:
                 "ResearchDesignRequest.llm_client is required when use_llm is true."
             )
         object.__setattr__(self, "execution_schema", dict(self.execution_schema))
+        object.__setattr__(self, "execution_context", self.execution_context.strip())
 
     def normalized_synthesis(self) -> SynthesisResult:
         """Restore the typed synthesis boundary without invoking an LLM."""
@@ -290,6 +292,7 @@ def _select_idea_with_llm(
                 else {},
                 ensure_ascii=False,
             ),
+            execution_context=request.execution_context,
         ),
         label="research-design",
     )

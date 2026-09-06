@@ -213,6 +213,7 @@ def evidence_pack_from_read(
     *,
     coverage: Mapping[str, Any] | None = None,
     source_plan: Mapping[str, Any] | None = None,
+    execution_context: str | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Adapt a typed Read result to the minimal synthesis input shape.
 
@@ -247,6 +248,7 @@ def evidence_pack_from_read(
         "evidence_refs": [chunk.chunk_id for chunk in result.bundle.chunks],
         "evidence_snippets": _evidence_snippets(result),
         "limitations": list(result.diagnostics),
+        "execution_context": _execution_context_payload(execution_context),
     }
 
 
@@ -263,6 +265,14 @@ def _evidence_snippets(result: ReadResult, *, max_chunks: int = 12, max_chars: i
         max_chunks=max_chunks,
         max_chars=max_chars,
     )
+
+
+def _execution_context_payload(value: object) -> str | dict[str, Any]:
+    """Normalize optional prepared-experiment constraints for synthesis."""
+
+    if isinstance(value, Mapping):
+        return {str(key): item for key, item in value.items()}
+    return str(value or "").strip()
 
 
 __all__ = [

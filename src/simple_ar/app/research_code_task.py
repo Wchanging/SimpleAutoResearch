@@ -196,6 +196,7 @@ def run_research_code_task_session(
             topic=request.topic,
             idea_id=request.idea_id,
             execution_schema=result_schema,
+            execution_context=synthesis.execution_context,
         ),
     )
     if design_result.status in {"failed", "blocked"}:

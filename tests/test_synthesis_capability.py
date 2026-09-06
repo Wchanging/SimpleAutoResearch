@@ -95,6 +95,7 @@ class SynthesisCapabilityTests(unittest.TestCase):
             read,
             coverage={"status": "covered", "covered_facets": ["method"]},
             source_plan={"sources": ["fixture"]},
+            execution_context="Use the prepared fixture benchmark and do not download data.",
         )
 
         self.assertEqual(pack["coverage"]["status"], "covered")
@@ -102,6 +103,7 @@ class SynthesisCapabilityTests(unittest.TestCase):
         self.assertEqual(pack["evidence_refs"], ["paper-1#chunk-1"])
         self.assertIn("paper-1#chunk-1", pack["evidence_snippets"])
         self.assertIn("paper.md:4", pack["evidence_snippets"] if isinstance(pack["evidence_snippets"], str) else "")
+        self.assertIn("prepared fixture benchmark", pack["execution_context"])
 
     def test_capability_can_add_explicit_llm_synthesis(self) -> None:
         class FakeClient:
@@ -138,6 +140,35 @@ class SynthesisCapabilityTests(unittest.TestCase):
         self.assertGreater(len(payload["synthesis_markdown"]), 0)
         self.assertIn("Themes", payload["synthesis_markdown"])
         self.assertIn("Hypothesis", payload["hypothesis_markdown"])
+
+    def test_llm_synthesis_receives_prepared_experiment_boundary(self) -> None:
+        class FakeClient:
+            def ask_json(self, _system: str, user: str, *, label: str = "") -> dict[str, object]:
+                self.user = user
+                return {
+                    "synthesis_markdown": "The evidence supports a bounded fixture experiment.",
+                    "hypothesis_markdown": "The prepared benchmark remains the evaluation authority.",
+                }
+
+        client = FakeClient()
+        context_text = (
+            "Dataset: sklearn digits. Benchmark: python benchmark.py. "
+            "Do not substitute another task."
+        )
+        result = synthesize_evidence(
+            SynthesisRequest(
+                evidence_pack={
+                    **_pack(),
+                    "execution_context": context_text,
+                },
+                use_llm=True,
+                llm_client=client,
+            )
+        )
+
+        self.assertEqual(result.execution_context, context_text)
+        self.assertIn("sklearn digits", client.user)
+        self.assertIn("do not substitute a dataset or task", client.user.lower())
 
     def test_llm_can_replace_rule_ideas_with_grounded_candidates(self) -> None:
         class FakeClient:

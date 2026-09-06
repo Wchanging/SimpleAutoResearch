@@ -1114,6 +1114,7 @@ def _writer_prompt(
         "visual_requirements": section_visuals,
         "global_research_context": {
             "evidence_summary": context.evidence_summary[:3000],
+            "execution_context": context.execution_context[:8000],
             "synthesis": context.synthesis_markdown[:3000],
             "hypothesis": context.hypothesis_markdown[:1500],
         },
@@ -1150,6 +1151,7 @@ def _writer_prompt(
             "Do not add Markdown image links unless a real generated image artifact exists; deterministic rendering handles planned figures separately.",
             "Draft front-matter as if it is written after the body: Abstract and Introduction should summarize the actual synthesis, not generic background.",
             "For each strong conclusion, add a boundary condition or uncertainty statement.",
+            "When a prepared execution context is supplied, treat its project, dataset, benchmark, and runtime limits as authoritative; do not repeat a conflicting literature setting as if it were the executed experiment.",
             "Keep paragraphs under roughly 120 words; split dense synthesis into short paragraphs or concise bullets.",
             "Use only `cite_as` values such as [@P1] for body citations; never cite long source handles or raw paper ids.",
             "The final renderer will map short citation keys back to verified source ids and numeric citations.",
@@ -1196,6 +1198,7 @@ def _writer_recovery_prompt(
         ),
         "topic": context.topic,
         "objective": memory.objective,
+        "execution_context": context.execution_context[:8000],
         "section": {
             "section_id": section.section_id,
             "heading": section.heading,
@@ -1219,6 +1222,7 @@ def _writer_recovery_prompt(
         ][:6],
         "style_rules": [
             "Write evidence-bounded academic prose using only the supplied source handles.",
+            "When a prepared execution context is supplied, keep the executed project, dataset, benchmark, and runtime limits authoritative.",
             "Use only supplied short citation keys such as [@P1].",
             "Do not include a References section.",
             "`draft_markdown` is mandatory; optional metadata may be empty arrays.",

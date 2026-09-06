@@ -72,6 +72,7 @@ class SynthesisResult:
     hypothesis_markdown: str = ""
     generation_mode: Literal["deterministic", "llm"] = "deterministic"
     diagnostics: tuple[str, ...] = ()
+    execution_context: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Return a compact JSON-serializable summary."""
@@ -85,6 +86,7 @@ class SynthesisResult:
             "synthesis_character_count": len(self.synthesis_markdown),
             "hypothesis_character_count": len(self.hypothesis_markdown),
             "diagnostics": list(self.diagnostics),
+            "execution_context_character_count": len(self.execution_context),
         }
 
     def to_handoff_dict(self) -> dict[str, Any]:
@@ -104,6 +106,7 @@ class SynthesisResult:
             "hypothesis_markdown": self.hypothesis_markdown,
             "generation_mode": self.generation_mode,
             "diagnostics": list(self.diagnostics),
+            "execution_context": self.execution_context,
         }
 
     def for_idea(self, idea_id: str) -> "SynthesisResult":
@@ -183,6 +186,7 @@ class SynthesisResult:
             hypothesis_markdown=str(data.get("hypothesis_markdown") or ""),
             generation_mode=_generation_mode(data.get("generation_mode")),
             diagnostics=tuple(str(item) for item in data.get("diagnostics", [])),
+            execution_context=str(data.get("execution_context") or ""),
         )
 
 
@@ -214,6 +218,7 @@ def _synthesize_deterministic_evidence(request: SynthesisRequest) -> SynthesisRe
         experiment_contract=experiment_contract,
         generation_mode="deterministic",
         diagnostics=tuple(diagnostics),
+        execution_context=_execution_context_text(pack),
     )
 
 
@@ -541,6 +546,9 @@ def _bounded_pack_json(pack: Mapping[str, Any]) -> str:
         "coverage": pack.get("coverage", {}),
         "counts": pack.get("counts", {}),
     }
+    execution_context = _execution_context_text(pack)
+    if execution_context:
+        selected["execution_context"] = execution_context[:8000]
     for key in ("paper_cards", "claim_cards", "method_cards", "dataset_cards"):
         value = pack.get(key)
         if isinstance(value, list):
@@ -552,6 +560,14 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
     """Create a small readable evidence view for the synthesis prompt."""
 
     lines = [f"# Evidence Notes\n\nTopic: {pack.get('topic', '')}"]
+    execution_context = _execution_context_text(pack)
+    if execution_context:
+        lines.extend(
+            [
+                "\n## Prepared Experiment Boundary (hard)",
+                execution_context[:8000],
+            ]
+        )
     for key, heading, fields in (
         ("paper_cards", "Papers", ("paper_id", "title", "method_summary")),
         ("claim_cards", "Claims", ("claim_id", "paper_id", "claim")),
@@ -575,6 +591,15 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
             if values:
                 lines.append("- " + " | ".join(values))
     return "\n".join(lines)
+
+
+def _execution_context_text(pack: Mapping[str, Any]) -> str:
+    """Return the bounded downstream experiment context supplied by a caller."""
+
+    value = pack.get("execution_context")
+    if isinstance(value, Mapping):
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    return str(value or "").strip()
 
 
 def _required_text(response: Mapping[str, Any], key: str) -> str:

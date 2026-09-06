@@ -197,6 +197,7 @@ def build_research_session_report_inputs(
         synthesis_markdown=synthesis_markdown,
         hypothesis_markdown=contract.hypothesis,
         evidence_summary=evidence_summary,
+        execution_context=session.brief.execution_context,
         search_meta={
             "status": session.search.status,
             "paper_count": len(session.search.papers),

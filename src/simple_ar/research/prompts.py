@@ -368,6 +368,12 @@ def synthesize_user_prompt(
         "- Use stable paper ids as provenance anchors where possible. If you use\n"
         "  a chunk/card id, copy the complete identifier exactly from the supplied\n"
         "  JSON; do not shorten provider or document prefixes.\n\n"
+        "- If a Prepared Experiment Boundary is supplied, it is authoritative for\n"
+        "  the executable idea: keep its project, dataset, benchmark, metrics,\n"
+        "  and runtime constraints. Use literature only to motivate a compatible\n"
+        "  change; do not substitute a dataset or task from a retrieved paper.\n"
+        "  If the literature conflicts with that boundary, choose a compatible\n"
+        "  direction and state the limitation instead of silently changing it.\n\n"
         "If `idea_candidates` is present, each item must contain non-empty "
         "`idea_id`, `title`, `hypothesis`, `proposed_change`, and "
         "`motivation_refs`, plus optional `expected_outcome`, "
@@ -389,9 +395,17 @@ def research_design_user_prompt(
     ideas_json: str,
     novelty_checks_json: str,
     contract_json: str,
+    execution_context: str = "",
 ) -> str:
     """Build the bounded model prompt for selecting an existing idea."""
 
+    boundary = (
+        "\n\nPrepared Experiment Boundary (hard):\n"
+        + execution_context[:8000]
+        + "\n"
+        if execution_context.strip()
+        else ""
+    )
     return (
         "Select exactly one candidate research idea for the next bounded experiment. "
         "Return a JSON object with exactly these fields: "
@@ -404,10 +418,14 @@ def research_design_user_prompt(
         "novelty checks, and the existing contract.\n"
         "- Do not create a new idea or change the baseline, dataset, metrics, "
         "hypothesis, proposed change, or execution command.\n\n"
+        "- When a Prepared Experiment Boundary is supplied, preserve its project, "
+        "dataset, benchmark, and runtime constraints; select only a compatible "
+        "candidate.\n\n"
         f"Research context:\n{research_context}\n\n"
         f"Candidate ideas JSON:\n{ideas_json}\n\n"
         f"Novelty checks JSON:\n{novelty_checks_json}\n\n"
         f"Existing experiment contract JSON:\n{contract_json}\n"
+        f"{boundary}"
     )
 
 
@@ -459,6 +477,9 @@ def code_task_design_user_prompt(
         "- Mention the benchmark command and the primary metric or metric family.\n"
         "- State that the patch should preserve public APIs unless the task explicitly requires otherwise.\n"
         "- If the research artifacts are thin, write a conservative exploratory-improvement task rather than inventing paper details.\n\n"
+        "- The prepared project, dataset, benchmark, and runtime constraints are "
+        "authoritative. If the research context conflicts with them, omit the "
+        "conflicting literature setting rather than copying it into the task.\n\n"
         f"Topic:\n{topic}\n\n"
         f"Goal Markdown:\n{goal_markdown}\n\n"
         f"Problem Markdown:\n{problem_markdown}\n\n"
@@ -510,7 +531,11 @@ def merged_code_task_design_user_prompt(
         "- Mention the benchmark command and primary metric/metric family.\n"
         "- Prefer a small, reviewable patch over a broad redesign.\n"
         "- If research artifacts are thin or unrelated, say so and keep the "
-        "task grounded in the user file.\n\n"
+        "task grounded in the user file.\n"
+        "- The prepared user task, project dataset, benchmark, and runtime "
+        "constraints are authoritative. If research context conflicts with them, "
+        "omit the conflicting literature setting rather than copying it into the "
+        "task.\n\n"
         f"Topic:\n{topic}\n\n"
         f"User Task Markdown:\n{user_task_markdown}\n\n"
         f"Goal Markdown:\n{goal_markdown}\n\n"
