@@ -8,6 +8,13 @@
 
 ### 变更
 
+- 收束 V2.8 文档管理：V2.8 主计划、session handoff 和长期愿景三份活动文档现在随 Git
+  版本管理，其他历史/临时 `MDfiles/` 笔记继续保持本地忽略，避免再次形成并行计划。
+- 将 V2.8 正式规模验收写清为第二层闸门：约 30–50 条 raw papers、10–20 篇 bounded Read、
+  一个资源受限的中等实验，以及包含完整章节、可追溯引用和指标审计的 Markdown report。
+- 选定轻量图像分类作为第一条规模验收方向，使用 `full_pipeline_tiny_mlp` 的 packaged
+  `sklearn.datasets.load_digits`，并记录研究方向确认、代码/数据准备和 report continuation
+  的现有人工衔接边界。
 - 报告指标 audit 现在会把等价的普通小数和科学计数法视为同一份数值证据，
   同时保留单位区分和 citation 数字过滤，避免把 `4e-05` 与 `4.0e-05` 之类的格式差异误报为 warning。
 - Code-Task 到报告的 handoff 现在可以解析相对于 run 或 stage 的嵌套 artifact 路径；当 Writer 已生成同名但不完整的章节时，

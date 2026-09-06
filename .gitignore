@@ -41,8 +41,13 @@ benchmark/survey_bench/__pycache__/
 benchmark/survey_bench/results/
 benchmark/survey_bench/submissions/
 
-# Local planning notes
-MDfiles/
+# Local planning notes. Keep the three active project documents versioned;
+# historical/session-specific notes remain local unless explicitly promoted.
+MDfiles/*
+!MDfiles/
+!MDfiles/SIMPLE_AUTORESEARCH_LONG_TERM_VISION_AND_ARCHITECTURE.md
+!MDfiles/SIMPLE_AUTORESEARCH_V2_8_SYSTEM_EVOLUTION_PLAN.md
+!MDfiles/SIMPLE_AUTORESEARCH_V2_8_SESSION_HANDOFF.md
 
 # Reference project; keep it locally for study, but do not vendor it into this repo.
 AutoResearchClaw/

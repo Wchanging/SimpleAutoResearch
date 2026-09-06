@@ -8,6 +8,18 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Tightened V2.8 document management: the V2.8 system plan, session handoff,
+  and long-term vision are now versioned as the three active planning documents;
+  historical and temporary `MDfiles/` notes remain ignored so they cannot form
+  a second route.
+- Defined the normal-user-scale V2.8 gate as a second acceptance layer:
+  approximately 30--50 raw papers, 10--20 bounded Read candidates, one
+  resource-bounded medium experiment, and a complete Markdown report with
+  traceable citations and metric audit.
+- Selected lightweight image classification on packaged
+  `sklearn.datasets.load_digits` through `full_pipeline_tiny_mlp` as the first
+  scale-acceptance direction, including explicit research-scope, code/data
+  preparation, and report-continuation handoff points.
 - Report metric audit now treats equivalent decimal and scientific-notation values
   as the same numeric evidence while preserving optional units and citation-number
   filtering, avoiding false warnings such as `4e-05` versus `4.0e-05`.
