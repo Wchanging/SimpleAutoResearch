@@ -1386,6 +1386,51 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIn("[@paper-1]", report)
         self.assertNotIn("[@paper-2]", report)
 
+    def test_report_audit_keeps_unused_source_pool_without_warning(self) -> None:
+        papers = [
+            Paper(
+                id="paper-1",
+                title="Cited Paper",
+                authors=[],
+                abstract="",
+                url="https://example.com/1",
+            ),
+            Paper(
+                id="paper-2",
+                title="Selected but Uncited Paper",
+                authors=[],
+                abstract="",
+                url="https://example.com/2",
+            ),
+        ]
+        context = build_report_context(
+            Context(Path("run"), "Agent Simulation", config={}),
+            report_mode="experiment",
+            goal="",
+            problem="",
+            search_meta={},
+            synthesis="",
+            hypothesis="",
+            plan={},
+            results={},
+            paper_rows=[paper.to_row() for paper in papers],
+            papers=papers,
+            research_evidence_summary="",
+        )
+        memory = ReportMemory()
+
+        audit = build_report_audit(
+            report="# Draft\n\nPrior work [@paper-1].\n",
+            report_body="# Draft\n\nPrior work [@paper-1].\n",
+            context=context,
+            memory=memory,
+        )
+
+        self.assertEqual(audit.status, "passed")
+        self.assertEqual(audit.citation_audit.status, "passed")
+        self.assertEqual(audit.citation_audit.unused_references, ["paper-2"])
+        self.assertEqual(audit.citation_audit.warnings, [])
+
     def test_report_quality_records_metrics_and_runtime_limits(self) -> None:
         paper = Paper(
             id="paper-1",

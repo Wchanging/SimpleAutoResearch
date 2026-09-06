@@ -208,10 +208,12 @@ def _citation_audit(report_body: str, context: ReportContext) -> CitationAudit:
     if known and not found:
         warnings.append("Report has paper metadata but no body citations.")
         status = "failed"
-    elif unused:
-        warnings.append("Some retrieved papers are not cited in the report body.")
-        if status == "passed":
-            status = "warning"
+    # ``context.papers`` is the selected source pool, not the final reference
+    # list.  Report assembly intentionally prunes that pool to body-cited
+    # papers before writing References/references.bib.  Keep the unused ids in
+    # the audit for provenance, but do not turn normal source selection into a
+    # report warning.  Unknown citations and a completely uncited paper pool
+    # remain hard quality signals above.
     return CitationAudit(
         status=status,
         known_citations=sorted(found & known),
