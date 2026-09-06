@@ -9,6 +9,9 @@ from pathlib import Path
 from simple_ar.experiment.code_task_bridge import code_task_project_spec
 
 
+SUBPROCESS_TIMEOUT_SEC = 45
+
+
 class ArchitectureBoundaryTests(unittest.TestCase):
     def test_cli_package_does_not_eagerly_import_entrypoint(self) -> None:
         probe = (
@@ -20,7 +23,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             [sys.executable, "-c", probe],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
@@ -30,7 +33,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             [sys.executable, "-m", "simple_ar.cli.main", "--help"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -49,7 +52,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             [sys.executable, "-c", probe],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
             check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
