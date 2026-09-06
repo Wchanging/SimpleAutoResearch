@@ -565,7 +565,8 @@ def _materialize_task(
         task_text = source_task_file.read_text(encoding="utf-8")
         if synthesis.experiment_contract is not None:
             task_text = task_text.rstrip() + "\n\n" + _research_handoff_text(
-                synthesis.experiment_contract
+                synthesis.experiment_contract,
+                execution_context=synthesis.execution_context,
             )
     else:
         if synthesis.experiment_contract is None:
@@ -593,26 +594,50 @@ def _generated_task_text(synthesis: SynthesisResult) -> str:
         "## Hypothesis",
         contract.hypothesis,
         "",
-        "## Research context",
-        f"- Baseline: {contract.baseline}",
-        f"- Dataset: {contract.dataset}",
-        f"- Metrics: {', '.join(contract.metrics) or 'use the configured benchmark metrics'}",
-        f"- Motivation: {', '.join(contract.motivation_refs) or 'not specified'}",
-        "",
-        "## Proposed change",
-        contract.proposed_change or "Make the smallest evidence-supported improvement.",
-        "",
-        "## Scope and validation",
-        *[f"- {item}" for item in contract.implementation_scope],
-        *[f"- Validate: {item}" for item in contract.validation_hints],
-        "- Do not modify tests or benchmark scoring code.",
-        "- Preserve the existing public interfaces and produce the configured metrics.",
-        "",
     ]
+    if synthesis.execution_context.strip():
+        lines.extend(
+            [
+                "## Prepared experiment boundary (authoritative)",
+                synthesis.execution_context.strip(),
+                "",
+                "## Literature motivation (non-authoritative execution context)",
+                f"- Motivation: {', '.join(contract.motivation_refs) or 'not specified'}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "## Research context",
+                f"- Baseline: {contract.baseline}",
+                f"- Dataset: {contract.dataset}",
+                f"- Metrics: {', '.join(contract.metrics) or 'use the configured benchmark metrics'}",
+                f"- Motivation: {', '.join(contract.motivation_refs) or 'not specified'}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Proposed change",
+            contract.proposed_change or "Make the smallest evidence-supported improvement.",
+            "",
+            "## Scope and validation",
+            *[f"- {item}" for item in contract.implementation_scope],
+            *[f"- Validate: {item}" for item in contract.validation_hints],
+            "- Do not modify tests or benchmark scoring code.",
+            "- Preserve the existing public interfaces and produce the configured metrics.",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
-def _research_handoff_text(contract: ResearchExperimentContract) -> str:
+def _research_handoff_text(
+    contract: ResearchExperimentContract,
+    *,
+    execution_context: str = "",
+) -> str:
     """Append the selected research direction without replacing the task."""
 
     lines = [
@@ -628,15 +653,35 @@ def _research_handoff_text(contract: ResearchExperimentContract) -> str:
         "### Proposed change",
         contract.proposed_change or "Use the smallest evidence-supported change.",
         "",
-        "### Experimental context",
-        f"- Baseline: {contract.baseline}",
-        f"- Dataset: {contract.dataset}",
-        f"- Metrics: {', '.join(contract.metrics) or 'use configured metrics'}",
-        "",
-        "### Validation guidance",
-        *[f"- {item}" for item in contract.validation_hints],
-        "",
     ]
+    if execution_context.strip():
+        lines.extend(
+            [
+                "### Prepared experiment boundary (authoritative)",
+                execution_context.strip(),
+                "",
+                "### Literature motivation (not executable configuration)",
+                f"- Motivation references: {', '.join(contract.motivation_refs) or 'not specified'}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "### Experimental context",
+                f"- Baseline: {contract.baseline}",
+                f"- Dataset: {contract.dataset}",
+                f"- Metrics: {', '.join(contract.metrics) or 'use configured metrics'}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "### Validation guidance",
+            *[f"- {item}" for item in contract.validation_hints],
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 

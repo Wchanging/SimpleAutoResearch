@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from simple_ar.code_task import (
+    PatchValidationError,
     analyze_code_task_failure,
     apply_patch_edits,
     build_code_task_context_pack,
@@ -32,7 +33,7 @@ from simple_ar.code_task.runtime.state import (
     save_code_task_manifest,
     utcnow_iso,
 )
-from simple_ar.core.artifacts import read_json
+from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.experiment.code_task_bridge.spec import (
     CodeTaskExperimentResult,
     CodeTaskExperimentSpec,
@@ -346,12 +347,35 @@ def _verify_or_repair_patch(
         message_callback=message_callback,
     )
     if repair.edit_count == 0:
-        raise RuntimeError(
-            "Embedded code-task repair produced no edits after a failed benchmark. "
-            f"See {repair.proposal_path}."
+        _record_repair_failure(
+            run_dir,
+            reason="empty_repair_proposal",
+            error=(
+                "Embedded code-task repair produced no edits after a failed benchmark. "
+                f"See {repair.proposal_path}."
+            ),
+            first_report=first.report_path,
         )
+        return changed_files
     _emit(message_callback, "Applying embedded code-task repair proposal.")
-    repaired_patch = apply_patch_edits(run_dir, edits_file=repair.proposal_path)
+    try:
+        repaired_patch = apply_patch_edits(run_dir, edits_file=repair.proposal_path)
+    except PatchValidationError as exc:
+        # A malformed repair must not erase the first patched benchmark's
+        # evidence.  Patch application validates the full proposal before
+        # writing, so the original workspace and report remain usable for
+        # analysis and an explicit later continuation.
+        _record_repair_failure(
+            run_dir,
+            reason="repair_patch_validation",
+            error=str(exc),
+            first_report=first.report_path,
+        )
+        _emit(
+            message_callback,
+            "Repair proposal was invalid; preserving the initial patched benchmark evidence.",
+        )
+        return changed_files
     if not spec.allow_test_changes and any(
         is_protected_edit_path(path) for path in repaired_patch.changed_files
     ):
@@ -400,6 +424,39 @@ def _merge_paths(first: tuple[str, ...], second: tuple[str, ...]) -> tuple[str, 
             seen.add(path)
             merged.append(path)
     return tuple(merged)
+
+
+def _record_repair_failure(
+    run_dir: Path,
+    *,
+    reason: str,
+    error: str,
+    first_report: Path,
+) -> None:
+    """Persist a bounded repair failure while keeping the initial result."""
+
+    artifact = run_dir / "code_task" / "meta" / "repair_failure.json"
+    write_json(
+        artifact,
+        {
+            "schema_version": "code_task_repair_failure.v1",
+            "status": "preserved_initial_result",
+            "reason": reason,
+            "error": error,
+            "initial_patched_report": first_report.as_posix(),
+        },
+    )
+    try:
+        manifest = load_code_task_manifest(run_dir)
+        repair = manifest_section(manifest, "repair")
+        repair["status"] = "repair_failed_preserved"
+        repair["failure_reason"] = reason
+        repair["failure_artifact"] = "code_task/meta/repair_failure.json"
+        save_code_task_manifest(run_dir, manifest)
+    except (OSError, TypeError, ValueError):
+        # The JSON artifact is the primary evidence; do not turn a manifest
+        # bookkeeping issue into loss of the already recorded benchmark.
+        return
 
 
 def _emit(callback: MessageCallback | None, message: str) -> None:

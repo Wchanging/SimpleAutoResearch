@@ -129,6 +129,33 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
             self.assertIn("Validation improves reliable agent accuracy.", materialized)
             self.assertIn("add validation", materialized)
 
+    def test_prepared_execution_boundary_overrides_literature_context_in_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            synthesis_file = _write_synthesis(root)
+            payload = json.loads(synthesis_file.read_text(encoding="utf-8"))
+            payload["execution_context"] = (
+                "Dataset: sklearn.datasets.load_digits. Benchmark: python benchmark.py. "
+                "The prepared project is authoritative."
+            )
+            synthesis_file.write_text(json.dumps(payload), encoding="utf-8")
+            source_task = root / "task.md"
+            source_task.write_text("# Original task\n", encoding="utf-8")
+            request = replace(
+                _request(root, synthesis_file),
+                spec=replace(_request(root, synthesis_file).spec, task_file=source_task),
+            )
+            with patch(
+                "simple_ar.app.research_code_task.prepare_code_task_experiment",
+                side_effect=_fake_prepare,
+            ) as prepare:
+                run_research_code_task_session(request)
+
+            materialized = prepare.call_args.kwargs["spec"].task_file.read_text(encoding="utf-8")
+            self.assertIn("Prepared experiment boundary (authoritative)", materialized)
+            self.assertIn("sklearn.datasets.load_digits", materialized)
+            self.assertNotIn("- Baseline: baseline", materialized)
+
     def test_backend_failure_is_retained_as_canonical_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
