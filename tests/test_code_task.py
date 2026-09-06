@@ -3751,6 +3751,7 @@ protected_patterns = ["pyproject.toml"]
             _write_toy_project(code_root)
             write_text(task_file, "# Task\n\nRun with an explicit interpreter.\n")
             run_dir = root / "runs" / "code-task-run"
+            expected_python = str(Path(sys.executable).resolve())
             initialize_code_task(
                 run_dir=run_dir,
                 code_root=code_root,
@@ -3766,8 +3767,8 @@ protected_patterns = ["pyproject.toml"]
 
             report = read_json(baseline.report_path)
             self.assertEqual(report["environment"]["mode"], "external")
-            self.assertEqual(report["environment"]["python_executable"], sys.executable)
-            self.assertEqual(report["command"][0], sys.executable)
+            self.assertEqual(report["environment"]["python_executable"], expected_python)
+            self.assertEqual(report["command"][0], expected_python)
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["environment"]["policy"]["mode"], "external")
             self.assertEqual(
