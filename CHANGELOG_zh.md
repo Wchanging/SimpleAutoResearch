@@ -14,6 +14,7 @@
   会补充确定性的 baseline/patched 对照表，确保最终报告展示全部已记录的对照指标。
 - canonical `research-session` 的报告 continuation 现在会在 Writer 组装后追加紧凑的确定性实验证据附录，包含对照 delta 和指标 provenance；
   即使模型生成的章节遗漏某个已记录指标，Code-Task 证据仍会完整保留。
+- canonical Code-Task handoff 现在会从 backend 的 run 目录读取 comparison artifact，确保 baseline/patched delta 能进入 research-session 结果和最终报告。
 
 ## 2026-09-05
 

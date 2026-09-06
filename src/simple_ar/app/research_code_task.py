@@ -649,7 +649,7 @@ def _canonical_code_task_result(
     root = result.code_task_run_dir
     baseline_report_path = root / "code_task" / "run" / "baseline" / "execution_report.json"
     patched_report_path = root / "code_task" / "run" / "patched" / "execution_report.json"
-    comparison_path = root / "code_task" / "comparison.json"
+    comparison_path = root / "code_task" / "run" / "comparison.json"
     patched_report = _read_json(patched_report_path)
     baseline_report = _read_json(baseline_report_path)
     comparison = _read_json(comparison_path)

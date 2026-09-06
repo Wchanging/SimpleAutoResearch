@@ -263,7 +263,13 @@ class ResearchCodeTaskApplicationTests(unittest.TestCase):
                 )
 
             self.assertEqual(context.topic, "reliable agents")
-            self.assertEqual(len(memory.metric_sources), 2)
+            self.assertEqual(len(memory.metric_sources), 3)
+            self.assertTrue(
+                any(
+                    item.label == "comparison_delta" and item.name == "accuracy"
+                    for item in memory.metric_sources
+                )
+            )
             self.assertEqual(report.status, "completed")
             self.assertEqual(report.audit.metric_audit.status, "passed")
             self.assertTrue(
@@ -356,8 +362,23 @@ def _fake_prepare(
         encoding="utf-8",
     )
     (patched / "metrics.json").write_text(json.dumps({"accuracy": 0.8}), encoding="utf-8")
-    (root / "comparison.json").write_text(
-        json.dumps({"schema_version": 1, "status": "ready", "verdict": "improved"}),
+    (root / "run" / "comparison.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "ready",
+                "verdict": "improved",
+                "metrics": [
+                    {
+                        "name": "accuracy",
+                        "baseline": 0.7,
+                        "patched": 0.8,
+                        "delta": 0.1,
+                        "interpretation": "improved",
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     summary = root / "summary.md"

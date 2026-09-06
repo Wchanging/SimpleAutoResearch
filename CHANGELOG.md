@@ -19,6 +19,9 @@ This file records user-visible project changes in reverse chronological order. P
   deterministic experiment-evidence appendix after Writer assembly, including
   comparison deltas and metric provenance; this keeps Code-Task evidence intact
   even when the model-generated sections omit a recorded metric.
+- The canonical Code-Task handoff now reads the comparison artifact from the
+  backend's run directory, preserving baseline/patched deltas in research-session
+  results and the final report.
 
 ## 2026-09-05
 
