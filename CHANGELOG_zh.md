@@ -8,6 +8,8 @@
 
 ### 变更
 
+- Synthesis 现在可以处理 LLM 复制长 chunk id 时遗漏 provider 前缀的情况：只有能够唯一匹配的后缀才会恢复，
+  有歧义或凭空生成的引用仍然会被证据边界校验拒绝。
 - canonical report 组装现在会把选定论文元数据沿 `research-session` continuation 传递下去，
   归一化模型生成的 citation key，并写入经过校验的 report body、确定性的 `References`、
   `references.bib` 和 `citation_map.json` 产物。Report audit 现在读取去除 References 后的正文，

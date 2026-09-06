@@ -206,6 +206,48 @@ class SynthesisCapabilityTests(unittest.TestCase):
                 )
             )
 
+    def test_llm_candidates_recover_unique_shortened_evidence_reference(self) -> None:
+        class FakeClient:
+            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                return {
+                    "synthesis_markdown": "Evidence summary.",
+                    "hypothesis_markdown": "Testable hypothesis.",
+                    "idea_candidates": [
+                        {
+                            "idea_id": "idea-llm-001",
+                            "title": "Use the grounded evidence",
+                            "hypothesis": "The bounded change improves success.",
+                            "motivation_refs": ["paper-1#chunk-1"],
+                            "proposed_change": "Change the implementation.",
+                        }
+                    ],
+                }
+
+        pack = _pack()
+        pack["paper_cards"] = [
+            {
+                "paper_id": "paper-1",
+                "title": "Reliable agents",
+                "method_summary": "A method improves validation.",
+                "evidence_refs": ["bundle-paper-1#chunk-1"],
+            }
+        ]
+        pack["claim_cards"] = []
+        pack["method_cards"] = []
+        pack["dataset_cards"] = []
+        result = synthesize_evidence(
+            SynthesisRequest(
+                evidence_pack=pack,
+                use_llm=True,
+                llm_client=FakeClient(),
+            )
+        )
+
+        self.assertEqual(
+            result.ideas[0].motivation_refs,
+            ["bundle-paper-1#chunk-1"],
+        )
+
     def test_research_package_keeps_capability_exports_lazy_but_compatible(self) -> None:
         self.assertIs(PublicSynthesisRequest, SynthesisRequest)
 

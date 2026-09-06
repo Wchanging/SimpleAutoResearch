@@ -8,6 +8,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Synthesis now preserves the evidence boundary when an LLM drops a provider
+  prefix from a long chunk id: only a unique suffix match is restored, while
+  ambiguous or invented references still fail validation.
 - Canonical report assembly now carries the selected paper metadata through the
   `research-session` continuation, normalizes model citation keys, and writes a
   verified report body plus deterministic `References`, `references.bib`, and

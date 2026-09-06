@@ -401,6 +401,7 @@ def _parse_llm_idea_candidates(
             raise LLMError(
                 f"LLM idea_candidates[{index - 1}].motivation_refs must not be empty."
             )
+        refs = [_resolve_evidence_ref(ref, allowed_refs) for ref in refs]
         unknown = sorted(set(refs) - allowed_refs)
         if unknown:
             raise LLMError(
@@ -503,6 +504,23 @@ def _row_string_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _resolve_evidence_ref(reference: str, allowed_refs: set[str]) -> str:
+    """Recover a uniquely shortened opaque evidence id without guessing.
+
+    Long provider/document prefixes are easy for a model to drop while it is
+    copying a chunk reference. A suffix match is safe only when it resolves
+    to exactly one known id; ambiguous or unrelated values remain unchanged
+    and are rejected by the existing evidence-boundary check.
+    """
+
+    if reference in allowed_refs:
+        return reference
+    matches = sorted(
+        candidate for candidate in allowed_refs if candidate.endswith(reference)
+    )
+    return matches[0] if len(matches) == 1 else reference
 
 
 def _has_evidence(pack: Mapping[str, Any]) -> bool:
