@@ -29,7 +29,10 @@ experimentation, and gradual extension.
   `plan -> search -> document_ingest -> read -> synthesize -> research_design
   -> experiment -> analysis -> report -> report_audit` path. The mainline uses
   explicit provider, artifact, metric, timeout, and continuation boundaries;
-  the model-backed CLI requests the report by default.
+  the model-backed CLI requests the report by default. The path has completed
+  one real AutoDL prepared-project run with 60 raw and 10 selected/documents
+  across network/LLM/CodeTask/experiment/report; this proves the bounded
+  foundation, not autonomous research for arbitrary tasks.
 - **Research sources**: the canonical session can search
   OpenAlex/Semantic Scholar/arXiv/local files through the provider-neutral
   connector boundary, with bounded document extraction and evidence cards.

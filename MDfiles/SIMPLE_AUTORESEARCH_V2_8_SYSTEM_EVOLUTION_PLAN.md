@@ -2,7 +2,7 @@
 
 > 文档级别：**V2.8 唯一有效的施工计划**。
 >
-> 更新时间：2026-09-06。当前 Git 基线：`21eac85`（`feat/v2.8-system-evolution`，已推送）。
+> 更新时间：2026-09-06。代码验证基线：`4a19b5e`（`feat/v2.8-system-evolution`）。
 >
 > 本文描述 V2.8 要做什么、当前真实差距、最终结构、能力迁移规则和退出条件。不表示所有目标已经实现。
 
@@ -63,7 +63,9 @@ LLM 可以参与计划、阅读辅助、综合、设计、分析和写作；但�
 ### 2.1 V2.8 完成条件
 
 V2.8 的验收分成两个层级，避免把“代码链路已经能跑”误写成“已经达到正常用户的研究
-规模”。两个层级都必须有持久化 artifact；第二层通过后，才可以把 V2.8 标记为正式闭环。
+规模”。两个层级都必须有持久化 artifact；第二层通过后，才可以把 V2.8 的基础闭环标记为
+正式可用。这里的“正式可用”限定为准备好 baseline/data/code、资源和指标的有界任务，不等于
+任意主题上的完整自主 AutoResearch。
 
 **第一层：工程闭环（当前已通过）**
 
@@ -79,10 +81,9 @@ V2.8 的验收分成两个层级，避免把“代码链路已经能跑”误写
 - 新旧入口和历史 artifact 的必要兼容回归通过。
 
 当前已有本地聚焦回归、AutoDL 全量测试、真实网络/LLM session 和真实 CodeTask session
-作为证据；但这些 session 仍属于低预算 smoke 或准备好的轻量项目，不能单独代表第二层已
-完成。
+作为第一层证据；第二层另有独立的正常用户规模验收记录。
 
-**第二层：正常用户规模的正式试用闭环（当前施工闸门）**
+**第二层：正常用户规模的正式试用闭环（已通过，2026-09-06）**
 
 至少完成一次受控、可复现的中等规模验收，目标边界如下：
 
@@ -100,6 +101,15 @@ V2.8 的验收分成两个层级，避免把“代码链路已经能跑”误写
 - 报告引用必须能回到选定来源，正文数字和实验指标必须能回到 artifact，`report_audit`
   的 citation、metric、claim 检查通过或明确记录可解释的 warning；
 - 保留完整 session 目录，使另一位协作者可以从 manifest、handoff 和报告复核每一步。
+
+本次验收使用 `full_pipeline_tiny_mlp` 和 OpenAlex：实际保留 60 条 raw、10 篇 selected
+Read/document，真实 `gpt-5.4-mini + chat` 完成计划、阅读、综合、设计和 Writer，CodeTask
+在隔离 workspace 中完成 baseline/modified benchmark、指标比较和 analysis，最终 session
+为 `completed`。`experiment` Markdown 报告包含摘要、问题/动机、相关工作、方法、实验设置、
+结果、讨论、局限、验证指标和参考文献；citation、metric、claim audit 均为 `passed`。
+60 条 raw 是 provider 在 `--max-results 10` 下的实际返回，略高于 30–50 的目标区间，已在
+验收记录中保留而没有静默裁剪。该 run 使用 writer-only 基础报告闸门；同一代码也有 reviewer
+通过和 reviewer warning 的对照记录，后者作为报告质量改进项而不是闭环事实失败。
 
 这一层验证的是“正常用户可用的基础闭环”，不是 publication-ready 论文，也不是任意主题
 都能自动研究。LaTeX/Overleaf 模板、复杂 repair、多候选和外部 Agent 仍属于后续版本。
@@ -146,8 +156,9 @@ simple-ar run
 - 已有受控测试覆盖同一 session 的 `code_task -> experiment -> analysis -> report/audit`；
   新增的集成 fixture 还实际调用了 production CodeTask bridge、隔离工作区、baseline、
   受限 patch、validation 和指标比较，而不是替换 capability handler；
-- 真实网络 + 真实 LLM + 用户准备项目的低预算正式 smoke 已完成；但上面 2.1 所定义的
-  30–50 条检索、10–20 篇阅读和中等复杂实验的正常用户规模验收仍未完成；
+- 真实网络 + 真实 LLM + 用户准备项目的低预算正式 smoke 已完成；上面 2.1 所定义的正常
+  用户规模验收也已通过一次：60 条 raw、10 篇 selected/document、中等但受控实验和完整
+  Markdown report/audit 均有持久化证据；
 - 不能把现有接口数量等同于任意主题上的完整 AutoResearch 能力。
 
 ### 3.2 已确认有价值的基础
@@ -387,11 +398,13 @@ canonical 路径。
 - v4 的长请求曾偶发超时，v5 暴露了 comparison artifact 路径解析问题；`21eac85` 修复后 v6
   成功，说明当前 retry、artifact handoff 和 report evidence appendix 已经通过一次真实远程
   验收。该结果证明“工程闭环”成立，不证明模型一定带来指标提升，也不证明正常用户规模已达标。
-- AutoDL `588 tests` 全量测试通过；测试和验收均采用受控命令，没有启动长训练、并行候选或
+- AutoDL `598 tests` 全量测试通过；测试和验收均采用受控命令，没有启动长训练、并行候选或
   高 GPU 占用任务。
-- **仍待执行**：一次 30–50 条 raw、10–20 篇 Read、真实中等实验和完整学术结构 Markdown
-  report 的规模验收；该验收将使用准备好的项目、受限 batch/epoch/timeout 和关闭 reviewer
-  的第一版基线，成功后再按需要增加一次 reviewer 迭代。
+- AutoDL v13 规模验收已通过：`60 raw -> 10 selected -> 10 documents -> LLM
+  plan/read/synthesis/design -> CodeTask -> baseline/modified experiment -> analysis
+  -> report -> report_audit`；report 状态为 `completed`，audit 的 citation/metric/claim
+  均为 `passed`。v12 的 reviewer warning 和 v11 的 reviewer-passed 结果也保留在远程 runs
+  中，作为报告质量随机性和审阅策略的对照证据。
 
 ### 6.6 canonical Search 筛选迁移记录（2026-09-05）
 
@@ -425,27 +438,26 @@ canonical 路径。
 这张矩阵的原则是：V2.8 主线只吸收能改善正式闭环且不引入额外调度复杂度的行为；旧 CLI
 仍需要的输出先留在冻结 compatibility 层，不再作为新能力的落点。
 
-### 6.8 AutoDL/3090 低资源验收边界（2026-09-06）
+### 6.8 AutoDL/3090 低资源验收边界（已完成，2026-09-06）
 
-GPU 服务器是 V2.8 的真实环境验收手段，不是新的编排层。当前 AutoDL helper 已在本机默认
-模式通过；真实服务器验收必须继续按低消耗顺序推进：
+GPU 服务器是 V2.8 的真实环境验收手段，不是新的编排层。AutoDL helper、低负载 CUDA smoke
+和真实服务器规模验收均已按低消耗顺序完成：
 
 1. 记录 GPU、Python/uv、commit、依赖和数据/项目路径；
 2. 先跑本地 fixture 完整 smoke，确认环境和 artifact 写入；
 3. 再跑单 provider、单结果、有限 chunks/idea、默认有界重试和短超时的 online smoke；
 4. 使用准备好的单个 CodeTask 项目验证 baseline、受限 patch、validation、experiment、
    analysis、report/audit；
-5. 以上通过后才进入本计划 6.9 的正常用户规模验收；真实数据/模型仍从小 batch、少量 epoch
-   开始，保留完整 session 目录。
+5. 规模验收从小 batch、少量 epoch 和单候选开始，并保留完整 session 目录。
 
 V2.8 不引入 GPU 自动申请、训练队列、并行候选或自动资源调度。GPU 实验失败必须保留失败
    attempt 和诊断；online/LLM 失败不能用 fixture 结果静默替代。具体命令和记录项见
    `examples/README.md` 的 AutoDL/3090 小节。
 
-### 6.9 V2.8 正常用户规模验收（当前施工目标）
+### 6.9 V2.8 正常用户规模验收（已通过，2026-09-06）
 
-这是 V2.8 在宣布“正式基础闭环完成”前最后一个业务验收闸门，不是新的框架层。验收固定为
-一条受控命令和一个准备好的项目：
+这是 V2.8 宣布“正式基础闭环完成”的最后一个业务验收闸门，不是新的框架层。验收固定为
+一条受控命令和一个准备好的项目，本次已完成：
 
 ```text
 30–50 raw papers
@@ -458,8 +470,8 @@ V2.8 不引入 GPU 自动申请、训练队列、并行候选或自动资源调�
 
 执行规则：
 
-- `--max-results` 目标为 30–50，`--max-chunks`、`--idea-limit`、请求超时和重试次数显式
-  固定；不因长上下文而无限扩大预算；
+- `--max-results`、selected paper budget、`--max-chunks`、`--idea-limit`、请求超时和重试
+  次数显式固定；raw provider 返回量可能有小幅偏差，但必须完整记录，不因长上下文而无限扩大预算；
 - 先使用现有准备好的项目和真实数据/代码，实验只允许一个受控方向、一个 benchmark 和
   明确的 batch/epoch/时间上限；
 - 第一轮关闭 reviewer，先验证 Writer、证据附录和 audit 的事实完整性；若基础报告通过，
@@ -469,9 +481,15 @@ V2.8 不引入 GPU 自动申请、训练队列、并行候选或自动资源调�
 - 若网络、模型或实验失败，保留 session 作为失败证据，检查后再决定一次有界 continuation，
   不用 fixture 结果覆盖真实失败，也不连续重跑消耗资源。
 
-退出条件：上述链路至少一次完整 `completed`，报告章节齐全，引用和数字可以回溯，audit
-通过或 warning 有明确解释，且 AutoDL GPU/CPU/磁盘占用在预设边界内。该条件通过后，V2.8
-进入冻结和小修阶段；未通过则只修复阻塞闭环的具体问题，不新增顶层抽象。
+退出条件已满足：v13 session 为 `completed`，报告章节齐全，引用和数字可以回溯，audit
+三项均为 `passed`，且 AutoDL 运行采用单候选、受限 benchmark、短实验和无并行设置。V2.8
+现在进入冻结和小修阶段；后续只修复真实阻塞，不新增顶层抽象。
+
+本次实际记录：`60 raw -> 10 selected -> 10 documents -> LLM plan/read/synthesis/design
+-> CodeTask -> baseline/modified experiment -> analysis -> report -> report_audit`。v13
+使用 `report-reviewer=disabled` 验证基础报告的确定性证据链；v11 的一轮 reviewer 结果为
+`completed`，v12 的 reviewer 结果为可解释的 `partial/warning`，两者都保留为报告质量回归
+样本，而不改变 v13 的闭环结论。
 
 #### 6.9.1 本次选定的验收方向
 
@@ -487,29 +505,26 @@ V2.8 不引入 GPU 自动申请、训练队列、并行候选或自动资源调�
 - 3090 作为可用的资源上限和后续 Torch/CUDA 复核环境，而不是强制启动 GPU。第一轮优先让
   CPU/packaged-data 路径稳定，若该方向的真实代码任务暴露出 GPU 分支的必要问题，再用小
   batch、少量 epoch 接入 CUDA；
-- 方向足够接近真实研究任务，但数据、代码和 benchmark 都能提前审查。它不会把公开代码、
-  数据下载、依赖安装和模型选择全部交给 LLM：缺失资源应先进入人工确认/准备状态，再由
-  用户显式接续后续 experiment/report。
+- 方向足够接近真实研究任务，但数据、代码和 benchmark 都能提前审查。公开代码、数据下载、
+  依赖安装和模型选择仍作为显式任务输入，不由 LLM 静默扩大权限；如果真实任务缺少资源，
+  先补齐准备好的项目/configuration，再从已有 session 边界继续，不为此新增人工接力子系统。
 
-#### 6.9.2 人机衔接边界（验收观察项，不单独扩展）
+#### 6.9.2 真实任务边界观察（不单独扩展）
 
-人机衔接只是本次真实使用验收需要观察的一类问题，不是 V2.8 当前要单独建设的子系统。
-项目已有三个可复用的中间边界，规模验收先按它们工作，不另造总控状态机：
+资源准备、代码作用域和报告 continuation 是真实任务可能遇到的边界，但不是 V2.8 要单独
+建设的人工接力子系统。规模验收只复用现有入口和状态，不另造总控状态机：
 
 ```text
-research-brief
-  -> 人工检查 sources/synthesis/task scope
-  -> research-code-task 或 research-session
-  -> CodeTask approval / validation
-  -> experiment -> analysis -> research-report
+research-session
+  -> prepared project / explicit task scope
+  -> CodeTask validation
+  -> experiment -> analysis -> report
 ```
 
-其中 `research-brief` 产出的 synthesis handoff、CodeTask 的 plan/proposal approval、
-`research-session --no-report` 后的 `ready_for_report` 和 `research-report` continuation
-分别可以承担“研究方向确认、代码变更确认、报告接续”。这次重点不是把它们扩展成新的
-工作流，而是在真实任务中记录主链是否因资源、代码、依赖、错误修复或报告事实问题被阻塞；
-只有明确出现无法表达的阻塞，才补带 reason、required_inputs、resume command 和审计 artifact
-的最小能力。
+如果用户确实需要补充资源或确认较大代码变更，现有 CodeTask approval、`ready_for_report`
+和 `research-report` continuation 已提供边界；只有真实运行暴露出无法表达的阻塞，才补带
+reason、required_inputs、resume command 和审计 artifact 的最小能力。原则是观察并修复实际
+阻塞，不把人工步骤本身发展成新的主线。
 
 ### Phase 4：V2.8 报告输出稳定化
 
@@ -524,9 +539,9 @@ research-brief
 输出包、网页端编译反馈记录和固定模板工程化顺延到 V2.9。本地不部署 LaTeX 编译器，也不
 在 V2.8 内承诺自动适配所有会议和期刊模板。
 
-### Phase 5：AutoDL 真实实验验证（当前与 6.9 合并推进）
+### Phase 5：AutoDL 真实实验验证（6.9 已完成，后续按需复现）
 
-在低资源 smoke 和 6.9 规模验收中，再用 3090 和真实环境验证：
+低资源 smoke 和 6.9 规模验收已经用 3090 服务器和真实环境验证了：
 
 - 实际模型、数据集和训练/推理命令；
 - GPU 资源、超时和依赖；
@@ -576,21 +591,18 @@ V2.8 的正式验收报告必须同时记录：
 
 ## 9. 当前下一步
 
-核心架构收口和工程闭环已经有证据，当前不再继续扩展底层；下一步只推进 6.9 的正常用户
-规模验收，并同步记录真实结果：
+V2.8 的基础闭环已经通过，当前不再新增顶层能力。后续按以下顺序推进：
 
-1. 在 AutoDL 当前分支和 `gpt-5.4-mini + chat` 配置下，使用一个准备好的真实数据/代码项目，
-   以 30–50 条 raw、10–20 篇 bounded Read、一个中等但受控的实验和完整 Markdown report
-   执行一次规模 session；
-2. 先执行 `--no-report` 前缀以确认 search/read/design/code-task/experiment/analysis 的
-   资源和 artifact，再在同一 session 上运行 report continuation；这只是验证边界，不改变
-   正式 CLI 默认的 report 行为；
-3. 检查并记录 raw/selected、notes、LLM attempts、实验结果、报告章节、citation/metric/claim
-   audit、GPU/CPU/磁盘占用和失败诊断；不把 reviewer 或指标提升当作闭环的隐含条件；
-4. 若规模 run 暴露了真实阻塞，只修复对应的配置、预算、artifact handoff、重试或 report
-   证据问题，并补聚焦回归；若通过，则冻结 V2.8 结构，清理最后确认无消费者的 legacy 重复
-   代码和临时输出；
-5. 回写本计划、handoff、长期愿景和中英文 changelog，再提交并推送一版可复核 checkpoint。
+1. 冻结 `research-session` 的 canonical 主线和 `full_pipeline_tiny_mlp` 验收基线；只有真实
+   运行暴露出配置、预算、重试、artifact handoff 或报告事实问题时才做小修；
+2. 完成 Phase 3 最后一次消费者审计：对 `_legacy`、旧 projection、`literature`、`retrieval`
+   和 tools 逐项确认。已被 canonical 行为替代且无真实消费者的实现直接删除；仍被旧 CLI、
+   benchmark 或历史 reader 使用的部分只保留薄 compatibility 层；
+3. 把 v12 这类 Reviewer warning 作为报告质量回归样本，继续改善 Writer/Reviewer 对本地
+   实验事实、文献动机和因果边界的区分，但不把 Reviewer 随机输出变成闭环状态机；
+4. V2.8 冻结后进入 V2.9：先稳定一个 Markdown/Overleaf-ready 模板和有限 continuation，再
+   评估多模板、复杂 repair；Claude Code、Codex、OpenCode 等外部 Harness 最后接入；
+5. 每次修改继续更新本计划、handoff、长期愿景和中英文 changelog，并提交可复核 checkpoint。
 
-在 6.9 通过前，不新增 scheduler、Harness、通用模板适配或新的顶层抽象；通过后才进入
-V2.9 的 Markdown/Overleaf 工程化与有限恢复设计。
+V2.8 冻结阶段不新增 scheduler、任意 DAG、外部 Harness、通用模板适配或新的顶层抽象；
+V2.9 再进入 Markdown/Overleaf 工程化与有限恢复设计。

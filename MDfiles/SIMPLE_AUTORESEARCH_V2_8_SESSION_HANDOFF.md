@@ -4,9 +4,9 @@
 >
 > **唯一施工计划**：`MDfiles/SIMPLE_AUTORESEARCH_V2_8_SYSTEM_EVOLUTION_PLAN.md`
 >
-> 状态快照：2026-09-06。当前 Git 基线：`21eac85`，已推送到
-> `origin/feat/v2.8-system-evolution`；当前工作树已清洁。当前本地
-> `.env` 使用 `gpt-5.4-mini` 和网关可用的 `chat` 模式。该文档和完整 AutoResearch 都不代表已经完成。
+> 状态快照：2026-09-06。代码验证基线：`4a19b5e`（`feat/v2.8-system-evolution`）；当前本地
+> `.env` 使用 `gpt-5.4-mini` 和网关可用的 `chat` 模式。V2.8 有界基础闭环已完成，完整
+> AutoResearch 仍按长期路线推进。
 
 ## 0. 新会话阅读顺序
 
@@ -27,10 +27,11 @@
 
 当前项目已经有一条显式的 capability/session 路径和一条旧八阶段兼容路径。最近的清理已经
 删除无消费者的超前层，并完成了同一 session 中 `code_task -> experiment -> analysis ->
-report/audit` 的真实 AutoDL 受控验收。真实网络 + `gpt-5.4-mini` 也已完成一次从检索、LLM
-计划/阅读/综合、实验、分析到 report/audit 的完整落地。由此可以确认第一层“工程闭环”成立；
-但 30–50 条检索、10–20 篇阅读、中等实验和完整学术结构 Markdown 报告的正常用户规模验收
-仍在进行，不能把低预算 smoke 直接当作 V2.8 最终完成。
+report/audit` 的真实 AutoDL 受控验收。v13 又在真实网络、`gpt-5.4-mini + chat` 和准备好的
+轻量项目上完成了 `60 raw -> 10 selected -> 10 documents -> LLM plan/read/synthesis/design
+-> CodeTask -> experiment -> analysis -> report -> report_audit`，session 为 `completed`，
+报告和三项 audit 均通过。因此 V2.8 的“正常用户可用基础闭环”已经通过；这不等于任意主题、
+任意代码库上的完整自主 AutoResearch，也不等于 publication-ready 论文。
 
 旧搜索、阅读、综合逻辑仍有冻结兼容实现，尚未完成最终删除；这属于 Phase 3 的兼容尾项，
 不再阻塞 canonical 主线的规模验收，但删除前仍需按消费者矩阵补齐回归。
@@ -41,11 +42,13 @@ report/audit` 的真实 AutoDL 受控验收。真实网络 + `gpt-5.4-mini` 也�
 ## 2. 当前 Git 和验证状态
 
 - 分支：`feat/v2.8-system-evolution`；
-- checkpoint：`21eac85 fix(research-code-task): preserve comparison artifact`；该提交之前已
-  完成 CodeTask comparison handoff、报告确定性实验附录和 report audit 修复；
-- 远端：已推送；
-- 工作树：已清洁；canonical Read 接入和其回归测试均已推送；
-- AutoDL 全量回归：`CUDA_VISIBLE_DEVICES='' uv run --no-sync python -m unittest discover -s tests -p 'test_*.py'`，588 项通过（27.358 秒）；本地最新 CodeTask/report 聚焦回归 14 项通过；
+- checkpoint：`4a19b5e fix(report): expose verified execution comparison`；该提交将权威的
+  baseline/candidate/comparison 投影同时交给 Writer 和 Reviewer，避免真实实验已存在却被
+  报告审阅误判为缺失；
+- 远端：代码补丁已应用到 AutoDL 工作树；本次文档和代码 checkpoint 待本地提交后推送；
+- 工作树：本地代码修改待文档收口后提交；canonical Read 接入、实验边界和报告回归均已通过；
+- AutoDL/本地全量回归：`uv run python -m unittest discover -s tests -p 'test_*.py'`，598 项
+  通过（本地 218.218 秒）；本地最新 report 聚焦回归 52 项通过；
 - 入口修复后补跑的边界/CLI、session/public API/search、report 和 synthesis 聚焦回归均通过；
 - 本轮已通过 code-task/report、report/audit、CLI 默认行为和 LLM fallback 的聚焦回归；
 - AutoDL 真实 CodeTask v6 已通过：同一 session 中完成 LLM plan/read/synthesis/design、隔离 workspace、baseline、受限 patch、validation、patched benchmark、comparison、analysis、report/audit；comparison 为 1 组、7 个指标，report audit 三项通过；
@@ -156,40 +159,45 @@ ARC-Bench、SurveyBench、历史 run reader 和部分旧 artifact projection 仍
   运行产物均已检查并清理；
 - 已修正 report audit 对 selected source metadata、可读指标名和科学计数法的识别，旧真实报告在不改正文的情况下重审为 `passed`；已修正 embedded CodeTask bridge 将严格串行依赖链合并为一个有界 batch，聚焦回归通过；
 - 已验证实验失败会保留错误和 attempt，并可显式 continuation；
-- AutoDL 全量测试通过：`588 tests in 27.358s — OK`；本地最新 CodeTask/report 聚焦回归
-  14 项通过，compileall 和 `git diff --check` 通过。
+- AutoDL v13 规模验收已完成：60 raw、10 selected、10 documents，实验结果 `passed` 且 comparison
+  verdict 为 `improved`；报告含 10 个主要章节，`report_audit.json` 的 citation/metric/claim
+  均为 `passed`，session manifest 为 `completed`。v11（reviewer passed）和 v12（reviewer
+  warning）也保留在 AutoDL `runs/`，用于后续报告质量回归；
+- `598 tests in 218.218s — OK`；本地 report 聚焦回归 52 项通过，compileall 和
+  `git diff --check` 在提交前复核。
 
 仍未证明：
 
-- 在正常用户规模下稳定完成一次 30–50 条 raw、10–20 篇 bounded Read、中等实验和完整报告；
 - 真实用户项目和真实 LLM 下 CodeTask 能稳定产生有效改进；当前证据证明的是隔离修改、验证、比较和“无提升时如实记录”，不证明自动得到更优指标；
 - 完整的代码错误迭代、实验重跑、结果比较和报告更新在规模 session 中的稳定性；
 - 多 provider 稳定性和任意主题上的研究质量；
-- 完整 reviewer 修订循环；
+- Reviewer 多轮修订在不同模型输出下的稳定性；v12 已记录一组可解释 warning，尚未把它
+  当作主闭环失败；
 - AutoDL/3090 上真实中等数据/模型实验的资源边界和复现性；
 - publication-ready 论文、LaTeX 编译和模板自适应；
 - 外部 Claude Code/Codex/OpenCode Harness 的成熟接入。
 
 ## 6. 当前下一步
 
-当前工程闭环已完成，正在进入主计划 6.9 的正常用户规模验收；不再新增顶层能力：
+V2.8 基础闭环已完成，当前进入冻结和 Phase 3 最后消费者审计，不再新增顶层能力：
 
-1. 在 AutoDL 当前分支上用 `gpt-5.4-mini + chat`、一个准备好的真实数据/代码项目，执行
-   30–50 条 raw、10–20 篇 bounded Read、一个中等但受控实验和完整 Markdown report；
-2. 先以 `--no-report` 前缀确认 search/read/design/code-task/experiment/analysis 的资源和
-   artifact，再在同一 session 上执行 report continuation；
-3. 检查 raw/selected、paper notes、LLM attempts、实验命令、指标 provenance、报告章节、
-   citation/metric/claim audit 以及 GPU/CPU/磁盘占用；失败时保留 session，不用 fixture 覆盖；
-4. 规模 run 若暴露真实阻塞，只修对应的预算、重试、artifact handoff、配置或报告事实问题，
-   补聚焦回归后再继续；通过后冻结 V2.8 主结构，再清理最后满足门槛的 legacy 重复实现；
-5. 每次真实验收后同步主计划、本 handoff、长期愿景和中英文 changelog，并提交推送 checkpoint。
+1. 保持 `research-session` 和 `full_pipeline_tiny_mlp` 作为 canonical 验收基线；真实运行只在
+   暴露具体的配置、预算、重试、artifact handoff 或报告事实问题时做小修；
+2. 对 `_legacy`、旧 projection、`literature`、`retrieval` 和 tools 逐项完成消费者审计；被
+   canonical 行为替代且无消费者的实现删除，仍有旧 CLI/benchmark/history reader 消费的部分
+   只保留薄 compatibility 层；
+3. 将 v12 Reviewer warning 保留为报告质量回归样本，改善本地实验事实、文献动机和因果边界
+   的表达，不把 Reviewer 随机结果升级成新的闭环状态机；
+4. 完成 V2.8 冻结后进入 V2.9：先做一个 Markdown/Overleaf-ready 模板和有限 continuation，
+   外部 Claude Code/Codex/OpenCode Harness 最后接入；
+5. 每次修改同步本 handoff、主计划、长期愿景和中英文 changelog，并提交可复核 checkpoint。
 
 Search/Read/Synthesis 的逐项状态见主计划 6.7：Search 的筛选、coverage、可选缓存和 Read 的
 bounded screening/notes/snippets 已进入 canonical；旧多轮 follow-up 和历史 artifact projection
 仍是冻结兼容行为，尚未宣称已删除。
 
-在正常用户规模验收通过前，不新增 scheduler、任意 DAG、外部 Harness、通用论文模板适配或
-新的顶层抽象。V2.8 通过后才进入 V2.9 的 Markdown/Overleaf 工程化与有限恢复设计。
+V2.8 冻结阶段不新增 scheduler、任意 DAG、外部 Harness、通用论文模板适配或新的顶层抽象。
+V2.9 再进入 Markdown/Overleaf 工程化与有限恢复设计。
 
 ## 7. 工作协议
 

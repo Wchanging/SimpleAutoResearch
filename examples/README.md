@@ -117,16 +117,24 @@ classification on the packaged `sklearn.datasets.load_digits` data. It has a
 real data split, model/training/metrics modules, tests, a benchmark, and
 parseable progress/metric output, while remaining small enough to run without
 long training. The acceptance target is approximately 30--50 raw literature
-records, 10--20 bounded Read candidates, one baseline/modified experiment,
-and the full Markdown `experiment` report profile. Start with the CPU path;
-use the available 3090 only for a separately bounded Torch/CUDA check after
-the CPU/data path is known to work.
+ records, 10--20 bounded Read candidates, one baseline/modified experiment,
+ and the full Markdown `experiment` report profile. Start with the CPU path;
+ use the available 3090 only for a separately bounded Torch/CUDA check after
+ the CPU/data path is known to work.
 
-The prepared-project path is intentionally human-checkable. Inspect the
-research synthesis, task scope, data/dependency requirements, and Code-Task
-proposal before continuing. If code or data must be supplied manually, update
-the prepared project/configuration and continue from the persisted handoff;
-do not ask the LLM to silently download or install arbitrary resources.
+This scale acceptance has been completed once on AutoDL with the prepared
+project: v13 retained 60 raw records and 10 selected documents, used the real
+`gpt-5.4-mini + chat` path, ran the bounded Code-Task baseline/modified
+experiment and analysis, and produced a `completed` session with a full
+Markdown report and passing citation/metric/claim audit. The provider returned
+60 raw records for `--max-results 10`; the exact count is kept in the session
+artifacts rather than silently clipped to the approximate target.
+
+The prepared-project path keeps research scope, data, dependencies, and code
+permissions explicit. If a real task lacks one of those inputs, prepare or
+update the project/configuration before continuing from its persisted boundary;
+this is an input contract, not a separate human-handoff subsystem. Do not ask
+the LLM to silently download or install arbitrary resources.
 
 V2.8 does not request GPUs, manage training queues, or schedule parallel
 candidates. GPU use is only for validating a real user project and a

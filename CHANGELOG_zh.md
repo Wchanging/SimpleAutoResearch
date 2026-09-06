@@ -8,6 +8,18 @@
 
 ### 变更
 
+- Report Writer 和 Reviewer 现在都会收到一份有界的权威实验结果投影，包含
+  baseline/candidate 指标、comparison delta、verdict 和资源变化。这样模型生成的本地实验
+  结论会与确定性 report appendix 对齐，同时不会把原始 stdout 或无关运行元数据塞进提示词。
+- Report audit 现在把检索池中未被报告选用的论文视为信息性记录，并把 `1,810` 与 `1810`
+  识别为同一份数字证据，避免把未选来源或千位分隔格式误判为报告失败。
+- 内嵌 Code-Task 的 repair 失败现在会保留初次 patched benchmark 证据，并记录有界 repair
+  failure，不再用后续无效 repair 错误遮蔽第一次实验结果。
+- 已在准备好的 tiny-MLP 项目上完成 AutoDL V2.8 规模验收：60 条 raw、10 篇 selected/document，
+  真实 `gpt-5.4-mini + chat` 计划、阅读、综合、设计、CodeTask、baseline/modified 实验、
+  analysis 和完整 Markdown report。session 为 `completed`，citation/metric/claim audit
+  均为 `passed`；Reviewer 开关的不同结果作为独立质量证据保留，不改变 V2.8 单方向范围。
+
 - Synthesis 现在可以处理 LLM 复制长 chunk id 时遗漏 provider 前缀的情况：只有能够唯一匹配的后缀才会恢复，
   有歧义或凭空生成的引用仍然会被证据边界校验拒绝。
 - canonical report 组装现在会把选定论文元数据沿 `research-session` continuation 传递下去，

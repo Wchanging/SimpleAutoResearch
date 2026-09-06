@@ -8,6 +8,25 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Report Writer and Reviewer prompts now receive a bounded projection of the
+  authoritative execution result, including baseline/candidate metrics,
+  comparison deltas, verdicts, and resource changes. This keeps the model's
+  local experiment claims aligned with the deterministic report appendix while
+  keeping raw output and unrelated run metadata out of the prompt.
+- Report audit now treats an unused paper in the retrieved source pool as
+  informational when it was not selected for the report, and accepts
+  comma-separated thousands values such as `1,810` as the same numeric evidence
+  as `1810`.
+- Embedded Code-Task repair failures now preserve the initial patched benchmark
+  evidence and record the bounded repair failure instead of masking the first
+  experiment result.
+- Completed the AutoDL V2.8 scale acceptance on the prepared tiny-MLP project:
+  60 raw records, 10 selected/documents, real `gpt-5.4-mini + chat` planning,
+  reading, synthesis, design, CodeTask, baseline/modified experiment, analysis,
+  and a full Markdown report. The session is `completed`; citation, metric, and
+  claim audits are `passed`. Reviewer-enabled runs remain separate quality
+  evidence and do not change the single-direction V2.8 scope.
+
 - Synthesis now preserves the evidence boundary when an LLM drops a provider
   prefix from a long chunk id: only a unique suffix match is restored, while
   ambiguous or invented references still fail validation.

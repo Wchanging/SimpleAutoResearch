@@ -2,7 +2,7 @@
 
 > 文档性质：项目长期方向、产品边界和架构原则，不是某个版本的施工清单。
 >
-> 更新时间：2026-09-06。当前 Git 基线：`21eac85`。
+> 更新时间：2026-09-06。代码验证基线：`4a19b5e`。
 >
 > V2.8 的唯一施工计划见 `SIMPLE_AUTORESEARCH_V2_8_SYSTEM_EVOLUTION_PLAN.md`；本文只保留长期视角和版本边界。
 
@@ -68,12 +68,13 @@ V2.8 先完成一个正式可试用的 research-to-report slice：
 它允许配置 LLM 参与计划、阅读辅助、综合、设计、分析和写作，但不允许模型自由决定任意
 路径、任意文件或无限循环。实验命令、baseline、数据集、资源和指标由用户或配置明确提供。
 
-V2.8 的完成分成两层：第一层是网络/LLM/代码任务/实验/分析/report/audit 的工程闭环，当前
-已经由本地回归和 AutoDL 真实 CodeTask session 证明；第二层是正常用户规模的正式试用，至少
-要有一次约 30–50 条 raw papers、10–20 篇 bounded Read、一个在 3090 上有明确资源上限的
-中等实验，以及包含 Abstract、Introduction/Motivation、Related Work、Method、Experimental
-Setup、Results、Discussion、Limitations、References 的完整 Markdown 报告。第二层通过前，
-V2.8 不能写成“完整闭环已完成”。
+V2.8 的完成分成两层：第一层是网络/LLM/代码任务/实验/分析/report/audit 的工程闭环，已经
+由本地回归和 AutoDL 真实 CodeTask session 证明；第二层是正常用户规模的正式试用。该层已
+在准备好的 `full_pipeline_tiny_mlp` 项目上通过一次：实际为 60 条 raw、10 篇 selected/read
+documents、一个有资源边界的 baseline/modified 实验，以及包含 Abstract、Problem/Motivation、
+Related Work、Method、Experimental Setup、Results、Discussion、Limitations、Verified
+Experiment Metrics、References 的完整 Markdown 报告，session 和三项 report audit 均通过。
+这表示 V2.8 的有界基础闭环已完成；不表示任意主题、任意代码库上的完整自主 AutoResearch。
 
 V2.8 不承诺：完整自主研究、实验树、多候选调度、远程资源治理、原生外部 Harness、全模板
 LaTeX 自适应或 publication-ready 论文。
@@ -204,7 +205,7 @@ compatibility 的物理实现，但不能继续接收新的核心业务逻辑。
 
 ## 6. 当前判断
 
-`09df140` 是一次有效的瘦身 checkpoint，`21eac85` 是当前可回退基线。随后已经完成一次主线
+`09df140` 是一次有效的瘦身 checkpoint，`4a19b5e` 是本次代码验证基线。随后已经完成一次主线
 边界收口和工程闭环验收：
 
 - 模型驱动的 `research-session` 默认到达 report/audit，`--no-report` 只用于调试；
@@ -215,25 +216,23 @@ compatibility 的物理实现，但不能继续接收新的核心业务逻辑。
   AutoDL 真实 CodeTask v6 也完成了隔离修改、baseline/patched comparison、analysis、report
   和 audit，1 组 comparison 的 7 个指标均保留在产物中；指标没有提升时仍正确记录
   `objective_inconclusive`，不把“流程完成”冒充为“研究改进成功”；
-- AutoDL 低负载 CUDA smoke 和 `588 tests` 全量回归已通过；当前没有启动长训练、并行候选或
+- AutoDL 低负载 CUDA smoke 和 `598 tests` 全量回归已通过；当前没有启动长训练、并行候选或
   GPU 自动编排；
 - 无生产消费者的 code-task 兼容 facade 和确认无价值的根目录临时产物已删除；
 - 旧八阶段搜索/阅读/综合实现已私有归档并冻结，公开 `pipeline_stages/research.py` 只剩
-  alias；legacy 业务本体尚未完成能力择优合并和最终清除；正常用户规模的检索/阅读/中等
-  实验/完整论文式 Markdown 报告验收仍未完成。
+  alias；legacy 业务本体仍按消费者矩阵保留最后的 compatibility 尾项；正常用户规模的
+  检索/阅读/中等实验/完整论文式 Markdown 报告验收已由 AutoDL v13 完成。
 
-当前最重要的工作是：
+当前主线是 V2.8 冻结和最后的兼容尾项审计：
 
 ```text
-一个真实 baseline example
-  -> 30–50 条网络检索结果
-  -> 10–20 篇 bounded Read/notes
-  -> research-session
-  -> code_task / experiment
-  -> analysis
-  -> 完整 Markdown report / audit
-  -> 失败和恢复证据
+V2.8 基础闭环（已通过）
+  -> canonical 主线冻结
+  -> 按消费者证据删除最后的 legacy 重复实现
+  -> V2.9 固定 Markdown/Overleaf-ready 模板与有限恢复
+  -> 最后接入外部 Agent Harness
 ```
 
-这次规模验收通过并完成 Phase 3 最后删除审计后，才进入 V2.9 的 Report/Overleaf 工程化和
-有限恢复，再之后才接入外部 Harness。
+V2.8 通过后仍不能跳过 Phase 3 的最后删除审计，但这一步只处理已经确认无消费者且有
+canonical 替代的重复实现；旧 CLI、benchmark 或历史 reader 仍需的内容继续作为薄兼容层。
+完成这次收口后，再进入 V2.9 的 Report/Overleaf 工程化和有限恢复，最后才接入外部 Harness。

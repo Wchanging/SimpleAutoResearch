@@ -21,6 +21,8 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
   `plan -> search -> document_ingest -> read -> synthesize -> research_design
   -> experiment -> analysis -> report -> report_audit` 主流程。主线明确约束
   provider、artifact、指标、超时和 continuation；模型模式的 CLI 默认请求报告。
+  该路径已在 AutoDL 的准备项目上完成一次 60 条 raw、10 篇 selected/document 的真实
+  网络/LLM/CodeTask/实验/报告闭环；这证明的是有界基础流程，不是任意任务上的完整自主研究。
 - **研究源**：canonical session 可以通过统一连接器访问
   OpenAlex/Semantic Scholar/arXiv/本地文件，并执行有界文档摄取和证据卡片生成；
   LLM 规划、有界阅读/筛选、paper notes 和综合需要显式开启。旧的 facet 扩展和多轮检索
