@@ -8,6 +8,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Report checkpoint identity uses template/criteria content, not their install
+  paths; source locations remain recorded. This applies to newly written
+  checkpoints, without rewriting historical snapshots.
 - Unified candidate motivation-reference validation between synthesis and
   assessment. Valid paper/card IDs no longer become missing-evidence warnings;
   model comparison still cites only the text chunks actually supplied.

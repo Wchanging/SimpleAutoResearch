@@ -32,7 +32,12 @@ def run_report_writing_capability(*, context: CapabilityContext, request: Report
                 "memory": memory.model_dump(mode="json"), "config": request.config.model_dump(mode="json"),
                 "template": request.template.model_dump(mode="json"),
                 "sources": [ref.to_dict() for ref in context.inputs if ref != request.resume_ref]}
-    snapshot["snapshot_id"] = hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    # Locations are provenance, not writing input: identical installed and
+    # checkout templates must share a checkpoint identity.
+    identity = {**snapshot, "template": request.template.model_dump(
+        mode="json", exclude={"template_path", "criteria_path"},
+    )}
+    snapshot["snapshot_id"] = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     source = context.store.write_json("report_inputs.json", snapshot, kind="report_snapshot", schema="report_snapshot.v1")
     completed = None
     reused_ref = None

@@ -59,13 +59,17 @@ class ReportCheckpointTests(unittest.TestCase):
                 result = run_report_writing_capability(context=first, request=request)
             self.assertEqual(result.status, "failed")
             checkpoint = next(ref for ref in result.artifacts if ref.kind == "report_checkpoint")
-            for changed in (False, True):
-                with self.subTest(changed=changed):
-                    output = ArtifactStore(Path(tmp) / str(changed))
+            for change in ("none", "location", "topic", "template", "criteria"):
+                changed = change in {"topic", "template", "criteria"}
+                with self.subTest(change=change):
+                    output = ArtifactStore(Path(tmp) / change)
                     retry = CapabilityContext(store=output, attempt=AttemptManifest("writer-2"),
                                               inputs=(checkpoint,), input_store=store)
-                    context = request.report_context.model_copy(update={"topic": "Changed"}) if changed else request.report_context
-                    resumed = replace(request, report_context=context, resume_ref=checkpoint)
+                    context = request.report_context.model_copy(update={"topic": "Changed"}) if change == "topic" else request.report_context
+                    updates = {"template_path": "another/template.md", "criteria_path": "another/criteria.md"} if change == "location" else (
+                        {f"{change}_markdown": "Changed writing instructions"} if change in {"template", "criteria"} else {}
+                    )
+                    resumed = replace(request, report_context=context, template=request.template.model_copy(update=updates), resume_ref=checkpoint)
                     with patch("simple_ar.report.writing.run_report_agent", side_effect=interrupted) as writer:
                         run_report_writing_capability(context=retry, request=resumed)
                     self.assertEqual(writer.call_args.kwargs["completed_checkpoint"], None if changed else saved)
