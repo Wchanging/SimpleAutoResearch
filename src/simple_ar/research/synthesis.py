@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import json
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.integrations.llm import LLMError
@@ -36,9 +36,9 @@ class SynthesisRequest:
     """Input for evidence synthesis.
 
     ``evidence_pack`` is the in-memory, expanded form produced by
-    ``build_evidence_pack``.  Persisted compact packs intentionally contain
-    references rather than duplicate card rows and should be hydrated by the
-    caller before invoking this boundary. ``use_llm`` is explicit so callers
+    ``evidence_pack_from_read``. Historical compact packs contain references instead
+    of card rows; callers must resolve those before using this boundary.
+    ``use_llm`` is explicit so callers
     can keep a reproducible offline path without silently mistaking it for
     model-generated research prose.
     """
@@ -222,7 +222,7 @@ def _synthesize_deterministic_evidence(request: SynthesisRequest) -> SynthesisRe
     )
 
 
-def synthesize_evidence(request: SynthesisRequest) -> SynthesisResult:
+def synthesize_evidence(request: SynthesisRequest, *, trace: Callable[[str, Any], None] | None = None) -> SynthesisResult:
     """Synthesize evidence using the selected deterministic or LLM mode.
 
     The default remains deterministic. When ``request.use_llm`` is true, the
@@ -236,7 +236,7 @@ def synthesize_evidence(request: SynthesisRequest) -> SynthesisResult:
     result = _synthesize_deterministic_evidence(request)
     if not request.use_llm:
         return result
-    return _add_llm_synthesis(result, request)
+    return _add_llm_synthesis(result, request, trace=trace)
 
 
 def run_synthesis_capability(
@@ -251,7 +251,16 @@ def run_synthesis_capability(
     explicitly carries a client; all candidate fields remain bounded by the
     supplied evidence identifiers and the existing handoff schema.
     """
-    result = synthesize_evidence(request)
+    traces = []
+
+    def save_trace(name: str, payload: Any) -> None:
+        traces.append(context.store.write_json(f"{name}.json", payload,
+            kind="synthesis_trace", schema="synthesis_trace.v1", producer="research.synthesis"))
+
+    try:
+        result = synthesize_evidence(request, trace=save_trace)
+    except LLMError as exc:
+        return CapabilityResult(status="failed", artifacts=tuple(traces), diagnostics=(str(exc),))
     output = context.store.write_json(
         "synthesis_result.json",
         result.to_handoff_dict(),
@@ -261,7 +270,7 @@ def run_synthesis_capability(
     )
     return CapabilityResult(
         status="completed" if result.status == "ready" else "partial",
-        artifacts=(output,),
+        artifacts=(output, *traces),
         diagnostics=result.diagnostics,
         usage={
             "ideas": len(result.ideas),
@@ -281,6 +290,7 @@ def run_synthesis_capability(
 def _add_llm_synthesis(
     result: SynthesisResult,
     request: SynthesisRequest,
+    *, trace: Callable[[str, Any], None] | None = None,
 ) -> SynthesisResult:
     """Add grounded model prose to an already-derived structured result."""
 
@@ -294,9 +304,7 @@ def _add_llm_synthesis(
         )
 
     pack = dict(request.evidence_pack)
-    response = client.ask_json(
-        SYNTHESIZE_SYSTEM,
-        synthesize_user_prompt(
+    prompt = synthesize_user_prompt(
             _evidence_notes_markdown(pack),
             _bounded_pack_json(pack),
             str(pack.get("evidence_snippets") or ""),
@@ -309,18 +317,30 @@ def _add_llm_synthesis(
                 },
                 ensure_ascii=False,
             ),
-        ),
-        label="research-synthesis",
     )
-    if not isinstance(response, Mapping):
-        raise LLMError("LLM synthesis response must be a JSON object.")
-    synthesis_markdown = _required_text(response, "synthesis_markdown")
-    hypothesis_markdown = _required_text(response, "hypothesis_markdown")
-    llm_ideas = _parse_llm_idea_candidates(
-        response,
-        pack,
-        limit=request.idea_limit,
-    )
+    response = client.ask_json(SYNTHESIZE_SYSTEM, prompt, label="research-synthesis")
+    for round_index in range(2):
+        if trace is not None:
+            trace(f"response-{round_index + 1}", response)
+        try:
+            if not isinstance(response, Mapping):
+                raise LLMError("LLM synthesis response must be a JSON object.")
+            synthesis_markdown = _required_text(response, "synthesis_markdown")
+            hypothesis_markdown = _required_text(response, "hypothesis_markdown")
+            llm_ideas = _parse_llm_idea_candidates(response, pack, limit=request.idea_limit)
+            break
+        except LLMError as exc:
+            if trace is not None:
+                trace(f"validation-{round_index + 1}", {"error": str(exc)})
+            if round_index == 1:
+                raise
+            correction = {"validation_error": str(exc), "previous_response": response,
+                          "allowed_motivation_refs": sorted(allowed_evidence_refs(pack))}
+            response = client.ask_json(SYNTHESIZE_SYSTEM,
+                prompt + "\n\nCorrect the rejected JSON once. Preserve grounded content; revise or omit an idea "
+                "that lacks evidence, never replace its citation with an unrelated allowed ID. Return the complete object.\n"
+                + json.dumps(correction, ensure_ascii=False, separators=(",", ":")),
+                label="research-synthesis-correction")
     if llm_ideas is None:
         return replace(
             result,
@@ -376,7 +396,7 @@ def _parse_llm_idea_candidates(
             "LLM idea_candidates must be a non-empty JSON list when supplied."
         )
 
-    allowed_refs = _allowed_evidence_refs(pack)
+    allowed_refs = allowed_evidence_refs(pack)
     ideas: list[IdeaCandidate] = []
     seen_ids: set[str] = set()
     for index, item in enumerate(raw[:limit], start=1):
@@ -468,7 +488,7 @@ def _idea_string_list(
     return list(dict.fromkeys(values))
 
 
-def _allowed_evidence_refs(pack: Mapping[str, Any]) -> set[str]:
+def allowed_evidence_refs(pack: Mapping[str, Any]) -> set[str]:
     """Collect identifiers the model may cite in a candidate motivation."""
 
     allowed: set[str] = set()
@@ -549,7 +569,7 @@ def _bounded_pack_json(pack: Mapping[str, Any]) -> str:
         # context.  The validator remains authoritative, but an exact
         # allowlist reduces avoidable retries when a model remembers a nearby
         # paper from the search pool instead of citing the selected evidence.
-        "allowed_motivation_refs": sorted(_allowed_evidence_refs(pack)),
+        "allowed_motivation_refs": sorted(allowed_evidence_refs(pack)),
     }
     execution_context = _execution_context_text(pack)
     if execution_context:
@@ -647,6 +667,7 @@ __all__ = [
     "SynthesisRequest",
     "SynthesisResult",
     "SynthesisStatus",
+    "allowed_evidence_refs",
     "synthesize_evidence",
     "run_synthesis_capability",
 ]

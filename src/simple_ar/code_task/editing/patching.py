@@ -10,14 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.core.artifacts import (
-    append_jsonl,
-    read_json,
-    read_jsonl,
-    read_text,
-    write_json,
-    write_text,
-)
+from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
 from simple_ar.code_task.editing.attempts import (
     LoadedCodeTaskBatch,
     load_latest_code_task_batch,
@@ -38,22 +31,13 @@ from simple_ar.code_task.analysis.context import (
     LoadedCodeTaskContextPack,
     load_latest_code_task_context_pack,
 )
-from simple_ar.code_task.editing.editor import (
-    ApplyEditRequest,
-    ApplyEditResult,
-    EditRequest,
-    EditResult,
-    EditorContext,
-    EditorSafetyPolicy,
-    editor_metadata,
-)
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.editing.planning import select_relevant_files
 from simple_ar.code_task.analysis.repo_map import build_repo_map
 from simple_ar.code_task.memory import task_memory_context
 from simple_ar.code_task.analysis.interfaces import snippet_api_contract
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
-from simple_ar.app.usage import summarize_usage
+from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.integrations.usage import record_usage
 
 
 CODE_TASK_EDIT_SYSTEM = (
@@ -65,6 +49,12 @@ CODE_TASK_EDIT_SYSTEM = (
 
 MessageCallback = Callable[[str], None]
 CONTROLLED_PATCH_BACKEND = "controlled_patch"
+
+
+def editor_metadata(*, backend: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Preserve existing artifact metadata without an editor lifecycle."""
+
+    return {"schema_version": 1, "backend": backend, **(extra or {})}
 
 
 class PatchValidationError(RuntimeError):
@@ -117,6 +107,12 @@ class _PreparedEdit:
     reason: str
 
 
+
+
+
+
+
+
 def propose_patch_edits(
     run_dir: Path,
     *,
@@ -129,127 +125,7 @@ def propose_patch_edits(
     budget_profile: str | None = None,
     edit_budget_overrides: dict[str, Any] | None = None,
     message_callback: MessageCallback | None = None,
-) -> ProposedEditsResult:
-    """Generate controlled old/new text edits through the default editor backend."""
-
-    root = Path(run_dir)
-    context = _editor_context_from_run(root)
-    safety = EditorSafetyPolicy(
-        allowed_patterns=allowed_patterns_from_manifest(context.manifest),
-        protected_patterns=protected_patterns_from_manifest(context.manifest),
-        allow_large_edits=allow_large_edits,
-    )
-    request = EditRequest(
-        context=context,
-        safety=safety,
-        model=model,
-        use_llm=use_llm,
-        force=force,
-        max_files=max_files,
-        max_source_chars_per_file=max_source_chars_per_file,
-        budget_profile=budget_profile,
-        edit_budget_overrides=edit_budget_overrides,
-        message_callback=message_callback,
-    )
-    result = ControlledPatchEditorBackend().propose(request)
-    return ProposedEditsResult(
-        run_dir=result.run_dir,
-        proposal_path=result.proposal_path,
-        mode=result.mode,
-        edit_count=result.edit_count,
-        selected_files=result.selected_files,
-    )
-
-
-def apply_patch_edits(
-    run_dir: Path,
-    *,
-    edits_file: Path | None = None,
-    allow_unapproved_plan: bool = False,
-    allow_large_edits: bool = False,
-) -> PatchApplyResult:
-    """Apply reviewed old/new text edits through the default editor backend."""
-
-    root = Path(run_dir)
-    context = _editor_context_from_run(root)
-    safety = EditorSafetyPolicy(
-        allowed_patterns=allowed_patterns_from_manifest(context.manifest),
-        protected_patterns=protected_patterns_from_manifest(context.manifest),
-        allow_large_edits=allow_large_edits,
-        allow_unapproved_plan=allow_unapproved_plan,
-    )
-    result = ControlledPatchEditorBackend().apply(
-        ApplyEditRequest(
-            context=context,
-            safety=safety,
-            proposal_path=edits_file,
-        )
-    )
-    return PatchApplyResult(
-        run_dir=result.run_dir,
-        applied_edits_path=result.applied_edits_path,
-        patch_diff_path=result.patch_diff_path,
-        changed_files=result.changed_files,
-    )
-
-
-class ControlledPatchEditorBackend:
-    """Editor backend that produces and applies bounded old/new replacements."""
-
-    name = CONTROLLED_PATCH_BACKEND
-
-    def propose(self, request: EditRequest) -> EditResult:
-        result = _propose_controlled_patch_edits(
-            request.context.run_dir,
-            model=request.model,
-            use_llm=request.use_llm,
-            force=request.force,
-            max_files=request.max_files,
-            max_source_chars_per_file=request.max_source_chars_per_file,
-            allow_large_edits=request.safety.allow_large_edits,
-            budget_profile=request.budget_profile,
-            edit_budget_overrides=request.edit_budget_overrides,
-            message_callback=request.message_callback,
-        )
-        return EditResult(
-            backend=self.name,
-            run_dir=result.run_dir,
-            proposal_path=result.proposal_path,
-            mode=result.mode,
-            edit_count=result.edit_count,
-            selected_files=result.selected_files,
-            metadata={"backend": self.name},
-        )
-
-    def apply(self, request: ApplyEditRequest) -> ApplyEditResult:
-        result = _apply_controlled_patch_edits(
-            request.context.run_dir,
-            edits_file=request.proposal_path,
-            allow_unapproved_plan=request.safety.allow_unapproved_plan,
-            allow_large_edits=request.safety.allow_large_edits,
-        )
-        return ApplyEditResult(
-            backend=self.name,
-            run_dir=result.run_dir,
-            applied_edits_path=result.applied_edits_path,
-            patch_diff_path=result.patch_diff_path,
-            changed_files=result.changed_files,
-            metadata={"backend": self.name},
-        )
-
-
-def _propose_controlled_patch_edits(
-    run_dir: Path,
-    *,
-    model: str | None = None,
-    use_llm: bool = True,
-    force: bool = False,
-    max_files: int = 8,
-    max_source_chars_per_file: int = 4000,
-    allow_large_edits: bool = False,
-    budget_profile: str | None = None,
-    edit_budget_overrides: dict[str, Any] | None = None,
-    message_callback: MessageCallback | None = None,
+    llm_client: LLMClient | None = None,
 ) -> ProposedEditsResult:
     """Generate controlled old/new text edits from an approved patch plan.
 
@@ -407,9 +283,10 @@ def _propose_controlled_patch_edits(
     if use_llm:
         try:
             _emit(message_callback, "Calling LLM for controlled edit proposal.")
-            client = LLMClient.from_env(
+            client = LLMClient.for_task(
+                client=llm_client,
                 model=model,
-                usage_callback=lambda usage: _record_code_task_usage(
+                usage_callback=lambda usage: record_usage(
                     meta_dir,
                     usage,
                     stage="code_task.propose_edits",
@@ -488,7 +365,7 @@ def _propose_controlled_patch_edits(
     )
 
 
-def _apply_controlled_patch_edits(
+def apply_patch_edits(
     run_dir: Path,
     *,
     edits_file: Path | None = None,
@@ -1777,31 +1654,6 @@ def _update_repair_after_apply(manifest: dict[str, Any], proposal_ref: str) -> N
     manifest["repair"] = repair
 
 
-def _record_code_task_usage(
-    meta_dir: Path,
-    usage: LLMUsage,
-    *,
-    stage: str,
-    batch_dir: Path | None = None,
-    message_callback: MessageCallback | None,
-) -> None:
-    usage_path = meta_dir / "llm_usage.jsonl"
-    row = usage.to_row()
-    row["stage"] = stage
-    append_jsonl(usage_path, row)
-    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
-    if batch_dir is not None:
-        batch_usage_path = batch_dir / "usage.jsonl"
-        append_jsonl(batch_usage_path, row)
-        write_json(batch_dir / "usage_summary.json", summarize_usage(read_jsonl(batch_usage_path)))
-    cost = row.get("estimated_cost_usd")
-    cost_text = f", est cost ${cost:.6f}" if isinstance(cost, (int, float)) else ""
-    _emit(
-        message_callback,
-        f"LLM usage {row.get('label', '')}: "
-        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
-        f"{row['total_tokens']} tokens ({row['source']}{cost_text}).",
-    )
 
 
 def _load_code_task_manifest(path: Path) -> dict[str, Any]:
@@ -1811,32 +1663,6 @@ def _load_code_task_manifest(path: Path) -> dict[str, Any]:
     return data
 
 
-def _editor_context_from_run(run_dir: Path) -> EditorContext:
-    root = Path(run_dir)
-    paths = code_task_paths(root)
-    task_dir = paths.task_dir
-    meta_dir = paths.meta_dir
-    workspace_dir = paths.workspace_dir
-    manifest = _load_code_task_manifest(paths.manifest_path)
-    batch = load_latest_code_task_batch(root)
-    loaded_context = load_latest_code_task_context_pack(root)
-    context_pack_ref = (
-        _context_pack_manifest_ref(root, loaded_context)
-        if loaded_context is not None
-        else None
-    )
-    return EditorContext(
-        run_dir=root,
-        task_dir=task_dir,
-        workspace_dir=workspace_dir,
-        meta_dir=meta_dir,
-        manifest=manifest,
-        task_text=_read_optional_text(task_dir / "task.md"),
-        patch_plan=_read_optional_text(task_dir / "patch_plan.md"),
-        codebase_index=_read_optional_json(meta_dir / "codebase_index.json"),
-        batch=_batch_ref(root, batch),
-        context_pack=context_pack_ref,
-    )
 
 
 def _read_optional_json(path: Path) -> dict[str, Any]:

@@ -27,7 +27,9 @@ from simple_ar.research.evidence.derivation import (
     build_idea_candidates,
     build_novelty_checks,
 )
-from simple_ar.research.evidence.pack import build_evidence_pack
+from simple_ar.research.brief import evidence_pack_from_read
+from simple_ar.research.documents.ingest import DocumentBundle
+from simple_ar.research.evidence.reader import ReadRequest, read_documents
 from simple_ar.research.store.chunking import build_text_chunks
 from simple_ar.research.documents.records import build_cache_manifest, build_document_records
 from simple_ar.research.documents.extractors import apply_fulltext_extraction
@@ -38,8 +40,6 @@ from simple_ar.research.planning.planner import build_query_plan, build_research
 from simple_ar.research.evidence.retrieval import RetrievalCandidate, relevance_score, screen_retrieval_candidates
 from simple_ar.research.sources.base import SearchQuery, build_source_plan, primary_query
 from simple_ar.research.connectors.local_files import LocalFileConnector
-from simple_ar.research.prompts import report_user_prompt
-from simple_ar.research.prompts import report_user_prompt as compat_report_user_prompt
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
@@ -734,31 +734,24 @@ class ResearchFoundationTests(unittest.TestCase):
             metadata={"paper_id": paper.id},
         )
         chunks = build_text_chunks([document], max_chunks=2)
-        paper_cards, claim_cards = build_evidence_cards(documents=[document], chunks=chunks)
-        method_cards = build_method_cards(documents=[document], chunks=chunks)
-        dataset_cards = build_dataset_cards(documents=[document], chunks=chunks)
-        pack = build_evidence_pack(
-            topic="multi-agent coding",
-            source_plan=SourcePlan(queries=["multi-agent coding"], require_fulltext=True),
-            papers=[paper],
-            documents=[document],
+        bundle = DocumentBundle(
+            records=[document],
             sections=[],
             chunks=chunks,
-            index_meta={"backend": "keyword", "chunk_count": len(chunks)},
-            paper_cards=paper_cards,
-            claim_cards=claim_cards,
-            method_cards=method_cards,
-            dataset_cards=dataset_cards,
-            code_links=[],
-            coverage_report={"status": "covered", "covered_facets": ["method"], "missing_facets": []},
             fulltext_manifest={"enabled": True, "selected_count": 1},
             fulltext_extraction={"parsed_count": 1, "status_counts": {"parsed": 1}},
+        )
+        pack = evidence_pack_from_read(
+            "multi-agent coding",
+            read_documents(ReadRequest(bundle=bundle)),
+            coverage={"status": "covered", "covered_facets": ["method"], "missing_facets": []},
         )
         ideas = build_idea_candidates(pack)
         novelty_checks = build_novelty_checks(ideas, pack)
         contract = build_experiment_contract(ideas, pack)
         self.assertEqual(pack["schema_version"], "evidence_pack.v1")
-        self.assertNotIn("The method proposes a planner-editor-reviewer", str(pack["papers"]))
+        self.assertEqual(pack["evidence_refs"], [chunk.chunk_id for chunk in chunks])
+        self.assertEqual(pack["counts"]["documents"], 1)
         self.assertTrue(ideas)
         self.assertTrue(ideas[0].motivation_refs)
         self.assertTrue(contract.motivation_refs)
@@ -935,10 +928,6 @@ class ResearchFoundationTests(unittest.TestCase):
         self.assertEqual(report["status"], "covered")
         self.assertEqual(report["covered_facets"], ["benchmark"])
         self.assertEqual(report["questions"][0]["status"], "covered")
-
-    def test_prompt_module_reexport_is_compatible(self) -> None:
-        self.assertIs(report_user_prompt, compat_report_user_prompt)
-
 
 class InMemoryConnectorSmokeTests(unittest.TestCase):
     def test_search_query_shape_accepts_papers(self) -> None:

@@ -194,45 +194,6 @@ def build_experiment_contract(
     )
 
 
-def experiment_contract_markdown(contract: ResearchExperimentContract) -> str:
-    """Render an experiment contract for review."""
-    rows = contract.to_row()
-    lines = [
-        "# Experiment Contract",
-        "",
-        f"Contract: {contract.contract_id}",
-        "",
-        "## Hypothesis",
-        "",
-        contract.hypothesis,
-        "",
-        "## Proposed Change",
-        "",
-        contract.proposed_change or "unknown",
-        "",
-        "## Expected Outcome",
-        "",
-        contract.expected_outcome or "unknown",
-        "",
-        "## Setup",
-        "",
-        f"- Baseline: {contract.baseline}",
-        f"- Dataset: {contract.dataset}",
-        f"- Metrics: {_join_or_unknown(contract.metrics)}",
-        "",
-        "## Motivation References",
-        "",
-    ]
-    lines.extend(f"- {ref}" for ref in contract.motivation_refs or ["none"])
-    lines.extend(["", "## Implementation Scope", ""])
-    lines.extend(f"- {item}" for item in contract.implementation_scope)
-    lines.extend(["", "## Risks", ""])
-    lines.extend(f"- {item}" for item in contract.risks or ["No explicit risks captured."])
-    lines.extend(["", "## JSON Fields", ""])
-    lines.extend(f"- {key}: {type(value).__name__}" for key, value in rows.items())
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def _observed_gaps(pack: dict[str, Any]) -> list[str]:
     coverage = _dict(pack.get("coverage"))
     gaps = [f"Missing facet `{facet}` should be resolved before strong claims." for facet in _string_list(coverage.get("missing_facets"))]
@@ -361,10 +322,6 @@ def _unique(values: Any) -> list[str]:
             rows.append(text)
             seen.add(key)
     return rows
-
-
-def _join_or_unknown(values: list[str]) -> str:
-    return ", ".join(values) if values else "unknown"
 
 
 def _clip(text: str, limit: int) -> str:

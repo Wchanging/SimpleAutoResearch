@@ -96,7 +96,7 @@ class ResearchDesignTests(unittest.TestCase):
                     "required_metrics": ["accuracy", "macro_f1"],
                 },
                 execution_context=(
-                    "Prepared project: examples/full_pipeline_tiny_mlp/project."
+                    "Prepared project: examples/code_task_digits_mlp/project."
                 ),
             )
         )

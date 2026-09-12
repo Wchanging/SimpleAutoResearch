@@ -272,7 +272,7 @@ class SearchCapabilityTests(unittest.TestCase):
                 topic="fixture search",
                 registry=registry,
             )
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "search",
                 attempt_id="attempt-001",
                 request=SearchRequest(queries=("fixture",), providers=("fixture",)),
@@ -280,7 +280,6 @@ class SearchCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             handoff = controller.store.read_json(
                 "attempts/attempt-001/search_result.json"
             )

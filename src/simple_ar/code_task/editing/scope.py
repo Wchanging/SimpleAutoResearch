@@ -98,20 +98,6 @@ def protected_patterns_from_manifest(manifest: dict[str, Any]) -> tuple[str, ...
     return normalized or DEFAULT_PROTECTED_EDIT_PATTERNS
 
 
-def edit_scope_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    """Return normalized edit-scope policy fields from a manifest."""
-
-    edit_scope = manifest.get("edit_scope", {})
-    mode = DEFAULT_EDIT_SCOPE_MODE
-    if isinstance(edit_scope, dict) and isinstance(edit_scope.get("mode"), str):
-        mode = str(edit_scope["mode"]).strip() or DEFAULT_EDIT_SCOPE_MODE
-    return {
-        "mode": mode,
-        "allowed_patterns": list(allowed_patterns_from_manifest(manifest)),
-        "protected_patterns": list(protected_patterns_from_manifest(manifest)),
-    }
-
-
 def is_protected_edit_path(
     relative_path: str,
     *,
@@ -161,21 +147,6 @@ def edit_scope_rejection_reason(
     if is_protected_edit_path(normalized, protected_patterns=protected_patterns):
         return "protected_path"
     return None
-
-
-def protected_edit_paths(
-    paths: Iterable[str],
-    *,
-    protected_patterns: Iterable[str] | None = None,
-) -> list[str]:
-    """Return paths that are protected by the current edit policy."""
-
-    result: list[str] = []
-    for path in paths:
-        normalized = normalize_workspace_path(path)
-        if normalized and is_protected_edit_path(normalized, protected_patterns=protected_patterns):
-            result.append(normalized)
-    return result
 
 
 def editable_paths(

@@ -22,9 +22,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_ROOT = REPO_ROOT / ".tmp_tests"
 EXAMPLE_ROOT = REPO_ROOT / "tests" / "fixtures" / "code_tasks" / "toy_spam_project"
 TASK_FILE = REPO_ROOT / "tests" / "fixtures" / "code_tasks" / "improve_toy_spam_baseline.md"
-TINY_DIGITS_ROOT = REPO_ROOT / "examples" / "full_pipeline_tiny_mlp" / "project"
+TINY_DIGITS_ROOT = REPO_ROOT / "examples" / "code_task_digits_mlp" / "project"
 TINY_DIGITS_TASK_FILE = (
-    REPO_ROOT / "examples" / "full_pipeline_tiny_mlp" / "task.md"
+    REPO_ROOT / "examples" / "code_task_digits_mlp" / "task.md"
 )
 MEDIUM_REVIEW_ROOT = REPO_ROOT / "examples" / "code_task_medium_review" / "project"
 MEDIUM_REVIEW_TASK_FILE = (

@@ -15,34 +15,73 @@ SimpleAutoResearch 现在采用 file-first + state-backed 的形态：
 
 这样项目更容易学习、调试和重构。
 
+## 工程原则与代码审查标准
+
+最重要的原则是：**为当前真实任务提供可靠路径；遇到研究上的不确定性，保留证据并继续判断；只有触及明确的执行边界时才阻止操作。**
+
+SimpleAutoResearch 同时要避免两种失控：不断增加暂时没有消费者的通用架构，以及不断增加检查、回退和防御分支，最后让真正的研究路径难以理解。下面的标准适用于新功能、重构、兼容层和测试，不仅适用于业务代码。
+
+### 改动、结构与抽象
+
+1. **一个改动必须对应一个具体问题。** 开始前说明什么输入或操作会触发当前问题、修改后应产生什么可观察变化。如果只能解释为“以后可能需要”或“这样更完整”，先不做；新增抽象、配置和检查也遵循同一标准。
+2. **正常路径应当直白可读。** 从研究输入到下一动作，应能沿着少量应用函数看明白。已有 capability registry 可以用于明确的能力边界，但普通内部函数不必全部注册，也不要为了可替换性让一次调用穿过多层 factory、manager、gateway 和 adapter。
+3. **先复用具体代码，再决定抽象。** 两处确实相同的处理可以提取共同函数；只是表面相似时允许少量重复。抽象应来自已经出现的共同需求，而不是来自预想中的所有未来实现。合并 CodeTask bridge 与独立入口前，先核对默认值、授权和失败语义，不能只统一函数名称。
+4. **配置项必须有实际使用场景。** 不为每个 `if` 增加开关，也不要求用户理解内部阶段才能运行。预算、可修改范围、研究目标等会影响用户决定的内容才需要显式配置；内部选择优先使用合理默认值。
+
+### 契约、真实性与异常
+
+5. **只在边界做必要校验，内部相信已经成立的契约。** 用户输入、模型输出、外部文件和进程结果需要校验；进入内部后使用明确类型，不让每层重复判断空值、字典和字段。尤其不能用连续的 `.get(..., 默认值)` 把缺失的实验结果悄悄变成零或空结果。
+6. **科学不确定性不等于系统错误。** 摘要不完整、idea 新颖性未知、实验没有提升，都应形成带限制的结果。只有当前动作确实缺少必要条件时才暂停该动作；缺少数据可以阻塞实验，但不应阻塞不依赖该数据的文献分析。
+7. **回退必须保持语义真实。** 模型不可用时可以输出确定性的状态摘要，但不能标为模型完成的分析；全文不可用时可以分析摘要，但不能称为全文阅读；实验失败时可以保留已有结果，但不能生成固定指标让流程通过。每种回退都要说明实际完成了什么。
+8. **异常在能处理它的地方处理一次。** provider 层处理可恢复的网络错误，应用边界记录运行失败和恢复位置。不要每层都捕获 `Exception` 后返回空对象、默认成功或模糊字符串；保留错误原因和调试信息，让真实缺陷尽早暴露。
+9. **每种事实只有一个负责维护它的地方。** 实验执行器负责实测结果，研究模块负责解释，应用层负责下一步，报告负责表达。CodeTask、session 和 Writer 不应分别维护互相矛盾的预算或成功状态。外部 Agent 不能通过自报成功覆盖框架观察。
+
+### 测试、兼容与交付
+
+10. **测试验证用户结果和关键边界。** 优先验证无实验请求不启动进程、恢复不重复训练、负结果不进入无限修复、指标与条件正确对应等行为。少测私有函数调用次数和内部对象数量；不能用大量 mock 取代一次小型真实执行，也不要求每个小改动都重跑昂贵验证。
+11. **兼容层有边界，也有退出条件。** 旧入口可以保留使用方式，但不能继续承载新业务。记录消费者、替代方案和删除条件；不要长期维护两套完整编排器，也不要为了删除旧目录而破坏有效的历史读取。
+12. **每批改动小而完整。** 一批解决一个可见问题，包含必要实现、验证和说明。尽量不要同时改变目录、接口、行为、依赖版本和输出格式；完成后及时删除已被替代的局部实现，避免只加代码而不结束迁移。
+
+### 固定的代码审查问题
+
+每次审查至少回答：
+
+- 这个改动解决了哪个已经确认的问题？
+- 正常路径是否更容易看懂？
+- 有没有新增重复状态、隐藏回退或不必要的配置？
+- 信息不足时，是否仍能完成不受影响的部分？
+- 用什么实际证据证明它有效？
+
+实施蓝图中的锁、预算、迁移和恢复，只实现当前路径需要的最小可靠版本；蓝图不是“先把所有基础设施和防护做齐，才允许交付功能”的清单。示例中的时间、请求和资源限制是可调整的工程起点，不能成为回避真实任务的理由。完整架构与施工顺序保存在项目本地的 `MDfiles/` 规划笔记中；该目录按项目约定不提交 GitHub，公开贡献者规则以本文为准。
+
 ### 兼容性审计
 
-仓库现在有一条正式执行面和一段冻结的兼容执行面：
+仓库保留一条正式研究入口、分段命令和历史读取；旧八阶段执行器已经删除：
 
 ```text
 research-session（正式用户主线）
   -> typed research capabilities -> SessionController -> ArtifactStore
 
-research-brief / research-experiment / research-code-task（分段/开发接口）
+research-brief（分段/开发接口）
   -> typed research capabilities -> SessionController -> ArtifactStore
 
-simple-ar run/resume（临时兼容面）
-  -> PipelineRunner -> 冻结的八阶段兼容投影
+simple-ar status / inspect / search-artifacts
+  -> 历史产物读取（不启动旧流程）
 ```
 
-`research-session` 是 V2.8 唯一正式用户入口，负责完整的
-`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment
--> analysis -> report -> report_audit`。`research-brief`、`research-experiment` 和
-`research-code-task` 仍保留，但只用于分段调试、已有 handoff 接续和库级组合，不与完整主线
-并列作为产品入口。`simple-ar run/resume` 仍然保留，是因为已有配置、run 目录和测试仍然
-依赖它的阶段形态产物；它不是继续新增 research 策略的地方。新的 capability 应
-放在 `research/`、`experiment/` 或 `report/` 中，`pipeline_stages/` 只负责把既有
-能力适配或投影为旧命令所需的格式。
+`research-session` 是 V2.8 唯一正式用户入口，负责有界的 research 流程。提供明确命令或
+CodeTask 时继续完成 `research_design -> experiment -> analysis -> report -> report_audit`；
+两者都省略时提供 literature-only 的 summary/report 路径，且不创建 execution 请求。
+`research-brief`
+仍保留，但只用于分段调试、已有 handoff 接续和库级组合，不与完整主线
+并列作为产品入口。`simple-ar run/resume` 已退出，不静默转换旧参数。新的 capability 应
+放在 `research/`、`experiment/` 或 `report/` 中。旧阶段层已删除；剩余实验和报告消费者
+仍需收束，不能宣称生命周期已经全部统一。
 
 2026 年 9 月的清洗已经删除确认没有生产消费者的超前/重复层：无用的 session-plan
 抽象、多候选 CodeTask 调度器、独立 research iteration policy，以及 research
-Tool/MCP 设计契约产物。旧 debug 路径和 synthesis 测试仍使用 evidence pack/cards，
-所以这些真正的研究证据能力保留。CodeTask 的 external CLI 支持也保留为显式、默认
+Tool/MCP 设计契约产物。Read cards 和 `evidence_pack_from_read()` 统一承担阅读到综合的
+证据交接；旧 debug 输出及完整 pack 构建器已退出，推导测试也使用正式交接。CodeTask 的 external CLI 支持保留为显式、默认
 禁用的 backend，因为当前实验路径仍使用它的 provider factory；它不是 V2.8 的
 workflow controller。
 
@@ -54,14 +93,15 @@ workflow controller。
 
 ### V2.8 收口顺序
 
-V2.8 的业务闭环已经通过，但工程发布还差入口统一和兼容退出。贡献者按下面顺序推进：
+V2.8 的 canonical 业务闭环已经接通，但工程发布还差兼容退出、真实 Linux/CUDA 验证和干净的发布基线。
+贡献者按下面顺序推进：
 
 1. 只把新研究行为放入 canonical `research/`、`experiment/`、`report/` 和 `code_task/`；
 2. 让 README、默认 example 和普通用户文档只指向 `research-session`；
 3. 把仍使用 `run/resume` 的真实消费者迁移到 typed handoff 或明确的只读导入边界；
 4. 删除已无消费者的旧 handler、registry、projection、临时输出和重复测试；
 5. 通过聚焦回归、fixture、CLI/历史格式回归、全量测试和低资源 smoke 后，才冻结 V2.8；
-6. V2.9 再处理报告工程、模块质量升级、有限 repair/continuation 和 Overleaf-ready 输出，
+6. V2.9 再处理报告工程、模块质量升级、更广的研究方向迭代和 Overleaf-ready 输出，
    外部 Claude Code/Codex/OpenCode Harness 更晚接入。
 
 这里的“一个入口”指用户正式入口只有 `research-session`；内部 capability 仍然保持模块化，
@@ -75,13 +115,8 @@ V2.8 的业务闭环已经通过，但工程发布还差入口统一和兼容退
 回归测试。优先删除已经确认的无效导入或有证据的重复分支；不要仅仅因为某个 adapter 较长，
 就在没有真实消费者的情况下继续拆出更多层。
 
-清理规则有意保持不对称：生产消费者已经消失的代码要删除；但不要为了让行数变小，
-把仍然内聚的兼容 adapter 拆成更多层。剩余的大文件应被视为已标记的债务，而不是
-新的架构中心：`pipeline_stages/research.py` 只是指向旧 research compatibility facade 的
-alias，`core/session.py` 是 attempt 边界，`report/service.py` 是 canonical report application
-和旧 projection 共用的 report writer。当前 facade 已将 Search/Read/Synthesis 规则委托给
-canonical 模块，只保留 Context/artifact projection 和有界兼容行为。只有 `run/resume`、
-benchmark、历史 reader 等真实消费者迁移且旧格式回归通过后，才能删除 facade。
+生产消费者消失的代码应删除，但不为降低文件行数而拆散内聚实现。旧研究门面和阶段别名
+已经删除。剩余报告、实验及应用生命周期仍須收束，共享 projection 不等于统一执行 owner。
 
 ## 职责边界表
 
@@ -90,12 +125,12 @@ benchmark、历史 reader 等真实消费者迁移且旧格式回归通过后，
 
 | 区域 | 稳定入口 | 负责内容 | 不负责内容 |
 | --- | --- | --- | --- |
-| Core runtime | `simple_ar.core` | 产物引用、attempt lineage、有界决策、profile 和转移校验 | 领域 schema、LLM 调用、代码编辑、重试或选择最佳结果 |
+| Core runtime | `simple_ar.core` | 产物引用、attempt lineage、有界决策、profile、转移校验和共享资源账本 | 领域 schema、provider 调用、代码编辑、重试或选择最佳结果 |
 | Sources、documents、evidence | `research.sources`、`research.documents`、`research.evidence` | provider/parser port、文档 bundle、cards、chunks 和带 provenance 的 handoff | workflow 调度、把 provider 专属策略塞进 core，或把全文复制进每份 handoff |
 | Synthesis | `research.synthesis`、`research.brief` | 基于证据的方向、研究契约和最小的文献到想法组合 | 自动宣称创新性、自动选择实验或隐式调用模型 |
 | Experiment 与 analysis | `research.experiment`、`research.analysis`、现有 `experiment.execution` | 显式运行请求、规范化结果、指标比较和结果证据状态 | 代码生成、repair 策略、重试策略或决定下一研究阶段 |
-| Report 与 audit | `report.capability`、`report.audit`、旧 `report.service` | 显式章节组装、可选图表渲染、引用/指标审计和旧报告兼容 | 隐藏缺失证据、凭空生成图表，或没有迁移契约就替换旧 writer/reviewer |
-| Application 与 benchmark | `cli`、`pipeline_stages`、`code_task` 和 benchmark adapter | 面向用户的编排、旧 projection、code-task 策略和外部评测接入 | 成为 core runtime 的依赖，或为了单个 benchmark 改变通用 capability 语义 |
+| Report 与 audit | `report.projection`、`report.capability`、`report.audit`、`report.writing` | 证据投影、显式章节组装、可选图表渲染、引用/指标审计和旧报告兼容 | 隐藏缺失证据、凭空生成图表，或没有迁移契约就替换旧 writer/reviewer |
+| Application 与 benchmark | `app`、`cli`、`code_task` 和 benchmark adapter | 面向用户的编排、旧 projection、code-task 策略和外部评测接入 | 成为 core runtime 的依赖，或为了单个 benchmark 改变通用 capability 语义 |
 
 如果一个功能看起来跨越两行，应把协调放在 application 或显式 adapter 中，
 通过声明的 `ArtifactRef` 传递输入；不要让下层直接导入上层的私有文件。只有当
@@ -125,51 +160,204 @@ attempt store 中，controller 会将引用标为 `missing`、追加诊断，并
 `research.planning.search_request_from_plan()` 是交给 `SearchRequest` 的对应内存
 适配器；它不调用 provider，也不负责检索策略。
 
-`SessionController` 为新 capability 提供有界 attempt 和 decision 持久化；它
-不替代 `PipelineRunner`，不负责调度无限制的研究图，也不会隐式重试。现有的
-`simple-ar run`、code-task 命令和旧 projection 仍是兼容入口，直到某条真实能力
-线拥有明确的输入/输出契约和回归证据后，才逐步迁移。
-`core` 目录中还保留历史的 `pipeline.py` 和 `stage_results.py` 兼容模块；它们
-不是新 capability 应依赖的无领域底层边界。新模块只应依赖上面的 artifact/session
-API；如果修改旧 collector，必须保持旧 pipeline 和 projection 的行为。
-直接调用 `execute()` 时也会在创建 attempt 前解析请求的 handler；拼写错误或未注册的
+`SessionController` 负责实际 attempt 和持久化，ResearchApplication 选择下一研究动作；
+不需要第二套八阶段执行器。旧 runner 和 `core/stage_results.py` 收集器已经删除。
+旧 Context、阶段契约表及无调用方的控制台事件框架已退出。capability 使用上述 artifact/session API；
+历史文档读取只是只读适配，不再附带运行生命周期。
+直接调用 `execute_attempt()` 时会在创建 attempt 前解析请求的 handler；拼写错误或未注册的
 capability 因此不会消耗预算，也不会留下伪造的失败 attempt。
+`execute_attempt()` 是新应用层使用的物理 attempt 入口：它持久化 running/result
+manifest 并更新有界计数，但不选择转移，也不追加 `DecisionRecord`。旧 `execute()` 及其固定阶段
+决策执行已退出，只保留一个物理执行入口；显式中断恢复也只返回执行事实，不追加研究决策。
+历史决策记录仍可读取。能力测试通过 `execute_attempt()` 检查实际结果和
+产物传递，研究完成、重试等决策由应用测试验证。
+CodeTask 用量回调统一使用 `integrations.usage.record_usage()` 写日志、批次投影与显示摘要；
+它不负责 BudgetLedger 结算，不在计划、改码、修复模块分别维护用量写入实现。
+新入口可以省略 `attempt_id`；controller 会用持久化的单调序号生成可读 ID，序号允许因
+崩溃或预检失败而跳号，但不会复用可能含有证据的目录。`SessionManifest` 现在保存
+`revision`、`status_reason`、`next_attempt_sequence`、状态引用和可选账本引用，写出
+`session_manifest.v2`；读取仍兼容 v1。v1 保持只读，避免改写历史；
+`research-session-migrate` 将支持的证据导入新的应用会话，不在原地升级历史 manifest。
+新应用在检查交付条件后可以调用 `pause(reason)`、`complete(reason)` 或
+`continue_with_revision(reason)`。暂停会阻止下一次物理 attempt；显式继续只增加修订号，
+不重置旧的 attempt 预算。core 不判断论文或实验是否科学充分，`complete()` 的交付检查
+由应用层负责；状态查询和恢复不会自动触发新工作。
 
-`TransitionPolicy` 是 controller 外围的轻量确定性约束。
-`TransitionRecipe` 是允许的下一能力白名单，`classify_failure()` 将短诊断信号
-归一化为有限的 failure kind。证据是否充足、假设是否得到支持等语义信号可以请求
-回看某个目标，但 recipe 仍会拒绝未列出的跳转。该策略不调用 LLM、不扫描整个 run，
-也不会隐式重试；`DecisionRecord` 会记录 failure kind 和 next capability，
-以及决策发生时观察到的预算计数；`list_attempts()` 则提供持久化 attempt lineage，
-便于比较且不会把不同 attempt 的产物混在一起。
-`status_snapshot()` 提供给状态界面和交接使用的紧凑 JSON 视图，包含 session/attempt
-计数、预算、最近决策、可选的 profile 可见目标以及每个运行中 attempt 的 ID 和
-capability，但不会复制产物内容，也不会替领域规则选择所谓“最佳结果”。调用 capability
-前会先校验 proposed target；创建后续 attempt 时还会根据持久化的当前 capability 再检查一次
-实际转移，因此省略或替换路径提案也不能绕过 allow-list；非法跳转不会
-消耗 handler 调用，也不会留下空 attempt。新 attempt 会在 handler 启动前先持久化为
-running，session 也会同步保存运行状态；进程中断时因此仍能留下可恢复的 lineage，
-而不是一个没有标记的调用。
-如果进程级中断已经得到人工确认，调用方可以重新加载 session，并对对应的 running
-attempt 显式调用 `recover_interrupted()`。它只会写入一个明确的 failed capability result
-并关闭该 attempt；不会自动重试、覆盖已有的 result envelope，也不会替领域逻辑选择下一步。
+`DecisionRecord` 和 manifest 的 recipe 标签只保留为历史数据，不再驱动策略。
+`status_snapshot()` 展示执行计数、预算和已记录的历史决策，不推断允许的下一步。
+新 attempt 在 handler 启动前持久化为 running，以保留中断后的恢复位置。
+如果进程级中断后 result 已经落盘，调用方可以重新加载 session，并显式调用
+`reconcile_attempt()`；它根据已持久化的 result 关闭 running attempt，或幂等补齐已结束 attempt 的计数。
+ResearchApplication 会先恢复缺失的状态引用再推进，避免重复调用已完成的动作。
+如果没有 result，调用方必须确认中断，再调用 `recover_interrupted()` 写入明确的 failed
+capability result。两者都不会自动重试、覆盖已有的 result envelope，也不会替领域逻辑选择下一步。
 只要仍有 attempt 保持 `running`，controller 就会拒绝创建新的 attempt，直到调用方显式完成
 上述恢复；这样可以保持单一活动 attempt 的 lineage，不会悄悄产生第二条分支。
 如果调用方确实需要从较早节点比较另一条假设或修复路径，可以在
-`execute()` 中明确传入 `parent_attempt_id`。父节点必须是已经收束为
-`completed` 或 `failed` 的现有 attempt，且创建新 attempt 前仍会按该父节点的
-capability 检查转移规则。默认行为仍使用持久化的当前 attempt，因此普通线性运行
+`execute_attempt()` 中明确传入 `parent_attempt_id`。父节点必须是已经收束为
+`completed` 或 `failed` 的现有 attempt，研究顺序由应用负责。
+默认行为仍使用持久化的当前 attempt，因此普通线性运行
 不变；这只是显式 lineage 分支，不是图调度器或自动重试。
 如果调用方需要为比较或恢复界面展示从根节点到某个节点的父链，可以使用
 `attempt_lineage()`。它只读取 attempt manifest，不合并产物、不选择最佳结果，也不调度新
 工作；父节点缺失或链路成环时会显式报错。
 
 V2.8 application 层负责给出有序 capability 序列，并显式调用
-`SessionController.execute()`。这样顺序直接体现在用例代码中，而不是隐藏在通用 plan
-runner 里。controller 仍会在创建 attempt 前检查已注册的 handler、允许的 transition、
-输入 artifact 和预算；更高层 workflow 需要读取返回的 decision，再显式构造有界续跑。
-所有传入的 input 都必须是 session 中已经存在的 artifact；缺失 handoff 会在边界处失败，
-不会创建 attempt 或消耗 session 预算。
+`SessionController.execute_attempt()`。当前的正式 P04 入口是
+`simple_ar.app.research_application.ResearchApplication`：它保存 `ResearchBrief` 和归一化
+资产，再按 `plan -> search -> document_ingest -> read -> synthesize -> summarize` 每次推进
+一个有界动作，并将已接受产物写入 `SessionManifest.state_refs`。重新加载后不需要重建前面
+的内存对象。`ResearchApplicationServices` 只提供这条路径实际需要的 LLM client、provider
+registry 和小型资源设置，不是通用 service registry。
+
+应用已支持研究摘要、评估/设计、显式实验与分析，以及在测量之间修改已初始化的 CodeTask；请求 report/paper 时，
+canonical application 会继续执行 report_write → report → report_audit，也支持不带实验的 report-only 请求，
+不会把缺失产物伪装成已经存在。`advance_session()` 和 `load_session()`
+是同一入口的库函数，正式 `research-session` CLI 直接使用它。所有输入仍必须是 session 中已经存在的 artifact，
+缺失 handoff 不会创建 attempt 或消耗预算。`SessionController.mutation_scope()` 是应用层
+组合一次 capability、状态引用和 manifest 更新时使用的公共单写者边界，不是调度器。
+持锁后会核对 manifest 是否仍与加载版本一致；旧 controller 必须重新加载，不能覆盖其他写入者的预算和引用。
+重新注入服务时保留已保存的数量限制；运行配置读取失败会明确报错，不静默替换成默认值。
+
+应用只维护一份派生 WorkPlan，以 JSON/Markdown 写入 `planning/`，包含交付状态、缺口和下一动作。
+重复的 readiness 视图/文件已退出；执行受阻时仍将已完成研究标为部分进展。当请求实验或 idea assessment 时，应用会在 synthesis
+之后执行有界的 `assess_ideas` capability；其 JSON/Markdown 产物记录证据引用是否可解析、相似工作风险、
+未知项和面向准备度的建议，不宣称新颖性，也不授予执行权限。
+
+应用只维护一份能力产物契约，供注册、正常执行与恢复复用。引用登记先解析全部声明产物再
+更新状态；baseline/candidate/repair 具体角色沿用 attempt trigger，不再维护第二套产物映射。
+
+传入 LLM client 时，候选评估使用按文档轮流选取的共同原文片段，并保存模型实际所见内容和截断信息；
+回复中的候选 ID 与证据引用在此边界校验。失败时产物标为 `deterministic_fallback`，不自动推荐候选。
+应用先保存摘要，再执行评估；请求 `research_design` 或实验/报告时，复用现有 `research_design`
+capability 承接建议及选择理由，不另做一次模型选择。模型不推荐时保留摘要并暂停；用户可通过
+`config.research_selected_idea_id` 显式选择。设计产物本身不授权执行。
+
+已有可执行实验时，需请求 `experiment` / `experiments`，并在 `services.config["execution"]` 提供
+`command`（argv 列表）、`cwd`（已存在的绝对目录）、`timeout_sec`，以及可选的 `result_schema`、`label`；
+`budget_limits` 同时提供有限的 `process_invocations` 与 `process_wall_seconds`。命令来自显式用户配置，
+不从模型文本推断；只请求摘要时，即使配置命令也不会启动进程。CodeTask 的 repair/retest 有界；普通显式实验
+的技术失败可由调用方显式重试而不重建研究证据，科学负结果不会被静默重跑。
+执行与确定性分析是独立持久化 attempt，失败进程可交付诊断但原失败状态不变；应用 completed 表示交付产物齐备，
+不是实验成功。重载复用已保存测量，覆盖物理 attempt 完成但应用引用未保存的窗口。
+完整资产保护和真实 Linux/CUDA 验收仍待完成；report 生命周期已经接入，但真实用户规模的语义质量仍待验证。
+
+执行配置还可提供 `protocol`，复用已有 `ResearchExperimentContract` 的 `protocol_revision`、
+`dataset_refs`、`split_spec`、`metric_specs` 和 `comparison_conditions` 保存对照设置；未知协议字段会
+被拒绝，不静默忽略尚不支持的约束。canonical 结果将进程 invocation ID 记为 `measurement_id`，
+运行 label 记为 `condition_id`，并保存声明协议和指标契约的指纹。新结果的协议不完整、不匹配或复用
+同一测量时，比较保留描述性差值，但结论为 inconclusive；匹配标记为 `declared_match`，不冒充独立验证。
+目前只校验显式指定文件（见下文），完整访问保护仍待完成。无测量元数据的旧结果保持兼容行为，
+同时标记 `legacy_unverified`。
+
+成对实验可添加 `execution.baseline` 并明确给出其 `command`；默认继承共有 cwd、timeout、protocol 和
+指标设置，baseline 自己提供的字段覆盖默认值。顶层 command 是 candidate。应用把两侧分别作为同一
+experiment capability 的独立动作执行，analysis 声明带两侧 artifact 引用的 `comparison.json`。
+attempt trigger 中的 `application:baseline` 保存动作角色，覆盖结果已落盘但状态引用未保存时的恢复。
+有效回退结果可用 `metric_below_target` 分析完成交付，不自动追加训练。这是一个显式对照，不等于
+有限研究迭代已经完成。
+
+修改 candidate 时添加 `execution.code_task`，提供绝对路径 `run_dir` 和明确的 `approval_note`；
+candidate 的 cwd 必须是该 CodeTask 隔离工作区。保留原 task 的用户要求，并在规划前追加选定设计、
+声明的执行协议及实际 baseline 指标，使用研究说明渲染函数。`research_handoff.json`
+固定原始任务及所消费的研究上下文，attempt 保存最终任务 Markdown。研究输入改变不能复用旧计划，
+该修订需准备新的 CodeTask run。
+`implement` 复用现有规划、提案、编辑与验证，在 validate 处结束，不暗中运行 baseline 或 benchmark；
+模型调用沿用 session 账本和 attempt ID，协议指定的工作区文件
+并入既有编辑保护规则。产物关联设计、已有 baseline、patch 和验证证据，已完成的修改恢复时不再执行。
+若要测未修改 baseline，应使用新初始化工作区；面向任意来源和复杂任务的通用资源准备、完整执行包迁移及
+所有旧入口收口仍未完成；已准备工程路径的 CodeTask→实验→报告主链可运行。
+
+旧分段 research-code-task 创建入口与桥接执行器已退出。validate_repair_patch 只做修复后
+审查和静态验证，重新测量由正式 experiment 动作负责；独立 CodeTask 保留明确的修复提案
+审批流程。不要在 implementation 边界内重新引入隐藏的修复/复测循环。
+
+生成项目的审查修复不得猜测实现意图：缺失入口、配置、文档、公共接口保持为审查发现，框架
+不再自动补固定实现，也不清空语法错误的包代码。模型提案复用快照和编辑校验；无模型时
+保留原文件与失败审查，不通过造文件让检查通过或启动实验。
+
+运行修复也遵循这一原则：匹配报错字符串不等于可以猜测模块新名称、批量重写 import 或替换
+results 路径。实际失败交给已有的有界模型修复路径，复用快照及校验；无模型时保持未解决。
+
+修复定位优先使用失败图路径、明确关联文件和源码匹配，其余项目文件提供有界上下文。
+不再把 `runner`、`data`、`artifact` 等文件名当作职责证据。
+
+结构化修复与整文件 content 共用动作应用器，content 先转换成 rewrite 动作。动作拒绝后
+不能再触发第二次整文件覆盖；部分拒绝会回滚目标文件，成功记录保留应用器观察到的哈希与 API。
+
+修复记录描述尝试过的编辑，不代表科研或执行成功。review/run 次数由同一记账函数维护；
+后续复查负责自己的结果，不把修复记录改写为 effective/recovered，也不在 implementation
+中复制修复状态。历史状态字段保持可读。
+
+`propose_repair_edits(..., failure_evidence=RepairEvidence(...))` 可接收测量所有者显式提供的失败
+报告与分析，不查找或伪造旧 CodeTask benchmark 记录；证据快照随提案保存，不应用修改、不重新测量。
+外部证据必须是 failed/timed_out 执行，不能把进程成功的科学负结果当作运行故障。未提供该参数时
+保留独立入口原有失败发现流程。
+
+初始化的 `execution.code_task` 可通过 `max_repairs` 显式授权技术修复轮数（非负整数，默认 `0`）。
+candidate failed/timed_out 后分别创建实现 attempt 和 canonical 复测 attempt，不重跑 baseline；
+同时服从既有 attempt、模型与进程预算。原 `experiment` 失败证据不覆盖，各轮保存为 `repair_N` /
+`experiment_repair_N`，analysis 用最后一次测量与 baseline 对照。达到轮数上限后交付剩余失败，不循环。
+提案、审阅或验证无效时在复测前暂停。完成修复的持久化结果可恢复而不重复编辑；patch 应用内部中断
+仍需检查 interrupted attempt，不能盲目重放。这只是有限技术修复，不是模型驱动研究修订或完整报告。
+较长流程可能需显式提高总 attempt 上限；修复轮数不扩大其他预算。
+
+`ResearchApplication.latest_experiment_ref()` 按应用动作顺序选择最后已有的 candidate 测量，
+分析、实验交付引用和导出快照共用这一选择，避免复测后仍把首次失败当最终结果。复测尚未落盘时
+仍指向上一份已记录结果，不改写任何历史引用。
+
+已有 baseline 可用 `execution.code_task.code_root` 替代 `run_dir`：提供绝对源目录、approval_note，
+以及执行 argv/timeout/protocol；cwd 可省略或等于 code_root。`prepare_execution` 在所属 attempt 内
+复用 CodeTask copy 初始化器，记录复制/跳过清单，交付隔离 cwd/run_dir，原项目不修改、不执行。
+准备不安装、不下载、不调用 setup hook/benchmark；baseline 继承隔离 cwd，显式等于 code_root 的
+baseline cwd 也映射到副本。完成准备后恢复不重复初始化；初始化内部中断仍需检查。沿用既有复制限制，
+大数据应为明确共享资产；此项不是仅数据自动生成 baseline 或论文复现准备。
+
+仅数据的文本基线使用 execution.dataset（绝对 UTF-8 CSV 路径）和 timeout_sec，不要求用户命令或
+CodeTask。固定列 text,label,split；split 明确为 train/eval，两侧非空且训练至少两个标签。当前上限
+10 MB / 10,000 行，超限明确停止准备，不偷偷采样。归一化文本跨 split 重复记录为潜在泄漏限制，
+不隐瞒，也不当成系统崩溃。准备保存源哈希、检查结果、归一化数据和 csv_text_classification 脚本，
+协议保护数据与 evaluator；随后由普通 experiment 动作仅使用 train 训练词袋＋逻辑回归，eval 上计算
+accuracy/macro-F1，BLAS/OpenMP 单线程，复用同一进程预算和分析路径。这是单一基线，不是自动候选
+实现、语言适配或论文复现；其他方法可使用已有源项目准备路径。
+
+prepared_execution 是实验的显式输入；其实测结果在 preparation 字段保存来源引用和限制，再进入
+分析 audit 与 Markdown。潜在划分泄漏等信息因此能传至面向报告的交接，不改写实际指标或进程状态。
+
+`ResearchApplication.report_inputs()` 将已完成产物投影为既有 ReportContext/ReportMemory；旧 session
+也调用同一 build_research_report_inputs。保留 baseline/candidate/comparison 独立来源、最后已分析测量和
+准备限制，实际执行协议优先于拟议设计。目前只是要求实验/分析的只读投影，不是报告快照、章节恢复或
+Writer/audit 生命周期。
+
+同时请求 experiment/experiments 和 report/paper 时，新应用已执行 report_write → report → report_audit。
+Writer 在正式 attempt 内运行，调用模型前保存带内容指纹的 context/memory/config/template/来源快照；
+组装和审计复用固定快照及 Writer memory，不刷新研究上下文。复用既有 agent/assembler/audit，默认总
+attempt 上限16，资源预算独立。Writer 失败保留快照并暂停，显式继续只重试写作；完整 Writer 结果可恢复到
+组装而不再调用模型。章节级 checkpoint 已在 Writer 边界持久化，canonical application 也支持无实验
+report-only 请求；旧报告入口执行顺序尚未迁移。
+
+报告 MetricSource 保留测量 ID、协议 ID/版本/指纹、条件、单位和来源类型；baseline/candidate 分别使用
+自己的指标方向与协议单位。历史缺失身份保留为空并标 legacy_unverified，比较差值标为派生；指标附表显示
+单位、条件和来源。这是可追溯元信息，不代表自由正文中的比较或科学结论已完成语义验证。
+
+实现证据（patch、验证、已有 review、工作计划和研究 handoff）复制进所属 attempt，并注册为 capability
+输出。`implementation.json.artifact_refs` 按 `artifact_base: "attempt"` 相对该 attempt 解析；
+原 CodeTask/workspace 绝对路径仅记录来源，不再承担证据读取。复制 session 后无需原 CodeTask 目录
+即可审阅这些证据，但不包含数据集、依赖环境、检查点或重新执行所需的完整源代码。
+
+`execution.protocol.protected_assets` 接受显式 `{asset_id, path}` 文件条目，可用于数据、拆分索引和
+评估器；相对路径按执行 cwd 解析，不递归扫描目录。必需文件启动前计算指纹，结束后复查，观察保存在
+`measurement.asset_integrity`。变化或删除会令 `validity_status=invalid`、总体结果 failed，同时保留
+真实 `execution_status`、退出码和指标；guard 给出 `protected_asset_changed`。即使声明协议相同，
+跨运行的受检文件内容不同也不能作同条件提升比较。它是指定文件的审计，不是 OS 写保护、访问隔离，
+也无法发现最终快照前已恢复的临时修改。哈希按块读取，时间不计入子进程墙钟预算。
+
+新的应用 session 还会持久化会话级 `BudgetLedger`，并在 manifest 中保存引用；传入标准
+`LLMClient` 时会创建绑定该账本的副本。CodeTask、Writer 和跨入口 client factory 的统一注入
+仍属于后续迁移，不在这里提前宣称完成。
+
+LLM 超时后，账本记录已知请求次数；有输出上限时保留 token 预留作为保守估计，实际用量仍标为未知，
+剩余额度内可以重试。没有上限的未知用量仍会阻止继续消费有限的 token 预算。
 
 attempt manifest 中的输出路径相对于各自的 attempt 目录。若后一个 capability 需要读取前一个
 能力的输出，应使用 `SessionController.attempt_output_refs()`；它会返回例如
@@ -179,18 +367,17 @@ attempt manifest 中的输出路径相对于各自的 attempt 目录。若后一
 `attempt_output_ref(..., kind=..., schema=...)` 精确要求一个 artifact，而不要依赖输出顺序；
 kind 不唯一时会明确失败。
 
-`LifecycleProfile` 提供五个可选的内置能力范围：`research_brief`、`survey`、
-`experiment`、`paper_audit` 和 `full_research`。session 使用这些名称之一时，
-controller 会在执行前拒绝超出 allow-list 的 capability 或 transition。这只是
+`LifecycleProfile` 提供四个可选的内置能力范围：`research_brief`、`survey`、
+`experiment` 和 `full_research`。session 使用这些名称之一时，
+controller 会在执行前拒绝超出 allow-list 的 capability。这只是
 范围校验，不是自动工作流，也不强制规定起始能力；无法识别的旧 profile 仍保持
 不加范围限制，以兼容历史调用和实验。
 新建 session 如果使用已知 profile 但没有显式传入 `BudgetState`，默认 attempt 预算为该
 profile 的能力数量加两次有界恢复机会。显式预算始终优先；旧 manifest 继续使用其中保存的
-计数和限制，不会被自动改写。
+计数和限制；v1 保持只读，显式迁移创建独立应用会话，保留原历史目录。
 attempt 可以继承 session 的 profile，也可以省略 profile；但不能把已有范围的 session
 悄悄改成另一个 profile。
-如果调用方需要展示允许的下一步，应使用 `SessionController.allowed_targets(source)`，
-不要直接读取 recipe 或 profile 的内部结构。
+下一动作由应用展示，Core 不再推断研究顺序。
 内置 capability 名称就是实际阶段边界：`plan`、`search`、`document_ingest`、`read`、
 `synthesize`、`research_design`、`experiment`、`analysis`、`report` 和 `report_audit`。
 `analyze` 仍是 `analysis` 的旧别名。`research_brief` 是应用/profile 名称，不是隐藏的
@@ -207,11 +394,8 @@ attempt 可以继承 session 的 profile，也可以省略 profile；但不能�
 `CapabilityResult` 的状态、输出引用、诊断、usage 和 provenance。它用于进程结束后恢复
 失败原因和结果边界，不复制全文或原始日志；旧八阶段不会因此改变产物布局。
 
-旧的巨型 research 实现已经移到 `src/simple_ar/_legacy/research_stages.py` 背后的兼容门面，
-公开的 `pipeline_stages/research.py` 仍作为旧调用方的 import alias。该门面负责适配 `Context`、
-保留旧 artifact 名称和有界检索 trace，并把研究行为委托给 canonical 模块；`_legacy` 也继续
-保留旧 import path 的别名。新的行为应优先实现到 `core/`、`research/`、`experiment/`、
-`report/` 和 `code_task/` 这些领域模块中。
+旧 research facade 和 `pipeline_stages/` 源码包已删除；research 领域模块负责研究行为。
+历史产物读取与执行路径分离保留。
 
 CLI 代码按职责拆分：
 
@@ -221,17 +405,7 @@ src/simple_ar/cli/
   main.py    命令分发与用户可见输出
 ```
 
-Pipeline stage 编排按工作流区域拆分：
-
-```text
-src/simple_ar/pipeline_stages/
-  research.py    指向兼容 research facade 的 alias（01-04 阶段）
-  experiment.py  05-07 阶段的旧 Context 适配器
-  report.py      08 阶段的旧 Context 适配器
-  common.py      仅兼容 artifact/evidence 辅助
-  registry.py    PipelineRunner 使用的 HANDLERS registry
-  handlers.py    仅兼容聚合；不要在这里继续添加新逻辑
-```
+旧阶段 registry、handlers、common 和 import aliases 已退出。
 
 顶层实现模块已经收束到领域包中。新代码应直接从 `core/*`、`app/*`、
 `integrations/*`、`research/*`、`experiment/*`、`report/*` 或 `code_task/*`
@@ -296,9 +470,9 @@ result = search_sources(
 
 `research.documents.ingest.build_document_bundle()` 是当前文档元数据、受许可的全文处理、
 section 和 chunk 之间的最小组合边界。它复用现有 research record，不调用 LLM，也不直接写
-阶段产物。Search 仍负责索引持久化和旧 JSON/JSONL projection；下游可以通过
-`research.service.load_search_document_bundle(ctx)` 从 state alias 或旧 Search 路径恢复同一个
-typed bundle，因此 reader 不需要知道具体 provider 或目录布局。
+阶段产物。Search 仍负责索引持久化和旧 JSON/JSONL projection；当前调用方传递 typed bundle 或其
+handoff 表示。`_legacy.documents.load_search_document_bundle(search_dir)` 显式读取历史 Search
+目录的 JSON/JSONL，不构造运行时 Context，也不推进历史流程。
 
 `research.documents.ports` 提供 manifest 选出本地资源之后使用的轻量
 `DocumentResolver` 和 `DocumentParser` 边界。`build_local_document_bundle()` 是直接从本地
@@ -324,6 +498,9 @@ typed bundle，因此 reader 不需要知道具体 provider 或目录布局。
 `DocumentBundle` 的 chunks 中解析；缺失引用会留下诊断并将结果降为 `partial`。也可以直接调用
 `validate_read_evidence()` 做同一项无副作用检查。该校验只检查显式引用，不扫描文件或判断
 引用内容的语义正确性。
+`query_evidence()` 是 P05a 的来源解析边界：给定文档或明确的 chunk ID，它返回带来源身份、内容版本、精确位置、
+提取状态、目标原文和同文档真实相邻上下文的 `EvidenceRef`。未知 ID 会显式报错；相邻 chunk 不能替代缺失的目标引用。
+Read handoff 的 `source_spans` 已使用该投影，但不复制原文；逐篇分配上下文和记录模型实际所见 chunk 仍待 P05a 后续实现。
 
 ### 复用 Synthesis 边界
 
@@ -340,11 +517,11 @@ typed bundle，因此 reader 不需要知道具体 provider 或目录布局。
 `synthesis_result.v1` handoff，包括 idea、novelty check 和可选的 research-level 实验契约。
 
 需要注意，`research.contracts` 中的 research-level `ExperimentContract` 描述有证据依据的假设和
-拟议改动；`experiment.contracts` 中历史上同名的执行契约则描述命令、指标、资源、依赖和实现设置。
-两者职责不同，新代码应从与契约职责相符的模块导入，不能把两个类型混用。
+拟议改动。无消费者的旧设计包、运行配置转换和domain profiles已删除；执行设置属于当前experiment请求，
+实现要求属于CodeTask契约，不再另建第二套设计包。
 `ResearchExperimentContract.from_row()` 可以恢复 research-level handoff，
 `ExperimentRequest` 同时接受这个 typed 对象和历史上使用的 mapping；canonical execution
-result 会保留该契约，但不会把它和旧的 execution contract 合并。
+result 会保留该契约，不重建已退休的设计包。
 纵向 fixture 会把恢复出的契约显式传给 `ExperimentRequest`，因此执行结果记录的是真实的
 research-to-experiment 交接，而不是从私有阶段目录重新猜测假设。
 如果调用方传入 typed research contract 但没有 execution result schema，契约声明的 metric
@@ -391,6 +568,10 @@ code-task 仍然是一个 backend，而不是又一套实验 API。
 如果 request 带有 primary 或 required metrics，组合入口会把这些要求转换为分析所需的最小
 视图，调用方不必在 context 中重复填写。
 
+分析模块负责自身证据与审计产物，不反向维护 CodeTask 修复状态；无调用方的
+`record_result_analysis_memory` 桥接已退出。CodeTask 摘要展示已记录的结果和修复说明，
+不再根据负结果、旧失败文件或缺少 memory event 推导另一套 blocker。
+
 `research.experiment.run_experiment_capability()` 是执行边界的可选 session 适配器。
 调用方自行注册名称后，它会把现有 canonical result 写成 `results.json`，并把捕获到的
 stdout/stderr 以同一 attempt 下的 `execution/stdout.txt` 和 `execution/stderr.txt` 产物保存。
@@ -426,17 +607,14 @@ session 层把“写出了分析文件”误认为“分析已经通过”。下
 `incomplete`；这个状态不会替调用方选择 retry 或研究阶段转移。请求持久化时，同一份精简
 状态也会写入 `analysis_status.json`。
 
-如果上层需要把分析结果交给 session policy，可使用
-`research.decisions.transition_request_from_analysis()`。这个函数只生成已有的
-`TransitionRequest`，不执行 handler、不自动重试，也不替调用方选择下一个 capability；恢复策略
-仍由调用方和核心 session budget 负责。
+应用直接消费类型化的分析结果和执行证据，不再通过适配器接入另一套 Core 科研策略。
 
 ### 复用 Report Figure 边界
 
 `report.ports.FigureRenderer` 是报告视觉输出的最小替换点。
-`DeterministicFigureRenderer` 包装现有 SVG 实现，并继续作为 report service 的默认实现。
-需要自行编排报告的调用方可以向 `execute_report(..., figure_renderer=...)` 传入其他 renderer；
-pipeline 入口不传该参数，因此保持原有行为。
+`DeterministicFigureRenderer` 包装现有 SVG 实现，作为 report assembly 默认实现。
+调用方可向 `assemble_report_document(..., figure_renderer=...)` 或对应
+`run_report_capability()` 传入 renderer；旧 stage service 已退出。
 未来的图像或图表 backend 可以实现同一个 render 方法，消费已有的 `ReportDocumentPlan`、
 `ReportFigureConfig` 和 `ReportFigureResult`，无需改动 writer、citation audit 或报告组装逻辑。
 
@@ -471,43 +649,18 @@ draft 的调用方提供下游报告边界。该适配器复用 `assemble_report
    显式输入、输出、预算和 transition 进行组合。
 5. 按需要补充 contract、application、失败/恢复以及 CLI/example 测试。
 
-Canonical capability 应使用显式 artifact 引用和紧凑 handoff。`ctx.find_artifact(...)`、
-`Stage` 和 `HANDLERS` 只属于旧路径兼容机制。只有在维护现有 `simple-ar run/resume` 输入/输出
-契约时才修改 `pipeline_stages/`，不要把新的 research 行为继续堆在那里。
+Canonical capability 使用显式 artifact 引用和紧凑 handoff，不再引入已退出的 stage registry
+或第二套生命周期。`Stage` 与隐式目录搜索暂用于历史兼容。
 
-## 添加 Experiment Template
+## 实验准备与执行
 
-固定脚本模板主要位于 `src/simple_ar/experiment/templates.py`。内嵌 8 阶段
-code-task templates 位于 `src/simple_ar/experiment/code_task_bridge/`，
-因为它们会在写 run harness 前准备已有 workspace。旧的
-`src/simple_ar/experiment/code_task_experiment.py` facade 已删除；新代码和兼容
-适配层都应直接从 `code_task_bridge` 导入。
+准备好的代码通过 `research.experiment` 与 `experiment.execution.backend` 测量，CodeTask
+负责隔离改码和验证。旧 Context design/code/run 执行器及阶段归档 helper 已退出，不再扩展。
 
-`src/simple_ar/experiment/runner.py` 用于固定模板生成脚本的 subprocess 运行。
-`src/simple_ar/code_task/` 则负责 LLM-guided 项目编辑、workspace 隔离、patch、
-validation 和 benchmark comparison。
+`research.preparation` 在支持的小数据场景复用 CSV 文本分类模板。新增准备能力必须对应明确
+输入契约和有界真实用例，不为凑齐所有实验类型扩展通用项目生成器；未知指标保持未知。
 
-`experiment.execution.backend.RunResult` 是统一的 subprocess 结果模型。
-`experiment.runner.ExperimentRunResult` 仅作为兼容别名保留；新的执行和分析代码应依赖
-`RunResult`，避免维护两套相同结果结构。
-
-新生成的 LLM usage 记录还会保存一次成功 `ask()` 请求实际使用的 provider 调用次数，
-汇总中会给出由此计算的重试次数；没有该字段的旧记录仍可读取，并按一次调用处理。
-
-顶层 run config 解析位于 `src/simple_ar/app/run_config.py`。它应该保持为薄的 TOML-to-runtime-options 层；code-task 专属 config 语义应继续放在 `src/simple_ar/code_task/runtime/config.py`，避免 standalone 和 embedded code-task 行为漂移。
-
-新的 template 应满足：
-
-- 添加到 `SUPPORTED_TEMPLATES`；
-- 生成完整 standalone `experiment.py`；
-- 只使用 `pyproject.toml` 中声明的依赖；
-- 打印机器可解析指标行，例如 `metric_name: 0.123`，由 `src/simple_ar/experiment/metrics.py` 解析；
-- 避免网络访问和不受控下载；
-- 在 `tests/test_experiment_runner.py` 中有测试。
-
-当前 template system 故意不做自由形式 code generation。这个边界能保证教学 pipeline 可复现，同时把更强 coding workflow 放在 `code-task` 下逐步发展。
-
-对内嵌 code-task template，应保持 automatic approval boundary 显式：它们应准备 workspace，使用 controlled old/new edits，写紧凑阶段产物，例如 `code_task_experiment.json`，并通过 `07-run` 运行 benchmark，而不是在 reporting 时悄悄修改源码。通用 `code_task_project` template 应保持为 standalone code-task modules 的薄桥接层，而不是另一套 coding 实现。
+历史实验读取和当前 bridge 仍保留；其中重复的生命周期是待清理债务，不是新的扩展位置。
 
 ## 扩展 Code Task
 
@@ -537,6 +690,11 @@ Metric comparison 应保持保守。未知数值指标可以记录 delta，但�
 
 ## 扩展 Report 与 Audit
 
+`report/survey.py` 保留来源分配与已有综述章节元数据的读取。旧服务失去消费者的契约构建、
+分类生成、规划文件写入和独立覆盖审计已退出；扩展应进入现用 Writer/document-plan 与
+report/audit 边界，不恢复第二套流水线。历史 `survey_contract` 上下文仍可读，但旧构建器专属的
+runtime 开关和 longform `planning_artifacts` 配置已删除。
+
 Report system 是 V2.4 用来承接 research-only survey、experiment report 和
 embedded code-task result 的出口。它应该保持 template-driven 和 evidence-aware，
 不要退回到单个大 prompt 或单个大 service 文件。
@@ -544,7 +702,7 @@ embedded code-task result 的出口。它应该保持 template-driven 和 eviden
 ```text
 src/simple_ar/report/
   schema.py        context、memory、tools、draft、review 的 Pydantic models
-  context.py       收集 papers、synthesis、metrics 和 code-task comparison
+  projection.py    将持久化研究与测量证据投影为报告输入
   templates.py     加载 Markdown 模板和 reviewer criteria
   memory.py        紧凑 section plan、evidence handles、claims、limitations
   tools.py         report tool schema definitions
@@ -554,25 +712,24 @@ src/simple_ar/report/
   citations.py     citation key 映射、显示标签和 citation cleanup
   audit.py         citation、metric、claim 和 reviewer audit 汇总
   assembler.py     section drafts 组装为最终 Markdown
-  quality.py       deterministic report quality checks
-  service.py       stage entrypoint 和 artifact packaging
+  writing.py       controller 管理的 Writer 执行和检查点
+  capability.py    报告组装和 artifact packaging
 ```
 
 新增 report 行为时：
 
-- schema 放在 `schema.py`，不要在 `service.py` 里继续堆自由 dict；
-- source lookup / backtracking 放到 `context.py`、`retrieval.py` 或
+- schema 放在 `schema.py`，不要在 Writer 中堆自由 dict；
+- source projection / backtracking 放到 `projection.py`、`retrieval.py` 或
   `tool_gateway.py`；
 - Writer/Reviewer loop 行为放到 `agent.py`；
 - citation 映射、显示转换和 cleanup 放到 `citations.py`；
-- 机械一致性检查放到 `audit.py` 或 `quality.py`；
+- 机械一致性检查放到 `audit.py`；
 - 模板和审查标准放在 `templates/report/`，不要硬编码成长 prompt；
-- `service.py` 只保留 stage-level coordinator 和 artifact writer 的职责。
+- Writer 执行放在 `writing.py`，报告组装放在 `capability.py`。
 
-`report/service.py`、私有 legacy research facade 和 `cli/main.py` 仍然偏大，
-需要视为黄灯；`pipeline_stages/research.py` 本身现在只是 alias。不要继续往这些文件里添加
-无关行为；新的工作应该迁移到对应领域模块，或者在兼容消费者退出后减少边界职责。这是维护
-规则，不是要求把每个小 helper 都拆成独立文件。
+`app/research_report.py` 现仅投影历史证据，不再执行 Writer 或固定 report/audit attempt。
+`app/research_application.py` 和 `cli/main.py` 仍需职责审查。
+优先删除重复状态和执行 owner，而不是把复杂度分散到更多文件。
 
 ## 扩展 Tools 和外部 Agent Backend
 
@@ -606,6 +763,8 @@ OpenAI tool calling、MCP adapter 和外部 agent backend 提供统一、可审�
 新增 tool/backend 时：
 
 - 只注册真实可用的工具；不要为了展示 MCP/OpenAI schema 添加 stub tool；
+- experiment 工具目前只读历史编号阶段目录，不是正式 session 结果 API；无实现的运行/修复/应用占位工具
+  和重复的实验专用 OpenAI 导出器已退出，使用统一 schema 导出；
 - write、shell、network、secret access 默认关闭，除非配置和审批路径明确开启；
 - 外部 agent 上下文写入 `agent_handoff/<name>/`，默认不要写用户全局工具目录；
 - 外部 agent 输出一律视为不可信。先收集到 `agent_outputs/<name>/`，再交给已有
@@ -651,9 +810,9 @@ OpenAI tool calling、MCP adapter 和外部 agent backend 提供统一、可审�
 uv run simple-ar-checks --list
 uv run simple-ar-checks quick
 uv run simple-ar-checks code-task
-uv run simple-ar-checks pipeline
+uv run --extra examples simple-ar-checks pipeline
 uv run simple-ar-checks research
-uv run simple-ar-checks code-task-examples
+uv run --extra examples simple-ar-checks code-task-examples
 uv run simple-ar-checks core
 ```
 
@@ -670,28 +829,57 @@ uv run python scripts/run_checks.py code-task
 | 仅文档 | `git diff --check` 加人工检查链接。 |
 | 小型 parser、prompt、config、metric 或 CLI 改动 | `uv run simple-ar-checks quick`。 |
 | Code-task 内部、workspace、repo-map、patching、validation、runner、repair | `uv run simple-ar-checks code-task`。 |
-| 内置 code-task 示例或 benchmark 示例 | `uv run simple-ar-checks code-task-examples`。 |
-| Pipeline、stages、experiment templates、run config | `uv run simple-ar-checks pipeline`。 |
-| Literature、retrieval、evidence ledger、report generation、LLM adapter | `uv run simple-ar-checks research`。 |
+| 内置 code-task 示例或 benchmark 示例 | `uv run --extra examples simple-ar-checks code-task-examples`。 |
+| 实验模板及其执行 | `uv run --extra examples simple-ar-checks pipeline`。 |
+| Literature、产物检索、研究证据、report generation、LLM adapter | `uv run simple-ar-checks research`。 |
 | Core capability boundary、registry、attempt store 和能力包示例 | `uv run simple-ar-checks core`。 |
-| 提交/推送前或大范围重构 | `uv run simple-ar-checks all`。 |
+| 输入、应用状态、候选评估 | `uv run simple-ar-checks application`。 |
+| LLM 传输与计量 | `uv run simple-ar-checks llm`。 |
+| 仅报告相关改动 | `uv run simple-ar-checks report`。 |
+| 本地进程控制、执行结果 | `uv run --extra examples simple-ar-checks execution`。 |
+| 共享接口/架构收口或发布候选 | `uv run --extra examples simple-ar-checks all`。 |
+
+小改动直接选择受影响的 unittest 模块或方法。组合分组时自动去重；选择 `all` 后不再重复运行其他分组。
+提交动作本身不是全量重跑的理由。删除测试要确认对应行为已废弃或有保留测试实际覆盖，不能仅按数量删减。
+mock 测试通过仍不能替代小型真实执行。
+
+Experiment 与 CodeTask 已复用 `core/process.py` 的输出和进程生命周期：每个流保留 200 KB 内存尾部，
+指定输出目录时流式保存最多 2 MB 日志前缀，同时记录丢弃字节数。stdout 指标解析只覆盖保留尾部；
+独立指标文件的统一消费仍待后续接入。canonical experiment 将 invocation/日志声明为 attempt 产物，
+CodeTask 历史记录指向对应 invocation。Windows Job Object 在启动后挂接，存在启动挂接窗口；
+POSIX 使用进程组，两者都不构成不可信代码沙箱。CPU/GPU/内存强制隔离未实现，元数据明确标注；
+`LocalExecutionBackend(budget_ledger=...)` 与 `execute_code_task(..., budget_ledger=...)`
+可共用应用账本，按 `session_id`、`attempt_id` 关联实际 benchmark invocation。执行边界预留
+`process_invocations`、`process_wall_seconds`，按实测墙钟时间结算，不冒充 GPU 利用率或 GPU 小时。
+`settle_process_record` 只恢复已完成记录的结算，不执行代码；环境探查/setup helpers 暂未纳入 process 计量，
+它们是显式的前置输入，不是隐藏的实验动作。新 ResearchApplication 的显式执行动作已经通过该 process 边界。
+`execute_code_task(..., llm_client=...)` 已将客户端传入已有项目的规划、编辑、审阅、修复，
+以及 greenfield 的生成和修复。`LLMClient.for_task` 保留 provider 设置、会话账本和 attempt 身份，
+附加所属任务的用量观察；角色模型覆盖不修改原客户端。生成流程的 reviewer client 已拥有观察者，
+不能再重复登记。旧 experiment bridge 的准备到验证已委托正式执行器，仅保留这些步骤的显式审批、
+停止状态转换和产物投影。基线进程失败先停止准备，不等同于有效的研究负结果。它的有界验证/自动修复
+仍须继续削减；新应用已经调用此 CodeTask 准备路径，并将 implementation 与实际测量动作分开。
+旧 bridge 的剩余行为尚未全部退出，因此不能据此宣称所有旧入口已完成替换。
 
 必要时仍可直接运行完整测试：
 
 ```bash
-uv run python -m unittest discover -s tests
+uv run --extra examples python -m unittest discover -s tests
 ```
 
 运行真实 code-task 示例测试：
 
 ```bash
-uv run python -m unittest tests.test_code_task_examples
+uv run --extra examples python -m unittest tests.test_code_task_examples
 ```
 
-运行 experiment runner tests：
+运行执行边界测试（输出捕获、超时及小型模板）：
+
+测试直接调用 `LocalExecutionBackend`；无消费者的 `experiment.runner` 脚本包装及
+`ExperimentRunError`/`ExperimentRunResult` 别名已退出。
 
 ```bash
-uv run python -m unittest tests.test_experiment_runner
+uv run --extra examples python -m unittest tests.test_experiment_runner
 ```
 
 运行配置解析和公开 example 配置加载测试：

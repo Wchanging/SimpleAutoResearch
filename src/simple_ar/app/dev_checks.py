@@ -26,8 +26,10 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
     "core": CheckGroup(
         description="Core artifact, capability, attempt, and handoff-package contract tests.",
         targets=(
+            "tests.test_budget",
             "tests.test_capabilities",
             "tests.test_capability_package_example",
+            "tests.test_session_locking",
             "tests.test_session_transitions",
             "tests.test_public_api",
         ),
@@ -35,7 +37,6 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
     "quick": CheckGroup(
         description="Fast sanity checks for contracts, config loading, metrics, prompts, and CLI parsing.",
         targets=(
-            "tests.test_contracts",
             "tests.test_dev_checks",
             "tests.test_run_config",
             "tests.test_metrics",
@@ -52,12 +53,10 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         targets=("tests.test_code_task_examples",),
     ),
     "pipeline": CheckGroup(
-        description="Pipeline, stage contracts, and experiment runner tests.",
+        description="Experiment/template execution checks (legacy group name; requires the examples extra).",
         targets=(
-            "tests.test_pipeline",
             "tests.test_experiment_execution",
             "tests.test_experiment_runner",
-            "tests.test_search_stage",
         ),
     ),
     "research": CheckGroup(
@@ -65,19 +64,23 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         targets=(
             "tests.test_research_foundation",
             "tests.test_document_ingest",
+            "tests.test_research_intake",
             "tests.test_read_boundary",
             "tests.test_search_registry",
             "tests.test_literature",
             "tests.test_retrieval",
-            "tests.test_evidence",
             "tests.test_llm",
+            "tests.test_idea_assessment",
             "tests.test_report",
+            "tests.test_report_checkpoints",
+            "tests.test_report_measurement_audit",
             "tests.test_search_capability",
             "tests.test_research_registry",
             "tests.test_document_ports",
             "tests.test_synthesis_capability",
             "tests.test_research_brief",
             "tests.test_research_brief_application",
+            "tests.test_research_application",
             "tests.test_research_session_application",
             "tests.test_research_report_application",
             "tests.test_research_code_task_application",
@@ -91,28 +94,45 @@ CHECK_GROUPS: dict[str, CheckGroup] = {
         ),
     ),
     "all": CheckGroup(
-        description="Full unittest discovery. Run before commits, pushes, or broad refactors.",
+        description="Full discovery for shared-interface/architecture checkpoints and release candidates.",
         targets=("discover", "-s", "tests"),
+    ),
+    "application": CheckGroup(
+        description="Research intake, application advancement, candidate assessment and recovery.",
+        targets=("tests.test_research_intake", "tests.test_research_application", "tests.test_idea_assessment", "tests.test_research_design", "tests.test_session_migration"),
+    ),
+    "llm": CheckGroup(
+        description="LLM transport, retries and budget accounting; no live provider calls.",
+        targets=("tests.test_llm", "tests.test_budget"),
+    ),
+    "report": CheckGroup(
+        description="Report generation, ports, audit and application integration.",
+        targets=("tests.test_report", "tests.test_report_checkpoints", "tests.test_report_measurement_audit", "tests.test_report_ports", "tests.test_report_capability", "tests.test_research_report_application"),
+    ),
+    "execution": CheckGroup(
+        description="Short real processes, experiment result boundaries and CodeTask progress relay.",
+        targets=("tests.test_process_control", "tests.test_experiment_runner", "tests.test_experiment_execution", "tests.test_experiment_capability"),
     ),
 }
 
 
 def build_unittest_command(
-    group_name: str,
+    group_name: str | Sequence[str],
     *,
     verbose: bool = False,
     failfast: bool = False,
 ) -> list[str]:
-    """Build the subprocess command for one named check group."""
+    """Build one command, deduplicating modules across selected groups."""
 
-    group = CHECK_GROUPS[group_name]
-    targets = list(group.targets)
-    if group_name == "all":
+    names = [group_name] if isinstance(group_name, str) else list(group_name)
+    if "all" in names:
+        targets = list(CHECK_GROUPS["all"].targets)
         if verbose:
             targets.append("-v")
         if failfast:
             targets.append("-f")
     else:
+        targets = list(dict.fromkeys(target for name in names for target in CHECK_GROUPS[name].targets))
         prefix: list[str] = []
         if verbose:
             prefix.append("-v")
@@ -150,19 +170,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_groups()
         return 0
     groups = list(args.groups or ["quick"])
-    for group_name in groups:
-        command = build_unittest_command(
-            group_name,
-            verbose=bool(args.verbose),
-            failfast=bool(args.failfast),
-        )
-        print_line(f"[{group_name}] {' '.join(command)}")
-        if args.dry_run:
-            continue
-        completed = subprocess.run(command, check=False)
-        if completed.returncode != 0:
-            return int(completed.returncode)
-    return 0
+    command = build_unittest_command(
+        groups, verbose=bool(args.verbose), failfast=bool(args.failfast),
+    )
+    print_line(f"[{', '.join(groups)}] {' '.join(command)}")
+    if args.dry_run:
+        return 0
+    return int(subprocess.run(command, check=False).returncode)
 
 
 def _print_groups() -> None:

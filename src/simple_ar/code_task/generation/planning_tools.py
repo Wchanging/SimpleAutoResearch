@@ -111,7 +111,7 @@ def build_tool_agent_architecture_plan(
         review=review,
         revision_count=revision_count,
     )
-    blockers = _planning_blockers(plan, review)
+    blockers = _planning_blockers(plan)
     if blockers:
         if planning_dir is not None:
             write_json(
@@ -361,14 +361,7 @@ def _assemble_architecture_plan(
     file_plan = state.get("file_plan") if isinstance(state.get("file_plan"), Mapping) else {}
     max_files = _positive_int(resource_plan.get("max_files"), 8)
     files = _normalize_files(file_plan.get("files"), max_files=max_files)
-    files, recovery_notes = _recover_degenerate_file_plan(
-        files,
-        architecture=architecture,
-        interfaces=interfaces,
-        max_files=max_files,
-    )
     risks = scalar_list(architecture.get("risks"))[:8]
-    risks.extend(recovery_notes)
     findings = review.get("findings") if isinstance(review.get("findings"), list) else []
     if findings:
         risks.extend(_finding_to_risk(row) for row in findings if isinstance(row, Mapping))
@@ -508,7 +501,7 @@ def _obligation_owner_index(files: list[dict[str, Any]]) -> dict[str, list[str]]
     return owners
 
 
-def _planning_blockers(plan: Mapping[str, Any], review: Mapping[str, Any]) -> list[str]:
+def _planning_blockers(plan: Mapping[str, Any]) -> list[str]:
     blockers: list[str] = []
     files = plan.get("files")
     file_rows = [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
@@ -518,196 +511,7 @@ def _planning_blockers(plan: Mapping[str, Any], review: Mapping[str, Any]) -> li
     duplicates = sorted({path for path in paths if path and paths.count(path) > 1})
     if duplicates:
         blockers.append("file plan has duplicate path(s): " + ", ".join(duplicates[:5]))
-    if len(file_rows) <= 1 and plan.get("architecture_summary"):
-        blockers.append("file plan collapsed to one file; cross-file implementation context would be unreliable")
-    structural_findings = _review_structural_blockers(plan, review)
-    if structural_findings:
-        blockers.append("planning review found unresolved structural blocker(s): " + "; ".join(structural_findings[:3]))
     return blockers
-
-
-def _review_structural_blockers(plan: Mapping[str, Any], review: Mapping[str, Any]) -> list[str]:
-    """Return only reviewer findings that match deterministic structural gaps.
-
-    The LLM reviewer is useful for surfacing risks, but it should not be the
-    sole hard gate. Findings about result quality, schema detail, or artifact
-    richness are preserved as planning risks and checked again during code
-    review/run repair. This function only turns a finding into a blocker when
-    the assembled plan objectively lacks the structure required to generate
-    code coherently.
-    """
-
-    findings = review.get("findings")
-    rows = findings if isinstance(findings, list) else []
-    files = plan.get("files")
-    file_rows = [row for row in files if isinstance(row, Mapping)] if isinstance(files, list) else []
-    path_set = {normalize_plan_path(row.get("path")) for row in file_rows}
-    path_set.discard("")
-    entrypoint_present = any(row.get("entrypoint") or row.get("path") == "main.py" for row in file_rows)
-    blockers: list[str] = []
-    for row in rows:
-        if not isinstance(row, Mapping) or _normalize_severity(row.get("severity")) != "critical":
-            continue
-        text = " ".join([clean_text(row.get("issue")), clean_text(row.get("required_change"))]).lower()
-        if any(token in text for token in ("path traversal", "outside", "absolute path", "unsafe path")):
-            blockers.append(clean_text(row.get("issue"))[:500])
-            continue
-        if "entrypoint" in text and not entrypoint_present:
-            blockers.append(clean_text(row.get("issue"))[:500])
-            continue
-        if ("missing file" in text or "omits required" in text) and len(path_set) <= 1:
-            blockers.append(clean_text(row.get("issue"))[:500])
-            continue
-        if ("duplicate" in text or "two entrypoint" in text or "both `main.py`" in text) and len(path_set) != len(file_rows):
-            blockers.append(clean_text(row.get("issue"))[:500])
-    return [item for item in blockers if item]
-
-
-def _recover_degenerate_file_plan(
-    files: list[dict[str, Any]],
-    *,
-    architecture: Mapping[str, Any],
-    interfaces: Mapping[str, Any],
-    max_files: int,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Recover a usable file plan from architecture when the file-planner collapses.
-
-    This is intentionally generic: it only uses the architecture modules and
-    interface contracts that were already produced for the task. It does not
-    know anything about external benchmark topics.
-    """
-
-    non_entry = [row for row in files if row.get("path") != "main.py"]
-    modules = architecture.get("modules")
-    module_rows = [row for row in modules if isinstance(row, Mapping)] if isinstance(modules, list) else []
-    if len(non_entry) >= 2 or len(module_rows) < 2 or max_files < 4:
-        return files, []
-
-    module_paths: dict[str, str] = {}
-    recovered: list[dict[str, Any]] = [
-        {
-            "path": "main.py",
-            "purpose": "Thin command-line entrypoint that calls the generated project orchestrator.",
-            "dependencies": ["generated_experiment/runner.py"],
-            "public_api": ["main(argv=None)"],
-            "acceptance_criteria": ["Runs with `python main.py` and prints parseable metrics."],
-            "contract_obligations": [],
-            "entrypoint": True,
-            "kind": "source",
-        },
-        {
-            "path": "generated_experiment/__init__.py",
-            "purpose": "Package marker for generated project modules.",
-            "dependencies": [],
-            "public_api": [],
-            "acceptance_criteria": ["Allows generated_experiment package imports."],
-            "contract_obligations": [],
-            "entrypoint": False,
-            "kind": "source",
-        },
-        {
-            "path": "generated_experiment/runner.py",
-            "purpose": "Project orchestrator that wires data, computation, metrics, and reporting modules.",
-            "dependencies": [],
-            "public_api": ["run_experiment(config=None) -> dict[str, float]"],
-            "acceptance_criteria": ["Runs the full project workflow and returns/prints required metrics."],
-            "contract_obligations": [],
-            "entrypoint": False,
-            "kind": "source",
-        },
-    ]
-
-    for module in module_rows:
-        name = clean_text(module.get("name"))
-        path = _module_path(name)
-        if not path or path in {row["path"] for row in recovered}:
-            continue
-        module_paths[_module_key(name)] = path
-        recovered.append(
-            {
-                "path": path,
-                "purpose": clean_text(module.get("responsibility"))[:500] or f"Implement {name} responsibility.",
-                "dependencies": [],
-                "public_api": _module_public_api(name, interfaces),
-                "acceptance_criteria": _module_acceptance(module),
-                "contract_obligations": scalar_list(module.get("obligation_ids") or module.get("contract_obligations"))[:24],
-                "entrypoint": False,
-                "kind": "source",
-            }
-        )
-        if len(recovered) >= max_files:
-            break
-
-    known = {row["path"] for row in recovered}
-    for row in recovered:
-        if row["path"] == "generated_experiment/runner.py":
-            excluded = {row["path"], "generated_experiment/__init__.py"}
-            row["dependencies"] = sorted(
-                item
-                for item in known
-                if item.startswith("generated_experiment/") and item not in excluded
-            )
-            continue
-        source_module = _module_key(Path(row["path"]).stem)
-        module = next((item for item in module_rows if _module_key(item.get("name")) == source_module), None)
-        raw_deps = module.get("dependencies") if isinstance(module, Mapping) else []
-        deps = raw_deps if isinstance(raw_deps, list) else []
-        row["dependencies"] = [
-            module_paths[_module_key(dep)]
-            for dep in deps
-            if _module_key(dep) in module_paths and module_paths[_module_key(dep)] in known
-        ]
-
-    return _prune_dependencies(recovered[:max(1, max_files)]), [
-        "File plan was recovered from architecture modules because the original file plan collapsed to a single entrypoint."
-    ]
-
-
-def _module_path(name: str) -> str:
-    slug = _slug(name)
-    if not slug or slug in {"main", "init", "__init__"}:
-        return ""
-    return f"generated_experiment/{slug}.py"
-
-
-def _module_key(value: object) -> str:
-    return _slug(clean_text(value)).replace("_", "")
-
-
-def _slug(value: str) -> str:
-    text = value.strip().lower()
-    chars: list[str] = []
-    previous_sep = False
-    for char in text:
-        if char.isalnum():
-            chars.append(char)
-            previous_sep = False
-        elif not previous_sep:
-            chars.append("_")
-            previous_sep = True
-    return "".join(chars).strip("_")[:64]
-
-
-def _module_public_api(name: str, interfaces: Mapping[str, Any]) -> list[str]:
-    rows = interfaces.get("module_apis")
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, Mapping):
-            continue
-        if _module_key(row.get("module") or row.get("name")) != _module_key(name):
-            continue
-        api = row.get("public_api")
-        result = scalar_list(api)[:12]
-        if result:
-            return result
-    slug = _slug(name)
-    return [f"build_{slug}(...)" if slug else "run(...)"]
-
-
-def _module_acceptance(module: Mapping[str, Any]) -> list[str]:
-    outputs = scalar_list(module.get("outputs"))[:4]
-    if outputs:
-        return [f"Produces {item} for downstream modules." for item in outputs]
-    return ["Implements its planned responsibility with deterministic, importable Python."]
 
 
 def _normalize_review(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -792,7 +596,7 @@ def _normalize_files(value: object, *, max_files: int) -> list[dict[str, Any]]:
             }
         )
     files = dedupe_file_rows(files, dependency_limit=16, public_api_limit=40, acceptance_limit=16)
-    if not any(row["path"] == "main.py" for row in files):
+    if files and not any(row["path"] == "main.py" for row in files):
         files.insert(
             0,
             {

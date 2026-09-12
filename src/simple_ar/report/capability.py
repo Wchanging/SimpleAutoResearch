@@ -51,6 +51,8 @@ class ReportAssemblyRequest:
     template_name: str = ""
     papers: tuple[Mapping[str, Any], ...] = ()
     citation_key_map: Mapping[str, str] = field(default_factory=dict)
+    paired_comparisons: tuple[Mapping[str, Any], ...] = ()
+    paired_summaries: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.title.strip():
@@ -67,6 +69,7 @@ class ReportAssemblyResult:
     report_markdown: str
     report_body_markdown: str = ""
     figures: tuple[ReportFigureRecord, ...] = ()
+    removed_citations: tuple[str, ...] = ()
 
 
 def assemble_report_document(
@@ -104,7 +107,7 @@ def assemble_report_document(
         title=request.title,
         sections=_order_sections(sections, document_plan),
     )
-    report_body, cited = _prepare_report_citations(
+    report_body, cited, removed_citations = _prepare_report_citations(
         report_body,
         request.papers,
         request.citation_key_map,
@@ -116,13 +119,18 @@ def assemble_report_document(
         citation_map,
     )
     renderer = figure_renderer or DeterministicFigureRenderer()
-    rendered = renderer.render(
-        report_markdown=report,
-        report_dir=report_dir,
-        config=config.figures,
-        template_name=request.template_name,
-        document_plan=document_plan,
-    )
+    if request.paired_comparisons and figure_renderer is None:
+        from simple_ar.report.figures import add_paired_measurement_figures
+        rendered = add_paired_measurement_figures(report_markdown=report, report_dir=report_dir,
+            comparisons=list(request.paired_comparisons), summaries=list(request.paired_summaries), config=config.figures)
+    else:
+        rendered = renderer.render(
+            report_markdown=report,
+            report_dir=report_dir,
+            config=config.figures,
+            template_name=request.template_name,
+            document_plan=document_plan,
+        )
     report = apply_section_numbering(
         rendered.report_markdown,
         mode=config.section_numbering,
@@ -133,6 +141,7 @@ def assemble_report_document(
         report_markdown=report,
         report_body_markdown=report_body,
         figures=tuple(rendered.figures),
+        removed_citations=tuple(removed_citations),
     )
 
 
@@ -140,22 +149,22 @@ def _prepare_report_citations(
     report_body: str,
     paper_rows: tuple[Mapping[str, Any], ...],
     citation_key_map: Mapping[str, str],
-) -> tuple[str, list[Paper]]:
+) -> tuple[str, list[Paper], list[str]]:
     """Normalize the writer-facing body and select its verified references."""
 
     papers = [Paper.from_row(dict(row)) for row in paper_rows]
     if not papers:
-        return strip_references_section(report_body), []
+        return strip_references_section(report_body), [], []
     allowed_ids = {paper.id for paper in papers}
     body = strip_references_section(report_body)
     body = expand_short_citation_keys(body, dict(citation_key_map))
     body = normalize_bare_source_id_citations(body, allowed_ids)
-    body, _ = sanitize_report_citations(body, allowed_ids)
+    body, removed = sanitize_report_citations(body, allowed_ids)
     validate_citations(body, allowed_ids)
     cited = cited_papers(body, papers)
     if not cited:
         raise CitationError("Report body did not cite any paper from papers.jsonl")
-    return body, cited
+    return body, cited, removed
 
 
 def _order_sections(
@@ -193,10 +202,13 @@ def run_report_capability(
     """Persist one assembled report through the session capability boundary."""
 
     renderer = figure_renderer or DeterministicFigureRenderer()
+    # Leave the default renderer implicit so the assembly boundary can choose
+    # the structured paired-measurement renderer when experiment comparisons
+    # are present.  A caller-supplied renderer remains authoritative.
     result = assemble_report_document(
         request,
         report_dir=context.store.root,
-        figure_renderer=renderer,
+        figure_renderer=figure_renderer,
     )
     report_ref = context.store.write_text(
         "report.md",
@@ -229,6 +241,10 @@ def run_report_capability(
         producer="report.assembly",
     )
     artifacts: list[ArtifactRef] = [report_ref, body_ref, references_ref, citation_map_ref]
+    artifacts.append(context.store.write_json(
+        "citation_cleanup.json", {"removed_citations": list(result.removed_citations)},
+        kind="citation_cleanup", schema="citation_cleanup.v1", producer="report.assembly",
+    ))
     diagnostics: list[str] = []
     figure_refs: list[ArtifactRef] = []
     for figure in result.figures:

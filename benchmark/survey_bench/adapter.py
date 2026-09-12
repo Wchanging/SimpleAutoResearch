@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,21 +25,6 @@ DEFAULT_SCORE_ROOT = DEFAULT_RESULTS_ROOT / "score"
 DEFAULT_THOROUGH_SCORE_ROOT = DEFAULT_RESULTS_ROOT / "score-thorough"
 DEFAULT_ABLATION_ROOT = DEFAULT_RESULTS_ROOT / "ablations"
 WITHOUT_REVIEW_GUIDED_REVISION = "w-o-review-guided-revision"
-_CANONICAL_REPORT_ENTRIES = (
-    "report.md",
-    "references.bib",
-    "citation_map.json",
-    "report_memory.json",
-    "outline_planning.json",
-    "report_quality.json",
-    "report_audit.json",
-    "manifest.json",
-    "figures",
-    "longform",
-    "sections",
-    "iterations",
-    "audit",
-)
 
 
 @dataclass(frozen=True)
@@ -71,39 +55,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     topics.add_argument("--with-ids", action="store_true", help="Show stable topic ids and result keys.")
     topics.set_defaults(func=cmd_topics)
 
-    run_topic = sub.add_parser("run-topic", help="Run SimpleAutoResearch generation for one SurveyBench topic id.")
-    add_root_args(run_topic)
-    run_topic.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
-    run_topic.add_argument("--thorough", action="store_true", help="Use configs/topics-thorough and the thorough result namespace.")
-    add_ablation_args(run_topic, include_execution=True)
-    run_topic.add_argument("--to-stage", default="", help="Optional stage override passed to simple-ar run.")
-    run_topic.set_defaults(func=cmd_run_topic)
-
-    resume_latest = sub.add_parser("resume-latest", help="Resume the latest SimpleAutoResearch run for one SurveyBench topic id.")
-    add_root_args(resume_latest)
-    resume_latest.add_argument("--topic-id", required=True, help="SurveyBench topic id such as topic16.")
-    resume_latest.add_argument("--thorough", action="store_true", help="Use configs/topics-thorough and the thorough result namespace.")
-    add_ablation_args(resume_latest, include_execution=True)
-    resume_latest.add_argument("--run-dir", type=Path, default=None, help="Optional run dir. Defaults to the latest topic run, even if report failed.")
-    resume_latest.add_argument(
-        "--reuse-full-run",
-        action="store_true",
-        help=(
-            "Resume only the report stage from the latest completed full-system run, "
-            "writing an isolated report variant instead of rerunning search/read."
-        ),
-    )
-    resume_latest.add_argument("--from-stage", default="report", help="Stage to resume from. Defaults to report.")
-    resume_latest.add_argument("--to-stage", default="report", help="Stage to stop at. Defaults to report.")
-    resume_latest.add_argument("--model", default="", help="Optional model override passed to simple-ar resume.")
-    resume_latest.add_argument("--llm-workers", type=int, default=None, help="Optional LLM worker override passed to simple-ar resume.")
-    resume_latest.add_argument("--quiet", action="store_true", help="Pass --quiet to simple-ar resume.")
-    resume_latest.add_argument(
-        "--overwrite-stage-artifacts",
-        action="store_true",
-        help="Pass --overwrite-stage-artifacts to simple-ar resume.",
-    )
-    resume_latest.set_defaults(func=cmd_resume_latest)
 
     recover_sections = sub.add_parser(
         "recover-sections",
@@ -230,22 +181,13 @@ def add_root_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--surveybench-root", type=Path, default=Path(DEFAULT_SURVEYBENCH_ROOT), help="Path to external SurveyBench checkout.")
 
 
-def add_ablation_args(parser: argparse.ArgumentParser, *, include_execution: bool = False) -> None:
+def add_ablation_args(parser: argparse.ArgumentParser) -> None:
     """Add isolated SurveyBench ablation namespace controls."""
     parser.add_argument(
         "--variant",
         default="",
         help="Optional isolated result namespace, for example `w-o-review-guided-revision`.",
     )
-    if include_execution:
-        parser.add_argument(
-            "--without-review-guided-revision",
-            action="store_true",
-            help=(
-                "Disable the report reviewer/revision loop while retaining the same "
-                "retrieval, outline, writer, final audit, and native SurveyBench judge."
-            ),
-        )
 
 
 def add_eval_args(parser: argparse.ArgumentParser) -> None:
@@ -272,93 +214,6 @@ def cmd_topics(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_run_topic(args: argparse.Namespace) -> int:
-    root = resolve_surveybench_root(args.surveybench_root)
-    topic_ref = resolve_topic_ref(root, args.topic_id)
-    config_path = topic_config_path(topic_ref, thorough=bool(args.thorough))
-    if not config_path.is_file():
-        raise SystemExit(f"Missing topic config: {config_path}")
-    from simple_ar.cli.main import main as simple_ar_main
-
-    thorough = bool(args.thorough)
-    variant = resolve_variant(args)
-    cli_args = ["run", "--config", str(config_path)]
-    if variant:
-        cli_args.extend(["--output-root", str(topic_results_root(thorough=thorough, variant=variant) / topic_ref.key)])
-    if bool(getattr(args, "without_review_guided_revision", False)):
-        cli_args.extend(["--report-reviewer", "disabled"])
-    if args.to_stage:
-        cli_args.extend(["--to-stage", str(args.to_stage)])
-    simple_ar_main(cli_args)
-    return 0
-
-
-def cmd_resume_latest(args: argparse.Namespace) -> int:
-    root = resolve_surveybench_root(args.surveybench_root)
-    topic_ref = resolve_topic_ref(root, args.topic_id)
-    thorough = bool(args.thorough)
-    config_path = topic_config_path(topic_ref, thorough=thorough)
-    if not config_path.is_file():
-        raise SystemExit(f"Missing topic config: {config_path}")
-    variant = resolve_variant(args)
-    reuse_full_run = bool(getattr(args, "reuse_full_run", False))
-    if reuse_full_run and args.run_dir is not None:
-        raise SystemExit("Use either --reuse-full-run or --run-dir, not both.")
-    if reuse_full_run:
-        _require_variant(variant, option="--reuse-full-run")
-        run_dir = latest_topic_run_dir(topic_ref.key, thorough=thorough, require_report=True)
-    else:
-        run_dir = args.run_dir or latest_topic_run_dir(
-            topic_ref.key,
-            thorough=thorough,
-            variant=variant,
-            require_report=False,
-        )
-    if not run_dir.is_dir():
-        raise SystemExit(f"Run directory does not exist: {run_dir}")
-    from simple_ar.cli.main import main as simple_ar_main
-
-    cli_args = [
-        "resume",
-        str(run_dir),
-        "--config",
-        str(config_path),
-        "--from-stage",
-        str(args.from_stage or "report"),
-        "--to-stage",
-        str(args.to_stage or "report"),
-    ]
-    if args.model:
-        cli_args.extend(["--model", str(args.model)])
-    if bool(getattr(args, "without_review_guided_revision", False)):
-        cli_args.extend(["--report-reviewer", "disabled"])
-    if reuse_full_run:
-        cli_args.extend(["--report-output-mode", "variant", "--report-output-label", variant])
-    if args.llm_workers is not None:
-        cli_args.extend(["--llm-workers", str(args.llm_workers)])
-    if args.quiet:
-        cli_args.append("--quiet")
-    if args.overwrite_stage_artifacts:
-        cli_args.append("--overwrite-stage-artifacts")
-    if reuse_full_run:
-        # A report-only reuse must be observational with respect to the full
-        # run's canonical report package.  The report stage also updates state
-        # metadata, but a variant must never replace the previous report,
-        # sections, or evidence audits.  Keep a temporary package snapshot as
-        # a final guard around the resumed pipeline.
-        with tempfile.TemporaryDirectory(prefix="simple-ar-report-variant-") as temp_dir:
-            snapshot_dir = Path(temp_dir) / "canonical-report"
-            _snapshot_canonical_report_package(run_dir / "08-report", snapshot_dir)
-            try:
-                simple_ar_main(cli_args)
-            finally:
-                _restore_canonical_report_package(run_dir / "08-report", snapshot_dir)
-        variant_report = report_variant_dir(run_dir, variant) / "report.md"
-        if not variant_report.is_file():
-            raise SystemExit(f"Variant report was not written: {variant_report}")
-    else:
-        simple_ar_main(cli_args)
-    return 0
 
 
 def cmd_recover_sections(args: argparse.Namespace) -> int:
@@ -397,7 +252,7 @@ def cmd_recover_sections(args: argparse.Namespace) -> int:
     )
     from simple_ar.report.figures import maybe_add_report_figures
     from simple_ar.report.schema import ReportFigureConfig, ReportMemory, ReportSectionDraft
-    from simple_ar.report.service import _display_citation_numbers
+    from simple_ar.report.citations import display_citation_numbers as _display_citation_numbers
 
     memory_path = source_dir / "report_memory.json"
     papers_path = run_dir / "02-search" / "papers.jsonl"
@@ -507,34 +362,6 @@ def _recovery_section_rank(heading: str) -> int:
     return 8
 
 
-def _snapshot_canonical_report_package(stage_dir: Path, snapshot_dir: Path) -> None:
-    """Copy only canonical report artifacts before a reusable variant run."""
-    snapshot_dir.mkdir(parents=True, exist_ok=True)
-    for name in _CANONICAL_REPORT_ENTRIES:
-        source = stage_dir / name
-        if not source.exists():
-            continue
-        target = snapshot_dir / name
-        if source.is_dir():
-            shutil.copytree(source, target)
-        else:
-            shutil.copy2(source, target)
-
-
-def _restore_canonical_report_package(stage_dir: Path, snapshot_dir: Path) -> None:
-    """Restore the canonical report package without touching variants/metadata."""
-    for name in _CANONICAL_REPORT_ENTRIES:
-        target = stage_dir / name
-        if target.is_dir():
-            shutil.rmtree(target)
-        elif target.exists():
-            target.unlink()
-    for source in snapshot_dir.iterdir():
-        target = stage_dir / source.name
-        if source.is_dir():
-            shutil.copytree(source, target)
-        else:
-            shutil.copy2(source, target)
 
 
 def cmd_validate(args: argparse.Namespace) -> int:

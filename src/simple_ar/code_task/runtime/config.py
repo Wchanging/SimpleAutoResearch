@@ -73,11 +73,11 @@ class EnvironmentSection(_ConfigModel):
 
 
 class WorkspaceSection(_ConfigModel):
+    model_config = ConfigDict(extra="forbid")
     mode: str | None = None
     include: list[str] | None = None
     exclude: list[str] | None = None
     reuse_source_venv: bool | None = None
-    setup_hook: str | None = None
 
 
 class SafetySection(_ConfigModel):
@@ -120,9 +120,7 @@ class ExecuteSection(_ConfigModel):
 
 
 class ExecuteAblationSection(_ConfigModel):
-    repair_context: str | None = None
-    use_repair_memory: bool | None = None
-    contract_context: str | None = None
+    model_config = ConfigDict(extra="forbid")
     review_gate: str | None = None
 
 
@@ -209,7 +207,6 @@ class CodeTaskInitOptions:
     workspace_include: tuple[str, ...]
     workspace_exclude: tuple[str, ...]
     workspace_reuse_source_venv: bool
-    workspace_setup_hook: str
     env_mode: str
     python_executable: str | None
     primary_metric: str | None
@@ -259,9 +256,6 @@ class CodeTaskExecuteOptions:
     max_files: int
     max_source_chars_per_file: int
     max_generated_lines: int
-    repair_context: str
-    use_repair_memory: bool
-    contract_context: str
     review_gate: str
     implementation_provider: str
     implementation_agent_mode: str
@@ -423,13 +417,6 @@ def load_code_task_execute_options(
             or _config_int(resource.max_generated_lines),
             1600,
         ),
-        repair_context=_repair_context_mode(ablation.repair_context),
-        use_repair_memory=_resolve_bool(
-            override=None,
-            value=ablation.use_repair_memory,
-            default=True,
-        ),
-        contract_context=_contract_context_mode(ablation.contract_context),
         review_gate=_review_gate_mode(ablation.review_gate),
         implementation_provider=_config_string(implementation.provider) or "local",
         implementation_agent_mode=_config_string(implementation.agent_mode),
@@ -472,7 +459,6 @@ def load_code_task_init_options(
     workspace_include: list[str] | tuple[str, ...] | None = None,
     workspace_exclude: list[str] | tuple[str, ...] | None = None,
     workspace_reuse_source_venv: bool | None = None,
-    workspace_setup_hook: str | None = None,
     env_mode: str | None = None,
     python_executable: str | None = None,
     primary_metric: str | None = None,
@@ -565,9 +551,6 @@ def load_code_task_init_options(
         value=workspace.reuse_source_venv,
         default=False,
     )
-    resolved_setup_hook = _config_string(workspace_setup_hook) or _config_string(
-        workspace.setup_hook
-    )
     resolved_workspace_include = _resolve_string_list(
         override=workspace_include,
         value=workspace.include,
@@ -593,7 +576,6 @@ def load_code_task_init_options(
         workspace_include=resolved_workspace_include,
         workspace_exclude=resolved_workspace_exclude,
         workspace_reuse_source_venv=resolved_reuse_source_venv,
-        workspace_setup_hook=resolved_setup_hook or "",
         env_mode=resolved_env_mode,
         python_executable=resolved_python,
         primary_metric=resolved_primary_metric,
@@ -765,28 +747,8 @@ def _planning_mode(value: str | None) -> str:
     return normalized
 
 
-def _repair_context_mode(value: str | None) -> str:
-    text = (_config_string(value) or "full").lower().replace("-", "_")
-    if text in {"full", "structured", "failure_graph", "failure_graph_bundle"}:
-        return "full"
-    if text in {"raw", "raw_logs", "raw_logs_only", "logs_only", "no_failure_graph"}:
-        return "raw_logs_only"
-    raise CodeTaskConfigError(
-        "Unsupported [execute.ablation].repair_context. Expected `full` or `raw_logs_only`."
-    )
 
 
-def _contract_context_mode(value: str | None) -> str:
-    text = (_config_string(value) or "full").lower().replace("-", "_")
-    if text in {"full", "contract", "task_contract"}:
-        return "full"
-    if text in {"minimal", "plan_then_code", "task_only", "natural_language"}:
-        return "minimal"
-    if text in {"plan_only", "accepted_plan_only", "downstream_plan_only"}:
-        return "plan_only"
-    raise CodeTaskConfigError(
-        "Unsupported [execute.ablation].contract_context. Expected `full`, `minimal`, or `plan_only`."
-    )
 
 
 def _review_gate_mode(value: str | None) -> str:

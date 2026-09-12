@@ -71,7 +71,6 @@ max_proposal_chars = 42000
 # "git_worktree" when fallback should be treated as an error.
 mode = "auto"
 reuse_source_venv = false
-setup_hook = ""
 
 [edit_scope]
 # Allow the application modules, entrypoint, and experiment config to change.

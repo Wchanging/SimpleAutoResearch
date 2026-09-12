@@ -222,33 +222,6 @@ For low-cost ablations, keep each result in a separate state file or variant.
 The following switches are passed through to `simple-ar code-task execute`:
 
 ```bash
-# No structured failure-graph context in repair prompts.
-uv run python benchmark/arc_bench/batch_runner.py run \
-  --topics ML06 ML09 ML10 \
-  --repair-context raw_logs_only \
-  --analyze \
-  --native-score \
-  --native-score-model gpt-4o \
-  --state-file benchmark/arc_bench/batch_state/ablation-no-failure-graph.json
-
-# No previous repair memory in repair prompts.
-uv run python benchmark/arc_bench/batch_runner.py run \
-  --topics ML06 ML09 ML10 \
-  --no-repair-memory \
-  --analyze \
-  --native-score \
-  --native-score-model gpt-4o \
-  --state-file benchmark/arc_bench/batch_state/ablation-no-repair-memory.json
-
-# Minimal task-contract prompt view, useful as a Plan-then-Code style baseline.
-uv run python benchmark/arc_bench/batch_runner.py run \
-  --topics ML06 ML09 ML10 \
-  --contract-context minimal \
-  --repair-rounds 0 \
-  --analyze \
-  --native-score \
-  --native-score-model gpt-4o \
-  --state-file benchmark/arc_bench/batch_state/ablation-minimal-contract.json
 
 # Fewer greenfield planning-review iterations.
 uv run python benchmark/arc_bench/batch_runner.py run \

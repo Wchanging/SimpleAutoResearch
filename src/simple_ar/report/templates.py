@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import resources
 from pathlib import Path
 
 from simple_ar.report.schema import ReportRuntimeConfig, ReportTemplateBundle
@@ -68,6 +69,9 @@ def _template_root(root: Path) -> Path:
     local = root / "templates" / "report"
     if local.exists():
         return local
+    packaged = resources.files("simple_ar").joinpath("report_templates")
+    if packaged.is_dir():
+        return Path(str(packaged))
     repo_root = Path(__file__).resolve().parents[3]
     return repo_root / "templates" / "report"
 

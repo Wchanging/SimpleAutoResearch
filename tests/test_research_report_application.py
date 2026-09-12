@@ -1,286 +1,129 @@
 from __future__ import annotations
 
-import json
-import sys
 import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
-from simple_ar.app.research_brief import ResearchBriefSessionRequest
-from simple_ar.app.research_report import (
-    ResearchReportSessionError,
-    ResearchReportSessionRequest,
-    build_research_session_report_inputs,
-    metric_sources_from_execution,
-    run_research_session_report_agent,
-    run_research_report_agent_session,
-    run_research_report_session,
-)
-from simple_ar.app.research_session import ResearchSessionRequest, run_research_session
+from legacy_session_fixture import historical_session
+from pathlib import Path
+
+from simple_ar.app.research_report import build_research_session_report_inputs
+from simple_ar.report.projection import metric_sources_from_execution
 from simple_ar.report.schema import (
-    AgentReportResult,
     ReportContext,
     ReportMemory,
-    ReportRuntimeConfig,
-    ReportSectionDraft,
-    ReportTemplateBundle,
 )
 
 
 class ResearchReportApplicationTests(unittest.TestCase):
-    def test_session_can_append_report_and_audit_without_copying_analysis(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            paper = root / "reliable_agents.md"
-            paper.write_text(
-                "# Method\n\nValidation improves reliable agent behavior.\n\n"
-                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
-                encoding="utf-8",
-            )
-            session = run_research_session(
-                ResearchSessionRequest(
-                    brief=ResearchBriefSessionRequest(
-                        topic="reliable agents",
-                        session_root=root / "session",
-                        local_documents=(paper,),
-                        max_results=2,
-                        max_chunks=20,
-                    ),
-                    command=(sys.executable, "-c", "print('accuracy: 0.75')"),
-                    cwd=root,
-                    timeout_sec=5,
-                    result_schema={"primary_metric": "accuracy"},
-                )
-            )
+    def test_paired_metrics_preserve_measurement_and_comparison_origins(self):
+        from simple_ar.report.projection import attach_paired_report_measurements
+        from simple_ar.core.capabilities import ArtifactRef
 
-            result = run_research_report_session(
-                ResearchReportSessionRequest(
-                    session_root=session.session_root,
-                    title="Reliable agents",
-                    sections=(
-                        ReportSectionDraft(
-                            section_id="findings",
-                            heading="Findings",
-                            draft_markdown="Validation improves accuracy [@paper-1].",
-                        ),
-                    ),
-                    source_refs=(session.analysis_ref,),
-                    context=ReportContext(
-                        topic="reliable agents",
-                        report_mode="research_only",
-                        papers=[{"id": "paper-1"}],
-                    ),
-                )
-            )
+        context, memory = attach_paired_report_measurements(
+            ReportContext(topic="Classification", report_mode="experiment"), ReportMemory(), [
+                (7, "baseline", ArtifactRef("baseline.json"),
+                 {"status": "passed", "metrics": {"accuracy": 0.7}}),
+                (7, "candidate", ArtifactRef("candidate.json"),
+                 {"status": "passed", "metrics": {"accuracy": 0.8}}),
+            ], comparisons=[{"seed": 7, "metrics": [{"name": "accuracy", "delta": 0.1}]}],
+            comparison_ref=ArtifactRef("comparison.json"),
+        )
+        self.assertEqual(
+            [(m.label, m.value, m.artifact) for m in context.metric_sources],
+            [("baseline:seed=7", 0.7, "baseline.json"),
+             ("candidate:seed=7", 0.8, "candidate.json"),
+             ("comparison_delta:seed=7", 0.1, "comparison.json")],
+        )
+        self.assertEqual(memory.metric_sources, context.metric_sources)
+        self.assertEqual({h.artifact for h in memory.source_handles},
+                         {"baseline.json", "candidate.json"})
 
-            self.assertEqual(result.status, "completed")
-            self.assertEqual(result.audit.status, "passed")
-            self.assertTrue(
-                (root / "session" / "attempts" / "report-001" / "report.md").is_file()
-            )
-            self.assertTrue(
-                (
-                    root
-                    / "session"
-                    / "attempts"
-                    / "report-audit-001"
-                    / "report_audit.json"
-                ).is_file()
-            )
-            self.assertEqual(len(result.attempts), 10)
-            self.assertEqual(result.decisions[-2].action, "accept")
-            self.assertEqual(result.decisions[-1].action, "accept")
-            report_text = (
-                root / "session" / "attempts" / "report-001" / "report.md"
-            ).read_text(encoding="utf-8")
-            self.assertIn("Validation improves accuracy", report_text)
-            manifest = json.loads(
-                (root / "session" / "session_manifest.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(manifest["status"], "completed")
+    def test_summary_sources_keep_units_and_do_not_invent_singleton_std(self):
+        from simple_ar.report.projection import attach_paired_report_measurements
+        from simple_ar.core.capabilities import ArtifactRef
+        context, _ = attach_paired_report_measurements(
+            ReportContext(topic="Classification", report_mode="experiment"), ReportMemory(), [],
+            comparisons=[], comparison_ref=ArtifactRef("paired_analysis.json"), summaries=[{
+                "group_id": 0, "metric": "accuracy", "unit": "fraction", "n": 1, "seeds": [7],
+                "baseline_mean": 0.5, "candidate_mean": 0.6, "delta_mean": 0.1, "delta_sample_std": None}])
+        self.assertEqual(len(context.metric_sources), 4)
+        self.assertFalse(any(m.name.endswith("std") for m in context.metric_sources))
+        self.assertEqual({m.unit for m in context.metric_sources}, {"fraction", "count"})
+        self.assertTrue(all(m.source_kind == "derived_summary" and m.artifact == "paired_analysis.json"
+                            for m in context.metric_sources))
 
-    def test_agent_writer_handoff_reuses_report_audit_and_records_trace(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            paper = root / "reliable_agents.md"
-            paper.write_text(
-                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
-                encoding="utf-8",
-            )
-            session = run_research_session(
-                ResearchSessionRequest(
-                    brief=ResearchBriefSessionRequest(
-                        topic="reliable agents",
-                        session_root=root / "session",
-                        local_documents=(paper,),
-                        max_results=2,
-                        max_chunks=20,
-                    ),
-                    command=(sys.executable, "-c", "print('accuracy: 0.75')"),
-                    cwd=root,
-                    timeout_sec=5,
-                    result_schema={"primary_metric": "accuracy"},
-                )
-            )
-            paper_id = session.search.papers[0].id
-            agent_result = AgentReportResult(
-                report_body=f"Reliable agents [@{paper_id}].",
-                memory=ReportMemory(objective="Validate reliable agents."),
-                sections=[
-                    ReportSectionDraft(
-                        section_id="findings",
-                        heading="Findings",
-                        draft_markdown=(
-                            f"Reliable agents improve accuracy to 0.75 [@{paper_id}]."
-                        ),
-                        used_sources=[paper_id],
-                    )
-                ],
-                used_agent=True,
-            )
-            with patch(
-                "simple_ar.app.research_report.run_report_agent",
-                return_value=agent_result,
-            ) as writer:
-                result = run_research_session_report_agent(
-                    session,
-                    template=ReportTemplateBundle(
-                        name="experiment",
-                        mode="experiment",
-                        template_path="template.md",
-                        criteria_path="criteria.md",
-                        template_markdown="# Findings",
-                        criteria_markdown="Use evidence.",
-                    ),
-                    config=ReportRuntimeConfig(reviewer="disabled"),
-                    client=object(),
-                )
+    def test_paired_report_excludes_failed_measurement_and_its_delta(self):
+        from simple_ar.report.projection import attach_paired_report_measurements
+        from simple_ar.core.capabilities import ArtifactRef
+        baseline = {"status": "passed", "metrics": {"accuracy": 0.75}}
+        failed = {"status": "failed", "metrics": {"accuracy": 0.99}}
+        context, memory = attach_paired_report_measurements(ReportContext(topic="Classification", report_mode="experiment"), ReportMemory(), [
+            (0, "baseline", ArtifactRef("baseline.json"), baseline),
+            (0, "candidate", ArtifactRef("failed.json"), failed)],
+            comparisons=[{"seed": 0, "metrics": [{"name": "accuracy", "delta": 0.24}]}],
+            comparison_ref=ArtifactRef("paired_analysis.json"))
+        self.assertEqual([m.value for m in context.metric_sources], [0.75])
+        self.assertEqual(context.metric_sources[0].artifact, "baseline.json")
+        self.assertTrue(any(h.artifact == "failed.json" for h in context.source_handles))
+        self.assertTrue(any("did not pass" in message for message in memory.limitations))
 
-            self.assertEqual(result.status, "completed")
-            self.assertIsNotNone(result.writer_ref)
-            assert result.writer_ref is not None
-            writer.assert_called_once()
-            self.assertTrue(writer.call_args.kwargs["memory"].section_plan)
-            writer_path = root / "session" / result.writer_ref.path
-            self.assertTrue(writer_path.is_file())
-            writer_payload = json.loads(writer_path.read_text(encoding="utf-8"))
-            self.assertEqual(writer_payload["schema_version"], "report_agent_result.v1")
-            self.assertNotIn("report_body", writer_payload)
-            report_attempt = json.loads(
-                (
-                    root
-                    / "session"
-                    / "attempts"
-                    / "report-001"
-                    / "attempt_manifest.json"
-                ).read_text(encoding="utf-8")
-            )
-            self.assertIn(
-                result.writer_ref.path,
-                [item["path"] for item in report_attempt["inputs"]],
-            )
+    def test_report_tools_receive_notes_by_document_identity_not_title(self):
+        from simple_ar.report.projection import attach_report_read_evidence
+        from simple_ar.core.capabilities import ArtifactRef
+        from simple_ar.research.contracts import DocumentRecord
+        from simple_ar.research.documents.ingest import DocumentBundle
+        from simple_ar.research.evidence.reader import ReadResult
+        from simple_ar.report.schema import SourceHandle, ReportToolCall
+        from simple_ar.report.tool_gateway import ReportToolGateway
 
-            trace_before = writer_path.read_text(encoding="utf-8")
-            with patch(
-                "simple_ar.app.research_report.run_report_agent",
-                side_effect=AssertionError("duplicate continuation invoked Writer"),
-            ) as duplicate_writer:
-                with self.assertRaisesRegex(
-                    ResearchReportSessionError,
-                    "continuation already exists",
-                ):
-                    run_research_session_report_agent(
-                        session,
-                        template=ReportTemplateBundle(
-                            name="experiment",
-                            mode="experiment",
-                            template_path="template.md",
-                            criteria_path="criteria.md",
-                            template_markdown="# Findings",
-                            criteria_markdown="Use evidence.",
-                        ),
-                        config=ReportRuntimeConfig(reviewer="disabled"),
-                        client=object(),
-                    )
-            duplicate_writer.assert_not_called()
-            self.assertEqual(trace_before, writer_path.read_text(encoding="utf-8"))
+        handles = [SourceHandle(handle=f"paper:{key}", kind="paper", paper_id=key, title="Same title")
+                   for key in ("p1", "p2")]
+        context = ReportContext(topic="Calibration", report_mode="research_only", source_handles=handles)
+        documents = DocumentBundle(records=[DocumentRecord(document_id=f"doc-{key}", source="fixture",
+            title="Same title", abstract=f"Abstract for {key}", metadata={"paper_id": key}) for key in ("p1", "p2")],
+            fulltext_manifest={}, fulltext_extraction={}, sections=[], chunks=[])
+        read = ReadResult(status="completed", bundle=documents, paper_notes=tuple(
+            {"paper_id": f"doc-{key}", "method": f"Method for {key}", "limitations": ["Abstract only"],
+             "evidence_refs": [f"doc-{key}#abstract"]} for key in ("p2", "p1")))
+        projected, memory = attach_report_read_evidence(context, ReportMemory(), documents=documents, read=read,
+                                                       read_ref=ArtifactRef("read/result.json"))
+        for key in ("p1", "p2"):
+            result = ReportToolGateway(projected).call(ReportToolCall(tool_name="get_paper_brief", arguments={"paper_id": key}))
+            evidence = result.content["handles"][0]
+            self.assertEqual(evidence["summary"], f"Abstract for {key}")
+            self.assertEqual(evidence["metadata"]["reading_notes"]["method"], f"Method for {key}")
+            self.assertEqual(evidence["metadata"]["extraction_status"], "metadata_only")
+            self.assertEqual(evidence["metadata"]["reading_artifact"], "read/result.json")
+        self.assertEqual(memory.source_handles, projected.source_handles)
+        self.assertEqual(context.source_handles[0].summary, "")
 
-    def test_agent_report_requires_a_passed_session(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            paper = root / "reliable_agents.md"
-            paper.write_text(
-                "# Results\n\nThe fixture reports accuracy: 0.25.\n",
-                encoding="utf-8",
-            )
-            session = run_research_session(
-                ResearchSessionRequest(
-                    brief=ResearchBriefSessionRequest(
-                        topic="reliable agents",
-                        session_root=root / "session",
-                        local_documents=(paper,),
-                        max_results=2,
-                        max_chunks=20,
-                    ),
-                    command=(
-                        sys.executable,
-                        "-c",
-                        "print('accuracy: 0.25'); raise SystemExit(2)",
-                    ),
-                    cwd=root,
-                    timeout_sec=5,
-                    result_schema={"primary_metric": "accuracy"},
-                )
-            )
+    def test_metric_projection_keeps_each_conditions_own_units_and_direction(self):
+        candidate = {"metrics": {"accuracy": 0.8},
+                     "result_schema": {"primary_metric": "accuracy", "direction": "higher"},
+                     "measurement": {"measurement_id": "candidate-2", "condition_id": "seed-2",
+                                     "protocol_id": "protocol", "protocol_revision": 2,
+                                     "protocol_fingerprint": "candidate-fingerprint", "source_kind": "measured"},
+                     "experiment_contract": {"metric_specs": [{"name": "accuracy", "unit": "fraction"}]},
+                     "baseline": {"metrics": {"accuracy": 80},
+                                  "result_schema": {"metric_directions": {"accuracy": "lower"}},
+                                  "measurement": {"measurement_id": "baseline-1", "condition_id": "seed-1", "source_kind": "measured"},
+                                  "experiment_contract": {"metric_specs": [{"name": "accuracy", "unit": "percent"}]}}}
+        rows = metric_sources_from_execution(candidate, artifact="result.json")
+        by_label = {row.label: row for row in rows}
+        self.assertEqual((by_label["candidate"].unit, by_label["candidate"].direction), ("fraction", "higher"))
+        self.assertEqual((by_label["baseline"].unit, by_label["baseline"].direction), ("percent", "lower"))
+        self.assertEqual(by_label["candidate"].measurement_id, "candidate-2")
+        self.assertEqual(by_label["baseline"].measurement_id, "baseline-1")
+        legacy = metric_sources_from_execution({"metrics": {"accuracy": 0.5}}, artifact="old.json")[0]
+        self.assertEqual(legacy.source_kind, "legacy_unverified")
+        self.assertIsNone(legacy.measurement_id)
+        self.assertEqual(legacy.unit, "")
 
-            self.assertFalse(session.report_ready)
-            with patch("simple_ar.app.research_report.run_report_agent") as writer:
-                with self.assertRaisesRegex(
-                    ResearchReportSessionError,
-                    "not ready for formal report generation",
-                ):
-                    run_research_session_report_agent(
-                        session,
-                        template=ReportTemplateBundle(
-                            name="experiment",
-                            mode="experiment",
-                            template_path="template.md",
-                            criteria_path="criteria.md",
-                            template_markdown="# Findings",
-                            criteria_markdown="Use evidence.",
-                        ),
-                        config=ReportRuntimeConfig(reviewer="disabled"),
-                        client=object(),
-                    )
-                writer.assert_not_called()
 
     def test_research_session_report_inputs_keep_execution_and_analysis_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            paper = root / "reliable_agents.md"
-            paper.write_text(
-                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
-                encoding="utf-8",
-            )
-            session = run_research_session(
-                ResearchSessionRequest(
-                    brief=ResearchBriefSessionRequest(
-                        topic="reliable agents",
-                        session_root=root / "session",
-                        local_documents=(paper,),
-                        max_results=2,
-                        max_chunks=20,
-                    ),
-                    command=(sys.executable, "-c", "print('accuracy: 0.75')"),
-                    cwd=root,
-                    timeout_sec=5,
-                    result_schema={
-                        "primary_metric": "accuracy",
-                        "metric_directions": {"accuracy": "higher"},
-                    },
-                )
-            )
+            session = historical_session(root / "session")
 
             context, memory = build_research_session_report_inputs(session)
 
@@ -288,150 +131,6 @@ class ResearchReportApplicationTests(unittest.TestCase):
             self.assertEqual(context.results["status"], "passed")
             self.assertTrue(any(item.name == "accuracy" for item in context.metric_sources))
             self.assertTrue(any(item.kind == "analysis" for item in memory.source_handles))
-
-    def test_canonical_report_appends_complete_experiment_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            paper = root / "reliable_agents.md"
-            paper.write_text(
-                "# Results\n\nThe fixture reports accuracy: 0.75.\n",
-                encoding="utf-8",
-            )
-            session = run_research_session(
-                ResearchSessionRequest(
-                    brief=ResearchBriefSessionRequest(
-                        topic="reliable agents",
-                        session_root=root / "session",
-                        local_documents=(paper,),
-                        max_results=2,
-                        max_chunks=20,
-                    ),
-                    command=(sys.executable, "-c", "print('accuracy: 0.75')"),
-                    cwd=root,
-                    timeout_sec=5,
-                    result_schema={"primary_metric": "accuracy"},
-                )
-            )
-            paper_id = session.search.papers[0].id
-            execution = {
-                "status": "passed",
-                "metrics": {"accuracy": 0.8, "feature_family_count": 2.0},
-                "baseline": {
-                    "metrics": {"accuracy": 0.7, "feature_family_count": 1.0}
-                },
-                "comparisons": [
-                    {
-                        "metrics": [
-                            {
-                                "name": "accuracy",
-                                "baseline": 0.7,
-                                "patched": 0.8,
-                                "delta": 0.1,
-                                "interpretation": "improved",
-                            },
-                            {
-                                "name": "feature_family_count",
-                                "baseline": 1.0,
-                                "patched": 2.0,
-                                "delta": 1.0,
-                                "interpretation": "increased",
-                            },
-                        ]
-                    }
-                ],
-            }
-            result = run_research_report_session(
-                ResearchReportSessionRequest(
-                    session_root=session.session_root,
-                    title="Reliable agents",
-                    sections=(
-                        ReportSectionDraft(
-                            section_id="findings",
-                            heading="Findings",
-                            draft_markdown=f"The candidate improved [@{paper_id}].",
-                        ),
-                    ),
-                    source_refs=(session.analysis_ref,),
-                    context=ReportContext(
-                        topic="reliable agents",
-                        report_mode="experiment",
-                        papers=[{"id": paper_id}],
-                        results=execution,
-                        metric_sources=metric_sources_from_execution(
-                            execution,
-                            artifact="results.json",
-                        ),
-                    ),
-                )
-            )
-            report_text = result.report_ref.path
-            report_path = session.session_root / report_text
-            report = report_path.read_text(encoding="utf-8")
-            report_attempt_root = session.session_root / "attempts" / "report-001"
-            report_body = (report_attempt_root / "report_body.md").read_text(
-                encoding="utf-8"
-            )
-            citation_map = json.loads(
-                (report_attempt_root / "citation_map.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            references_bib = (report_attempt_root / "references.bib").read_text(
-                encoding="utf-8"
-            )
-
-        self.assertEqual(result.status, "completed")
-        self.assertEqual(result.audit.status, "passed")
-        self.assertIn("## References", report)
-        self.assertIn(f"[@{paper_id}]", report_body)
-        self.assertNotIn("## References", report_body)
-        self.assertEqual(citation_map["entries"][0]["paper_id"], paper_id)
-        self.assertIn("@misc{", references_bib)
-        self.assertIn("## Verified Experiment Metrics", report)
-        self.assertIn("| Metric | Baseline | Patched | Delta | Interpretation |", report)
-        self.assertIn("`feature_family_count`", report)
-
-    def test_agent_writer_failure_does_not_assemble_a_report(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            session_root = root / "session"
-            session_root.mkdir()
-            (session_root / "session_manifest.json").write_text(
-                '{"schema_version":"session_manifest.v1","session_id":"session",'
-                '"topic":"reliable agents","status":"running","budget":{},'
-                '"decisions":[]}',
-                encoding="utf-8",
-            )
-            with patch(
-                "simple_ar.app.research_report.run_report_agent",
-                return_value=None,
-            ) as writer:
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "did not return a validated result",
-                ):
-                    run_research_report_agent_session(
-                        session_root=session_root,
-                        context=ReportContext(
-                            topic="reliable agents",
-                            report_mode="research_only",
-                        ),
-                        memory=ReportMemory(),
-                        template=ReportTemplateBundle(
-                            name="experiment",
-                            mode="research_only",
-                            template_path="template.md",
-                            criteria_path="criteria.md",
-                            template_markdown="# Findings",
-                            criteria_markdown="Use evidence.",
-                        ),
-                        config=ReportRuntimeConfig(reviewer="disabled"),
-                        client=object(),
-                    )
-
-                self.assertTrue(writer.call_args.kwargs["memory"].section_plan)
-
-            self.assertFalse((session_root / "attempts" / "report-001").exists())
 
 
 if __name__ == "__main__":

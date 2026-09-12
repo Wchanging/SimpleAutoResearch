@@ -16,36 +16,78 @@ SimpleAutoResearch is now file-first plus state-backed:
 
 This keeps the project easier to learn, debug, and refactor.
 
+## Engineering Principles And Code Review Standard
+
+The primary principle is: **provide a reliable path for the current real task; preserve evidence and continue reasoning when the research is uncertain; block only when an explicit execution boundary is reached.**
+
+SimpleAutoResearch must avoid two forms of drift: adding general architecture with no current consumer, and adding so many checks, fallbacks, and defensive branches that the actual research path becomes difficult to understand. These standards apply to new features, refactors, compatibility layers, and tests, not only to domain code.
+
+### Changes, Structure, And Abstraction
+
+1. **Every change must answer a concrete problem.** State which input or operation exposes the current problem and what observable behavior should change. If the only explanation is “we may need it later” or “it is more complete,” defer it; the same rule applies to abstractions, configuration, and checks.
+2. **The normal path should be readable.** A reader should be able to follow the path from research input to the next action through a small number of application functions. Use the existing capability registry for explicit capability boundaries, but do not register every internal helper or route an ordinary call through layers of factories, managers, gateways, and adapters merely for replaceability.
+3. **Reuse concrete code before extracting an abstraction.** Extract a shared function when two behaviors are genuinely the same; allow a little duplication when they only look similar. Abstractions should come from an observed common need, not every imagined future implementation. Before converging the CodeTask bridge and independent entrypoint, compare defaults, authorization, and failure semantics rather than only renaming functions.
+4. **Every configuration option needs a real use case.** Do not add a switch for every `if`, or require users to understand internal stages to run a task. Make budgets, edit scope, and research objectives explicit when they affect user decisions; use sensible defaults for internal choices.
+
+### Contracts, Truthfulness, And Errors
+
+5. **Validate necessary boundaries, then trust the internal contract.** Validate user input, model output, external files, and process results. Once inside a typed boundary, do not repeat checks for emptiness, dictionaries, and fields at every layer. In particular, do not let chains of `.get(..., default)` silently turn missing experiment evidence into zero or an empty result.
+6. **Scientific uncertainty is not a system error.** An incomplete abstract, unknown novelty, or non-improving experiment should produce a qualified result. Pause an action only when that action lacks a required condition; missing data may block an experiment without blocking literature analysis that does not depend on it.
+7. **Fallbacks must preserve meaning.** When a model is unavailable, a deterministic status summary is acceptable but must not be labeled as model-generated analysis. When only an abstract is available, it may be analyzed but must not be called full-text reading. When an experiment fails, existing evidence may be retained but a fixed metric must never be invented to make the workflow pass. Every fallback must state what it actually completed.
+8. **Handle an exception once, where it can be handled.** The provider layer handles recoverable network errors; the application boundary records execution failure and recovery position. Do not catch `Exception` at every layer and return an empty object, default success, or vague string. Preserve the cause and diagnostic context so real defects surface early.
+9. **Each fact has one owner.** The experiment executor owns measured results, research owns interpretation, the application owns next-step decisions, and the report owns expression. CodeTask, session, and Writer must not maintain contradictory budgets or success states. An external Agent cannot override framework observations by reporting success.
+
+### Tests, Compatibility, And Delivery
+
+10. **Test user outcomes and important boundaries.** Prioritize behavior such as not starting a process for a no-experiment request, not retraining during recovery, not entering infinite repair after a negative result, and matching metrics to conditions. Test fewer private call counts and internal object counts; mocks must not replace a small real execution, and every small change need not trigger an expensive validation.
+11. **Compatibility layers have boundaries and exit conditions.** Preserve an old entrypoint when its usage still matters, but do not let it carry new business logic. Record its consumers, replacement, and deletion condition. Do not maintain two complete orchestrators indefinitely, and do not break valid historical reads merely to remove an old directory.
+12. **Each batch should be small and complete.** A batch should solve one visible problem and include the necessary implementation, validation, and explanation. Avoid changing directories, interfaces, behavior, dependency versions, and output formats all at once; remove locally superseded code when the migration is complete instead of only adding more code.
+
+### Fixed Review Questions
+
+Every review should answer at least:
+
+- Which confirmed problem does this change solve?
+- Is the normal path easier to understand?
+- Did it add duplicate state, hidden fallback, or unnecessary configuration?
+- Can unaffected work still proceed when information is incomplete?
+- What practical evidence demonstrates that it works?
+
+Locks, budgets, migration, and recovery in the implementation blueprint should be the smallest reliable versions required by the current path. The blueprint is not a checklist saying that every piece of infrastructure and protection must be complete before any user feature can ship. Its example limits are adjustable engineering starting points, not reasons to avoid real tasks. The full architecture and construction order live in the project's local `MDfiles/` planning notes; that directory is intentionally excluded from GitHub, so this document is the public contributor standard.
+
 ### Compatibility Audit
 
-The repository has one formal execution surface and one frozen compatibility
-surface:
+The repository has one formal research entrypoint, segmented commands, and
+historical readers. The old eight-stage runner has been removed:
 
 ```text
 research-session (formal user mainline)
   -> typed research capabilities -> SessionController -> ArtifactStore
 
-research-brief / research-experiment / research-code-task (segmented/development)
+research-brief (segmented/development)
   -> typed research capabilities -> SessionController -> ArtifactStore
 
-simple-ar run/resume (temporary compatibility surface)
-  -> PipelineRunner -> frozen eight-stage compatibility projection
+simple-ar status / inspect / search-artifacts
+  -> historical artifact readers (no old workflow execution)
 ```
 
-`research-session` is the only formal V2.8 user entrypoint and owns the complete
-bounded research-to-report sequence. The segmented commands remain useful for
+`research-session` is the only formal V2.8 user entrypoint and owns the bounded
+research sequence. With an explicit command or CodeTask it continues through
+experiment, analysis, report, and audit; without either it provides the
+literature-only summary/report path and creates no execution request. The
+segmented commands remain useful for
 development, diagnostics, and persisted handoff continuation, but are not a
-parallel product workflow. `simple-ar run/resume` remains because existing
-configs, run directories, and tests still consume its stage-shaped artifacts.
-It is not a second place to add new research policy. New capability work belongs
-under `research/`, `experiment/`, or `report/`; `pipeline_stages/` should only
-adapt or project that behavior for the old command.
+parallel product workflow. `simple-ar run/resume` is retired; its flags are not
+silently translated. New capability work belongs under `research/`, `experiment/`,
+or `report/`. The old stage layer has been deleted; remaining experiment and
+report consumers still require cleanup. Lifecycle unification is not complete.
 
 The September 2026 cleanup removed confirmed speculative or duplicate layers:
 the unused session-plan abstraction, multi-candidate CodeTask scheduler,
 standalone research iteration policy, and research Tool/MCP design-contract
-artifacts. The existing evidence pack/cards were kept because the legacy debug
-path and synthesis tests still consume them. CodeTask's external CLI support is
+artifacts. Read cards and `evidence_pack_from_read()` provide the shared
+Read-to-Synthesis handoff; the obsolete debug output and full-pack builder have
+been removed, and derivation tests use that same handoff. CodeTask's external CLI support is
 also kept as a disabled/explicit backend because the current experiment path
 uses its provider factory; it is not a V2.8 workflow controller.
 
@@ -59,8 +101,9 @@ for hypothetical future use.
 
 ### V2.8 Closure Order
 
-The business closure has passed, but the engineering release gate still requires
-entrypoint unification and compatibility exit:
+The canonical business path is connected, but the engineering release gate still
+requires compatibility exit, real Linux/CUDA validation, and a clean release
+baseline:
 
 1. Put new behavior only in the canonical research, experiment, report, and
    Code-Task modules.
@@ -73,8 +116,8 @@ entrypoint unification and compatibility exit:
 5. Run the fixture, full suite, CLI checks, and bounded AutoDL smoke before
    freezing V2.8.
 6. Start V2.9 only after that gate, with report engineering, module upgrades,
-   bounded repair/continuation, and Overleaf-ready output; external Harness
-   adapters come later.
+   broader research-direction iteration, and Overleaf-ready output; external
+   Harness adapters come later.
 
 The public “one entrypoint” rule does not remove internal modularity. Capabilities
 remain independently testable and composable for developers, recovery, and
@@ -90,17 +133,10 @@ dispatch, documentation, fixtures, and historical readers, then add a focused
 regression for the replacement path. Prefer removing dead imports or a proven
 duplicate branch over splitting a large but cohesive adapter into more layers.
 
-The cleanup rule is deliberately asymmetric: remove code when its production
-consumer is gone, but do not split a cohesive compatibility adapter merely to
-make the line count look smaller. The remaining large files are named debt,
-not new architectural owners: `pipeline_stages/research.py` points to the
-legacy research facade, `core/session.py` is the attempt boundary, and
-`report/service.py` is the established report writer used by the canonical
-report application as well as the old projection. The research facade now
-delegates Search/Read/Synthesis rules to canonical modules and keeps only old
-Context/artifact projection and bounded compatibility behavior. Delete it
-only after its run/resume, benchmark, and historical-reader consumers have
-been migrated and the old-format regressions remain green.
+Remove code when its production consumer is gone; do not split cohesive code
+merely to reduce file size. The old research facade and stage aliases are deleted.
+Remaining report, experiment and application lifecycle duplication still needs
+retirement; shared projections alone do not establish one execution owner.
 
 ## Ownership Map
 
@@ -110,12 +146,12 @@ important because it prevents domain policy from leaking into the core.
 
 | Area | Stable entry | Owns | Does not own |
 | --- | --- | --- | --- |
-| Core runtime | `simple_ar.core` | artifact references, attempt lineage, bounded decisions, profiles, and transition validation | domain schemas, LLM calls, code edits, retries, or selecting the best result |
+| Core runtime | `simple_ar.core` | artifact references, attempt lineage, bounded decisions, profiles, transition validation, and the shared resource ledger | domain schemas, provider calls, code edits, retries, or selecting the best result |
 | Sources, documents, and evidence | `research.sources`, `research.documents`, `research.evidence` | provider/parser ports, document bundles, cards, chunks, and provenance-aware handoffs | workflow scheduling, provider-specific policy in core, or copying full text into every handoff |
 | Synthesis | `research.synthesis`, `research.brief` | evidence-derived directions, research contracts, and the smallest literature-to-idea composition | claiming novelty, choosing an experiment automatically, or calling a model implicitly |
 | Experiment and analysis | `research.experiment`, `research.analysis`, existing `experiment.execution` | explicit run requests, canonical results, metric comparison, and result evidence status | code generation, repair policy, retry policy, or deciding the next research stage |
-| Report and audit | `report.capability`, `report.audit`, legacy `report.service` | explicit section assembly, optional figure rendering, citation/metric audit, and legacy report compatibility | hiding missing evidence, inventing figures, or replacing the legacy writer/reviewer without a migration contract |
-| Application and benchmarks | `cli`, `pipeline_stages`, `code_task`, and benchmark adapters | user-facing orchestration, legacy projections, code-task policy, and external evaluator integration | becoming a dependency of the core runtime or changing canonical capability semantics for one benchmark |
+| Report and audit | `report.projection`, `report.capability`, `report.audit`, `report.writing` | evidence projection, explicit section assembly, optional figure rendering, citation/metric audit, and legacy report compatibility | hiding missing evidence, inventing figures, or replacing the legacy writer/reviewer without a migration contract |
+| Application and benchmarks | `app`, `cli`, `code_task`, and benchmark adapters | user-facing orchestration, legacy projections, code-task policy, and external evaluator integration | becoming a dependency of the core runtime or changing canonical capability semantics for one benchmark |
 
 When a feature appears to span two rows, keep the coordination in the
 application or an explicit adapter and pass declared `ArtifactRef` inputs. Do
@@ -152,52 +188,62 @@ until their contracts are ready.
 `research.planning.search_request_from_plan()` is the corresponding in-memory
 handoff to `SearchRequest`; it does not invoke a provider or own search policy.
 
-`SessionController` adds bounded attempts and decision persistence for new
-capabilities. It does not replace `PipelineRunner`, decide an unrestricted
-research graph, or add implicit retries. Existing `simple-ar run`, code-task
-commands, and their legacy projections remain the compatibility path until a
-real capability has an input/output contract and regression evidence.
-The `core` package also contains the historical `pipeline.py` and
-`stage_results.py` compatibility modules; they are not the dependency-free
-runtime boundary for new capabilities. New modules should depend only on the
-artifact/session APIs above, while changes to the legacy collector must retain
-the old pipeline and projection behavior.
-Direct `execute()` calls also resolve the requested handler before creating an
+`SessionController` owns physical attempts and persistence; ResearchApplication
+chooses the next research action. Neither requires a second eight-stage runner.
+The old runner and `core/stage_results.py` collector have been deleted.
+The old Context, stage-contract table and unused console event framework are
+retired. Capabilities use the artifact/session APIs above; archived document
+reading is a small read-only adapter, not a runtime lifecycle.
+Direct `execute_attempt()` calls resolve the requested handler before creating an
 attempt, so a misspelled or unregistered capability cannot consume budget or
 leave a synthetic failure attempt.
+`execute_attempt()` is the corresponding physical-attempt entry for the newer
+application layer: it persists the running/result manifests and updates the
+bounded counter but does not choose a transition or append a `DecisionRecord`.
+The old `execute()` entry and its fixed-stage decision execution were removed.
+`execute_attempt()` is the sole physical execution path; it does not enforce a
+second research sequence. Explicit interrupted recovery also returns execution
+facts without appending research decisions; historical decision records remain readable.
+CodeTask usage callbacks share `integrations.usage.record_usage()` for logs,
+batch projections and display summaries. This function does not settle the
+BudgetLedger; do not add independent usage writers to planning, editing or repair.
+New capability tests use `execute_attempt()` and validate actual results and
+handoffs; application tests own research completion and retry decisions.
+The new entry may omit `attempt_id`; the controller then uses a persisted
+monotonic sequence to generate a readable id. Gaps after a crash or preflight
+failure are acceptable, but an id that may contain evidence is never reused.
+`SessionManifest` now persists `revision`, `status_reason`,
+`next_attempt_sequence`, state references, and an optional ledger reference, and
+writes `session_manifest.v2`; loading still accepts v1. A v1 session is
+read-only so inspection cannot rewrite history. `research-session-migrate`
+imports supported evidence into a new application session; it does not upgrade
+the historical manifest in place.
+After checking delivery conditions, a new application may call
+`pause(reason)`, `complete(reason)`, or `continue_with_revision(reason)`. Pause
+blocks another physical attempt; explicit continuation increments a revision
+without resetting the previous attempt budget. Core does not judge whether a
+paper or experiment is scientifically sufficient; the application owns that
+delivery check. Status inspection and recovery do not start new work implicitly.
 
-`TransitionPolicy` is the small deterministic guard around that controller.
-`TransitionRecipe` is an explicit allow-list of permitted next capabilities;
-`classify_failure()` normalizes short diagnostic signals into a bounded set of
-failure kinds. Semantic inputs such as evidence sufficiency or hypothesis
-support can request a revisiting target, but the recipe still rejects
-unlisted jumps. The policy never calls an LLM, scans the full run, or retries
-implicitly. `DecisionRecord` records the resulting failure kind and next
-capability together with the budget counters observed at that decision, while
-`list_attempts()` exposes persisted attempt lineage for comparison without
-merging their artifacts.
-`status_snapshot()` provides a compact JSON-ready view for status displays and
-handoffs. It reports session/attempt counts, budget, the latest decision, and
-optional profile-visible targets, plus the ID and capability of each running
-attempt, but never copies artifact contents or picks a domain-specific best
-result. Proposed transition targets are preflighted
-before a capability handler runs, so an impossible jump cannot spend a handler
-call or create an empty attempt. When a later attempt is requested, the same
-recipe is checked against the persisted current capability, so omitting or
-replacing a route proposal cannot bypass the allow-list. A newly created attempt and its session
-running state are persisted before the handler starts, so an interrupted
-process leaves resumable lineage instead of an unmarked invocation.
+`DecisionRecord` and the manifest's recipe label are retained as historical data,
+not active policy. `status_snapshot()` reports execution counts, budget and the
+last recorded decision without deriving permitted next steps. Attempts are
+persisted as running before the handler starts.
 After a process-level interruption, a caller may load the session and call
-`recover_interrupted()` for the manually confirmed running attempt. This writes
-an explicit failed capability result and closes that attempt; it never retries,
-overwrites an existing result envelope, or chooses the next domain operation.
+`reconcile_attempt()` when the capability result is already on disk. It closes
+a running attempt or repairs accounting for an already finalized attempt,
+idempotently. ResearchApplication also restores its missing state reference
+before advancing, so the same completed action is not invoked twice.
+If no result exists, the caller must confirm the interruption and
+call `recover_interrupted()`, which writes an explicit failed capability result.
+Neither operation retries, overwrites an existing result envelope, or chooses
+the next domain operation.
 While any attempt is still marked `running`, a new attempt is rejected until
 that explicit recovery is performed. This preserves the one-active-attempt
 lineage without silently creating a second branch. A caller that intentionally
 wants to compare an alternative from an earlier node may pass
-`parent_attempt_id` to `execute()`. The parent must be an existing completed or
-failed attempt, and the transition is checked against that parent's capability
-before a new attempt is created. The default remains the persisted current
+`parent_attempt_id` to `execute_attempt()`. The parent must be an existing completed or
+failed attempt. The application owns the research route. The default remains the persisted current
 attempt, so ordinary linear runs are unchanged; this option is an explicit
 lineage branch, not a graph scheduler or automatic retry.
 Use `attempt_lineage()` when a caller needs the root-to-node chain for a
@@ -206,13 +252,269 @@ artifacts, choose a best result, or schedule work; missing parents and cycles
 are reported explicitly.
 
 The V2.8 application layer owns the ordered capability sequence and calls
-`SessionController.execute()` explicitly. This keeps the sequence visible in
-the use case instead of hiding it in a generic plan runner. The controller
-still preflights registered handlers, allowed transitions, input artifacts and
-budgets before an attempt is created; a higher-level workflow must inspect the
-returned decision before constructing a bounded continuation. Every supplied
-input must be an existing session artifact; missing handoffs fail at this
-boundary without creating an attempt or spending session budget.
+`SessionController.execute_attempt()` explicitly. The new
+`simple_ar.app.research_application.ResearchApplication` is the first formal
+entry: it persists a `ResearchBrief` and normalized assets, then advances the
+visible sequence `plan -> search -> document_ingest -> read -> synthesize ->
+summarize` one bounded action at a time. It records the accepted output in
+`SessionManifest.state_refs`, so a reload can continue without reconstructing
+earlier in-memory objects. `ResearchApplicationServices` supplies only the
+LLM client, provider registry, and small resource settings that this path
+uses; it is not a general service registry.
+
+The entry completes an evidence-backed summary and supports assessment/design.
+Explicit experiment requests continue through execution and analysis; an
+explicitly initialized CodeTask can implement a candidate between measurements;
+existing source projects and the bounded CSV text baseline can be prepared
+through the same application boundary; report-only requests also use the shared
+Writer/assembly/audit lifecycle. `advance_session()` and `load_session()` are
+library helpers for the same path, and the formal `research-session` CLI uses
+it directly. The controller
+still preflights registered handlers, input artifacts, and budgets before an
+attempt is created. A higher-level workflow must inspect the result before
+constructing a bounded continuation; every supplied input must be an existing
+session artifact.
+
+The application exposes one derived `WorkPlan`, persisted under `planning/`
+as JSON and Markdown. It contains delivery status, gaps and the next action;
+the redundant readiness view/file is retired. Available research is still
+reported as partial progress when execution is blocked. When an execution or idea-assessment deliverable is requested,
+the application also runs the bounded `assess_ideas` capability after
+synthesis. Its JSON and Markdown artifacts record evidence resolution,
+similarity risk, unknowns, and a readiness-oriented recommendation; they do
+not claim novelty or authorize execution.
+
+The application maintains one capability-output contract table for registration,
+normal execution and recovery. A shared binding step resolves all declared
+references before updating state. Attempt triggers retain the exact baseline,
+candidate or repair role; recovery does not need another output mapping.
+
+With an injected LLM client, assessment compares candidates against a common
+source context sampled round-robin across documents. It records the text actually
+sent, truncation, response and recommendation. Candidate IDs and citations are
+validated at this boundary; failures retain `deterministic_fallback` assessments.
+The application saves its summary before assessment, then reuses the existing
+`research_design` capability for design/execution requests without another model
+selection call. Abstention pauses design; `config.research_selected_idea_id` can
+provide an explicit choice. Design does not authorize experiment execution.
+
+For an existing executable experiment, request `experiment` or `experiments`
+and supply `services.config["execution"]` with `command` (an argv list), `cwd`
+(an existing absolute directory), `timeout_sec`, and optional `result_schema`
+and `label`. Also set finite `process_invocations` and `process_wall_seconds`
+in `budget_limits`. The command is user supplied, never inferred from LLM text;
+configuration alone does not launch it for a summary-only request. Canonical
+CodeTask repair/retest is bounded, and a simple explicit technical failure can
+be retried by an explicit caller decision without rebuilding research evidence;
+scientific negative results are not silently retried.
+Results and deterministic analysis are separate persisted attempts. Failed
+executions retain their status and can still deliver diagnostic analysis; a
+completed application means requested artifacts exist, not that the experiment
+succeeded. Saved physical results are reused after reload, including interruption
+between attempt finalization and application-reference persistence. Protocol
+complete asset protection and the real Linux/CUDA acceptance remain pending; the
+report lifecycle is connected but its live semantic quality still needs
+user-scale validation.
+
+Execution configuration also accepts `protocol`, using the existing
+`ResearchExperimentContract`: `protocol_revision`, `dataset_refs`, `split_spec`,
+`metric_specs` and `comparison_conditions` retain comparison settings. Unknown
+protocol fields are rejected instead of silently ignoring unsupported constraints.
+Canonical results attach the process invocation ID as `measurement_id`, the run
+label as `condition_id`, and a declared-protocol/metric-schema fingerprint.
+`compare_experiment_results` permits descriptive deltas but returns `inconclusive`
+for new results with incomplete/mismatched protocols or the same measurement ID.
+Matching declarations are labeled `declared_match`, not independently verified:
+only explicitly named files can be checked (below); access enforcement remains pending. Older
+results without measurement metadata retain compatibility behavior with the
+explicit `legacy_unverified` label.
+
+For a paired experiment, add `execution.baseline` with its explicit `command`.
+It inherits shared cwd, timeout, protocol and metric settings; supplied baseline
+fields override those defaults. The top-level command is the candidate. The
+application schedules baseline and candidate as separate uses of the same
+experiment capability, then analysis writes `comparison.json` with both artifact
+references. `application:baseline` in the attempt trigger preserves the role
+across a crash before state-reference persistence. A valid regression finishes
+with `metric_below_target` analysis and does not request automatic retraining.
+This is one explicit pair, not a research iteration loop.
+
+To modify a candidate, add `execution.code_task` with an absolute initialized
+`run_dir` and an explicit `approval_note`; candidate `cwd` must be that isolated
+workspace. The original CodeTask task remains the user requirements; the selected
+design, declared execution protocol and actual baseline metrics are appended before
+planning using the research-handoff renderer.
+`research_handoff.json` freezes the consumed context and original task, and the
+attempt records the resulting task Markdown. Changed research inputs cannot reuse
+an already planned CodeTask run; prepare a fresh run for that revision.
+The `implement` action reuses CodeTask planning, proposal, editing and validation,
+without running its benchmark or hidden baseline. Its model calls share the session budget and attempt ID;
+declared workspace protocol assets join the existing protected edit patterns.
+Implementation records reference the design, baseline (when present), patch and
+validation evidence. Recovery accepts completed implementation without repeating
+edits. Start from a fresh initialized workspace for an unchanged baseline;
+automatic workspace preparation, source provenance checks, full
+execution-bundle portability, and broad research-direction revision remain
+unfinished.
+
+The old segmented research-code-task creator and its bridge executor have been
+retired. `validate_repair_patch` retains review/static validation without measuring;
+the canonical experiment action owns remeasurement. Standalone CodeTask keeps its
+explicit repair-proposal approval flow. Do not reintroduce a combined repair/run
+loop behind the implementation boundary.
+
+Generated-project review repair must not guess implementation intent. Missing
+entrypoints, configuration, documentation or public APIs remain review findings;
+the framework no longer synthesizes fixed replacements or empties invalid package
+code. Model-proposed repairs reuse snapshots and edit validation. Without a model,
+the original files and failed review remain unchanged, and no experiment is started.
+
+Runtime repair follows the same rule: a matching exception string does not
+authorize a guessed module rename, global import rewrite or results-path
+substitution. The observed failure goes to the existing bounded model repair
+path with snapshots and validation; unavailable model repair leaves it unresolved.
+
+Repair localization prioritizes failure-graph paths, explicitly implicated files
+and source matches. Remaining project files provide bounded context; names such
+as `runner`, `data` or `artifact` are not treated as evidence of responsibility.
+
+Repair actions and whole-file content share the action applicator. Content becomes
+a rewrite action; rejected actions cannot trigger a second overwrite. Partial
+rejection rolls back the target file; accepted edits retain observed hashes and APIs.
+
+Repair records describe attempted edits, not scientific or execution success.
+Review/run repair counts share one accounting function. Follow-up review owns
+its result; it does not rewrite the repair record as effectively recovered or
+copy repair status into implementation state. Historical status fields remain readable.
+
+`propose_repair_edits(..., failure_evidence=RepairEvidence(...))` accepts the
+measurement owner's explicit failure report and analysis without discovering or
+creating a legacy CodeTask benchmark record. It snapshots the supplied evidence
+beside the proposal and does not apply edits or launch another measurement.
+External evidence must describe a failed/timed-out execution, not a scientific
+regression from a successfully executed experiment. Omission retains existing
+standalone failure discovery.
+
+An initialized `execution.code_task` can explicitly authorize automatic technical
+repair rounds with `max_repairs` (non-negative integer, default `0`). After a
+failed/timed-out candidate, the application records a separate implementation
+attempt, then a canonical experiment attempt; it never remeasures the baseline.
+All rounds also obey the existing attempt, LLM and process budgets. Original
+`experiment` evidence remains unchanged; `repair_N` and `experiment_repair_N` state
+refs retain each round, and analysis compares the last measurement with baseline.
+Reaching the limit delivers the remaining failure rather than looping. An invalid
+proposal/review/validation pauses before remeasurement. Persisted completed repair
+results recover without repeating edits; interruption inside patch application
+still needs interrupted-attempt inspection, not an automatic blind replay.
+This is bounded technical repair, not model-directed research revision or complete
+report generation. The default attempt cap may need an explicit increase for a
+longer authorized workflow; a repair limit does not enlarge other budgets.
+
+`ResearchApplication.latest_experiment_ref()` selects the last recorded candidate
+from the application action sequence. Analysis, experiment deliverable references
+and the exported snapshot use this same selection; they do not treat the initial
+failed candidate as the final result after a repair. Before remeasurement exists,
+the previous recorded result remains selected. Historical refs are never rewritten.
+
+For an existing baseline, `execution.code_task.code_root` can replace `run_dir`.
+Supply an absolute source directory and `approval_note`, plus execution argv,
+timeout and protocol. Cwd may be omitted or equal code_root. `prepare_execution`
+reuses the CodeTask copy initializer inside its attempt, records copied/skipped
+files, and hands off isolated cwd/run_dir. The original project is not edited or
+measured. Preparation does not install, download or run setup hooks/benchmarks.
+Baseline inherits the isolated cwd; an explicit baseline cwd equal to code_root
+is remapped. Completed preparation recovers without reinitialization; interrupted
+partial initialization still needs inspection. Existing copy limits apply, so keep
+large datasets as explicit shared assets.
+
+For a data-only text baseline, execution accepts `dataset` (absolute UTF-8 CSV
+path) and `timeout_sec`, without a user command or CodeTask. Required columns are
+`text,label,split`; split values must be `train` or `eval`, both must exist and
+training must contain at least two labels. Current limits are 10 MB / 10,000 rows;
+exceeding them fails preparation instead of silently sampling. Normalized-text
+overlap is recorded as possible leakage, not hidden or treated as a system crash.
+Preparation saves source hash, inspection, normalized data and the generated
+`csv_text_classification` script. The explicit protocol protects data/evaluator.
+The ordinary experiment action then trains CountVectorizer + LogisticRegression
+on train only (one BLAS/OpenMP thread) and measures accuracy/macro-F1 on eval;
+it uses the same process budget and analysis path, not another runner. This is a
+single baseline, not automatic candidate generation, language adaptation or paper
+reproduction. The existing project-preparation path remains available for other methods.
+
+Prepared execution is a declared experiment input. Its reference and limitations
+are retained in the measured result under `preparation`, then carried into the
+analysis audit and Markdown. This preserves issues such as split leakage through
+the report-facing handoff without changing observed metrics or process status.
+
+`ResearchApplication.report_inputs()` projects completed canonical artifacts into
+existing `ReportContext`/`ReportMemory`; the old session adapter uses the same
+`build_research_report_inputs()` constructor. It retains separate baseline,
+candidate and comparison sources, latest analyzed measurements and limitations.
+The measured execution protocol takes precedence over proposed design. This is
+a read-only projection: experiment requests use the completed experiment/analysis
+artifacts, while report-only requests use the available literature evidence. The
+projection itself is not the report snapshot or Writer/audit execution boundary;
+those are created by the report capabilities below.
+
+When both experiment and report/paper outputs are requested, the application now
+runs `report_write -> report -> report_audit`. The Writer runs inside a controller
+attempt, after a content-identified snapshot of context, memory, configuration,
+template and source references has been saved. Assembly and audit reuse that
+snapshot and the Writer's memory, not a refreshed live context. Existing agent,
+assembler and audit implementations are reused. Default total attempt allowance
+is 16; resource budgets remain independent. A Writer failure pauses with its
+snapshot retained; explicit continuation retries writing without research reruns.
+A completed Writer can recover into assembly without another model call. Section
+checkpoints are persisted at the Writer boundary, and the canonical application
+also supports report-only/no-experiment requests. The legacy report entry still
+has its old execution order.
+
+Report `MetricSource` retains measurement ID, protocol ID/revision/fingerprint,
+condition, unit and source kind. Baseline and candidate use their own metric schemas
+and protocol units; old records remain `legacy_unverified` with missing identity,
+and comparison deltas are marked derived. The metric appendix displays unit,
+condition and origin. These are traceable declarations, not proof that arbitrary
+prose comparisons or scientific conclusions have passed semantic review.
+
+Implementation evidence (patch, validation, available review, work plan and research
+handoff) is copied into its attempt and registered as capability outputs.
+`implementation.json.artifact_refs` resolves relative to that attempt, as indicated
+by `artifact_base: "attempt"`. CodeTask/workspace absolute paths are provenance,
+not the evidence lookup mechanism. Copying a session therefore preserves these
+records without the external CodeTask directory; it does not bundle datasets,
+dependencies, checkpoints or all source files needed to rerun the experiment.
+
+`execution.protocol.protected_assets` accepts explicit `{asset_id, path}` file
+entries for data, split indices or evaluators. Relative paths resolve against
+the execution cwd. Required files are hashed before launch and checked again
+afterward; there is no recursive directory scan. Results retain both observations
+under `measurement.asset_integrity`. A changed/deleted file sets `validity_status`
+to `invalid` and the overall result to failed while retaining `execution_status`,
+return code and metrics. The guard reports `protected_asset_changed`. Matching
+protocol declarations do not permit comparisons across different observed file
+contents. These checks are audits of named files, not OS write protection, access
+isolation or detection of changes restored before the final snapshot. Hashing is
+streamed and is not included in the child-process wall-time budget.
+
+New application sessions also persist a session-level `BudgetLedger` and its
+manifest reference. A standard `LLMClient` passed to the application is copied
+with that ledger attached, while the broader CodeTask/Writer/client-factory
+convergence remains a later migration step.
+
+`SessionController.mutation_scope()` is the public grouping boundary for an
+application mutation. It keeps a capability result, its state reference, and
+the enclosing manifest under one process/OS lock. It does not turn the
+application into a scheduler or hold a second copy of domain state.
+While holding the lock, the controller checks that the saved manifest still
+matches the version it loaded. A stale writer must reload; it cannot overwrite
+another writer's budget or accepted references. Reinjecting services on reload
+preserves persisted numeric settings, and unreadable runtime configuration is
+reported rather than replaced with defaults.
+
+For a timed-out LLM request, the ledger records the known request count. With
+an output cap it retains the token reservation as a conservative estimate,
+keeps actual token usage marked unknown, and permits retries within the
+remaining budget. Unbounded unknown usage still blocks a finite token budget.
 
 Attempt outputs are local to their attempt directory. Use
 `SessionController.attempt_output_refs()` when a later capability should read
@@ -224,20 +526,20 @@ When a capability emits multiple domain outputs, use
 `attempt_output_ref(..., kind=..., schema=...)` to require one unambiguous
 artifact instead of relying on output order; ambiguous kinds fail explicitly.
 
-`LifecycleProfile` provides five optional, built-in capability scopes:
-`research_brief`, `survey`, `experiment`, `paper_audit`, and `full_research`.
-When a session uses one of these names, the controller rejects a capability or
-transition outside its allow-list before execution. This is a scope check, not
+`LifecycleProfile` provides four optional, built-in capability scopes:
+`research_brief`, `survey`, `experiment`, and `full_research`.
+When a session uses one of these names, the controller rejects a capability
+outside its allow-list before execution. This is a scope check, not
 an automatic workflow or a mandatory start point. Unrecognized profile names
 remain unscoped for compatibility with older callers and experiments.
 When a new session uses a recognized profile without an explicit `BudgetState`,
 its default attempt budget is the number of named capabilities plus two bounded
 recovery attempts. An explicit budget always wins; legacy manifests keep their
-stored counters and limits.
+stored counters and limits; v1 stays read-only. Explicit migration creates a
+separate application session and preserves the historical directory.
 An attempt may inherit the session profile or omit it; it cannot replace a
 scoped session with another profile.
-Use `SessionController.allowed_targets(source)` when a caller needs to render
-the permitted next steps; do not inspect the recipe or profile internals.
+The application exposes its current next action; Core does not infer one.
 The built-in capability names are the actual stage boundaries: `plan`, `search`,
 `document_ingest`, `read`, `synthesize`, `research_design`, `experiment`,
 `analysis`, `report`, and `report_audit`. `analyze` remains a legacy alias for
@@ -261,14 +563,8 @@ usage, and provenance. This preserves the result boundary after the process
 ends without copying full text or raw logs; the legacy eight-stage artifact
 layout is unchanged.
 
-The old monolithic research implementation has been moved behind
-`src/simple_ar/_legacy/research_stages.py`, while the public
-`pipeline_stages/research.py` path remains an import alias for old callers.
-That private module is now a compatibility facade: it adapts `Context`, keeps
-legacy artifact names and bounded retrieval traces, and delegates research
-behavior to canonical modules. The `_legacy` package also keeps aliases for
-older imports. New behavior should be implemented in the domain modules under
-`core/`, `research/`, `experiment/`, `report/`, and `code_task/`.
+The old research facade and `pipeline_stages/` source package have been deleted.
+Research domain modules own research behavior; historical readers remain separate.
 
 CLI code is split by responsibility:
 
@@ -278,17 +574,7 @@ src/simple_ar/cli/
   main.py    command dispatch and user-facing output
 ```
 
-Pipeline-stage orchestration is split by workflow area:
-
-```text
-src/simple_ar/pipeline_stages/
-  research.py    alias to the compatibility research facade (stages 01-04)
-  experiment.py  old Context adapters for stages 05-07
-  report.py      old Context adapter for stage 08
-  common.py      compatibility-only artifact/evidence helpers
-  registry.py    HANDLERS registry used by PipelineRunner
-  handlers.py    compatibility aggregation only; do not add new logic here
-```
+The old stage registry, handlers, common helpers and import aliases are retired.
 
 Top-level implementation modules have been collapsed into domain packages.
 Prefer direct imports from `core/*`, `app/*`, `integrations/*`, `research/*`,
@@ -364,10 +650,10 @@ refer to missing paper metadata.
 boundary for document metadata, permitted full-text handling, sections, and
 chunks. It reuses the existing research records without calling an LLM or
 writing stage artifacts. Search keeps ownership of index persistence and
-legacy JSON/JSONL projections. Downstream code can use
-`research.service.load_search_document_bundle(ctx)` to hydrate that same typed
-bundle from state aliases or legacy Search paths, so a reader does not need to
-know which provider or directory layout produced it.
+legacy JSON/JSONL projections. Current callers pass the typed bundle or use its
+handoff representation. `_legacy.documents.load_search_document_bundle(search_dir)`
+reads archived Search JSON/JSONL from an explicit directory without creating a
+runtime Context or advancing a historical run.
 
 `research.documents.ports` provides the small `DocumentResolver` and
 `DocumentParser` ports used after a manifest has selected a local resource.
@@ -402,6 +688,14 @@ against the chunks in the same `DocumentBundle`; an unresolved reference is
 recorded as a diagnostic and downgrades the result to `partial`. The same
 side-effect-free check is available as `validate_read_evidence()`. It validates
 explicit references only; it does not scan files or judge semantic correctness.
+`query_evidence()` is the P05a source-resolution boundary: given a document or
+explicit chunk IDs, it returns `EvidenceRef` rows with the source identity,
+content revision, exact location, extraction status, target text, and real
+same-document neighboring context. Unknown IDs are errors; an adjacent chunk
+is never used as a substitute for a missing target.
+Read handoffs consume this projection for `source_spans`, excluding raw text
+so the document bundle remains the source of truth. Per-paper context coverage
+and tracking exactly which chunks reached the model remain P05a follow-up work.
 
 ### Reusing The Synthesis Boundary
 
@@ -426,14 +720,14 @@ without network or LLM access, including its idea rows, novelty checks, and
 optional research-level experiment contract.
 
 The research-level `ExperimentContract` in `research.contracts` describes a
-grounded hypothesis and proposed change. It is distinct from the execution
-contract with the same historical name in `experiment.contracts`, which carries
-command, metric, resource, dependency, and implementation settings. New code
-should import from the module matching the contract's responsibility.
+grounded hypothesis and proposed change. The unused legacy design-package
+builder, runtime-config converter and domain profiles have been removed.
+Execution settings belong to the current experiment request; implementation
+requirements belong to the CodeTask contract, not a second design package.
 `ResearchExperimentContract.from_row()` restores the research-level handoff,
 and `ExperimentRequest` accepts either that typed object or the historical
 mapping form; canonical execution results preserve the contract without
-merging it with the legacy execution contract.
+reconstructing the retired design package.
 In the vertical fixture, the restored contract is passed into the explicit
 `ExperimentRequest`, so the execution result records the research-to-experiment
 handoff rather than reconstructing the hypothesis from a private stage path.
@@ -499,6 +793,11 @@ When the request carries primary or required metrics, the composition exposes
 those requirements to analysis without requiring callers to duplicate them in
 the context.
 
+Analysis owns its evidence and audit artifacts, not CodeTask repair state. The
+unused `record_result_analysis_memory` bridge has been removed. CodeTask summaries
+display recorded outcomes and repair notes; they do not infer extra blockers
+from a negative comparison, an old failure file, or a missing memory event.
+
 `research.experiment.run_experiment_capability()` is the opt-in session adapter
 for execution. It registers under a caller-chosen name, writes the existing
 canonical result as `results.json`, and stores the captured stdout/stderr under
@@ -547,24 +846,20 @@ execution record remains `incomplete`; the status never chooses a retry or a
 research transition. When persistence is requested, the same small handoff is
 also written to `analysis_status.json`.
 
-When an upper-layer workflow needs to pass an analysis outcome to the session
-policy, use `research.decisions.transition_request_from_analysis()`. This pure
-adapter only creates the existing `TransitionRequest`; it does not invoke
-handlers, retry, choose a next capability, or add another decision schema.
-Both typed results and persisted mappings are accepted for cross-process
-handoff. Recovery policy remains with the caller and the core session budget.
+The application consumes typed analysis results and execution evidence directly.
+There is no separate adapter into a Core research policy.
 
 ### Reusing The Report Figure Port
 
 `report.ports.FigureRenderer` is the small substitution point for report
 visuals. `DeterministicFigureRenderer` wraps the existing SVG implementation
-and remains the default used by the report service. A future image or chart
+and remains the default for report assembly. A future image or chart
 backend can implement the same render method and consume the existing
 `ReportDocumentPlan`, `ReportFigureConfig`, and `ReportFigureResult`; it does
 not need to change writer, citation audit, or report assembly code. Callers
 that own report orchestration can pass another renderer to
-`execute_report(..., figure_renderer=...)`; the pipeline entry point omits it
-and therefore keeps the existing behavior.
+`assemble_report_document(..., figure_renderer=...)` or the corresponding
+`run_report_capability()` entry. The old stage-level service is retired.
 
 ### Using The Report Assembly Boundary
 
@@ -607,56 +902,23 @@ eight-stage implementation. Add a capability in this order:
 5. Add contract, application, failure/recovery, and CLI/example coverage as
    appropriate.
 
-Canonical capabilities should use explicit artifact references and compact
-   handoffs. `ctx.find_artifact(...)`, `Stage`, and `HANDLERS` are legacy
-   compatibility mechanisms only. Modify `pipeline_stages/` only when keeping
-   an existing `simple-ar run/resume` input/output contract; do not add new
-   research behavior there.
+Canonical capabilities use explicit artifact references and compact handoffs.
+Do not reintroduce the retired stage registry or a second lifecycle. `Stage` and
+implicit directory lookup remain historical compatibility mechanisms.
 
-## Adding An Experiment Template
+## Experiment Preparation And Execution
 
-Fixed script templates primarily live in `src/simple_ar/experiment/templates.py`.
-Embedded 8-stage code-task templates live under
-`src/simple_ar/experiment/code_task_bridge/` because they prepare an existing
-workspace before writing the run harness. The former
-`src/simple_ar/experiment/code_task_experiment.py` facade has been removed;
-new code and compatibility adapters should import from `code_task_bridge`.
+Prepared-code execution uses `research.experiment` and `experiment.execution.backend`;
+CodeTask owns isolated edits and validation. Do not add new Context-based design,
+code or run stages: those executors and their stage-archive helpers are retired.
 
-Use `src/simple_ar/experiment/runner.py` for fixed generated-template
-subprocesses. Use `src/simple_ar/code_task/` for LLM-guided project editing,
-workspace isolation, patching, validation, and benchmark comparison.
+`research.preparation` reuses the CSV text-classification template for its supported
+small-data baseline. New preparation support must have a concrete input contract
+and a bounded executable example; do not add a general project generator merely
+to populate all possible experiment types. Keep unknown measurements unknown.
 
-`experiment.execution.backend.RunResult` is the canonical subprocess result
-model. `experiment.runner.ExperimentRunResult` remains only as a compatibility
-alias, so new execution and analysis code should depend on `RunResult`.
-
-New LLM usage rows also record the number of provider attempts used by a
-successful `ask()` request. Usage summaries expose the derived retry count;
-older rows without this field remain readable and are treated as one attempt.
-
-Top-level run config parsing lives in `src/simple_ar/app/run_config.py`. Keep it as
-a thin TOML-to-runtime-options layer; code-task-specific config semantics should
-continue to live in `src/simple_ar/code_task/runtime/config.py` so standalone
-and embedded code-task runs do not drift apart.
-
-A new template should:
-
-- be added to `SUPPORTED_TEMPLATES`;
-- generate a complete standalone `experiment.py`;
-- use only dependencies declared in `pyproject.toml`;
-- print machine-parseable metric lines like `metric_name: 0.123`, parsed by
-  `src/simple_ar/experiment/metrics.py`;
-- avoid network access and uncontrolled downloads;
-- have a test in `tests/test_experiment_runner.py`.
-
-The current template system is deliberately not free-form code generation. That boundary keeps the teaching pipeline reproducible while stronger coding workflows develop under `code-task`.
-
-For embedded code-task templates, keep the automatic approval boundary explicit:
-they should copy a workspace, use controlled old/new edits, write a compact
-stage artifact such as `code_task_experiment.json`, and run the benchmark
-through `07-run` instead of silently mutating source code during reporting.
-The generic `code_task_project` template should remain a thin bridge over the
-standalone code-task modules rather than a separate coding implementation.
+Historical experiment readers and the current bridge remain available. Their
+remaining duplicate lifecycle logic is cleanup debt, not an extension point.
 
 ## Extending Code Task
 
@@ -692,6 +954,13 @@ convention is common enough to be unsurprising.
 
 ## Extending Report And Audit
 
+`report/survey.py` retains source routing and consumption of existing survey
+section metadata. The old service's unused contract builder, taxonomy generator,
+planning-file writer and separate coverage audits are retired. Extend the active
+Writer/document-plan and report/audit boundaries instead of restoring that second
+pipeline. Historical `survey_contract` context remains readable; the builder-only
+runtime toggle and longform `planning_artifacts` option no longer exist.
+
 The report system is the V2.4 outlet for research-only surveys, experiment
 reports, and embedded code-task results. Keep it template-driven and
 evidence-aware rather than turning it back into a single prompt or a single
@@ -700,7 +969,7 @@ large service file.
 ```text
 src/simple_ar/report/
   schema.py        Pydantic models for context, memory, tools, drafts, reviews
-  context.py       collect papers, synthesis, metrics, and code-task comparison
+  projection.py    project persisted research and measurement evidence into report inputs
   templates.py     load Markdown templates and reviewer criteria
   memory.py        compact section plan, evidence handles, claims, limitations
   tools.py         report tool schema definitions
@@ -710,29 +979,27 @@ src/simple_ar/report/
   citations.py     citation key mapping, display labels, and citation cleanup
   audit.py         citation, metric, claim, and reviewer audit aggregation
   assembler.py     section drafts to final Markdown
-  quality.py       deterministic report quality checks
-  service.py       stage entrypoint and artifact packaging
+  writing.py       controller-owned Writer execution and checkpoints
+  capability.py    report assembly and artifact packaging
 ```
 
 When adding report behavior:
 
-- put schemas in `schema.py`, not ad hoc dictionaries in `service.py`;
-- put new source lookup or backtracking logic in `context.py`,
+- put schemas in `schema.py`, not ad hoc dictionaries in the writer;
+- put new source projection or backtracking logic in `projection.py`,
   `retrieval.py`, or `tool_gateway.py`;
 - put Writer/Reviewer loop behavior in `agent.py`;
 - put citation mapping, display conversion, and citation cleanup in
   `citations.py`;
-- put mechanical checks in `audit.py` or `quality.py`;
+- put mechanical checks in `audit.py`;
 - keep templates and criteria in `templates/report/`, not hard-coded prompt
   strings;
-- keep `service.py` as the stage-level coordinator and artifact writer.
+- keep Writer execution in `writing.py` and assembly in `capability.py`.
 
-`report/service.py`, the private legacy research facade, and `cli/main.py` are
-still large enough to be treated as yellow lights. `pipeline_stages/research.py`
-itself is only an alias now. Do not add unrelated behavior to these files. New
-work should either move logic into the owning domain module or reduce a
-compatibility boundary when its consumers are gone. This is a maintenance rule,
-not a demand to split every small helper into a separate file.
+`app/research_report.py` now only reads historical evidence; it no longer runs a
+Writer or appends fixed report/audit attempts. `app/research_application.py` and `cli/main.py` still need
+responsibility review. Remove redundant state and execution ownership rather
+than distributing the same complexity across more files.
 
 ## Extending Tools And External Agent Backends
 
@@ -768,6 +1035,9 @@ agent backends.
 Rules for new tool/backend work:
 
 - register real tools only; do not add MCP/OpenAI schemas for stub tools;
+- experiment-domain tools currently read archived numbered-stage directories;
+  they are not the canonical session result API. Unimplemented run/repair/apply
+  stubs and the duplicate experiment-specific OpenAI exporter are retired;
 - keep write, shell, network, and secret access disabled unless a config and
   approval path explicitly enables them;
 - write external-agent context into `agent_handoff/<name>/`, never into a
@@ -834,9 +1104,9 @@ Use layered checks during development:
 uv run simple-ar-checks --list
 uv run simple-ar-checks quick
 uv run simple-ar-checks code-task
-uv run simple-ar-checks pipeline
+uv run --extra examples simple-ar-checks pipeline
 uv run simple-ar-checks research
-uv run simple-ar-checks code-task-examples
+uv run --extra examples simple-ar-checks code-task-examples
 uv run simple-ar-checks core
 ```
 
@@ -853,28 +1123,74 @@ Recommended validation layers:
 | Docs only | `git diff --check` plus manual link review. |
 | Small parser, prompt, config, metric, or CLI changes | `uv run simple-ar-checks quick`. |
 | Code-task internals, workspace, repo-map, patching, validation, runner, repair | `uv run simple-ar-checks code-task`. |
-| Bundled code-task examples or benchmark examples | `uv run simple-ar-checks code-task-examples`. |
-| Pipeline, stages, experiment templates, run config | `uv run simple-ar-checks pipeline`. |
+| Bundled code-task examples or benchmark examples | `uv run --extra examples simple-ar-checks code-task-examples`. |
+| Experiment templates and their execution | `uv run --extra examples simple-ar-checks pipeline`. |
 | Literature, retrieval, evidence ledger, report generation, LLM adapter | `uv run simple-ar-checks research`. |
 | Core capability boundary, registry, attempt store, and package example | `uv run simple-ar-checks core`. |
-| Before commit/push or broad refactors | `uv run simple-ar-checks all`. |
+| Intake, application state, candidate assessment | `uv run simple-ar-checks application`. |
+| LLM transport and accounting | `uv run simple-ar-checks llm`. |
+| Report changes only | `uv run simple-ar-checks report`. |
+| Local process control and execution results | `uv run --extra examples simple-ar-checks execution`. |
+| Shared-interface/architecture checkpoint or release candidate | `uv run --extra examples simple-ar-checks all`. |
+
+For a small change, select the affected unittest module or method directly.
+Combining check groups deduplicates modules; `all` supersedes other groups.
+Do not rerun the full suite merely because a commit is being made. Preserve
+useful regression tests; remove one when its behavior is obsolete or demonstrably
+covered by another retained test. A green mock suite does not replace real execution.
+
+Experiment and CodeTask use `core/process.py` for bounded output capture and
+process lifetime. Each stream keeps a 200 KB memory tail and, when an output
+directory is supplied, a 2 MB log prefix; discarded-byte counts remain visible.
+Metrics parsed from stdout therefore cover the retained tail only. Dedicated
+metric-file consumption remains follow-up work. Canonical experiment attempts
+declare invocation/log artifacts; CodeTask history references its invocation.
+The Windows Job Object is attached after spawn, leaving a startup attachment
+window; POSIX uses a process group. Neither mechanism is a hostile-code sandbox.
+CPU, GPU and memory enforcement are explicitly unimplemented.
+`LocalExecutionBackend(budget_ledger=...)` and `execute_code_task(..., budget_ledger=...)`
+can share the application's ledger for benchmark calls, with `session_id` and
+`attempt_id` linking actual invocations. The process boundary reserves
+`process_invocations` and `process_wall_seconds`, then settles observed wall time
+(not GPU utilization or GPU hours). `settle_process_record` reuses finalized
+records without executing code. Environment probes/setup helpers are not yet
+included in process accounting; they remain explicit preflight inputs rather
+than hidden experiment actions. ResearchApplication execution actions use this
+process boundary.
+`execute_code_task(..., llm_client=...)` forwards the injected client through
+existing-project planning/edit/review/repair and greenfield generation/repair.
+`LLMClient.for_task` retains provider settings, the session ledger and attempt
+identity while adding the owning task's usage observer; model overrides change
+the role model, not the original client. Existing generation review clients
+already own their usage observer and must not register a duplicate one.
+The legacy experiment bridge now delegates preparation through validation to
+the official executor and retains only its explicit approval/stop mapping and
+artifact projection for those steps. Baseline process failure stops preparation
+before planning; it is not equivalent to a valid negative research result.
+Its bounded verification/auto-repair sequence remains a compatibility concern.
+The canonical application now calls this CodeTask preparation path and keeps
+implementation separate from measured experiment actions. The legacy bridge's
+remaining behavior still needs to be reduced before it can be removed.
 
 Run the full test suite directly when needed:
 
 ```bash
-uv run python -m unittest discover -s tests
+uv run --extra examples python -m unittest discover -s tests
 ```
 
 Run the realistic code-task example:
 
 ```bash
-uv run python -m unittest tests.test_code_task_examples
+uv run --extra examples python -m unittest tests.test_code_task_examples
 ```
 
-Run the experiment runner tests:
+Run the execution-boundary tests (output capture, timeout, and a small template):
+
+These call `LocalExecutionBackend` directly; the unused `experiment.runner`
+script wrapper and its `ExperimentRunError`/`ExperimentRunResult` aliases are retired.
 
 ```bash
-uv run python -m unittest tests.test_experiment_runner
+uv run --extra examples python -m unittest tests.test_experiment_runner
 ```
 
 Run config and public example config loading tests:

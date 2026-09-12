@@ -50,8 +50,6 @@ class WorkspaceSpec:
         exclude: Additional POSIX glob patterns skipped by ``sparse_copy``.
         reuse_source_venv: Whether a detected source ``.venv`` may be recorded
             and selected as the initial execution interpreter.
-        setup_hook: Optional setup command recorded for future managed
-            environment support. V2.2 does not execute it during init.
     """
 
     code_root: Path | None
@@ -61,7 +59,6 @@ class WorkspaceSpec:
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     reuse_source_venv: bool = False
-    setup_hook: str = ""
 
 
 @dataclass(frozen=True)
@@ -209,7 +206,6 @@ def _create_copy_workspace(
             source_root=source,
             workspace_dir=workspace,
             reuse_source_venv=spec.reuse_source_venv,
-            setup_hook=spec.setup_hook,
             mode="copy",
         ),
         patterns={},
@@ -248,7 +244,6 @@ def _create_sparse_copy_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
             source_root=source,
             workspace_dir=workspace,
             reuse_source_venv=spec.reuse_source_venv,
-            setup_hook=spec.setup_hook,
             mode="sparse_copy",
         ),
         patterns={
@@ -338,7 +333,6 @@ def _create_git_worktree_workspace(
             source_root=source,
             workspace_dir=project_root.resolve(),
             reuse_source_venv=spec.reuse_source_venv,
-            setup_hook=spec.setup_hook,
             mode="git_worktree",
         ),
         patterns={},
@@ -379,8 +373,6 @@ def _create_empty_workspace(spec: WorkspaceSpec) -> WorkspaceResult:
             "reuse_source_venv": False,
             "source_venv_detected": "",
             "python_executable": "",
-            "setup_hook": spec.setup_hook.strip(),
-            "setup_hook_executed": False,
             "notes": [
                 "Empty workspace prepared for a greenfield code-task run.",
                 "Generated code must stay inside this workspace.",
@@ -604,7 +596,6 @@ def _environment_mapping(
     source_root: Path,
     workspace_dir: Path,
     reuse_source_venv: bool,
-    setup_hook: str,
     mode: str,
 ) -> dict[str, Any]:
     source_venv_python = _source_venv_python(source_root)
@@ -623,8 +614,6 @@ def _environment_mapping(
         "reuse_source_venv": reuse_source_venv,
         "source_venv_detected": str(source_venv_python) if source_venv_python else "",
         "python_executable": selected_python,
-        "setup_hook": setup_hook.strip(),
-        "setup_hook_executed": False,
         "notes": notes,
     }
 

@@ -22,7 +22,7 @@ class ResearchBriefApplicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
-            def register_failed_plan(registry: object, *, names: object) -> None:
+            def register_failed_plan(registry: object, *, names: object = ()) -> None:
                 del names
                 registry.register(
                     "plan",
@@ -33,7 +33,7 @@ class ResearchBriefApplicationTests(unittest.TestCase):
                 )
 
             with patch(
-                "simple_ar.app.research_brief.register_research_capabilities",
+                "simple_ar.app.research_application.register_research_capabilities",
                 side_effect=register_failed_plan,
             ):
                 with self.assertRaisesRegex(
@@ -52,7 +52,8 @@ class ResearchBriefApplicationTests(unittest.TestCase):
         class FakeClient:
             model = "fake-brief-model"
 
-            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+            def ask_json(self, system: str, user: str, *, label: str = "", **kwargs: object) -> dict[str, object]:
+                del kwargs
                 if label == "research-planner":
                     return {
                         "questions": [
@@ -135,41 +136,31 @@ class ResearchBriefApplicationTests(unittest.TestCase):
                     topic="reliable agents",
                     session_root=root / "session",
                     local_documents=(paper,),
+                    queries=("reliability validation",),
+                    providers=("local_files",),
                     max_results=2,
                     max_chunks=20,
+                    llm_client=object(),  # use_llm=False must not invoke this object.
                 )
             )
 
             self.assertIn(result.status, {"ready", "partial", "needs_review"})
+            self.assertIn("reliability validation", result.plan.query_plan.queries)
+            self.assertEqual(result.plan.source_plan.sources, ["local_files"])
             self.assertTrue(result.brief_path.is_file())
             self.assertEqual(len(result.attempts), 5)
             self.assertEqual(
                 [attempt.capability for attempt in result.attempts],
                 ["document_ingest", "plan", "read", "search", "synthesize"],
             )
-            self.assertEqual(
-                [decision.action for decision in result.decisions],
-                ["accept", "accept", "accept", "accept", "accept"],
-            )
-            self.assertTrue(
-                (root / "session" / "attempts" / "plan-001" / "research_plan.json").is_file()
-            )
-            self.assertTrue(
-                (root / "session" / "attempts" / "search-001" / "search_result.json").is_file()
-            )
-            self.assertTrue(
-                (root / "session" / "attempts" / "document-001" / "document_bundle.json").is_file()
-            )
-            self.assertTrue(
-                (root / "session" / "attempts" / "read-001" / "read_result.json").is_file()
-            )
-            self.assertTrue(
-                (root / "session" / "attempts" / "synthesize-001" / "synthesis_result.json").is_file()
-            )
             manifest = json.loads(
                 (root / "session" / "session_manifest.json").read_text(encoding="utf-8")
             )
             self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["schema_version"], "session_manifest.v2")
+            for name in ("plan", "search", "documents", "read", "synthesis", "summary"):
+                self.assertTrue((result.session_root / manifest["state_refs"][name]["path"]).is_file())
+            self.assertEqual(result.brief_ref.path, manifest["state_refs"]["synthesis"]["path"])
 
     def test_cli_runs_the_same_local_document_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -197,12 +188,10 @@ class ResearchBriefApplicationTests(unittest.TestCase):
             self.assertIn("Status:", output.getvalue())
             sessions = list((root / "runs").iterdir())
             self.assertEqual(len(sessions), 1)
-            self.assertTrue(
-                (sessions[0] / "attempts" / "read-001" / "read_result.json").is_file()
-            )
-            self.assertTrue(
-                (sessions[0] / "attempts" / "synthesize-001" / "synthesis_result.json").is_file()
-            )
+            manifest = json.loads((sessions[0] / "session_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema_version"], "session_manifest.v2")
+            for name in ("read", "synthesis", "summary"):
+                self.assertTrue((sessions[0] / manifest["state_refs"][name]["path"]).is_file())
 
 
 if __name__ == "__main__":

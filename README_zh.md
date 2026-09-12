@@ -25,17 +25,16 @@ SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目�
   网络/LLM/CodeTask/实验/报告闭环；这证明的是有界基础流程，不是任意任务上的完整自主研究。
 - **研究源**：canonical session 可以通过统一连接器访问
   OpenAlex/Semantic Scholar/arXiv/本地文件，并执行有界文档摄取和证据卡片生成；
-  LLM 规划、有界阅读/筛选、paper notes 和综合需要显式开启。旧的 facet 扩展和多轮检索
-  仍属于冻结的 `simple-ar run/resume` 兼容路径，不是第二条 V2.8 主线。
+  LLM 规划、有界阅读/筛选、paper notes 和综合需要显式开启。旧八阶段的检索策略不再作为可执行路径支持。
 - **入口层级**：普通用户在 V2.8 只需要记住 `simple-ar research-session`；
   `research-session-continue` 和 `research-report` 是同一 session 的恢复/报告子命令。
-  `research-brief`、`research-experiment` 和 `research-code-task` 保留为分段、开发和诊断接口，
-  `simple-ar run/resume` 保留为旧八阶段兼容入口，均不再作为并行产品主线。
+  `research-brief` 保留为分段、开发和诊断接口，
+  旧 `research-experiment`、`research-code-task` 和 `simple-ar run/resume` 执行命令已退出；历史产物仍可读取。
 - **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：canonical session 可以显式把一个准备好的项目和一份 Code-Task TOML
   交给隔离的 Code-Task backend，再复用同一套 experiment、analysis、report 和 audit handoff。
-  V2.8 不包含候选矩阵或自主修复循环。
+  在显式配置时支持有界的成对测量和技术修复/复测；自主研究方向循环仍不属于 V2.8。
 - **延期的集成边界**：只读 tool schema、MCP 暴露和外部 Agent/Harness 适配器目前只作为边界或
   兼容面冻结。Claude Code、Codex、OpenCode 等 Harness 属于 V2.8 之后的工作，不是当前验收条件。
 - **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
@@ -59,6 +58,10 @@ cd SimpleAutoResearch
 ```bash
 uv sync
 ```
+
+框架本身不要求 scikit-learn。运行附带的传统机器学习示例及其测试时，使用
+`uv sync --extra examples`，并以 `uv run --extra examples ...` 运行命令；
+使用 pip 时安装 `pip install '.[examples]'`。
 
 创建本地环境变量文件：
 
@@ -108,31 +111,15 @@ uv run python examples/research_session_smoke.py
 provider 失败时不会用 fixture 结果冒充成功；如果提供 `--code-task-config`，可以接入一个
 准备好的项目，但 V2.8 每次只执行一个研究方向。
 
+如果只想做文献研究，可以同时省略 `--command` 和 `--code-task-config`。不提供 `--model` 时，
+session 会在有证据支持的 summary 处结束；提供模型时，可以继续生成 research-only Markdown 报告。
+该模式不会创建实验预算，也不会启动实验进程。
+
 以下命令是分段或兼容入口，不是第二条 V2.8 完整主线。只有在调试、恢复已有 handoff、
 验证旧配置或运行历史 benchmark 时才需要使用它们。
 
-### 2. 旧兼容路径 Research Report：文献优先报告
 
-```bash
-uv run simple-ar run --topic "agent simulation" --to-stage report --max-papers 5
-```
-
-如果希望把搜索源、query 和报告设置写成可复用配置，可以使用 run config。内置 research-report 示例使用 live academic sources、有边界的 full-text extraction，以及 research-only 报告生成：
-
-```bash
-uv run simple-ar run --config examples/research_report/configs/research_report.toml
-```
-
-如果只想做文献综述，可以先停在 `synthesize`，再从打印出的 run 目录生成研究报告：
-
-```bash
-uv run simple-ar run --topic "agent simulation" --to-stage synthesize
-uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
-```
-
-V2.4 的报告路径使用 Markdown 报告模板和 LLM Writer/Reviewer loop，支持短 citation key、报告审计产物、独立 variant 重跑，以及面向较大论文集合的 full-source / batch-refine 起草策略。实际命令可以参考 `examples/research_report/configs/research_report.toml` 和 [使用与配置](docs/USAGE_zh.md)。
-
-### 3. Code Task：已有代码库修改
+### 2. Code Task：已有代码库修改
 
 当你已经有一个项目，希望模型提出可审核的改进时，先写一个简短任务文件，例如 `tasks/improve_model.md`，说明希望修改什么、用什么 benchmark 判断效果。然后为自己的项目创建一个 TOML 配置：
 
@@ -173,84 +160,6 @@ uv run simple-ar status runs/<run-id>
 
 内置 standalone code-task 示例是 `examples/code_task_medium_review/configs/code_task.toml`，放在 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中作为辅助示例。
 
-### 4. 旧兼容路径 Research With Experiment：研究流程衔接代码实验
-
-当你希望研究流程先收集文献上下文，再衔接已有代码项目完成实验修改，并把代码证据写入最终报告时，使用这个模式。针对自己的项目，可以创建一个顶层 run config：
-
-```toml
-[run]
-topic = "research and improve my model"
-output_root = "runs"
-to_stage = "report"
-
-[llm]
-enabled = true
-# 在线阶段在有限 provider 重试后默认失败；只有明确接受降级结果时才设为 true。
-allow_fallback = false
-
-[search]
-offline = false
-max_papers = 5
-
-[research]
-# 可选：02-search 的 source planner。
-mode = "standard"  # lite | standard | strong
-sources = ["openalex", "semantic_scholar", "arxiv"]
-queries = ["research and improve my model"]
-cache = true
-
-[experiment]
-template = "code_task_project"
-timeout = 120
-
-[code_task]
-code_root = "path/to/your/project"
-# 可选。如果不提供，05-design 会根据研究产物和紧凑代码摘要生成任务文件。
-task_file = "tasks/improve_model.md"
-name = "my-research-code-task"
-
-[benchmark]
-command = "python benchmark.py"
-primary_metric = "accuracy"
-
-[benchmark.metric_directions]
-accuracy = "higher"
-latency_ms = "resource"
-
-[workspace]
-mode = "auto"  # auto | copy | git_worktree | sparse_copy
-
-[environment]
-mode = "current"
-```
-
-然后运行完整流程：
-
-```bash
-uv run simple-ar run --config path/to/your_pipeline.toml
-```
-
-这会创建一次正常的 8 阶段 run。在 `06-code` 中，系统会把配置中的项目准备到 `06-code/code_task_run/code_task/workspace`，构建 repo map 和 context pack，调用 LLM 生成 work plan 与 patch proposal，在隔离 workspace 内应用补丁并验证。`07-run` 会运行 patched benchmark，把指标投影到 canonical `results.json`，写出 `guard_report.json`，并在可用时比较嵌套 code-task 指标；`08-report` 会生成最终报告，并把嵌套的 work plan、patch、benchmark 和 comparison 产物作为确定性 code-task 证据写进去。
-
-内嵌路径的目标是端到端跑完，因此会在隔离 workspace 中自动批准 patch plan。如果你希望每一步都先人工审核，应使用 standalone `code-task` 命令。内置 demo 配置在 `examples/full_pipeline_tiny_mlp/configs/pipeline.toml`；完整说明见 [使用与配置](docs/USAGE_zh.md#8-阶段流程中的内嵌-code-task)。如果想保留用户写好的 `task.md` 作为硬约束，同时让 `05-design` 融合前面研究上下文，可以设置 `[implementation].task_handoff = "merge"`。
-
-### 5. 兼容/高级路径 Greenfield Experiment：从零生成受控实验项目
-
-当任务还没有现成源码项目时，可以使用 greenfield 路径。当前实现会复用和已有代码任务相同的 code-task 引擎：`05-design` 先写出 experiment contract，`06-code` 在 `06-code/code_task_run/` 下创建 `kind = "greenfield"` 的嵌套 code-task run，再把生成项目投影回 `06-code/generated_project/` 供 `07-run` 兼容使用。从 `code` 或 `run` 重跑时，旧的关键产物默认会先归档；报告阶段会读取 canonical results、resource plan、guard status 和 code review 信号，而不是直接从 stdout 猜测实验结论。
-
-轻量公开示例位于 `examples/greenfield_lightweight_training/configs/greenfield_training.toml`。它会让 pipeline 从零生成一个 CPU-only 的中等偏轻量文本分类实验套件，使用本地确定性数据、多个 baseline/model condition 和可解析指标：
-
-```bash
-uv run simple-ar run --config examples/greenfield_lightweight_training/configs/greenfield_training.toml --to-stage run
-```
-
-这个示例适合做本地 greenfield 结构检查：它会测试任务 Markdown handoff、architecture/file planning、多文件生成、code review、run guard 和 diagnosis。更强的 greenfield 任务可以复用同样的配置形态，但需要有意识地提高资源预算，并明确任务自己的指标 schema。
-
-Greenfield code-task run 还会通过扫描当前 Python 环境写出
-`code_task/meta/dependency_advice.json`。终端只展示和任务相关的可用库子集，JSON
-则保留完整 package snapshot，供规划和审计使用。评审失败时，通用可修复问题
-（例如核心文件仍是 fallback、缺少 artifact writer）可以进入有限轮次 LLM repair；
-修复后的文件 metadata 会同步后再进入 validation 和 benchmark。
 
 ## 当前能力边界
 

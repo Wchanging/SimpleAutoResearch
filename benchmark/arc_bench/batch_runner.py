@@ -356,23 +356,6 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
         help="Override code-task --planning-mode for every execute call; omit to keep each TOML default.",
     )
     parser.add_argument(
-        "--repair-context",
-        choices=("full", "raw_logs_only"),
-        default=None,
-        help="Ablation passthrough for code-task execute repair context.",
-    )
-    parser.add_argument(
-        "--no-repair-memory",
-        action="store_true",
-        help="Ablation passthrough: omit previous repair memory from code-task repair prompts.",
-    )
-    parser.add_argument(
-        "--contract-context",
-        choices=("full", "minimal", "plan_only"),
-        default=None,
-        help="Ablation passthrough for code-task prompt contract context.",
-    )
-    parser.add_argument(
         "--planning-source-state-file",
         default=None,
         help=(
@@ -1225,9 +1208,6 @@ class RunnerContext:
     repair_rounds: int | None = None
     planning_review_rounds: int | None = None
     planning_mode: str | None = None
-    repair_context: str | None = None
-    use_repair_memory: bool = True
-    contract_context: str | None = None
     planning_source_state_file: Path | None = None
     review_gate: str | None = None
     arc_root: Path | None = None
@@ -1254,9 +1234,6 @@ def _context_from_args(args: argparse.Namespace) -> RunnerContext:
         repair_rounds=getattr(args, "repair_rounds", None),
         planning_review_rounds=getattr(args, "planning_review_rounds", None),
         planning_mode=getattr(args, "planning_mode", None),
-        repair_context=getattr(args, "repair_context", None),
-        use_repair_memory=not bool(getattr(args, "no_repair_memory", False)),
-        contract_context=getattr(args, "contract_context", None),
         planning_source_state_file=(
             _abs(repo_root, args.planning_source_state_file)
             if getattr(args, "planning_source_state_file", None)
@@ -1418,12 +1395,6 @@ def _run_topic(
         execute_cmd.extend(["--planning-mode", ctx.planning_mode])
     if ctx.llm_retry_attempts > 0:
         execute_cmd.extend(["--llm-retry-attempts", str(ctx.llm_retry_attempts)])
-    if ctx.repair_context:
-        execute_cmd.extend(["--repair-context", ctx.repair_context])
-    if not ctx.use_repair_memory:
-        execute_cmd.append("--no-repair-memory")
-    if ctx.contract_context:
-        execute_cmd.extend(["--contract-context", ctx.contract_context])
     if planning_source_run is not None:
         execute_cmd.extend(["--reuse-planning-from", _rel(ctx.repo_root, planning_source_run)])
     if ctx.review_gate:

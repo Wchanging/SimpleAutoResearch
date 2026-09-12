@@ -3,14 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 
-from simple_ar.core.artifacts import read_jsonl, write_text
-from simple_ar.core.pipeline import Context
-from simple_ar.core.stages import Stage
 from simple_ar.literature.models import Paper
-from simple_ar.pipeline_stages.research import execute_search
-from simple_ar.research.sources import SearchProviderRegistry, default_search_provider_registry
+from simple_ar.research.sources import SearchProviderRegistry, default_search_provider_registry, SearchRequest, search_sources
 from simple_ar.research.sources.base import SearchQuery, SearchResponse
 
 
@@ -75,23 +70,10 @@ class SearchProviderRegistryTests(unittest.TestCase):
             ("arxiv", "local_files", "openalex", "semantic_scholar"),
         )
 
-    def test_execute_search_accepts_a_replacement_provider_registry(self) -> None:
+    def test_search_accepts_a_replacement_provider_registry(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             root = Path(tmp)
-            run_dir = root / "run"
-            write_text(run_dir / "01-plan" / "problem.md", "# Problem\nStudy a fixture source.\n")
-            ctx = Context(
-                run_dir,
-                "fixture topic",
-                config={
-                    "research_sources": ["custom_source"],
-                    "max_papers": 1,
-                    "allow_fixture_fallback": False,
-                },
-                current_stage=Stage.SEARCH,
-            )
-
             class ReplacementConnector:
                 source_name = "custom_source"
 
@@ -113,11 +95,12 @@ class SearchProviderRegistryTests(unittest.TestCase):
                     )
 
             registry = SearchProviderRegistry({"custom_source": ReplacementConnector})
-            with patch("simple_ar.pipeline_stages.research.put_cache", return_value=None):
-                execute_search(ctx, provider_registry=registry)
-
-            papers = read_jsonl(ctx.run_dir / "02-search" / "papers.jsonl")
-            self.assertEqual([paper["id"] for paper in papers], ["replacement-paper"])
+            result = search_sources(
+                SearchRequest(queries=("fixture topic",), providers=("custom_source",),
+                              max_results_per_query=1, cache_dir=root / "cache"),
+                registry=registry,
+            )
+            self.assertEqual([paper.id for paper in result.papers], ["replacement-paper"])
 
 
 if __name__ == "__main__":

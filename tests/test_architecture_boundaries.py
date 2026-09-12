@@ -42,8 +42,8 @@ class ArchitectureBoundaryTests(unittest.TestCase):
     def test_canonical_session_import_does_not_load_frozen_pipeline(self) -> None:
         probe = (
             "import sys; "
-            "import simple_ar.app.research_session; "
-            "import simple_ar.report.service; "
+            "import simple_ar.app.research_application; "
+            "import simple_ar.report.writing; "
             "assert not any(name.startswith('simple_ar.pipeline_stages') "
             "for name in sys.modules), sorted(name for name in sys.modules "
             "if name.startswith('simple_ar.pipeline_stages'))"
@@ -60,7 +60,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
     def test_canonical_research_modules_do_not_load_compatibility_layers(self) -> None:
         probe = (
             "import sys; "
-            "import simple_ar.app.research_session; "
+            "import simple_ar.app.research_application; "
             "import simple_ar.research.sources.capability; "
             "import simple_ar.research.evidence.reader; "
             "import simple_ar.research.synthesis; "
@@ -68,6 +68,22 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             "if name.startswith('simple_ar.pipeline_stages') or "
             "name.startswith('simple_ar._legacy')); "
             "assert not forbidden, forbidden"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+
+    def test_canonical_application_does_not_load_legacy_report_adapter(self) -> None:
+        probe = (
+            "import sys; "
+            "import simple_ar.app.research_application; "
+            "import simple_ar.report.projection; "
+            "assert 'simple_ar.app.research_report' not in sys.modules"
         )
         completed = subprocess.run(
             [sys.executable, "-c", probe],

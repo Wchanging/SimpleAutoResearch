@@ -6,9 +6,8 @@
 
 ## 工作流预设
 
-V2.8 面向普通用户的正式工作流只有 `research-session`：它把 research-to-report 的阶段
-按固定顺序串起来，并在同一个 session 中保存 handoff、attempt、artifact 和审计结果。
-当前 8 阶段 pipeline 是旧入口的兼容投影，不是第二条正在演进的产品路线。
+正式研究入口是 `research-session`，在同一会话中维护 attempt、产物、报告与审计，
+按请求选择文献或实验任务。旧八阶段执行器已退出，不再作为兼容工作流运行。
 SimpleAutoResearch 仍保持 module-first，但模块化发生在内部 capability 和应用层；它让
 测试、恢复、开发者接口以及后续 workflow 可以复用能力，不意味着普通用户需要在多条入口
 之间自行拼接完整流程。
@@ -20,10 +19,10 @@ research-session
   -> research_design -> experiment -> analysis -> report -> report_audit
 
 内部可复用/分段接口
-research-brief / research-experiment / research-code-task
+research-brief
 
-临时兼容入口
-simple-ar run/resume -> 旧八阶段 artifact projection
+历史读取入口
+simple-ar status RUN_DIR -> 只读展示存档
 ```
 
 ## Capability 运行
@@ -47,31 +46,27 @@ capability。内置范围包括 `research_brief`、`survey`、`experiment`、`pa
 继续使用其中持久化的预算。
 
 如果调用方需要串起多个 capability，应由 application 层按明确顺序调用
-`SessionController.execute()`。它会持久化每个 attempt，并在 decision 不允许继续时停止。
+`SessionController.execute_attempt()`。它持久化执行事实；是否停止、继续或完成研究由应用决定。
 进程恢复时应先加载 session、查看状态和 attempt lineage，再显式构造下一次调用；core
 不会静默重跑中断的 attempt，也不会替领域规则选择所谓最佳结果。
 如果已经人工确认发生了中断，调用方可以使用
 `SessionController.recover_interrupted()`，先把遗留的 running attempt 收束为明确失败，
 再显式构造 retry 或 repair attempt。该方法不会自动重试，也不会覆盖已有的 result envelope。
 只要前一个 attempt 仍标记为 `running`，controller 就会拒绝新 attempt，避免恢复前悄悄形成第二条活动分支。
-创建后续 attempt 前，controller 还会根据持久化的当前 attempt 检查实际调用的
-capability 是否属于白名单转移。这可以拦住被省略或被替换的路径，同时保留已列出的回退
-以及同能力 repair。
-controller 对续跑调用执行同样的检查，并在创建新 attempt 前拒绝缺失的输入 artifact。
+Core 在创建 attempt 前检查能力范围、预算和输入 artifact；研究顺序归应用负责，
+执行边界不再施加第二套固定阶段转移规则。
 
 如果后一个 capability 需要使用前一个 attempt 的已声明输出，应调用
 `SessionController.attempt_output_refs()`。它只把 attempt 内的相对路径转换成
 session 根目录引用，不复制或合并产物；使用哪个 attempt、哪个输出仍由调用方决定。
 如果需要从较早的 `completed` 或 `failed` attempt 开始另一条比较路径，可以在
-`SessionController.execute()` 中传入它的 `parent_attempt_id`。controller 会记录该
-父节点，并按父节点的 capability 校验新的转移；不传时仍沿用当前 attempt 的线性行为。
+`SessionController.execute_attempt()` 中传入它的 `parent_attempt_id`。controller 校验并记录该
+父节点；不传时仍沿用当前 attempt 的线性行为。
 controller 不会自行推断分支，也不会替调用方选择结果。需要展示某个节点的父链时可使用
 `attempt_lineage()`；它只读取持久化的 attempt manifest，不合并产物或调度新工作。
 
-`research-session` 应用现在通过只读的 `recommended_transition` 属性消费这个边界：执行和分析
-都通过时建议继续到 `report`，其他结果则返回 `experiment` 边界，由调用方明确决定修复或重新设计。
-这个建议使用核心 transition policy 和 session budget，不会创建 attempt、重新运行命令，也不会把失败
-session 伪装成成功。
+历史研究会话读取器展示记录过的 `next_capability` 和执行证据，不再用已退出的策略
+重新推算下一步；新研究的动作选择归 ResearchApplication 负责。
 
 如果库调用方只想得到一个内存中的聚合值，可以使用
 `research.brief.build_research_brief()` 只保留为内存中的兼容视图。默认 registry 刻意不再
@@ -80,7 +75,9 @@ session 伪装成成功。
 
 下面的 `research-brief` 是分段/开发入口，不是 V2.8 完整主线。面向普通用户的完整流程应
 优先使用 `simple-ar research-session`；需要只构建研究 handoff、调试阅读或从已有 handoff
-开始时，才使用这些较小的组合入口。`research-brief` 只负责一条明确的路径：
+开始时，才使用这些较小的组合入口。`research-brief` 现在只是参数/返回值适配器，
+请求同一个 `ResearchApplication` 生成文献摘要，采用其生命周期及默认请求/token 预算，
+不再维护独立编排器。其研究能力顺序为：
 
 ```text
 plan -> search -> document_ingest -> read -> synthesize
@@ -100,9 +97,9 @@ uv run simple-ar research-brief --topic "reliable agents" \
   --output-root runs/research-brief
 ```
 
-命令会在输出目录下创建带时间戳的 session。每次交接保留在独立 attempt 中，通常位于
-`attempts/plan-001/`、`attempts/search-001/`、`attempts/document-001/`、
-`attempts/read-001/` 和 `attempts/synthesize-001/`；规范输出分别是
+命令会在输出目录下创建带时间戳的 v2 session。每次交接保留在动态命名的独立 attempt 中，
+实际路径从 `session_manifest.json.state_refs` 读取；下游命令使用 CLI 输出的
+`Synthesis handoff` 路径，不再拼接固定 attempt ID。规范输出分别是
 `research_plan.json`、`search_result.json`、`document_bundle.json`、`read_result.json` 和
 `synthesis_result.json`。能力结果与 attempt manifest 会记录状态和 lineage。该入口不会
 静默重试或覆盖旧 attempt；`--query`、`--provider`、`--max-results`、`--max-chunks` 和
@@ -115,13 +112,8 @@ LLM client 完成研究规划、有界 Read 筛选/重排、paper notes 和综�
 Read provenance、`planner: llm` 与 `generation_mode: llm`。缺少凭据、传输失败或模型返回格式
 错误时，对应 attempt 会失败，不会静默伪造模型结果。
 
-下一条小组合入口是 `simple-ar research-experiment`。它接收前一个入口生成的
-research direction，调用现有执行后端运行一次明确的命令，再把规范化的 `results.json`
-交给现有结果分析能力。输入是持久化的 `research_brief.v1` 或 `synthesis_result.v1`，因此
-方向到实验的交接仍然明确可检查。执行失败也会作为证据进入分析，但 retry、repair 和实验
-选择仍由调用方负责。
-传入 `--model NAME` 会额外启用共享 LLM 的结果分析；省略它时分析保持 deterministic，
-实际使用的模式会记录在 analysis capability 的 provenance 中。
+分段 `research-experiment` 创建器已退出。实验与分析能力继续由正式应用复用，
+不再为旧 synthesis 文件另建一套会话生命周期。
 
 如果希望把完整流程保留在同一个 session 中，应使用唯一正式主线
 `simple-ar research-session`。它复用相同的
@@ -131,6 +123,10 @@ capability。默认实验命令仍由调用方给出；传入 `--code-task-confi
 会改用已有的 project-style Code-Task backend，项目、benchmark、workspace、baseline 和
 执行设置仍由 TOML 管理，最终输出会规范化为同一份 canonical result。这仍是受控组合，
 不是不受限制的研究循环。
+
+如果既没有提供实验命令，也没有传入 `--code-task-config`，同一个入口也支持 literature-only
+组合：在有证据支持的 summary 处结束，不创建 execution 请求；提供模型时，可以继续进入
+research-only 报告路径。这是明确支持的无实验形态，不会隐式生成占位实验。
 
 如果 session 的实验失败但仍保留了 design 和 analysis handoff，可以显式追加一次恢复实验，
 复用已有文献和研究设计，不重新检索：
@@ -144,88 +140,19 @@ uv run simple-ar research-session-continue \
   --command python -c "print('accuracy: 0.90')"
 ```
 
-它只会追加 `experiment-002` 和 `analysis-002`，并把失败的 `experiment-001` 记录为显式父节点。
-修正后的命令由调用方提供；不会重复 search、design 或代码生成。每个 session 只允许一次这种恢复，
-同时保留原有 attempt 和报告交接槽位，不覆盖旧产物。恢复成功后继续使用
-`simple-ar research-report`；恢复失败仍会持久化并以非零 shell 状态返回，方便检查。
+对于 canonical `session_manifest.v2`，它会创建动态命名的新 experiment attempt，把失败候选记录为父节点，
+然后复用已有文献和 design 做确定性 analysis。修正后的命令由调用方提供；不会重复 search 或 design，
+原有 attempt 也不会被覆盖。这个边界只处理普通显式实验的技术失败；成对实验、数据准备和 CodeTask
+使用各自的有界恢复路径。科学负结果是证据，不会被静默重跑。旧 v1 session 仍保留固定的
+`experiment-002`/`analysis-002` 兼容行为。
 
-同一个 session 还可以通过 `run_research_report_session()` 继续进入现有 Report 边界。
-调用方提供 section drafts、`ReportContext` 和需要追踪的 source refs；适配器会追加
-`report` 与 `report_audit` attempt，不复制或替换之前的 analysis 产物。因此
-`research-session` 前缀在实验和分析完成后会报告 `ready_for_report`，真正的报告 continuation
-完成后 session 才会关闭。section drafts 仍由调用方明确提供，writer/revision 策略不会被
-塞进生命周期 controller。
+使用 `--no-report` 创建的正式 session 可通过 `research-report` 补齐报告动作，复用既有证据
+和测量。Writer 与检查点统一在 `report/writing.py`，组装和审计通过同一应用生命周期完成。
 
-已有的 `simple-ar status <session-root>` 命令也支持 capability session 的
-`session_manifest.json`。它只报告持久化的 session 检查点、attempt 状态、有限预算和最后一次
-决策，不会重新运行或改写任何 capability；旧的 `manifest.json` status 路径保持不变。
-
-如果希望由现有的 Writer/Reviewer 实现负责生成草稿，可以使用
-`run_research_report_agent_session()`。它仍然只接收紧凑的 report context 和 memory，
-另外显式接收已有的 template、runtime config、LLM client 与 tool gateway，然后把通过
-校验的 section drafts 交给同一套 report 和 audit capability。Writer 轨迹会保存为
-`inputs/report_agent_result.json`，并作为 report attempt 的输入引用；最终 `report.md`
-仍是唯一的成稿正文。这个入口只是复用当前 report agent 的适配器，不复制 prompt，也
-不新增另一套报告 pipeline。
-
-对于标准的“文献到实验”路径，`build_research_session_report_inputs()` 会从
-`ResearchSessionResult` 确定性整理紧凑的 context 和 memory：持久化的 synthesis、选中的
-论文元数据、真实执行结果和结果分析 claims 都会保留为报告输入来源。
-`run_research_session_report_agent()` 是这条路径的轻量便捷入口，但 template、运行预算和
-LLM client 仍由调用方选择；它只是报告交接，不是自动研究调度器。该入口只接受执行和分析
-均通过的 session（`report_ready=True`）。如果需要为失败或部分结果生成诊断报告，应改用
-底层的显式报告边界，由调用方明确提供草稿和证据。
-
-进程结束后，如果需要从已有 session 继续报告阶段，可以调用
-`load_research_session_result()`。它只根据 `session_manifest.json` 以及声明的
-`plan-001`、`search-001`、`document-001`、`read-001`、`synthesize-001`、可选的 `design-001`、`experiment-001`
-和 `analysis-001` typed handoff 恢复同一个结果，不会联网、执行命令、重试或自行挑选“最好”的
-结果。因此，调用方可以明确地把一个已完成的实验 session 交给 Report/Audit，而不必重跑
-前面的阶段；缺失或格式错误的 handoff 会以 `ResearchSessionError` 失败。
-
-如果需要把研究方向交给真实的代码实验，可以在应用层调用
-`simple_ar.app.research_code_task.run_research_code_task_session()`。它读取持久化的
-`synthesis_result.v1` 或 `research_brief.v1`，复用现有 Code-Task backend 完成隔离、代码
-生成、验证、执行和结果分析，并把真实 execution/analysis refs 留在同一个 session 中。
-V2.8 路径刻意只执行一个明确选定的研究方向。多候选比较要等单方向路径在真实准备项目
-上验证稳定后再考虑，不作为当前主流程的一部分。
-
-需要从命令行运行这一窄路径时，可以直接复用已有 Code-Task TOML：
-
-```bash
-uv run simple-ar research-code-task --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
-  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
-  --output-root runs/research-code-task
-```
-
-加入 `--with-report` 后，会在同一个成功的 session 上继续使用已有的实验报告
-Writer/Reviewer 和 audit：
-
-```bash
-uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model "$SIMPLE_AR_MODEL" --with-report
-```
-
-只有执行和结果分析都通过时才允许这次接续；它不会重试，也不会把失败 session 伪装成正式报告。
-
-该命令只执行一个研究方向。它要求配置中的 `[execute].use_llm = true`，并且当前只接入已有 project-style
-Code-Task，不会替用户自动创建 GPU 环境或任意 greenfield 工程。
-
-完成或失败的单个 Code-Task session 可以在后续进程中通过
-`load_research_code_task_session_result(session_root)` 恢复。该入口只读取 session manifest、
-声明的 synthesis input，以及 `canonical_results.2.5` 和 `analysis_handoff.v1` 输出；不会重新
-执行 Code-Task、访问 provider、重试或在多个产物中自行选优。handoff 缺失或引用不一致时会以
-`ResearchCodeTaskSessionError` 明确失败。
-
-如果 session 在运行时显式为报告阶段保留了下一能力，可以先用上述恢复函数读取它，
-再调用 `run_research_code_task_report_agent(session, ...)` 继续。这个 wrapper 要求持久化的
-最后一条 decision 明确把 `report` 作为下一能力，然后复用通用 Writer/Reviewer 与
-Report/Audit 路径；已经收束的 session 不会被偷偷重新打开。
-
-`simple_ar.app.research_code_task_report` 可以继续把上述 session 的 execution 和 analysis
-证据交给通用 Report/Audit。它只生成紧凑的 context、metric sources 和 claim evidence，
-再复用现有 report assembler/audit；section drafts 仍需由调用方提供，不能把这条适配器
-误解为自动论文 writer。
+历史 session 可检查和读取，但不再由第二套 Writer/report/audit 执行器续写。
+`build_research_session_report_inputs()` 和 `build_code_task_report_inputs()` 只投影已有证据，
+不执行或修改会话。分段 `research-code-task` 创建入口已退出；完整任务使用
+`research-session --code-task-config`。
 
 如果应用需要使用内置适配器，也可以调用
 `research.register_research_capabilities(registry, names=...)`。不传
@@ -297,9 +224,7 @@ Read 在生成和恢复时会检查 cards 的 `evidence_refs` 是否仍指向 bu
 对应的 `AnalysisResult` 还提供保守的证据状态：`passed`、`failed`、`blocked`、
 `incomplete` 或 `metric_below_target`。它要求显式的 execution handoff，不会自动安排
 retry 或阶段转移；持久化的独立分析还会写出 `analysis_status.json`。
-需要把分析结果交给 session policy 时，可使用
-`research.decisions.transition_request_from_analysis()`。它只生成已有 transition 输入，不执行下一步、
-不自动重试，也不覆盖原有 attempt；恢复策略仍由调用方和核心 session budget 负责。
+应用直接消费分析证据并负责下一动作。
 
 如果 session 只需要审查已经组装好的报告，可以显式注册
 `report.audit.run_report_audit_capability()`。调用方传入报告 artifact 引用和 typed report
@@ -323,12 +248,13 @@ retry 或阶段转移；持久化的独立分析还会写出 `analysis_status.js
 plan -> search -> read -> synthesize -> report
 ```
 
-当前现实边界：
-
-- `run --to-stage report` 仍会执行 design/code/run，因为默认 pipeline 是教学 demo。
-- 如果只想做纯文献流程，先停在 `synthesize`，再 resume 到 `report`；`auto` 模式会因为没有 `results.json` 而生成 research-only report。
+未提供执行命令或 CodeTask 配置时，`research-session` 使用纯文献路径，不启动实验。
+报告属于同一生命周期；只有显式 `--no-report` 才省略该交付。
 
 ### 2. Code Task：已有代码库
+
+普通 `execute` 默认只生成 patch plan；显式执行 `--to-step work-plan` / `--to-step batch`
+或已有 work plan 时才使用分批路径。交互执行遵循同一规则，分批任务的作用域、批准与恢复记录保留。
 
 适合已经有代码，希望进行有目标的修改、优化、修复或 benchmark improvement。
 
@@ -347,7 +273,7 @@ init workspace -> index code -> map repo -> probe environment
 - 源项目会准备到 `code_task/workspace`。已有项目默认 `auto`：优先为已有 commit 的 Git 项目创建 detached `git_worktree`，如果 Git 条件不满足则降级为受保护的 `copy`，并记录原因与下一步建议。monorepo 场景下会在仓库根创建 worktree，并把对应项目子目录作为可编辑 project root。实验性 `sparse_copy` 只复制配置的 include patterns，并始终排除 data/model/cache/secret-like 路径。原始代码不会被修改。
 - Patch application 必须经过显式人工 approval gate。
 - Edit proposal 是保守 old/new replacement，不是自由形式重写。
-- 默认 editor backend 是 `controlled_patch`；backend interface 现在已经显式存在，后续外部 agent 可以接到同一套安全和审核 gate 后面。
+- 受控补丁提案与应用直接调用实现，重复编辑适配层已退出；产物保留 `controlled_patch` 来源标记。外部 Harness 接入属于后续工作。
 - 同一个文件可以有多个有序 edit，但每个 `old` block 必须保持唯一匹配；无效 proposal 会在写文件前停止。
 - `code-task execute` 可以推进下一步，但会在 plan approval 和 proposal review 处停下，除非用户显式继续。
 - Work-plan item 应该是可执行的 implementation batch。executor 在选择第一个 active batch 时会跳过明显的纯分析 item，因此 LLM 生成的“先 inspect 项目”不会意外限制后续 edit 阶段。
@@ -358,99 +284,55 @@ init workspace -> index code -> map repo -> probe environment
 
 内置示例：
 
-- `examples/research_report/`：纯 research-only 流程，覆盖 search/read/synthesize/report，并支持 live academic sources 和 report variant。
+- `examples/research_session_smoke.py`：正式研究应用 smoke；纯文献报告也使用同一应用，不再提供旧 pipeline 配置。
 - `examples/code_task_medium_review/`：standalone code-task 流程，目标是一个多模块 review classifier，入口是 `main.py`，使用 JSON config，运行时有进度输出，任务自然涉及 feature extraction、model scoring 和配置文件之间的联动。
-- `examples/full_pipeline_tiny_mlp/`：完整 8 阶段流程，目标是轻量 NumPy MLP benchmark，适合不依赖 GPU 的端到端本地检查。
+- `examples/code_task_digits_mlp/`：独立 CodeTask 的轻量 NumPy MLP benchmark，适合无 GPU 的真实 CPU 测量。
 
-### 3. Research With Experiment：研究衔接实验（兼容/高级用例）
+### 3. Research With Experiment：研究衔接实验
 
-适合希望从研究想法走到可执行实验和有结果支撑的报告。
+使用 `research-session`，显式提供执行命令或 `--code-task-config`。
+应用负责研究生命周期；CodeTask 在准备好的工作区实现修改，experiment 能力负责实测。
 
 概念流程：
 
 ```text
-plan -> search -> read -> synthesize -> design experiment
--> template codegen or embedded code-task -> run benchmark -> report
+plan -> search -> document ingest -> read -> synthesize -> design
+-> 按请求准备/实现 -> experiment -> analysis -> report -> audit
 ```
 
-当前状态：
+- 研究目标与限制通过 research handoff 传给 CodeTask。普通修改只需一份批准后的 patch plan；
+  显式请求或已有 work plan 的任务保留分批路径。
+- 实现产出冻结的 patch、validation、review 和计划证据；通过这些检查不等于科学上有提升。
+- 实验结果和对照保留执行来源。失败进程不构成有效测量，合法负结果也不意味着应无限修复。
+- 报告使用已记录的文献、实现和实验证据。机械审计通过不等于论文达到发表质量或语义已经正确。
+- 恢复报告不能重跑已完成实验。入口参见上方会话命令与 `examples/research_session_smoke.py`；
+  离线 smoke 使用 fixture，不是真实科研验收。
 
-- `06-code` 可以生成白名单 template experiment、为已有项目准备内嵌 code-task workspace，也可以在没有现成源码时调用统一 code-task greenfield engine。greenfield 情况下，真实嵌套 run 位于 `06-code/code_task_run/`，兼容产物会再投影回 `06-code/generated_project/`。
-- `--experiment-template code_task_project` 是通用内嵌 handoff，会接入 code-task workflow。它接受 `--code-task-config`，也接受显式 `--code-root`、可选 `--task-file` 和 `--benchmark-command`。如果没有 task file，`05-design` 会基于前面研究产物和紧凑代码摘要生成 `generated_code_task.md`。
-- 内嵌生成任务会包含来自 synthesis/design artifacts 的 Research-to-Code Bridge，让 code-task planning 能看到方法迁移线索、实现假设、指标契约、消融目标、资源约束和风险提示。
-- 旧入口 `simple-ar run --config ...` 仍适合保持多参数兼容 run 可读、可复现；V2.8 普通用户
-  应优先使用 `simple-ar research-session`，不要把旧配置当作新的研究能力入口。
-- `--experiment-template llm_code_task_toy_spam` 仍保留为 bundled smoke-test template。
-- 内嵌路径是端到端的：它会构建和 standalone code-task 一致的 repo map / context pack、work plan、attempt/batch 证据，然后在准备好的 workspace 内自动批准 patch plan。严格的串行依赖链会合并为一个有界 batch（最多 3 个 work item、4 个目标文件），避免实现、接线和配置被静默拆到不同 attempt。此类 batch 通常使用 `large` budget；内嵌路径会读取 Code-Task TOML 的 `[execute].allow_large_edits`，没有显式批准时会保留产物并以清晰的失败状态结束。需要人工检查较大 proposal 时，standalone code-task 仍然是更合适的入口。
-- Report generation 有保护：只有 citation、metric visibility、fixture disclosure 和 toy-demo boundary 检查通过时，才接受 LLM draft。
+## 历史八阶段产物
 
-## 旧八阶段兼容投影
+旧八阶段执行器已经删除。`run`、`resume`、`research-code-task` 和
+`research-experiment` 拒绝执行并提示使用 `research-session`；旧模板参数不再代表可执行工作流。
 
-旧的 8 阶段 pipeline 仍然是一个可复现的兼容 workflow preset，但不再是 V2.8 的正式主线：
-它保留旧配置、阶段目录和历史 reader 所需的 artifact 形态；新的研究规则只能进入 canonical
-capability，旧入口不再新增业务逻辑。待真实消费者迁移并通过历史格式回归后，兼容投影按主计划
-删除。
-
-```text
-01 plan        限定主题和研究问题
-02 search      检索论文 metadata、全文和本地 chunks
-03 read        筛选、排序并结构化阅读检索结果
-04 synthesize  分析主题、gap 和可实验假设
-05 design      创建实验计划
-06 code        生成实验代码或准备内嵌 code task
-07 run         执行实验并解析指标
-08 report      写带引用的 Markdown 报告
-```
-
-| 阶段 | 主要输出 | 目的 |
-| --- | --- | --- |
-| `plan` | `goal.md`, `problem.md` | 把主题收束成具体研究问题；启用 LLM 时由 LLM 支持。 |
-| `search` | `papers.jsonl`、`search_meta.json`、`documents/`、`research_index/` | 检索和摄取 metadata/全文，记录 provider provenance，并构建本地 chunks。它可以为了预算做候选选择，但不做语义阅读审查。 |
-| `read` | `review/`、`paper_notes.json`、`notes.md` | 对检索结果做筛选和阅读优先级排序，再把 shortlist 转成规范化 Paper Brief；启用 LLM 且检索量较大时，先按 title/abstract 小批次粗筛，再重排保留集合。 |
-| `synthesize` | `synthesis_brief.json`、`synthesis.md`、`hypothesis.md` | 基于 read 阶段 Paper Brief 分析主题、gap、有限 ideas 和可测试假设。默认推导保持确定性；显式启用 LLM 时可以提出有界候选，但每条 motivation reference 都会对照输入证据校验。 |
-| `design` | `experiment_plan.json`、`experiment_contract.json`、`result_schema.json`、`resource_plan.json`、`dependency_plan.json`、`domain_profile.json`、`contract_validation.json` | 选择安全实验模板，并写出可执行契约、指标 schema、资源/依赖预算、domain profile 和代码前检查。 |
-| `code` | `code_task_run/`、`generated_project/`、`experiment.py` 或模板代码 | 基于 design contract 准备内嵌已有项目 code-task、运行统一 greenfield code-task 生成，或写出白名单模板实验。 |
-| `run` | `results.json`、`guard_report.json`、`stdout.txt`、`stderr.txt` | 执行实验，写出 canonical results，并在报告前检查缺失/异常指标。 |
-| `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | 基于模板写带 citation 的报告，并保留有界 source backtracking、报告记忆和审计产物；启用 LLM 时由 LLM 支持。 |
+现有阶段目录存档不会被删除或改写。`status RUN_DIR` 可以展示其中记录的 manifest 和 pipeline state。
+私有接口 `_legacy.documents.load_search_document_bundle(search_dir)` 可只读加载历史 Search
+目录，不创建运行时 Context。历史产物名称描述的是存档证据，不是另一套可执行 pipeline。
 
 ## Search 与 LLM 边界
 
-Search 是检索入口，不是完整证据引擎。它会收束研究问题、选择 source 顺序、检索候选文献、记录 provider provenance，并构建 document/full-text/index 产物。它可以为了预算做候选排序和截断，但语义筛选、结构化阅读、综合和实验契约分别由后续阶段负责。
+Search 检索记录并保留来源；文档摄取处理本地或允许访问的远程正文，Read 选择和分析证据，
+Synthesis 综合证据，Design 提出实验方案。缺少全文应保留为明确限制，不能声称已完成全文阅读。
 
-普通运行默认只保留紧凑产物：
-
-```text
-02-search/
-  papers.jsonl / search_meta.json
-  documents/       # 标准化 document records，以及 full-text/cache manifests
-  research_index/  # 可迁移 chunks 与本地索引 metadata
-```
-
-`03-read` 负责筛选、重排和 Paper Brief。LLM 模式下，它会先并发粗筛紧凑 title/abstract 批次，再给保留集合分配阅读优先级、证据角色和 synthesis hint。`04-synthesize` 默认生成 `synthesis_brief.json`、`synthesis.md` 和 `hypothesis.md`；旧的 cards/evidence pack 诊断产物只在 `[run].debug_artifacts = true` 时保留。`05-design` 负责 experiment contract。
-
-当 `[run].debug_artifacts = true` 时，search 还会保留 planning 文件、retrieval traces、retrieval-selection rows、coverage-review reports 和 section tables。V2.8 research 路径不再生成超前的 Tool/MCP handoff 产物；它们属于后置的 external Harness 阶段。
-
-共享加速索引默认放在 run 目录之外的 `.simple_ar_cache/research_index`，按 run/source metadata 组织。run-local 的 PDF 下载缓存和 extracted text 属于可重建内容，可以用 `simple-ar clean` 预览和清理。
-
-LLM 参与是有边界的。research planner 可以使用 deterministic、`auto` 或 LLM 模式；coverage check 和本地 novelty check 只是风险信号，不是原创性证明。`--no-llm` 会让 plan/read/synthesize/report 使用 deterministic fallback 文本。
-
-完整 search-stage 文件树和逐文件说明见 [使用与配置](USAGE_zh.md)。search、cache、parser 和 debug artifact 配置见 [配置参考](CONFIG_REFERENCE_zh.md)。
+LLM idea 与本地新颖性检查只是研究建议，不是原创性证明；离线 fixture 输出不是模型完成的科研分析。
+具体输入输出见上方 capability 入口。
 
 ## Artifact 归属概览
 
-WORKFLOWS 只保留产物归属层面的说明；完整文件树放在 [使用与配置](USAGE_zh.md)。概括来说：
-
-- run 根目录文件（`state.json`、`manifest.json`、`config_snapshot.json`、usage logs，以及可选 artifact indexes）负责 resume state、配置快照和可观测性。
-- 阶段目录（`01-plan` 到 `08-report`）各自拥有自己的 contract、report 和稳定 handoff artifact。
-- `02-search` 负责 retrieval、document/full-text 状态和本地 chunks。
-- `03-read` 负责 reading review、shortlist、literature cards 和结构化阅读笔记。
-- `04-synthesize` 负责从 read 阶段产物推导出的紧凑 evidence bridge、gaps、ideas、novelty hints、synthesis 和 hypothesis。
-- `05-design` 负责 experiment contracts、result schemas、resource/dependency
-  plans、domain profiles、contract validation 和 experiment plans。
-- 当 research pipeline 衔接代码执行时，`06-code/code_task_run` 会嵌入与 standalone code task 相同形态的 artifact。
-- `08-report` 负责最终报告包：报告正文、references、manifest、紧凑报告记忆、source/citation/metric audit 和质量检查。
-
-这样可以让详细运行文件保持可追踪，同时不要求读者在理解 workflow 前先读完每个 JSON/JSONL。主要用于诊断或可重建的文件，应该通过 `debug_artifacts` 管控，或明确标注为 cleanup-safe。
+- `session_manifest.json` 记录会话和 attempt 状态；应用选择研究动作，共享 budget ledger 记录用量。
+- `attempts/` 下各次执行拥有其声明产物；通过引用而非固定阶段编号连接检索、阅读、综合、实现、
+  实验、分析、写作与审计。
+- 实现冻结所测版本的 patch 与检查证据；实验执行拥有实测指标，分析模块负责解释。
+- 报告写作、组装、审计保留各自的 attempt 产物。进程完成、工作流完成和论文达到发表质量是不同结论。
+- 历史编号阶段目录仅作为存档。可重建缓存不是结果的事实来源，不能替代原始产物。
 
 ## Code Task Artifact 边界
 

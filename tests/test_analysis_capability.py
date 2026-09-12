@@ -21,6 +21,63 @@ from simple_ar.result_analysis.schema import AnalysisContext
 
 
 class AnalysisCapabilityTests(unittest.TestCase):
+    def test_paired_summary_groups_conditions_and_preserves_singleton_uncertainty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ArtifactStore(Path(tmp))
+            pairs, inputs = [], []
+            for seed, delta, epochs in ((0, 0.1, 1), (1, 0.3, 1), (2, 0.4, 2)):
+                pair = {"seed": seed}
+                for role, value in (("baseline", 0.5), ("candidate", 0.5 + delta)):
+                    ref = store.write_json(f"{role}-{seed}.json", {
+                        "status": "passed", "metrics": {"accuracy": value},
+                        "experiment_contract": {"comparison_conditions": {"seed": seed, "epochs": epochs}},
+                        "measurement": {"measurement_id": f"{role}-{seed}", "source_kind": "measured",
+                                        "protocol_fingerprint": f"fixture-{seed}"}}, kind="experiment_result")
+                    pair[role] = ref.to_dict()
+                    inputs.append(ref)
+                pairs.append(pair)
+            collection = store.write_json("set.json", {"pairs": pairs}, kind="experiment_set")
+            result = analyze_experiment_capability(context=CapabilityContext(store=store,
+                attempt=AttemptManifest(attempt_id="analysis-1"), inputs=(collection, *inputs)),
+                result_ref=collection, analysis_context={"research_question": "Describe paired outcomes."})
+            evidence = store.read_json(next(ref for ref in result.artifacts if ref.kind == "experiment_set_analysis"))
+            summaries = evidence["paired_summary"]
+            self.assertEqual(len(summaries), 2)
+            self.assertEqual(summaries[0]["seeds"], [0, 1])
+            self.assertAlmostEqual(summaries[0]["delta_mean"], 0.2)
+            self.assertAlmostEqual(summaries[0]["delta_sample_std"], 0.02 ** 0.5)
+            self.assertEqual(len(summaries[0]["sources"]), 2)
+            self.assertEqual(summaries[1]["n"], 1)
+            self.assertIsNone(summaries[1]["delta_sample_std"])
+            self.assertTrue(any("no significance" in text for text in evidence["limitations"]))
+
+    def test_collection_analysis_preserves_failed_and_missing_pairs_without_zero_fill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ArtifactStore(Path(tmp))
+            baseline = store.write_json("baseline.json", {"status": "passed", "metrics": {"accuracy": 0.75}},
+                                        kind="experiment_result")
+            failed = store.write_json("failed.json", {"status": "failed", "metrics": {"accuracy": 0.99}},
+                                      kind="experiment_result")
+            collection = store.write_json("set.json", {"schema_version": "experiment_set.v1", "pairs": [
+                {"seed": 0, "baseline": baseline.to_dict(), "candidate": failed.to_dict()},
+                {"seed": 1, "baseline": None, "candidate": None},
+            ]}, kind="experiment_set")
+            result = analyze_experiment_capability(context=CapabilityContext(
+                store=store, attempt=AttemptManifest(attempt_id="analysis-1"),
+                inputs=(collection, baseline, failed)), result_ref=collection,
+                analysis_context={"research_question": "Compare classifiers."})
+            evidence = store.read_json(next(ref for ref in result.artifacts if ref.kind == "experiment_set_analysis"))
+            self.assertEqual(evidence["status"], "incomplete")
+            self.assertEqual(evidence["planned_pairs"], 2)
+            self.assertEqual(evidence["failed_measurements"], [
+                {"seed": 0, "condition": "candidate", "status": "failed", "artifact": failed.path}])
+            self.assertEqual(evidence["missing_measurements"], [
+                {"seed": 1, "condition": "baseline"}, {"seed": 1, "condition": "candidate"}])
+            self.assertEqual(len(evidence["seed_evidence"]), 1)
+            self.assertEqual(evidence["seed_evidence"][0]["metrics"], {"accuracy": 0.75})
+            self.assertEqual(evidence["comparisons"][0]["candidate_ref"], failed.to_dict())
+            self.assertEqual(evidence["metrics"], {})
+
     def test_analysis_handoff_round_trips_without_execution(self) -> None:
         handoff = AnalysisHandoff(
             execution_ref=ArtifactRef(

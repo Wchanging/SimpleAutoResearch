@@ -65,6 +65,38 @@ def _pack() -> dict[str, object]:
 
 
 class SynthesisCapabilityTests(unittest.TestCase):
+    def test_correction_is_bounded_and_retains_rejected_output(self):
+        for corrected in (True, False):
+            with self.subTest(corrected=corrected), tempfile.TemporaryDirectory() as tmp:
+                calls = []
+
+                class Client:
+                    def ask_json(self, system, user, *, label=""):
+                        calls.append((label, user))
+                        ref = "paper-1#chunk-1" if corrected and len(calls) == 2 else "invented-paper"
+                        return {"synthesis_markdown": "Validation evidence.", "hypothesis_markdown": "Test validation.",
+                                "idea_candidates": [{"idea_id": "idea-1", "title": "Validation",
+                                    "hypothesis": "Validation improves reliability.", "proposed_change": "Add a checker.",
+                                    "motivation_refs": [ref]}]}
+
+                context = CapabilityContext(store=ArtifactStore(Path(tmp)), attempt=AttemptManifest("synthesize"))
+                result = run_synthesis_capability(context=context,
+                    request=SynthesisRequest(evidence_pack=_pack(), use_llm=True, llm_client=Client()))
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[1][0], "research-synthesis-correction")
+                self.assertIn("unknown motivation refs", calls[1][1])
+                self.assertIn("allowed_motivation_refs", calls[1][1])
+                self.assertEqual(context.store.read_json("response-1.json")["idea_candidates"][0]["motivation_refs"], ["invented-paper"])
+                self.assertIn("unknown motivation refs", context.store.read_json("validation-1.json")["error"])
+                self.assertTrue(any(ref.path == "response-1.json" for ref in result.artifacts))
+                if corrected:
+                    self.assertNotEqual(result.status, "failed")
+                    self.assertEqual(context.store.read_json("synthesis_result.json")["ideas"][0]["motivation_refs"], ["paper-1#chunk-1"])
+                else:
+                    self.assertEqual(result.status, "failed")
+                    self.assertFalse(context.store.exists("synthesis_result.json"))
+                    self.assertTrue(context.store.exists("validation-2.json"))
+
     def test_evidence_pack_keeps_bounded_source_snippets_and_search_coverage(self) -> None:
         bundle = DocumentBundle(
             records=[

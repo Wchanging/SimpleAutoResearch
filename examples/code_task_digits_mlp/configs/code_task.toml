@@ -1,0 +1,35 @@
+# CPU-only existing-project coding example; not an eight-stage pipeline.
+[code_task]
+code_root = "examples/code_task_digits_mlp/project"
+task_file = "examples/code_task_digits_mlp/task.md"
+output_root = "runs"
+name = "digits-mlp"
+
+[workspace]
+mode = "copy"
+
+[environment]
+mode = "current"
+
+[edit_scope]
+allowed_patterns = ["digits_mlp/**"]
+
+[benchmark]
+command = "python benchmark.py"
+primary_metric = "accuracy"
+
+[benchmark.metric_directions]
+accuracy = "higher"
+macro_f1 = "higher"
+train_time_sec = "resource"
+inference_time_ms = "resource"
+parameter_count = "resource"
+
+[execute]
+to_step = "run"
+timeout_sec = 60
+repair_rounds = 1
+max_files = 6
+baseline_policy = "auto"
+apply_proposed_edits = false
+allow_planning_fallback = false

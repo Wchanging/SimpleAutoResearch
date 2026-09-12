@@ -219,10 +219,9 @@ class DocumentPortTests(unittest.TestCase):
                 require_fulltext=True,
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "document_ingest",
                 attempt_id="attempt-001",
-                next_capability="read",
                 request=DocumentIngestRequest(
                     papers=(),
                     source_plan=source_plan,
@@ -231,22 +230,19 @@ class DocumentPortTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             ref = controller.attempt_output_refs("attempt-001")[0]
             payload = controller.store.read_json(ref)
             self.assertEqual(payload["schema_version"], "document_bundle.v1")
             self.assertEqual(len(payload["documents"]), 1)
 
             restored = DocumentBundle.from_handoff_dict(payload)
-            read_result, read_decision = controller.execute(
+            read_result = controller.execute_attempt(
                 "read",
                 attempt_id="attempt-002",
                 inputs=(ref,),
-                next_capability="synthesize",
                 request=ReadRequest(bundle=restored),
             )
             self.assertEqual(read_result.status, "completed")
-            self.assertEqual(read_decision.action, "accept")
 
 
 if __name__ == "__main__":

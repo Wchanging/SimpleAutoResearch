@@ -13,9 +13,11 @@ dependencies = [
     "pypdf>=6.12.2",
     "python-dotenv>=1.2.2",
     "rich>=15.0.0",
-    "scikit-learn>=1.8.0",
     "tqdm>=4.67.3",
 ]
+
+[project.optional-dependencies]
+examples = ["scikit-learn>=1.8.0"]
 
 [project.scripts]
 simple-ar = "simple_ar.cli:main"
@@ -27,3 +29,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/simple_ar"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"templates/report" = "simple_ar/report_templates"

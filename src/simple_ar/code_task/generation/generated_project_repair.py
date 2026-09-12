@@ -6,63 +6,34 @@ This module is intentionally separate from ``simple_ar.code_task.execution.repai
 that module proposes human-reviewed patch edits for existing-project code-task
 runs, while this module performs bounded automatic repair inside an already
 generated project workspace. The edit application is shared and deterministic:
-structured actions are preferred, and whole-file replacement is kept as a
-fallback for structural failures.
+structured actions and whole-file content share one application path. Rejected
+actions do not fall through to a second file-writing strategy.
 """
 
 import json
-import shutil
 import py_compile
 import re
-import sys
 import ast
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import Any, Mapping
 
-from simple_ar.agent_backends import (
-    AgentPermissionPolicy,
-    AgentRunRequest,
-    create_agent_backend,
-    create_agent_handoff,
-    ingest_agent_outputs,
-    normalize_agent_mode,
-    validate_agent_mode_for_provider,
-)
 from simple_ar.core.artifacts import write_json
 from simple_ar.code_task.analysis.interfaces import (
     dependency_context,
-    find_local_api_mismatches,
     find_return_contract_mismatches,
     public_api,
-    public_api_from_source,
 )
 from simple_ar.code_task.analysis.entrypoints import source_suppresses_entrypoint_traceback
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.editing.actions import apply_repair_actions
 from simple_ar.code_task.editing.snapshots import FileSnapshotSet, create_file_snapshot_set
-from simple_ar.code_task.generation.common import contains_any, safe_relative_path
-from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
+from simple_ar.code_task.generation.common import safe_relative_path
 from simple_ar.code_task.review_pipeline import build_review_index, compact_review_index
 from simple_ar.code_task.repair_contract import atomic_patch_set_record, normalize_repair_plan
-from simple_ar.integrations.llm import LLMClient
+from simple_ar.integrations.llm import LLMClient, LLMError
 
 _RUN_REPAIR_MAX_FILES = 8
-_STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
-    "types",
-    "typing",
-    "dataclasses",
-    "pathlib",
-    "json",
-    "random",
-    "statistics",
-    "collections",
-    "enum",
-    "copy",
-    "re",
-    "sys",
-}
 
 
 def repair_generated_project_from_review(
@@ -78,20 +49,13 @@ def repair_generated_project_from_review(
     previous_repair_context: str = "",
     client: LLMClient | None = None,
 ) -> dict[str, Any]:
-    """Apply narrow deterministic repairs after generated-project review failure.
-
-    The review gate runs before validation and benchmark execution, so a small
-    syntax issue can otherwise strand an expensive generated project. This
-    helper fixes only objective, local problems such as Python files that fail
-    to compile due to common generation glitches. It does not try to rewrite
-    warnings or bypass the reviewer.
-    """
+    """Apply model-proposed review repairs; never invent project-specific fixes."""
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     summary: dict[str, Any] = {
         "schema_version": "greenfield_review_repair.v1",
         "status": "skipped",
-        "strategy": "deterministic_compile_repair",
+        "strategy": "llm_review_repair",
         "review_status": str(review_report.get("status", "unknown")),
         "changed_files": [],
         "unresolved_errors": [],
@@ -103,6 +67,11 @@ def repair_generated_project_from_review(
         write_json(output_path, summary)
         return summary
 
+    if client is None:
+        summary["notes"].append("Model repair unavailable; original files and failed review remain unchanged.")
+        write_json(output_path, summary)
+        return summary
+
     snapshot = create_file_snapshot_set(
         workspace_dir=project_dir,
         snapshot_root=output_path.parent / "repair_snapshots",
@@ -111,52 +80,7 @@ def repair_generated_project_from_review(
 
     changed: list[str] = []
     unresolved: list[str] = []
-    for path in sorted(project_dir.rglob("*.py")):
-        rel = path.relative_to(project_dir).as_posix()
-        error = _compile_error(path)
-        if not error:
-            continue
-        original = path.read_text(encoding="utf-8", errors="replace")
-        repaired = _repair_common_python_generation_error(rel, original)
-        if repaired != original:
-            snapshot.capture(rel)
-            path.write_text(repaired, encoding="utf-8")
-            if not _compile_error(path):
-                changed.append(rel)
-                continue
-            snapshot.restore([rel])
-        if path.name == "__init__.py":
-            snapshot.capture(rel)
-            path.write_text('"""Generated experiment package."""\n\n__all__ = []\n', encoding="utf-8")
-            if not _compile_error(path):
-                changed.append(rel)
-                summary["notes"].append(f"Replaced invalid package marker in {rel}.")
-                continue
-            snapshot.restore([rel])
-        unresolved.append(f"{rel}: {error}")
-
-    _repair_fallback_support_modules(
-        project_dir,
-        review_report=review_report,
-        code_artifacts=code_artifacts or {},
-        changed=changed,
-        notes=summary["notes"],
-        unresolved=unresolved,
-        snapshot=snapshot,
-    )
-
-    _repair_missing_local_api_aliases(
-        project_dir,
-        review_report=review_report,
-        changed=changed,
-        notes=summary["notes"],
-        unresolved=unresolved,
-        snapshot=snapshot,
-    )
-
-    _repair_missing_static_artifacts(project_dir, review_report, changed, summary["notes"], snapshot=snapshot)
-
-    if client is not None and _review_needs_llm_repair(project_dir, review_report):
+    if _review_needs_llm_repair(review_report):
         regenerated = _regenerate_review_failed_files(
             project_dir=project_dir,
             review_report=review_report,
@@ -181,9 +105,9 @@ def repair_generated_project_from_review(
         summary["status"] = "failed"
     elif changed:
         summary["status"] = "patched"
-        summary["notes"].append("Patched deterministic Python compile issues; rerun review before execution.")
+        summary["notes"].append("Applied model-proposed edits; rerun review before execution.")
     else:
-        summary["notes"].append("No deterministic review repairs were available.")
+        summary["notes"].append("No review repairs were applied.")
     _attach_snapshot_summary(summary, snapshot)
     write_json(output_path, summary)
     return summary
@@ -218,7 +142,7 @@ def _regenerate_review_failed_files(
         previous = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
         try:
             response = client.ask_json(
-                "You repair generated Python project files. Return only JSON with `summary` and either `actions` or fallback `content`.",
+                "You repair generated Python project files. Return only JSON with `summary` and either `actions` or whole-file `content`, not both.",
                 _review_file_repair_prompt(
                     rel_path=rel_path,
                     file_spec=spec,
@@ -231,7 +155,7 @@ def _regenerate_review_failed_files(
                 ),
                 label=f"greenfield-review-repair-{rel_path}",
             )
-        except Exception as exc:
+        except LLMError as exc:
             unresolved.append(f"{rel_path}: LLM review repair failed: {exc}")
             continue
         applied = _apply_llm_file_repair_response(
@@ -266,131 +190,58 @@ def _apply_llm_file_repair_response(
     fallback_summary: str,
     snapshot: FileSnapshotSet | None = None,
 ) -> dict[str, Any] | None:
+    """Normalize model output once, then use the shared action application."""
+
     target = project_dir / rel_path
     if _response_declares_no_change(response):
-        notes.append(f"Skipped {rel_path}; repair response declared no change for this target.")
+        notes.append(f"Skipped {rel_path}; repair response declared no change.")
         return None
+    actions = response.get("actions")
+    structured = isinstance(actions, list) and bool(actions)
+    if not structured:
+        content = str(response.get("content", "")).strip()
+        if not content:
+            unresolved.append(f"{rel_path}: LLM repair returned neither actions nor content.")
+            return None
+        content = _strip_markdown_fence(content.rstrip() + "\n")
+        actions = [{
+            "action": "rewrite_file", "path": rel_path, "content": content,
+            "rationale": str(response.get("summary") or fallback_summary),
+        }]
     if snapshot is not None:
         snapshot.capture(rel_path)
-    before_api = public_api(target) if target.suffix == ".py" and target.is_file() else []
-    action_result: dict[str, Any] | None = None
-    action_rejection = ""
-    actions = response.get("actions")
-    if isinstance(actions, list) and actions:
-        action_result = apply_repair_actions(project_dir, actions, allowed_paths={rel_path})
-        if action_result.get("status") == "patched":
-            error = _compile_error(target) if target.suffix == ".py" and target.is_file() else ""
-            if error:
-                _restore_repair_target(
-                    target,
-                    previous_content,
-                    previous_exists,
-                    snapshot=snapshot,
-                    rel_path=rel_path,
-                )
-                unresolved.append(f"{rel_path}: action repair failed to compile: {error}")
-            elif guard_error := _post_write_static_guard(target=target, rel_path=rel_path):
-                _restore_repair_target(
-                    target,
-                    previous_content,
-                    previous_exists,
-                    snapshot=snapshot,
-                    rel_path=rel_path,
-                )
-                unresolved.append(f"{rel_path}: action repair rejected: {guard_error}")
-            elif api_error := _public_api_change_guard(action_result=action_result, response=response):
-                _restore_repair_target(
-                    target,
-                    previous_content,
-                    previous_exists,
-                    snapshot=snapshot,
-                    rel_path=rel_path,
-                )
-                unresolved.append(f"{rel_path}: action repair rejected: {api_error}")
-            else:
-                if rel_path not in changed:
-                    changed.append(rel_path)
-                notes.append(f"Applied structured actions to {rel_path}.")
-                return {
-                    "path": rel_path,
-                    "mode": f"{mode_prefix}_actions",
-                    "line_count": _file_line_count(target),
-                    "summary": str(response.get("summary") or fallback_summary)[:500],
-                    "public_api": public_api(target) if target.suffix == ".py" and target.is_file() else [],
-                    "edit_application": action_result,
-                }
-        elif action_result.get("status") == "skipped" and not action_result.get("rejected_actions"):
-            notes.append(f"Skipped {rel_path}; structured actions made no changes.")
-            return None
-        elif action_result.get("rejected_actions"):
-            action_rejection = (
-                f"{rel_path}: structured repair actions were rejected: "
-                f"{json.dumps(action_result.get('rejected_actions'), ensure_ascii=False)[:1000]}"
-            )
-
-    content = str(response.get("content", "")).strip()
-    if not content:
-        if action_rejection:
-            unresolved.append(action_rejection)
-        if action_result is None:
-            unresolved.append(f"{rel_path}: LLM repair returned neither actions nor content.")
+    applied = apply_repair_actions(project_dir, actions, allowed_paths={rel_path})
+    error = ""
+    if applied["rejected_actions"]:
+        error = "structured repair actions were rejected: " + json.dumps(
+            applied["rejected_actions"], ensure_ascii=False
+        )[:1000]
+    elif applied["status"] != "patched":
+        notes.append(f"Skipped {rel_path}; repair actions made no changes.")
         return None
-    content = _strip_markdown_fence(content.rstrip() + "\n")
-    guard_error = _whole_file_rewrite_guard(
-        rel_path=rel_path,
-        content=content,
-        before_api=before_api,
-        response=response,
-    )
-    if guard_error:
-        unresolved.append(f"{rel_path}: whole-file repair rejected: {guard_error}")
-        return None
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    error = _compile_error(target) if target.suffix == ".py" else ""
+    else:
+        error = (
+            (_compile_error(target) if target.suffix == ".py" and target.is_file() else "")
+            or _post_write_static_guard(target=target, rel_path=rel_path)
+            or _public_api_change_guard(action_result=applied, response=response)
+        )
     if error:
         _restore_repair_target(
-            target,
-            previous_content,
-            previous_exists,
-            snapshot=snapshot,
-            rel_path=rel_path,
+            target, previous_content, previous_exists,
+            snapshot=snapshot, rel_path=rel_path,
         )
-        unresolved.append(f"{rel_path}: repaired file failed to compile: {error}")
-        return None
-    if guard_error := _post_write_static_guard(target=target, rel_path=rel_path):
-        _restore_repair_target(
-            target,
-            previous_content,
-            previous_exists,
-            snapshot=snapshot,
-            rel_path=rel_path,
-        )
-        unresolved.append(f"{rel_path}: whole-file repair rejected: {guard_error}")
+        unresolved.append(f"{rel_path}: repair rejected: {error}")
         return None
     if rel_path not in changed:
         changed.append(rel_path)
-    notes.append(f"Regenerated {rel_path} with LLM file repair.")
+    notes.append(f"Applied repair actions to {rel_path}.")
     return {
         "path": rel_path,
-        "mode": mode_prefix,
-        "line_count": max(1, len(content.splitlines())),
+        "mode": f"{mode_prefix}_actions" if structured else mode_prefix,
+        "line_count": _file_line_count(target),
         "summary": str(response.get("summary") or fallback_summary)[:500],
-        "public_api": public_api(target) if target.suffix == ".py" else [],
-        "edit_application": {
-            "schema_version": "code_task_repair_edit_application.v1",
-            "status": "patched",
-            "changed_files": [rel_path],
-            "applied_actions": [
-                {
-                    "action": "rewrite_file",
-                    "path": rel_path,
-                    "public_api_changed": True,
-                    "rationale": str(response.get("summary") or fallback_summary)[:500],
-                }
-            ],
-            "rejected_actions": action_result.get("rejected_actions", []) if action_result else [],
-        },
+        "public_api": public_api(target) if target.suffix == ".py" and target.is_file() else [],
+        "edit_application": applied,
     }
 
 
@@ -431,57 +282,6 @@ def _response_declares_no_change(response: Mapping[str, Any]) -> bool:
     ):
         return True
     return False
-
-
-def _whole_file_rewrite_guard(
-    *,
-    rel_path: str,
-    content: str,
-    before_api: list[str],
-    response: Mapping[str, Any],
-) -> str:
-    if not rel_path.endswith(".py"):
-        return ""
-    stripped = content.strip()
-    if not stripped:
-        return "empty_python_content"
-    lowered = stripped.lower()
-    first_line = next((line.strip().lower() for line in stripped.splitlines() if line.strip()), "")
-    placeholder_lines = {
-        "no_op",
-        "noop",
-        "pass",
-        "no change",
-        "no changes needed",
-        "not applicable",
-    }
-    if first_line in placeholder_lines or lowered in placeholder_lines:
-        return "placeholder_or_no_change_content"
-    has_python_shape = bool(
-        re.search(r"^\s*(from|import|def|class|@|[A-Za-z_][A-Za-z0-9_]*\s*=)", content, re.MULTILINE)
-    )
-    if not has_python_shape:
-        return "content_does_not_look_like_python_source"
-    try:
-        tree = compile(content, rel_path, "exec")
-    except SyntaxError as exc:
-        return f"syntax_error:{exc.msg}"
-    del tree
-    if before_api:
-        # Avoid writing to disk just to inspect API: parse definitions directly.
-        after_api = public_api_from_source(content)
-        after_api_names = {_api_name_from_signature(item) for item in after_api if _api_name_from_signature(item)}
-        before_names = {_api_name_from_signature(item) for item in before_api if isinstance(item, str)}
-        before_names.discard("")
-        if before_names and not after_api_names:
-            return "public_api_would_be_removed"
-        lost = sorted(name for name in before_names if name not in after_api_names)
-        allow_break = bool(response.get("allow_api_breaking_change"))
-        if not allow_break and _public_api_contract_breaks(before_api, after_api):
-            return "public_api_signature_would_change"
-        if lost and not allow_break:
-            return "existing_public_api_would_be_removed"
-    return ""
 
 
 def _public_api_change_guard(*, action_result: Mapping[str, Any], response: Mapping[str, Any]) -> str:
@@ -552,14 +352,6 @@ def _api_name_from_signature(value: str) -> str:
     return match.group(1) if match else ""
 
 
-def _public_api_names_from_source(source: str) -> set[str]:
-    return {
-        _api_name_from_signature(item)
-        for item in public_api_from_source(source)
-        if _api_name_from_signature(item)
-    }
-
-
 def _file_line_count(path: Path) -> int:
     if not path.is_file():
         return 0
@@ -569,164 +361,25 @@ def _file_line_count(path: Path) -> int:
         return 0
 
 
-def _repair_fallback_support_modules(
-    project_dir: Path,
-    *,
-    review_report: Mapping[str, Any],
-    code_artifacts: Mapping[str, Any],
-    changed: list[str],
-    notes: list[str],
-    unresolved: list[str],
-    snapshot: FileSnapshotSet | None = None,
-) -> None:
-    """Repair generic generated-project support modules without task-specific code.
-
-    These modules are framework-level helpers, not domain logic. Keeping them
-    deterministic prevents a transient provider failure from blocking an
-    otherwise coherent generated experiment.
-    """
-
-    targets = set(_review_repair_target_paths(review_report=review_report, code_artifacts=code_artifacts))
-    if "generated_experiment/resources.py" not in targets:
-        return
-    target = project_dir / "generated_experiment" / "resources.py"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if snapshot is not None:
-        snapshot.capture("generated_experiment/resources.py")
-    target.write_text(_resources_module(), encoding="utf-8")
-    error = _compile_error(target)
-    if error:
-        unresolved.append(f"generated_experiment/resources.py: deterministic support repair failed: {error}")
-        return
-    if "generated_experiment/resources.py" not in changed:
-        changed.append("generated_experiment/resources.py")
-    notes.append("Generated a deterministic generic resources.py support module.")
 
 
-def _repair_missing_local_api_aliases(
-    project_dir: Path,
-    *,
-    review_report: Mapping[str, Any],
-    changed: list[str],
-    notes: list[str],
-    unresolved: list[str],
-    snapshot: FileSnapshotSet | None = None,
-) -> None:
-    """Patch objective local API alias gaps without another LLM call.
-
-    A common generated-project failure mode is: one file imports
-    ``module.public_name`` while the target module contains the implementation
-    as ``_public_name``. When this exact shape is present, adding a public alias
-    is safer and cheaper than asking the model to guess an old/new edit block.
-    """
-
-    for item in _review_findings(review_report):
-        if str(item.get("category", "")).strip() != "missing_local_api":
-            continue
-        for module_name, missing_symbol in _missing_local_api_refs(item):
-            rel_path = _module_name_to_path(module_name)
-            if not rel_path:
-                continue
-            target = project_dir / rel_path
-            if not target.is_file() or target.suffix != ".py":
-                continue
-            try:
-                source = target.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                unresolved.append(f"{rel_path}: could not read target module for API alias repair: {exc}")
-                continue
-            names = _top_level_names(source)
-            if missing_symbol in names:
-                continue
-            private_symbol = f"_{missing_symbol}"
-            if private_symbol not in names:
-                continue
-            alias_line = f"{missing_symbol} = {private_symbol}"
-            if alias_line in source:
-                continue
-            if snapshot is not None:
-                snapshot.capture(rel_path)
-            repaired = source.rstrip() + (
-                "\n\n# Public alias added by review repair for cross-file generated-code compatibility.\n"
-                f"{alias_line}\n"
-            )
-            target.write_text(repaired, encoding="utf-8")
-            error = _compile_error(target)
-            if error:
-                _restore_repair_target(target, source, True, snapshot=snapshot, rel_path=rel_path)
-                unresolved.append(f"{rel_path}: local API alias repair failed to compile: {error}")
-                continue
-            if rel_path not in changed:
-                changed.append(rel_path)
-            notes.append(f"Added deterministic public alias `{missing_symbol}` for `{private_symbol}` in {rel_path}.")
 
 
-def _review_needs_llm_repair(project_dir: Path, review_report: Mapping[str, Any]) -> bool:
-    """Return whether unresolved blocking findings still need model repair."""
+def _review_needs_llm_repair(review_report: Mapping[str, Any]) -> bool:
+    """Use the review findings; this boundary has not silently repaired them."""
 
-    local_api_remaining = find_local_api_mismatches(project_dir)
-    for item in _review_findings(review_report):
-        severity = str(item.get("severity", "blocking")).strip() or "blocking"
-        category = str(item.get("category", "")).strip()
-        if severity != "blocking":
-            continue
-        if category == "missing_local_api" and not local_api_remaining:
-            continue
-        if category == "missing_entrypoint" and (project_dir / "main.py").is_file():
-            continue
-        if category == "missing_required_artifact":
-            summary = str(item.get("summary", "")).lower()
-            if "readme" in summary and (project_dir / "README.md").is_file():
-                continue
-        return True
-    return False
-
-
-def _missing_local_api_refs(item: Mapping[str, Any]) -> list[tuple[str, str]]:
-    text = " ".join(
-        str(value)
-        for value in (
-            item.get("summary", ""),
-            item.get("recommendation", ""),
-            " ".join(str(row) for row in item.get("evidence", []) if isinstance(row, str))
-            if isinstance(item.get("evidence"), list)
-            else "",
-        )
+    return any(
+        (str(item.get("severity", "blocking")).strip() or "blocking") == "blocking"
+        for item in _review_findings(review_report)
     )
-    refs: list[tuple[str, str]] = []
-    for match in re.finditer(r"`([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\.([A-Za-z_][A-Za-z0-9_]*)`", text):
-        module_name = match.group(1)
-        symbol = match.group(2)
-        if module_name and symbol:
-            refs.append((module_name, symbol))
-    return list(dict.fromkeys(refs))
 
 
-def _module_name_to_path(module_name: str) -> str:
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$", module_name):
-        return ""
-    return module_name.replace(".", "/") + ".py"
 
 
-def _top_level_names(source: str) -> set[str]:
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            names.update(_assignment_names(node))
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            names.update(alias.asname or alias.name.split(".")[-1] for alias in node.names if alias.name != "*")
-    return names
 
 
-def _assignment_names(node: ast.Assign | ast.AnnAssign) -> list[str]:
-    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-    return [target.id for target in targets if isinstance(target, ast.Name)]
+
+
 
 
 def _review_repair_target_paths(
@@ -746,27 +399,9 @@ def _review_repair_target_paths(
             if row.get("mode") == "fallback":
                 targets.append(path)
     findings = _review_findings(review_report)
-    categories = {str(item.get("category", "")).strip() for item in findings}
-    summaries = _review_signal_text(findings)
     targets.extend(_paths_from_review_findings(findings))
-    if "missing_artifact_writer" in categories:
-        targets.extend(
-            _rank_repair_candidates(
-                _generated_python_paths(code_artifacts),
-                signal_text=summaries,
-                preferred_roles=("artifact", "orchestrator", "entrypoint"),
-            )
-        )
-    if "missing_local_api" in categories:
-        targets.extend(_paths_from_review_summaries(summaries))
     if not targets:
-        targets.extend(
-            _rank_repair_candidates(
-                _generated_python_paths(code_artifacts),
-                signal_text=summaries,
-                preferred_roles=("orchestrator", "entrypoint", "data", "preprocess", "config", "core", "artifact"),
-            )[:5]
-        )
+        targets.extend(sorted(_generated_python_paths(code_artifacts))[:5])
     return list(dict.fromkeys(path for path in targets if path))
 
 
@@ -880,11 +515,6 @@ def _compact_for_prompt(value: Mapping[str, Any], *, limit: int = 12000) -> dict
     return {"truncated_json": text[:limit], "truncated": True}
 
 
-def _looks_like_fenced_block(value: str) -> bool:
-    stripped = value.strip()
-    return stripped.startswith("```") and stripped.endswith("```")
-
-
 def _strip_markdown_fence(value: str) -> str:
     stripped = value.strip()
     if not stripped.startswith("```"):
@@ -895,52 +525,6 @@ def _strip_markdown_fence(value: str) -> str:
     return value
 
 
-def _repair_missing_static_artifacts(
-    project_dir: Path,
-    review_report: Mapping[str, Any],
-    changed: list[str],
-    notes: list[str],
-    *,
-    snapshot: FileSnapshotSet | None = None,
-) -> None:
-    findings = _review_findings(review_report)
-    summaries = " ".join(str(item.get("summary", "")) for item in findings).lower()
-    categories = {str(item.get("category", "")).strip() for item in findings}
-    if "missing_entrypoint" in categories:
-        main = project_dir / "main.py"
-        if not main.exists() or not main.read_text(encoding="utf-8", errors="replace").strip():
-            if snapshot is not None:
-                snapshot.capture("main.py")
-            main.write_text(_main_script(), encoding="utf-8")
-            changed.append("main.py")
-            notes.append("Generated a deterministic thin main.py entrypoint after review reported it missing.")
-    if "missing_required_artifact" in categories and "readme" in summaries:
-        readme = project_dir / "README.md"
-        if not readme.exists() or not readme.read_text(encoding="utf-8", errors="replace").strip():
-            if snapshot is not None:
-                snapshot.capture("README.md")
-            readme.write_text(_generated_readme(project_dir), encoding="utf-8")
-            changed.append("README.md")
-            notes.append("Generated a minimal README because the task explicitly required one.")
-    if "config" in summaries:
-        config = project_dir / "config.example.json"
-        if not config.exists():
-            if snapshot is not None:
-                snapshot.capture("config.example.json")
-            config.write_text(
-                json.dumps(
-                    {
-                        "seed": 42,
-                        "output_dir": "artifacts",
-                        "notes": "Example configuration generated by review repair.",
-                    },
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            changed.append("config.example.json")
-            notes.append("Generated config.example.json as a static sample artifact.")
 
 
 def _review_findings(review_report: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -955,236 +539,10 @@ def _review_findings(review_report: Mapping[str, Any]) -> list[Mapping[str, Any]
     return []
 
 
-def _generated_readme(project_dir: Path) -> str:
-    files = [
-        path.relative_to(project_dir).as_posix()
-        for path in sorted(project_dir.rglob("*.py"))
-        if "__pycache__" not in path.parts
-    ][:12]
-    file_lines = "\n".join(f"- `{path}`" for path in files) or "- No Python files were found."
-    return (
-        "# Generated Project\n\n"
-        "This project was generated for a SimpleAutoResearch code-task run.\n\n"
-        "## Contents\n\n"
-        f"{file_lines}\n\n"
-        "## Usage\n\n"
-        "Run the benchmark command recorded by the surrounding code-task manifest. "
-        "If the task defines CLI modes, inspect `main.py --help` or the project entrypoint.\n\n"
-        "## Artifacts\n\n"
-        "Runtime outputs should be written under an `artifacts/` directory when the task requests structured results.\n"
-    )
 
 
-def _resources_module() -> str:
-    return '''from __future__ import annotations
-
-"""Generic local resource detection for generated experiments.
-
-The module is intentionally conservative and dependency-free. It provides a
-small stable API that generated runners can use to choose bounded presets
-without assuming a specific machine, GPU driver, or optional package.
-"""
-
-from dataclasses import asdict, dataclass
-import os
-import platform
-import shutil
-import subprocess
-from typing import Any, Mapping
 
 
-@dataclass(frozen=True)
-class ResourceInfo:
-    cpu_count: int
-    memory_gb: float | None
-    gpu_available: bool
-    gpu_count: int
-    gpu_names: tuple[str, ...]
-    platform: str
-    max_runtime_sec_hint: float | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["gpu_names"] = list(self.gpu_names)
-        return data
-
-
-def detect_resources(max_runtime_sec_hint: float | None = None) -> ResourceInfo:
-    cpu_count = max(1, int(os.cpu_count() or 1))
-    memory_gb = _detect_memory_gb()
-    gpu_names = _detect_gpu_names()
-    return ResourceInfo(
-        cpu_count=cpu_count,
-        memory_gb=memory_gb,
-        gpu_available=bool(gpu_names),
-        gpu_count=len(gpu_names),
-        gpu_names=tuple(gpu_names),
-        platform=platform.platform(),
-        max_runtime_sec_hint=max_runtime_sec_hint,
-    )
-
-
-def select_profile(
-    resources: ResourceInfo | None = None,
-    config: Mapping[str, Any] | Any | None = None,
-    max_runtime_sec: float | None = None,
-) -> str:
-    if resources is None:
-        resources = detect_resources(max_runtime_sec_hint=max_runtime_sec)
-    runtime_hint = _runtime_hint(config, max_runtime_sec, resources.max_runtime_sec_hint)
-    if runtime_hint is not None and runtime_hint <= 60:
-        return "tiny"
-    if resources.gpu_available and resources.gpu_count > 0 and (runtime_hint is None or runtime_hint >= 300):
-        return "gpu"
-    if resources.cpu_count >= 8 and (resources.memory_gb is None or resources.memory_gb >= 16):
-        return "medium"
-    if resources.cpu_count >= 4:
-        return "small"
-    return "tiny"
-
-
-def resource_summary(resources: ResourceInfo | None = None) -> dict[str, Any]:
-    return (resources or detect_resources()).to_dict()
-
-
-def _runtime_hint(
-    config: Mapping[str, Any] | Any | None,
-    explicit: float | None,
-    fallback: float | None,
-) -> float | None:
-    if explicit is not None:
-        return _as_float(explicit)
-    for key in ("max_runtime_sec", "timeout_sec", "timeout"):
-        value = _lookup(config, key)
-        if value is not None:
-            return _as_float(value)
-    return fallback
-
-
-def _lookup(config: Mapping[str, Any] | Any | None, key: str) -> Any:
-    if config is None:
-        return None
-    if isinstance(config, Mapping):
-        value = config.get(key)
-        if value is not None:
-            return value
-        runtime = config.get("runtime")
-        if isinstance(runtime, Mapping):
-            return runtime.get(key)
-        return None
-    value = getattr(config, key, None)
-    if value is not None:
-        return value
-    runtime = getattr(config, "runtime", None)
-    return getattr(runtime, key, None) if runtime is not None else None
-
-
-def _as_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _detect_memory_gb() -> float | None:
-    if hasattr(os, "sysconf"):
-        try:
-            pages = os.sysconf("SC_PHYS_PAGES")
-            page_size = os.sysconf("SC_PAGE_SIZE")
-            return round(float(pages) * float(page_size) / (1024 ** 3), 3)
-        except (OSError, ValueError, TypeError):
-            return None
-    return None
-
-
-def _detect_gpu_names() -> list[str]:
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible and visible.strip() and visible.strip() != "-1":
-        values = [item.strip() for item in visible.split(",") if item.strip()]
-        if values:
-            return [f"cuda:{item}" for item in values]
-    if shutil.which("nvidia-smi"):
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-        except Exception:
-            return []
-        if result.returncode == 0:
-            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return []
-'''
-
-
-def repair_generated_project_from_guard(
-    *,
-    project_dir: Path,
-    result_schema: Mapping[str, Any],
-    guard_report: Mapping[str, Any],
-    diagnosis_report: Mapping[str, Any] | None = None,
-    current_metrics: Mapping[str, Any],
-    output_path: Path,
-) -> dict[str, Any]:
-    """Apply conservative repairs driven by guard evidence.
-
-    The first V2.5 repair only fixes schema-compliance gaps in generated
-    projects. It does not attempt broad semantic debugging.
-    """
-
-    missing = _merge_names(
-        _missing_metrics(result_schema, current_metrics),
-        _missing_metrics_from_diagnosis(diagnosis_report or {}),
-    )
-    issues = guard_report.get("issues")
-    issue_codes = [
-        str(item.get("code", ""))
-        for item in issues
-        if isinstance(item, Mapping) and str(item.get("code", "")).strip()
-    ] if isinstance(issues, list) else []
-    summary: dict[str, Any] = {
-        "schema_version": "experiment_repair.v1",
-        "status": "skipped",
-        "strategy": "schema_metric_fallback",
-        "issue_codes": issue_codes,
-        "diagnosis_status": (diagnosis_report or {}).get("status", "unknown"),
-        "diagnosis_codes": _diagnosis_codes(diagnosis_report or {}),
-        "missing_metrics": missing,
-        "changed_files": [],
-        "notes": [],
-    }
-    if not missing:
-        summary["notes"].append("No missing required metrics were detected.")
-        write_json(output_path, summary)
-        return summary
-    snapshot = create_file_snapshot_set(
-        workspace_dir=project_dir,
-        snapshot_root=output_path.parent / "repair_snapshots",
-        label="guard-repair",
-    )
-    runner = project_dir / "generated_experiment" / "runner.py"
-    if not runner.parent.is_dir():
-        runner.parent.mkdir(parents=True, exist_ok=True)
-    snapshot.capture("generated_experiment/runner.py")
-    runner.write_text(_fallback_runner(missing, result_schema), encoding="utf-8")
-    main = project_dir / "main.py"
-    snapshot.capture("main.py")
-    main.write_text(_main_script(), encoding="utf-8")
-    summary["changed_files"].append("main.py")
-    init = project_dir / "generated_experiment" / "__init__.py"
-    if not init.exists():
-        snapshot.capture("generated_experiment/__init__.py")
-        init.write_text('"""Generated experiment package."""\n', encoding="utf-8")
-        summary["changed_files"].append("generated_experiment/__init__.py")
-    summary["changed_files"].append("generated_experiment/runner.py")
-    summary["status"] = "patched"
-    summary["notes"].append("Rewrote runner with deterministic required-metric fallback.")
-    _attach_snapshot_summary(summary, snapshot)
-    write_json(output_path, summary)
-    return summary
 
 
 def repair_generated_project_from_run_failure(
@@ -1199,34 +557,31 @@ def repair_generated_project_from_run_failure(
     contract: Mapping[str, Any] | None = None,
     dependency_advice: Mapping[str, Any] | None = None,
     previous_repair_context: str = "",
-    repair_context_mode: str = "full",
     client: LLMClient | None = None,
 ) -> dict[str, Any]:
-    """Apply narrow deterministic repairs after generated-project run failure.
-
-    This helper covers objective Python runtime mismatches that commonly occur
-    when separate generated files disagree on an internal API. It is intentionally
-    conservative: patch, compile, and keep file-level snapshots for rollback;
-    otherwise report that no deterministic repair was available.
-    """
+    """Apply bounded model-proposed repairs using the observed runtime failure."""
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     summary: dict[str, Any] = {
         "schema_version": "greenfield_run_repair.v1",
         "status": "skipped",
-        "strategy": "deterministic_runtime_repair",
+        "strategy": "llm_runtime_repair",
         "failure_status": str(failure_analysis.get("status", "unknown")),
         "changed_files": [],
         "unresolved_errors": [],
         "notes": [],
         "ablation": {
-            "repair_context": repair_context_mode,
             "use_repair_memory": bool(previous_repair_context.strip()),
         },
     }
     if not project_dir.is_dir():
         summary["status"] = "failed"
         summary["unresolved_errors"].append(f"Missing generated project directory: {project_dir}")
+        write_json(output_path, summary)
+        return summary
+
+    if client is None:
+        summary["notes"].append("Model repair unavailable; original files and runtime failure remain unchanged.")
         write_json(output_path, summary)
         return summary
 
@@ -1237,38 +592,6 @@ def repair_generated_project_from_run_failure(
     )
 
     changed: list[str] = []
-    patched = False
-    if _should_skip_quick_runtime_patches(previous_repair_context):
-        summary["notes"].append(
-            "Skipped deterministic quick patches because previous repair context shows repeated failure."
-        )
-    else:
-        compat_patch = apply_generated_project_compatibility_patch(
-            project_dir=project_dir,
-            stderr_text=stderr_text,
-            snapshot=snapshot,
-        )
-        patched = compat_patch.applied
-        if compat_patch.applied:
-            changed.extend(path for path in compat_patch.changed_files if path not in changed)
-            summary["notes"].append(compat_patch.note)
-    if not patched:
-        patched = _patch_stdlib_shadow_module(project_dir, stderr_text, changed, snapshot=snapshot)
-    if not patched:
-        patched = _patch_nested_artifact_results_path(project_dir, stderr_text, changed, snapshot=snapshot)
-    if patched:
-        compile_errors = _compile_project(project_dir)
-        if not compile_errors:
-            summary["status"] = "patched"
-            summary["changed_files"] = changed
-            summary["notes"].append("Patched an internal generated entrypoint/API mismatch.")
-            _attach_snapshot_summary(summary, snapshot)
-            write_json(output_path, summary)
-            return summary
-        summary["unresolved_errors"].extend(compile_errors)
-        snapshot.restore()
-        changed.clear()
-
     if client is not None:
         regenerated = _regenerate_run_failed_files(
             project_dir=project_dir,
@@ -1280,7 +603,6 @@ def repair_generated_project_from_run_failure(
             contract=contract or {},
             dependency_advice=dependency_advice or {},
             previous_repair_context=previous_repair_context,
-            repair_context_mode=repair_context_mode,
             client=client,
             changed=changed,
             notes=summary["notes"],
@@ -1305,7 +627,7 @@ def repair_generated_project_from_run_failure(
             changed.clear()
 
     summary["changed_files"] = changed
-    summary["notes"].append("No deterministic run-failure repair was available.")
+    summary["notes"].append("No model-proposed run-failure repair was applied.")
     _attach_snapshot_summary(summary, snapshot)
     write_json(output_path, summary)
     return summary
@@ -1322,7 +644,6 @@ def _regenerate_run_failed_files(
     contract: Mapping[str, Any],
     dependency_advice: Mapping[str, Any],
     previous_repair_context: str,
-    repair_context_mode: str,
     client: LLMClient,
     changed: list[str],
     notes: list[str],
@@ -1335,7 +656,6 @@ def _regenerate_run_failed_files(
         failure_analysis=failure_analysis,
         stderr_text=stderr_text,
         code_artifacts=code_artifacts,
-        repair_context_mode=repair_context_mode,
     )
     repair_context = _run_repair_context(
         project_dir=project_dir,
@@ -1345,12 +665,8 @@ def _regenerate_run_failed_files(
         heuristic_targets=heuristic_targets,
         result_schema=result_schema,
         contract=contract,
-        repair_context_mode=repair_context_mode,
     )
-    prompt_failure_analysis = _failure_analysis_for_repair_prompt(
-        failure_analysis,
-        repair_context_mode=repair_context_mode,
-    )
+    prompt_failure_analysis = dict(failure_analysis)
     raw_repair_plan = _plan_run_repair_targets(
         failure_analysis=prompt_failure_analysis,
         stderr_text=stderr_text,
@@ -1389,7 +705,7 @@ def _regenerate_run_failed_files(
         spec = file_specs.get(rel_path, {"path": rel_path, "purpose": "Repair generated runtime failure.", "dependencies": []})
         try:
             response = client.ask_json(
-                "You repair one file in a generated Python experiment project after a benchmark runtime failure. Return only JSON with `summary` and either `actions` or fallback `content`.",
+                "You repair one file in a generated Python experiment project after a benchmark runtime failure. Return only JSON with `summary` and either `actions` or whole-file `content`, not both.",
                 _run_file_repair_prompt(
                     rel_path=rel_path,
                     current_content=previous,
@@ -1406,7 +722,7 @@ def _regenerate_run_failed_files(
                 ),
                 label=f"greenfield-run-repair-{rel_path}",
             )
-        except Exception as exc:
+        except LLMError as exc:
             unresolved.append(f"{rel_path}: LLM run repair failed: {exc}")
             continue
         applied = _apply_llm_file_repair_response(
@@ -1462,12 +778,10 @@ def _plan_run_repair_targets(
             ),
             label="greenfield-run-repair-plan",
         )
-    except Exception as exc:
+    except LLMError as exc:
         unresolved.append(f"run-repair-plan: LLM diagnosis failed: {exc}")
         return {}
-    if not isinstance(response, Mapping):
-        return {}
-    return dict(response)
+    return response
 
 
 def _repair_plan_targets(
@@ -1537,30 +851,13 @@ def _run_repair_context(
     heuristic_targets: list[str],
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
-    repair_context_mode: str = "full",
 ) -> dict[str, Any]:
     all_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
-    signal_text = " ".join(
-        [
-            stderr_text,
-            json.dumps(dict(failure_analysis), ensure_ascii=False, default=str),
-        ]
-    ).lower()
-    ranked = _rank_repair_candidates(
-        all_paths,
-        signal_text=signal_text,
-        preferred_roles=("orchestrator", "data", "preprocess", "config", "core", "artifact", "entrypoint"),
-    )
-    matched = _source_signal_matches(project_dir, all_paths, signal_text)
-    graph_candidates = (
-        _failure_graph_candidate_paths(failure_analysis, project_dir=project_dir)
-        if repair_context_mode != "raw_logs_only"
-        else []
-    )
-    candidate_paths = list(dict.fromkeys([*graph_candidates, *heuristic_targets, *matched, *ranked]))[:10]
+    candidate_paths = list(dict.fromkeys([
+        *heuristic_targets, *sorted(all_paths),
+    ]))[:10]
     context = {
         "schema_version": "code_task_runtime_repair_context.v1",
-        "context_mode": repair_context_mode,
         "heuristic_targets": heuristic_targets,
         "review_index": _generated_review_index(project_dir, result_schema=result_schema, contract=contract),
         "return_contract_mismatches": find_return_contract_mismatches(project_dir),
@@ -1572,24 +869,11 @@ def _run_repair_context(
         "project_api": _project_api_snapshot(project_dir),
         "resource_static": analyze_resource_risks(project_dir),
     }
-    if repair_context_mode != "raw_logs_only":
-        context["failure_graph"] = _compact_failure_graph_for_repair(failure_analysis)
-        context["runtime_contracts"] = _runtime_contract_context(failure_analysis)
+    context["failure_graph"] = _compact_failure_graph_for_repair(failure_analysis)
+    context["runtime_contracts"] = _runtime_contract_context(failure_analysis)
     return context
 
 
-def _failure_analysis_for_repair_prompt(
-    failure_analysis: Mapping[str, Any],
-    *,
-    repair_context_mode: str,
-) -> dict[str, Any]:
-    result = dict(failure_analysis)
-    if repair_context_mode == "raw_logs_only":
-        result.pop("failure_graph", None)
-        result.pop("failure_graph_data", None)
-        result["context_mode"] = "raw_logs_only"
-        result["note"] = "Structured failure-graph bundle omitted for ablation."
-    return result
 
 
 def _compact_failure_graph_for_repair(failure_analysis: Mapping[str, Any]) -> dict[str, Any]:
@@ -1635,13 +919,10 @@ def _generated_review_index(
     result_schema: Mapping[str, Any],
     contract: Mapping[str, Any],
 ) -> dict[str, Any]:
-    try:
-        return compact_review_index(
-            build_review_index(project_dir, result_schema=result_schema, contract=contract),
-            max_files=80,
-        )
-    except Exception:
-        return {"schema_version": "code_task_review_index.v1", "files": []}
+    return compact_review_index(
+        build_review_index(project_dir, result_schema=result_schema, contract=contract),
+        max_files=80,
+    )
 
 
 def _candidate_file_context(project_dir: Path, rel_path: str) -> dict[str, Any]:
@@ -1652,7 +933,6 @@ def _candidate_file_context(project_dir: Path, rel_path: str) -> dict[str, Any]:
         source = ""
     return {
         "path": rel_path,
-        "roles": sorted(_path_roles(rel_path)),
         "public_api": public_api(target) if target.suffix == ".py" else [],
         "source_excerpt": _head_tail_excerpt(source, limit=3600),
     }
@@ -1743,187 +1023,35 @@ def _run_repair_target_paths(
     failure_analysis: Mapping[str, Any],
     stderr_text: str,
     code_artifacts: Mapping[str, Any],
-    repair_context_mode: str = "full",
 ) -> list[str]:
-    text = " ".join(
-        [
-            stderr_text,
-            json.dumps(dict(failure_analysis), ensure_ascii=False, default=str),
-        ]
-    )
-    candidates: list[str] = []
-    lowered = text.lower()
-    known_paths = _generated_python_paths(code_artifacts, project_dir=project_dir)
-    if repair_context_mode != "raw_logs_only":
-        candidates.extend(_failure_graph_candidate_paths(failure_analysis, project_dir=project_dir))
-    if _is_artifact_path_contract_failure(lowered):
-        candidates.extend(
-            _rank_repair_candidates(
-                known_paths,
-                signal_text=lowered,
-                preferred_roles=("artifact", "config", "entrypoint", "orchestrator"),
-            )[:5]
-        )
-    elif _is_runtime_watchdog_failure(lowered):
-        candidates.extend(
-            _rank_repair_candidates(
-                known_paths,
-                signal_text=lowered,
-                preferred_roles=("core", "orchestrator", "config", "data", "preprocess", "entrypoint"),
-            )[:6]
-        )
-    elif _is_empty_greenfield_evidence_failure(lowered):
-        candidates.extend(
-            _rank_repair_candidates(
-                known_paths,
-                signal_text=lowered,
-                preferred_roles=("entrypoint", "orchestrator", "core", "artifact", "data"),
-            )
-        )
-    elif "features" in lowered and "labels" in lowered and "metadata" in lowered:
-        candidates.extend(
-            _rank_repair_candidates(
-                known_paths,
-                signal_text=lowered,
-                preferred_roles=("data", "preprocess", "config", "orchestrator"),
-            )
-        )
-    elif ("dataset" in lowered or "source" in lowered or "field" in lowered or "bundle" in lowered) and (
-        "not found" in lowered or "missing" in lowered or "cannot proceed" in lowered
-    ):
-        candidates.extend(
-            _rank_repair_candidates(
-                known_paths,
-                signal_text=lowered,
-                preferred_roles=("data", "preprocess", "config", "orchestrator", "core", "entrypoint"),
-            )
-        )
-    elif "has no attribute" in lowered or "attributeerror" in lowered:
-        candidates.extend(_attribute_contract_matches(project_dir, known_paths, lowered))
-        candidates.extend(
-            _rank_repair_candidates(
-                known_paths,
-                signal_text=lowered,
-                preferred_roles=("artifact", "core", "orchestrator", "entrypoint", "data", "preprocess", "config"),
-            )[:8]
-        )
+    """Prioritize observed locations and source matches, not filename roles."""
+
+    known = _generated_python_paths(code_artifacts, project_dir=project_dir)
+    text = stderr_text + "\n" + json.dumps(dict(failure_analysis), ensure_ascii=False, default=str)
+    candidates = _failure_graph_candidate_paths(failure_analysis, project_dir=project_dir)
     implicated = failure_analysis.get("implicated_files")
     if isinstance(implicated, list):
         candidates.extend(_normalize_generated_project_path(str(path)) for path in implicated)
     candidates.extend(_paths_from_review_summaries(text))
-    if (
-        "run_experiment" in lowered or "experiment run failed" in lowered
-    ) and not _is_empty_greenfield_evidence_failure(lowered):
-        candidates.extend(
-            _rank_repair_candidates(
-                known_paths,
-                signal_text=lowered,
-                preferred_roles=("orchestrator", "entrypoint"),
-            )[:3]
-        )
-    if not candidates:
-        candidates.extend(_fallback_run_repair_targets(code_artifacts, project_dir=project_dir))
-    normalized = []
-    for path in candidates:
-        rel = safe_relative_path(path)
-        if not rel or not rel.endswith(".py"):
-            continue
-        target = project_dir / rel
-        if target.is_file():
-            normalized.append(rel)
-    return list(dict.fromkeys(normalized))
+    candidates.extend(_source_signal_matches(project_dir, known, text))
+    valid = [
+        rel for path in candidates
+        if (rel := safe_relative_path(path)) and rel.endswith(".py")
+        and (project_dir / rel).is_file()
+    ]
+    return list(dict.fromkeys(valid)) or sorted(known)
 
 
-def _is_empty_greenfield_evidence_failure(text: str) -> bool:
-    return (
-        "quality guard" in text
-        or "empty_greenfield_evidence" in text
-        or "condition-level records" in text
-        or "all non-resource metrics are zero" in text
-    )
 
 
-def _fallback_run_repair_targets(
-    code_artifacts: Mapping[str, Any],
-    *,
-    project_dir: Path | None = None,
-) -> list[str]:
-    return _rank_repair_candidates(
-        _generated_python_paths(code_artifacts, project_dir=project_dir),
-        signal_text="",
-        preferred_roles=("orchestrator", "entrypoint", "data", "preprocess", "config", "core", "artifact"),
-    )
 
 
-def _attribute_contract_matches(project_dir: Path, paths: list[str], signal_text: str) -> list[str]:
-    """Return files that directly consume or produce the missing attribute.
-
-    AttributeError messages often identify the contract symbol but not the
-    traceback location because generated entrypoints catch exceptions and print
-    a compact ``ERROR: ...`` line. In that case repairing only the producer can
-    leave downstream consumers with stale ``obj.field`` access after another
-    file has converted the contract to a mapping. Exact symbol matches keep this
-    generic without naming benchmark-specific files.
-    """
-
-    symbols = _attribute_error_symbols(signal_text)
-    if not symbols:
-        return []
-    rows: list[tuple[int, int, str]] = []
-    for path in paths:
-        target = project_dir / path
-        if not target.is_file() or target.suffix != ".py":
-            continue
-        try:
-            source = target.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        lowered = source.lower()
-        score = 0
-        for symbol in symbols:
-            symbol_l = symbol.lower()
-            if f".{symbol_l}" in lowered:
-                score += 6
-            if f'["{symbol_l}"]' in lowered or f"['{symbol_l}']" in lowered:
-                score += 4
-            if symbol_l in lowered:
-                score += 1
-        if score:
-            role_bias = 0 if "artifact" in _path_roles(path) else 1
-            rows.append((-score, role_bias, path))
-    return [path for _, _, path in sorted(rows)]
 
 
-def _attribute_error_symbols(signal_text: str) -> list[str]:
-    symbols: list[str] = []
-    patterns = (
-        r"has no attribute ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
-        r"has no attribute\s+([A-Za-z_][A-Za-z0-9_]*)",
-        r"attributeerror:[^'\"]*['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
-        r"attributeerror:[^\n]*has no attribute\s+([A-Za-z_][A-Za-z0-9_]*)",
-    )
 
 
-def _is_artifact_path_contract_failure(text: str) -> bool:
-    return (
-        "artifact_path_mismatch" in text
-        or "artifact path contract" in text
-        or "same-name artifact" in text
-        or "wrong workspace path" in text
-    )
 
 
-def _is_runtime_watchdog_failure(text: str) -> bool:
-    return (
-        "runtime_watchdog" in text
-        or "runtime output watchdog" in text
-        or "warning_flood" in text
-        or "repeated_output_flood" in text
-        or "output_volume_limit" in text
-    )
-    for pattern in patterns:
-        symbols.extend(match.lower() for match in re.findall(pattern, signal_text, flags=re.IGNORECASE))
-    return list(dict.fromkeys(symbols))
 
 
 def _generated_python_paths(
@@ -1948,262 +1076,24 @@ def _generated_python_paths(
     return list(dict.fromkeys(path for path in paths if not path.endswith("/__init__.py")))
 
 
-def _rank_repair_candidates(
-    paths: list[str],
-    *,
-    signal_text: str,
-    preferred_roles: tuple[str, ...],
-) -> list[str]:
-    role_order = {role: index for index, role in enumerate(preferred_roles)}
-
-    def score(path: str) -> tuple[int, int, int, str]:
-        roles = _path_roles(path)
-        matching_roles = [role_order[role] for role in roles if role in role_order]
-        role_score = min(matching_roles) if matching_roles else len(role_order) + 3
-        signal_bonus = 0 if _path_matches_signal(path, signal_text) else 1
-        depth = path.count("/")
-        return role_score, signal_bonus, depth, path
-
-    ranked = sorted((safe_relative_path(path) for path in paths), key=score)
-    return [path for path in ranked if path]
 
 
-def _path_roles(path: str) -> set[str]:
-    name = PurePosixPath(path).name.lower()
-    stem = PurePosixPath(path).stem.lower()
-    full = path.lower()
-    roles: set[str] = set()
-    if name in {"main.py", "__main__.py", "cli.py", "app.py"} or stem in {"main", "cli", "app"}:
-        roles.add("entrypoint")
-    if contains_any(full, ("runner", "run_", "execute", "executor", "orchestr", "workflow", "pipeline", "experiment", "train", "eval")):
-        roles.add("orchestrator")
-    if contains_any(full, ("input", "data", "dataset", "loader", "source", "ingest", "feature", "label")):
-        roles.add("data")
-    if contains_any(full, ("process", "preprocess", "transform", "prepare", "clean", "split")):
-        roles.add("preprocess")
-    if contains_any(full, ("config", "setting", "option", "param", "schema")):
-        roles.add("config")
-    if contains_any(full, ("core", "model", "algorithm", "logic", "method", "estimator", "classif", "regress")):
-        roles.add("core")
-    if contains_any(full, ("analysis", "metric", "score", "report", "artifact", "output", "result", "summary", "writer")):
-        roles.add("artifact")
-    return roles or {"support"}
 
 
-def _path_matches_signal(path: str, signal_text: str) -> bool:
-    if not signal_text:
-        return False
-    parts = {part.lower() for part in PurePosixPath(path).parts}
-    parts.add(PurePosixPath(path).stem.lower())
-    return any(part and part in signal_text for part in parts)
 
 
-def _should_skip_quick_runtime_patches(previous_repair_context: str) -> bool:
-    """Return true when deterministic patches are likely to repeat a failed guess."""
-
-    lowered = previous_repair_context.lower()
-    return (
-        "repeated failure signal detected" in lowered
-        or "do not simply retry the same target or strategy" in lowered
-    )
 
 
-def _patch_stdlib_shadow_module(
-    project_dir: Path,
-    stderr_text: str,
-    changed: list[str],
-    *,
-    snapshot: FileSnapshotSet | None = None,
-) -> bool:
-    shadow = _shadowed_stdlib_module(project_dir, stderr_text)
-    if not shadow:
-        return False
-    module = shadow["module"]
-    source = project_dir / str(shadow["source"])
-    if not source.exists():
-        return False
-    replacement = _replacement_module_name(project_dir, module, package=source.is_dir())
-    suffix = ".py" if source.is_file() else ""
-    destination = project_dir / f"{replacement}{suffix}"
-    if destination.exists():
-        return False
-    if snapshot is not None:
-        _snapshot_path_tree(snapshot, project_dir=project_dir, relative_path=source.relative_to(project_dir).as_posix())
-        _snapshot_rename_destination(
-            snapshot,
-            project_dir=project_dir,
-            source=source,
-            destination=destination,
-        )
-    source.rename(destination)
-    _rewrite_local_module_imports(project_dir, old=module, new=replacement, snapshot=snapshot)
-    changed.append(f"{source.relative_to(project_dir).as_posix()} -> {destination.relative_to(project_dir).as_posix()}")
-    for path in sorted(project_dir.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        rel = path.relative_to(project_dir).as_posix()
-        if rel not in changed and rel != destination.relative_to(project_dir).as_posix():
-            try:
-                content = path.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            if replacement in content:
-                changed.append(rel)
-    replacement_rel = destination.relative_to(project_dir).as_posix()
-    if replacement_rel not in changed:
-        changed.append(replacement_rel)
-    return True
 
 
-def _shadowed_stdlib_module(project_dir: Path, stderr_text: str) -> dict[str, str]:
-    lowered = stderr_text.lower()
-    candidates = [*sorted(project_dir.glob("*.py")), *sorted(path for path in project_dir.iterdir() if path.is_dir())]
-    for path in candidates:
-        module = path.stem if path.is_file() else path.name
-        if module not in _STDLIB_SHADOW_MODULES:
-            continue
-        path_text = path.as_posix().lower()
-        if (
-            f"module '{module}'" in lowered
-            or f"module named '{module}." in lowered
-            or f"no module named '{module}." in lowered
-            or f"'{module}' is not a package" in lowered
-            or f"from '{module}'" in lowered
-            or f"import name" in lowered and f"{module}.py" in lowered
-            or path_text in lowered.replace("\\", "/")
-        ):
-            return {
-                "module": module,
-                "source": path.relative_to(project_dir).as_posix(),
-                "kind": "file" if path.is_file() else "directory",
-            }
-    return {}
 
 
-def _snapshot_path_tree(snapshot: FileSnapshotSet, *, project_dir: Path, relative_path: str) -> None:
-    source = project_dir / relative_path
-    if source.is_file():
-        snapshot.capture(relative_path)
-        return
-    if not source.is_dir():
-        snapshot.capture(relative_path)
-        return
-    for path in sorted(source.rglob("*")):
-        if path.is_file():
-            snapshot.capture(path.relative_to(project_dir).as_posix())
 
 
-def _snapshot_rename_destination(
-    snapshot: FileSnapshotSet,
-    *,
-    project_dir: Path,
-    source: Path,
-    destination: Path,
-) -> None:
-    if source.is_file():
-        snapshot.capture(destination.relative_to(project_dir).as_posix())
-        return
-    if not source.is_dir():
-        return
-    for path in sorted(source.rglob("*")):
-        if not path.is_file():
-            continue
-        rel_inside = path.relative_to(source)
-        snapshot.capture((destination / rel_inside).relative_to(project_dir).as_posix())
 
 
-def _replacement_module_name(project_dir: Path, module: str, *, package: bool = False) -> str:
-    candidates = (
-        [f"project_{module}", f"local_{module}", f"{module}_schema"]
-        if package
-        else [f"{module}_schema", f"project_{module}", f"local_{module}"]
-    )
-    for candidate in candidates:
-        if not (project_dir / f"{candidate}.py").exists():
-            return candidate
-    index = 2
-    while (project_dir / f"{module}_schema_{index}.py").exists():
-        index += 1
-    return f"{module}_schema_{index}"
 
 
-def _rewrite_local_module_imports(
-    project_dir: Path,
-    *,
-    old: str,
-    new: str,
-    snapshot: FileSnapshotSet | None = None,
-) -> None:
-    from_pattern = re.compile(rf"(^|\n)([ \t]*)from[ \t]+{re.escape(old)}[ \t]+import[ \t]+")
-    from_dotted_pattern = re.compile(rf"(^|\n)([ \t]*)from[ \t]+{re.escape(old)}(\.[A-Za-z_][A-Za-z0-9_.]*)[ \t]+import[ \t]+")
-    import_pattern = re.compile(rf"(^|\n)([ \t]*)import[ \t]+{re.escape(old)}([ \t]*(?:#.*)?(?:\n|$))")
-    import_dotted_pattern = re.compile(
-        rf"(^|\n)([ \t]*)import[ \t]+{re.escape(old)}(\.[A-Za-z_][A-Za-z0-9_.]*)([ \t]*(?:as[ \t]+[A-Za-z_][A-Za-z0-9_]*)?[ \t]*(?:#.*)?(?:\n|$))"
-    )
-    dynamic_patterns = (
-        (f'"{old}"', f'"{new}"'),
-        (f"'{old}'", f"'{new}'"),
-    )
-    for path in sorted(project_dir.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        updated = from_dotted_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}from {new}{m.group(3)} import ", content)
-        updated = from_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}from {new} import ", updated)
-        updated = import_dotted_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}import {new}{m.group(3)}{m.group(4)}", updated)
-        updated = import_pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}import {new} as {old}{m.group(3)}", updated)
-        if path.name in {"main.py", "__main__.py"}:
-            for before, after in dynamic_patterns:
-                updated = updated.replace(before, after)
-        if updated != content:
-            if snapshot is not None:
-                snapshot.capture(path.relative_to(project_dir).as_posix())
-            path.write_text(updated, encoding="utf-8")
-
-
-def _patch_nested_artifact_results_path(
-    project_dir: Path,
-    stderr_text: str,
-    changed: list[str],
-    *,
-    snapshot: FileSnapshotSet | None = None,
-) -> bool:
-    lowered = stderr_text.lower()
-    if "artifacts/results.json" not in lowered or "not written" not in lowered:
-        return False
-    patched = False
-    for path in sorted(project_dir.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if "artifacts/results.json" not in content and "artifacts') / 'results.json" not in content:
-            continue
-        if "Path(results_dir)" not in content and "base /" not in content:
-            continue
-        updated = content
-        replacements = {
-            'Path("artifacts/results.json")': 'Path("results.json")',
-            "Path('artifacts/results.json')": "Path('results.json')",
-            'Path("artifacts") / "results.json"': 'Path("results.json")',
-            "Path('artifacts') / 'results.json'": "Path('results.json')",
-        }
-        for before, after in replacements.items():
-            updated = updated.replace(before, after)
-        if updated != content:
-            rel = path.relative_to(project_dir).as_posix()
-            if snapshot is not None:
-                snapshot.capture(rel)
-            path.write_text(updated, encoding="utf-8")
-            if rel not in changed:
-                changed.append(rel)
-            patched = True
-    return patched
 
 
 def _normalize_generated_project_path(value: str) -> str:
@@ -2271,174 +1161,6 @@ def _run_file_repair_prompt(
     )
 
 
-def repair_generated_project_with_agent_backend(
-    *,
-    run_dir: Path,
-    project_dir: Path,
-    provider: str,
-    result_schema: Mapping[str, Any],
-    guard_report: Mapping[str, Any],
-    diagnosis_report: Mapping[str, Any] | None = None,
-    current_metrics: Mapping[str, Any],
-    output_path: Path,
-    client: LLMClient | None = None,
-    timeout_sec: int = 600,
-    external_enabled: bool = False,
-    agent_mode: str = "",
-    agent_model: str = "",
-    agent_binary: str = "",
-    agent_args: tuple[str, ...] = (),
-) -> dict[str, Any]:
-    """Ask an agent backend for a bounded repair proposal, then apply candidate files.
-
-    The backend never edits ``project_dir`` directly. It must write changed files under
-    ``generated_files/`` in the handoff directory; this function copies those files into
-    the generated project and records provenance before the run stage reruns guards.
-    """
-
-    resolved_agent_mode = normalize_agent_mode(agent_mode, provider=provider)
-    validate_agent_mode_for_provider(resolved_agent_mode, provider=provider)
-    package = create_agent_handoff(
-        run_dir=run_dir,
-        name=f"repair-{provider}",
-        instructions=_repair_handoff_instructions(
-            result_schema=result_schema,
-            guard_report=guard_report,
-            diagnosis_report=diagnosis_report or {},
-            current_metrics=current_metrics,
-        ),
-        permission_policy=AgentPermissionPolicy(
-            allow_file_write=True,
-            allow_shell_commands=False,
-            allow_network=False,
-            allowed_write_patterns=["generated_files/**", "review.md", "agent_result.json"],
-            notes=[
-                "Write only replacement or new project files under generated_files/.",
-                "Do not mutate 06-code/generated_project directly.",
-                "SimpleAutoResearch will apply files and rerun result guards.",
-            ],
-        ),
-        expected_outputs={
-            "mode": "greenfield_repair",
-            "allowed_outputs": ["generated_files/", "review.md", "agent_result.json"],
-            "canonical_result": "agent_result.json",
-        },
-        artifact_refs=[
-            "05-design/result_schema.json",
-            "07-run/results.json",
-            "07-run/guard_report.json",
-            "07-run/diagnosis.json",
-            "06-code/code_artifacts.json",
-            "06-code/code_review.json",
-        ],
-    )
-    backend = create_agent_backend(
-        provider,
-        enabled=external_enabled,
-        client=client,
-        model=agent_model or None,
-        timeout_sec=timeout_sec,
-        binary=agent_binary or None,
-        extra_args=agent_args,
-    )
-    result = backend.run(
-        AgentRunRequest(
-            provider=provider,
-            run_dir=run_dir,
-            handoff_dir=package.handoff_dir,
-            workspace_dir=project_dir,
-            timeout_sec=timeout_sec,
-            metadata={
-                "mode": "greenfield_repair",
-                "agent_mode": resolved_agent_mode.value,
-                "guard_status": str(guard_report.get("status", "unknown")),
-            },
-        )
-    )
-    ingestion = ingest_agent_outputs(run_dir=run_dir, handoff_dir=package.handoff_dir)
-    summary: dict[str, Any] = {
-        "schema_version": "experiment_repair.v1",
-        "status": "skipped",
-        "strategy": f"agent_backend:{provider}",
-        "provider": provider,
-        "agent_mode": resolved_agent_mode.value,
-        "agent_status": result.status,
-        "handoff_dir": package.handoff_dir.relative_to(run_dir).as_posix(),
-        "ingestion": ingestion,
-        "changed_files": [],
-        "notes": [],
-    }
-    generated_dir = package.handoff_dir / "generated_files"
-    if not result.ok:
-        summary["notes"].append(f"Agent backend did not complete successfully: {result.message or result.status}.")
-        write_json(output_path, summary)
-        return summary
-    if not generated_dir.is_dir():
-        summary["notes"].append("Agent backend produced no generated_files/ repair proposal.")
-        write_json(output_path, summary)
-        return summary
-    backup_dir = output_path.parent / "repair_backups" / "generated_project_before_agent"
-    if project_dir.is_dir():
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
-        shutil.copytree(project_dir, backup_dir)
-        summary["backup_dir"] = backup_dir.relative_to(run_dir).as_posix()
-    changed = _overlay_generated_files(generated_dir, project_dir)
-    summary["changed_files"] = changed
-    summary["status"] = "patched" if changed else "skipped"
-    if changed:
-        summary["notes"].append("Applied agent-generated repair files; rerun guard will validate the result.")
-    else:
-        summary["notes"].append("No safe repair files were found in generated_files/.")
-    write_json(output_path, summary)
-    return summary
-
-
-def _missing_metrics(schema: Mapping[str, Any], metrics: Mapping[str, Any]) -> list[str]:
-    required = schema.get("required_metrics")
-    names = [str(item) for item in required if str(item).strip()] if isinstance(required, list) else []
-    primary = str(schema.get("primary_metric") or "").strip()
-    if primary and primary not in names:
-        names.insert(0, primary)
-    return [name for name in names if name not in metrics]
-
-
-def _repair_handoff_instructions(
-    *,
-    result_schema: Mapping[str, Any],
-    guard_report: Mapping[str, Any],
-    diagnosis_report: Mapping[str, Any],
-    current_metrics: Mapping[str, Any],
-) -> str:
-    return (
-        "# Greenfield Repair Handoff\n\n"
-        "Patch the generated experiment project by writing changed files under `generated_files/`. "
-        "Focus on the smallest repair that satisfies the result schema and preserves bounded runtime.\n\n"
-        "## Current Metrics\n\n"
-        f"{dict(current_metrics)}\n\n"
-        "## Result Schema\n\n"
-        f"{dict(result_schema)}\n\n"
-        "## Guard Report\n\n"
-        f"{dict(guard_report)}\n\n"
-        "## Diagnosis\n\n"
-        f"{dict(diagnosis_report)}\n"
-    )
-
-
-def _overlay_generated_files(src_dir: Path, project_dir: Path) -> list[str]:
-    project_dir.mkdir(parents=True, exist_ok=True)
-    changed: list[str] = []
-    for src in sorted(src_dir.rglob("*")):
-        if not src.is_file():
-            continue
-        rel = safe_relative_path(src.relative_to(src_dir).as_posix())
-        if not rel:
-            continue
-        dst = project_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        changed.append(rel)
-    return changed
 
 
 def _compile_error(path: Path) -> str:
@@ -2456,90 +1178,3 @@ def _compile_project(project_dir: Path) -> list[str]:
         if error:
             errors.append(f"{path.relative_to(project_dir).as_posix()}: {error}")
     return errors
-
-
-def _repair_common_python_generation_error(path: str, value: str) -> str:
-    stripped = value.lstrip("\ufeff")
-    leading = value[: len(value) - len(stripped)]
-    if path.endswith("__init__.py"):
-        for marker in ('__"""', "__'''"):
-            if stripped.startswith(marker):
-                return leading + stripped[2:]
-    return value
-
-
-def _missing_metrics_from_diagnosis(diagnosis: Mapping[str, Any]) -> list[str]:
-    completion = diagnosis.get("completion")
-    if not isinstance(completion, Mapping):
-        return []
-    missing = completion.get("missing_metrics")
-    return [str(item) for item in missing if str(item).strip()] if isinstance(missing, list) else []
-
-
-def _diagnosis_codes(diagnosis: Mapping[str, Any]) -> list[str]:
-    rows = diagnosis.get("deficiencies")
-    items = [item for item in rows if isinstance(item, Mapping)] if isinstance(rows, list) else []
-    return [str(item.get("code")) for item in items if str(item.get("code", "")).strip()]
-
-
-def _merge_names(left: list[str], right: list[str]) -> list[str]:
-    result: list[str] = []
-    for name in left + right:
-        if name not in result:
-            result.append(name)
-    return result
-
-
-def _fallback_runner(metrics: list[str], schema: Mapping[str, Any]) -> str:
-    values = _metric_values(metrics)
-    rows = ",\n        ".join(f"{name!r}: {value:.6f}" for name, value in values.items())
-    return (
-        "from __future__ import annotations\n\n\n"
-        "def run_experiment() -> dict[str, float]:\n"
-        "    # Repair fallback: satisfy the declared result schema after guard failure.\n"
-        "    return {\n"
-        f"        {rows}\n"
-        "    }\n"
-    )
-
-
-def _main_script() -> str:
-    return (
-        "from __future__ import annotations\n\n"
-        "from generated_experiment.runner import run_experiment\n\n\n"
-        "def main() -> None:\n"
-        "    for name, value in sorted(run_experiment().items()):\n"
-        "        try:\n"
-        "            number = float(value)\n"
-        "        except (TypeError, ValueError):\n"
-        "            continue\n"
-        "        print(f\"{name}: {number:.6f}\")\n\n\n"
-        "if __name__ == \"__main__\":\n"
-        "    main()\n"
-    )
-
-
-def _metric_values(metrics: list[str]) -> dict[str, float]:
-    result: dict[str, float] = {}
-    for index, metric in enumerate(metrics):
-        lowered = metric.lower()
-        if "baseline" in lowered:
-            value = 0.60
-        elif "accuracy" in lowered or "f1" in lowered or "score" in lowered or "quality" in lowered:
-            value = min(0.95, 0.82 + index * 0.01)
-        elif "gain" in lowered or "delta" in lowered or "margin" in lowered or "improvement" in lowered:
-            value = 0.05 + index * 0.01
-        elif "count" in lowered or "size" in lowered or "items" in lowered or "samples" in lowered:
-            value = float(2 + index)
-        elif "param" in lowered:
-            value = 128.0 + index * 16.0
-        elif "loss" in lowered or "error" in lowered:
-            value = max(0.01, 0.25 - index * 0.01)
-        elif "time" in lowered or "latency" in lowered:
-            value = 0.02 + index * 0.005
-        elif "passed" in lowered:
-            value = 1.0
-        else:
-            value = min(0.99, 0.82 + index * 0.02)
-        result[metric] = value
-    return result

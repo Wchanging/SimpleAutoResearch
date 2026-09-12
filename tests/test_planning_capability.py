@@ -25,8 +25,9 @@ class PlanningCapabilityTests(unittest.TestCase):
         class FakeClient:
             model = "fake-research-model"
 
-            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+            def ask_json(self, system: str, user: str, *, label: str = "", **kwargs: object) -> dict[str, object]:
                 self.label = label
+                self.max_output_tokens = kwargs.get("max_output_tokens")
                 return {
                     "questions": [
                         {
@@ -68,6 +69,7 @@ class PlanningCapabilityTests(unittest.TestCase):
         self.assertEqual(result.provenance["mode"], "llm")
         self.assertEqual(result.provenance["model"], "fake-research-model")
         self.assertEqual(client.label, "research-planner")
+        self.assertEqual(client.max_output_tokens, 1200)
         self.assertEqual(payload["planner"], "llm")
 
     def test_plan_reuses_existing_deterministic_planners(self) -> None:
@@ -172,17 +174,15 @@ class PlanningCapabilityTests(unittest.TestCase):
                 budget=None,
             )
 
-            plan_result, plan_decision = controller.execute(
+            plan_result = controller.execute_attempt(
                 "plan",
                 attempt_id="plan-001",
-                next_capability="search",
                 request=ResearchPlanRequest(
                     topic="fixture research",
                     config={"research_sources": ["fixture"]},
                 ),
             )
             self.assertEqual(plan_result.status, "completed")
-            self.assertEqual(plan_decision.action, "accept")
 
             plan_ref = controller.attempt_output_ref(
                 "plan-001",
@@ -192,7 +192,7 @@ class PlanningCapabilityTests(unittest.TestCase):
             restored = ResearchPlanResult.from_handoff_dict(
                 controller.store.read_json(plan_ref)
             )
-            search_result, search_decision = controller.execute(
+            search_result = controller.execute_attempt(
                 "search",
                 attempt_id="search-001",
                 inputs=(plan_ref,),
@@ -201,7 +201,6 @@ class PlanningCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(search_result.status, "completed")
-            self.assertEqual(search_decision.action, "accept")
             payload = controller.store.read_json(
                 controller.attempt_output_ref(
                     "search-001",

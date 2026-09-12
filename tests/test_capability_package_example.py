@@ -22,14 +22,13 @@ class MinimalCapabilityPackageTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "minimal-copy",
                 attempt_id="attempt-001",
                 inputs=(source,),
             )
 
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             self.assertEqual(
                 controller.store.read_json("attempts/attempt-001/result.json"),
                 {"input": {"value": 3}},
@@ -47,13 +46,12 @@ class MinimalCapabilityPackageTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "minimal-copy",
                 attempt_id="attempt-001",
             )
 
             self.assertEqual(result.status, "failed")
-            self.assertEqual(decision.action, "repair")
             self.assertFalse((Path(tmp) / "attempts" / "attempt-001" / "result.json").exists())
 
 

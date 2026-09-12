@@ -41,8 +41,9 @@ of the survey in prose, not as a command log.
 
 Build a taxonomy rather than a paper-by-paper list. Start with a compact table
 or bullet taxonomy that maps papers onto 2-3 comparison dimensions, such as
-collaboration topology, training/adaptation strategy, validation mechanism, and
-context/memory control. After the table, focus prose on cross-family contrasts,
+learning or inference strategy, assumptions, required data or resources, and
+evaluation protocol. Choose dimensions supported by this topic's evidence,
+not a fixed taxonomy from another research field. After the table, focus prose on cross-family contrasts,
 assumptions, and boundary conditions; do not simply restate each table row. Do
 not write paragraphs of the form "Paper A does X, Paper B does Y" unless the
 paper is a clear milestone.
@@ -50,19 +51,19 @@ paper is a clear milestone.
 ## Evaluation And Benchmarks
 
 Compare how the papers evaluate their systems. Discuss benchmark type, task
-scale, metrics, and evidence strength. Explicitly distinguish function-level,
-single-file, multi-file, and repository-level evidence when possible. Avoid
+scale, metrics, and evidence strength. Distinguish the actual evaluation settings,
+data splits, baselines, and generalization boundaries reported by the sources. Avoid
 fabricating results. Include a compact evidence-quality map when enough
 information is available, for example columns such as method family, benchmark
-scale, single-agent comparison, cost/budget control, and evidence strength.
+scale, baseline comparison, cost/budget control, and evidence strength.
 
 ## Design Patterns And Failure Modes
 
 Synthesize recurring design patterns, trade-offs, and failure modes. Make clear
 when evidence is suggestive rather than conclusive. Every strong claim should
 include a boundary statement that explains where the claim may not transfer.
-Use short subheadings when helpful, such as Role Specialization, Interaction
-Protocols, Context / Memory Control, and Common Failure Modes.
+Use short subheadings grounded in the topic's recurring methodological choices,
+resource trade-offs, and observed failure modes.
 
 ## Research Gaps And Opportunities
 

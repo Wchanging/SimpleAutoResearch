@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from simple_ar.core import CapabilityRegistry, SessionController
@@ -22,6 +23,98 @@ from simple_ar.research.synthesis import SynthesisResult
 
 
 class ExperimentCapabilityTests(unittest.TestCase):
+    def test_process_output_directory_is_registered_as_an_experiment_artifact(self):
+        from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ArtifactStore(root / "attempt")
+            command = [sys.executable, "-c", "import os; from pathlib import Path; "
+                "p=Path(os.environ['SIMPLE_AR_OUTPUT_DIR']); p.mkdir(); "
+                "(p/'curve.json').write_text('[1, 2]'); print('accuracy: 0.5')"]
+            result = run_experiment_capability(context=CapabilityContext(store=store,
+                attempt=AttemptManifest(attempt_id="experiment-1")),
+                request=ExperimentRequest(run=RunRequest(command, root, 5)))
+            output = next(ref for ref in result.artifacts if ref.kind == "experiment_outputs")
+            self.assertEqual((store.resolve(output) / "curve.json").read_text(), "[1, 2]")
+            canonical = store.read_json(next(ref for ref in result.artifacts if ref.kind == "experiment_result"))
+            self.assertEqual(canonical["artifacts"]["outputs"], output.path)
+
+    def test_protected_file_changes_invalidate_measurement_without_losing_process_result(self):
+        from simple_ar.experiment.execution.guards import evaluate_result_guard
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / "split.json"
+            data.write_text("[0, 1]", encoding="utf-8")
+            contract = ResearchExperimentContract(
+                contract_id="protected-evaluation", hypothesis="Compare on one fixed split.",
+                dataset_refs=[{"asset_id": "fixture", "revision": "1"}], split_spec={"file": "split.json"},
+                metric_specs=[{"name": "accuracy", "unit": "fraction"}], comparison_conditions={"seed": 0},
+                protected_assets=[{"asset_id": "split", "path": "split.json"}],
+            )
+            def measure(code):
+                return run_experiment(ExperimentRequest(
+                    run=RunRequest([sys.executable, "-c", code], root, 5),
+                    result_schema={"primary_metric": "accuracy", "direction": "higher"},
+                    experiment_contract=contract,
+                )).canonical
+            baseline = measure("print('accuracy: 0.5')")
+            self.assertEqual(baseline["validity_status"], "observed_assets_unchanged")
+            data.write_text("[2, 3]", encoding="utf-8")
+            candidate = measure("print('accuracy: 0.9')")
+            self.assertEqual(compare_experiment_results(baseline, candidate)["comparability"], "mismatched")
+            tampered = measure("from pathlib import Path; Path('split.json').unlink(); print('accuracy: 1.0')")
+            self.assertEqual(tampered["returncode"], 0)
+            self.assertEqual(tampered["execution_status"], "passed")
+            self.assertEqual(tampered["validity_status"], "invalid")
+            self.assertEqual(tampered["status"], "failed")
+            self.assertEqual(tampered["metrics"]["accuracy"], 1.0)
+            self.assertEqual(tampered["measurement"]["asset_integrity"]["changed_assets"], ["split"])
+            self.assertEqual(evaluate_result_guard(tampered)["status"], "failed")
+            with self.assertRaises(FileNotFoundError):
+                measure("from pathlib import Path; Path('must-not-run').touch()")
+            self.assertFalse((root / "must-not-run").exists())
+
+    def test_measured_comparison_tracks_protocol_and_rejects_changed_conditions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contract = ResearchExperimentContract(
+                contract_id="paired-validation", hypothesis="Compare two small classifiers.",
+                dataset_refs=[{"asset_id": "fixture", "revision": "v1"}],
+                split_spec={"validation_indices": [0, 1]},
+                metric_specs=[{"name": "accuracy", "direction": "higher", "unit": "fraction"}],
+                comparison_conditions={"seed": 0},
+            )
+            self.assertEqual(ResearchExperimentContract.from_row(contract.to_row()), contract)
+            schema = {"primary_metric": "accuracy", "direction": "higher"}
+            def measure(label, correct, protocol=contract, result_schema=schema, exitcode=0):
+                return run_experiment(ExperimentRequest(
+                    run=RunRequest([sys.executable, "-c", f"print('accuracy:', {correct} / 2); raise SystemExit({exitcode})"],
+                                   Path(tmp), 5, label=label),
+                    result_schema=result_schema, experiment_contract=protocol,
+                )).canonical
+            baseline = measure("baseline", 1)
+            candidate = measure("candidate", 2)
+            self.assertNotEqual(baseline["measurement"]["measurement_id"], candidate["measurement"]["measurement_id"])
+            self.assertEqual(candidate["measurement"]["condition_id"], "candidate")
+            matching = compare_experiment_results(baseline, candidate)
+            self.assertEqual(matching["comparability"], "declared_match")
+            self.assertEqual(matching["verdict"], "improved")
+            self.assertEqual(compare_experiment_results(candidate, candidate)["comparability"], "unknown")
+            failed = measure("failed", 1, exitcode=3)
+            self.assertEqual(compare_experiment_results(failed, candidate)["verdict"], "inconclusive")
+            for changed, changed_schema in (
+                (replace(contract, split_spec={"validation_indices": [2, 3]}), schema),
+                (contract, {"primary_metric": "accuracy", "direction": "lower"}),
+            ):
+                other = measure("other", 2, changed, changed_schema)
+                comparison = compare_experiment_results(baseline, other)
+                self.assertEqual(comparison["comparability"], "mismatched")
+                self.assertEqual(comparison["verdict"], "inconclusive")
+                self.assertEqual(comparison["metrics"][0]["interpretation"], "not_comparable")
+                self.assertEqual(comparison["deltas"]["accuracy"], 0.5)
+                self.assertFalse(any("improved" in reason for reason in comparison["reasons"]))
+            incomplete = measure("incomplete", 2, replace(contract, split_spec={}))
+            self.assertEqual(compare_experiment_results(baseline, incomplete)["comparability"], "unknown")
+
     def test_synthesis_handoff_builds_explicit_experiment_request(self) -> None:
         contract = ResearchExperimentContract(
             contract_id="synthesis-contract-001",
@@ -265,7 +358,7 @@ class ExperimentCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "run-experiment",
                 attempt_id="attempt-001",
                 request=ExperimentRequest(
@@ -279,7 +372,6 @@ class ExperimentCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             refs = controller.attempt_output_refs("attempt-001")
             payload = controller.store.read_json(refs[0])
             self.assertEqual(payload["schema_version"], "2.5")
@@ -306,7 +398,7 @@ class ExperimentCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "run-experiment",
                 attempt_id="attempt-001",
                 request=ExperimentRequest(
@@ -319,7 +411,7 @@ class ExperimentCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "failed")
-            self.assertEqual(decision.failure_kind, "resource")
+            self.assertIn("Experiment execution timed out.", result.diagnostics)
             self.assertEqual(
                 controller.store.read_json(controller.attempt_output_refs("attempt-001")[0])["status"],
                 "timed_out",
@@ -342,7 +434,7 @@ class ExperimentCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "run-experiment",
                 attempt_id="attempt-001",
                 request=ExperimentRequest(
@@ -359,7 +451,7 @@ class ExperimentCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "failed")
-            self.assertEqual(decision.failure_kind, "metric")
+            self.assertIn("Experiment result guard failed.", result.diagnostics)
             payload = controller.store.read_json(
                 "attempts/attempt-001/results.json"
             )
@@ -378,7 +470,7 @@ class ExperimentCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, _ = controller.execute(
+            result = controller.execute_attempt(
                 "run-experiment",
                 attempt_id="attempt-001",
                 request=ExperimentRequest(
@@ -399,6 +491,12 @@ class ExperimentCapabilityTests(unittest.TestCase):
             payload = controller.store.read_json(result_ref)
             self.assertEqual(payload["artifacts"]["stdout"], "execution/stdout.txt")
             self.assertEqual(payload["artifacts"]["stderr"], "execution/stderr.txt")
+            process_ref = next(ref for ref in result.artifacts if ref.kind == "process_invocation")
+            process_record = controller.store.read_json(controller.attempt_output_ref(
+                "attempt-001", kind="process_invocation", schema="process_invocation.v1",
+            ))
+            self.assertEqual(process_record["returncode"], 2)
+            self.assertIn("invocation.json", process_ref.path)
             self.assertEqual(
                 controller.store.read_text("attempts/attempt-001/execution/stdout.txt"),
                 "out\n",
@@ -421,10 +519,9 @@ class ExperimentCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            controller.execute(
+            controller.execute_attempt(
                 "experiment",
                 attempt_id="attempt-001",
-                next_capability="analysis",
                 request=ExperimentRequest(
                     run=RunRequest(
                         command=[sys.executable, "-c", "print('accuracy: 0.75')"],
@@ -435,7 +532,7 @@ class ExperimentCapabilityTests(unittest.TestCase):
                 ),
             )
             result_ref = controller.attempt_output_refs("attempt-001")[0]
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "analysis",
                 attempt_id="attempt-002",
                 inputs=(result_ref,),
@@ -444,7 +541,6 @@ class ExperimentCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             analysis_ref = controller.attempt_output_refs("attempt-002")[0]
             payload = controller.store.read_json(analysis_ref)
             self.assertEqual(payload["schema_version"], "analysis_handoff.v1")

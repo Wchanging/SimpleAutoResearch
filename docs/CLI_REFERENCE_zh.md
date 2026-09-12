@@ -5,10 +5,12 @@
 本文是 SimpleAutoResearch 的命令速查手册，只关注命令语法、参数、产物和少量边界说明。
 
 V2.8 的正式用户入口只有 `simple-ar research-session`，它负责从研究问题到
-`report/report_audit` 的完整有界流程。`research-session-continue` 和 `research-report` 是
-同一 session 的恢复/报告子命令；`research-brief`、`research-experiment` 和
-`research-code-task` 是分段、开发或诊断接口。`simple-ar run/resume` 只作为旧八阶段的
-冻结兼容入口，新的研究能力不会再进入其中。
+`report/report_audit` 的完整有界流程。`research-report` 可以为 `--no-report` 创建的 canonical
+session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使用 canonical 的显式重试边界，
+不再回退执行旧 v1 session。旧会话保持只读，可通过 `research-session-migrate` 将证据导入新会话。
+`research-brief`
+是分段、开发或诊断接口。旧 `research-experiment`、`research-code-task` 和 `simple-ar run/resume` 执行命令已退出；
+`status` 和 artifact 工具仍可读取历史产物，不会将旧阶段参数静默映射到新应用。
 
 - 安装和实践流程：[使用与配置](USAGE_zh.md)
 - 工作流概念和产物结构：[工作流与产物](WORKFLOWS_zh.md)
@@ -18,14 +20,11 @@ V2.8 的正式用户入口只有 `simple-ar research-session`，它负责从研�
 
 | 命令 | 用途 |
 | --- | --- |
-| `simple-ar research-session` | **V2.8 正式主入口**：在同一个 session 中运行完整的有界 research-to-report 流程。 |
-| `simple-ar research-session-continue` | 在失败的 research session 中追加一次显式恢复实验。 |
+| `simple-ar research-session` | **V2.8 正式主入口**：在同一个 session 中运行 literature-only 或完整的有界 research-to-report 流程。 |
+| `simple-ar research-session-continue` | 重试 canonical 显式实验中的技术失败。 |
+| `simple-ar research-session-migrate` | 从只读的 `session_manifest.v1` 创建 canonical 后继 session。 |
 | `simple-ar research-report` | 从已完成的 research session 生成并审查报告。 |
 | `simple-ar research-brief` | 分段/开发接口：从主题或本地文献构建有证据支持的 research brief。 |
-| `simple-ar research-experiment` | 分段/开发接口：从 research handoff 执行并分析一个已声明的实验。 |
-| `simple-ar research-code-task` | 将 research handoff 交给已有的 project-style Code-Task backend。 |
-| `simple-ar run` | 旧八阶段兼容入口；不再作为 V2.8 正式主线。 |
-| `simple-ar resume` | 继续旧的 research pipeline 兼容 run。 |
 | `simple-ar status` | 查看 research run 或 code-task run 状态。 |
 | `simple-ar tools ...` | 导出 tool schema、调用 run-local tool，或通过 MCP stdio 暴露只读 tools。 |
 | `simple-ar inspect` | 为某次 run 构建本地 artifact index。 |
@@ -35,75 +34,6 @@ V2.8 的正式用户入口只有 `simple-ar research-session`，它负责从研�
 
 ## Research Pipeline
 
-### `simple-ar run`
-
-**一句话说明**：启动一次旧八阶段兼容流程；V2.8 普通用户应优先使用
-`simple-ar research-session`。
-
-该命令保留旧配置、阶段目录和历史 artifact 读取能力。它不会获得新的 research 策略，
-待真实消费者迁移并完成历史格式回归后，按 V2.8 Phase 3B 删除或进一步收缩为只读兼容入口。
-
-**语法用法**：
-
-```bash
-uv run simple-ar run --topic "agent simulation" --to-stage report
-uv run simple-ar run --config examples/research_report/configs/research_report.toml
-```
-
-**参数表**：
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `--config PATH` | path | 可复现 run 的 TOML 配置；显式 CLI 参数会覆盖配置值。 |
-| `--topic TEXT` | string | 研究主题。除非 `[run].topic` 已设置，否则必填。 |
-| `--output-root DIR` | path | 时间戳 run 目录创建位置。 |
-| `--from-stage NAME` | stage | 起始阶段，默认 `plan`。 |
-| `--to-stage NAME` | stage | 结束阶段，默认 `report`。 |
-| `--model NAME` | string | LLM 模型覆盖。 |
-| `--llm-workers N` | int | 支持阶段的并发 LLM worker 数。 |
-| `--max-papers N` | int | 文献 metadata 数量上限。 |
-| `--search-query TEXT` | string | 覆盖生成的搜索 query。 |
-| `--experiment-template NAME` | string | 实验模板，例如 `code_task_project`。 |
-| `--experiment-timeout N` | int | 实验子进程 timeout。 |
-| `--report-mode MODE` | enum | `auto`、`research_only` 或 `experiment`。 |
-| `--report-reviewer MODE` | choice | `llm` 或 `disabled`。`disabled` 会关闭 report reviewer/revision loop，但保留写作后的 audit。 |
-| `--no-llm` | flag | 尽可能使用 deterministic fallback，不调用 LLM。 |
-| `--offline-search` | flag | 跳过 live literature providers。 |
-| `--allow-fixture-fallback` | flag | live/cache 失败后允许 fixture metadata。 |
-| `--strict-search` | flag | 搜索失败时直接失败，不使用 cache/fixture fallback。 |
-| `--no-retrieval` | flag | 禁用本地 artifact retrieval 上下文。 |
-| `--retrieval-top-k N` | int | 本地 artifact chunk 检索数量。 |
-| `--quiet` | flag | 减少进度日志输出。 |
-| `--overwrite-stage-artifacts` | flag | 关闭 `06-code` / `07-run` 重跑时的默认归档保护。只有旧代码/运行产物可丢弃时才使用。 |
-
-**内嵌 code-task 参数**：
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `--code-task-config PATH` | path | `--experiment-template code_task_project` 使用的 code-task TOML。 |
-| `--code-root DIR` | path | 准备到内嵌 code-task workspace 的源项目。 |
-| `--task-file PATH` | path | 任务文件。内嵌 run 可省略；省略时 `05-design` 会生成任务。 |
-| `--benchmark-command TEXT` | string | patch 前后运行的 benchmark command。 |
-| `--code-task-name TEXT` | string | 内嵌 code-task 实验展示名。 |
-| `--code-task-max-file-bytes N` | int | 内嵌 copy/sparse 模式最大复制文件大小。 |
-| `--code-task-workspace-mode MODE` | enum | `auto`、`copy`、`git_worktree`、`sparse_copy`，或 greenfield code-task 使用的 `empty`。`auto` 优先 git worktree，失败时降级 copy。 |
-| `--code-task-workspace-reuse-source-venv` | flag | 使用检测到的 source `.venv` Python。 |
-| `--code-task-workspace-setup-hook TEXT` | string | 为未来 managed environment 记录 setup command。 |
-| `--code-task-env-mode MODE` | enum | `current` 或 `external`。 |
-| `--code-task-python PATH` | path | external env mode 的 Python 路径。 |
-| `--primary-metric NAME` | string | 对比使用的主指标。 |
-| `--metric-direction NAME=DIRECTION` | repeatable | 指标方向：`higher`、`lower`、`resource` 或 `ignore`。 |
-
-**生成产物**：
-
-- `runs/<run-id>/manifest.json`
-- `runs/<run-id>/config_snapshot.json`
-- `01-plan/`、`02-search/`、`08-report/` 等阶段目录
-
-**注意**：
-
-真实运行参数较多时，优先使用 TOML。完整字段见
-[配置参考](CONFIG_REFERENCE_zh.md#完整-pipeline-config)。
 
 ### `simple-ar research-brief`（分段/开发接口）
 
@@ -136,52 +66,22 @@ uv run simple-ar research-brief \
 LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求失败或返回无效结果时，
 对应 attempt 会明确失败，不会偷偷改用 deterministic 正文。
 
-### `simple-ar research-experiment`（分段/开发接口）
+### 已退出的 `simple-ar research-experiment`
 
-**一句话说明**：接收已经审阅的 `research_brief.v1` 或 `synthesis_result.v1` handoff，
-通过现有执行后端运行一次实验，并把真实结果交给结果分析能力。
-
-**语法用法**（`--command` 必须放在最后）：
-
-```bash
-uv run simple-ar research-experiment \
-  --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
-  --cwd examples/research_brief/fixtures \
-  --primary-metric accuracy \
-  --metric-direction accuracy=higher \
-  --command python -c "print('accuracy: 0.75')"
-```
-
-执行前会检查输入 handoff；如果 synthesis 不是 `ready` 或没有 experiment contract，入口会拒绝执行。
-session 会把输入 handoff、`results.json`、stdout/stderr、guard、diagnosis 和 `analysis.json`
-分别记录在 `experiment-001/` 与 `analysis-001/` attempt 下。即使实验失败，它仍会被交给分析能力并
-保留为证据；入口不会隐式 retry 或 repair。
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `--topic TEXT` | string | 新 session 的主题标签。 |
-| `--synthesis-file PATH` | path | 已持久化的 `research_brief.v1` 或 `synthesis_result.v1` 输入。 |
-| `--model NAME` | string | 可选模型；启用 LLM 结果分析。 |
-| `--output-root DIR` | path | 带时间戳 session 的父目录。 |
-| `--cwd DIR` | path | 传给执行后端的工作目录。 |
-| `--timeout-sec N` | int | 本地执行 timeout。 |
-| `--primary-metric NAME` | string | 结果中应解析到的主指标。 |
-| `--metric NAME` | repeatable | 其他必需指标，可重复传入。 |
-| `--metric-direction NAME=DIRECTION` | repeatable | 指标方向，例如 `accuracy=higher` 或 `loss=lower`。 |
-| `--command ...` | command | 交给本地执行后端的命令，必须放在最后。 |
+独立 design→experiment→analysis 创建器已删除；研究任务使用 `research-session`。
+旧 `--synthesis-file` 参数不作隐式兼容。领域能力仍可在库级组合，历史产物保持可读。
 
 ### `simple-ar research-session`（V2.8 正式唯一主入口）
 
-**一句话说明**：在同一个 `full_research` session 中运行 V2.8 正式端到端主线：
+**一句话说明**：在同一个 session 中运行 V2.8 正式主线。提供实验命令或
+`--code-task-config` 时，运行有界的 research-to-experiment 流程：
 `plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`。
-默认由调用方明确提供实验命令。传入 `--code-task-config` 时，experiment attempt
-会改由已有的 project-style Code-Task backend 负责实现；它仍然是一次有界实验，
-不表示开启自主迭代。
+两者都省略时，运行 literature-only 流程并在有证据支持的 summary 处结束；如果提供模型，
+还会继续生成 research-only 报告。该模式不会创建实验请求或启动进程。
 
-模型可用时，主线会继续进入 `report -> report_audit`；`--no-report` 仅用于调试或只检查
-前缀 handoff。若需要恢复或单独生成报告，应使用同一 session 的
-`research-session-continue` / `research-report` 子命令，而不是切换到另一条研究主线。
+模型可用时，同一个 application 会继续进入 `report -> report_audit`；`--no-report` 仅用于调试
+或只检查前缀 handoff。之后调用 `research-report` 可以只补齐报告交付物，不重新检索、分析或
+运行已有实验；`research-session-continue` 只用于明确的恢复或修订决定。
 
 **语法用法**（`--command` 必须放在最后）：
 
@@ -208,11 +108,11 @@ uv run simple-ar research-session \
 ```
 
 TOML 仍然是 Code-Task 项目、benchmark、workspace、baseline 和执行设置的来源。
-生成的 code-task 产物会保留在 session 的 `experiment-001` attempt 下，并规范化为
+生成的 code-task 产物会保留在 session 的 preparation/implementation attempt 下，并规范化为
 同一份 Analysis 消费的 canonical result；不会新增第二套代码生成器。
 
-内嵌 bridge 会把严格的串行依赖链合并为一个有界 batch（最多 3 个 work item、4 个目标文件）。
-如果该 batch 需要 `large` budget，检查 proposal 后必须在 Code-Task TOML 中显式设置
+canonical application 会在隔离的 preparation workspace 中复用既有 Code-Task 实现和验证能力。
+如果 proposal 需要 `large` budget，检查 proposal 后必须在 Code-Task TOML 中显式设置
 `[execute].allow_large_edits = true`；否则 session 会保留产物，并在审批边界停止。
 
 可选的 `--cache-dir` 会传给 document ingest。后续 session 会复用有效的全文缓存文件；默认值仍是
@@ -220,21 +120,14 @@ session-local，以保持旧命令兼容。
 
 它复用分段接口的 attempt-local 产物，但这些接口不再构成第二条完整主线，并且主线不隐式
 retry 或 repair。若还没有准备好的可执行实验，`research-brief` 只能作为提前准备 handoff
-的开发工具；如果已经有持久化 direction 需要单独验证，才使用 `research-experiment`。
-实验与分析前缀完成后，结果状态为 `ready_for_report`，因为 session 仍会为显式报告 continuation
-保持打开。可以使用窄的 `simple-ar research-report` 命令完成这次交接；它只是委托给现有的
-Python 报告适配器，不新增另一套报告引擎或 scheduler。
+的开发工具；实验继续由正式研究会话管理。
+使用 `--no-report` 创建的 session 之后可用窄的 `simple-ar research-report` 命令补齐报告；
+它只重新打开 canonical application 的报告动作，复用已持久化的 synthesis、测量和 analysis。
 如果希望一次显式调用完成前缀和报告，可以在最后的 `--command` 之前加入
-`--model NAME --with-report`；前缀通过后会接着执行同一条报告路径。
-`--report-reviewer` 和 `--max-review-iterations` 只控制这次报告 continuation。
-如果需要由 agent 生成 continuation 草稿，同一模块还提供
-`run_research_report_agent_session()`。它复用现有 Writer/Reviewer 实现，把紧凑的轨迹保存为
-report attempt 的输入，再调用同一套 report/audit capability；不会增加第二个 writer，也
-不会隐式 retry。
-对于 `research-session` 的结果，还可以使用
-`build_research_session_report_inputs()` 和 `run_research_session_report_agent()`：它们从
-session 中已经持久化的 synthesis、论文元数据、执行结果和分析证据整理报告输入，同时仍
-由调用方明确选择 template、预算和 client。
+`--model NAME --with-report`；`--report-reviewer` 和 `--max-review-iterations` 会进入同一份
+application 配置。
+Writer 执行和检查点统一由正式应用调用 `report/writing.py`。历史报告输入投影只读保留，
+原来的独立 report-session 执行 API 已退出。
 
 省略 `--model` 时，planning、reading、synthesis、design 选择和 analysis 都保持
 deterministic；传入 `--model NAME` 后，同一个共享 client 会用于 planning、有界 reading/
@@ -248,9 +141,10 @@ status 命令：
 uv run simple-ar status runs/research-session/<session>
 ```
 
-当目录包含 `session_manifest.json` 时，status 会显示 session 状态、当前 attempt、有限预算、
-各类 attempt 计数和最后一次决策；不会读取或改写 capability 产物。仍包含 `manifest.json` 的旧
-pipeline 和 Code-Task 目录继续使用原来的 status 行为。
+当目录包含 canonical `session_manifest.json`（schema `session_manifest.v2`）时，status 会显示
+application 状态、当前 attempt、有限预算、各类 attempt 计数和最后一次决策；不会读取或改写 capability
+产物。旧的 `session_manifest.v1` 只作为只读兼容输入；旧 pipeline 和 Code-Task 目录继续使用原来的
+status 行为。
 
 如果开放的 session 没有 active attempt，status 还可能显示
 `Handoff: ready_for_report` 或 `Continuation: explicit ...`。这只是持久化的下一步提示，
@@ -258,8 +152,9 @@ pipeline 和 Code-Task 目录继续使用原来的 status 行为。
 
 ### `simple-ar research-session-continue`
 
-**一句话说明**：在已有 session 的实验失败且 analysis 建议回到 experiment 时，显式追加一次恢复实验。
-它复用文献、research design 和失败的父 attempt，不重新检索，也不增加自动修复策略。
+**一句话说明**：在已有 session 中用调用方提供的修正命令，显式重试一次技术失败的实验。
+对于 canonical v2，它复用文献、research design 和失败的父 attempt，不重新检索；成对实验、数据准备
+和 CodeTask 失败由各自的有界边界处理。科学负结果是证据，不会被静默重跑；旧 v1 session 不再原地执行。
 
 **用法**（`--command` 必须放在最后）：
 
@@ -272,9 +167,28 @@ uv run simple-ar research-session-continue \
   --command python -c "print('accuracy: 0.90')"
 ```
 
-命令会追加 `experiment-002` 和 `analysis-002`，并记录 `experiment-001` 为父节点；同一个 session
-拒绝第二次恢复分支。默认复用父实验保存的 result schema，也可以用 metric 参数显式补充或覆盖。恢复成功
-后可以继续 `research-report`；恢复失败仍会保存产物并返回非零状态，原有 attempt 和文献产物不会被覆盖。
+canonical session 会创建动态命名的新 experiment attempt，并把失败的候选记录为父节点，随后重新执行确定性
+analysis；原 attempt 和文献产物不会被覆盖。只允许重试 `failed`/`timed_out` 技术失败，默认沿用原 result
+schema，metric 参数可显式补充或覆盖。若请求了报告，成功后会显示下一步 report action。
+旧会话可显式迁移证据，但迁移不等于继续执行旧阶段计划。
+
+### `simple-ar research-session-migrate`
+
+**一句话说明**：从旧的 `session_manifest.v1` 创建新的 canonical session，
+不改写旧目录。不会猜测历史预算剩余量，也不会把未知旧产物冒充为当前状态；只有显式指定且可读取的小型产物才会迁入。
+
+**用法**：
+
+```bash
+uv run simple-ar research-session-migrate \
+  --source-root runs/legacy/<session> \
+  --destination-root runs/research-session/<successor> \
+  --artifact search \
+  --requested-output report
+```
+
+命令会输出新 session 路径、`parent_session`、迁移 artifact、导入/跳过数量，
+以及 `Historical budget: unknown_not_imported`。目标目录必须为空，且不能位于旧 session 目录内。
 
 ### `simple-ar research-report`
 
@@ -286,79 +200,16 @@ uv run simple-ar research-report \
   --model "$SIMPLE_AR_MODEL"
 ```
 
-报告和审查会作为新的 attempt 写入原 session。相同 session 再次调用时，如果对应 attempt 已经存在会直接拒绝，避免静默替换已有报告。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit 仍会运行。
+报告和审查会作为新的 attempt 写入原 session。canonical session 已有报告时再次调用是幂等读取，
+不会重新运行 Writer。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit
+仍会运行。历史 session 可读取，但不再由第二套报告执行器续写；损坏的正式 session 会明确失败，
+不会回退到另一条流程。
 
-### `simple-ar research-code-task`
+### 已退出的分段 CodeTask 命令
 
-**一句话说明**：将持久化的研究方向交给已有的隔离 project-style Code-Task backend，
-再输出规范化执行结果和结果分析产物。这是第一条可执行的 research-to-code 消费路径，
-不会替换 `code-task` 或八阶段 pipeline。
+research-code-task 及其独立 session 执行器已退出。研究任务使用
+research-session --code-task-config，纯编码任务使用独立 code-task；历史分段结果仍可读取。
 
-**语法用法**：
-
-```bash
-uv run simple-ar research-code-task \
-  --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
-  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
-  --output-root runs/research-code-task
-```
-
-传入的 Code-Task TOML 必须设置 `[execute].use_llm = true`。命令会创建新的 session，
-不会覆盖之前的 brief 或 run，并只执行一个明确选定的方向。多候选比较暂时后置，等单方向
-路径在真实准备项目上验证稳定后再考虑。
-加入 `--with-report` 后，会在这个通过的 Code-Task session 上继续使用已有 Writer/Reviewer、
-报告组装和 audit 路径。
-
-| 参数 | 含义 |
-| --- | --- |
-| `--topic TEXT` | 用于 session 标识和分析上下文的研究主题。 |
-| `--synthesis-file PATH` | 持久化的 `research_brief.v1` 或 `synthesis_result.v1` handoff。 |
-| `--code-task-config PATH` | 现有 project-style Code-Task TOML。 |
-| `--output-root DIR` | 新的带时间戳 session 的父目录。 |
-| `--model NAME` | 可选的单模型 override，交给现有 backend。 |
-| `--timeout-sec N` | 可选的 `[execute].timeout_sec` 覆盖值。 |
-| `--baseline-policy POLICY` | 可选覆盖：`auto`、`run`、`skip`、`provided` 或 `none`。 |
-| `--baseline-metrics-file PATH` | `provided` policy 使用的 baseline 指标文件。 |
-| `--with-report` | 为通过的 session 追加标准报告和 audit。 |
-
-当前入口只接入已有 project-style Code-Task，不会创建托管环境、分配 GPU 或声称支持任意
-greenfield 生成。`--with-report` 需要 `--model`，使用标准 experiment 模板。
-
-### `simple-ar resume`
-
-**一句话说明**：继续已有 research pipeline run。
-
-**语法用法**：
-
-```bash
-uv run simple-ar resume runs/<run-id>
-uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
-uv run simple-ar resume runs/<run-id> --from-stage report --to-stage report --report-output-mode variant --report-output-label survey-v2
-```
-
-**参数表**：
-
-`resume` 接收 `RUN_DIR`，并支持大多数 `run` 参数作为覆盖，包括
-`--config`、阶段范围、LLM/search/report 参数、报告写入策略和内嵌 code-task 参数。
-
-常用报告写入参数：
-
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `--report-output-mode` | choice | `overwrite`、`archive` 或 `variant`。`variant` 会写入 `08-report/variants/<label>/`，不替换当前主报告。 |
-| `--report-reviewer` | choice | `llm` 或 `disabled`。用于在 resume 时覆盖 report reviewer/revision loop。 |
-| `--report-output-label` | string | report archive/variant 的可选目录标签。 |
-| `--overwrite-stage-artifacts` | flag | 关闭 `06-code` / `07-run` 重跑时的默认归档保护。 |
-
-**生成产物**：
-
-- 更新已有 run 目录
-- 在 `manifest.json` 中追加阶段执行状态
-
-**注意**：
-
-如果存在 `config_snapshot.json`，未传入的值会尽量沿用原 run 配置。
 
 ### `simple-ar status`
 
@@ -553,6 +404,9 @@ Code-task 命令会把代码任务准备到 `runs/<run-id>/code_task/workspace`�
 
 ### 高级编排命令
 
+已有项目的普通 `execute` 只使用一份 patch plan。通过 `--to-step work-plan` / `--to-step batch`
+或已有 work plan 才进入分批路径，交互模式也相同；它们不是每次修改的必经阶段。
+
 #### `simple-ar code-task init`
 
 **一句话说明**：创建 code-task run，准备可编辑 workspace，并构建初始代码索引。
@@ -584,7 +438,6 @@ uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmar
 | `--workspace-include GLOB` | repeatable | `sparse_copy` include pattern。 |
 | `--workspace-exclude GLOB` | repeatable | `sparse_copy` 额外 exclude pattern。 |
 | `--workspace-reuse-source-venv` | flag | 检测并复用 source `.venv` Python。 |
-| `--workspace-setup-hook TEXT` | string | 记录 setup command；init 不执行它。 |
 | `--max-file-bytes N` | int | copy/sparse 模式最大复制文件大小，`0` 表示禁用。 |
 
 **生成产物**：
@@ -625,7 +478,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--timeout N` | int | benchmark timeout。 |
 | `--baseline-policy MODE` | enum | 已有项目 baseline 策略：`auto`、`run`、`skip`、`provided` 或 `none`。昂贵 baseline 可用 `skip`/`none` 跳过，或用 `provided` 记录已有指标。 |
 | `--baseline-metrics-file PATH` | path | `--baseline-policy provided` 时读取的 JSON 或 `metric=0.82` 文本指标文件。 |
-| `--planning-mode MODE` | enum | Greenfield 规划模式：`tool_agent` 会拆分规划并做有限 review 修订；`compact` 使用旧的单次架构规划。 |
+| `--planning-mode MODE` | enum | Greenfield 规划：`tool_agent` 分步规划并做有限审阅；`compact` 在重试前只调用一次架构规划。 |
 | `--yes` | flag | 普通 execute 模式下自动批准 inline 审核门；与 `--interactive` 一起使用时，自动继续 primitive prompts。只有明确接受审核风险、想自动化跑通时才使用。 |
 | `--interactive` | flag | 调试模式：逐个 primitive step 确认，而不是连续运行到下一个审核门。 |
 | `--no-review-inline` | flag | 禁用 inline 审核提示，在审核门直接停止。 |
@@ -688,8 +541,8 @@ provider-specific CLI 参数。
 
 Greenfield 默认使用 `tool_agent` planning，会把 requirements、architecture、
 interfaces、file plan 和 planning review 的中间产物写到
-`code_task/meta/planning/`。只有排查旧单次规划路径时才建议使用
-`--planning-mode compact`。
+`code_task/meta/planning/`。需要减少规划调用时可使用
+`--planning-mode compact`；后续文件生成、审阅与执行共用同一实现。
 
 如果 greenfield review 发现通用可修复的 blocking finding，有限 repair 轮次会优先
 生成结构化局部 action，例如唯一 old/new 替换或函数级替换；只有文件级结构错误时才

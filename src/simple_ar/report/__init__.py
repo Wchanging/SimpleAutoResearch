@@ -13,7 +13,6 @@ from simple_ar.report.capability import (
     assemble_report_document,
     run_report_capability,
 )
-from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.ports import DeterministicFigureRenderer, FigureRenderer
 from simple_ar.report.schema import (
@@ -54,7 +53,6 @@ __all__ = [
     "ReportAssemblyResult",
     "assemble_report_document",
     "run_report_capability",
-    "build_report_context",
     "initialize_report_memory",
     "load_report_template_bundle",
     "DeterministicFigureRenderer",

@@ -7,14 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.core.artifacts import (
-    append_jsonl,
-    read_json,
-    read_jsonl,
-    read_text,
-    write_json,
-    write_text,
-)
+from simple_ar.core.artifacts import append_jsonl, read_json, read_text, write_json, write_text
 from simple_ar.code_task.editing.scope import (
     allowed_patterns_from_manifest,
     is_edit_allowed_path,
@@ -27,8 +20,8 @@ from simple_ar.code_task.analysis.context import (
 )
 from simple_ar.code_task.memory import task_memory_context
 from simple_ar.code_task.analysis.interfaces import snippet_api_contract
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
-from simple_ar.app.usage import summarize_usage
+from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.integrations.usage import record_usage
 
 
 CODE_TASK_PLAN_SYSTEM = (
@@ -73,6 +66,7 @@ def generate_patch_plan(
     max_files: int = 8,
     max_source_chars_per_file: int = 2500,
     message_callback: MessageCallback | None = None,
+    llm_client: LLMClient | None = None,
 ) -> PatchPlanResult:
     """Generate a reviewable patch plan for an initialized code-task run.
 
@@ -155,11 +149,13 @@ def generate_patch_plan(
             try:
                 suffix = f" (attempt {attempt}/{llm_retry_attempts})" if llm_retry_attempts > 1 else ""
                 _emit(message_callback, f"Calling LLM for code-task patch planning{suffix}.")
-                client = LLMClient.from_env(
+                client = LLMClient.for_task(
+                    client=llm_client,
                     model=model,
-                    usage_callback=lambda usage: _record_code_task_usage(
+                    usage_callback=lambda usage: record_usage(
                         meta_dir,
                         usage,
+                        stage="code_task.plan",
                         message_callback=message_callback,
                     ),
                 )
@@ -425,11 +421,11 @@ def _plan_user_prompt(
         "- Require human approval before patch application.\n\n"
         f"Task:\n{task_text}\n\n"
         f"Benchmark command recorded for later validation:\n{benchmark_command or 'None'}\n\n"
-        f"Run context JSON:\n{json.dumps(run_context, indent=2, ensure_ascii=False)}\n\n"
+        f"Run context JSON:\n{json.dumps(run_context, separators=(',', ':'), ensure_ascii=False)}\n\n"
         f"Task memory:\n{memory_context}\n\n"
-        f"Codebase index summary JSON:\n{json.dumps(compact_index, indent=2, ensure_ascii=False)}\n\n"
+        f"Codebase index summary JSON:\n{json.dumps(compact_index, separators=(',', ':'), ensure_ascii=False)}\n\n"
         "Selected Python API contract (derived from the exact snippets below):\n"
-        f"{json.dumps(snippet_api_contract(snippets), indent=2, ensure_ascii=False)}\n\n"
+        f"{json.dumps(snippet_api_contract(snippets), separators=(',', ':'), ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}"
     )
 
@@ -844,25 +840,6 @@ def _update_manifest_after_plan(
     write_json(manifest_path, manifest)
 
 
-def _record_code_task_usage(
-    meta_dir: Path,
-    usage: LLMUsage,
-    *,
-    message_callback: MessageCallback | None,
-) -> None:
-    usage_path = meta_dir / "llm_usage.jsonl"
-    row = usage.to_row()
-    row["stage"] = "code_task.plan"
-    append_jsonl(usage_path, row)
-    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
-    cost = row.get("estimated_cost_usd")
-    cost_text = f", est cost ${cost:.6f}" if isinstance(cost, (int, float)) else ""
-    _emit(
-        message_callback,
-        f"LLM usage {row.get('label', '')}: "
-        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
-        f"{row['total_tokens']} tokens ({row['source']}{cost_text}).",
-    )
 
 
 def _source_snippets(

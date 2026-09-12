@@ -11,11 +11,9 @@ duplicating the full artifact manual; for concrete commands and file trees, see
 
 ## Workflow Presets
 
-For ordinary V2.8 users, the formal workflow is only `research-session`: it
-connects the research-to-report stages in a fixed order and keeps handoffs,
-attempts, artifacts, and audits in one session. The current 8-stage pipeline is
-the frozen compatibility projection for the old entrypoint, not a second product
-mainline.
+The formal research entrypoint is `research-session`. It owns attempts, artifacts,
+reports and audits in one session, selecting literature or experiment work from
+the request. The old eight-stage executor is retired, not a compatibility workflow.
 
 The project remains module-first internally. Capabilities can be reused by tests,
 recovery, developer APIs, and future workflows, but ordinary users should not
@@ -28,10 +26,10 @@ research-session
   -> research_design -> experiment -> analysis -> report -> report_audit
 
 segmented/development interfaces
-research-brief / research-experiment / research-code-task
+research-brief
 
-temporary compatibility entrypoint
-simple-ar run/resume -> old eight-stage artifact projection
+historical read interface
+simple-ar status RUN_DIR -> read-only archive display
 ```
 
 ## Capability Runs
@@ -59,9 +57,9 @@ callers can override this with `BudgetState`, while loaded legacy manifests
 retain their persisted budget.
 
 For a caller-owned multi-capability handoff, the application layer should call
-`SessionController.execute()` for each explicit capability in the chosen
-sequence. It persists each attempt and stops when the returned decision is not
-accepted. A resumed process should load the session, inspect its status and
+`SessionController.execute_attempt()` for each explicit capability in the chosen
+sequence. It persists execution facts; the application decides whether to stop,
+continue or complete the research. A resumed process should inspect status and
 attempt lineage, and explicitly construct the next call; the core does not
 silently rerun an interrupted attempt or choose a domain-specific best result.
 When an interruption has been manually confirmed, the caller can use
@@ -70,32 +68,25 @@ an explicit failure before constructing a retry or repair attempt. The method
 does not retry or overwrite an existing result envelope.
 The controller rejects any new attempt while a prior attempt is still marked
 `running`, so recovery cannot accidentally create a second active branch.
-Before creating a subsequent attempt, the controller also checks the actual
-capability against the persisted current attempt's allow-listed transitions.
-This catches an omitted or replaced route proposal while retaining listed
-backtracks and same-capability repairs.
-The controller applies the same check to a resumed call, and rejects missing
-input artifacts before creating a new attempt.
+Core validates capability scope, budget and input artifacts before creating a
+new attempt. Research sequencing belongs to the application, not a second
+fixed transition recipe in the execution boundary.
 
 Use `SessionController.attempt_output_refs()` to pass declared outputs from a
 completed or failed attempt to a later capability. Attempt-local paths are
 converted to session-root references without copying or merging artifacts;
 the caller still decides which attempt and which output to use.
 When an alternative should start from an earlier completed or failed attempt,
-pass its ID as `parent_attempt_id` to `SessionController.execute()`. The
-controller records that parent and validates the new capability against the
-parent's route. Without this explicit argument, attempts continue from the
+pass its ID as `parent_attempt_id` to `SessionController.execute_attempt()`. The
+controller validates and records that parent. Without this argument, attempts continue from the
 current attempt as before; the controller does not infer branches or select a
 winner. Use `attempt_lineage()` to inspect the root-to-node chain for a
 comparison or recovery view; it reads only persisted attempt manifests and
 does not merge artifacts or schedule work.
 
-The `research-session` application exposes this boundary through its
-read-only `recommended_transition` property. A passed execution and analysis
-recommend continuing to `report`; any other result is returned to the
-`experiment` boundary for an explicit caller-owned repair or redesign. The
-recommendation uses the core transition policy and session budget; it never
-creates an attempt, reruns a command, or turns a failed session into a success.
+Historical research-session readers expose the stored `next_capability` and
+execution evidence. They do not recompute a next-step recommendation with a
+retired policy; new research decisions belong to ResearchApplication.
 
 For a library caller that wants one in-memory value, use
 `research.brief.build_research_brief()` is an in-memory compatibility view only.
@@ -104,8 +95,10 @@ capability: sessions persist `read` and `synthesize` separately. Historical
 `research_brief.v1` handoffs remain readable, but they are not a second
 executable lifecycle.
 
-The small user-facing composition is available as `simple-ar research-brief`.
-It owns one explicit path:
+`simple-ar research-brief` is a compatibility request/result adapter over the
+same `ResearchApplication` used by `research-session`, not another orchestrator.
+It requests a literature summary and uses the canonical lifecycle and default
+request/token budgets. Its research capabilities are:
 
 ```text
 plan -> search -> document_ingest -> read -> synthesize
@@ -125,10 +118,10 @@ uv run simple-ar research-brief --topic "reliable agents" \
   --output-root runs/research-brief
 ```
 
-The command creates a timestamped session directory. Each handoff remains in
-its own attempt, normally under `attempts/plan-001/`, `attempts/search-001/`,
-`attempts/document-001/`, `attempts/read-001/`, and
-`attempts/synthesize-001/`. The canonical outputs are `research_plan.json`,
+The command creates a timestamped v2 session directory. Each handoff remains in
+its own dynamically named attempt. Read `session_manifest.json.state_refs` for
+the actual paths; use the CLI's printed `Synthesis handoff` path for downstream
+commands instead of constructing an attempt ID. The canonical outputs are `research_plan.json`,
 `search_result.json`, `document_bundle.json`, `read_result.json`, and
 `synthesis_result.json`; capability results and attempt manifests record their
 status and lineage. The command does not silently retry or overwrite a prior
@@ -146,16 +139,8 @@ provenance plus `planner: llm` and `generation_mode: llm`. Missing credentials,
 transport failures, or malformed model output fail the relevant attempt; they
 do not silently become a model-generated result.
 
-The next small composition accepts the resulting research direction through
-`simple-ar research-experiment`. It runs one declared command with the
-existing execution backend and sends its canonical `results.json` to the
-existing result-analysis capability. Its input is a persisted
-`research_brief.v1` or `synthesis_result.v1`, so the direction-to-experiment
-handoff is explicit and inspectable. Execution failures are analyzed as
-evidence, but retries, repair, and experiment selection remain caller-owned.
-Passing `--model NAME` also enables the shared LLM result-analysis step;
-omitting it keeps analysis deterministic. The selected mode is recorded in
-the analysis capability provenance.
+The segmented `research-experiment` creator is retired. Experiment and analysis
+capabilities remain shared by the formal application, without a separate session lifecycle.
 
 For a single session that owns both sides of this handoff, use
 `simple-ar research-session`. It reuses the same explicit
@@ -167,6 +152,12 @@ Code-Task backend for that experiment attempt instead: its project, benchmark,
 workspace, baseline, and execution settings remain owned by the TOML, and its
 output is normalized into the same canonical result. This is a controlled
 composition rather than an unrestricted research loop.
+
+When neither an execution command nor `--code-task-config` is supplied, the same
+entrypoint remains a literature-only composition. It ends at the evidence-backed
+summary without creating an execution request; with a model, it can continue to
+the research-only report path. This is the supported no-experiment form, not an
+implicit placeholder experiment.
 
 If that session ends with a failed experiment but retains its design and
 analysis handoffs, one explicit recovery can reuse the same literature and
@@ -181,108 +172,26 @@ uv run simple-ar research-session-continue \
   --command python -c "print('accuracy: 0.90')"
 ```
 
-This creates only `experiment-002` and `analysis-002`, with the failed
-`experiment-001` as their explicit parent. The revised command is supplied by
-the caller; search, design, and code generation are not repeated. The session
-reserves the existing report handoff slots, permits one recovery per session,
-and leaves the original artifacts untouched. After a successful recovery,
-continue with `simple-ar research-report`; a failed recovery remains persisted
-for inspection and returns a non-zero shell status.
+For a canonical `session_manifest.v2`, this creates a new dynamically named
+experiment attempt whose parent is the failed candidate, then reuses the
+existing literature and design for deterministic analysis. The revised command
+is supplied by the caller; search and design are not repeated. The original
+attempt remains intact. This boundary accepts only a simple explicit technical
+failure; paired, prepared-data, and CodeTask sessions keep their dedicated
+bounded recovery paths. A scientific negative result is evidence and is not
+silently retried. Legacy `session_manifest.v1` sessions retain the fixed
+`experiment-002`/`analysis-002` compatibility behavior.
 
-The same session can be continued into the existing report boundary with
-`run_research_report_session()`. The caller supplies section drafts,
-`ReportContext`, and any source refs; the adapter appends `report` and
-`report_audit` attempts without copying or replacing the earlier analysis
-artifact. A successful `research-session` prefix therefore reports
-`ready_for_report`, while the report continuation is the operation that can
-close the session. Supplying drafts explicitly keeps writer/revision policy
-outside the lifecycle controller.
+The canonical session can continue through `research-report` after `--no-report`.
+It reuses persisted evidence and measurements, adding only missing report actions.
+Writer execution and checkpoints belong to `report/writing.py`; assembly and audit
+remain separate canonical capabilities in the same application lifecycle.
 
-The existing `simple-ar status <session-root>` command also understands a
-capability session's `session_manifest.json`. It reports the persisted session
-checkpoint, attempt states, bounded budget, and last decision without rerunning
-or rewriting any capability. The legacy `manifest.json` status path is
-unchanged.
-
-When the existing Writer/Reviewer implementation should own draft generation,
-use `run_research_report_agent_session()` instead. It accepts the same compact
-report context and memory plus the existing template, runtime config, LLM
-client, and tool gateway; it then passes the validated section drafts to the
-same report and audit capabilities. The writer trace is stored as
-`inputs/report_agent_result.json` and referenced by the report attempt, while
-the assembled `report.md` remains the single report body. This is an adapter
-over the current report agent, not a second prompt or a new report pipeline.
-
-For the standard literature-to-experiment path,
-`build_research_session_report_inputs()` derives that compact context and
-memory directly from a `ResearchSessionResult`: the persisted synthesis,
-selected paper metadata, execution result, and result-analysis claims remain
-the sources of the report inputs. `run_research_session_report_agent()` is the
-small convenience wrapper for this path. It still requires the caller to
-choose the template, runtime budget, and LLM client; it is a report handoff,
-not an automatic research scheduler. It accepts only a session whose
-execution and analysis both passed (`report_ready=True`). For failure or
-partial-result reports, call the lower-level explicit report boundary with
-the caller's chosen drafts and evidence instead.
-
-After the process ends, `load_research_session_result()` restores the same
-typed result from `session_manifest.json` and the declared `plan-001`,
-`search-001`, `document-001`, `read-001`, `synthesize-001`, optional `design-001`,
-`experiment-001`, and `analysis-001` outputs. It performs no network request, execution, retry, or result
-selection, so a caller can explicitly continue an existing session into
-Report/Audit without rerunning its earlier stages. Missing or malformed
-handoffs fail closed with `ResearchSessionError`.
-
-When a research direction should enter a real code experiment, the application
-layer exposes `simple_ar.app.research_code_task.run_research_code_task_session()`.
-It reads a persisted `synthesis_result.v1` or `research_brief.v1`, reuses the
-existing Code-Task backend for workspace isolation, generation, validation,
-execution, and result analysis, and retains execution/analysis refs in the same
-session. The V2.8 path intentionally runs one explicitly selected research
-direction. Multi-candidate comparison is deferred until the single-direction
-path has been validated on a real prepared project.
-
-```bash
-uv run simple-ar research-code-task --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
-  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
-  --output-root runs/research-code-task
-```
-
-`--with-report` continues a passed session through the existing experiment
-report Writer/Reviewer and audit path:
-
-```bash
-uv run simple-ar research-code-task --topic "reliable agents" --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json --code-task-config examples/code_task_medium_review/configs/code_task.toml --output-root runs/research-code-task --model "$SIMPLE_AR_MODEL" --with-report
-```
-
-The continuation is accepted only after execution and result analysis pass; it
-does not retry or turn a failed run into a formal report.
-
-The command runs one direction. Add `--with-report` when the passed session
-should be handed to Report/Audit. The configuration must set
-`[execute].use_llm = true`. This first consumer covers the existing project-style
-Code-Task backend; it does not create a GPU environment or claim arbitrary
-greenfield generation.
-
-A finished or failed single Code-Task session can be restored in a later
-process with `load_research_code_task_session_result(session_root)`. The
-loader reads the session manifest, the declared synthesis input, and the
-`canonical_results.2.5` plus `analysis_handoff.v1` outputs. It does not run
-Code-Task, contact a provider, retry, or choose among artifacts; a missing or
-inconsistent handoff raises `ResearchCodeTaskSessionError`.
-
-To continue a session that was intentionally opened for reporting, first load
-it with the restoration function and then call
-`run_research_code_task_report_agent(session, ...)`. The wrapper requires the
-persisted final decision to name `report` as the next capability, then reuses
-the generic Writer/Reviewer and Report/Audit path.
-
-`simple_ar.app.research_code_task_report` can then pass the session's execution
-and analysis evidence to the generic Report/Audit boundary. It derives compact
-context, metric sources, and claim evidence before reusing the existing report
-assembler and audit. Section drafts are still supplied by the caller, so this
-adapter should not be read as an automatic paper writer.
+Historical sessions remain inspectable, but no second Writer/report/audit executor
+resumes them. `build_research_session_report_inputs()` and
+`build_code_task_report_inputs()` only project existing evidence without executing
+or modifying the session. The segmented `research-code-task` creator is retired;
+use `research-session --code-task-config` for complete tasks.
 
 Applications that want the built-in adapters can use
 `research.register_research_capabilities(registry, names=...)`. The `names`
@@ -375,10 +284,7 @@ The resulting `AnalysisResult` also exposes a conservative evidence status
 It requires an explicit execution handoff and never schedules a retry or
 transition; persisted standalone analyses additionally write
 `analysis_status.json`.
-When an upper-layer session needs to consume this status, use
-`research.decisions.transition_request_from_analysis()`. It only builds the
-existing transition input and never executes a next step, retries, or
-overwrites an attempt; the caller still owns the recovery choice.
+The application consumes the analysis evidence directly and owns the next action.
 
 For an already assembled report, register
 `report.audit.run_report_audit_capability()` when a session needs a standalone
@@ -407,11 +313,9 @@ Conceptual flow:
 plan -> search -> read -> synthesize -> report
 ```
 
-Reality check today:
-
-- `run --to-stage report` still executes design/code/run stages because the default pipeline is a teaching demo.
-- For a pure literature pass, stop at `synthesize`, then resume `report`; `auto`
-  mode will produce a research-only report because no `results.json` exists.
+Without an execution command or CodeTask configuration, `research-session`
+uses the literature-only path and does not start an experiment. Reports belong
+to the same lifecycle; `--no-report` explicitly omits that delivery.
 
 ### 2. Code Task (Existing Codebase)
 
@@ -421,7 +325,7 @@ Conceptual flow:
 
 ```text
 init workspace -> index code -> map repo -> probe environment
--> apply baseline policy -> build context pack -> work-plan -> create batch
+-> apply baseline policy -> build context pack
 -> plan patch -> approve -> propose edits -> apply edits
 -> review changes -> validate -> run patched benchmark -> post-run review
 -> compare results
@@ -430,6 +334,10 @@ init workspace -> index code -> map repo -> probe environment
 
 Key boundaries:
 
+- Ordinary `execute` uses one patch plan. Decomposition is opt-in through
+  `execute --to-step work-plan` / `--to-step batch` or an existing work plan.
+  Interactive execution follows the same rule. Explicit batch workflows retain
+  their scope, approval, completion and repair history.
 - The source project is prepared under `code_task/workspace`; existing-project
   runs default to `auto`, which prefers a detached `git_worktree` for committed
   Git projects and falls back to a guarded `copy` with recorded next-step hints.
@@ -439,9 +347,9 @@ Key boundaries:
   data/model/cache/secret-like paths. The original code is never modified.
 - Patch application is gated by an explicit human approval step.
 - Edit proposals are conservative old/new replacements, not free-form rewrites.
-- The default editor backend is `controlled_patch`; the backend interface is
-  now explicit so future external agents can plug in behind the same safety and
-  review gates.
+- Controlled patch proposals and application call their implementation directly.
+  The duplicate editor-adapter layer has been retired; artifact metadata retains
+  `controlled_patch` for provenance. External Harness integration is later work.
 - Multiple ordered edits may target one file, but every `old` block must remain
   uniquely matchable; invalid proposals stop before workspace files are written.
 - `code-task execute` can run the next safe steps, but it stops at plan approval
@@ -469,158 +377,85 @@ Key boundaries:
 
 Bundled examples:
 
-- `examples/research_report/`: research-only search/read/synthesize/report
-  workflow with live academic sources and report variants.
+- `examples/research_session_smoke.py`: canonical research workflow smoke;
+  literature-only reports use the same application, not an old pipeline config.
 - `examples/code_task_medium_review/`: standalone code-task workflow over a
   multi-module review classifier with a `main.py` entrypoint, JSON config,
   visible progress output, and a task that naturally touches feature extraction,
   model scoring, and configuration.
-- `examples/full_pipeline_tiny_mlp/`: full 8-stage pipeline over a lightweight
-  NumPy MLP benchmark, useful for end-to-end local checks without GPU.
+- `examples/code_task_digits_mlp/`: standalone coding on a lightweight NumPy
+  MLP benchmark, useful for real local CPU measurements without GPU.
 
-### 3. Research With Experiment (Legacy/Advanced)
+### 3. Research With Experiment
 
-Use this when you want a research idea to become an executable experiment and a result-backed report.
+Use `research-session` for a research task with an explicit execution command or
+`--code-task-config`. The application owns the research lifecycle; CodeTask
+implements changes in the prepared workspace, while the experiment capability
+owns measurements.
 
 Conceptual flow:
 
 ```text
-plan -> search -> read -> synthesize -> design experiment
--> template codegen or embedded code-task -> run benchmark -> report
+plan -> search -> document ingest -> read -> synthesize -> design
+-> prepare/implement when requested -> experiment -> analysis -> report -> audit
 ```
 
-Current status:
+- Research inputs and constraints are passed to CodeTask through the research
+  handoff. Ordinary modification uses one approved patch plan; explicit or
+  existing work plans retain their batch workflow.
+- Implementation produces frozen patch, validation, review and plan evidence.
+  These checks do not themselves establish a scientific improvement.
+- Experiment results and comparisons keep their execution references. A failed
+  process is not a valid measurement; a valid negative result is not an
+  instruction to repair forever.
+- Report generation uses the recorded literature, implementation and measurement
+  evidence. Mechanical audit success is not proof of publication quality or
+  semantic correctness.
+- Resuming report work must not rerun experiments that have completed. See the
+  session commands above and `examples/research_session_smoke.py` for the entry
+  point; the offline smoke is a fixture, not real scientific validation.
 
-- `06-code` can generate a whitelisted template experiment, prepare an embedded
-  code-task workspace for existing projects, or call the unified code-task
-  greenfield engine when no source project exists yet. In the greenfield case,
-  the real nested run lives under `06-code/code_task_run/`, while compatibility
-  artifacts are projected back to `06-code/generated_project/`.
-- `--experiment-template code_task_project` is the generic embedded handoff into the code-task workflow. It accepts either `--code-task-config` or explicit `--code-root`, optional `--task-file`, and `--benchmark-command` flags. If no task file is supplied, `05-design` generates `generated_code_task.md` from the earlier research artifacts and a compact codebase summary.
-- The generated embedded task includes a compact Research-to-Code Bridge from
-  synthesis/design artifacts, so code-task planning sees method-transfer hints,
-  implementation hypotheses, metric contracts, ablation targets, resource
-  constraints, and risk notes.
-- `simple-ar run --config ...` is the preferred way to keep multi-option research/code-task runs readable and repeatable.
-- `--experiment-template llm_code_task_toy_spam` remains only as a bundled smoke-test template.
-- The embedded path is end-to-end: it builds the same repo-map/context-pack,
-  work-plan, and attempt/batch evidence as standalone code tasks, then
-  auto-approves the patch plan inside the prepared workspace. A strict serial
-  dependency chain is merged into one bounded batch (at most three work items
-  and four target files) so implementation, wiring, and configuration are not
-  silently split across separate attempts. Such a batch normally uses the
-  `large` budget; the embedded path reads `[execute].allow_large_edits` from
-  the Code-Task TOML and preserves the run with a clear failure if explicit
-  approval is absent. Standalone code-task remains the better place for a
-  human to inspect a larger proposal interactively.
-- The final report receives the nested code-task comparison as experiment
-  evidence, so before/after metrics can appear in the Code Task Evidence section
-  instead of being hidden inside `06-code/`.
-- Report generation is guarded: LLM drafts are accepted only when citations, metric visibility, fixture disclosure, and toy-demo boundaries pass rule-based checks.
+## Historical Eight-Stage Artifacts
 
-## Legacy Eight-Stage Compatibility Projection
+The old eight-stage executor has been removed. `run`, `resume`,
+`research-code-task` and `research-experiment` reject execution and point to
+`research-session`; old template flags do not select a supported workflow.
 
-The old eight-stage pipeline remains a reproducible compatibility preset, but
-it is no longer the V2.8 mainline. It preserves the stage-shaped artifacts
-needed by old configs and historical readers; new research policy belongs only
-to canonical capabilities. After its real consumers migrate and the historical
-format regressions remain green, this projection will be removed.
-
-```text
-01 plan        Scope the topic and research question
-02 search      Retrieve paper metadata, full text, and local chunks
-03 read        Screen, shortlist, and structure retrieved papers
-04 synthesize  Analyze themes, gaps, and experimentable hypotheses
-05 design      Create an experiment plan
-06 code        Generate experiment code or prepare an embedded code task
-07 run         Execute the experiment and parse metrics
-08 report      Write a Markdown report with references
-```
-
-| Stage | Main outputs | Purpose |
-| --- | --- | --- |
-| `plan` | `goal.md`, `problem.md` | Scope the topic into a concrete research question (LLM-backed when enabled). |
-| `search` | `papers.jsonl`, `search_meta.json`, `documents/`, `research_index/` | Retrieve and ingest metadata/full text, record provider provenance, and build local chunks. It may select candidates within budget but does not perform semantic review. |
-| `read` | `review/`, `paper_notes.json`, `notes.md` | Screen and prioritize retrieved papers, then convert the shortlist into canonical Paper Briefs (LLM-backed when enabled). Larger LLM runs use coarse title/abstract batches before reranking the kept set. |
-| `synthesize` | `synthesis_brief.json`, `synthesis.md`, `hypothesis.md` | Analyze read-stage Paper Briefs into themes, gaps, bounded ideas, and testable hypotheses. The default derivation is deterministic; an explicitly enabled LLM may propose a bounded candidate list, but every motivation reference is checked against the supplied evidence. |
-| `design` | `experiment_plan.json`, `experiment_contract.json`, `result_schema.json`, `resource_plan.json`, `dependency_plan.json`, `domain_profile.json`, `contract_validation.json` | Select a safe experiment template and write the executable contract, metric schema, resource/dependency budget, domain profile, and pre-code validation. |
-| `code` | `code_task_run/`, `generated_project/`, `experiment.py`, or template code | Prepare an embedded existing-code task, run unified greenfield code-task generation, or write a whitelisted template experiment from the design contract. |
-| `run` | `results.json`, `guard_report.json`, `stdout.txt`, `stderr.txt` | Execute the experiment, normalize canonical results, and guard against missing/invalid metrics before reporting. |
-| `report` | `report.md`, `references.bib`, `manifest.json`, `report_quality.json`, `report_memory.json`, `report_audit.json` | Write a template-guided report with citations, bounded source backtracking, and audit artifacts (LLM-backed when enabled). |
+Existing stage-shaped archives are not deleted or rewritten. `status RUN_DIR`
+can display their recorded manifest and pipeline state. The private
+`_legacy.documents.load_search_document_bundle(search_dir)` reads an archived
+Search directory without creating a runtime context. Historical artifact names
+describe stored evidence, not a second executable pipeline.
 
 ## Search And LLM Boundaries
 
-Search is the retrieval gate, not the whole evidence engine. It scopes research
-questions, chooses source order, retrieves candidates, records provider
-provenance, and builds document/full-text/index artifacts. It may rank and cap
-retrieved candidates to stay within budget, but semantic screening, structured
-reading, synthesis, and experiment-contract work are owned by later stages.
+Search retrieves records and records provenance. Document ingest handles local
+or permitted remote text; Read selects and analyzes evidence, Synthesis combines
+it, and Design proposes an experiment. Missing full text remains an explicit
+limitation, not a claim that the paper was read in full.
 
-Normal runs keep compact artifacts by default:
-
-```text
-02-search/
-  papers.jsonl / search_meta.json
-  documents/       # normalized document records and full-text/cache manifests
-  research_index/  # portable chunks and local-index metadata
-```
-
-`03-read` owns screening, reranking, and canonical Paper Briefs. In LLM mode it
-first coarse-screens compact title/abstract batches, then reranks the kept set
-with reading priorities, evidence roles, and synthesis hints. `04-synthesize`
-owns `synthesis_brief.json`, `synthesis.md`, and `hypothesis.md`; legacy
-cards/evidence-pack diagnostics are retained only when
-`[run].debug_artifacts = true`. `05-design` owns the experiment contract.
-
-When `[run].debug_artifacts = true`, search also keeps planning files, retrieval
-traces, retrieval-selection rows, coverage-review reports, and section tables.
-The V2.8 research path does not generate speculative Tool/MCP handoff artifacts;
-those belong to the deferred external-Harness phase.
-
-Shared accelerator stores live outside the run by default under
-`.simple_ar_cache/research_index`, keyed by run/source metadata. Run-local cache
-folders such as downloaded PDFs and extracted text are rebuildable and can be
-previewed or cleaned with `simple-ar clean`.
-
-LLM participation is bounded. The research planner can run in deterministic,
-`auto`, or LLM mode; lightweight coverage checks and local novelty checks are
-risk signals, not proof of originality. `--no-llm` keeps plan/read/synthesize/report
-on deterministic fallback text.
-
-For the full search-stage file tree and per-file descriptions, see
-[Usage And Configuration](USAGE.md). For search, cache, parser, and debug-artifact
-settings, see [Configuration Reference](CONFIG_REFERENCE.md).
+LLM-generated ideas and local novelty checks are research suggestions, not proof
+of originality. Offline fixture output is not model-backed scientific analysis.
+See the capability entrypoints above for typed inputs and outputs.
 
 ## Artifact Ownership Summary
 
-WORKFLOWS intentionally stays at the ownership level; the complete file tree lives
-in [Usage And Configuration](USAGE.md). At a high level:
-
-- Root run files (`state.json`, `manifest.json`, `config_snapshot.json`, usage
-  logs, and optional artifact indexes) track resume state, configuration, and
-  observability.
-- Stage directories (`01-plan` through `08-report`) own their own contracts,
-  reports, and stable handoff artifacts.
-- `02-search` owns retrieval, document/full-text status, and local chunks.
-- `03-read` owns reading review, shortlists, literature cards, and structured
-  reading notes.
-- `04-synthesize` owns the compact evidence bridge, gaps, ideas, novelty hints,
-  synthesis, and hypothesis derived from read-stage artifacts.
-- `05-design` owns experiment contracts, result schemas, resource/dependency
-  plans, domain profiles, contract validation, and experiment plans.
-- `06-code/code_task_run` embeds the same artifact shape as a standalone code
-  task when the research pipeline hands off to code execution.
-- `08-report` owns the final report package: report text, references, manifest,
-  compact report memory, source/citation/metric audit, and quality checks.
-
-This split keeps detailed operational files available without forcing readers to
-learn every JSON/JSONL artifact before they understand the workflow. When a file
-is primarily diagnostic or rebuildable, it should either be gated by
-`debug_artifacts` or documented as cleanup-safe.
+- `session_manifest.json` records session and attempt state; the application
+  chooses research actions, and the shared budget ledger records usage.
+- Each `attempts/` directory owns its declared artifacts. References, rather
+  than fixed stage numbers, connect search, reading, synthesis, implementation,
+  experiments, analysis, writing and audit.
+- Implementation freezes the patch and checks used for the measured revision.
+  Experiment execution owns observed metrics; analysis interprets them.
+- Report writing, assembly and audit retain their own attempt artifacts. A
+  completed process, a completed workflow and a publication-quality paper are
+  different claims.
+- Historical numbered stage directories remain archives only. Rebuildable caches
+  are not the authority for results and must not replace source artifacts.
 
 ## Code Task Artifact Boundaries
 
-Standalone code tasks and embedded pipeline code tasks use the same conceptual
+Standalone code tasks and research-application implementations use the same conceptual
 layout. The important boundary is what each group is responsible for:
 
 - `workspace/`: isolated editable project copy, worktree, or sparse subset.

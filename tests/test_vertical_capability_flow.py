@@ -49,25 +49,22 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 budget=BudgetState(max_attempts=6),
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "read",
                 attempt_id="attempt-001",
-                next_capability="synthesize",
                 request=ReadRequest(bundle=_bundle()),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             read_ref = controller.attempt_output_refs("attempt-001")[0]
             read_result = ReadResult.from_handoff_dict(
                 controller.store.read_json(read_ref),
                 bundle=_bundle(),
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "synthesize",
                 attempt_id="attempt-002",
                 inputs=(read_ref,),
-                next_capability="experiment",
                 request=SynthesisRequest(
                     evidence_pack=evidence_pack_from_read(
                         "reliable agents",
@@ -76,14 +73,12 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             synthesis_ref = controller.attempt_output_refs("attempt-002")[0]
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "experiment",
                 attempt_id="attempt-003",
                 inputs=(synthesis_ref,),
-                next_capability="analysis",
                 request=ExperimentRequest(
                     run=RunRequest(
                         command=[sys.executable, "-c", "print('accuracy: 0.75')"],
@@ -97,24 +92,20 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             result_ref = controller.attempt_output_refs("attempt-003")[0]
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "analysis",
                 attempt_id="attempt-004",
                 inputs=(result_ref,),
-                next_capability="report",
                 result_ref=result_ref,
                 analysis_context={"task_id": "vertical-flow"},
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "report",
                 attempt_id="attempt-005",
-                next_capability="report_audit",
                 request=ReportAssemblyRequest(
                     title="Reliable agents",
                     sections=(
@@ -127,10 +118,9 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             report_ref = controller.attempt_output_refs("attempt-005")[0]
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "report_audit",
                 attempt_id="attempt-006",
                 inputs=(report_ref,),
@@ -145,8 +135,8 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
-            self.assertEqual(controller.status_snapshot()["status"], "completed")
+            self.assertEqual(controller.status_snapshot()["status"], "running")
+            self.assertEqual(controller.manifest.decisions, [])
             self.assertEqual(
                 controller.store.read_json(
                     "attempts/attempt-006/report_audit.json"
@@ -186,10 +176,9 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 budget=BudgetState(max_attempts=10),
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "search",
                 attempt_id="search-001",
-                next_capability="document_ingest",
                 request=SearchRequest(
                     queries=("reliable agents",),
                     providers=("fixture",),
@@ -200,7 +189,6 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             search_ref = controller.attempt_output_refs("search-001")[0]
             search_result = SearchResult.from_handoff_dict(
                 controller.store.read_json(search_ref)
@@ -213,11 +201,10 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 require_fulltext=True,
                 budget={"max_fulltext_documents": 1},
             )
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "document_ingest",
                 attempt_id="document-001",
                 inputs=(search_ref,),
-                next_capability="read",
                 request=DocumentIngestRequest(
                     papers=search_result.papers,
                     source_plan=source_plan,
@@ -226,32 +213,28 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             document_ref = controller.attempt_output_refs("document-001")[0]
             bundle = DocumentBundle.from_handoff_dict(
                 controller.store.read_json(document_ref)
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "read",
                 attempt_id="read-001",
                 inputs=(document_ref,),
-                next_capability="synthesize",
                 request=ReadRequest(bundle=bundle),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             read_ref = controller.attempt_output_refs("read-001")[0]
             read_result = ReadResult.from_handoff_dict(
                 controller.store.read_json(read_ref),
                 bundle=bundle,
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "synthesize",
                 attempt_id="synthesis-001",
                 inputs=(read_ref,),
-                next_capability="experiment",
                 request=SynthesisRequest(
                     evidence_pack=evidence_pack_from_read(
                         "reliable agents",
@@ -260,7 +243,6 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
 
             synthesis_ref = controller.attempt_output_ref(
                 "synthesis-001",
@@ -272,10 +254,9 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
             )
             self.assertIsNotNone(synthesis_result.experiment_contract)
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "experiment",
                 attempt_id="experiment-001",
-                next_capability="analysis",
                 request=experiment_request_from_synthesis(
                     synthesis_result,
                     run=RunRequest(
@@ -290,7 +271,6 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             result_ref = controller.attempt_output_ref(
                 "experiment-001",
                 kind="experiment_result",
@@ -302,25 +282,22 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 "experiment_contract.v1",
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "analysis",
                 attempt_id="analysis-001",
                 inputs=(result_ref,),
-                next_capability="report",
                 result_ref=result_ref,
                 analysis_context={"task_id": "builtin-vertical-flow"},
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             analysis_ref = controller.attempt_output_refs("analysis-001")[0]
             analysis_payload = controller.store.read_json(analysis_ref)
             metric = analysis_payload["analysis"]["metric_summary"]["metrics"][0]
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "report",
                 attempt_id="report-001",
                 inputs=(analysis_ref,),
-                next_capability="report_audit",
                 request=ReportAssemblyRequest(
                     title="Reliable agents",
                     sections=(
@@ -336,14 +313,13 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             report_ref = controller.attempt_output_refs("report-001")[0]
             self.assertIn(
                 f"{metric['name']} {metric['value']}",
                 controller.store.read_text(report_ref),
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "report_audit",
                 attempt_id="audit-001",
                 inputs=(report_ref,),
@@ -358,8 +334,8 @@ class VerticalCapabilityFlowTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
-            self.assertEqual(controller.manifest.status, "completed")
+            self.assertEqual(controller.manifest.status, "running")
+            self.assertEqual(controller.manifest.decisions, [])
             self.assertEqual(len(controller.list_attempts()), 8)
 
 

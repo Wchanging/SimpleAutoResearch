@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from simple_ar.app.usage import summarize_usage
+from simple_ar.integrations.usage import record_usage, summarize_usage
+from simple_ar.core.artifacts import read_json, read_jsonl
+from simple_ar.core.budget import BudgetLedger
 from simple_ar.integrations.llm import (
     LLMClient,
     LLMError,
     LLMRequest,
     LLMSettings,
+    LLMUsage,
     _call_openai_sdk,
     estimate_tokens,
     parse_json_object,
@@ -17,6 +22,26 @@ from simple_ar.integrations.llm import (
 
 
 class LLMParsingTests(unittest.TestCase):
+    def test_usage_recording_keeps_batch_projection_and_unknown_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = Path(tmp) / "meta"
+            batch = Path(tmp) / "batch"
+            messages = []
+            record_usage(meta, LLMUsage("fixture", "plan", 10, 2, 12, "provider", 0.01),
+                         stage="code_task.plan", message_callback=messages.append)
+            record_usage(meta, LLMUsage("fixture", "edit", 20, 3, 23, "provider", provider_attempts=2),
+                         stage="code_task.propose_edits", batch_dir=batch,
+                         message_callback=messages.append)
+            summary = read_json(meta / "llm_usage_summary.json")
+            self.assertEqual(summary["requests"], 2)
+            self.assertEqual(summary["total_tokens"], 35)
+            self.assertEqual(summary["retry_count"], 1)
+            self.assertIsNone(summary["estimated_cost_usd"])
+            self.assertEqual(read_json(batch / "usage_summary.json")["total_tokens"], 23)
+            self.assertEqual(read_jsonl(batch / "usage.jsonl"), read_jsonl(meta / "llm_usage.jsonl")[1:])
+            self.assertIn("$0.010000", messages[0])
+            self.assertNotIn("est cost", messages[1])
+
     def test_usage_summary_keeps_legacy_rows_and_counts_provider_retries(self) -> None:
         summary = summarize_usage(
             [
@@ -269,7 +294,7 @@ class LLMParsingTests(unittest.TestCase):
         completion.assert_not_called()
         sleep.assert_called_once_with(0.25)
 
-    def test_default_env_omits_timeout_and_output_cap(self) -> None:
+    def test_default_env_omits_implicit_timeout_but_honors_explicit_output_cap(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -292,8 +317,7 @@ class LLMParsingTests(unittest.TestCase):
         api_mode, request = openai_call.call_args.args
         self.assertEqual(api_mode, "chat")
         self.assertNotIn("timeout", request)
-        self.assertNotIn("max_tokens", request)
-        self.assertNotIn("max_completion_tokens", request)
+        self.assertEqual(request["max_completion_tokens"], 999)
 
     def test_chat_cap_uses_completion_token_param_for_newer_models(self) -> None:
         client = LLMClient(
@@ -314,6 +338,203 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(api_mode, "chat")
         self.assertEqual(request["max_completion_tokens"], 80)
         self.assertNotIn("max_tokens", request)
+
+    def test_invalid_per_call_output_cap_fails_before_provider_request(self) -> None:
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                api_mode="chat",
+            )
+        )
+
+        with patch("simple_ar.integrations.llm._call_openai_sdk") as openai_call:
+            with self.assertRaisesRegex(LLMError, "positive integer"):
+                client.ask("system", "user", max_output_tokens=0)
+
+        openai_call.assert_not_called()
+
+    def test_budget_ledger_settles_successful_provider_attempt(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 2, "total_tokens": 100})
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                api_mode="chat",
+                max_output_tokens=10,
+                retry_attempts=1,
+            ),
+            budget_ledger=ledger,
+            budget_session_id="session-1",
+            budget_attempt_id="attempt-1",
+        )
+        response = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        }
+
+        with patch(
+            "simple_ar.integrations.llm._call_openai_sdk", return_value=response
+        ) as openai_call:
+            self.assertEqual(
+                client.ask("system", "user", label="plan", budget_call_id="call-1"),
+                "ok",
+            )
+
+        openai_call.assert_called_once()
+        self.assertEqual(len(ledger.entries), 1)
+        entry = ledger.entries[0]
+        self.assertEqual(entry.status, "settled")
+        self.assertEqual(entry.session_id, "session-1")
+        self.assertEqual(entry.attempt_id, "attempt-1")
+        self.assertEqual(entry.logical_call_id, "call-1")
+        self.assertEqual(entry.purpose, "plan")
+        self.assertEqual(entry.actual, {"llm_requests": 1, "total_tokens": 5})
+        self.assertEqual(entry.actual_source, "provider")
+        self.assertEqual(ledger.remaining("llm_requests"), 1)
+        self.assertEqual(ledger.remaining("total_tokens"), 95)
+
+    def test_with_budget_binds_a_client_copy_to_application_ledger(self) -> None:
+        source = LLMClient(
+            LLMSettings(api_key="test-key", api_mode="chat", max_output_tokens=10),
+        )
+        ledger = BudgetLedger({"llm_requests": 1, "total_tokens": 50})
+        client = source.with_budget(ledger, session_id="session-1")
+        response = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        }
+
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response):
+            self.assertEqual(client.ask("system", "user", label="plan"), "ok")
+
+        self.assertIsNot(client, source)
+        self.assertEqual(ledger.entries[0].session_id, "session-1")
+        self.assertEqual(ledger.entries[0].actual["total_tokens"], 5)
+
+    def test_task_client_preserves_provider_and_budget_with_role_model_override(self) -> None:
+        observed, local = [], []
+        ledger = BudgetLedger({"llm_requests": 1, "total_tokens": 100})
+        source = LLMClient(
+            LLMSettings(api_key="test-key", base_url="https://provider.invalid/v1",
+                        model="planner", api_mode="chat", max_output_tokens=10),
+            usage_callback=observed.append, budget_ledger=ledger,
+            budget_session_id="session-1", budget_attempt_id="implement-1",
+        )
+        client = LLMClient.for_task(client=source, model="reviewer", usage_callback=local.append)
+        response = {
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+        }
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response) as transport:
+            self.assertEqual(client.ask("system", "user", label="review"), "ok")
+        self.assertEqual(source.model, "planner")
+        self.assertEqual(client.model, "reviewer")
+        self.assertEqual(transport.call_args.args[1]["model"], "reviewer")
+        self.assertEqual(observed, local)
+        self.assertEqual(len(local), 1)
+        self.assertEqual(len(ledger.entries), 1)
+        self.assertEqual(ledger.entries[0].attempt_id, "implement-1")
+        self.assertEqual(ledger.remaining("llm_requests"), 0)
+
+    def test_budget_exhaustion_prevents_provider_call(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 0, "total_tokens": 100})
+        client = LLMClient(
+            LLMSettings(api_key="test-key", api_mode="chat"),
+            budget_ledger=ledger,
+        )
+
+        with patch("simple_ar.integrations.llm._call_openai_sdk") as openai_call:
+            with self.assertRaises(LLMError):
+                client.ask("system", "user", label="blocked")
+
+        openai_call.assert_not_called()
+        self.assertEqual(ledger.entries, ())
+
+    def test_retryable_provider_failure_is_counted_before_retry(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 3, "total_tokens": 100})
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                api_mode="chat",
+                max_output_tokens=10,
+                retry_attempts=2,
+                retry_base_delay_sec=0.25,
+            ),
+            budget_ledger=ledger,
+        )
+        response = {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch(
+            "simple_ar.integrations.llm._call_openai_sdk",
+            side_effect=[RuntimeError("503 Service Unavailable"), response],
+        ) as openai_call, patch("simple_ar.integrations.llm.time.sleep"):
+            self.assertEqual(client.ask("system", "user", label="retry"), "ok")
+
+        self.assertEqual(openai_call.call_count, 2)
+        self.assertEqual([entry.status for entry in ledger.entries], ["settled", "settled"])
+        self.assertEqual(ledger.entries[0].actual_source, "estimated")
+        self.assertEqual(ledger.entries[0].actual["llm_requests"], 1)
+        self.assertEqual(ledger.entries[1].actual["llm_requests"], 1)
+        self.assertEqual(ledger.remaining("llm_requests"), 1)
+
+    def test_provider_timeout_marks_attempt_unknown(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 3, "total_tokens": 100})
+        client = LLMClient(
+            LLMSettings(
+                api_key="test-key",
+                api_mode="chat",
+                retry_attempts=1,
+            ),
+            budget_ledger=ledger,
+        )
+
+        with patch(
+            "simple_ar.integrations.llm._call_openai_sdk",
+            side_effect=RuntimeError("Request timed out."),
+        ) as openai_call:
+            with self.assertRaises(LLMError):
+                client.ask("system", "user", label="timeout")
+
+        openai_call.assert_called_once()
+        self.assertEqual(ledger.entries[0].status, "unknown")
+        self.assertEqual(ledger.remaining("llm_requests"), 2)
+        self.assertIsNone(ledger.remaining("total_tokens"))
+
+    def test_capped_timeout_can_retry_with_reserved_unknown_usage(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 3, "total_tokens": 100})
+        client = LLMClient(
+            LLMSettings(api_key="test-key", api_mode="chat", max_output_tokens=10,
+                        retry_attempts=3, retry_base_delay_sec=0),
+            budget_ledger=ledger,
+        )
+        response = {"choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}
+        with patch("simple_ar.integrations.llm._call_openai_sdk",
+                   side_effect=[TimeoutError("timed out"), response]) as call:
+            self.assertEqual(client.ask("system", "user"), "ok")
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(ledger.remaining("llm_requests"), 1)
+        self.assertEqual(ledger.entries[0].status, "unknown")
+        self.assertEqual(ledger.unknown_dimensions(), ("total_tokens",))
+        self.assertEqual(ledger.remaining("total_tokens"),
+                         95 - ledger.entries[0].reserved["total_tokens"])
+
+    def test_authentication_failure_releases_preflight_reservation(self) -> None:
+        ledger = BudgetLedger({"llm_requests": 2, "total_tokens": 100})
+        client = LLMClient(
+            LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=3),
+            budget_ledger=ledger,
+        )
+
+        with patch(
+            "simple_ar.integrations.llm._call_openai_sdk",
+            side_effect=RuntimeError("Authentication failed: invalid API key."),
+        ) as openai_call:
+            with self.assertRaises(LLMError):
+                client.ask("system", "user", label="auth")
+
+        openai_call.assert_called_once()
+        self.assertEqual(ledger.entries[0].status, "released")
+        self.assertEqual(ledger.remaining("llm_requests"), 2)
 
     def test_ask_does_not_retry_permanent_auth_error(self) -> None:
         client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", retry_attempts=3))

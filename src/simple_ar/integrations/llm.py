@@ -6,12 +6,15 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Sequence, TypeVar
+from uuid import uuid4
 
 os.environ.setdefault("LITELLM_LOG", "ERROR")
 import litellm
 from dotenv import load_dotenv
+
+from simple_ar.core.budget import BudgetError, BudgetLedger
 
 
 T = TypeVar("T")
@@ -36,9 +39,9 @@ class LLMSettings:
             cost estimates.
         request_timeout_sec: Optional per-request provider timeout in
             seconds. ``None`` means do not pass a client-side timeout.
-        max_output_tokens: Optional maximum output-token budget per request.
-            ``None`` disables provider output-limit parameters, including
-            per-call caps supplied by individual pipeline steps.
+        max_output_tokens: Optional client-wide default output-token budget per
+            request. ``None`` disables the client-wide default; an explicit
+            per-call cap supplied by a pipeline step still applies.
         retry_attempts: Total provider attempts for transient transport/server
             failures. Includes the first request.
         retry_base_delay_sec: Initial exponential-backoff delay.
@@ -145,6 +148,9 @@ class LLMClient:
         settings: LLMSettings,
         *,
         usage_callback: UsageCallback | None = None,
+        budget_ledger: BudgetLedger | None = None,
+        budget_session_id: str = "",
+        budget_attempt_id: str = "",
     ) -> None:
         """Create a client from validated LLM settings.
 
@@ -152,6 +158,11 @@ class LLMClient:
             settings: Provider connection settings.
             usage_callback: Optional callback invoked after each successful
                 request with token usage metadata.
+            budget_ledger: Optional shared ledger. When supplied, each
+                provider attempt reserves before transport and settles after a
+                successful response.
+            budget_session_id: Session identity recorded in ledger entries.
+            budget_attempt_id: Attempt identity recorded in ledger entries.
 
         Raises:
             LLMError: If the API key is missing.
@@ -163,6 +174,12 @@ class LLMClient:
         self._provider_model = _litellm_model(settings)
         self._settings = settings
         self._usage_callback = usage_callback
+        self._budget_ledger = budget_ledger
+        self._budget_session_id = budget_session_id
+        self._budget_attempt_id = budget_attempt_id
+        self._budget_namespace = uuid4().hex[:12]
+        self._budget_call_sequence = 0
+        self._budget_reservation_sequence = 0
         self._usage_lock = threading.Lock()
         if self._settings.transport_backend == "litellm":
             litellm.suppress_debug_info = True
@@ -174,6 +191,9 @@ class LLMClient:
         *,
         api_mode: str | None = None,
         usage_callback: UsageCallback | None = None,
+        budget_ledger: BudgetLedger | None = None,
+        budget_session_id: str = "",
+        budget_attempt_id: str = "",
     ) -> "LLMClient":
         """Load provider settings from ``.env`` and environment variables.
 
@@ -181,6 +201,9 @@ class LLMClient:
             model: Optional model override. When omitted, ``SIMPLE_AR_MODEL`` is
                 used, falling back to ``gpt-4o-mini``.
             usage_callback: Optional usage callback for token accounting.
+            budget_ledger: Optional shared ledger for bounded sessions.
+            budget_session_id: Session identity recorded in ledger entries.
+            budget_attempt_id: Attempt identity recorded in ledger entries.
 
         Returns:
             Configured ``LLMClient`` instance.
@@ -202,7 +225,13 @@ class LLMClient:
             json_response_format=_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"),
             chat_token_limit_param=_chat_token_limit_param_mode("SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM"),
         )
-        return cls(settings, usage_callback=usage_callback)
+        return cls(
+            settings,
+            usage_callback=usage_callback,
+            budget_ledger=budget_ledger,
+            budget_session_id=budget_session_id,
+            budget_attempt_id=budget_attempt_id,
+        )
 
     def ask(
         self,
@@ -212,6 +241,7 @@ class LLMClient:
         label: str = "",
         max_output_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
+        budget_call_id: str | None = None,
     ) -> str:
         """Send one text request to the model.
 
@@ -223,6 +253,9 @@ class LLMClient:
                 the client-wide ``SIMPLE_AR_MAX_OUTPUT_TOKENS`` setting is used.
             response_format: Optional provider-native structured-output hint
                 forwarded to LiteLLM/OpenAI-compatible providers.
+            budget_call_id: Optional stable logical-call identity used by the
+                shared budget ledger. A local identity is generated when it
+                is omitted.
 
         Returns:
             Model output with surrounding whitespace removed.
@@ -234,32 +267,92 @@ class LLMClient:
         if self._settings.base_url:
             request["api_base"] = self._settings.base_url
             request["base_url"] = self._settings.base_url
-        output_cap = None
-        if self._settings.max_output_tokens is not None:
-            output_cap = (
-                max_output_tokens
-                if max_output_tokens is not None
-                else self._settings.max_output_tokens
-            )
+        # An explicit per-request cap is meaningful even when the client-wide
+        # environment setting is unset.  The caller is allowed to bound one
+        # expensive or structurally sensitive request without imposing the
+        # same cap on every request made by this client.
+        output_cap = max_output_tokens
+        if output_cap is None:
+            output_cap = self._settings.max_output_tokens
         if output_cap is not None:
-            request["max_output_tokens"] = max(1, int(output_cap))
+            try:
+                output_cap = int(output_cap)
+            except (TypeError, ValueError) as exc:
+                raise LLMError("max_output_tokens must be a positive integer") from exc
+            if output_cap < 1:
+                raise LLMError("max_output_tokens must be a positive integer")
+            request["max_output_tokens"] = output_cap
         if response_format is not None:
             if self._settings.api_mode in {"responses", "auto"}:
                 request["text"] = {"format": response_format}
             else:
                 request["response_format"] = response_format
-        response, provider_attempts = self._request_with_retry(request)
+        prompt_tokens = estimate_tokens(system) + estimate_tokens(user)
+        logical_call_id = budget_call_id or label or self._next_budget_call_id()
+        response, provider_attempts, reservation_id = self._request_with_retry(
+            request,
+            logical_call_id=logical_call_id,
+            prompt_tokens=prompt_tokens,
+            output_cap=output_cap,
+            label=label,
+        )
 
         output = _content_from_response(response).strip()
-        self._record_usage(
-            response,
-            system,
-            user,
-            output,
-            label=label,
-            provider_attempts=provider_attempts,
-        )
+        try:
+            usage = self._build_usage_record(
+                response,
+                system,
+                user,
+                output,
+                label=label,
+                provider_attempts=provider_attempts,
+            )
+        except Exception as exc:
+            self._mark_budget_unknown(reservation_id, reason=f"usage reconciliation failed: {exc}")
+            raise
+        self._settle_budget(reservation_id, usage)
+        self._notify_usage(usage)
         return output
+
+    def with_budget(
+        self,
+        budget_ledger: BudgetLedger,
+        *,
+        session_id: str = "",
+        attempt_id: str = "",
+    ) -> "LLMClient":
+        """Return a client copy bound to one application's resource ledger."""
+
+        return type(self)(
+            self._settings,
+            usage_callback=self._usage_callback,
+            budget_ledger=budget_ledger,
+            budget_session_id=session_id or self._budget_session_id,
+            budget_attempt_id=attempt_id or self._budget_attempt_id,
+        )
+
+    @classmethod
+    def for_task(
+        cls, *, client: "LLMClient | None" = None,
+        model: str | None = None, usage_callback: UsageCallback | None = None,
+    ) -> "LLMClient":
+        """Use an injected session client while preserving task usage reporting."""
+        if client is None:
+            return cls.from_env(model=model, usage_callback=usage_callback)
+
+        def observe(usage: LLMUsage) -> None:
+            if client._usage_callback is not None:
+                client._usage_callback(usage)
+            if usage_callback is not None and usage_callback is not client._usage_callback:
+                usage_callback(usage)
+
+        return cls(
+            replace(client._settings, model=model or client.model),
+            usage_callback=observe,
+            budget_ledger=client._budget_ledger,
+            budget_session_id=client._budget_session_id,
+            budget_attempt_id=client._budget_attempt_id,
+        )
 
     def _build_request(self, system: str, user: str) -> dict[str, Any]:
         if self._settings.api_mode in {"responses", "auto"}:
@@ -289,12 +382,21 @@ class LLMClient:
             return self._provider_model
         return self._openai_model
 
-    def _request_with_retry(self, request: dict[str, Any]) -> tuple[object, int]:
-        """Call the provider with bounded exponential backoff for transient errors."""
+    def _request_with_retry(
+        self,
+        request: dict[str, Any],
+        *,
+        logical_call_id: str = "",
+        prompt_tokens: int = 0,
+        output_cap: int | None = None,
+        label: str = "",
+    ) -> tuple[object, int, str | None]:
+        """Call the provider with bounded backoff and optional accounting."""
         attempts = max(1, int(self._settings.retry_attempts or 1))
         last_error: Exception | None = None
         mode_attempts: list[tuple[str, int, Exception]] = []
         provider_attempts = 0
+        reserved_total_tokens = prompt_tokens + (output_cap or 0)
         for api_mode in _api_attempt_order(self._settings.api_mode):
             mode_request = _request_for_api_mode(
                 request,
@@ -304,8 +406,14 @@ class LLMClient:
             attempted = 0
             for attempt in range(1, attempts + 1):
                 attempted = attempt
+                provider_attempts += 1
+                reservation_id = self._reserve_budget(
+                    logical_call_id=logical_call_id,
+                    label=label,
+                    provider_attempt=provider_attempts,
+                    reserved_total_tokens=reserved_total_tokens,
+                )
                 try:
-                    provider_attempts += 1
                     return (
                         _call_provider(
                             self._settings.transport_backend,
@@ -313,9 +421,16 @@ class LLMClient:
                             mode_request,
                         ),
                         provider_attempts,
+                        reservation_id,
                     )
                 except Exception as exc:
                     last_error = exc
+                    self._reconcile_failed_budget_attempt(
+                        reservation_id,
+                        exc,
+                        reserved_total_tokens=reserved_total_tokens,
+                        has_output_cap=output_cap is not None,
+                    )
                     if attempt >= attempts or not _is_transient_llm_error(exc):
                         break
                     if (
@@ -338,6 +453,74 @@ class LLMClient:
             f"LLM request failed after {_attempt_summary(mode_attempts)} attempt(s): {last_error}"
         ) from last_error
 
+    def _reserve_budget(
+        self,
+        *,
+        logical_call_id: str,
+        label: str,
+        provider_attempt: int,
+        reserved_total_tokens: int,
+    ) -> str | None:
+        if self._budget_ledger is None:
+            return None
+        reservation_id = self._next_budget_reservation_id()
+        try:
+            self._budget_ledger.reserve(
+                reservation_id,
+                {
+                    "llm_requests": 1,
+                    "total_tokens": reserved_total_tokens,
+                },
+                session_id=self._budget_session_id,
+                attempt_id=self._budget_attempt_id,
+                logical_call_id=logical_call_id,
+                purpose=label or "llm_request",
+            )
+        except BudgetError as exc:
+            raise LLMError(
+                f"LLM budget prevented provider attempt {provider_attempt}"
+                f" for {label or logical_call_id}: {exc}"
+            ) from exc
+        return reservation_id
+
+    def _reconcile_failed_budget_attempt(
+        self,
+        reservation_id: str | None,
+        error: Exception,
+        *,
+        reserved_total_tokens: int,
+        has_output_cap: bool,
+    ) -> None:
+        if self._budget_ledger is None or reservation_id is None:
+            return
+        reason = f"provider attempt failed: {type(error).__name__}: {error}"
+        try:
+            if _is_budget_consumption_unknown(error):
+                self._budget_ledger.mark_unknown(
+                    reservation_id, reason=reason,
+                    known_actual={"llm_requests": 1},
+                    retain_reservation=has_output_cap,
+                )
+            elif _is_transient_llm_error(error):
+                # A retryable server/transport failure is still a physical
+                # provider attempt.  No usage payload is available, so keep a
+                # conservative estimate rather than silently dropping it.
+                self._budget_ledger.settle(
+                    reservation_id,
+                    {
+                        "llm_requests": 1,
+                        "total_tokens": reserved_total_tokens,
+                    },
+                    actual_source="estimated",
+                    reason=reason,
+                )
+            else:
+                # Authentication and other local/provider rejections are known
+                # not to have reached a billable successful request.
+                self._budget_ledger.release(reservation_id, reason=reason)
+        except BudgetError as exc:
+            raise LLMError(f"Could not reconcile failed LLM budget attempt: {exc}") from exc
+
     def ask_json(
         self,
         system: str,
@@ -345,6 +528,7 @@ class LLMClient:
         *,
         label: str = "",
         max_output_tokens: int | None = None,
+        budget_call_id: str | None = None,
     ) -> dict[str, Any]:
         """Send one request and parse the response as a JSON object.
 
@@ -354,6 +538,8 @@ class LLMClient:
             label: Optional label used in usage records.
             max_output_tokens: Optional per-request output cap. When omitted,
                 the client-wide ``SIMPLE_AR_MAX_OUTPUT_TOKENS`` setting is used.
+            budget_call_id: Optional stable logical-call identity for the
+                shared budget ledger.
 
         Returns:
             Parsed JSON object.
@@ -370,6 +556,7 @@ class LLMClient:
                 label=label,
                 max_output_tokens=max_output_tokens,
                 response_format=response_format,
+                budget_call_id=budget_call_id,
             )
         except LLMError as exc:
             if self._settings.json_response_format == "auto" and _is_response_format_error(exc):
@@ -378,6 +565,7 @@ class LLMClient:
                     json_user,
                     label=f"{label}-no-response-format" if label else "",
                     max_output_tokens=max_output_tokens,
+                    budget_call_id=budget_call_id,
                 )
             else:
                 raise
@@ -471,8 +659,30 @@ class LLMClient:
         *,
         label: str,
         provider_attempts: int = 1,
-    ) -> None:
-        """Record provider usage, falling back to local token estimates."""
+    ) -> LLMUsage:
+        """Build and notify one usage record for compatibility callers."""
+        record = self._build_usage_record(
+            response,
+            system,
+            user,
+            output,
+            label=label,
+            provider_attempts=provider_attempts,
+        )
+        self._notify_usage(record)
+        return record
+
+    def _build_usage_record(
+        self,
+        response: object,
+        system: str,
+        user: str,
+        output: str,
+        *,
+        label: str,
+        provider_attempts: int = 1,
+    ) -> LLMUsage:
+        """Build usage without notifying observers or changing state."""
         usage = _usage_from_response(response)
         if usage is None:
             prompt_tokens = estimate_tokens(system) + estimate_tokens(user)
@@ -495,9 +705,47 @@ class LLMClient:
             estimated_cost_usd=self._estimated_cost(prompt_tokens, completion_tokens),
             provider_attempts=max(1, int(provider_attempts)),
         )
+
+        return record
+
+    def _notify_usage(self, record: LLMUsage) -> None:
+        """Notify the legacy usage observer exactly once after settlement."""
         if self._usage_callback is not None:
             with self._usage_lock:
                 self._usage_callback(record)
+
+    def _settle_budget(self, reservation_id: str | None, usage: LLMUsage) -> None:
+        if self._budget_ledger is None or reservation_id is None:
+            return
+        try:
+            self._budget_ledger.settle(
+                reservation_id,
+                {
+                    "llm_requests": 1,
+                    "total_tokens": usage.total_tokens,
+                },
+                actual_source=usage.source,
+            )
+        except BudgetError as exc:
+            raise LLMError(f"Could not settle LLM usage in budget ledger: {exc}") from exc
+
+    def _mark_budget_unknown(self, reservation_id: str | None, *, reason: str) -> None:
+        if self._budget_ledger is None or reservation_id is None:
+            return
+        try:
+            self._budget_ledger.mark_unknown(reservation_id, reason=reason)
+        except BudgetError as exc:
+            raise LLMError(f"Could not mark LLM budget usage unknown: {exc}") from exc
+
+    def _next_budget_call_id(self) -> str:
+        with self._usage_lock:
+            self._budget_call_sequence += 1
+            return f"llm-call-{self._budget_namespace}-{self._budget_call_sequence:06d}"
+
+    def _next_budget_reservation_id(self) -> str:
+        with self._usage_lock:
+            self._budget_reservation_sequence += 1
+            return f"llm-reservation-{self._budget_namespace}-{self._budget_reservation_sequence:06d}"
 
     def _estimated_cost(self, prompt_tokens: int, completion_tokens: int) -> float | None:
         """Estimate request cost when caller has configured model pricing."""
@@ -1110,6 +1358,12 @@ def _is_response_transport_disconnect(exc: Exception) -> bool:
         "connection aborted",
     )
     return any(marker in message or marker in name for marker in markers)
+
+
+def _is_budget_consumption_unknown(exc: Exception) -> bool:
+    """Return whether a failed call may have reached the provider."""
+
+    return _is_response_transport_disconnect(exc) or _is_timeout_error(exc)
 
 
 def _is_timeout_error(exc: Exception) -> bool:

@@ -98,25 +98,6 @@ def expand_short_citation_keys(markdown_body: str, citation_key_map: dict[str, s
     return re.sub(r"\[([Pp]\d+(?:\s*[;,]\s*[Pp]\d+)*)\]", replace_bare_group, expanded)
 
 
-def record_removed_citations(report_audit: object, citation_ids: list[str]) -> None:
-    """Annotate report audit when invalid citation placeholders were removed."""
-    if not citation_ids:
-        return
-    joined = ", ".join(citation_ids)
-    warning = (
-        "Removed citation id(s) not present in the current run source map before "
-        f"writing references: {joined}."
-    )
-    if hasattr(report_audit, "citation_audit"):
-        report_audit.citation_audit.warnings.append(warning)
-        if report_audit.citation_audit.status == "passed":
-            report_audit.citation_audit.status = "warning"
-    if hasattr(report_audit, "notes"):
-        report_audit.notes.append(warning)
-    if getattr(report_audit, "status", "passed") == "passed":
-        report_audit.status = "warning"
-
-
 def citation_display_map(papers: list[Paper]) -> dict[str, int]:
     """Return stable numeric citation labels for body-cited papers."""
     return {paper.id: index for index, paper in enumerate(papers, start=1)}
@@ -241,28 +222,6 @@ def ordered_body_citation_ids(markdown: str, allowed_ids: set[str]) -> list[str]
             ordered.append(paper_id)
             seen.add(paper_id)
     return ordered
-
-
-def citation_instruction(papers: list[Paper], citation_key_map: dict[str, str] | None = None) -> str:
-    """Build citation guidance from known paper metadata."""
-    if not papers:
-        return ""
-    key_by_id = {paper_id: key for key, paper_id in (citation_key_map or {}).items()}
-    lines = [
-        "Use only these short citation keys in body text, in Pandoc form `[@P1]`:",
-    ]
-    for paper in papers:
-        abstract = f" Abstract: {paper.abstract[:220]}" if paper.abstract else ""
-        source = f" Source: {paper.source}" if paper.source else ""
-        key = key_by_id.get(paper.id, paper.id)
-        lines.append(f"- [@{key}] TITLE: \"{paper.title}\".{source}{abstract}")
-    lines.extend(
-        [
-            "Do not cite a paper unless the sentence discusses that paper or its listed metadata.",
-            "If no listed paper supports a claim, write the claim without a citation or weaken it.",
-        ]
-    )
-    return "\n".join(lines)
 
 
 def literature_citation_sentence(papers: list[Paper]) -> str:

@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Mapping
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.integrations.llm import LLMError
 from simple_ar.research.contracts import QueryPlan, ResearchQuestion, SourcePlan
-from simple_ar.research.outputs.artifacts import build_research_plan_artifact
 from simple_ar.research.prompts import (
     PLAN_SYSTEM,
     RESEARCH_PLANNER_SYSTEM,
@@ -72,11 +71,17 @@ class ResearchPlanResult:
     def to_handoff_dict(self) -> dict[str, Any]:
         """Return the existing ``research_plan.v1`` artifact shape."""
 
-        return build_research_plan_artifact(
-            questions=list(self.questions),
-            query_plan=self.query_plan,
-            source_plan=self.source_plan,
-        )
+        return {
+            "schema_version": "research_plan.v1",
+            "planner": self.query_plan.planner,
+            "research_questions": {
+                "schema_version": "research_questions.v1",
+                "planner": self.query_plan.planner,
+                "questions": [question.to_row() for question in self.questions],
+            },
+            "query_plan": self.query_plan.to_row(),
+            "source_plan": self.source_plan.to_row(),
+        }
 
     @classmethod
     def from_handoff_dict(cls, data: Mapping[str, Any]) -> "ResearchPlanResult":
@@ -133,10 +138,8 @@ def build_research_scope(
 ) -> tuple[str, str]:
     """Build the two human-readable scope artifacts used by the old pipeline.
 
-    The eight-stage runner still writes ``goal.md`` and ``problem.md`` for
-    compatibility.  Keeping their content generation here lets that adapter
-    reuse the canonical planning boundary instead of maintaining a second LLM
-    planning call in ``pipeline_stages``.
+    Scope text generation belongs to the planning boundary; it does not create
+    stage directories or own a second research lifecycle.
     """
 
     if not topic.strip():
@@ -270,6 +273,7 @@ def build_requested_research_plan(request: ResearchPlanRequest) -> ResearchPlanR
         RESEARCH_PLANNER_SYSTEM,
         prompt,
         label="research-planner",
+        max_output_tokens=_planning_output_tokens(config),
     )
     questions, query_plan = build_llm_research_plan(
         topic=request.topic,
@@ -301,6 +305,17 @@ def _llm_query_budget(config: Mapping[str, object]) -> int:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return min(max(1, value), 12)
     return 6
+
+
+def _planning_output_tokens(config: Mapping[str, object]) -> int:
+    """Keep the structured planning response small enough for a fast pass."""
+
+    value = config.get("research_planning_max_output_tokens", 1200)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return 1200
+    return value if value > 0 else 1200
 
 
 def search_request_from_plan(result: ResearchPlanResult) -> "SearchRequest":

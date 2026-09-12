@@ -14,6 +14,65 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class RetrievalTests(unittest.TestCase):
+    def test_evidence_files_are_not_indexed_as_sources(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            run_dir = Path(tmp) / "run"
+            write_text(run_dir / "01-plan" / "goal.md", "# Goal\n\nMeasure accuracy.\n")
+            write_json(run_dir / "02-search" / "planning" / "research_plan.json", {"query_plan": {}})
+            write_jsonl(run_dir / "02-search" / "documents" / "documents.jsonl", [{"document_id": "doc-1"}])
+            write_json(run_dir / "02-search" / "documents" / "cache_manifest.json", {"document_count": 1})
+            write_jsonl(run_dir / "02-search" / "research_index" / "chunks.jsonl", [{"chunk_id": "chunk-1"}])
+            write_json(run_dir / "02-search" / "research_index" / "index_meta.json", {"chunk_count": 1})
+            write_jsonl(run_dir / "03-read" / "cards" / "paper_cards.jsonl", [{"paper_id": "paper-1"}])
+            write_jsonl(run_dir / "03-read" / "cards" / "claim_cards.jsonl", [{"claim_id": "claim-1"}])
+            write_jsonl(run_dir / "03-read" / "cards" / "method_cards.jsonl", [{"method_id": "method-1"}])
+            write_jsonl(run_dir / "03-read" / "cards" / "dataset_cards.jsonl", [{"dataset_id": "dataset-1"}])
+            write_jsonl(run_dir / "03-read" / "cards" / "code_links.jsonl", [{"url": "https://example.test/repo"}])
+            write_json(run_dir / "04-synthesize" / "evidence" / "evidence_pack.json", {"schema_version": "test"})
+            write_text(run_dir / "04-synthesize" / "evidence" / "evidence_pack.md", "# Evidence\n")
+            write_text(run_dir / "04-synthesize" / "evidence" / "gap_summary.md", "# Gap\n")
+            write_jsonl(run_dir / "04-synthesize" / "evidence" / "idea_candidates.jsonl", [{"idea_id": "idea-1"}])
+            write_jsonl(run_dir / "04-synthesize" / "evidence" / "novelty_checks.jsonl", [{"idea_id": "idea-1"}])
+            write_json(run_dir / "05-design" / "evidence" / "experiment_contract.json", {"schema_version": "test"})
+            write_text(run_dir / "05-design" / "evidence" / "experiment_contract.md", "# Contract\n")
+            write_jsonl(run_dir / "02-search" / "traces" / "retrieval_rounds.jsonl", [{"status": "ok"}])
+            write_jsonl(run_dir / "02-search" / "traces" / "retrieval_selection.jsonl", [{"decision": "keep"}])
+            write_jsonl(run_dir / "03-read" / "review" / "screening_decisions.jsonl", [{"decision": "keep"}])
+            write_json(run_dir / "02-search" / "review" / "coverage_report.json", {"status": "partial"})
+            write_json(run_dir / "source_plan.json", {"stages": {}})
+            write_jsonl(run_dir / "activity_log.jsonl", [{"event": "archived"}])
+            write_jsonl(run_dir / "evidence_ledger.jsonl", [{"evidence_id": "archived"}])
+
+            index = build_artifact_index(run_dir, write=False)
+            paths = {item["path"] for item in index["artifacts"]}
+
+            self.assertIn("01-plan/goal.md", paths)
+            self.assertNotIn("02-search/planning/research_plan.json", paths)
+            self.assertNotIn("02-search/documents/documents.jsonl", paths)
+            self.assertNotIn("02-search/documents/cache_manifest.json", paths)
+            self.assertNotIn("02-search/research_index/chunks.jsonl", paths)
+            self.assertNotIn("02-search/research_index/index_meta.json", paths)
+            self.assertNotIn("03-read/cards/paper_cards.jsonl", paths)
+            self.assertNotIn("03-read/cards/claim_cards.jsonl", paths)
+            self.assertNotIn("03-read/cards/method_cards.jsonl", paths)
+            self.assertNotIn("03-read/cards/dataset_cards.jsonl", paths)
+            self.assertNotIn("03-read/cards/code_links.jsonl", paths)
+            self.assertNotIn("04-synthesize/evidence/evidence_pack.json", paths)
+            self.assertNotIn("04-synthesize/evidence/evidence_pack.md", paths)
+            self.assertNotIn("04-synthesize/evidence/gap_summary.md", paths)
+            self.assertNotIn("04-synthesize/evidence/idea_candidates.jsonl", paths)
+            self.assertNotIn("04-synthesize/evidence/novelty_checks.jsonl", paths)
+            self.assertNotIn("05-design/evidence/experiment_contract.json", paths)
+            self.assertNotIn("05-design/evidence/experiment_contract.md", paths)
+            self.assertNotIn("02-search/traces/retrieval_rounds.jsonl", paths)
+            self.assertNotIn("02-search/traces/retrieval_selection.jsonl", paths)
+            self.assertNotIn("03-read/review/screening_decisions.jsonl", paths)
+            self.assertNotIn("02-search/review/coverage_report.json", paths)
+            self.assertNotIn("source_plan.json", paths)
+            self.assertNotIn("activity_log.jsonl", paths)
+            self.assertNotIn("evidence_ledger.jsonl", paths)
+
     def test_artifact_index_records_kind_hash_and_stage(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

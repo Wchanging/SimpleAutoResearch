@@ -4,6 +4,526 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-13
+
+### Changed
+
+- Unified candidate motivation-reference validation between synthesis and
+  assessment. Valid paper/card IDs no longer become missing-evidence warnings;
+  model comparison still cites only the text chunks actually supplied.
+- Established the architecture-slimming checkpoint: one research lifecycle,
+  read-only historical adapters, and shared experiment/report boundaries.
+  Local execution and clean-install smoke are verified; live report acceptance
+  remains incomplete and is not claimed as a finished research run.
+- Clarified planning choices by call cost and review granularity; both use the
+  same generation/execution path. Fixed main.py entrypoint normalization so
+  compact and multistep plans agree. Defaults are unchanged.
+- Planning review text no longer becomes a hard blocker through keyword matching.
+  Findings remain recorded as risks; concrete plan and edit boundaries still apply.
+- Multistep planning no longer expands small file plans into a synthetic
+  generated_experiment package. Valid single-file plans are accepted; empty
+  plans fail, and supplied multifile layouts remain intact.
+- Empty model-produced architecture plans now fail or use an explicitly enabled
+  fallback, instead of being silently converted into a main-only plan.
+- Bumped the generated-review contract so existing resume logic refreshes reviews
+  made under retired rules; stopping at review does not rerun the experiment.
+- Removed the active-learning label-leakage blocker based on helper/variable
+  names, which could reject labeled training data without tracing its origin.
+  Existing semantic review receives task/data-flow guidance; static review no
+  longer claims this domain-specific detection, and live semantic accuracy is unverified.
+- Static resource review now reports fit-loop observations as warnings, not a
+  runtime-cost verdict. Removed model-name/scaler heuristics and score-based
+  blocking thresholds; execution timeout and resource controls remain unchanged.
+
+## 2026-09-12
+
+### Changed
+
+- Generated-project repair catches the LLM client's declared errors instead of
+  masking internal defects; review-index failures no longer become empty indexes.
+- Generated-project repairs now use the same post-application syntax/API checks
+  for whole-file content and structured actions. Removed the duplicate source-shape
+  heuristic that rejected valid expression-only Python scripts; failed edits still restore the original file.
+- Removed unused legacy citation-audit mutation/prompt helpers, batch-reading
+  prompt, and edit-scope wrappers. Active citation handling and edit checks remain.
+- Moved scikit-learn from mandatory framework dependencies to the `examples`
+  extra. Use `uv run --extra examples ...` for bundled classical-ML examples
+  and their tests; locked package versions are unchanged.
+- Retired the unused `experiment.runner` script wrapper and result/error aliases.
+  Its output, timeout, and small-template tests now exercise the shared execution backend.
+- Unified evidence-pack construction on the existing Read-to-Synthesis adapter;
+  removed the legacy full-pack builder and migrated its derivation test to the
+  canonical reader output, retaining source-reference assertions.
+- Removed unused evidence/coverage/experiment-contract Markdown renderers and
+  the legacy compact-pack projection with numbered-stage paths. Structured
+  evidence, coverage computation, and experiment derivation remain.
+- Removed unused legacy whole-report and CodeTask-design prompts, their obsolete
+  string-only tests, and the unconsumed generated-project launcher template.
+  The canonical design, Writer/Reviewer, and process execution paths remain.
+- Removed the retired research-stage output package and its duplicate document,
+  reading-review, synthesis, and design artifact writers. Planning serializes
+  its unchanged handoff directly; canonical capabilities and archive reading remain.
+- Removed the unused legacy external-agent repair chain, including its numbered
+  stage handoff, backup/overlay writer, and private helpers. Active generated
+  project repair and agent-backed generation remain.
+- Removed memory-derived `current_status` and `next_actions`. Event histories,
+  repair lessons, and artifact references remain; compressed implementation
+  decisions are presented as history, not current execution instructions.
+- Stopped writing the unused `attempts.items` state/count snapshots in CodeTask
+  manifests. Batch records, current references, and historical files remain.
+- Model repair failures now propagate instead of producing an empty offline
+  proposal and consuming a repair count. Explicit `--no-llm` remains supported.
+- Removed the summary's duplicate blocker/evidence-gap inference and the unused
+  `record_result_analysis_memory` API. Negative comparisons remain visible as
+  research results, without being classified as additional execution blockers.
+- Removed the non-executing workspace setup-hook option and its manifest metadata.
+  Workspace configuration now rejects unknown fields instead of silently accepting
+  a hook that never runs; environment selection and workspace creation remain.
+- Updated the usage and CLI guides for the default single-plan CodeTask path;
+  removed retired pipeline retrieval commands from artifact-tool examples.
+- Removed unimplemented experiment run/repair/apply tool registrations and the
+  unused domain-specific schema exporter. Working archive tools and the common
+  OpenAI/MCP schema exporters remain; descriptions identify historical inputs.
+- Removed the unused experiment design package, its legacy configuration
+  converter and domain profiles. Research and CodeTask contracts remain the
+  active handoffs; task-text and required-metric coverage uses the runnable path.
+- Removed the unused stage-evidence collector and its separate source-plan,
+  activity-log and evidence-ledger writers. Artifact search and exclusion of
+  archived diagnostic files remain; canonical research evidence is unchanged.
+- Reconciled workflow documentation with the retired eight-stage executor:
+  current session/attempt ownership, explicit experiments and historical read-only
+  access replace obsolete template commands and numbered-stage execution recipes.
+- Ordinary CodeTask execution now uses one approved patch plan, without an
+  automatic work-plan LLM call or batch state. Explicit work-plan/batch commands
+  and existing batch workflows remain supported, including interactive CLI.
+- Unified CodeTask repair-counter reads. Invalid persisted counts no longer
+  silently reset the retry allowance; repair memory reuses the saved counter.
+- Greenfield initial and post-repair benchmarks now share one execution loop,
+  preserving pre-rerun review/validation and bounded repair decisions.
+- Removed the unused WorkspaceState write lifecycle, its configuration snapshot
+  and retired stage parsing helpers. Historical CLI status still reads archived
+  JSON without rewriting it; canonical session persistence is unchanged.
+- Retired unused eight-stage Context, contract and console-event infrastructure,
+  and research/experiment service wrappers. Archived Search documents retain a
+  small explicit-directory reader; CodeTask Rich message styles remain.
+- Retired the old stage-directory report context builder. Report inputs use persisted-artifact projection; Writer/audit tests no longer depend on legacy directory discovery.
+- Removed the unused legacy report-quality checker; canonical report auditing remains the validation path.
+- Removed contract-truncation and repair-memory-disable ablation modes, including
+  their prompt adapter, CLI/config plumbing and ARC runner passthroughs. Normal
+  generation and repair retain the full contract and bounded prior context.
+  Historical benchmark analysis remains, but no new retired-mode runbook is generated.
+- Retired the repair-context ablation switch from CodeTask and the ARC batch
+  runner. Repair retains bounded structured diagnostics by default. Remove the
+  old `execute.ablation.repair_context` field; unsupported ablation fields now
+  fail configuration validation rather than silently selecting another mode.
+- Unified generated-code repair inventory updates. Line counts now reflect files
+  rather than clipped estimates; partial repairs no longer invent deterministic
+  provenance or discard declared deliverables based only on their filenames.
+- Unified seven CodeTask usage-log writers under `integrations.usage`, removing
+  the dependency on application-layer aggregation. Stage labels, batch projections,
+  unknown costs and usage messages remain; budget settlement is unchanged.
+- Removed the unused fixed transition policy and analysis-to-policy adapter.
+  History readers retain recorded decisions and recipe labels without deriving
+  new recommendations or requiring old recipe implementations to load them.
+- Removed `SessionController.execute()` and its fixed-stage decision execution.
+  Capability calls use `execute_attempt()`; interrupted recovery records failure
+  and budget facts without choosing a research action. Historical decisions remain readable.
+- Decoupled physical attempt execution from the legacy fixed-stage transition
+  recipe. The application owns research sequencing; scope, budget, artifact and
+  parent-attempt checks remain in Core.
+- Removed the legacy manifest write opt-in. Historical v1 sessions remain
+  read-only; explicit evidence import creates a separate application session.
+- Removed the unconsumed survey-contract builder, taxonomy/planning artifact
+  writer and separate coverage audits left behind by the retired report service.
+  Active source routing, historical survey-section consumption, Writer/Reviewer
+  and canonical report audits remain; obsolete builder-only options were removed.
+- Retired obsolete eight-stage/report example configs. Preserved the digits MLP
+  project as `examples/code_task_digits_mlp` with current standalone configuration;
+  the lightweight greenfield example now also uses CodeTask configuration.
+- Unified canonical application output contracts and artifact-reference binding
+  across normal execution and recovery, including idea and experiment comparisons.
+  Capability registration reuses the same inventory; no second scheduler was added.
+- Removed the duplicate application readiness projection/file. WorkPlan now
+  carries delivery status, gaps and next action, including available research
+  when experiments are blocked; Markdown progress remains available.
+- Consolidated review/run repair accounting and removed duplicate repair status
+  copies in implementation state. Follow-up review no longer rewrites repair
+  evidence into an additional effective/recovered status; historical fields remain readable.
+- Removed the duplicate editor adapter/request/result layer and its separate
+  external-agent editor API. Public patch proposal/application functions now
+  execute directly without reloading context through a fixed backend wrapper.
+  Approval, edit scope, atomic writes and existing provenance metadata remain.
+- Unified generated-project repair writes: whole-file content becomes a shared
+  rewrite action with the same validation, rollback and observed edit record.
+  Rejected actions no longer fall through to a second whole-file overwrite.
+- Simplified generated-project repair localization to observed failure paths
+  and source matches. Removed filename-role scoring and error-category routing,
+  including a broken attribute-error parser; custom layouts and attribute
+  consumers remain covered by repair tests.
+- Removed automatic runtime-error string rewrites for generated projects:
+  standard-library-name renaming/import rewriting and fixed results-path
+  substitutions. These failures now use the existing model-proposed repair
+  path; without a model, original files and failure evidence remain unchanged.
+- Removed guessed generated-project review repairs: automatic private/public
+  aliases, fixed entrypoint/config/README generation, and replacing invalid
+  package code with an empty module. Without a model, repair leaves files and
+  the failed review unchanged; model-proposed edits retain snapshot validation.
+- Retired `research-experiment` and its separate design/execution/analysis
+  session creator. Research experiments use the canonical application; domain
+  capabilities remain reusable. The old `--synthesis-file` CLI is not translated.
+- Removed legacy v1 in-place experiment recovery. `research-session-continue`
+  now uses only canonical retry; historical evidence remains readable and can
+  be explicitly imported into a new session with `research-session-migrate`.
+- Retired the segmented `research-code-task` creator and its separate
+  design/CodeTask/analysis session lifecycle. Use `research-session
+  --code-task-config` or standalone `code-task`. Historical session reading and
+  report evidence projection remain read-only.
+- Removed the obsolete embedded CodeTask bridge executor and its benchmark
+  verification/auto-repair loop. Applied-repair review and static validation
+  remain shared; canonical experiment actions own remeasurement.
+- Removed the unused outer-pipeline TOML parser and legacy section/alias
+  normalization. CodeTask configuration uses its existing shared parser;
+  historical config snapshots remain readable files. Configuration reference
+  now documents current CodeTask fields and research-session integration.
+- Removed the unused bridge benchmark-script generator and old template dispatcher.
+- Removed unused Context-based experiment design/code/run stages and their
+  task-generation, implementation-routing and rerun-archive helpers. Canonical
+  execution, real CodeTask validation and historical result readers remain.
+  Removed the unused legacy Context LLM client/usage writer; current usage
+  aggregation remains shared.
+- Report writing now has one product execution owner, `report/writing.py`.
+  Retired the standalone fixed-attempt report continuation APIs; historical
+  evidence projections remain read-only. `research-report` accepts canonical
+  application sessions only and no longer falls back after a load error.
+  `research-code-task --with-report` fails before execution; use
+  `research-session --code-task-config` for complete research tasks.
+- Removed the unused eight-stage report service, including its separate Writer
+  invocation, toy/fixture fallback prose, archive/variant packaging and stage
+  manifest. SurveyBench now imports citation formatting directly. Canonical
+  Writer/Reviewer, assembly, citations, figures and historical readers remain.
+- Removed the legacy research facade and the `pipeline_stages` handler/alias
+  layer. Search, screening and reading tests now target the canonical boundaries;
+  old fixture-search fallback and stage-specific retrieval rounds are retired.
+- Removed the unused eight-stage `PipelineRunner`, including its separate
+  checkpoint, manifest, stage-result collector and stage-output lifecycle. Domain context and historical
+  readers remain; new research uses ResearchApplication.
+- SurveyBench no longer exposes `run-topic` / `resume-latest` or their legacy
+  report backup/replay path. Export reports explicitly; historical validation and
+  native evaluation remain available.
+- Retired the eight-stage `run` / `resume` CLI execution routes and their option
+  parsing/configuration recovery. Use `research-session` for new work. Historical
+  status and artifact inspection remain available; legacy flags are not translated.
+  Removed obsolete CLI/Quickstart/usage instructions for these execution routes.
+- Removed generated-project quick patches that invented experiment presets or
+  accepted ignored function arguments. Runtime failures use general repair instead.
+- Removed legacy guard repair that rewrote experiment code to return fixed metric
+  values. Missing metrics stay missing, including when old fallback-scaffold settings
+  are enabled; existing historical result readers are unchanged.
+- `research-brief` now delegates to the canonical ResearchApplication lifecycle,
+  including v2 state references and budgets; use its printed synthesis path rather
+  than fixed attempt IDs. Removed the unused `ResearchSessionRequest` /
+  `run_research_session` Python creation API; use `research_application.create_session`.
+  Historical session reading and explicit legacy continuation remain supported.
+- Generated-project review repair no longer overwrites `resources.py` with an
+  assumed resource/profile implementation. Such failures use the existing general
+  model repair path, or remain unresolved when no model is available.
+- Research reports now expose the selected implementation's frozen patch and
+  validation/review evidence through the existing report tool, with source paths
+  and explicit truncation. Recovery reuses persisted application role names;
+  duplicate report projection wrappers were replaced with direct re-exports.
+- `research-session` now supports the declared literature-only shape: omitting
+  both `--command` and `--code-task-config` produces a summary (or a
+  model-backed research-only report) without creating an execution budget or
+  process request. The existing command and CodeTask paths are unchanged.
+- The live application example now exposes `--max-output-tokens` as a separate
+  per-request response cap. This allows a slow or reasoning-heavy gateway to use
+  a smaller synthesis response without changing session-wide request/token
+  budgets or evidence validation; the default remains 2400.
+- `research-session-continue` now routes canonical `session_manifest.v2` sessions through a
+  narrow application-level retry: a caller-supplied correction can retry one technical
+  explicit-experiment failure, preserve the failed parent attempt, and reuse research
+  evidence. Legacy v1 sessions retain the fixed compatibility recovery path; scientific
+  negative results are not silently retried.
+- Research input and runtime configuration artifacts receive revisioned filenames when a
+  session is explicitly continued, so a retry or report continuation does not overwrite
+  the previous revision's input snapshot.
+- `research-session` now constructs and advances the canonical `ResearchApplication`; the old
+  research-session runner is no longer on the formal CLI path. `research-report` reads canonical
+  sessions first and can append a report deliverable without rerunning settled research evidence.
+- Embedded CodeTask preparation now passes its persisted task input to the established initializer,
+  completing the real `prepare_execution -> implement` contract instead of failing before workspace setup.
+- Canonical ResearchApplication report-input projection now lives under
+  `simple_ar.report.projection`; the old application report module remains a
+  compatibility boundary, while the formal application no longer imports it.
+- Report templates are now included in wheel builds and can be resolved from
+  package resources outside the repository checkout; an explicit project
+  template directory still takes precedence.
+- Added a deliberately small v1 session successor importer. It creates a new
+  canonical ResearchApplication session, records `parent_session`, and copies
+  only explicitly selected small legacy artifacts with source/destination
+  mappings; the legacy session remains read-only and unknown artifacts stay
+  visibly skipped.
+- Added `simple-ar research-session-migrate` as the user-facing compatibility
+  command for that importer; it reports the successor path, migration artifact,
+  skipped artifacts, and the non-imported historical budget state.
+- CodeTask work-plan normalization now escalates a cohesive item that names
+  more files than the normal edit budget to the explicit larger-budget review
+  boundary, instead of generating an impossible empty proposal.
+- ResearchApplication execution specs can explicitly carry a CodeTask budget
+  profile and large-edit approval through the implementation boundary; the
+  bundled medium-review example uses this only for its bounded three-file
+  change.
+- An unapproved larger CodeTask proposal now returns an actionable budget
+  approval state instead of surfacing as an implementation exception.
+- The live application example now supports an explicit `--deterministic-plan`
+  mode for provider-degraded runs. It skips only the optional LLM planning
+  call; later network retrieval, reading, synthesis, and report stages keep
+  their configured LLM path, and the selected mode remains in session config.
+- The bundled medium-review live acceptance now uses a 320k-token ceiling for
+  its full CodeTask plus sectioned experiment report; reviewer output is
+  explicitly capped by the configured section budget so the ceiling reflects
+  the real combined workflow rather than failing at the report tail.
+- The ResearchApplication now completes delivery after a report audit with
+  warnings while retaining the audit artifact and findings; only a failed audit
+  blocks the lifecycle.
+- Paired experiment reports now render an optional measured-comparison SVG from
+  structured, protocol-matched observations in the application path. Figures
+  retain baseline/candidate artifact sources and never infer values from prose
+  or missing measurements; the report appendix also correctly displays the
+  candidate metric field.
+- The Rich live application example now exposes the prepared CIFAR-10
+  three-seed configuration through `--cifar10`, with persisted-session resume;
+  it still requires pre-existing data and an interpreter and performs no
+  implicit installation or download.
+- The general online application example now gives its complete Writer/Reviewer
+  smoke a 160k-token ceiling, based on the observed multi-section report cost;
+  the example uses one review pass per section so bounded retries do not turn a
+  low-resource check into an unbounded repair run; the ceiling remains explicit
+  rather than being extended after a session pauses.
+- Paired analysis adds descriptive means and sample standard deviation of paired
+  deltas, separated by common protocol and protected-file identity. Reports retain
+  derived-statistic provenance and units; singleton standard deviation stays absent.
+- Added a CIFAR three-seed application configuration and a non-executing config
+  CLI; preparation forwards explicit edit patterns to the existing CodeTask scope,
+  keeping only `method.py` editable and the dataset external to the copied project.
+- Local experiment invocations expose a unique `SIMPLE_AR_OUTPUT_DIR` and register
+  generated outputs in canonical artifacts. The CIFAR runner can use this directory
+  without a fixed output argument, keeping seeds and repair runs separate.
+- Paired execution now supports bounded, revision-aware CodeTask repair: retain
+  baselines and superseded candidates, remeasure the repaired candidate set, and
+  preserve failed/missing seeds when the repair limit is reached.
+- Paired CodeTask execution now measures all
+  baselines before one implementation, hands off every baseline and links candidate
+  attempts to that implementation.
+- Prepared-command paired reports now consume all seeds through the existing
+  Writer/assembly/audit lifecycle. Measured values and derived deltas retain distinct
+  condition identities and artifact sources; failed-run values are excluded from the metric ledger.
+- Paired analysis consumes the complete measurement-reference collection, reuses
+  per-pair comparisons and retains failed/missing seeds without zero-filling.
+  Empty/partial collections no longer appear as completed experiment deliverables.
+- Development-only paired execution records each prepared command as a separate
+  budgeted attempt and preserves a result-reference collection across recovery.
+- CIFAR CPU preflight now uses the shared process executor and ledger, with
+  explicit download authorization and bounded two-step training. Pinned its
+  separate CPU environment and verified official-data loading/optimization on Windows.
+- Added a prepared CIFAR-10 calibration example with shared-data preparation,
+  protected split/metrics and a research-editable method. Full training and
+  application-level GPU matrix acceptance remain unverified.
+- AutoDL CPU preflight now checks the new application and bounded real execution;
+  opt-in online paths no longer use the legacy runner or fixed experiment metrics.
+- CodeTask research handoffs avoid repeating the protocol block and use compact
+  JSON for evidence and patch-planning context, preserving source and evaluation fields.
+- Implementation artifacts retain CodeTask step records and surface blocked-step
+  diagnostics, including budget failures, instead of only a generic planning message.
+- New-application synthesis, candidate assessment and design receive the original
+  research request and configured execution constraints without a duplicate manual
+  context field; brief/runtime inputs are included in provenance.
+- Synthesis retains rejected model responses and validation errors, and permits
+  one evidence-bound correction request. Failed corrections remain failed;
+  provider retries and session budgets remain unchanged.
+- The new-application live example can reuse the existing medium-review project
+  for isolated baseline/CodeTask/candidate checks with protected evaluation assets
+  and one bounded repair. This is an engineering fixture, not GPU acceptance.
+- Compact report-agent JSON prompts without removing evidence fields; default
+  survey guidance now uses topic-appropriate evaluation and method dimensions
+  instead of assuming agent/repository research.
+- New application report sources now carry paper abstracts, linked reading notes,
+  extraction depth and read-artifact provenance. Notes are explicitly model
+  interpretations, joined by persisted document identity rather than title.
+- Fixed the report Reviewer's failure path referencing an undefined runtime config;
+  exhausted retries now preserve the original error or an explicitly enabled fallback warning.
+- Added a resumable, budgeted new-application live example with Rich action status,
+  real search/LLM reporting and optional small CSV training; it does not substitute
+  for CodeTask/GPU acceptance.
+- Report assembly preserves removed citation IDs in `citation_cleanup.json`.
+  The new application's audit flags the affected claims for revision instead of
+  treating citation removal as evidence repair. Historical reports remain readable.
+- Report audit validates canonical measurement-table rows against their source,
+  metric, value, unit, condition and origin, catching swapped baseline/candidate
+  values. Final-prose semantics are explicitly marked `semantic_unchecked`;
+  numeric visibility is not proof of a conclusion.
+- Report-only ResearchApplication requests now use the shared Writer/assembly/audit
+  lifecycle with a literature template. They neither require an experiment contract
+  nor launch training; prior-work evidence is not presented as session measurements.
+- ResearchApplication now owns experimental report writing, assembly and audit
+  as separate attempts. Writer inputs are snapshotted before model calls;
+  failures retain that snapshot, and completed writing resumes without rerunning
+  research. Completed Writer/Reviewer sections are checkpointed and reused on
+  explicit retry when the report input snapshot matches; changed inputs restart writing.
+- New application report inputs reuse the existing context constructor, retaining
+  latest measurements, separate baseline/comparison sources and limitations.
+  Proposed research design is not presented as the measured execution protocol.
+  Report metric rows retain measurement/protocol identity, condition, units and
+  origin, using each condition's own direction rather than candidate defaults.
+- Added bounded CSV-only text baseline preparation (`text,label,split`), using
+  the existing experiment template/runner path for actual bag-of-words logistic
+  regression. Inspection records source identity and possible split leakage;
+  limits never silently truncate data. No user baseline code is required.
+  Preparation limitations follow the measured result into analysis audit and Markdown.
+- ResearchApplication can prepare an existing project via `execution.code_task.code_root`,
+  reusing the CodeTask copy initializer and recording a recoverable execution handoff.
+  Preparation does not train, install dependencies or modify the source project.
+- Fixed experiment deliverable references after repair: work-plan/readiness,
+  analysis and snapshot export now agree on the latest recorded candidate while
+  retaining the initial failure and all remeasurements.
+- ResearchApplication supports explicitly bounded technical repair/retest rounds
+  through `execution.code_task.max_repairs` (default off). Baseline and initial
+  failure evidence are retained; each remeasurement is separately budgeted, and
+  completed repairs recover without duplicate edits. Exhausted rounds yield a
+  failed-result analysis instead of indefinite retries.
+- CodeTask repair proposals can consume explicit external execution-failure
+  evidence without rerunning measurements or manufacturing legacy run records.
+  Supplied evidence is saved with the proposal; valid scientific regressions
+  are not treated as execution failures.
+- Moved authorized one-repair verification out of the experiment compatibility
+  bridge into CodeTask orchestration. Standalone repair approval remains manual;
+  valid low-scoring runs are not retried, and invalid repairs retain failure evidence.
+- Implementation attempts now own patch, validation, review and planning evidence
+  through relative artifact references. Copied sessions retain these records
+  without the external CodeTask directory; datasets and environments are not bundled.
+- CodeTask implementation now consumes the selected design and measured baseline
+  before planning, preserving original requirements and recording the effective
+  task. Research revisions cannot silently reuse an older patch plan. Existing
+  and new entry points share the research-handoff renderer.
+- ResearchApplication can reuse an initialized CodeTask between baseline and
+  candidate measurements, with explicit edit approval and shared model accounting.
+  Implementation stops at validation; recovery does not repeat completed edits.
+  The compatibility bridge shares this preparation helper instead of duplicating
+  approval/proposal/validation orchestration.
+- Explicit protocol `protected_assets` are hashed before and after execution.
+  Changed or unreadable files invalidate the result without erasing return codes
+  or metrics; comparisons reject changed contents across runs. Checks cover only
+  named files and do not provide filesystem isolation or write protection.
+- ResearchApplication supports an explicit baseline/candidate pair as separate
+  recoverable measurements. Analysis declares a comparison artifact referencing
+  both results; valid regressions finish with a negative outcome, not an automatic
+  repair loop. Persisted action roles distinguish baseline from candidate during
+  recovery even though both use the same experiment capability.
+- Canonical results now carry physical measurement identity and a fingerprint of
+  the declared protocol plus metric schema. New comparisons retain descriptive
+  deltas but withhold improvement claims for mismatched/incomplete protocols or
+  reused measurements. Historical results remain readable as `legacy_unverified`;
+  declared matching settings do not imply verified asset contents.
+- ResearchApplication now connects explicitly configured experiments to the
+  existing execution and deterministic analysis capabilities. Execution requires
+  an experiment deliverable, explicit argv/cwd/timeout and finite process budgets.
+  Reload reuses persisted measurements, including failed-process evidence;
+  diagnostic output does not change an experiment's failure status.
+- The embedded CodeTask entry now delegates preparation through validation to
+  the official executor, removing duplicate baseline/planning/edit orchestration
+  while retaining its approval policy and legacy artifact projection. Failed
+  baselines stop before model planning; preparation and bounded verification
+  accept the shared client and budget ledger.
+- Fixed Windows CodeTask argument grouping quotes so quoted Python `-c` code
+  executes rather than silently evaluating a string literal.
+- CodeTask planning, editing, review, generation and repair accept a shared LLM
+  client through the official executor. Task model overrides preserve provider
+  settings and session accounting while keeping local usage/progress observers.
+- Local experiment and CodeTask benchmark execution accept a shared budget
+  ledger, reserve before spawn, release failed launches and settle observed
+  wall time. Finalized invocation records can reconcile accounting without
+  rerunning a process; repeated invocation IDs cannot start another run.
+- Candidate assessment can compare ideas with an injected LLM using a persisted,
+  bounded common source context. Invalid citations or provider failures retain
+  explicitly labeled rule-based assessments. ResearchApplication now reuses the
+  recommendation in the existing design capability and preserves a summary
+  before downstream assessment/design can pause.
+- Experiment and CodeTask execution now share bounded process output capture,
+  streamed log files, invocation records and process-tree cleanup. CodeTask
+  retains its progress relay and runtime watchdog; Windows text output keeps
+  the existing normalized newline behavior.
+- Added focused `application`, `llm`, `report` and `execution` check groups.
+  Combining groups runs overlapping test modules once; `all` supersedes other
+  selections. Full discovery is reserved for integration checkpoints and releases.
+
+## 2026-09-11
+
+### Changed
+
+- Fixed stale session writes and recovery after an attempt finished but before
+  its budget or application reference was saved. Completed actions are reused.
+- Capped LLM timeouts retain conservative token reservations and known request
+  counts, allowing bounded retries without hiding unknown actual usage.
+- Reload preserves numeric settings when services are reinjected and reports
+  unreadable configuration. Intake persistence now uses one shared writer.
+- Fixed document-only evidence queries and connected EvidenceRef projections
+  to Read handoffs without duplicating source text.
+- Fixed per-call `max_output_tokens` semantics: an explicit cap is now sent to
+  the provider even when no client-wide default is configured, and invalid
+  non-positive caps fail before a provider request.
+- Added the first bounded `BudgetLedger` implementation for shared, atomic
+  file-backed accounting. It records reservation identity, attempt context,
+  reserved/actual use, estimated versus provider usage, idempotent settlement,
+  released preflight work, and unknown provider consumption.
+- Added optional ledger injection to `LLMClient`. Each physical provider
+  attempt is reserved before transport; successful usage is settled, retryable
+  failures are conservatively recorded, authentication rejection is released,
+  and timeout/disconnect uncertainty remains visible. The existing usage
+  callback remains a compatibility display observer; the application-wide
+  client factory and session manifest integration are deferred to P03/P04.
+- Added the P02 input boundary: plain text, Markdown/TXT requests, and
+  explicit TOML metadata normalize into a versioned `ResearchBrief` plus
+  role-aware `ResearchAsset` records. Missing files and unrecognized formats
+  remain visible diagnostics; parsing performs no model call, download,
+  repository scan, dependency install, or code execution.
+- Extracted the first P03 shared attempt kernel. The new
+  `SessionController.execute_attempt()` persists a physical capability result
+  without choosing a transition, while the compatibility `execute()` now uses
+  the same validation, result reconciliation, persistence, and bounded-counter
+  path before recording its legacy decision.
+- Completed the second P03 slice: the new entry can allocate non-reused attempt
+  ids from a persisted sequence, and the session manifest now carries v2
+  lifecycle state, revisions, pause reasons, state references, and an optional
+  ledger reference. Added `pause()`, `complete()`, and
+  `continue_with_revision()`; explicit continuation does not reset the old
+  budget, and v1 manifests remain readable. The controller now also provides
+  a cross-platform single-writer session lock, persisted-result reconciliation,
+  and an explicit opt-in boundary for writing legacy v1 sessions.
+- Added the first P04 application slice in
+  `simple_ar.app.research_application`. It persists normalized brief/assets,
+  advances the canonical `plan -> search -> document_ingest -> read ->
+  synthesize -> summarize` path one action at a time, supports reload and
+  explicit continuation, and exports a compact session snapshot. Requests for
+  code, experiments, or reports stop at a visible summary boundary; they do
+  not claim that those later outputs already exist. The CLI is intentionally
+  not switched yet; that belongs to P12/P13 after the execution lifecycle is
+  connected.
+- Added the first P05a evidence-resolution slice: stable `EvidenceRef`
+  projections and `query_evidence()` retain source identity, document revision,
+  exact locations, extraction status, target text, and real same-document
+  adjacent context; dangling chunk IDs are rejected.
+- Added the minimal P04b work-plan and readiness projections. The application
+  now persists `planning/work_plan.json`, `planning/work_plan.md`, and
+  `planning/readiness.json`, and exposes the same view through its library
+  status object. These are derived views, not a second scheduler or state
+  database. A session-level `BudgetLedger` is also persisted and referenced by
+  the manifest; standard `LLMClient` instances receive a ledger-bound copy.
+- Added the first P05b candidate-assessment slice. `assess_ideas` compares a
+  bounded set of synthesis candidates against the current evidence refs,
+  records unresolved evidence, similarity risk, unknowns, and a bounded next
+  recommendation, and writes JSON/Markdown review artifacts. It is a readiness
+  assessment only: it does not claim novelty, select a winner, or run code.
+
 ## 2026-09-06
 
 ### Changed

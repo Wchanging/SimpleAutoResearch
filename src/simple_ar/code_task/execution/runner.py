@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import codecs
 import json
 import os
 import re
@@ -9,11 +8,13 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from simple_ar.core.artifacts import write_json, write_text
+from simple_ar.core.process import ProcessSpec, run_process
+from simple_ar.core.budget import BudgetLedger
 from simple_ar.code_task.editing.attempts import (
     load_latest_code_task_batch,
     update_code_task_batch_state,
@@ -108,6 +109,8 @@ class _OutputWatchdog:
             self.samples.append(f"{stream_name}: {display[:240]}")
         normalized = _normalize_watchdog_line(display)
         if normalized:
+            if len(self.repeated_lines) >= 2048 and normalized not in self.repeated_lines:
+                self.repeated_lines.pop(next(iter(self.repeated_lines)))
             self.repeated_lines[normalized] = self.repeated_lines.get(normalized, 0) + 1
         lowered = display.lower()
         if any(token in lowered for token in WATCHDOG_WARNING_TOKENS):
@@ -201,6 +204,9 @@ def run_code_task_benchmark(
     python_executable: str | Path | None = None,
     stream_output: bool | str = False,
     output_callback: OutputCallback | None = None,
+    budget_ledger: BudgetLedger | None = None,
+    session_id: str = "",
+    attempt_id: str = "",
 ) -> CodeTaskRunResult:
     """Run the recorded benchmark command inside the copied workspace.
 
@@ -275,13 +281,18 @@ def run_code_task_benchmark(
             timeout_sec=timeout_sec,
             stream_output=stream_output,
             output_callback=output_callback,
+            output_dir=paths.run_artifact_dir / label / "process",
+            budget_ledger=budget_ledger, session_id=session_id, attempt_id=attempt_id,
         )
         duration_sec = round(time.monotonic() - started, 3)
         stdout, stdout_truncated = _clip_output(completed.stdout)
         stderr, stderr_truncated = _clip_output(completed.stderr)
         metrics = parse_metric_lines(stdout)
         status = "passed" if completed.returncode == 0 else "failed"
-        report_metadata: dict[str, Any] = {}
+        process_record = completed.simple_ar_process
+        stdout_truncated |= process_record["streams"]["stdout"]["tail_bytes_discarded"] > 0
+        stderr_truncated |= process_record["streams"]["stderr"]["tail_bytes_discarded"] > 0
+        report_metadata: dict[str, Any] = {"process": process_record}
         run_metadata: dict[str, Any] = {}
         artifact_scan: dict[str, Any] | None = None
         if _is_greenfield_manifest(manifest):
@@ -342,6 +353,7 @@ def run_code_task_benchmark(
         )
     except subprocess.TimeoutExpired as exc:
         duration_sec = round(time.monotonic() - started, 3)
+        process_record = exc.simple_ar_process
         stdout, stdout_truncated = _clip_output(_output_text(exc.stdout))
         stderr_text = _output_text(exc.stderr)
         if stderr_text:
@@ -349,6 +361,8 @@ def run_code_task_benchmark(
         stderr_text += f"Timed out after {timeout_sec} seconds."
         stderr, stderr_truncated = _clip_output(stderr_text)
         metrics = parse_metric_lines(stdout)
+        stdout_truncated |= process_record["streams"]["stdout"]["tail_bytes_discarded"] > 0
+        stderr_truncated |= process_record["streams"]["stderr"]["tail_bytes_discarded"] > 0
         return _write_execution_result(
             run_dir,
             manifest=manifest,
@@ -366,6 +380,7 @@ def run_code_task_benchmark(
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
             run_label=label,
+            report_metadata={"process": process_record},
         )
 
 
@@ -379,6 +394,9 @@ def run_code_task_baseline(
     python_executable: str | Path | None = None,
     stream_output: bool | str = False,
     output_callback: OutputCallback | None = None,
+    budget_ledger: BudgetLedger | None = None,
+    session_id: str = "",
+    attempt_id: str = "",
 ) -> CodeTaskRunResult:
     """Run the recorded benchmark as the pre-patch baseline.
 
@@ -404,6 +422,7 @@ def run_code_task_baseline(
         timeout_sec=timeout_sec,
         skip_validation=skip_validation,
         run_label="baseline",
+        budget_ledger=budget_ledger, session_id=session_id, attempt_id=attempt_id,
         env_mode=env_mode,
         python_executable=python_executable,
         stream_output=stream_output,
@@ -478,87 +497,47 @@ def _run_command(
     timeout_sec: int,
     stream_output: bool | str,
     output_callback: OutputCallback | None,
+    output_dir: Path | None = None,
+    budget_ledger: BudgetLedger | None = None,
+    session_id: str = "",
+    attempt_id: str = "",
 ) -> subprocess.CompletedProcess[str]:
     mode = normalize_stream_output_mode(stream_output)
     watchdog = _OutputWatchdog()
+    cancel = threading.Event()
     callback = output_callback if mode not in {"off", "summary"} else None
-    process = subprocess.Popen(
-        command_args,
-        cwd=cwd,
-        env=_safe_env(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=0,
+    relays = {
+        name: _OutputRelay(name, callback, mode, watchdog, cancel)
+        for name in ("stdout", "stderr")
+    }
+    spec = ProcessSpec(command_args, cwd, timeout_sec, env=_safe_env(cwd), output_dir=output_dir,
+                       session_id=session_id, attempt_id=attempt_id)
+    if output_dir:
+        spec = replace(spec, output_dir=output_dir / spec.invocation_id)
+    result = run_process(
+        spec,
+        output_callback=lambda name, chunk: relays[name].feed(chunk),
+        cancel=cancel,
+        budget_ledger=budget_ledger,
     )
-    stdout_chunks: list[str] = []
-    stderr_chunks: list[str] = []
-    stop_event = threading.Event()
-    stdout_thread = threading.Thread(
-        target=_read_stream,
-        args=(process.stdout, "stdout", stdout_chunks, callback, mode, watchdog, stop_event),
-        daemon=True,
-    )
-    stderr_thread = threading.Thread(
-        target=_read_stream,
-        args=(process.stderr, "stderr", stderr_chunks, callback, mode, watchdog, stop_event),
-        daemon=True,
-    )
-    stdout_thread.start()
-    stderr_thread.start()
-    deadline = time.monotonic() + timeout_sec
-    killed_by_watchdog = False
-    returncode: int | None = None
-    while True:
-        returncode = process.poll()
-        if returncode is not None:
-            break
-        if watchdog.triggered is not None:
-            killed_by_watchdog = True
-            stop_event.set()
-            process.kill()
-            try:
-                returncode = process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                returncode = 124
-            break
-        if time.monotonic() >= deadline:
-            stop_event.set()
-            process.kill()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-            stdout_thread.join(timeout=2)
-            stderr_thread.join(timeout=2)
-            raise subprocess.TimeoutExpired(
-                command_args,
-                timeout_sec,
-                output="".join(stdout_chunks),
-                stderr="".join(stderr_chunks),
-            )
-        time.sleep(0.05)
-    if killed_by_watchdog:
-        stop_event.set()
-        process.kill()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
-    stdout_thread.join(timeout=2)
-    stderr_thread.join(timeout=2)
-    stdout = "".join(stdout_chunks)
-    stderr = "".join(stderr_chunks)
+    for relay in relays.values():
+        relay.finish()
+    if result.stop_reason == "timeout":
+        exc = subprocess.TimeoutExpired(command_args, timeout_sec, output=result.stdout, stderr=result.stderr)
+        exc.simple_ar_process = result.record
+        raise exc
+    stderr = result.stderr
     if watchdog.triggered is not None:
-        detail = str(watchdog.triggered.get("detail") or watchdog.triggered.get("reason") or "output flood")
+        detail = watchdog.triggered["detail"]
         stderr = stderr.rstrip() + f"\nRuntime output watchdog aborted benchmark: {detail}\n"
     completed = subprocess.CompletedProcess(
         command_args,
-        int(returncode if returncode is not None else 124),
-        stdout=stdout,
-        stderr=stderr,
+        124 if watchdog.triggered is not None else result.returncode,
+        stdout=result.stdout, stderr=stderr,
     )
+    completed.simple_ar_process = result.record
     if watchdog.triggered is not None:
-        setattr(completed, "simple_ar_watchdog", watchdog.triggered)
+        completed.simple_ar_watchdog = watchdog.triggered
     if mode == "summary" and output_callback is not None:
         _emit_output_summary(completed.stdout, completed.stderr, output_callback)
     return completed
@@ -581,98 +560,64 @@ def normalize_stream_output_mode(value: bool | str) -> StreamOutputMode:
     )
 
 
-def _read_stream(
-    stream: Any,
-    stream_name: str,
-    chunks: list[str],
-    callback: OutputCallback | None,
-    mode: StreamOutputMode,
-    watchdog: _OutputWatchdog | None = None,
-    stop_event: threading.Event | None = None,
-) -> None:
-    if stream is None:
-        return
-    buffer: list[str] = []
-    last_progress = ""
-    last_progress_time = 0.0
-    pending_progress = ""
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+class _OutputRelay:
+    """Keep CodeTask's line/progress presentation separate from process control."""
 
-    def emit(text: str, *, progress: bool = False, force: bool = False) -> bool:
-        nonlocal last_progress, last_progress_time
-        if callback is None:
-            return False
+    def __init__(self, name, callback, mode, watchdog, cancel) -> None:
+        self.name, self.callback, self.mode = name, callback, mode
+        self.watchdog, self.cancel = watchdog, cancel
+        self.buffer: list[str] = []
+        self.pending = ""
+        self.last_progress = ""
+        self.last_progress_time = 0.0
+
+    def emit(self, text: str, *, progress: bool = False, force: bool = False) -> bool:
         display = _display_stream_text(text)
-        if not display:
+        if self.callback is None or not display:
             return False
         if progress:
             now = time.monotonic()
-            if not force:
-                if display == last_progress:
-                    return False
-                if now - last_progress_time < PROGRESS_RELAY_MIN_INTERVAL_SEC:
-                    return False
-            last_progress = display
-            last_progress_time = now
-        try:
-            callback(stream_name, display)
-        except Exception:
-            pass
+            if not force and (
+                display == self.last_progress
+                or now - self.last_progress_time < PROGRESS_RELAY_MIN_INTERVAL_SEC
+            ):
+                return False
+            self.last_progress, self.last_progress_time = display, now
+        self.callback(self.name, display)
         return True
 
-    try:
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                break
-            raw = stream.read(1)
-            if not raw:
-                break
-            char = decoder.decode(raw)
-            if not char:
-                continue
-            chunks.append(char)
+    def flush(self, *, progress: bool = False) -> None:
+        text = "".join(self.buffer)
+        self.buffer.clear()
+        self.watchdog.observe(self.name, text)
+        if self.watchdog.triggered is not None:
+            self.cancel.set()
+        if progress:
+            if not self.emit(text, progress=True):
+                self.pending = text
+        else:
+            if self.pending and _display_stream_text(self.pending) != _display_stream_text(text):
+                self.emit(self.pending, progress=True, force=True)
+            self.pending = ""
+            self.emit(text, force=True)
+
+    def feed(self, chunk: str) -> None:
+        for char in chunk:
             if char == "\n":
-                line = "".join(buffer)
-                if watchdog is not None:
-                    watchdog.observe(stream_name, line)
-                    if watchdog.triggered is not None and stop_event is not None:
-                        stop_event.set()
-                if pending_progress:
-                    if _display_stream_text(pending_progress) != _display_stream_text(line):
-                        emit(pending_progress, progress=True, force=True)
-                    pending_progress = ""
-                emit(line, force=True)
-                buffer.clear()
-            elif char == "\r":
-                if mode == "auto":
-                    text = "".join(buffer)
-                    if watchdog is not None:
-                        watchdog.observe(stream_name, text)
-                        if watchdog.triggered is not None and stop_event is not None:
-                            stop_event.set()
-                    if not emit(text, progress=True):
-                        pending_progress = text
-                    buffer.clear()
-                else:
-                    buffer.append(char)
+                self.flush()
+            elif char == "\r" and self.mode == "auto":
+                self.flush(progress=True)
             else:
-                buffer.append(char)
-        tail = decoder.decode(b"", final=True)
-        if tail:
-            chunks.append(tail)
-            buffer.append(tail)
-        if buffer:
-            if watchdog is not None:
-                watchdog.observe(stream_name, "".join(buffer))
-            if pending_progress:
-                if _display_stream_text(pending_progress) != _display_stream_text("".join(buffer)):
-                    emit(pending_progress, progress=True, force=True)
-                pending_progress = ""
-            emit("".join(buffer), force=True)
-        elif pending_progress:
-            emit(pending_progress, progress=True, force=True)
-    finally:
-        stream.close()
+                self.buffer.append(char)
+                if len(self.buffer) >= 8192:
+                    self.flush()
+
+    def finish(self) -> None:
+        if self.buffer:
+            self.flush()
+        elif self.pending:
+            self.emit(self.pending, progress=True, force=True)
+            self.pending = ""
 
 
 def _display_stream_text(text: str) -> str:
@@ -930,6 +875,11 @@ def _split_command(command_text: str, *, environment_policy: dict[str, Any]) -> 
             "Shell control operators are not supported in benchmark commands. "
             "Use a direct command such as `python -m unittest discover -s tests`."
         )
+    if os.name == "nt":
+        # Non-POSIX shlex preserves grouping quotes. Popen receives argv, not
+        # shell text: keeping them makes Python -c execute a string literal.
+        args = [token[1:-1] if len(token) >= 2 and token[0] in {"'", '"'}
+                and token[-1] == token[0] else token for token in args]
     if args[0] in {"python", "python3"}:
         args[0] = _policy_python_executable(environment_policy)
     return args

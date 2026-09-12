@@ -7,17 +7,17 @@ def default_experiment_tool_specs() -> list[ExperimentToolSpec]:
     return [
         ExperimentToolSpec(
             name="read_experiment_contract",
-            description="Read the current run's experiment contract, result schema, resource plan, and domain profile.",
+            description="Read an archived eight-stage run's experiment contract, result schema, resource plan, and domain profile.",
             permission="read_only",
         ),
         ExperimentToolSpec(
             name="list_experiment_artifacts",
-            description="List stable 05-design, 06-code, and 07-run experiment artifacts for the current run.",
+            description="List archived 05-design, 06-code, and 07-run experiment artifacts.",
             permission="read_only",
         ),
         ExperimentToolSpec(
             name="read_results_json",
-            description="Read canonical 07-run/results.json for report or repair context.",
+            description="Read archived 07-run/results.json; this is not the current session attempt result API.",
             permission="read_only",
         ),
         ExperimentToolSpec(
@@ -77,21 +77,6 @@ def default_experiment_tool_specs() -> list[ExperimentToolSpec]:
                 },
                 "required": ["query"],
             },
-        ),
-        ExperimentToolSpec(
-            name="run_experiment_command",
-            description="Reserved execution tool; disabled by default and routed through ExecutionBackend.",
-            permission="execution",
-        ),
-        ExperimentToolSpec(
-            name="request_code_repair",
-            description="Reserved repair request tool; requires gated code provider.",
-            permission="write_patch",
-        ),
-        ExperimentToolSpec(
-            name="apply_reviewed_patch",
-            description="Reserved reviewed patch application tool; requires explicit approval.",
-            permission="write_patch",
         ),
     ]
 

@@ -8,7 +8,7 @@ downstream result shape.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,6 +26,7 @@ from simple_ar.experiment.execution.diagnosis import (
 )
 from simple_ar.experiment.execution.guards import evaluate_result_guard
 from simple_ar.experiment.execution.results import build_canonical_results
+from simple_ar.experiment.execution.measurement import snapshot_protocol_assets, reconcile_protocol_assets
 from simple_ar.result_analysis.schema import AnalysisContext, AnalysisResult
 
 from .analysis import (
@@ -170,6 +171,7 @@ def run_experiment(
 ) -> ExperimentResult:
     """Execute one request and normalize its result without writing files."""
     selected_backend = backend or LocalExecutionBackend()
+    before = snapshot_protocol_assets(request.normalized_experiment_contract(), request.run.cwd)
     run_result = selected_backend.run(request.run)
     canonical = build_canonical_results(
         run_result,
@@ -180,6 +182,15 @@ def run_experiment(
         verdicts=list(request.verdicts),
         guard=request.guard,
     )
+    if before:
+        integrity = reconcile_protocol_assets(before)
+        canonical["measurement"]["asset_integrity"] = integrity
+        canonical["validity_status"] = "invalid" if integrity["status"] == "changed" else "observed_assets_unchanged"
+        if integrity["status"] == "changed":
+            canonical["status"] = "failed"
+        canonical["measurement"]["limitations"] = [
+            "Only declared files were hashed before and after execution; this is not access isolation or protection against temporary changes."
+        ]
     return ExperimentResult(run=run_result, canonical=canonical)
 
 
@@ -197,6 +208,12 @@ def run_experiment_capability(
     execution to a failed capability result; it never turns a timeout into a
     successful experiment and never retries implicitly.
     """
+    local_backend = backend is None or isinstance(backend, LocalExecutionBackend)
+    if local_backend:
+        request = replace(request, run=replace(
+            request.run, output_dir=context.store.root / "execution" / "process",
+            attempt_id=context.attempt.attempt_id,
+        ))
     result = run_experiment(request, backend=backend)
     stdout_ref = context.store.write_text(
         "execution/stdout.txt",
@@ -213,12 +230,35 @@ def run_experiment_capability(
         producer="research.experiment",
     )
     canonical = result.to_dict()
+    preparation_refs = [ref for ref in context.inputs if ref.kind == "prepared_execution"]
+    if preparation_refs:
+        preparation_ref = preparation_refs[0]
+        preparation = context.read_input_json(preparation_ref)
+        canonical["preparation"] = {
+            "source_ref": preparation_ref.to_dict(),
+            "limitations": list(preparation["limitations"]),
+        }
     artifact_paths = dict(canonical.get("artifacts") or {})
     artifact_paths["stdout"] = stdout_ref.path
     artifact_paths["stderr"] = stderr_ref.path
     artifact_paths["guard"] = "guard_report.json"
     artifact_paths["diagnosis"] = "diagnosis.json"
     artifact_paths["diagnosis_markdown"] = "diagnosis.md"
+    process_refs = []
+    if local_backend and result.run.process_record:
+        process_dir = request.run.output_dir / result.run.process_record["invocation_id"]
+        if (process_dir / "outputs").is_dir():
+            output_ref = context.store.ref(process_dir / "outputs", kind="experiment_outputs", producer="research.experiment")
+            process_refs.append(output_ref)
+            artifact_paths["outputs"] = output_ref.path
+        for filename, kind, schema in (
+            ("invocation.json", "process_invocation", "process_invocation.v1"),
+            ("stdout.log", "execution_log", "text.v1"),
+            ("stderr.log", "execution_log", "text.v1"),
+        ):
+            ref = context.store.ref(process_dir / filename, kind=kind, schema=schema, producer="research.experiment")
+            process_refs.append(ref)
+            artifact_paths[f"process_{filename}"] = ref.path
     canonical["artifacts"] = artifact_paths
     guard = (
         dict(request.guard)
@@ -272,7 +312,7 @@ def run_experiment_capability(
         if result.status == "timed_out":
             diagnostics.append("Experiment execution timed out.")
         else:
-            diagnostics.append(f"Experiment execution status: {result.status}.")
+            diagnostics.append(f"Experiment result status: {result.status}.")
         if result.run.returncode is not None:
             diagnostics.append(f"Process exited with code {result.run.returncode}.")
     elif guard_failed:
@@ -292,6 +332,7 @@ def run_experiment_capability(
             guard_ref,
             diagnosis_ref,
             diagnosis_markdown_ref,
+            *process_refs,
         ),
         diagnostics=tuple(diagnostics),
         usage={

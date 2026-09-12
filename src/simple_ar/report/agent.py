@@ -84,6 +84,8 @@ def run_report_agent(
     config: ReportRuntimeConfig,
     gateway: ReportToolGateway,
     emit: Callable[[str], None] | None = None,
+    checkpoint_sink: Callable[[dict[str, Any]], None] | None = None,
+    completed_checkpoint: Mapping[str, Any] | None = None,
 ) -> AgentReportResult | None:
     """Run the bounded Writer/Reviewer loop for the report stage.
 
@@ -95,6 +97,8 @@ def run_report_agent(
         config: Runtime report config.
         gateway: Read-only report tool gateway.
         emit: Optional progress callback.
+        checkpoint_sink: Save only fully drafted/reviewed sections and their evidence.
+        completed_checkpoint: Previously completed prefix; the caller verifies input identity.
 
     Returns:
         Agent-generated report body and updated memory, or ``None`` when agent
@@ -113,15 +117,36 @@ def run_report_agent(
         memory=current,
         config=config,
         emit=emit,
-    )
+    ) if completed_checkpoint is None else current
     current = _resolve_document_plan(current, config=config)
     sections: list[ReportSectionDraft] = []
     iterations: list[ReportIterationRecord] = []
     all_findings: list[ReviewerFinding] = []
     all_tool_results: list[ReportToolResult] = []
 
+    if completed_checkpoint is not None:
+        current = ReportMemory.model_validate(completed_checkpoint["memory"])
+        sections = [ReportSectionDraft.model_validate(row) for row in completed_checkpoint["sections"]]
+        iterations = [ReportIterationRecord.model_validate(row) for row in completed_checkpoint["iterations"]]
+        all_findings = [ReviewerFinding.model_validate(row) for row in completed_checkpoint["reviewer_findings"]]
+        all_tool_results = [ReportToolResult.model_validate(row) for row in completed_checkpoint["tool_results"]]
+        expected = [section.section_id for section in _draft_sequence(current.section_plan)]
+        if [section.section_id for section in sections] != expected[:len(sections)]:
+            raise ValueError("Report checkpoint sections do not match the planned draft sequence.")
+    completed_count = len(sections)
+
+    def checkpoint() -> None:
+        if checkpoint_sink is not None:
+            checkpoint_sink({"memory": current.model_dump(mode="json"),
+                             "sections": [row.model_dump(mode="json") for row in sections],
+                             "iterations": [row.model_dump(mode="json") for row in iterations],
+                             "reviewer_findings": [row.model_dump(mode="json") for row in all_findings],
+                             "tool_results": [row.model_dump(mode="json") for row in all_tool_results]})
+
     try:
         for section_index, section in enumerate(_draft_sequence(current.section_plan), start=1):
+            if section_index <= completed_count:
+                continue
             # Long reports still need multiple evidence windows. Each window
             # revises the same complete section so the Writer can reconcile
             # new evidence without accumulating duplicate prose.
@@ -179,6 +204,7 @@ def run_report_agent(
             if config.reviewer == "disabled":
                 sections.append(draft)
                 _merge_draft_into_memory(current, draft, [])
+                checkpoint()
                 continue
 
             section_findings: list[ReviewerFinding] = []
@@ -196,6 +222,7 @@ def run_report_agent(
                     memory=current,
                     section=section,
                     draft=draft,
+                    config=config,
                     label=f"report-reviewer-{section.section_id}{label_suffix}",
                     emit=emit,
                 )
@@ -247,6 +274,7 @@ def run_report_agent(
 
             sections.append(draft)
             _merge_draft_into_memory(current, draft, section_findings)
+            checkpoint()
 
         body = assemble_report_sections(title=context.topic, sections=_final_sequence(current.section_plan, sections))
         current.reviewer_findings = _dedupe_findings(current.reviewer_findings + all_findings)
@@ -895,6 +923,7 @@ def _review_section(
     section: ReportSectionPlan,
     draft: ReportSectionDraft,
     label: str,
+    max_output_tokens: int | None = None,
     prompt_suffix: str = "",
 ) -> ReportSectionReview:
     prompt = _reviewer_prompt(
@@ -910,6 +939,7 @@ def _review_section(
         REVIEWER_SYSTEM,
         prompt,
         label=label,
+        max_output_tokens=max_output_tokens,
     )
     return ReportSectionReview.model_validate(_normalize_review_response(response, section))
 
@@ -995,6 +1025,7 @@ def _review_section_with_recovery(
     memory: ReportMemory,
     section: ReportSectionPlan,
     draft: ReportSectionDraft,
+    config: ReportRuntimeConfig,
     label: str,
     emit: Callable[[str], None] | None = None,
 ) -> ReportSectionReview:
@@ -1006,6 +1037,7 @@ def _review_section_with_recovery(
             memory=memory,
             section=section,
             draft=draft,
+            max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
             label=label,
         )
     except (LLMError, ValidationError, ValueError) as exc:
@@ -1018,6 +1050,7 @@ def _review_section_with_recovery(
             memory=memory,
             section=section,
             draft=draft,
+            max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
             label=f"{label}-retry",
             prompt_suffix=(
                 "The previous response was not accepted as valid JSON. "
@@ -1361,7 +1394,7 @@ def _reviewer_prompt(
 def _json_prompt(payload: dict[str, Any]) -> str:
     return (
         "Return exactly one JSON object. Do not wrap it in Markdown fences.\n\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
 
 

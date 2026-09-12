@@ -10,45 +10,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="simple-ar")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = subparsers.add_parser("run", help="Start a new research run.")
-    run_parser.add_argument("--config", default=None, help="Optional TOML config for the 8-stage run.")
-    run_parser.add_argument("--topic", default=None)
-    run_parser.add_argument("--output-root", default=None)
-    run_parser.add_argument("--from-stage", default=None)
-    run_parser.add_argument("--to-stage", default=None)
-    run_parser.add_argument("--model", default=None)
-    run_parser.add_argument("--llm-workers", type=int, default=None)
-    run_parser.add_argument("--max-papers", type=int, default=None)
-    run_parser.add_argument("--search-query", default=None)
-    run_parser.add_argument("--experiment-template", default=None)
-    run_parser.add_argument("--experiment-timeout", type=int, default=None)
-    _add_pipeline_code_task_args(run_parser)
-    run_parser.add_argument("--no-llm", action="store_true", default=None)
-    run_parser.add_argument("--offline-search", action="store_true", default=None)
-    run_parser.add_argument("--allow-fixture-fallback", action="store_true", default=None)
-    run_parser.add_argument("--strict-search", action="store_true", default=None)
-    run_parser.add_argument("--no-retrieval", action="store_true", default=None)
-    run_parser.add_argument("--retrieval-top-k", type=int, default=None)
-    run_parser.add_argument(
-        "--report-mode",
-        choices=("auto", "research_only", "experiment"),
-        default=None,
-        help="Report drafting mode: auto (based on results.json), research_only, or experiment.",
-    )
-    run_parser.add_argument(
-        "--report-reviewer",
-        choices=("llm", "disabled"),
-        default=None,
-        help="Override the report reviewer backend. `disabled` skips the reviewer/revision loop.",
-    )
-    _add_report_output_args(run_parser)
-    run_parser.add_argument("--quiet", action="store_true", default=None)
-    run_parser.add_argument(
-        "--overwrite-stage-artifacts",
-        action="store_true",
-        default=None,
-        help="Do not archive existing code/run stage artifacts before rerunning those stages.",
-    )
 
     brief_parser = subparsers.add_parser(
         "research-brief",
@@ -94,50 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
     brief_parser.add_argument("--max-chunks", type=int, default=300)
     brief_parser.add_argument("--idea-limit", type=int, default=3)
 
-    experiment_parser = subparsers.add_parser(
-        "research-experiment",
-        help="Execute and analyze a declared experiment from a research handoff.",
-    )
-    experiment_parser.add_argument("--topic", required=True)
-    experiment_parser.add_argument("--synthesis-file", required=True)
-    experiment_parser.add_argument(
-        "--model",
-        default=None,
-        help="Optional model override; enables LLM-backed result analysis.",
-    )
-    experiment_parser.add_argument(
-        "--output-root",
-        default="runs/research-experiment",
-        help="Parent directory for the timestamped experiment session.",
-    )
-    experiment_parser.add_argument("--cwd", default=".")
-    experiment_parser.add_argument("--timeout-sec", type=int, default=300)
-    experiment_parser.add_argument("--label", default="research-experiment")
-    experiment_parser.add_argument("--primary-metric", default=None)
-    experiment_parser.add_argument(
-        "--metric",
-        action="append",
-        default=[],
-        help="Required metric name; may be repeated.",
-    )
-    experiment_parser.add_argument(
-        "--metric-direction",
-        action="append",
-        default=[],
-        metavar="NAME=DIRECTION",
-        help="Metric direction, such as accuracy=higher; may be repeated.",
-    )
-    experiment_parser.add_argument(
-        "--command",
-        dest="command_argv",
-        nargs=argparse.REMAINDER,
-        required=True,
-        help="Command to execute; place this option last.",
-    )
 
     session_parser = subparsers.add_parser(
         "research-session",
-        help="Run a bounded literature-to-experiment research session.",
+        help="Run a bounded literature-only or literature-to-experiment research session.",
     )
     session_parser.add_argument("--topic", required=True)
     session_parser.add_argument(
@@ -244,8 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         required=False,
         help=(
-            "Command to execute; place this option last. Omit it when using "
-            "--code-task-config."
+            "Command to execute; place this option last. Omit it for a "
+            "literature-only summary/report or when using --code-task-config."
         ),
     )
 
@@ -260,8 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     continuation_parser.add_argument(
         "--parent-attempt-id",
-        default="experiment-001",
-        help="Failed experiment attempt to branch from; defaults to experiment-001.",
+        default=None,
+        help="Failed experiment attempt to branch from; defaults to the latest canonical experiment (or experiment-001 for legacy sessions).",
     )
     continuation_parser.add_argument(
         "--model",
@@ -291,6 +212,41 @@ def build_parser() -> argparse.ArgumentParser:
         nargs=argparse.REMAINDER,
         required=True,
         help="Revised command to execute; place this option last.",
+    )
+
+    migration_parser = subparsers.add_parser(
+        "research-session-migrate",
+        help="Create a canonical successor session from a read-only v1 session.",
+    )
+    migration_parser.add_argument(
+        "--source-root",
+        required=True,
+        help="Existing session directory containing session_manifest.v1.",
+    )
+    migration_parser.add_argument(
+        "--destination-root",
+        required=True,
+        help="New, empty directory for the canonical successor session.",
+    )
+    migration_parser.add_argument(
+        "--artifact",
+        dest="artifact_names",
+        action="append",
+        default=[],
+        help="State reference to copy; may be repeated. Only explicitly named small files are copied.",
+    )
+    migration_parser.add_argument(
+        "--requested-output",
+        dest="requested_outputs",
+        action="append",
+        default=[],
+        help="Requested successor output; may be repeated. Defaults to the legacy brief or research_summary.",
+    )
+    migration_parser.add_argument(
+        "--max-artifact-bytes",
+        type=int,
+        default=2 * 1024 * 1024,
+        help="Maximum size of each explicitly selected imported artifact.",
     )
 
     report_parser = subparsers.add_parser(
@@ -325,89 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum Writer revision cycles per section.",
     )
 
-    code_research_parser = subparsers.add_parser(
-        "research-code-task",
-        help="Run a bounded research direction through the existing Code-Task backend.",
-    )
-    code_research_parser.add_argument("--topic", required=True)
-    code_research_parser.add_argument("--synthesis-file", required=True)
-    code_research_parser.add_argument(
-        "--code-task-config",
-        required=True,
-        help="Existing-project Code-Task TOML used for source, benchmark, and environment settings.",
-    )
-    code_research_parser.add_argument(
-        "--output-root",
-        default="runs/research-code-task",
-        help="Parent directory for the timestamped research Code-Task session.",
-    )
-    code_research_parser.add_argument(
-        "--model",
-        default=None,
-        help="Optional single-model override for the existing Code-Task backend.",
-    )
-    code_research_parser.add_argument(
-        "--timeout-sec",
-        type=int,
-        default=None,
-        help="Optional benchmark timeout override; otherwise use [execute].timeout_sec.",
-    )
-    code_research_parser.add_argument(
-        "--baseline-policy",
-        choices=("auto", "run", "skip", "provided", "none"),
-        default=None,
-        help="Optional baseline policy override; otherwise use [execute].baseline_policy.",
-    )
-    code_research_parser.add_argument(
-        "--baseline-metrics-file",
-        default=None,
-        help="Optional baseline metrics file when the provided policy is selected.",
-    )
-    code_research_parser.add_argument(
-        "--with-report",
-        action="store_true",
-        help="After a passed session, generate and audit its experiment report.",
-    )
-    code_research_parser.add_argument("--label", default="research-code-task")
 
-    resume_parser = subparsers.add_parser("resume", help="Resume an existing run.")
-    resume_parser.add_argument("run_dir")
-    resume_parser.add_argument("--config", default=None, help="Optional TOML config overrides.")
-    resume_parser.add_argument("--from-stage", default=None)
-    resume_parser.add_argument("--to-stage", default=None)
-    resume_parser.add_argument("--model", default=None)
-    resume_parser.add_argument("--llm-workers", type=int, default=None)
-    resume_parser.add_argument("--max-papers", type=int, default=None)
-    resume_parser.add_argument("--search-query", default=None)
-    resume_parser.add_argument("--experiment-template", default=None)
-    resume_parser.add_argument("--experiment-timeout", type=int, default=None)
-    _add_pipeline_code_task_args(resume_parser)
-    resume_parser.add_argument("--no-llm", action="store_true", default=None)
-    resume_parser.add_argument("--offline-search", action="store_true", default=None)
-    resume_parser.add_argument("--allow-fixture-fallback", action="store_true", default=None)
-    resume_parser.add_argument("--strict-search", action="store_true", default=None)
-    resume_parser.add_argument("--no-retrieval", action="store_true", default=None)
-    resume_parser.add_argument("--retrieval-top-k", type=int, default=None)
-    resume_parser.add_argument(
-        "--report-mode",
-        choices=("auto", "research_only", "experiment"),
-        default=None,
-        help="Override report drafting mode for a resumed run.",
-    )
-    resume_parser.add_argument(
-        "--report-reviewer",
-        choices=("llm", "disabled"),
-        default=None,
-        help="Override the report reviewer backend. `disabled` skips the reviewer/revision loop.",
-    )
-    _add_report_output_args(resume_parser)
-    resume_parser.add_argument("--quiet", action="store_true", default=None)
-    resume_parser.add_argument(
-        "--overwrite-stage-artifacts",
-        action="store_true",
-        default=None,
-        help="Do not archive existing code/run stage artifacts before rerunning those stages.",
-    )
 
     status_parser = subparsers.add_parser("status", help="Show run status.")
     status_parser.add_argument("run_dir")
@@ -813,7 +687,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--planning-mode",
         choices=("tool_agent", "compact"),
         default=None,
-        help="Greenfield planning mode: tool_agent decomposes planning; compact uses the older single architecture call.",
+        help="Greenfield planning: tool_agent uses staged planning and review; compact uses one architecture call before retries.",
     )
     code_task_execute.add_argument(
         "--llm-retry-attempts",
@@ -828,30 +702,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override greenfield planning reviewer revision rounds for this execute call.",
     )
     code_task_execute.add_argument("--repair-rounds", type=int, default=None)
-    code_task_execute.add_argument(
-        "--repair-context",
-        choices=("full", "raw_logs_only"),
-        default=None,
-        help=(
-            "Ablation control for repair prompts. `full` uses structured failure diagnostics; "
-            "`raw_logs_only` omits failure-graph bundle fields from LLM repair context."
-        ),
-    )
-    code_task_execute.add_argument(
-        "--no-repair-memory",
-        action="store_true",
-        help="Ablation control: do not inject previous repair memory into repair prompts.",
-    )
-    code_task_execute.add_argument(
-        "--contract-context",
-        choices=("full", "minimal", "plan_only"),
-        default=None,
-        help=(
-            "Ablation control for model prompts. `minimal` changes the end-to-end prompt view; "
-            "`plan_only` is valid only with --reuse-planning-from and omits the canonical "
-            "contract from downstream model prompts while retaining the accepted plan."
-        ),
-    )
     code_task_execute.add_argument(
         "--reuse-planning-from",
         type=Path,
@@ -1024,115 +874,7 @@ def _add_code_task_workspace_args(parser: argparse.ArgumentParser) -> None:
             "interpreter as the initial external execution policy."
         ),
     )
-    parser.add_argument(
-        "--workspace-setup-hook",
-        default=None,
-        help=(
-            "Record a project setup command for future managed environments. "
-            "The hook is not executed during init."
-        ),
-    )
 
-def _add_pipeline_code_task_args(parser: argparse.ArgumentParser) -> None:
-    """Add optional 8-stage code-task experiment configuration arguments."""
-    parser.add_argument(
-        "--code-task-config",
-        default=None,
-        help="Optional TOML config for --experiment-template code_task_project.",
-    )
-    parser.add_argument(
-        "--code-root",
-        dest="code_task_code_root",
-        default=None,
-        help="Source project prepared by --experiment-template code_task_project.",
-    )
-    parser.add_argument(
-        "--task-file",
-        dest="code_task_task_file",
-        default=None,
-        help="Markdown task file for --experiment-template code_task_project.",
-    )
-    parser.add_argument(
-        "--benchmark-command",
-        dest="code_task_benchmark_command",
-        default=None,
-        help="Benchmark command run before and after code-task edits.",
-    )
-    parser.add_argument(
-        "--code-task-name",
-        default=None,
-        help="Optional display name for the embedded code-task experiment.",
-    )
-    parser.add_argument(
-        "--code-task-max-file-bytes",
-        type=int,
-        default=None,
-        help="Maximum source file size copied in embedded copy/sparse modes.",
-    )
-    parser.add_argument(
-        "--code-task-workspace-mode",
-        choices=("auto", "copy", "git_worktree", "sparse_copy"),
-        default=None,
-        help="Embedded code-task workspace strategy.",
-    )
-    parser.add_argument(
-        "--code-task-workspace-reuse-source-venv",
-        action="store_true",
-        default=None,
-        help="Use a detected source .venv Python for the embedded code task.",
-    )
-    parser.add_argument(
-        "--code-task-workspace-setup-hook",
-        default=None,
-        help="Record a setup command for the embedded code-task workspace.",
-    )
-    parser.add_argument(
-        "--code-task-env-mode",
-        choices=("current", "external"),
-        default=None,
-        help="Embedded code-task execution environment mode.",
-    )
-    parser.add_argument(
-        "--code-task-python",
-        dest="code_task_python_executable",
-        default=None,
-        help="Python executable for --code-task-env-mode external.",
-    )
-    parser.add_argument(
-        "--primary-metric",
-        dest="code_task_primary_metric",
-        default=None,
-        help="Primary benchmark metric for embedded code-task comparison.",
-    )
-    parser.add_argument(
-        "--metric-direction",
-        dest="code_task_metric_direction",
-        action="append",
-        default=None,
-        type=_metric_direction_arg,
-        metavar="METRIC=DIRECTION",
-        help="Metric direction for embedded code-task comparison. May be repeated.",
-    )
-
-
-def _add_report_output_args(parser: argparse.ArgumentParser) -> None:
-    """Add shared report output policy arguments for run/resume."""
-    parser.add_argument(
-        "--report-output-mode",
-        choices=("overwrite", "archive", "variant"),
-        default=None,
-        help=(
-            "Report write policy. overwrite replaces 08-report outputs; "
-            "archive backs up existing outputs before replacing them; "
-            "variant writes a separate 08-report/variants/<label> package "
-            "without replacing the current report.md when it already exists."
-        ),
-    )
-    parser.add_argument(
-        "--report-output-label",
-        default=None,
-        help="Optional folder label for --report-output-mode variant/archive.",
-    )
 
 
 def _metric_direction_arg(value: str) -> tuple[str, str]:

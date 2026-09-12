@@ -53,11 +53,12 @@ def build_architecture_plan(
                     planning_dir=planning_dir,
                     message_callback=message_callback,
                 )
+                plan = normalize_architecture_plan(raw, contract=contract, resource_plan=resource_plan)
             except LLMError as exc:
                 last_error = exc
                 _emit(message_callback, f"Greenfield tool-agent planning failed. {exc}")
             else:
-                return normalize_architecture_plan(raw, contract=contract, resource_plan=resource_plan), "tool_agent"
+                return plan, "tool_agent"
         elif mode == "compact":
             for attempt in range(1, retry_attempts + 1):
                 try:
@@ -142,16 +143,11 @@ def normalize_architecture_plan(
         public_api_limit=30,
         acceptance_limit=12,
     )[:max_files]
+    if not files:
+        raise LLMError("Architecture planning returned no usable file specifications")
     if not any(row.get("path") == "main.py" for row in files):
         files.insert(0, _main_file_spec())
     files = entrypoint_first(files)
-    if not files:
-        files = fallback_architecture_plan(
-            contract=contract,
-            result_schema={},
-            resource_plan=resource_plan,
-            domain_profile={},
-        )["files"]
     plan = {
         "schema_version": "greenfield_architecture.v1",
         "mode": "greenfield_project",
@@ -660,7 +656,7 @@ def _normalize_file(row: Mapping[str, Any]) -> dict[str, Any]:
         "dependencies": normalize_dependency_paths(row.get("dependencies"), limit=12),
         "public_api": scalar_list(row.get("public_api"))[:30] or _default_public_api(path),
         "acceptance_criteria": scalar_list(row.get("acceptance_criteria"))[:12],
-        "entrypoint": bool(row.get("entrypoint")),
+        "entrypoint": bool(row.get("entrypoint")) or path == "main.py",
     }
 
 

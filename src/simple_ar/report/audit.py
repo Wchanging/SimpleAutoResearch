@@ -73,6 +73,7 @@ class ReportAuditCapabilityRequest:
     context: ReportContext | Mapping[str, Any]
     memory: ReportMemory | Mapping[str, Any]
     report_body_ref: ArtifactRef | None = None
+    citation_cleanup_ref: ArtifactRef | None = None
 
 
 def build_report_audit(
@@ -102,6 +103,7 @@ def build_report_audit(
         notes=[
             "V2.4 audit combines local rule gates with Writer/Reviewer findings when agent mode is enabled.",
             "Mechanical checks remain conservative and provenance-focused.",
+            "Semantic support of final prose is unchecked; metric visibility and section review do not prove final conclusions.",
         ],
     )
 
@@ -154,6 +156,18 @@ def run_report_audit_capability(
             memory=report_memory,
         )
     )
+    if request.citation_cleanup_ref is not None:
+        removed = context.read_input_json(request.citation_cleanup_ref)["removed_citations"]
+        if removed:
+            message = "Assembly removed unknown citations; associated claims need revision: " + ", ".join(removed)
+            audit.citation_audit.unknown_citations = sorted(set(audit.citation_audit.unknown_citations) | set(removed))
+            audit.citation_audit.warnings.append(message)
+            audit.citation_audit.status = "failed"
+            audit.status = "failed"
+            audit.reviewer_findings.append(ReviewerFinding(
+                finding_id="citation-cleanup", type="unresolved_citation", severity="major",
+                message=message, suggested_action="Revise the affected claims against existing evidence; do not only delete citation markers.",
+            ))
     output = context.store.write_json(
         "report_audit.json",
         audit.model_dump(mode="json"),
@@ -226,7 +240,8 @@ def _citation_audit(report_body: str, context: ReportContext) -> CitationAudit:
 
 def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
     if not context.metric_sources:
-        return MetricAudit(status="passed")
+        errors = _measurement_table_errors(report_body, context)
+        return MetricAudit(status="failed" if errors else "passed", warnings=errors)
     lower = report_body.lower()
     matched: list[str] = []
     unmatched: list[str] = []
@@ -247,6 +262,10 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
         )
         if status == "passed":
             status = "warning"
+    table_errors = _measurement_table_errors(report_body, context)
+    if table_errors:
+        warnings.extend(table_errors)
+        status = "failed"
     return MetricAudit(
         status=status,
         matched_metrics=matched,
@@ -254,6 +273,35 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
         unmatched_numbers=unmatched_numbers,
         warnings=warnings,
     )
+
+
+def _measurement_table_errors(report_body: str, context: ReportContext) -> list[str]:
+    """Check our structured metric ledger, not arbitrary natural-language tables."""
+    header = ["Source", "Metric", "Value", "Unit", "Condition", "Origin"]
+
+    def cell(value: str) -> str:
+        return value.replace("|", "/").replace("\n", " ").strip()
+
+    expected = {
+        (cell(metric.label or "experiment"), f"`{cell(metric.name)}`", _format_metric(metric.value),
+         cell(metric.unit or "not recorded"), cell(metric.condition_id or "not recorded"), cell(metric.source_kind))
+        for metric in context.metric_sources
+    }
+    errors = []
+    in_table = False
+    for line_number, line in enumerate(report_body.splitlines(), 1):
+        if not line.strip().startswith("|"):
+            in_table = False
+            continue
+        row = [part.strip() for part in line.strip().strip("|").split("|")]
+        if row == header:
+            in_table = True
+            continue
+        if not in_table or all(re.fullmatch(r":?-+:?", part) for part in row):
+            continue
+        if tuple(row) not in expected:
+            errors.append(f"Measurement table row {line_number} does not match its source, metric, value, unit, condition and origin.")
+    return errors
 
 
 def _claim_audit(memory: ReportMemory) -> ClaimAudit:

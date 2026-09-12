@@ -4,6 +4,221 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-09-13
+
+- 综合与评估复用同一候选动机引用集合，合法论文/卡片 ID 不再误报为缺失证据；模型对比仍只能引用实际提供的文本块。
+- 固化架构瘦身阶段基线：单一研究生命周期、历史只读适配及共享实验/报告边界。本地执行与干净安装 smoke 已验证；真实报告验收仍未完成，不宣称完整科研运行已通过。
+- 按调用成本和审阅粒度说明两种规划选择，后续生成/执行共用；修正 main.py 入口标记在 compact 与多步规划间的不一致，默认模式不变。
+- 删除规划审阅文本按关键词转硬阻塞的规则；意见保留为风险，实际计划与修改边界继续生效。
+- 多步规划不再把小型文件计划扩展为固定 generated_experiment 包；允许有效单文件计划，空计划失败，自定义多文件结构保持不变。
+- 模型返回空架构文件计划时明确失败或使用已授权的回退，不再静默补 main.py 后伪装成成功规划。
+- 更新生成项目审阅契约版本，恢复时复用既有逻辑刷新退休规则下的审阅；停在 review 不重新执行实验。
+- 删除根据 helper/变量名推断主动学习标签泄漏的阻塞策略，避免未追踪数据来源就误拒已标注训练数据；现有语义审阅补充任务协议/数据流要求，静态审阅不再宣称这项领域检测，真实语义识别能力仍待在线验收。
+- 资源静态审阅只报告 fit 循环观察与提醒，不再把它判为实测开销；删除模型名/Scaler 特例、风险分数及阻塞阈值，实际执行超时与资源控制不变。
+
+## 2026-09-12
+
+- 生成项目修复只捕获 LLM 客户端约定异常，不再掩盖内部缺陷；审阅索引构建失败不再伪装为空索引。
+- 生成项目的整文件修复与结构化动作统一使用写入后的语法/接口检查；删除误拒纯表达式 Python 脚本的重复形态预检，失败仍恢复原文件。
+- 删除无消费者的旧引用审计修改/提示辅助函数、批量阅读提示词及编辑范围包装；正式引用处理与修改范围检查保留。
+- scikit-learn 从框架必装依赖移至 `examples` 可选组；传统机器学习示例及其测试使用 `uv run --extra examples ...`，锁定版本不变。
+- 删除无消费者的 `experiment.runner` 脚本包装及结果/异常别名；输出、超时和小型模板测试直接验证共享执行后端。
+- 证据包构建统一使用现有 Read→Synthesis 适配器；删除旧完整 pack 构建器，推导测试迁到正式阅读结果并保留来源引用断言。
+- 删除无消费者的证据/覆盖度/实验契约 Markdown 副本生成器及旧编号阶段紧凑包投影；保留结构化证据、覆盖度计算与实验方案推导。
+- 删除无调用方的旧整篇报告/CodeTask设计提示词、对应过时字符串测试及生成项目启动包装模板；保留正式设计、Writer/Reviewer与进程执行路径。
+- 删除退休研究阶段的 outputs 包及重复文档、阅读审阅、综合和设计产物写入链；规划直接序列化原有交接格式，保留正式能力与历史读取。
+- 删除无调用方的旧外部 Agent 修复链，包括编号阶段 handoff、独立备份/覆盖写入与专用辅助函数；保留当前生成项目修复及 Agent 生成入口。
+- 移除记忆层从事件摘要派生的 `current_status` 与 `next_actions`；保留事件、修复经验及产物引用，压缩决策明确作为历史上下文而非当前执行指令。
+- CodeTask 根 manifest 不再重复写入无消费者的 `attempts.items` 状态/计数快照；保留实际批次记录、当前入口引用和历史文件。
+- 模型修复调用失败时保留错误，不再伪装成离线空提案并增加修复计数；显式 `--no-llm` 行为保留。
+- 删除摘要重复推导 blocker/证据缺口的逻辑及无调用方的 `record_result_analysis_memory` API；保留实际状态、负结果和修复记录，不把负结果另判为执行阻塞。
+- 移除从未执行的 workspace setup-hook 配置及其元数据；工作区配置拒绝未知字段，避免静默接受无效初始化命令，保留环境选择与工作区创建。
+- 使用指南及 CLI 参考同步 CodeTask 默认单计划路径；产物工具示例移除已退休 pipeline 检索命令。
+- 删除未实现的实验运行/修复/应用工具注册及无调用方的专用 schema 导出器；保留实际存档读取与统一 OpenAI/MCP 导出，描述明确历史输入边界。
+- 删除无消费者的旧实验设计包、配套配置转换与领域 profiles；保留正式 research/CodeTask 契约，任务正文与必需指标改由当前可执行路径验证。
+- 删除无调用方的旧阶段证据收集器及独立 source plan、活动日志、evidence ledger 写入路径；保留通用产物搜索与历史诊断文件排除，正式研究证据不变。
+- 工作流文档与八阶段执行器退出同步：以当前 session/attempt 归属、显式实验和历史只读访问，替代过时模板命令及编号阶段执行说明。
+- 普通 CodeTask 默认只走一份已批准的 patch plan，不再自动增加 work-plan 模型调用和批次状态；显式 work-plan/batch 及已有分批任务保留，交互 CLI 同步。
+- 统一 CodeTask 修复计数读取，无效持久化计数不再静默恢复重试额度；修复记忆直接复用刚保存的计数。
+- 从零生成代码的首次实验与修复重跑共用同一执行循环，保留重跑前审查、验证及有界修复判断。
+- 删除无消费者的 WorkspaceState 写入生命周期、配置快照及旧阶段解析；历史 CLI 状态仍直接读取存档 JSON 且不改写，正式 session 持久化不变。
+- 删除无调用方的八阶段 Context、契约及控制台事件框架和研究/实验 service 包装；历史 Search 文档保留显式目录只读入口，CodeTask 的 Rich 消息样式保留。
+- 退出旧阶段目录式报告输入构建器，使用持久化产物投影；Writer/审计测试不再依赖旧目录发现逻辑。
+- 删除无产品调用方的旧报告质量检查器；正式报告继续使用统一审计路径。
+- 删除合同裁剪与关闭修复历史的消融模式，包括提示适配模块、CLI/配置传递及 ARC 批运行参数；正常生成和修复保留完整合同及有界历史。历史基准分析保留，不再生成已退休模式的新运行手册。
+- 退出 CodeTask 与 ARC 批量运行器的修复上下文消融开关，默认保留有界结构化诊断。旧配置需删除 `execute.ablation.repair_context`；不支持的消融字段会在配置边界报错，不静默切换模式。
+- 统一生成代码修复后的产物清单更新，行数按实际文件统计、不截断为上限加一；部分修复不再被推断为“确定性修复”，已声明交付文件不再仅因名称被过滤。
+- 七处 CodeTask 用量日志写入统一到 `integrations.usage`，移除对 app 聚合模块的反向依赖；保留阶段标签、批次投影、未知费用和用量提示，不改变预算结算。
+- 删除无正式消费者的固定转移策略和分析到策略适配器；历史读取保留已记录的决策与 recipe 标签，不重新推荐动作，也不要求加载旧规则实现。
+- 删除 `SessionController.execute()` 及固定阶段决策执行；能力统一走 `execute_attempt()`，中断恢复只记录失败和预算事实，不选择科研动作；历史决策仍可读取。
+- 正式物理执行入口不再受旧固定阶段转移表约束；研究顺序归应用负责，Core 保留能力范围、预算、产物与父 attempt 校验。
+- 移除旧 manifest 的兼容写入开关；历史 v1 会话保持只读，显式证据导入创建独立应用会话。
+- 删除旧报告服务退出后无消费者的 survey 契约构建、分类/规划产物写入和独立覆盖审计；保留现用来源分配、历史综述章节读取、Writer/Reviewer 与正式报告审计，同时移除仅服务于旧构建器的配置项。
+- 删除失效的八阶段/旧报告示例配置；digits MLP 基线迁为 `examples/code_task_digits_mlp`，保留代码与测试并使用现行独立配置；轻量 greenfield 示例同样切换为 CodeTask 配置。
+- 合并正式应用正常执行与恢复的产物契约、引用登记，包括 idea/实验对比附属产物；能力注册复用同一清单，不再分别维护多份映射。
+- 删除正式应用重复的 readiness 投影/文件；WorkPlan 统一承载交付状态、缺口和下一动作，实验受阻时仍显示已完成研究的部分进展，保留 Markdown 进度。
+- 合并 review/run 修复记账，删除 implementation 中重复的修复状态；后续复查不再改写修复证据或生成额外 effective/recovered 状态，历史字段仍可读取。
+- 删除重复的 editor adapter/request/result 层及其独立外部编辑 API；公开补丁提案/应用函数直接执行，不再经过固定 backend 转发和重复上下文读取。保留审批、编辑范围、原子写入与来源 metadata。
+- 合并生成项目修复的两套写入：content 转成共享 rewrite 动作，复用校验、回滚和实际编辑记录；动作拒绝后不再回退整文件覆盖。
+- 生成项目修复定位收敛为实际失败路径与源码匹配，删除文件名角色打分和错误类别分流，连同失效的属性错误解析；保留自定义布局与属性消费者修复验证。
+- 删除生成项目运行错误的字符串自动修法：标准库同名模块重命名/import 批量改写和固定 results 路径替换。错误交由已有模型修复提案处理；无模型时保留原文件及失败证据。
+- 删除生成项目审查中的猜测式修复：自动私有/公共别名、固定入口/config/README 补写及清空错误包代码。无模型时保留原文件和失败审查；模型提案继续复用快照及编辑校验。
+- 退出 `research-experiment` 及其独立 design/execution/analysis 会话创建器；正式应用继续复用领域能力，旧 `--synthesis-file` 参数不作隐式兼容。
+- 删除旧 v1 原地实验恢复编排；`research-session-continue` 只走正式重试边界。历史证据保持可读，可用 `research-session-migrate` 显式导入新会话，不再维护固定编号的旧恢复流程。
+- 退出分段 `research-code-task` 创建器及其独立 design/CodeTask/analysis 会话生命周期；研究任务使用 `research-session --code-task-config`，纯编码使用独立 `code-task`。历史 session 读取和报告证据投影只读保留。
+- 删除旧内嵌 CodeTask 桥接执行器和 benchmark 验证/自动修复循环；保留修复后审查、静态验证，由正式实验动作负责重新测量。
+- 删除无人使用的外层 pipeline TOML 解析器和旧 section/别名转换；CodeTask 继续使用现有共享解析器，历史配置快照仍可读取。配置参考收缩为当前 CodeTask 字段与 research-session 接入。
+- 删除无人调用的桥接 benchmark 脚本生成器与旧模板分发函数。
+- 删除无产品调用方的 Context 实验 design/code/run 阶段，以及专属任务生成、实现路由和重跑归档 helper；正式执行、真实 CodeTask 验证和历史结果读取保留。删除失去消费者的旧 Context LLM 初始化/用量写入路径，现用汇总保留。
+- 报告 Writer 的产品执行统一到 `report/writing.py`；退出独立固定 attempt 的报告接续 API，历史证据投影只读保留。`research-report` 只接续正式应用会话，不在加载失败后转入旧流程。`research-code-task --with-report` 在执行前退出并提示改用完整的 `research-session --code-task-config` 主线。
+- 删除无产品调用方的八阶段 report service，连同独立 Writer 调用、toy/fixture 回退文章、archive/variant 打包和阶段 manifest；SurveyBench 直接复用引用模块。正式 Writer/Reviewer、组装、引用、图表及历史读取保留。
+- 删除旧 research facade 和 `pipeline_stages` handler/alias 层；检索、筛选与阅读测试直接验证正式能力，退出旧 fixture 检索回退和阶段专属检索轮次。
+- 删除无生产调用方的八阶段 `PipelineRunner`，连同其独立检查点、manifest、阶段结果收集器和输出生命周期；领域 context 与历史读取暂留，新研究统一使用 ResearchApplication。
+- SurveyBench 移除 `run-topic` / `resume-latest` 及其旧报告备份重跑路径，改为显式导出报告；历史格式验证和原生评测仍保留。
+- 停止支持八阶段 `run` / `resume` CLI 执行路径，删除其参数和配置恢复逻辑；新任务使用 `research-session`。历史状态与产物查看仍可用，不静默转换旧参数；清除 CLI、Quickstart、使用手册中对应的旧执行教程。
+- 删除生成项目中自动补造实验 preset、为函数添加未使用参数的快捷补丁，运行失败交给通用修复。
+- 删除旧 guard 修复中将实验代码改写为固定指标值的分支；即使旧配置开启 fallback scaffold，也不再补造缺失指标。历史结果读取保持不变。
+- `research-brief` 改为调用同一个 ResearchApplication，采用 v2 状态引用与预算；下游使用其输出的 synthesis 路径，不再拼接固定 attempt ID。删除无生产调用方的 `ResearchSessionRequest` / `run_research_session` Python 创建接口，改用 `research_application.create_session`；历史会话读取和显式兼容恢复仍保留。
+- 生成项目的 review 修复不再用假定的资源探查/运行档位实现覆盖 `resources.py`；此类失败走已有通用模型修复，无模型时保留未解决状态。
+- 研究报告通过现有工具读取所选代码修改版本的冻结 patch、验证和 review 证据，保留来源路径与截断标记。恢复复用已持久化的应用状态名；重复报告投影 wrapper 改为直接导出共享实现。
+- `research-session` 现在支持明确的 literature-only 形态：同时省略 `--command` 和
+  `--code-task-config` 时生成 summary；如果提供模型，则生成 model-backed research-only 报告，
+  不创建实验预算或进程请求。已有命令和 CodeTask 路径不变。
+- 在线应用示例新增 `--max-output-tokens`，将单次响应上限与 session 的请求/token
+  总预算分开；网关较慢或推理较重时可以降低综合响应上限，但不会改变证据校验规则，默认仍为 2400。
+
+- `research-session` 现在直接创建并推进 canonical `ResearchApplication`，正式 CLI 不再调用旧的
+  research-session 编排器；`research-report` 会优先读取 canonical session，并可在不重跑已有研究证据的
+  情况下补齐报告交付物。
+- CodeTask 准备阶段现在把已持久化的任务输入传给既有初始化器，补完整真实的
+  `prepare_execution -> implement` 契约，不会在 workspace 初始化前因缺少任务文件而失败。
+- canonical ResearchApplication 的报告输入投影已移到
+  `simple_ar.report.projection`；旧 application report 模块暂作为兼容边界保留，正式应用不再隐式加载它。
+- 报告模板现在会进入 wheel 构建，并可在仓库外通过包资源解析；用户显式指定的项目模板目录仍优先。
+- 新增有明确边界的 v1 会话后继导入：创建新的 canonical ResearchApplication
+  会话并记录 `parent_session`，只按白名单迁入小型旧产物并保存新旧引用映射；旧会话保持只读，未知或不可用产物明确记录为跳过。
+- 新增 `simple-ar research-session-migrate` 兼容命令，输出后继 session 路径、迁移 artifact、跳过产物和未导入的历史预算状态。
+
+- CodeTask 工作计划规范化现在会把单个任务中超过 normal 编辑预算的多文件修改，提升到明确的大预算审查边界，避免模型被要求生成不可能的空提案。
+- ResearchApplication 执行规格现在可以显式传递 CodeTask 预算档位和大修改批准；内置 medium-review 示例仅为其受限的三文件修改使用该配置。
+- 未批准的大预算 CodeTask 提案现在会返回可处理的预算批准状态，不再表现为实现阶段异常。
+
+- 在线应用示例新增显式 `--deterministic-plan` 模式，用于供应商规划请求暂时不可用时继续验收：仅跳过可选的 LLM 规划，后续网络检索、阅读、综合和报告仍使用配置的 LLM，并将该模式记录在 session 配置中。
+- 内置 medium-review 在线验收现在为完整 CodeTask 加分章节实验报告使用 320k token 上限；审阅器输出显式受章节预算限制，预算一次性覆盖有限 provider 重试，不在暂停后临时追加。
+- ResearchApplication 在报告审计存在 warning 时仍完成交付，同时保留审计产物和 findings；只有 failed 审计会阻塞生命周期。
+- 通用在线报告 smoke 在 160k token 上限内按每个章节一次 Writer 加一次 Reviewer 运行，不自动增加修订轮次；正式报告仍可通过配置提高审阅轮次。
+### 变更
+
+- `research-session-continue` 现在会将 canonical `session_manifest.v2` session 路由到应用层的窄重试边界：
+  调用方提供修正命令后，可重试一次普通显式实验的技术失败，保留失败父 attempt 并复用已有研究证据。
+  旧 v1 session 仍使用固定的兼容恢复路径；科学负结果不会被静默重跑。
+- session 显式继续时，研究输入和运行配置会使用带 revision 的文件名，重试或补齐报告不再覆盖上一版输入快照。
+
+- 配对实验报告现在可在应用主链中从结构化、协议匹配的实测结果生成可选 SVG 对比图；图表保留
+  baseline/candidate 产物来源，不从正文或缺失测量推断数值，报告附录也已修正候选指标字段读取。
+- Rich 在线应用示例新增 `--cifar10`，可启动准备好的 CIFAR 三种子配置并恢复持久化 session；
+  仍要求数据和解释器已准备好，不会隐式安装依赖或下载数据。
+- 通用在线应用示例将完整 Writer/Reviewer smoke 的显式上限调整为 160k token，依据实际多章节
+  报告消耗设定；session 暂停后不会临时追加预算。
+- 配对分析按共同协议与受保护文件身份分组，新增描述性均值和配对差值样本标准差；报告保留
+  派生统计来源和单位，单种子标准差保持缺失，不补零或自动声称显著提升。
+- 新增 CIFAR 三种子应用配置及仅输出配置的 CLI；准备阶段将显式编辑白名单交给已有 CodeTask
+  作用域机制，限定修改 method.py，共享数据不复制进工程。
+- 本地实验每次调用提供独立的 `SIMPLE_AR_OUTPUT_DIR`，生成目录登记为 canonical 产物；
+  CIFAR runner 可省略固定输出参数，避免种子与修复重测覆盖旧目录。
+- 配对执行支持有界、版本感知的 CodeTask 修复：保留基线和旧候选，重测修复后的候选组，
+  修复次数耗尽时保留失败/未测种子，不混版本或强行继续训练。
+- 矩阵 CodeTask 已接通：全部基线完成后仅实现一次，交接全部基线证据，候选 attempt 引用对应实现。
+- 已准备命令的配对报告接入现有 Writer/组装/审计生命周期，覆盖全部种子；实测值与派生差值保留
+  各自条件和产物来源，失败运行的残留值不进入有效指标账本。
+- 配对分析读取完整测量引用集合，复用逐对比较，保留失败/缺失种子且不补零；
+  空集合或部分测量不再显示为实验产物已全部完成。
+- 开发中的配对执行将每项已准备命令记录为独立预算 attempt，恢复时保留完整结果引用集合；
+- CIFAR CPU 预检复用共享进程执行器与账本，显式授权下载并限时执行两步训练；
+  固定独立 CPU 环境依赖，已在 Windows 验证官方数据加载与真实优化步骤。
+- 新增 CIFAR-10 校准基线示例，分离共享数据准备、受保护拆分/指标与研究可修改的方法；
+  完整训练和应用级 GPU 实验矩阵尚未完成验收。
+- AutoDL CPU 预检切换到新应用与有界真实执行；显式开启的在线路径不再使用旧编排或固定实验指标。
+- CodeTask 研究交接去除重复展开的协议块，证据与补丁规划上下文采用紧凑 JSON，保留源码和评价字段。
+- 实现产物保留 CodeTask 步骤记录并展示 blocked 步骤的具体诊断，包括预算失败，不再只有通用规划提示。
+- 新应用综合、候选评估和设计自动接收原研究任务与已配置执行约束，无需重复填写上下文字段，
+  brief/runtime 输入纳入来源记录；纯研究不会被标成已有实验基线。
+- 综合保留被拒绝的模型响应和校验错误，最多进行一次带证据约束的纠正请求；纠正仍失败就保留失败，
+  不改 provider 重试和 session 预算，不静默接受未知引用。
+- 新应用在线示例可复用现有 medium-review 工程，衔接隔离 baseline/CodeTask/candidate，保护评价资产，
+  最多一次修复；这是工程 fixture，不等同 GPU 验收。
+- 报告 agent 的 JSON prompt 使用紧凑序列化，不删除证据字段；默认综述模板改用随主题选择的方法与
+  评价维度，不再假定所有研究都是 Agent/代码仓库任务。
+- 新应用报告来源补齐论文摘要、关联阅读笔记、提取深度和 Read 产物出处；笔记明确标为模型解读，
+  按持久化文档身份关联，不依赖标题匹配。
+- 修复报告 Reviewer 失败分支使用未定义 config 的问题；重试耗尽后保留原始错误，或在显式允许时
+  给出 fallback 警告，不再被 NameError 遮蔽。
+- 新增可恢复、有预算限制的新应用在线示例，显示 Rich 动作状态，使用真实检索/LLM，支持可选
+  小型 CSV 训练；不将该检查等同于 CodeTask/GPU 验收。
+- 报告组装将删除的引用 ID 保存到 `citation_cleanup.json`；新应用审计要求修订受影响 claim，
+  不把删除错误引用等同于修复证据。历史报告仍可读取，不补造清理记录。
+- 报告审计逐行核对框架结果表的来源、指标、值、单位、条件和来源类型，识别 baseline/candidate
+  数值互换。最终正文语义明确标为 `semantic_unchecked`，数值出现不代表结论成立。
+- ResearchApplication 仅请求报告时使用文献模板并复用 Writer/组装/审计生命周期，不要求实验合同，
+  不启动训练；明确区分前人文献结果与本次实测，不补造实验或指标。
+- ResearchApplication 将实验报告写作、组装和审计纳入独立 attempt；模型调用前固定输入快照，失败
+  保留记录，完成写作后恢复不重跑研究或模型。完成写作/审阅的章节保存 checkpoint，显式重试时
+  仅复用输入快照一致的章节；输入变化则重新写作。
+- 新应用报告输入复用既有上下文构造器，保留最新测量、独立 baseline/比较来源和限制，不将拟议设计
+  冒充实际执行协议。
+  报告指标保留测量/协议身份、条件、单位及来源，baseline 不再借用 candidate 的指标方向。
+- 新增有界 CSV 文本基线准备（text,label,split），无需用户 baseline 代码，通过既有模板/执行路径
+  实际训练词袋＋逻辑回归；记录数据身份和潜在划分泄漏，超限不静默截断数据。
+  准备限制随实测结果进入分析审计和 Markdown，不只留在准备记录中。
+- ResearchApplication 可通过 `execution.code_task.code_root` 准备已有源项目，复用 CodeTask copy
+  初始化器并保存可恢复交接；准备不训练、不安装依赖、不修改原项目，尚不包含仅数据场景。
+- 修复代码修复后的实验交付引用：work-plan/readiness、分析与导出快照统一指向最后已有的 candidate
+  测量，保留首次失败及所有复测记录。
+- ResearchApplication 支持 `execution.code_task.max_repairs` 显式限制技术修复/复测轮数（默认关闭）；
+  baseline 不重跑、首次失败证据不覆盖，复测独立计量，已完成修复恢复不重复编辑。次数耗尽交付失败分析，
+  不无限重试。
+- CodeTask 修复提案支持显式外部执行失败证据，不重复测量、不伪造旧运行记录；证据随提案保存，
+  有效科学负结果不当作执行故障。
+- 已授权的一次验证/修复从 experiment 兼容 bridge 收回 CodeTask 编排；独立入口仍需审阅修复提案，
+  有效低分结果不自动重试，无效修复保留首次失败证据。
+- 实现 attempt 以相对产物引用保存 patch、验证、review 和规划证据；复制 session 后不再依赖
+  外部 CodeTask 目录读取这些记录，不复制数据集或依赖环境。
+- CodeTask 实现规划前接收选定设计和实测 baseline，保留原始要求并记录最终任务文本；
+  研究输入修订不再静默复用旧 patch plan。新旧入口共用研究说明渲染函数。
+- ResearchApplication 可在 baseline/candidate 之间复用已初始化的 CodeTask，沿用显式编辑授权及
+  会话模型计量；实现动作止于验证，恢复不重复已完成修改。兼容 bridge 共用这一准备函数，
+  删除重复的批准、提案和验证编排；尚不代表自动实验准备或完整论文循环已完成。
+- 显式协议 `protected_assets` 在执行前后计算文件指纹；变化或不可读会使结果无效，但保留退出码与指标，跨运行内容不一致也不能作同条件提升结论。仅检查指定文件，不提供文件系统隔离或写保护。
+- ResearchApplication 支持显式 baseline/candidate 成对实验，分别保存可恢复测量；分析声明关联两侧结果的比较产物。有效回退结果正常交付，不触发自动修复循环；持久化动作角色区分共用 experiment capability 的 baseline 与 candidate，避免恢复时串位。
+- canonical 结果增加物理测量身份及声明协议/指标契约指纹；协议不同、不完整或重复使用同一测量时，只展示描述性差值，不给出提升结论。历史结果仍可读取并标记 `legacy_unverified`；声明匹配不代表资产内容已验证。
+- ResearchApplication 已将显式配置的实验接入现有执行与确定性分析能力；需请求实验交付、提供 argv/cwd/timeout 和有限进程预算。重载复用已保存测量，包括失败进程证据；交付诊断不会改写实验失败状态。
+- embedded CodeTask 的准备到验证改为委托正式执行器，删除重复的基线、规划和编辑编排，保留既有审批与结果投影；基线执行失败先停止模型规划，准备及有界验证可共用客户端与账本。
+- 修复 Windows CodeTask 参数分组引号残留，使带引号的 Python `-c` 内容实际执行，而非静默求值字符串后返回成功。
+- CodeTask 正式执行入口可向规划、编辑、审阅、生成和修复传递共享模型客户端；角色模型覆盖保留 provider 设置与会话计量，同时保留任务本地的用量与进度观察。
+- 本地实验后端及 CodeTask benchmark/execute 入口可注入共享预算账本，启动前预留、启动失败释放、结束后结算实测墙钟时间；已完成 invocation 可恢复结算，同一 invocation ID 不会重新启动进程。
+- 候选评估可使用注入的 LLM，在持久化的共同原文上下文上比较方案；无效引用或 provider 故障保留明确标注的规则评估。ResearchApplication 已复用现有设计能力承接建议，并在评估/设计可能暂停之前保存研究摘要。
+- Experiment 与 CodeTask 共用限量输出捕获、流式日志、invocation 记录和进程树清理；保留 CodeTask 的进度展示与输出 watchdog，Windows 文本输出继续使用原有换行归一化语义。
+- 增加 `application`、`llm`、`report`、`execution` 聚焦检查分组；组合分组时重叠模块只运行一次，`all` 覆盖其他选择。全量检查安排在集成收口与发布节点。
+
+## 2026-09-11
+
+### 变更
+
+- 修复旧会话状态写回覆盖，以及 attempt 已结束但预算或应用引用尚未保存时的恢复；复用已完成动作。
+- 有输出上限的 LLM 超时保留保守 token 预留和已知请求次数，允许额度内重试，实际用量仍标为未知。
+- 重载时重新注入服务保留原数量限制，配置读取失败明确报错；输入产物统一由一处写入。
+- 修复仅按文档查询证据的筛选，并将 EvidenceRef 投影接入 Read handoff，不重复保存原文。
+- 固定按次请求 `max_output_tokens` 的语义：即使客户端没有全局默认上限，显式传入的上限也会实际传给 provider；无效的非正值会在请求前失败。
+- 新增第一个最小的 `BudgetLedger`，用于共享、持久化和原子写入的资源记录。它保存预留身份、会话和 attempt 上下文、预留与实际消耗、估计与 provider 测量来源、幂等结算、未发请求的释放，以及未知消耗的保守保留。
+- `LLMClient` 现在可以注入共享账本：每次实际 provider attempt 在传输前预留，成功后按使用量结算；可重试失败保守记录，认证拒绝释放，超时或断连的未知消耗保留。旧 usage callback 继续作为兼容展示观察者；统一 client factory 与新 manifest 的接入延后到 P03/P04。
+- P02 输入边界已经实现：纯文本、Markdown/TXT 文件和显式配置的 TOML 元数据可以统一为 versioned `ResearchBrief` 和带角色的 `ResearchAsset`；缺失文件和未识别格式保留为可检查诊断；解析不调用模型、不下载、不扫描仓库、不安装依赖，也不执行代码。
+- 完成 P03 的第一小步：抽取共享 attempt 执行内核。新的 `SessionController.execute_attempt()` 只持久化一次物理 capability 结果，不选择转移；兼容 `execute()` 也复用同一套校验、结果对齐、持久化和有界计数逻辑，再追加旧的 decision。
+- 完成 P03 的第二小步：新入口可用持久化序号生成不复用的 attempt ID；会话 manifest 增加 v2 状态承载、revision、暂停原因、状态引用和可选账本引用。新增 `pause()`、`complete()` 与 `continue_with_revision()`，显式继续不会重置旧预算；v1 manifest 仍可读取。controller 现在还提供跨平台单写者会话锁、已落盘结果的协调恢复，以及写入旧 v1 会话时的显式 opt-in 边界。
+- 增加 P04 第一小步 `simple_ar.app.research_application`：持久化归一化 brief/asset，按 `plan -> search -> document_ingest -> read -> synthesize -> summarize` 每次推进一个动作，支持重新加载、显式继续和会话快照导出。若请求代码、实验或论文报告，会在研究摘要处明确暂停，不伪装后续产物已经存在；CLI 切换留到 P12/P13。
+- 增加 P05a 第一小步：稳定的 `EvidenceRef` 投影和 `query_evidence()` 保留来源身份、文档版本、精确位置、提取状态、目标原文及同文档真实相邻上下文；悬空 chunk ID 会显式拒绝。
+- 增加 P04b 最小工作计划与 readiness 投影：应用现在持久化 `planning/work_plan.json`、`planning/work_plan.md` 和 `planning/readiness.json`，并从同一份应用状态返回对应视图。这些是派生视图，不是第二套调度器或状态库；同时持久化会话级 `BudgetLedger`，在 manifest 中保存引用，并为标准 `LLMClient` 绑定账本副本。
+- 增加 P05b 第一小步候选评估：`assess_ideas` 针对有限数量的 synthesis 候选核对当前证据引用，记录未解析证据、相似工作风险、未知项和有界的下一步建议，并写入 JSON/Markdown 审阅产物。它只表示执行准备度，不宣称新颖性、不自动选中候选，也不执行代码。
+
 ## 2026-09-06
 
 ### 变更

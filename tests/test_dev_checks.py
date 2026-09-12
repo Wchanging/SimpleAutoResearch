@@ -38,6 +38,15 @@ class DevChecksTests(unittest.TestCase):
         self.assertEqual(command[:3], [sys.executable, "-m", "unittest"])
         self.assertEqual(command[3:], ["discover", "-s", "tests"])
 
+    def test_overlapping_groups_run_each_module_once(self) -> None:
+        command = build_unittest_command(["llm", "research", "llm"])
+        self.assertEqual(command.count("tests.test_llm"), 1)
+        self.assertEqual(command.count("tests.test_budget"), 1)
+        self.assertEqual(
+            build_unittest_command(["quick", "all", "execution"]),
+            build_unittest_command("all"),
+        )
+
     def test_default_group_is_optional(self) -> None:
         args = parse_args([])
 

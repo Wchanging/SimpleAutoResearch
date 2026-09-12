@@ -19,7 +19,6 @@ from simple_ar.core.capabilities import (
     CapabilityResult,
     CapabilityRegistry,
 )
-from simple_ar.core.pipeline import Context
 from simple_ar.core.session import BudgetState, SessionController
 
 
@@ -29,14 +28,6 @@ class CapabilityBoundaryTests(unittest.TestCase):
         self.assertIs(PublicArtifactStore, ArtifactStore)
         self.assertIs(PublicCapabilityResult, CapabilityResult)
 
-    def test_pipeline_context_exposes_run_relative_store(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            ctx = Context(Path(tmp) / "run", "toy topic")
-
-            ref = ctx.artifact_store.write_text("capability/result.txt", "ok\n")
-
-            self.assertEqual(ref.path, "capability/result.txt")
-            self.assertEqual(ctx.artifact_store.read_text(ref), "ok\n")
 
     def test_store_writes_relative_artifact_refs_without_hash_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -235,13 +226,13 @@ class CapabilityBoundaryTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, decision = controller.execute("fixture", attempt_id="attempt-001")
+            result = controller.execute_attempt("fixture", attempt_id="attempt-001")
             loaded = SessionController.load(tmp, registry=registry)
 
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
-            self.assertEqual(loaded.manifest.status, "completed")
-            self.assertEqual(loaded.manifest.decisions[0].attempt_id, "attempt-001")
+            self.assertEqual(loaded.manifest.status, "running")
+            self.assertEqual(loaded.manifest.current_attempt, "attempt-001")
+            self.assertEqual(loaded.manifest.decisions, [])
             self.assertEqual(loaded.manifest.budget.attempts, 1)
             self.assertTrue((Path(tmp) / "attempts" / "attempt-001" / "result.json").is_file())
             persisted = loaded.store.read_capability_result(
@@ -249,7 +240,7 @@ class CapabilityBoundaryTests(unittest.TestCase):
             )
             self.assertEqual(persisted.status, "completed")
             self.assertEqual(
-                loaded.manifest.decisions[0].output_paths,
+                tuple(ref.path for ref in loaded.list_attempts()[0].outputs),
                 ("result.json", "capability_result.json"),
             )
             self.assertEqual(loaded.store.read_attempt_manifest("attempts/attempt-001/attempt_manifest.json").outputs[0].path, "result.json")
@@ -272,7 +263,7 @@ class CapabilityBoundaryTests(unittest.TestCase):
                 topic="input resolution",
                 registry=registry,
             )
-            result, _ = controller.execute(
+            result = controller.execute_attempt(
                 "copy-input",
                 attempt_id="attempt-001",
                 inputs=(source_ref,),
@@ -309,23 +300,26 @@ class CapabilityBoundaryTests(unittest.TestCase):
                 budget=BudgetState(max_attempts=5, max_no_progress=2),
             )
 
-            first, first_decision = controller.execute(
+            first = controller.execute_attempt(
                 "broken",
                 attempt_id="attempt-001",
                 trigger="initial",
             )
-            second, second_decision = controller.execute(
+            second = controller.execute_attempt(
                 "broken",
                 attempt_id="attempt-002",
                 trigger="repair",
             )
 
             self.assertEqual(first.status, "failed")
-            self.assertEqual(first_decision.action, "repair")
-            self.assertEqual(second_decision.action, "block")
+            self.assertEqual(second.status, "failed")
+            self.assertEqual(second.diagnostics, ("same failure",))
+            with self.assertRaisesRegex(RuntimeError, "budget is exhausted"):
+                controller.execute_attempt("broken", attempt_id="attempt-003")
             self.assertEqual(controller.manifest.status, "blocked")
+            self.assertEqual(len(controller.list_attempts()), 2)
             self.assertEqual(controller.manifest.budget.no_progress, 2)
-            self.assertEqual(controller.manifest.decisions[1].reason, "same failure Session budget exhausted.")
+            self.assertEqual(controller.manifest.decisions, [])
             self.assertTrue((Path(tmp) / "attempts" / "attempt-001" / "attempt_manifest.json").is_file())
             self.assertTrue((Path(tmp) / "attempts" / "attempt-002" / "attempt_manifest.json").is_file())
 
@@ -344,11 +338,11 @@ class CapabilityBoundaryTests(unittest.TestCase):
                 budget=BudgetState(max_attempts=2, max_no_progress=2),
             )
 
-            controller.execute("partial", attempt_id="attempt-001", trigger="initial")
+            controller.execute_attempt("partial", attempt_id="attempt-001", trigger="initial")
 
             self.assertEqual(controller.manifest.status, "running")
             with self.assertRaises(FileExistsError):
-                controller.execute("partial", attempt_id="attempt-001", trigger="revise")
+                controller.execute_attempt("partial", attempt_id="attempt-001", trigger="revise")
             self.assertEqual(controller.manifest.budget.attempts, 1)
 
     def test_session_controller_can_branch_from_an_explicit_completed_attempt(self) -> None:
@@ -378,16 +372,15 @@ class CapabilityBoundaryTests(unittest.TestCase):
                 registry=registry,
             )
 
-            first, _ = controller.execute(
+            first = controller.execute_attempt(
                 "plan",
                 attempt_id="attempt-001",
-                next_capability="search",
             )
-            second, _ = controller.execute(
+            second = controller.execute_attempt(
                 "search",
                 attempt_id="attempt-002",
             )
-            branch, decision = controller.execute(
+            branch = controller.execute_attempt(
                 "search",
                 attempt_id="attempt-003",
                 parent_attempt_id="attempt-001",
@@ -396,7 +389,6 @@ class CapabilityBoundaryTests(unittest.TestCase):
             self.assertEqual(first.status, "completed")
             self.assertEqual(second.status, "failed")
             self.assertEqual(branch.status, "completed")
-            self.assertEqual(decision.action, "accept")
             self.assertEqual(
                 controller.store.read_attempt_manifest(
                     "attempts/attempt-003/attempt_manifest.json"
@@ -434,14 +426,13 @@ class CapabilityBoundaryTests(unittest.TestCase):
                 topic="branch parent validation",
                 registry=registry,
             )
-            controller.execute(
+            controller.execute_attempt(
                 "plan",
                 attempt_id="attempt-001",
-                next_capability="search",
             )
 
             with self.assertRaisesRegex(KeyError, "Unknown parent attempt"):
-                controller.execute(
+                controller.execute_attempt(
                     "search",
                     attempt_id="attempt-002",
                     parent_attempt_id="missing-parent",

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from simple_ar.core.artifacts import read_json, write_json
+from simple_ar.experiment.execution.measurement import measurement_record
 
 
 CANONICAL_RESULT_SCHEMA_VERSION = "2.5"
@@ -37,6 +38,7 @@ def build_canonical_results(
         "schema_version": CANONICAL_RESULT_SCHEMA_VERSION,
         "generated_at": _utcnow_iso(),
         "status": status,
+        "execution_status": status,
         # Legacy top-level keys kept for report/context compatibility.
         "returncode": returncode,
         "timed_out": timed_out,
@@ -50,8 +52,10 @@ def build_canonical_results(
             "duration_sec": float(getattr(run_result, "duration_sec", 0.0) or 0.0),
             "stdout_chars": len(stdout),
             "stderr_chars": len(stderr),
+            "process": dict(getattr(run_result, "process_record", {})),
         },
         "result_schema": schema,
+        "measurement": measurement_record(run_result, experiment_contract, schema),
         "primary_metric": primary_metric,
         "artifacts": dict(artifacts or {}),
         "comparisons": [dict(item) for item in comparisons or []],

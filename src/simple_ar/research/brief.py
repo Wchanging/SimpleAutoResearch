@@ -217,10 +217,8 @@ def evidence_pack_from_read(
 ) -> dict[str, Any]:
     """Adapt a typed Read result to the minimal synthesis input shape.
 
-    This is a domain handoff, not a replacement for the full evidence-pack
-    builder used by the legacy research stage.  It keeps one small adapter for
-    callers that explicitly compose the standalone Read and Synthesis
-    capabilities without copying source chunk text.
+    This is the shared domain handoff for Read and Synthesis. It preserves
+    cards and source references, with bounded snippets for model context.
     """
     return {
         "schema_version": "evidence_pack.v1",

@@ -6,11 +6,12 @@ import unittest
 from pathlib import Path
 
 from simple_ar.core import CapabilityRegistry, SessionController
+from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
 from simple_ar.report.audit import (
     ReportAuditCapabilityRequest,
     run_report_audit_capability,
 )
-from simple_ar.report.capability import ReportAssemblyRequest, run_report_capability
+from simple_ar.report.capability import ReportAssemblyRequest, run_report_capability, assemble_report_document
 from simple_ar.report.figures import ReportFigureRecord, ReportFigureResult
 from simple_ar.report.schema import (
     ReportContext,
@@ -25,6 +26,32 @@ from simple_ar.report.schema import (
 
 
 class ReportAuditCapabilityTests(unittest.TestCase):
+    def test_measured_figures_use_declared_groups_and_keep_source_refs(self):
+        import xml.etree.ElementTree as ET
+        pair = {"seed": 0, "comparability": "declared_match", "baseline": {"status": "passed"},
+            "candidate": {"status": "passed"}, "baseline_ref": {"path": "baseline.json"},
+            "candidate_ref": {"path": "candidate.json"}, "metrics": [{"name": "accuracy", "baseline": 0.5, "candidate": 1.0}]}
+        summary = {"group_id": 0, "metric": "accuracy", "unit": "fraction",
+                   "sources": [{"baseline_ref": pair["baseline_ref"], "candidate_ref": pair["candidate_ref"]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = ReportAssemblyRequest(title="Paired evaluation", sections=(ReportSectionDraft(
+                section_id="results", heading="Results", draft_markdown="Measured results."),),
+                config=ReportRuntimeConfig(figures=ReportFigureConfig(enabled=True)),
+                paired_comparisons=(pair,), paired_summaries=(summary,))
+            result = assemble_report_document(request, report_dir=root)
+            self.assertEqual(len(result.figures), 1)
+            figure = result.figures[0]
+            self.assertEqual(figure.source_artifacts, ["baseline.json", "candidate.json"])
+            svg = ET.parse(root / figure.path)
+            circles = svg.findall(".//{http://www.w3.org/2000/svg}circle")
+            self.assertEqual([c.attrib["cx"] for c in circles], ["460.00", "700.00"])
+            self.assertIn("fraction", figure.title)
+            self.assertIn(figure.path, result.report_markdown)
+            from dataclasses import replace
+            absent = assemble_report_document(replace(request, paired_summaries=()), report_dir=root / "no-data")
+            self.assertEqual(absent.figures, ())
+
     def test_report_capability_assembles_explicit_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = CapabilityRegistry()
@@ -37,7 +64,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "report",
                 attempt_id="attempt-001",
                 request=ReportAssemblyRequest(
@@ -53,7 +80,6 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             self.assertIn("Evidence-backed claim", controller.store.read_text(
                 "attempts/attempt-001/report.md"
             ))
@@ -70,7 +96,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, _ = controller.execute(
+            result = controller.execute_attempt(
                 "report",
                 attempt_id="attempt-001",
                 request=ReportAssemblyRequest(
@@ -87,7 +113,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                         ReportSectionDraft(
                             section_id="findings",
                             heading="Findings",
-                            draft_markdown="The result is supported [@paper-2].",
+                            draft_markdown="The result is supported [@paper-2]. Another claim [@missing].",
                         ),
                     ),
                 ),
@@ -115,6 +141,25 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                 [artifact.kind for artifact in result.artifacts[:4]],
                 ["report", "report_body", "report_references", "citation_map"],
             )
+            self.assertNotIn("@missing", body)
+            self.assertEqual(json.loads((attempt_root / "citation_cleanup.json").read_text(encoding="utf-8")),
+                             {"removed_citations": ["missing"]})
+            refs = {
+                ref.kind: controller.store.ref(f"attempts/attempt-001/{ref.path}", kind=ref.kind)
+                for ref in result.artifacts
+            }
+            audit_store = ArtifactStore(Path(tmp) / "audit")
+            audit_result = run_report_audit_capability(
+                context=CapabilityContext(store=audit_store, attempt=AttemptManifest("audit"),
+                                          inputs=tuple(refs.values()), input_store=controller.store),
+                request=ReportAuditCapabilityRequest(report_ref=refs["report"], report_body_ref=refs["report_body"],
+                    citation_cleanup_ref=refs["citation_cleanup"],
+                    context=ReportContext(topic="Offline report", report_mode="research_only",
+                                          papers=[{"id": "paper-2", "title": "Used paper"}]), memory=ReportMemory()),
+            )
+            self.assertEqual(audit_result.status, "failed")
+            audit = audit_store.read_json("report_audit.json")
+            self.assertIn("missing", audit["citation_audit"]["unknown_citations"])
 
     def test_report_capability_renders_only_planned_figures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,7 +173,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, _ = controller.execute(
+            result = controller.execute_attempt(
                 "report",
                 attempt_id="attempt-001",
                 request=ReportAssemblyRequest(
@@ -198,7 +243,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, _ = controller.execute(
+            result = controller.execute_attempt(
                 "report",
                 attempt_id="attempt-001",
                 request=ReportAssemblyRequest(
@@ -233,7 +278,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                 registry=registry,
             )
 
-            result, _ = controller.execute(
+            result = controller.execute_attempt(
                 "report",
                 attempt_id="attempt-001",
                 request=ReportAssemblyRequest(
@@ -301,7 +346,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                 kind="report_body",
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "report_audit",
                 attempt_id="attempt-001",
                 inputs=(report_ref, body_ref),
@@ -318,7 +363,6 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "completed")
-            self.assertEqual(decision.action, "accept")
             output = controller.store.read_json(
                 "attempts/attempt-001/report_audit.json"
             )
@@ -344,7 +388,7 @@ class ReportAuditCapabilityTests(unittest.TestCase):
                 "# Report\n\nUnsupported citation [@missing].\n",
             )
 
-            result, decision = controller.execute(
+            result = controller.execute_attempt(
                 "report_audit",
                 attempt_id="attempt-001",
                 inputs=(report_ref,),
@@ -360,7 +404,6 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "failed")
-            self.assertEqual(decision.action, "repair")
             self.assertTrue(result.diagnostics)
             self.assertEqual(
                 controller.store.read_json(

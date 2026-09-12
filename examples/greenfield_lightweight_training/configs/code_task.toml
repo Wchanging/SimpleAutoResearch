@@ -1,0 +1,37 @@
+# Bounded local project generation, not a full research/report workflow.
+[code_task]
+kind = "greenfield"
+task_file = "examples/greenfield_lightweight_training/task.md"
+output_root = "runs"
+name = "greenfield-lightweight-training"
+
+[workspace]
+mode = "empty"
+
+[environment]
+mode = "current"
+
+[benchmark]
+command = "python generated_project/main.py"
+primary_metric = "accuracy"
+
+[benchmark.metric_directions]
+accuracy = "higher"
+macro_f1 = "higher"
+majority_accuracy = "higher"
+keyword_accuracy = "higher"
+unigram_accuracy = "higher"
+bigram_accuracy = "higher"
+ablation_gain = "higher"
+train_time_sec = "resource"
+inference_time_ms = "resource"
+parameter_count = "resource"
+
+[execute]
+to_step = "run"
+timeout_sec = 60
+repair_rounds = 1
+max_files = 10
+max_generated_lines = 1800
+baseline_policy = "none"
+allow_planning_fallback = false

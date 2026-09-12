@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from simple_ar.code_task import load_code_task_init_options
 from simple_ar.code_task.runtime.config import (
@@ -14,8 +13,6 @@ from simple_ar.code_task.runtime.config import (
 
 CODE_TASK_TOY_SPAM_TEMPLATE = "llm_code_task_toy_spam"
 CODE_TASK_PROJECT_TEMPLATE = "code_task_project"
-CODE_TASK_TOY_SPAM_BENCHMARK = "python -m unittest discover -s tests"
-MessageCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -33,7 +30,6 @@ class CodeTaskExperimentSpec:
     workspace_include: tuple[str, ...] = ()
     workspace_exclude: tuple[str, ...] = ()
     workspace_reuse_source_venv: bool = False
-    workspace_setup_hook: str = ""
     env_mode: str = "current"
     python_executable: str | None = None
     edit_scope_mode: str | None = None
@@ -63,56 +59,12 @@ class CodeTaskExperimentSpec:
         return schema
 
 
-@dataclass(frozen=True)
-class CodeTaskExperimentResult:
-    """Compact result returned after preparing an embedded code-task run."""
-
-    code_task_run_dir: Path
-    workspace_dir: Path
-    patch_plan_path: Path
-    proposed_edits_path: Path
-    patch_diff_path: Path
-    validation_report_path: Path
-    plan_mode: str
-    edit_mode: str
-    edit_count: int
-    changed_files: tuple[str, ...]
-    validation_status: str
-    template: str = CODE_TASK_TOY_SPAM_TEMPLATE
-    baseline_status: str = ""
-    environment_report_path: Path | None = None
-    baseline_report_path: Path | None = None
-    repo_map_path: Path | None = None
-    repo_map_summary_path: Path | None = None
-    context_pack_path: Path | None = None
-    context_prompt_path: Path | None = None
-    context_snippets_path: Path | None = None
-    work_plan_path: Path | None = None
-    work_plan_markdown_path: Path | None = None
-    work_plan_mode: str = ""
-    work_plan_item_count: int = 0
-    attempt_id: str = ""
-    attempt_state_path: Path | None = None
-    batch_id: str = ""
-    batch_state_path: Path | None = None
-    work_item_id: str = ""
-    summary_path: Path | None = None
 
 
 def is_code_task_experiment_template(template: object) -> bool:
     return str(template) in {CODE_TASK_TOY_SPAM_TEMPLATE, CODE_TASK_PROJECT_TEMPLATE}
 
 
-def code_task_toy_spam_spec(repo_root: Path) -> CodeTaskExperimentSpec:
-    root = Path(repo_root)
-    return CodeTaskExperimentSpec(
-        template=CODE_TASK_TOY_SPAM_TEMPLATE,
-        code_root=root / "tests" / "fixtures" / "code_tasks" / "toy_spam_project",
-        task_file=root / "tests" / "fixtures" / "code_tasks" / "improve_toy_spam_baseline.md",
-        benchmark_command=CODE_TASK_TOY_SPAM_BENCHMARK,
-        allow_test_changes=False,
-        approval_note="Auto-approved inside the isolated research-session demo workspace.",
-    )
 
 
 def code_task_project_spec(
@@ -136,7 +88,6 @@ def code_task_project_spec(
             workspace_reuse_source_venv=_config_bool(
                 config.get("code_task_workspace_reuse_source_venv")
             ),
-            workspace_setup_hook=_config_string(config.get("code_task_workspace_setup_hook")),
             env_mode=_config_string(config.get("code_task_env_mode")),
             python_executable=_config_string(config.get("code_task_python_executable")),
             primary_metric=_config_string(config.get("code_task_primary_metric")),
@@ -170,7 +121,6 @@ def code_task_project_spec(
         workspace_include=options.workspace_include,
         workspace_exclude=options.workspace_exclude,
         workspace_reuse_source_venv=options.workspace_reuse_source_venv,
-        workspace_setup_hook=options.workspace_setup_hook,
         env_mode=options.env_mode,
         python_executable=options.python_executable,
         edit_scope_mode=options.edit_scope_mode,
@@ -183,18 +133,6 @@ def code_task_project_spec(
     )
 
 
-def code_task_experiment_spec(
-    repo_root: Path,
-    config: dict[str, object],
-    *,
-    task_file_override: Path | None = None,
-) -> CodeTaskExperimentSpec:
-    template = str(config.get("experiment_template", "")).strip()
-    if template == CODE_TASK_TOY_SPAM_TEMPLATE:
-        return code_task_toy_spam_spec(repo_root)
-    if template == CODE_TASK_PROJECT_TEMPLATE:
-        return code_task_project_spec(config, task_file_override=task_file_override)
-    raise RuntimeError(f"Unsupported code-task experiment template: {template}")
 
 
 def _resolve_user_path(value: str) -> Path:

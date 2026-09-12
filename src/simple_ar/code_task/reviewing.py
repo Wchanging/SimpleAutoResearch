@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.app.usage import summarize_usage
-from simple_ar.core.artifacts import append_jsonl, read_jsonl, write_json
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
+from simple_ar.integrations.usage import record_usage
+from simple_ar.core.artifacts import write_json
+from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.reviewing.schema import ReviewFinding, normalize_review_findings, review_report
 
 
@@ -30,6 +30,7 @@ def run_llm_review(
     model: str | None = None,
     use_llm: bool = True,
     client: LLMClient | None = None,
+    record_injected_usage: bool = False,
     message_callback: MessageCallback | None = None,
     max_findings: int = 16,
     allow_blocking: bool = False,
@@ -40,11 +41,15 @@ def run_llm_review(
         return []
     try:
         _emit(message_callback, f"Calling LLM reviewer for {label}.")
-        llm_client = client or LLMClient.from_env(
+        # Generated-project clients already own their task usage observer.
+        # Existing-project review receives the unscoped session client.
+        llm_client = client if client is not None and not record_injected_usage else LLMClient.for_task(
+            client=client,
             model=model,
-            usage_callback=lambda usage: _record_review_usage(
+            usage_callback=lambda usage: record_usage(
                 meta_dir,
                 usage,
+                stage="code_task.review",
                 message_callback=message_callback,
             ),
         )
@@ -107,23 +112,6 @@ def review_prompt(
     )
 
 
-def _record_review_usage(
-    meta_dir: Path,
-    usage: LLMUsage,
-    *,
-    message_callback: MessageCallback | None,
-) -> None:
-    usage_path = meta_dir / "llm_usage.jsonl"
-    row = usage.to_row()
-    row["stage"] = "code_task.review"
-    append_jsonl(usage_path, row)
-    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
-    _emit(
-        message_callback,
-        f"LLM usage {row.get('label', '')}: "
-        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
-        f"{row['total_tokens']} tokens ({row['source']}).",
-    )
 
 
 def _downgrade_llm_blockers(findings: list[ReviewFinding]) -> list[ReviewFinding]:

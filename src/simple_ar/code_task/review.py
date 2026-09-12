@@ -21,6 +21,7 @@ from simple_ar.code_task.review_pipeline import (
 from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest
 from simple_ar.core.artifacts import read_json, read_text, write_json
 from simple_ar.reviewing.schema import ReviewFinding
+from simple_ar.integrations.llm import LLMClient
 from simple_ar.code_task.reviewing import build_review_artifact, review_prompt, run_llm_review
 
 
@@ -40,6 +41,7 @@ def review_code_task_changes(
     *,
     phase: str = "post_apply",
     model: str | None = None,
+    llm_client: LLMClient | None = None,
     use_llm: bool = True,
     max_source_chars_per_file: int = 3000,
     message_callback: MessageCallback | None = None,
@@ -79,6 +81,7 @@ def review_code_task_changes(
         },
     )
     llm_findings = _layered_llm_findings(
+        llm_client=llm_client,
         run_dir=root,
         manifest=manifest,
         phase=phase,
@@ -233,6 +236,7 @@ def _layered_llm_findings(
     review_index: dict[str, Any],
     review_clusters: list[dict[str, Any]],
     model: str | None,
+    llm_client: LLMClient | None,
     use_llm: bool,
     max_source_chars_per_file: int,
     message_callback: MessageCallback | None,
@@ -266,6 +270,8 @@ def _layered_llm_findings(
         )
         findings.extend(
             run_llm_review(
+                client=llm_client,
+                record_injected_usage=True,
                 meta_dir=paths.meta_dir,
                 prompt=prompt,
                 label=f"code-task-review-{phase}-{cluster_id}",

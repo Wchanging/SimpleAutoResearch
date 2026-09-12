@@ -9,24 +9,34 @@ from pathlib import Path
 from simple_ar.code_task import execute_code_task, initialize_code_task
 from simple_ar.code_task.generation.architecture import fallback_architecture_plan
 from simple_ar.code_task.generation.task_contract import build_greenfield_task_contract
-from simple_ar.experiment.contracts import build_experiment_design_package
 from simple_ar.experiment.execution.backend import LocalExecutionBackend, RunRequest
 from simple_ar.experiment.execution.diagnosis import diagnose_experiment_run, render_diagnosis_markdown
 from simple_ar.experiment.execution.guards import evaluate_result_guard
-from simple_ar.code_task.generation.generated_project_repair import repair_generated_project_from_guard
 from simple_ar.experiment.execution.results import build_canonical_results
-from simple_ar.experiment.rerun import preserve_stage_outputs
 from simple_ar.experiment.tools.gateway import LocalExperimentToolGateway
 from simple_ar.core.artifacts import read_json
-from simple_ar.core.pipeline import Context
-from simple_ar.core.stages import Stage
-from simple_ar.report.context import build_report_context
 
 
 TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class ExperimentExecutionTests(unittest.TestCase):
+    def test_local_invocations_get_distinct_output_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            command = [sys.executable, "-c", "import os; from pathlib import Path; "
+                "p=Path(os.environ['SIMPLE_AR_OUTPUT_DIR']); p.mkdir(); "
+                "(p/'metrics.json').write_text('measured'); print(p)"]
+            request = RunRequest(command, root, 5, output_dir=root / "processes")
+            first, second = LocalExecutionBackend().run(request), LocalExecutionBackend().run(request)
+            self.assertEqual((first.returncode, second.returncode), (0, 0))
+            paths = [root / "processes" / result.process_record["invocation_id"] / "outputs"
+                     for result in (first, second)]
+            self.assertNotEqual(paths[0], paths[1])
+            for path, result in zip(paths, (first, second)):
+                self.assertEqual((path / "metrics.json").read_text(), "measured")
+                self.assertEqual(Path(result.stdout.strip()), path)
+
     def test_local_backend_and_canonical_results_keep_legacy_metric_fields(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -225,40 +235,13 @@ class ExperimentExecutionTests(unittest.TestCase):
             task_contract = read_json(run_dir / "code_task" / "meta" / "task_contract.json")
             self.assertEqual(task_contract["schema_version"], "code_task_contract.v4")
             self.assertEqual(task_contract["task_kind"], "greenfield")
+            self.assertIn("Create a tiny local experiment", task_contract["task"])
+            self.assertIn("macro_f1", task_contract["metric_contract"]["required_metrics"])
             self.assertIn("version_hash", task_contract)
             metrics = read_json(run_dir / "code_task" / "run" / "patched" / "metrics.json")
             self.assertIn("accuracy", metrics)
             self.assertIn("macro_f1", metrics)
 
-    def test_greenfield_contract_includes_task_file_requirements(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            task_file = Path(tmp) / "task.md"
-            task_file.write_text(
-                "# Task\n\nTrain a tiny local classifier and report macro_f1.\n",
-                encoding="utf-8",
-            )
-
-            package = build_experiment_design_package(
-                {
-                    "task_kind": "greenfield",
-                    "task_objective": "Build a lightweight training project.",
-                    "task_task_file": str(task_file),
-                    "implementation_mode": "generate_project",
-                    "evaluation_primary_metric": "macro_f1",
-                    "evaluation_required_metrics": ["macro_f1"],
-                    "generation_enabled": True,
-                },
-                topic="",
-                hypothesis="",
-                template="greenfield_project",
-            )
-
-            self.assertIn("Train a tiny local classifier", package.contract.objective)
-            self.assertTrue(
-                any("macro_f1" in item for item in package.contract.constraints),
-                package.contract.constraints,
-            )
 
     def test_greenfield_task_contract_extracts_evidence_plan(self) -> None:
         contract = build_greenfield_task_contract(
@@ -333,130 +316,8 @@ class ExperimentExecutionTests(unittest.TestCase):
         self.assertIn("generated_experiment/validation.py", paths)
         self.assertLessEqual(len(paths), 16)
 
-    def test_stage_rerun_archives_existing_outputs_by_default(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            run_dir = Path(tmp) / "run"
-            stage_dir = run_dir / "07-run"
-            stage_dir.mkdir(parents=True)
-            (stage_dir / "results.json").write_text('{"old": true}', encoding="utf-8")
-            (stage_dir / "stdout.txt").write_text("old stdout\n", encoding="utf-8")
-            ctx = Context(run_dir=run_dir, topic="test", current_stage=Stage.RUN, config={})
 
-            archive = preserve_stage_outputs(
-                ctx,
-                artifact_paths=("results.json", "stdout.txt"),
-                reason="unit rerun",
-            )
 
-            self.assertIsNotNone(archive)
-            assert archive is not None
-            self.assertIn("results.json", archive.archived_paths)
-            self.assertTrue((archive.archive_dir / "results.json").is_file())
-            self.assertTrue((stage_dir / "rerun_archive.json").is_file())
-
-    def test_report_context_exposes_canonical_experiment_evidence(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            run_dir = Path(tmp) / "run"
-            (run_dir / "07-run").mkdir(parents=True)
-            (run_dir / "06-code").mkdir(parents=True)
-            (run_dir / "05-design").mkdir(parents=True)
-            (run_dir / "07-run" / "results.json").write_text("{}", encoding="utf-8")
-            (run_dir / "07-run" / "guard_report.json").write_text("{}", encoding="utf-8")
-            (run_dir / "06-code" / "code_review.json").write_text("{}", encoding="utf-8")
-            (run_dir / "05-design" / "resource_plan.json").write_text("{}", encoding="utf-8")
-            ctx = Context(run_dir=run_dir, topic="test")
-            results = {
-                "status": "passed",
-                "returncode": 0,
-                "timed_out": False,
-                "metrics": {"score": 0.75},
-                "guard": {"status": "warning", "issues": [{"severity": "warning", "code": "x"}]},
-                "diagnosis": {
-                    "status": "warning",
-                    "summary": "Run has warnings.",
-                    "completion": {"missing_metrics": []},
-                    "repair": {"local_repair_supported": False},
-                    "deficiencies": [{"severity": "major", "code": "code_review_warning"}],
-                },
-                "code_review": {"status": "warning", "summary": {"warning_count": 1}},
-                "resource_plan": {"max_runtime_sec": 30},
-                "review_failure_recovery": {
-                    "reason": "llm_project_failed_code_review",
-                    "recovery_mode": "deterministic_fallback_scaffold",
-                },
-            }
-
-            report_context = build_report_context(
-                ctx,
-                report_mode="experiment",
-                goal="",
-                problem="",
-                search_meta={},
-                synthesis="",
-                hypothesis="",
-                plan={},
-                results=results,
-                paper_rows=[],
-                papers=[],
-                research_evidence_summary="",
-            )
-
-            handles = {handle.handle for handle in report_context.source_handles}
-            self.assertIn("artifact:canonical_results", handles)
-            self.assertIn("artifact:result_guard", handles)
-            self.assertIn("artifact:experiment_diagnosis", handles)
-            self.assertIn("artifact:code_review", handles)
-            self.assertIn("artifact:resource_plan", handles)
-            self.assertIn("artifact:review_failure_recovery", handles)
-
-    def test_repair_fills_missing_required_metrics_for_generated_project(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            project = Path(tmp) / "generated_project"
-            (project / "generated_experiment").mkdir(parents=True)
-            (project / "generated_experiment" / "runner.py").write_text(
-                "def run_experiment():\n    return {'loss': 0.5}\n",
-                encoding="utf-8",
-            )
-            (project / "main.py").write_text(
-                "raise RuntimeError('old broken entrypoint')\n",
-                encoding="utf-8",
-            )
-            schema = {"primary_metric": "accuracy", "required_metrics": ["accuracy", "macro_f1"]}
-
-            summary = repair_generated_project_from_guard(
-                project_dir=project,
-                result_schema=schema,
-                guard_report={"issues": [{"code": "missing_primary_metric"}]},
-                diagnosis_report={
-                    "status": "failed",
-                    "completion": {"missing_metrics": ["accuracy", "macro_f1"]},
-                    "deficiencies": [{"code": "missing_primary_metric"}],
-                },
-                current_metrics={"loss": 0.5},
-                output_path=Path(tmp) / "repair_summary.json",
-            )
-
-            self.assertEqual(summary["status"], "patched")
-            repaired = (project / "generated_experiment" / "runner.py").read_text(encoding="utf-8")
-            self.assertIn("accuracy", repaired)
-            self.assertIn("macro_f1", repaired)
-            namespace: dict[str, object] = {}
-            exec(repaired, namespace)
-            metrics = namespace["run_experiment"]()  # type: ignore[operator]
-            self.assertIsInstance(metrics["accuracy"], float)
-            self.assertIsInstance(metrics["macro_f1"], float)
-            main = (project / "main.py").read_text(encoding="utf-8")
-            self.assertIn("generated_experiment.runner", main)
-            self.assertFalse((project / "main.py.before_repair").exists())
-            self.assertEqual(summary["snapshot"]["captured_count"], 3)
-            snapshot = read_json(Path(summary["snapshot"]["manifest"]))
-            self.assertEqual(
-                sorted(row["path"] for row in snapshot["files"]),
-                ["generated_experiment/__init__.py", "generated_experiment/runner.py", "main.py"],
-            )
 
     def test_local_experiment_tool_gateway_reads_contract_and_results(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

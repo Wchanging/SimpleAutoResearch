@@ -40,7 +40,7 @@ class CommonToolLayerTests(unittest.TestCase):
         self.assertIn("search_code_task_code", names)
         self.assertIn("read_experiment_contract", names)
         self.assertIn("get_paper_brief", names)
-        self.assertIn("run_experiment_command", names)
+        self.assertTrue({"run_experiment_command", "request_code_repair", "apply_reviewed_patch"}.isdisjoint(names))
 
         openai_tools = export_openai_tool_schemas(registry)
         mcp_tools = export_mcp_tool_schemas(registry)
@@ -71,6 +71,7 @@ class CommonToolLayerTests(unittest.TestCase):
             self.assertEqual(result.status, "ok")
             self.assertEqual(result.data["experiment_contract"]["contract_id"], "exp-test")
             self.assertEqual(blocked.status, "blocked")
+            self.assertEqual(blocked.error, "Unknown tool.")
             self.assertTrue((run_dir / "tools" / "tool_trace.jsonl").is_file())
 
     def test_common_gateway_dispatches_code_task_memory_and_lookup_tools(self) -> None:
@@ -179,7 +180,7 @@ class CommonToolLayerTests(unittest.TestCase):
             self.assertIn("read_code_task_memory", names)
             self.assertNotIn("read_experiment_contract", names)
 
-    def test_code_task_memory_current_status_ignores_nonblocking_review_noise(self) -> None:
+    def test_code_task_memory_preserves_events_without_inventing_current_state(self) -> None:
         TEST_ROOT.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             run_dir = Path(tmp)
@@ -192,7 +193,7 @@ class CommonToolLayerTests(unittest.TestCase):
                 summary="Patched benchmark passed.",
                 status="passed",
             )
-            self.assertEqual(memory.current_status, "Patched benchmark passed.")
+            self.assertEqual(memory.events[-1].status, "passed")
 
             memory = record_code_task_memory_event(
                 run_dir,
@@ -201,7 +202,7 @@ class CommonToolLayerTests(unittest.TestCase):
                 status="warning",
                 key="review-warning",
             )
-            self.assertEqual(memory.current_status, "Patched benchmark passed.")
+            self.assertEqual(memory.events[-1].status, "warning")
 
             memory = record_code_task_memory_event(
                 run_dir,
@@ -210,7 +211,13 @@ class CommonToolLayerTests(unittest.TestCase):
                 status="blocking",
                 key="review-blocking",
             )
-            self.assertEqual(memory.current_status, "Blocking reviewer finding.")
+            self.assertEqual(memory.events[-1].status, "blocking")
+            context = task_memory_context(run_dir)
+            self.assertIn("Patched benchmark passed.", context)
+            self.assertIn("Minor reviewer note.", context)
+            self.assertIn("Blocking reviewer finding.", context)
+            self.assertNotIn("## Current Status", context)
+            self.assertNotIn("current_status", memory.model_dump())
 
     def test_embedded_code_task_memory_lives_under_stage_code_memory(self) -> None:
         TEST_ROOT.mkdir(parents=True, exist_ok=True)
@@ -265,6 +272,8 @@ class CommonToolLayerTests(unittest.TestCase):
             context = task_memory_context(run_dir)
             self.assertIn("Long-Term Compressed Memory", context)
             self.assertIn("Validation checkpoint", context)
+            self.assertNotIn("next_actions", read_json(paths.compressed_memory_json))
+            self.assertNotIn("Likely Next Actions", context)
 
     def test_code_task_reviewer_writes_structured_findings_to_memory(self) -> None:
         TEST_ROOT.mkdir(parents=True, exist_ok=True)

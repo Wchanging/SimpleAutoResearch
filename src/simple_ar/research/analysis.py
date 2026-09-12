@@ -10,10 +10,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
+from simple_ar.experiment.execution.measurement import comparison_compatibility
+from simple_ar.result_analysis.service import sample_std
 from simple_ar.result_analysis.metrics import normalize_direction
 from simple_ar.result_analysis.schema import AnalysisContext, AnalysisResult
 from simple_ar.result_analysis.service import run_result_analysis
@@ -146,10 +149,23 @@ def compare_experiment_results(
         metric_rows=metric_rows,
         primary_metric=primary,
     )
+    compatibility, compatibility_reason = comparison_compatibility(baseline_data, candidate_data)
+    not_comparable = compatibility in {"unknown", "mismatched"}
+    if compatibility == "declared_match" and (baseline_status != "passed" or candidate_status != "passed"):
+        not_comparable = True
+        compatibility_reason = "Declared protocols match, but a failed execution cannot establish scientific improvement."
+    if not_comparable:
+        verdict = "inconclusive"
+        reasons = [compatibility_reason]
+        for row in metric_rows:
+            row["interpretation"] = "not_comparable"
+    else:
+        reasons.append(compatibility_reason)
     return {
         "schema_version": "experiment_comparison.v1",
         "status": "ready" if baseline_data and candidate_data else "incomplete",
         "verdict": verdict,
+        "comparability": compatibility,
         "reasons": reasons,
         "metric_config": {
             "primary_metric": primary,
@@ -428,6 +444,67 @@ def _merge_result_schema_into_analysis_context(
     return context.model_copy(update={"expected_metrics": expected})
 
 
+def _experiment_set_payload(context: CapabilityContext, collection: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve the declared collection; reuse the single-pair comparison rules."""
+    comparisons, rows, missing, failed = [], [], [], []
+    groups = {}
+    statuses = []
+    for pair in collection["pairs"]:
+        measured = {}
+        for role in ("baseline", "candidate"):
+            reference = pair[role]
+            if reference is None:
+                missing.append({"seed": pair["seed"], "condition": role})
+                continue
+            ref = ArtifactRef.from_dict(reference)
+            result = context.read_input_json(ref)
+            measured[role] = result
+            statuses.append(result["status"])
+            # Failed runs remain in the set/comparison, never in valid metric rows.
+            if result["status"] == "passed":
+                rows.append({"condition": role, "seed": pair["seed"], "metrics": result["metrics"],
+                             "artifact": ref.path})
+            else:
+                failed.append({"seed": pair["seed"], "condition": role, "status": result["status"], "artifact": ref.path})
+        if len(measured) == 2:
+            comparison = compare_experiment_results(measured["baseline"], measured["candidate"])
+            comparisons.append({**comparison, "seed": pair["seed"],
+                                "baseline_ref": pair["baseline"], "candidate_ref": pair["candidate"]})
+            if comparison["comparability"] == "declared_match" and all(r["status"] == "passed" for r in measured.values()):
+                baseline = measured["baseline"]
+                protocol = dict(baseline["experiment_contract"])
+                conditions = dict(protocol["comparison_conditions"])
+                conditions.pop("seed", None)
+                protocol["comparison_conditions"] = conditions
+                integrity = baseline["measurement"].get("asset_integrity", {})
+                key = json.dumps([protocol, integrity.get("content_fingerprint")], sort_keys=True)
+                group = groups.setdefault(key, {"protocol": protocol, "pairs": []})
+                group["pairs"].append(comparisons[-1])
+    summaries = []
+    for group_id, group in enumerate(groups.values()):
+        names = {row["name"] for pair in group["pairs"] for row in pair["metrics"]}
+        for name in sorted(names):
+            selected = [(pair, row) for pair in group["pairs"] for row in pair["metrics"] if row["name"] == name]
+            values = [row["delta"] for _, row in selected]
+            summaries.append({"group_id": group_id, "metric": name, "n": len(values),
+                "unit": next((spec.get("unit", "") for spec in group["protocol"].get("metric_specs", []) if spec["name"] == name), ""),
+                "seeds": [pair["seed"] for pair, _ in selected],
+                "baseline_mean": sum(row["baseline"] for _, row in selected) / len(values),
+                "candidate_mean": sum(row["candidate"] for _, row in selected) / len(values),
+                "delta_mean": sum(values) / len(values), "delta_sample_std": sample_std(values),
+                "protocol": group["protocol"], "sources": [{"baseline_ref": pair["baseline_ref"],
+                    "candidate_ref": pair["candidate_ref"]} for pair, _ in selected]})
+    return {"status": "passed" if statuses and not missing and all(s == "passed" for s in statuses) else "incomplete",
+            "metrics": {}, "comparisons": comparisons, "seed_evidence": rows,
+            "paired_summary": summaries,
+            "implementation_ref": collection.get("implementation_ref"),
+            "candidate_revision": collection.get("candidate_revision", 0),
+            "superseded_candidates": collection.get("superseded_candidates", []),
+            "missing_measurements": missing, "failed_measurements": failed, "planned_pairs": len(collection["pairs"]),
+            "limitations": ["Paired summaries are descriptive, grouped by declared protocol and observed protected-file identity. "
+                "Only the current candidate revision is included; no significance test or population uncertainty is established."]}
+
+
 def analyze_experiment_capability(
     *,
     context: CapabilityContext,
@@ -436,6 +513,7 @@ def analyze_experiment_capability(
     client: Any | None = None,
     use_llm: bool = False,
     label: str = "experiment-analysis",
+    baseline_ref: ArtifactRef | None = None,
 ) -> CapabilityResult:
     """Analyze a declared execution result through the session boundary.
 
@@ -448,6 +526,31 @@ def analyze_experiment_capability(
     payload = context.read_input_json(result_ref)
     if not isinstance(payload, Mapping):
         raise ValueError("Experiment result artifact must be a JSON object.")
+    is_collection = result_ref.kind == "experiment_set"
+    if is_collection:
+        if baseline_ref is not None:
+            raise ValueError("A result set already declares its paired baselines.")
+        payload = _experiment_set_payload(context, payload)
+    comparison_ref = None
+    collection_analysis_ref = None
+    if is_collection:
+        collection_analysis_ref = context.store.write_json(
+            "paired_analysis.json", {"schema_version": "experiment_set_analysis.v1",
+                "collection_ref": result_ref.to_dict(), **payload},
+            kind="experiment_set_analysis", schema="experiment_set_analysis.v1", producer="research.analysis",
+        )
+    if baseline_ref is not None:
+        baseline = context.read_input_json(baseline_ref)
+        if not isinstance(baseline, Mapping):
+            raise ValueError("Baseline result artifact must be a JSON object.")
+        comparison = compare_experiment_results(baseline, payload)
+        comparison["baseline_ref"] = baseline_ref.to_dict()
+        comparison["candidate_ref"] = result_ref.to_dict()
+        comparison_ref = context.store.write_json(
+            "comparison.json", comparison, kind="experiment_comparison",
+            schema="experiment_comparison.v1", producer="research.analysis",
+        )
+        payload = {**payload, "comparisons": [*payload.get("comparisons", []), comparison]}
     execution_status = str(payload.get("status") or "unknown")
     result_schema = payload.get("result_schema")
     result_schema = result_schema if isinstance(result_schema, Mapping) else {}
@@ -469,6 +572,9 @@ def analyze_experiment_capability(
         )
     project_results = dict(base_context.project_results)
     project_results["execution_result"] = dict(payload)
+    if is_collection:
+        project_results["seed_evidence"] = payload["seed_evidence"]
+        project_results["comparisons"] = payload["comparisons"]
     analysis = analyze_results(
         AnalysisRequest(
             context=base_context.model_copy(
@@ -479,6 +585,22 @@ def analyze_experiment_capability(
         ),
         client=client,
     )
+    preparation = payload.get("preparation")
+    if is_collection:
+        limitations = payload["limitations"]
+        analysis.audit.limitations = list(dict.fromkeys([*analysis.audit.limitations, *limitations]))
+        analysis.readme_markdown += "\n\n## Paired measurement coverage\n\n" + (
+            f"Planned pairs: {payload['planned_pairs']}; paired comparisons: {len(payload['comparisons'])}; "
+            f"missing measurements: {len(payload['missing_measurements'])}; failed measurements: {len(payload['failed_measurements'])}.\n\n"
+            + "\n".join(f"- {item}" for item in limitations) + "\n"
+        )
+    if preparation is not None:
+        limitations = preparation["limitations"]
+        analysis.audit.limitations = list(dict.fromkeys([*analysis.audit.limitations, *limitations]))
+        if limitations:
+            analysis.readme_markdown = analysis.readme_markdown.rstrip() + (
+                "\n\n## Preparation limitations\n\n" + "\n".join(f"- {item}" for item in limitations) + "\n"
+            )
     handoff = AnalysisHandoff(
         execution_ref=result_ref,
         execution_status=execution_status,
@@ -502,7 +624,7 @@ def analyze_experiment_capability(
     )
     return CapabilityResult(
         status=capability_status,
-        artifacts=(output,),
+        artifacts=(output,) + tuple(ref for ref in (comparison_ref, collection_analysis_ref) if ref is not None),
         diagnostics=diagnostics,
         usage={
             "execution_status": execution_status,

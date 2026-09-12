@@ -86,52 +86,6 @@ def build_coverage_report(
     }
 
 
-def coverage_report_markdown(report: dict[str, Any]) -> str:
-    """Render a compact Markdown coverage report."""
-
-    lines = [
-        "# Coverage Report",
-        "",
-        f"Status: `{report.get('status', 'unknown')}`",
-        "",
-        "## Facet Coverage",
-        "",
-        f"- Required facets: {_join(report.get('required_facets'))}",
-        f"- Covered facets: {_join(report.get('covered_facets'))}",
-        f"- Missing facets: {_join(report.get('missing_facets'))}",
-        "",
-        "## Research Questions",
-        "",
-    ]
-    for row in report.get("questions", []):
-        if not isinstance(row, dict):
-            continue
-        lines.append(
-            f"- `{row.get('question_id')}` [{row.get('facet')}]: "
-            f"{row.get('status')} ({row.get('evidence_count')} kept evidence item(s))"
-        )
-    lines.extend(["", "## Follow-Up Queries", ""])
-    follow_ups = report.get("follow_up_queries", [])
-    if isinstance(follow_ups, list) and follow_ups:
-        for item in follow_ups:
-            if isinstance(item, dict):
-                lines.append(f"- [{item.get('facet')}] `{item.get('query')}`")
-    else:
-        lines.append("- No follow-up query recommended within the current budget.")
-    lines.extend(["", "## Retrieval Summary", ""])
-    retrieval = report.get("retrieval") if isinstance(report.get("retrieval"), dict) else {}
-    selection = report.get("retrieval_selection") if isinstance(report.get("retrieval_selection"), dict) else {}
-    lines.extend(
-        [
-            f"- Executed rounds: {retrieval.get('executed_rounds', 0)} / {retrieval.get('planned_rounds', 0)}",
-            f"- Source attempts: {retrieval.get('attempt_count', 0)}",
-            f"- Selected retrieval candidates: {selection.get('kept_documents', 0)} / {selection.get('max_documents', 0)}",
-            f"- Candidate rows: {selection.get('candidate_rows', 0)}",
-        ]
-    )
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def _required_facets(questions: list[ResearchQuestion], query_plan: QueryPlan) -> list[str]:
     facets: list[str] = []
     for question in questions:
@@ -249,9 +203,3 @@ def _unique(values: Any) -> list[str]:
             seen.add(key)
             result.append(text)
     return result
-
-
-def _join(value: object) -> str:
-    if not isinstance(value, list) or not value:
-        return "`none`"
-    return ", ".join(f"`{item}`" for item in value)

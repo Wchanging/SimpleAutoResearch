@@ -26,7 +26,7 @@ about scope.
 - Evaluation / benchmark sections should include a compact evidence-quality map
   when the available sources support it.
 - Claims about performance or usefulness should include a boundary condition,
-  such as benchmark type, task scale, repository-level transfer risk, or cost.
+  such as benchmark type, task scale, cross-dataset or domain transfer risk, or cost.
 - Each section should be readable: avoid one very large paragraph. Prefer
   2-4 short paragraphs or concise bullets when comparing papers.
 - Design-pattern sections should use subheadings or bullets when they otherwise

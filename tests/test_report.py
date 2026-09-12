@@ -5,12 +5,12 @@ import json
 import re
 import shutil
 import tempfile
+from unittest.mock import patch
 from pathlib import Path
 
-from simple_ar.experiment.code_task_bridge import CODE_TASK_PROJECT_TEMPLATE
 from simple_ar.literature.models import Paper
 from simple_ar.literature.verify import validate_citations
-from simple_ar.core.pipeline import Context
+from simple_ar.integrations.llm import LLMError
 from simple_ar.report.agent import (
     _compact_execution_results,
     _is_claim_record_response,
@@ -33,11 +33,11 @@ from simple_ar.report.citations import (
     sanitize_report_citations as _sanitize_report_citations,
     strip_references_section as _strip_references_section,
 )
-from simple_ar.report.context import build_report_context
 from simple_ar.report.memory import initialize_report_memory
-from simple_ar.report.quality import build_report_quality
 from simple_ar.report.schema import (
     MetricSource,
+    ReportContext,
+    SourceHandle,
     ReportMemory,
     ReportRuntimeConfig,
     ReportSectionDraft,
@@ -45,17 +45,30 @@ from simple_ar.report.schema import (
     ReportToolCall,
 )
 from simple_ar.report.schema import ReportSectionReview
-from simple_ar.report.service import (
-    _build_research_report,
-    _build_report,
-    _ensure_code_task_evidence_section,
-    _report_runtime_config,
-    _report_bound_errors,
-    _validated_agent_report,
-)
 from simple_ar.report.templates import load_report_template_bundle
 from simple_ar.report.tool_gateway import ReportToolGateway
-from simple_ar.report.survey import _build_taxonomy, _build_visual_coverage_audit, enrich_survey_sections
+from simple_ar.report.survey import enrich_survey_sections
+
+
+def _report_fixture(papers: list[Paper], **fields) -> ReportContext:
+    """Writer/audit inputs, independent of legacy stage-directory discovery."""
+    context = ReportContext(
+        papers=[paper.to_row() for paper in papers],
+        citation_key_map={f"P{i}": paper.id for i, paper in enumerate(papers, 1)},
+        source_handles=[SourceHandle(
+            handle=f"paper:{paper.id}", kind="paper", citation_key=f"P{i}",
+            title=paper.title, paper_id=paper.id, summary=paper.abstract,
+            metadata={"authors": paper.authors, "url": paper.url,
+                      "source": paper.source, "source_id": paper.source_id,
+                      "published": paper.published},
+        ) for i, paper in enumerate(papers, 1)],
+        **fields,
+    )
+    context.metric_sources = [MetricSource(
+        metric_id=f"metric:{name}", name=name, value=value,
+        artifact="results.json", label="experiment",
+    ) for name, value in context.results.get("metrics", {}).items()]
+    return context
 
 
 class _FakeReportLLM:
@@ -244,9 +257,7 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertNotIn("stdout", compact["comparisons"][0])
 
     def test_report_runtime_config_accepts_zero_revision_cycles(self) -> None:
-        config = _report_runtime_config(
-            Context(Path("run"), "Agent Simulation", config={"report_max_review_iterations": 0})
-        )
+        config = ReportRuntimeConfig(max_review_iterations=0)
 
         self.assertEqual(config.max_review_iterations, 0)
 
@@ -417,71 +428,6 @@ class ReportSafetyTests(unittest.TestCase):
 
         self.assertEqual(merged.draft_markdown, revised.draft_markdown)
 
-    def test_report_context_includes_nested_code_task_comparison(self) -> None:
-        run_dir = Path(".tmp_tests") / "report-code-task-context"
-        if run_dir.exists():
-            shutil.rmtree(run_dir)
-        comparison_dir = run_dir / "06-code" / "code_task_run" / "code_task" / "run"
-        comparison_dir.mkdir(parents=True)
-        comparison = {
-            "verdict": "improved",
-            "reasons": ["improved `accuracy` by +0.10"],
-            "baseline": {"metrics": {"accuracy": 0.70, "macro_f1": 0.68}},
-            "patched": {"metrics": {"accuracy": 0.80, "macro_f1": 0.79}},
-            "metrics": [
-                {
-                    "name": "accuracy",
-                    "delta": 0.10,
-                    "direction": "higher_is_better",
-                }
-            ],
-        }
-        (comparison_dir / "comparison.json").write_text(
-            json.dumps(comparison),
-            encoding="utf-8",
-        )
-        meta_dir = run_dir / "06-code"
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        (meta_dir / "code_task_experiment.json").write_text(
-            json.dumps({"code_task_run_dir": str(meta_dir / "code_task_run")}),
-            encoding="utf-8",
-        )
-        ctx = Context(run_dir, "code task report")
-        paper = Paper(
-            id="paper-1",
-            title="Known Paper",
-            authors=[],
-            abstract="Known abstract.",
-            url="https://example.com/1",
-        )
-
-        context = build_report_context(
-            ctx,
-            report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={"template": "code_task_project"},
-            results={"metrics": {"accuracy": 0.80}},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="",
-        )
-        template = load_report_template_bundle(
-            report_mode="experiment",
-            config=ReportRuntimeConfig(template="experiment"),
-            project_root=Path.cwd(),
-        )
-        memory = initialize_report_memory(context=context, template=template)
-
-        metric_ids = {metric.metric_id for metric in memory.metric_sources}
-        self.assertIn("metric:code_task_baseline_accuracy", metric_ids)
-        self.assertIn("metric:code_task_patched_accuracy", metric_ids)
-        self.assertIn("metric:code_task_delta_accuracy", metric_ids)
-        self.assertIn("artifact:code_task_comparison", memory.section_plan[0].evidence_handles)
-        shutil.rmtree(run_dir)
 
     def test_report_review_accepts_object_revision_instructions(self) -> None:
         review = ReportSectionReview.model_validate(
@@ -519,37 +465,6 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertNotIn("@missing", sanitized)
         validate_citations(sanitized, {"paper-1"})
 
-    def test_validated_agent_report_repairs_unknown_citations(self) -> None:
-        paper = Paper(
-            id="paper-1",
-            title="Known Paper",
-            authors=[],
-            abstract="",
-            url="https://example.com/paper-1",
-        )
-        draft = (
-            "# Draft\n\n"
-            "Known evidence is still cited [@paper-1], while a malformed "
-            "placeholder should be removed [@paper-typo].\n"
-        )
-
-        result = _validated_agent_report(
-            Context(Path("run"), "Agent Simulation", config={}),
-            draft,
-            search_meta={"source": "openalex", "status": "ok"},
-            plan={},
-            papers=[paper],
-            citation_key_map={},
-            report_mode="research_only",
-            results_present=False,
-        )
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        report_body, removed = result
-        self.assertEqual(removed, ["paper-typo"])
-        self.assertIn("[@paper-1]", report_body)
-        self.assertNotIn("paper-typo", report_body)
 
     def test_short_citation_keys_expand_before_validation(self) -> None:
         body = "# Draft\n\nKnown evidence [@P1; @p2]. Bare fallback [P1, P2].\n"
@@ -560,32 +475,6 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIn("Bare fallback [@paper-1; @paper-2]", expanded)
         validate_citations(expanded, {"paper-1", "paper-2"})
 
-    def test_validated_agent_report_accepts_short_citation_keys(self) -> None:
-        paper = Paper(
-            id="paper-1",
-            title="Known Paper",
-            authors=[],
-            abstract="",
-            url="https://example.com/paper-1",
-        )
-
-        result = _validated_agent_report(
-            Context(Path("run"), "Agent Simulation", config={}),
-            "# Draft\n\nKnown evidence is cited with a short model key [@P1].\n",
-            search_meta={"source": "openalex", "status": "ok"},
-            plan={},
-            papers=[paper],
-            citation_key_map={"P1": "paper-1"},
-            report_mode="research_only",
-            results_present=False,
-        )
-
-        self.assertIsNotNone(result)
-        assert result is not None
-        report_body, removed = result
-        self.assertEqual(removed, [])
-        self.assertIn("[@paper-1]", report_body)
-        self.assertNotIn("[@P1]", report_body)
 
     def test_numeric_citation_display_uses_map_without_losing_source_ids(self) -> None:
         paper = Paper(
@@ -621,7 +510,6 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(artifact["entries"][0]["paper_id"], "paper-1")
 
     def test_report_template_bundle_and_memory_are_structured(self) -> None:
-        ctx = Context(Path("run"), "Agent Simulation", config={})
         paper = Paper(
             id="paper-1",
             title="Known Paper",
@@ -629,19 +517,16 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="A paper about agent systems.",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            ctx,
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="research_only",
-            goal="# Goal\nStudy agents.",
-            problem="# Problem\nWhat evidence exists?",
+            goal_markdown="# Goal\nStudy agents.",
+            problem_markdown="# Problem\nWhat evidence exists?",
             search_meta={"source": "openalex", "status": "ok"},
-            synthesis="# Synthesis\nAgent workflows have roles.",
-            hypothesis="# Hypothesis\nRole separation may help.",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="- Known evidence [@paper-1].",
+            synthesis_markdown="# Synthesis\nAgent workflows have roles.",
+            hypothesis_markdown="# Hypothesis\nRole separation may help.",
+            evidence_summary="- Known evidence [@paper-1].",
         )
         template = load_report_template_bundle(
             report_mode="research_only",
@@ -657,6 +542,29 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIn("paper:paper-1", {handle.handle for handle in memory.source_handles})
         self.assertIn("P1", {handle.citation_key for handle in memory.source_handles})
 
+    def test_report_templates_can_resolve_from_packaged_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            packaged = root / "package"
+            shutil.copytree(Path.cwd() / "templates" / "report", packaged / "report_templates")
+            project_root = root / "outside-checkout"
+            project_root.mkdir()
+            with patch(
+                "simple_ar.report.templates.resources.files",
+                return_value=packaged,
+            ):
+                template = load_report_template_bundle(
+                    report_mode="research_only",
+                    config=ReportRuntimeConfig(template="survey"),
+                    project_root=project_root,
+                )
+
+            self.assertEqual(
+                Path(template.template_path).parent,
+                packaged / "report_templates",
+            )
+            self.assertIn("Abstract", template.template_markdown)
+
     def test_report_memory_can_expose_all_selected_papers(self) -> None:
         papers = [
             Paper(
@@ -668,19 +576,16 @@ class ReportSafetyTests(unittest.TestCase):
             )
             for index in range(1, 13)
         ]
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            papers,
+            topic='Agent Simulation',
             report_mode="research_only",
-            goal="# Goal\nStudy agents.",
-            problem="# Problem\nWhat evidence exists?",
+            goal_markdown="# Goal\nStudy agents.",
+            problem_markdown="# Problem\nWhat evidence exists?",
             search_meta={"source": "openalex", "status": "ok"},
-            synthesis="# Synthesis\nAgent workflows have roles.",
-            hypothesis="# Hypothesis\nRole separation may help.",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row() for paper in papers],
-            papers=papers,
-            research_evidence_summary="- Known evidence.",
+            synthesis_markdown="# Synthesis\nAgent workflows have roles.",
+            hypothesis_markdown="# Hypothesis\nRole separation may help.",
+            evidence_summary="- Known evidence.",
             max_section_sources=0,
         )
         template = load_report_template_bundle(
@@ -703,19 +608,16 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="A paper about agent systems.",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="research_only",
-            goal="# Goal\nStudy agents.",
-            problem="# Problem\nWhat evidence exists?",
+            goal_markdown="# Goal\nStudy agents.",
+            problem_markdown="# Problem\nWhat evidence exists?",
             search_meta={"source": "openalex", "status": "ok"},
-            synthesis="# Synthesis\nAgent workflows have roles.",
-            hypothesis="# Hypothesis\nRole separation may help.",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="- Known evidence [@paper-1].",
+            synthesis_markdown="# Synthesis\nAgent workflows have roles.",
+            hypothesis_markdown="# Hypothesis\nRole separation may help.",
+            evidence_summary="- Known evidence [@paper-1].",
         )
         template = load_report_template_bundle(
             report_mode="research_only",
@@ -748,6 +650,41 @@ class ReportSafetyTests(unittest.TestCase):
             result.report_body.index("## Method Families"),
         )
 
+        # A later provider failure must not discard completed, reviewed sections.
+        checkpoints = []
+        failing_client = _TrackingReportLLM()
+        original_ask = failing_client.ask_json
+
+        def fail_after_first_section(*args, **kwargs):
+            if checkpoints:
+                raise LLMError("provider unavailable after first section")
+            return original_ask(*args, **kwargs)
+
+        with patch.object(failing_client, "ask_json", side_effect=fail_after_first_section), self.assertRaises(LLMError):
+            run_report_agent(
+                client=failing_client, context=context, template=template, memory=memory,
+                config=ReportRuntimeConfig(template="survey", max_review_iterations=1),
+                gateway=gateway, checkpoint_sink=checkpoints.append,
+            )
+        self.assertEqual(len(checkpoints), 1)
+        saved = checkpoints[0]
+        self.assertEqual(len(saved["sections"]), 1)
+        self.assertTrue(saved["iterations"])
+
+        resumed_client = _TrackingReportLLM()
+        resumed = run_report_agent(
+            client=resumed_client, context=context, template=template, memory=memory,
+            config=ReportRuntimeConfig(template="survey", max_review_iterations=1),
+            gateway=gateway, completed_checkpoint=saved,
+        )
+        self.assertIsNotNone(resumed)
+        self.assertEqual(resumed.sections[0].model_dump(mode="json"), saved["sections"][0])
+        self.assertEqual(len(resumed.sections), len(result.sections))
+        first_id = saved["sections"][0]["section_id"]
+        self.assertFalse(any(_extract_prompt_value(prompt, "section_id") == first_id
+                             for prompt in resumed_client.prompts.values()))
+        self.assertEqual(resumed.iterations[0].model_dump(mode="json"), saved["iterations"][0])
+
     def test_report_agent_applies_multiple_review_revision_cycles(self) -> None:
         paper = Paper(
             id="paper-1",
@@ -756,19 +693,16 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="A paper about agent systems.",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="research_only",
-            goal="# Goal\nStudy agents.",
-            problem="# Problem\nWhat evidence exists?",
+            goal_markdown="# Goal\nStudy agents.",
+            problem_markdown="# Problem\nWhat evidence exists?",
             search_meta={"source": "openalex", "status": "ok"},
-            synthesis="# Synthesis\nAgent workflows have roles.",
-            hypothesis="# Hypothesis\nRole separation may help.",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="- Known evidence [@paper-1].",
+            synthesis_markdown="# Synthesis\nAgent workflows have roles.",
+            hypothesis_markdown="# Hypothesis\nRole separation may help.",
+            evidence_summary="- Known evidence [@paper-1].",
         )
         config = ReportRuntimeConfig(template="survey", max_review_iterations=2)
         template = load_report_template_bundle(
@@ -802,19 +736,16 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="A paper about agent systems.",
             url="https://example.com/1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="research_only",
-            goal="# Goal\nStudy agents.",
-            problem="# Problem\nWhat evidence exists?",
+            goal_markdown="# Goal\nStudy agents.",
+            problem_markdown="# Problem\nWhat evidence exists?",
             search_meta={"source": "openalex", "status": "ok"},
-            synthesis="# Synthesis\nAgent workflows have roles.",
-            hypothesis="# Hypothesis\nRole separation may help.",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="- Known evidence [@paper-1].",
+            synthesis_markdown="# Synthesis\nAgent workflows have roles.",
+            hypothesis_markdown="# Hypothesis\nRole separation may help.",
+            evidence_summary="- Known evidence [@paper-1].",
         )
         template = load_report_template_bundle(
             report_mode="research_only",
@@ -845,19 +776,16 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="A paper about agent systems.",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="research_only",
-            goal="# Goal\nStudy agents.",
-            problem="# Problem\nWhat evidence exists?",
+            goal_markdown="# Goal\nStudy agents.",
+            problem_markdown="# Problem\nWhat evidence exists?",
             search_meta={"source": "openalex", "status": "ok"},
-            synthesis="# Synthesis\nAgent workflows have roles.",
-            hypothesis="# Hypothesis\nRole separation may help.",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="- Known evidence [@paper-1].",
+            synthesis_markdown="# Synthesis\nAgent workflows have roles.",
+            hypothesis_markdown="# Hypothesis\nRole separation may help.",
+            evidence_summary="- Known evidence [@paper-1].",
         )
         config = ReportRuntimeConfig(
             template="survey",
@@ -897,19 +825,16 @@ class ReportSafetyTests(unittest.TestCase):
             )
             for index in range(1, 13)
         ]
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            papers,
+            topic='Agent Simulation',
             report_mode="research_only",
-            goal="# Goal\nStudy agents.",
-            problem="# Problem\nWhat evidence exists?",
+            goal_markdown="# Goal\nStudy agents.",
+            problem_markdown="# Problem\nWhat evidence exists?",
             search_meta={"source": "openalex", "status": "ok"},
-            synthesis="# Synthesis\nAgent workflows have roles.",
-            hypothesis="# Hypothesis\nRole separation may help.",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row() for paper in papers],
-            papers=papers,
-            research_evidence_summary="- Known evidence.",
+            synthesis_markdown="# Synthesis\nAgent workflows have roles.",
+            hypothesis_markdown="# Hypothesis\nRole separation may help.",
+            evidence_summary="- Known evidence.",
             max_section_sources=0,
         )
         template = load_report_template_bundle(
@@ -928,6 +853,7 @@ class ReportSafetyTests(unittest.TestCase):
             config=ReportRuntimeConfig(
                 template="survey",
                 max_review_iterations=0,
+                max_section_tokens=777,
                 source_strategy="batch_refine",
                 source_batch_size=5,
             ),
@@ -943,7 +869,9 @@ class ReportSafetyTests(unittest.TestCase):
             prompt for label, prompt in client.prompts.items() if label.startswith("report-integrator-")
         ]
         self.assertTrue(integration_prompts)
-        self.assertTrue(all('"previous_draft": {' in prompt for prompt in integration_prompts))
+        self.assertTrue(all('"previous_draft":' in prompt for prompt in integration_prompts))
+        self.assertTrue(client.max_output_tokens_values)
+        self.assertTrue(all(value == 777 for value in client.max_output_tokens_values))
 
     def test_report_tool_gateway_exports_and_resolves_sources(self) -> None:
         paper = Paper(
@@ -953,19 +881,11 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="Known metadata.",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={},
             results={"metrics": {"accuracy": 0.75}},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="",
         )
         gateway = ReportToolGateway(context)
 
@@ -1004,19 +924,11 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={},
             results={"metrics": {"accuracy": 0.75}},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="",
         )
         template = load_report_template_bundle(
             report_mode="experiment",
@@ -1052,19 +964,11 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={},
             results={"metrics": {"pass@1": 0.75}},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="",
         )
         template = load_report_template_bundle(
             report_mode="experiment",
@@ -1095,19 +999,11 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={},
             results={"metrics": {"accuracy": 0.75}},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="",
         )
         template = load_report_template_bundle(
             report_mode="experiment",
@@ -1135,19 +1031,11 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="We audited twelve benchmark papers.",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={},
             results={"metrics": {"accuracy": 0.75}},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="",
         )
         template = load_report_template_bundle(
             report_mode="experiment",
@@ -1175,15 +1063,10 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={},
             results={
                 "metrics": {
                     "accuracy": 0.75,
@@ -1192,9 +1075,6 @@ class ReportSafetyTests(unittest.TestCase):
                     "eval_examples": 14.0,
                 }
             },
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="",
         )
         template = load_report_template_bundle(
             report_mode="experiment",
@@ -1227,19 +1107,10 @@ class ReportSafetyTests(unittest.TestCase):
             abstract="",
             url="https://example.com/paper-1",
         )
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            [paper],
+            topic='Agent Simulation',
             report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row()],
-            papers=[paper],
-            research_evidence_summary="",
         )
         context.metric_sources = [
             MetricSource(
@@ -1262,61 +1133,6 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(audit.metric_audit.unmatched_metrics, [])
         self.assertEqual(audit.metric_audit.unmatched_numbers, [])
 
-    def test_code_task_evidence_completes_an_existing_partial_section(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            run_dir = Path(tmp)
-            report_dir = run_dir / "08-report"
-            comparison_path = (
-                report_dir / "code_task_run" / "code_task" / "run" / "comparison.json"
-            )
-            comparison_path.parent.mkdir(parents=True)
-            (report_dir / "code_task_experiment.json").write_text(
-                json.dumps({"code_task_run_dir": "code_task_run"}),
-                encoding="utf-8",
-            )
-            comparison_path.write_text(
-                json.dumps(
-                    {
-                        "verdict": "improved",
-                        "reasons": ["improved `accuracy`"],
-                        "baseline": {
-                            "metrics": {"accuracy": 0.7, "feature_family_count": 1.0}
-                        },
-                        "patched": {
-                            "metrics": {"accuracy": 0.8, "feature_family_count": 2.0}
-                        },
-                        "metrics": [
-                            {
-                                "name": "accuracy",
-                                "baseline": 0.7,
-                                "patched": 0.8,
-                                "delta": 0.1,
-                                "interpretation": "improved",
-                            },
-                            {
-                                "name": "feature_family_count",
-                                "baseline": 1.0,
-                                "patched": 2.0,
-                                "delta": 1.0,
-                                "interpretation": "increased",
-                            },
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            context = Context(run_dir, "reliable agents")
-            partial = "## Code Task Evidence\n\nThe writer covered accuracy only.\n"
-            report = _ensure_code_task_evidence_section(
-                context,
-                {"template": CODE_TASK_PROJECT_TEMPLATE},
-                partial,
-            )
-
-        self.assertIn("### Verified Comparison Metrics", report)
-        self.assertIn("`feature_family_count`", report)
-        self.assertIn("| 2 | 1 | increased |", report)
 
     def test_model_written_references_are_replaced_with_known_papers(self) -> None:
         draft = (
@@ -1340,93 +1156,7 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertNotIn("@fake-paper", report)
         validate_citations(report, {"paper-1"})
 
-    def test_fallback_report_states_fixture_limitations(self) -> None:
-        ctx = Context(
-            Path("run"),
-            "Agent Simulation",
-            config={"max_papers": 1, "experiment_timeout_sec": 30},
-        )
-        paper = Paper(
-            id="fixture-001",
-            title="Placeholder Paper for Pipeline Testing",
-            authors=["SimpleAutoResearch"],
-            abstract="Fixture metadata.",
-            url="https://example.com/fixture-001",
-            source="fixture",
-        )
-        report = _append_references_section(
-            _build_report(
-                ctx,
-                goal="# Goal\nStudy agent simulation.",
-                problem="# Problem\nHow can agent simulation be studied?",
-                search_meta={
-                    "query": "Agent Simulation",
-                    "source": "fixture",
-                    "status": "fallback",
-                    "returned": 1,
-                },
-                synthesis="# Synthesis\nStage outputs can become later inputs.",
-                hypothesis="# Hypothesis\nA file-first pipeline is inspectable.",
-                plan={
-                    "template": "toy_text_classification",
-                    "dataset": "built_in_toy_spam",
-                    "baseline": "keyword_rules",
-                    "method": "bag_of_words_logistic_regression",
-                    "metrics": ["accuracy"],
-                },
-                results={
-                    "returncode": 0,
-                    "timed_out": False,
-                    "metrics": {"accuracy": 0.75},
-                    "command": ["python", "experiment.py"],
-                },
-                papers=[paper],
-            ),
-            [paper],
-        )
 
-        self.assertIn("## Literature Search", report)
-        self.assertIn("fixture metadata", report)
-        self.assertIn("| `accuracy` | 0.75 |", report)
-        self.assertIn("[@fixture-001]", report.split("## References", maxsplit=1)[0])
-        self.assertNotIn("Raw result metadata", report)
-        validate_citations(report, {"fixture-001"})
-
-    def test_code_task_fixture_fallback_discussion_uses_operational_evidence(self) -> None:
-        ctx = Context(Path("run"), "LLM-guided improvement", config={"max_papers": 1})
-        paper = Paper(
-            id="fixture-001",
-            title="Placeholder Paper for Pipeline Testing",
-            authors=["SimpleAutoResearch"],
-            abstract="Fixture metadata.",
-            url="https://example.com/fixture-001",
-            source="fixture",
-        )
-
-        report = _build_report(
-            ctx,
-            goal="# Goal\nImprove toy code.",
-            problem="# Problem\nCan the workflow patch a toy project?",
-            search_meta={"source": "fixture", "status": "offline_fixture", "returned": 1},
-            synthesis="# Synthesis\nA placeholder hypothesis about output accuracy.",
-            hypothesis="# Hypothesis\nMeasure placeholder effectiveness.",
-            plan={
-                "template": "llm_code_task_toy_spam",
-                "mode": "embedded_code_task",
-                "metrics": ["benchmark_passed", "changed_files"],
-            },
-            results={
-                "returncode": 0,
-                "timed_out": False,
-                "metrics": {"benchmark_passed": 1.0, "changed_files": 1.0},
-                "command": ["python", "experiment.py"],
-            },
-            papers=[paper],
-        )
-
-        self.assertIn("operational rather than literature-backed", report)
-        self.assertIn("changed 1 file(s)", report)
-        self.assertNotIn("placeholder effectiveness", report)
 
     def test_body_citation_ids_ignore_reference_list_only_citations(self) -> None:
         markdown = (
@@ -1481,19 +1211,10 @@ class ReportSafetyTests(unittest.TestCase):
                 url="https://example.com/2",
             ),
         ]
-        context = build_report_context(
-            Context(Path("run"), "Agent Simulation", config={}),
+        context = _report_fixture(
+            papers,
+            topic='Agent Simulation',
             report_mode="experiment",
-            goal="",
-            problem="",
-            search_meta={},
-            synthesis="",
-            hypothesis="",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row() for paper in papers],
-            papers=papers,
-            research_evidence_summary="",
         )
         memory = ReportMemory()
 
@@ -1509,177 +1230,12 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(audit.citation_audit.unused_references, ["paper-2"])
         self.assertEqual(audit.citation_audit.warnings, [])
 
-    def test_report_quality_records_metrics_and_runtime_limits(self) -> None:
-        paper = Paper(
-            id="paper-1",
-            title="Known Paper",
-            authors=[],
-            abstract="",
-            url="https://example.com/1",
-            source="fixture",
-        )
-        report_body = (
-            "# Draft\n\n"
-            "The run uses fixture metadata [@paper-1].\n\n"
-            "## Results\n\n"
-            "| Metric | Value |\n"
-            "|---|---:|\n"
-            "| `accuracy` | 0.75 |\n\n"
-            "## Limitations\n\n"
-            "The literature stage used fixture metadata and the experiment timed out."
-        )
-        report = _append_references_section(report_body, [paper])
 
-        quality = build_report_quality(
-            report,
-            report_body,
-            search_meta={"source": "fixture", "status": "fallback"},
-            results={"metrics": {"accuracy": 0.75}, "returncode": None, "timed_out": True},
-            papers=[paper],
-            cited_papers=[paper],
-        )
 
-        self.assertEqual(quality["status"], "passed")
-        self.assertEqual(quality["summary"]["metric_count"], 1)
-        self.assertEqual(quality["body_citation_ids"], ["paper-1"])
 
-    def test_report_bounds_reject_fixture_overclaims(self) -> None:
-        report = (
-            "# Draft\n\n"
-            "## Related Work\n\n"
-            "Prior research has established groundwork for practical solutions "
-            "in spam filtering [@fixture-001].\n\n"
-            "## Limitations\n\n"
-            "The run used fixture metadata."
-        )
 
-        errors = _report_bound_errors(
-            report,
-            search_meta={"source": "fixture", "status": "offline_fixture"},
-            plan={"template": "llm_code_task_toy_spam"},
-            report_mode="experiment",
-            results_present=True,
-        )
 
-        self.assertTrue(any("overclaims" in error for error in errors))
 
-    def test_report_bounds_reject_toy_code_task_overclaims(self) -> None:
-        report = (
-            "# Draft\n\n"
-            "## Results\n\n"
-            "The patch demonstrates performance improvements and the potential of "
-            "LLMs for enhancing spam detection beyond this benchmark. This is a "
-            "promising direction."
-        )
-
-        errors = _report_bound_errors(
-            report,
-            search_meta={"source": "openalex", "status": "ok"},
-            plan={"template": "llm_code_task_toy_spam"},
-            report_mode="experiment",
-            results_present=True,
-        )
-
-        self.assertTrue(any("code-task benchmark" in error for error in errors))
-
-    def test_report_bounds_accept_conservative_fixture_disclosure(self) -> None:
-        report = (
-            "# Draft\n\n"
-            "## Related Work\n\n"
-            "The only available citation is fixture metadata used to keep the "
-            "pipeline deterministic [@fixture-001].\n\n"
-            "## Results\n\n"
-            "The benchmark passed after one source-file patch."
-        )
-
-        self.assertEqual(
-            _report_bound_errors(
-                report,
-                search_meta={"source": "fixture", "status": "offline_fixture"},
-                plan={"template": "llm_code_task_toy_spam"},
-                report_mode="experiment",
-                results_present=True,
-            ),
-            [],
-        )
-
-    def test_research_only_fallback_does_not_imply_experiment_execution(self) -> None:
-        paper = Paper(
-            id="fixture-001",
-            title="Placeholder Paper for Pipeline Testing",
-            authors=["SimpleAutoResearch"],
-            abstract="Fixture metadata.",
-            url="https://example.com/fixture-001",
-            source="fixture",
-        )
-        ctx = Context(Path("run"), "Agent Simulation", config={"max_papers": 1})
-
-        report = _build_research_report(
-            ctx,
-            goal="# Goal\nStudy agent simulation.",
-            problem="# Problem\nWhat themes appear in agent simulation metadata?",
-            search_meta={"source": "fixture", "status": "offline_fixture", "returned": 1},
-            synthesis="# Synthesis\nThe retrieved metadata is a placeholder.",
-            hypothesis="# Hypothesis\nA later benchmark could test a concrete implementation.",
-            papers=[paper],
-        )
-
-        self.assertIn("## Draft Status", report)
-        self.assertIn("## Research Question", report)
-        self.assertIn("## Available Sources", report)
-        self.assertIn("## Evidence Handoff", report)
-        self.assertIn("## Boundaries And Next Steps", report)
-        self.assertIn("conservative fallback", report)
-        self.assertNotRegex(report, r"(?m)^## Method\s*$")
-        self.assertNotRegex(report, r"(?m)^## Experiments\s*$")
-        self.assertNotRegex(report, r"(?m)^## Results\s*$")
-        self.assertNotIn("experiment design, code generation, execution", report)
-        self.assertIn("No experiment was executed", report)
-        self.assertIn("should not be treated as a complete literature-backed review", report)
-        self.assertNotIn("Hint:", report)
-        self.assertNotIn("Use this paper as", report)
-        self.assertNotIn("Paper Brief", report)
-        self.assertNotIn("Additional synthesis detail", report)
-        self.assertNotIn("## Search Scope", report)
-        self.assertNotIn("## Evidence Summary", report)
-
-    def test_research_only_bounds_reject_prompt_residue(self) -> None:
-        report = (
-            "# Draft\n\n"
-            "## Method Families\n\n"
-            "Paper Brief [@paper-1]: Hint: Use this paper as an example.\n\n"
-            "## Evidence Summary\n\n"
-            "Additional synthesis detail is available in the stage artifacts."
-        )
-
-        errors = _report_bound_errors(
-            report,
-            search_meta={"source": "openalex", "status": "ok"},
-            plan={},
-            report_mode="research_only",
-            results_present=False,
-        )
-
-        self.assertTrue(any("pipeline residue" in error for error in errors))
-
-    def test_research_only_bounds_allow_academic_evidence_terms_in_prose(self) -> None:
-        report = (
-            "# Draft\n\n"
-            "## Method Families\n\n"
-            "Corrective methods can broaden search scope when initial retrieval "
-            "does not support an answer. The evidence summary should distinguish "
-            "source limitations from confirmed findings [@paper-1]."
-        )
-
-        errors = _report_bound_errors(
-            report,
-            search_meta={"source": "openalex", "status": "ok"},
-            plan={},
-            report_mode="research_only",
-            results_present=False,
-        )
-
-        self.assertFalse(any("pipeline residue" in error for error in errors))
 
     def test_academic_section_numbering_preserves_unnumbered_front_and_back_matter(self) -> None:
         rendered = apply_section_numbering(
@@ -1712,32 +1268,6 @@ Summary.
         self.assertIn("#### 2.1.1 Dense Retrieval", rendered)
         self.assertIn("## References", rendered)
 
-    def test_taxonomy_keeps_coverage_checklist_out_of_organization_axes(self) -> None:
-        taxonomy = _build_taxonomy(
-            topic="Example Topic",
-            coverage_facets=["method_taxonomy", "datasets_benchmarks_and_evaluation"],
-            selected_papers=[
-                {
-                    "citation_key": "P1",
-                    "title": "A Benchmark for Example Topic",
-                    "abstract": "Evaluation metrics and datasets.",
-                    "role": "evaluation",
-                },
-                {
-                    "citation_key": "P2",
-                    "title": "A Survey of Example Topic",
-                    "abstract": "A survey and taxonomy.",
-                    "role": "related_survey",
-                },
-            ],
-        )
-
-        self.assertEqual(
-            [row["label"] for row in taxonomy["coverage_facets"]],
-            ["Method Taxonomy", "Datasets Benchmarks And Evaluation"],
-        )
-        self.assertNotIn("Method Taxonomy", [row["label"] for row in taxonomy["facets"]])
-        self.assertNotIn("Datasets Benchmarks And Evaluation", [row["label"] for row in taxonomy["facets"]])
 
     def test_survey_outline_fallback_restores_configured_source_budget(self) -> None:
         papers = [
@@ -1750,19 +1280,13 @@ Summary.
             )
             for index in range(1, 13)
         ]
-        context = build_report_context(
-            Context(Path("run"), "Example Topic", config={}),
+        context = _report_fixture(
+            papers,
+            topic='Example Topic',
             report_mode="research_only",
-            goal="# Goal\nSynthesize the field.",
-            problem="# Problem\nWhat evidence is available?",
-            search_meta={},
-            synthesis="# Synthesis\nMethods and evaluation are both relevant.",
-            hypothesis="",
-            plan={},
-            results={},
-            paper_rows=[paper.to_row() for paper in papers],
-            papers=papers,
-            research_evidence_summary="",
+            goal_markdown="# Goal\nSynthesize the field.",
+            problem_markdown="# Problem\nWhat evidence is available?",
+            synthesis_markdown="# Synthesis\nMethods and evaluation are both relevant.",
             max_section_sources=0,
         ).model_copy(
             update={
@@ -1883,42 +1407,6 @@ Summary.
         self.assertEqual(requirements["figures"][0]["view"], "evaluation-landscape")
         self.assertEqual(visual_requirements(plan, sections[1]), {"tables": [], "figures": []})
 
-    def test_visual_coverage_audit_matches_captioned_table_and_figure(self) -> None:
-        visual_plan = {
-            "requested_table_count": 2,
-            "requested_figure_count": 1,
-            "tables": [
-                {
-                    "table_id": "taxonomy-comparison",
-                    "title": "Taxonomy and Representative Evidence",
-                    "section_id": "taxonomy",
-                    "suggested_columns": ["Facet", "Core idea", "Representative papers", "Evidence boundary"],
-                },
-                {
-                    "table_id": "evaluation-landscape",
-                    "title": "Evaluation Settings and Metrics",
-                    "section_id": "evaluation",
-                    "suggested_columns": ["Setting", "Task or dataset", "Metric", "Observed limitation"],
-                },
-            ],
-            "figures": [{"figure_id": "taxonomy-map", "title": "Survey Taxonomy Map"}],
-        }
-        report = """## Taxonomy
-
-**Table: Taxonomy and Representative Evidence**
-
-| Facet | Core idea | Representative papers | Evidence boundary |
-| --- | --- | --- | --- |
-| A | B | [@P1] | Limited scope |
-
-![Conceptual taxonomy map](figures/taxonomy-map.svg)
-"""
-        audit = _build_visual_coverage_audit(final_report=report, visual_plan=visual_plan)
-
-        self.assertEqual(audit["realized_table_count"], 1)
-        self.assertEqual(audit["realized_figure_count"], 1)
-        self.assertEqual(audit["missing_tables"][0]["table_id"], "evaluation-landscape")
-        self.assertEqual(audit["status"], "warning")
 
 
 if __name__ == "__main__":

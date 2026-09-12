@@ -40,6 +40,7 @@ class ResearchDesignRequest:
     execution_context: str = ""
     use_llm: bool = False
     llm_client: Any | None = None
+    selection_rationale: str = ""
 
     def __post_init__(self) -> None:
         if self.use_llm and self.llm_client is None:
@@ -162,7 +163,7 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
             diagnostics=("Synthesis handoff has no experiment contract.",),
         )
 
-    selection_rationale = ""
+    selection_rationale = request.selection_rationale
     generation_mode = "deterministic"
     if request.idea_id is not None or not request.use_llm or not synthesis.ideas:
         selected_idea, novelty_check = _select_idea(synthesis, request.idea_id)

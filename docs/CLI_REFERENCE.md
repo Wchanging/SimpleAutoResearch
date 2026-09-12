@@ -6,11 +6,15 @@ This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
 
 For ordinary V2.8 use, `simple-ar research-session` is the only formal user
-entrypoint for the bounded research-to-report flow. `research-session-continue`
-and `research-report` continue the same session; `research-brief`,
-`research-experiment`, and `research-code-task` are segmented development or
-diagnostic interfaces. `simple-ar run/resume` is retained only as a frozen
-compatibility surface for the old eight-stage artifacts.
+entrypoint for the bounded research-to-report flow. `research-report` can
+continue a canonical session created with `--no-report`; the current
+`research-session-continue` uses the canonical retry boundary for v2 sessions
+only. Legacy v1 sessions remain read-only; use `research-session-migrate` to
+import evidence into a new canonical successor rather than execute the old workflow.
+`research-brief` is a segmented development or diagnostic interface.
+The old `research-experiment`, `research-code-task` and `run/resume` execution commands are retired;
+`status` and artifact tools still read historical outputs. Old stage options are
+not silently translated to the canonical application.
 
 - Installation and walkthroughs: [Usage And Configuration](USAGE.md)
 - Workflow concepts and artifacts: [Workflows And Artifacts](WORKFLOWS.md)
@@ -20,14 +24,11 @@ compatibility surface for the old eight-stage artifacts.
 
 | Command | Purpose |
 | --- | --- |
-| `simple-ar research-session` | **V2.8 formal mainline**: run the bounded research-to-report flow in one session. |
-| `simple-ar research-session-continue` | Append one explicit recovery experiment to a failed research session. |
+| `simple-ar research-session` | **V2.8 formal mainline**: run the bounded literature-only or research-to-report flow in one session. |
+| `simple-ar research-session-continue` | Retry one failed canonical explicit experiment. |
+| `simple-ar research-session-migrate` | Create a canonical successor from a read-only `session_manifest.v1`. |
 | `simple-ar research-report` | Generate and audit a report from a completed research session. |
 | `simple-ar research-brief` | Segmented/development interface for an evidence-backed research brief. |
-| `simple-ar research-experiment` | Segmented/development interface for one declared experiment handoff. |
-| `simple-ar research-code-task` | Pass a research handoff through the existing project-style Code-Task backend. |
-| `simple-ar run` | Frozen old eight-stage compatibility entrypoint. |
-| `simple-ar resume` | Continue an old compatibility pipeline run. |
 | `simple-ar status` | Print status for a research run or code-task run. |
 | `simple-ar tools ...` | Export tool schemas, call run-local tools, or serve read-only tools over MCP stdio. |
 | `simple-ar inspect` | Build a local artifact index for a run. |
@@ -37,76 +38,6 @@ compatibility surface for the old eight-stage artifacts.
 
 ## Research Pipeline
 
-### `simple-ar run`
-
-**Purpose**: start an old eight-stage compatibility run. Ordinary V2.8 users
-should prefer `simple-ar research-session`.
-
-This command preserves legacy configs, stage directories, and historical artifact
-readers. It receives no new research policy and will be removed or reduced to a
-read-only importer after the real consumers migrate under V2.8 Phase 3B.
-
-**Usage**:
-
-```bash
-uv run simple-ar run --topic "agent simulation" --to-stage report
-uv run simple-ar run --config examples/research_report/configs/research_report.toml
-```
-
-**Options**:
-
-| Option | Type | Description |
-| --- | --- | --- |
-| `--config PATH` | path | TOML config for a repeatable run. CLI flags override config values. |
-| `--topic TEXT` | string | Research topic. Required unless `[run].topic` is set in config. |
-| `--output-root DIR` | path | Directory where timestamped run directories are created. |
-| `--from-stage NAME` | stage | First stage to execute. Default: `plan`. |
-| `--to-stage NAME` | stage | Last stage to execute. Default: `report`. |
-| `--model NAME` | string | LLM model override. |
-| `--llm-workers N` | int | Parallel LLM workers for supported stages. |
-| `--max-papers N` | int | Literature metadata limit. |
-| `--search-query TEXT` | string | Override the generated search query. |
-| `--experiment-template NAME` | string | Experiment template, such as `code_task_project`. |
-| `--experiment-timeout N` | int | Subprocess timeout for experiment execution. |
-| `--report-mode MODE` | enum | `auto`, `research_only`, or `experiment`. |
-| `--report-reviewer MODE` | choice | `llm` or `disabled`. `disabled` skips the report reviewer/revision loop but retains post-draft audits. |
-| `--no-llm` | flag | Use deterministic fallback text where possible. |
-| `--offline-search` | flag | Skip live literature providers. |
-| `--allow-fixture-fallback` | flag | Allow fixture metadata after live/cache failures. |
-| `--strict-search` | flag | Fail instead of using cache/fixture fallback. |
-| `--no-retrieval` | flag | Disable local artifact retrieval context. |
-| `--retrieval-top-k N` | int | Number of local artifact chunks to retrieve. |
-| `--quiet` | flag | Suppress progress logs. |
-| `--overwrite-stage-artifacts` | flag | Disable default archive protection for rerunning `06-code` / `07-run` artifacts. Use only when old code/run outputs are disposable. |
-
-**Code-task pipeline options**:
-
-| Option | Type | Description |
-| --- | --- | --- |
-| `--code-task-config PATH` | path | Code-task TOML for `--experiment-template code_task_project`. |
-| `--code-root DIR` | path | Source project prepared under the embedded code-task workspace. |
-| `--task-file PATH` | path | Task file. Optional for embedded runs; if omitted, stage `05-design` generates one. |
-| `--benchmark-command TEXT` | string | Benchmark command run before and after edits. |
-| `--code-task-name TEXT` | string | Display name for the embedded code-task experiment. |
-| `--code-task-max-file-bytes N` | int | Max copied file size for embedded copy/sparse modes. |
-| `--code-task-workspace-mode MODE` | enum | `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty` for greenfield code-task runs. `auto` prefers git worktree and falls back to copy. |
-| `--code-task-workspace-reuse-source-venv` | flag | Use a detected source `.venv` Python. |
-| `--code-task-workspace-setup-hook TEXT` | string | Record a setup command for future managed environments. |
-| `--code-task-env-mode MODE` | enum | `current` or `external`. |
-| `--code-task-python PATH` | path | Python executable for external env mode. |
-| `--primary-metric NAME` | string | Primary benchmark metric for comparison. |
-| `--metric-direction NAME=DIRECTION` | repeatable | Metric direction: `higher`, `lower`, `resource`, or `ignore`. |
-
-**Outputs**:
-
-- `runs/<run-id>/manifest.json`
-- `runs/<run-id>/config_snapshot.json`
-- numbered stage directories such as `01-plan/`, `02-search/`, `08-report/`
-
-**Notes**:
-
-Use a TOML config for real runs with many options. See the
-[Configuration Reference](CONFIG_REFERENCE.md#complete-pipeline-config).
 
 ### `simple-ar research-brief` (segmented/development interface)
 
@@ -144,57 +75,27 @@ The run prints and persists the selected mode. LLM mode requires the normal
 `.env` provider settings; a missing key or failed model response is reported
 as a failed attempt rather than replaced by deterministic prose.
 
-### `simple-ar research-experiment` (segmented/development interface)
+### Retired `simple-ar research-experiment`
 
-**Purpose**: execute one reviewed `research_brief.v1` or `synthesis_result.v1`
-handoff and analyze the observed result through the existing execution and
-result-analysis capabilities.
-
-**Usage** (the command must be the final option):
-
-```bash
-uv run simple-ar research-experiment \
-  --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
-  --cwd examples/research_brief/fixtures \
-  --primary-metric accuracy \
-  --metric-direction accuracy=higher \
-  --command python -c "print('accuracy: 0.75')"
-```
-
-The input handoff is checked before execution; a synthesis that is not ready
-or has no experiment contract is rejected. The session records the source
-handoff, `results.json`, captured stdout/stderr, guard and diagnosis artifacts,
-and `analysis.json` under separate `experiment-001/` and `analysis-001/`
-attempts. A failed execution is still analyzed and retained as evidence, but
-the application does not retry or repair it implicitly.
-
-| Option | Type | Description |
-| --- | --- | --- |
-| `--topic TEXT` | string | Topic label for the new session. |
-| `--synthesis-file PATH` | path | Persisted `research_brief.v1` or `synthesis_result.v1` input. |
-| `--model NAME` | string | Optional model; enables LLM-backed result analysis. |
-| `--output-root DIR` | path | Parent directory for the timestamped session. |
-| `--cwd DIR` | path | Working directory passed to the execution backend. |
-| `--timeout-sec N` | int | Local execution timeout. |
-| `--primary-metric NAME` | string | Primary metric expected in parsed output. |
-| `--metric NAME` | repeatable | Additional required metric names. |
-| `--metric-direction NAME=DIRECTION` | repeatable | Direction such as `accuracy=higher` or `loss=lower`. |
-| `--command ...` | command | Command passed to the local backend; place it last. |
+The separate design→experiment→analysis creator is retired. Use `research-session`
+for research tasks. The old `--synthesis-file` argument is not silently translated.
+Domain capabilities remain composable at library level; historical artifacts remain readable.
 
 ### `simple-ar research-session` (V2.8 formal mainline)
 
-**Purpose**: run the V2.8 formal end-to-end composition
-`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`
-in one `full_research` session. By default the experiment command is supplied
-explicitly. With `--code-task-config`, the experiment attempt instead delegates
-implementation to the existing project-style Code-Task backend; this is still
-one bounded experiment, not autonomous iteration.
+**Purpose**: run the V2.8 formal composition in one session. If an execution
+command or `--code-task-config` is supplied, it continues through the bounded
+research-to-experiment path
+`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`.
+If neither is supplied, it is a literature-only session that ends at an
+evidence-backed summary, or continues to a research-only report when a model
+is supplied. The latter never creates an execution request or process.
 
-When a model is available, the mainline continues through `report` and
-`report_audit`; `--no-report` is for debugging or prefix-only inspection. Use
-`research-session-continue` or `research-report` for recovery/report continuation
-within the same session rather than switching to another research mainline.
+When a model is available, the same application continues through `report` and
+`report_audit`; `--no-report` is for debugging or prefix-only inspection. A
+later `research-report` call can add that deliverable to a completed canonical
+prefix without rerunning its research evidence or experiment. Use
+`research-session-continue` only for an explicit recovery/revision decision.
 
 **Usage** (the command must be the final option):
 
@@ -221,43 +122,35 @@ uv run simple-ar research-session \
 ```
 
 The TOML remains the source of Code-Task project, benchmark, workspace,
-baseline, and execution settings. The generated code-task artifacts are kept
-under the session's `experiment-001` attempt and are normalized into the same
-canonical result consumed by Analysis; no second code generator is introduced.
+baseline, and execution settings. The generated code-task artifacts stay under
+the preparation/implementation attempts of the session and are normalized
+into the same canonical result consumed by Analysis; no second code generator
+is introduced.
 
-The embedded bridge merges a strict serial dependency chain into one bounded
-batch (at most three work items and four target files). If that batch requires
-the `large` budget, `[execute].allow_large_edits = true` must be set explicitly
-in the Code-Task TOML after reviewing the proposal; otherwise the session
-preserves its artifacts and stops at the approval boundary.
+The canonical application reuses the established Code-Task implementation and
+validation capabilities inside its isolated preparation workspace. If the
+proposal requires the `large` budget, `[execute].allow_large_edits = true` must
+be set explicitly in the Code-Task TOML after reviewing the proposal;
+otherwise the session preserves its artifacts and stops at the approval
+boundary.
 
 The optional `--cache-dir` is forwarded to document ingest. Valid cached
 full-text files are reused on later sessions; the default remains session-local
 for backward compatibility.
 
 It preserves the same attempt-local artifacts as the individual entries and
-adds no implicit retry or repair policy. Use `research-brief` when execution
-is not yet ready, or `research-experiment` when a persisted direction should
-be executed in a separate session.
-When the experiment and analysis prefix completes, its result status is
-`ready_for_report` because the session remains open for an explicit report
-continuation. Use the narrow `simple-ar research-report` command for that
-handoff; it delegates to the existing Python report adapter rather than adding
-another report engine or scheduler.
-For a single explicit invocation, add `--model NAME --with-report` before the
-final `--command`; this runs the same report continuation after the prefix
-passes. `--report-reviewer` and `--max-review-iterations` control only that
-report continuation.
-For an agent-generated continuation, the same application module exposes
-`run_research_report_agent_session()`. It reuses the existing Writer/Reviewer
-implementation, persists its compact trace as an input to the report attempt,
-and then uses the same report/audit capabilities; it does not add a second
-writer or an implicit retry loop.
-For a `research-session` result, `build_research_session_report_inputs()` and
-`run_research_session_report_agent()` provide the corresponding small adapter:
-they derive report inputs from the session's persisted synthesis, paper
-metadata, execution, and analysis evidence, while leaving template, budget,
-and client selection explicit.
+adds no implicit retry or repair policy. Use `research-brief` for literature-only preparation; experiments stay in the
+canonical research session.
+For a session created with `--no-report`, use the narrow
+`simple-ar research-report` command later to request the report. It reopens the
+canonical application only for the missing report actions and reuses the
+persisted synthesis, measurements, and analysis. For a single explicit
+invocation, add `--model NAME --with-report` before the final `--command`;
+`--report-reviewer` and `--max-review-iterations` are stored in the same
+application configuration.
+Writer execution and checkpoints belong to `report/writing.py` in the canonical
+application. Historical report-input projections are read-only; the former
+standalone report-session execution APIs have been retired.
 
 Omitting `--model` keeps planning, reading, synthesis, design selection, and
 analysis deterministic. When `--model NAME` is supplied, the same shared
@@ -273,10 +166,11 @@ status command:
 uv run simple-ar status runs/research-session/<session>
 ```
 
-When the directory contains `session_manifest.json`, status prints the session
-state, current attempt, bounded budget, attempt counts, and last decision. It
-does not read or rewrite capability outputs. Existing pipeline and Code-Task
-directories with `manifest.json` keep their original status behavior.
+When the directory contains the canonical `session_manifest.json` (schema
+`session_manifest.v2`), status prints the application state, current attempt,
+bounded budget, attempt counts, and last decision. A legacy
+`session_manifest.v1` remains read-only compatibility input. Existing pipeline
+and Code-Task directories keep their original status behavior.
 
 When an open session has no active attempt, status may also print
 `Handoff: ready_for_report` or `Continuation: explicit ...`. These are persisted
@@ -285,10 +179,13 @@ caller must invoke the next operation explicitly.
 
 ### `simple-ar research-session-continue`
 
-**Purpose**: run one caller-supplied recovery experiment in an existing session
-whose latest analysis points back to the experiment boundary. Literature,
-research design, and the failed parent attempt are reused; no search or
-automatic repair policy is added.
+**Purpose**: run one caller-supplied recovery experiment in an existing
+session. For a canonical `session_manifest.v2`, it reuses literature, design,
+and the failed candidate attempt, then runs deterministic analysis again. The
+canonical boundary is deliberately limited to a simple explicit experiment;
+paired runs, prepared data, and CodeTask failures use their own bounded paths.
+Legacy `session_manifest.v1` execution is retired. Migration imports evidence,
+not an executable continuation of the old stage plan.
 
 **Usage** (the command must be the final option):
 
@@ -301,13 +198,34 @@ uv run simple-ar research-session-continue \
   --command python -c "print('accuracy: 0.90')"
 ```
 
-The command appends `experiment-002` and `analysis-002` with
-`experiment-001` as parent and refuses a second recovery branch in the same
-session. It reuses the parent's result schema unless metric options override
-it. A successful result is ready for `research-report`; a failed result is
-persisted and causes a non-zero exit so the caller cannot mistake it for a
-successful continuation. The original attempt and all literature artifacts
-remain unchanged.
+For a canonical session, the corrected command must replace a technical
+`failed`/`timed_out` candidate; a scientific negative result is retained as
+evidence and is not silently retried. The new attempt records the previous
+experiment as its parent, preserves the original attempt directory, and does
+not rerun search or design. A report-requesting session returns with the next
+report action; otherwise the repaired result is analyzed and the session can
+complete. Historical sessions are not modified by this command.
+
+### `simple-ar research-session-migrate`
+
+**Purpose**: create a new canonical session from an old `session_manifest.v1`
+without rewriting the old directory. The importer does not guess historical
+budget remaining or translate unknown artifacts into current state. Copy only
+small, explicitly named state artifacts when their files are available.
+
+**Usage**:
+
+```bash
+uv run simple-ar research-session-migrate \
+  --source-root runs/legacy/<session> \
+  --destination-root runs/research-session/<successor> \
+  --artifact search \
+  --requested-output report
+```
+
+The command prints the new session path, `parent_session`, migration artifact,
+imported/skipped counts, and `Historical budget: unknown_not_imported`. The
+destination must be empty and outside the legacy session root.
 
 ### `simple-ar research-report`
 
@@ -325,89 +243,19 @@ uv run simple-ar research-report \
 ```
 
 The report and audit are appended as new attempts under the same session. A
-second invocation with the same session is rejected when those attempt IDs
-already exist, so it cannot silently replace the previous report. Use
-`--reviewer disabled` only when an explicit writer-only comparison is wanted;
-the final audit still runs.
+second invocation with an existing canonical report is idempotent: it reads
+the completed state and does not rerun the Writer. Use `--reviewer disabled`
+only when an explicit writer-only comparison is wanted; the final audit still
+runs. Legacy sessions remain readable but cannot be resumed by a second report
+executor. An invalid canonical session fails explicitly instead of falling back
+to another workflow.
 
-### `simple-ar research-code-task`
+### Retired segmented CodeTask command
 
-**Purpose**: run a persisted research direction through the existing isolated
-project-style Code-Task backend, then expose canonical execution and result
-analysis artifacts. This is the first executable research-to-code consumer;
-it does not replace `code-task` or the eight-stage pipeline.
+`research-code-task` and its separate session executor have been retired.
+Use `research-session --code-task-config` for research tasks or standalone
+`code-task` for coding tasks. Historical segmented results remain readable.
 
-**Usage**:
-
-```bash
-uv run simple-ar research-code-task \
-  --topic "reliable agents" \
-  --synthesis-file runs/research-brief/<session>/attempts/synthesize-001/synthesis_result.json \
-  --code-task-config examples/code_task_medium_review/configs/code_task.toml \
-  --output-root runs/research-code-task
-```
-
-The command requires `[execute].use_llm = true` in the supplied Code-Task TOML
-and creates a new session, so an earlier brief or run is not overwritten. It
-runs one explicitly selected direction. Multi-candidate comparison is deferred
-until the single-direction path is validated on a real prepared project.
-Pass `--with-report` to continue a passed Code-Task session through the existing
-Writer/Reviewer, report assembly, and audit path. This is an explicit
-continuation, not a second report engine.
-
-| Option | Meaning |
-| --- | --- |
-| `--topic TEXT` | Research topic used for session identity and analysis context. |
-| `--synthesis-file PATH` | Persisted `research_brief.v1` or `synthesis_result.v1` handoff. |
-| `--code-task-config PATH` | Existing project-style Code-Task TOML. |
-| `--output-root DIR` | Parent directory for the new timestamped session. |
-| `--model NAME` | Optional single-model override for the existing backend. |
-| `--timeout-sec N` | Optional override for `[execute].timeout_sec`. |
-| `--baseline-policy POLICY` | Optional override: `auto`, `run`, `skip`, `provided`, or `none`. |
-| `--baseline-metrics-file PATH` | Baseline metrics file for the `provided` policy. |
-| `--with-report` | Append the standard report and audit to the passed session. |
-
-This entry currently covers existing project-style Code-Task only. It does not
-create a managed environment, allocate GPU resources, or claim arbitrary
-greenfield generation. `--with-report` requires `--model` and uses the standard
-experiment template.
-
-### `simple-ar resume`
-
-**Purpose**: continue an existing research pipeline run.
-
-**Usage**:
-
-```bash
-uv run simple-ar resume runs/<run-id>
-uv run simple-ar resume runs/<run-id> --from-stage report --report-mode research_only
-uv run simple-ar resume runs/<run-id> --from-stage report --to-stage report --report-output-mode variant --report-output-label survey-v2
-```
-
-**Options**:
-
-`resume` accepts `RUN_DIR` plus most `run` options as overrides, including
-`--config`, stage range, LLM/search/report options, report output policy, and
-embedded code-task options.
-
-Common report output options:
-
-| Option | Type | Description |
-|---|---|---|
-| `--report-output-mode` | choice | `overwrite`, `archive`, or `variant`. `variant` writes `08-report/variants/<label>/` without replacing the current main report. |
-| `--report-reviewer` | choice | `llm` or `disabled`. A resume override for the report reviewer/revision loop. |
-| `--report-output-label` | string | Optional folder label for report archive/variant outputs. |
-| `--overwrite-stage-artifacts` | flag | Disable default archive protection for rerunning `06-code` / `07-run` artifacts. |
-
-**Outputs**:
-
-- updates the existing run directory
-- appends stage execution state to `manifest.json`
-
-**Notes**:
-
-When `config_snapshot.json` exists, omitted values are preserved from the
-original run.
 
 ### `simple-ar status`
 
@@ -628,6 +476,11 @@ intervention.
 
 ### High-Level Orchestration
 
+For existing projects, ordinary `execute` uses one patch plan. Work-plan/batch
+creation is opt-in through `--to-step work-plan` / `--to-step batch` or an
+existing work plan, including interactive mode. These are not mandatory stages
+for every modification.
+
 #### `simple-ar code-task init`
 
 **Purpose**: create a code-task run, prepare the editable workspace, and build
@@ -660,7 +513,6 @@ uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmar
 | `--workspace-include GLOB` | repeatable | Include pattern for `sparse_copy`. |
 | `--workspace-exclude GLOB` | repeatable | Additional exclude pattern for `sparse_copy`. |
 | `--workspace-reuse-source-venv` | flag | Reuse a detected source `.venv` Python as external execution policy. |
-| `--workspace-setup-hook TEXT` | string | Record a setup command; it is not executed during init. |
 | `--max-file-bytes N` | int | Maximum copied file size in copy/sparse modes. Use `0` to disable. |
 
 **Outputs**:
@@ -703,7 +555,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 | `--timeout N` | int | Benchmark timeout. |
 | `--baseline-policy MODE` | enum | Existing-project baseline handling: `auto`, `run`, `skip`, `provided`, or `none`. Use `skip`/`none` for expensive baselines, or `provided` with a metrics file. |
 | `--baseline-metrics-file PATH` | path | JSON or metric-line file used when `--baseline-policy provided`. |
-| `--planning-mode MODE` | enum | Greenfield planning mode: `tool_agent` decomposes planning with reviewer-directed bounded revision; `compact` uses the older single-call architecture planner. |
+| `--planning-mode MODE` | enum | Greenfield planning: `tool_agent` uses staged planning and bounded review; `compact` uses a single architecture call before retries. |
 | `--yes` | flag | Auto-approve inline review gates in normal execute mode; with `--interactive`, auto-continue primitive prompts. Use only after you are comfortable approving the reviewed plan/proposal. |
 | `--interactive` | flag | Debug mode: confirm each primitive step instead of running continuously to the next review gate. |
 | `--no-review-inline` | flag | Disable inline review prompts and stop at review gates instead. |
@@ -771,8 +623,8 @@ advice-only and never installs packages automatically.
 
 Greenfield planning defaults to `tool_agent`, which writes intermediate
 requirements, architecture, interface, file-plan, and planning-review artifacts
-under `code_task/meta/planning/`. Use `--planning-mode compact` only when
-debugging the older single-call planner.
+under `code_task/meta/planning/`. Use `--planning-mode compact` for a lower-call
+planning path; subsequent file generation, review, and execution are shared.
 
 If greenfield review fails with generic recoverable findings, bounded repair
 rounds first ask for structured local actions such as unique old/new replacements

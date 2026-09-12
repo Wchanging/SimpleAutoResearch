@@ -5,8 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from simple_ar.app.usage import summarize_usage
-from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
+from simple_ar.integrations.usage import record_usage
+from simple_ar.core.artifacts import read_json, read_text, write_json
+from simple_ar.core.budget import BudgetLedger
 from simple_ar.code_task.editing.attempts import (
     LoadedCodeTaskBatch,
     create_code_task_batch,
@@ -24,7 +25,7 @@ from simple_ar.code_task.analysis.context import (
     load_latest_code_task_context_pack,
 )
 from simple_ar.code_task.editing.patching import PatchValidationError, apply_patch_edits, propose_patch_edits
-from simple_ar.code_task.editing.planning import generate_patch_plan
+from simple_ar.code_task.editing.planning import generate_patch_plan, record_plan_decision
 from simple_ar.code_task.generation.greenfield import generate_greenfield_code_task
 from simple_ar.code_task.generation.task_contract import (
     build_greenfield_task_contract,
@@ -32,7 +33,6 @@ from simple_ar.code_task.generation.task_contract import (
     load_task_contract,
     save_task_contract,
 )
-from simple_ar.code_task.generation.prompt_context import contract_prompt_context
 from simple_ar.code_task.generation.generated_project_repair import (
     repair_generated_project_from_review,
     repair_generated_project_from_run_failure,
@@ -63,7 +63,7 @@ from simple_ar.code_task.runtime.state import (
 from simple_ar.code_task.execution.summary import write_code_task_summary
 from simple_ar.code_task.execution.validation import validate_code_task
 from simple_ar.code_task.editing.work_plan import generate_code_task_work_plan
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
+from simple_ar.integrations.llm import LLMClient, LLMError
 
 
 MessageCallback = Callable[[str], None]
@@ -147,6 +147,7 @@ def execute_code_task(
     *,
     to_step: str = "run",
     dry_run: bool = False,
+    llm_client: LLMClient | None = None,
     model: str | None = None,
     planner_model: str | None = None,
     writer_model: str | None = None,
@@ -170,9 +171,6 @@ def execute_code_task(
     planning_review_rounds: int = 2,
     llm_retry_attempts: int = 1,
     repair_rounds: int = 0,
-    repair_context: str = "full",
-    use_repair_memory: bool = True,
-    contract_context: str = "full",
     planning_snapshot_from: str | Path | None = None,
     review_gate: str = "strict",
     budget_profile: str | None = None,
@@ -190,6 +188,9 @@ def execute_code_task(
     implementation_agent_args: tuple[str, ...] = (),
     implementation_agent_timeout_sec: int = 600,
     message_callback: MessageCallback | None = None,
+    budget_ledger: BudgetLedger | None = None,
+    session_id: str = "",
+    attempt_id: str = "",
 ) -> CodeTaskExecuteResult:
     """Run a conservative state-aware code-task workflow.
 
@@ -245,14 +246,6 @@ def execute_code_task(
             and repair before stopping or explicitly falling back.
         repair_rounds: Maximum repair proposals execute may create after a
             validation or benchmark failure. Proposals are never auto-applied.
-        repair_context: Repair-prompt ablation mode. ``full`` includes
-            structured diagnostic bundle fields; ``raw_logs_only`` omits them
-            from LLM repair context while leaving run artifacts intact.
-        use_repair_memory: Whether repair prompts should include previous
-            repair memory. Disable only for controlled ablations.
-        contract_context: Contract-prompt ablation mode. ``full`` propagates
-            the task contract; ``minimal`` keeps artifacts but passes a smaller
-            task-level view to model prompts.
         planning_snapshot_from: Optional source run containing an accepted
             greenfield plan. Only planning metadata is imported after contract
             hash verification; generated code and mutable memory are excluded.
@@ -301,8 +294,10 @@ def execute_code_task(
             root,
             paths,
             steps,
+            budget_ledger=budget_ledger, session_id=session_id, attempt_id=attempt_id,
             to_step=to_step,
             dry_run=dry_run,
+            llm_client=llm_client,
             model=model,
             planner_model=planner_model,
             writer_model=writer_model,
@@ -324,9 +319,6 @@ def execute_code_task(
             planning_review_rounds=planning_review_rounds,
             llm_retry_attempts=llm_retry_attempts,
             repair_rounds=repair_rounds,
-            repair_context=repair_context,
-            use_repair_memory=use_repair_memory,
-            contract_context=contract_context,
             planning_snapshot_from=planning_snapshot_from,
             review_gate=review_gate,
             implementation_provider=implementation_provider,
@@ -420,6 +412,7 @@ def execute_code_task(
                 python_executable=python_executable,
                 stream_output=stream_benchmark_output,
                 output_callback=_benchmark_output_callback(message_callback),
+                budget_ledger=budget_ledger, session_id=session_id, attempt_id=attempt_id,
             )
             _record(steps, "baseline", "done", f"status {result.status}")
             _memory_event(
@@ -451,7 +444,8 @@ def execute_code_task(
     if _stop_after("baseline", to_step):
         return _result(paths, steps, "stop_point", "Stopped after baseline as requested.")
 
-    if _should_run("work-plan", to_step):
+    # Batch decomposition is explicit; ordinary tasks need one approved patch plan.
+    if to_step in {"work-plan", "batch"}:
         if _work_plan_exists(paths):
             _record(steps, "work-plan", "skipped", "work_plan.json already exists")
         elif dry_run:
@@ -463,6 +457,7 @@ def execute_code_task(
             try:
                 result = generate_code_task_work_plan(
                     root,
+                    llm_client=llm_client,
                     model=planner_model or model,
                     use_llm=use_llm,
                     allow_llm_fallback=allow_planning_fallback,
@@ -504,6 +499,8 @@ def execute_code_task(
         latest_batch = _latest_batch(manifest)
         if latest_batch:
             _record(steps, "batch", "skipped", f"latest batch is {latest_batch}")
+        elif not _work_plan_exists(paths):
+            _record(steps, "batch", "skipped", "single-task path uses the patch plan directly")
         elif dry_run:
             return _dry_result(paths, steps, "batch", "create attempt/batch state for first work item")
         elif _batch_cap_exceeded(root, max_batches):
@@ -530,6 +527,7 @@ def execute_code_task(
             try:
                 result = generate_patch_plan(
                     root,
+                    llm_client=llm_client,
                     model=planner_model or model,
                     use_llm=use_llm,
                     allow_llm_fallback=allow_planning_fallback,
@@ -602,6 +600,7 @@ def execute_code_task(
             _emit(message_callback, "Generating controlled edit proposal.")
             result = propose_patch_edits(
                 root,
+                llm_client=llm_client,
                 model=editor_model or model,
                 use_llm=use_llm,
                 force=proposal_exists,
@@ -724,6 +723,7 @@ def execute_code_task(
             review = review_code_task_changes(
                 root,
                 phase="post_apply",
+                llm_client=llm_client,
                 model=reviewer_model or model,
                 use_llm=use_llm,
                 max_source_chars_per_file=max_source_chars_per_file,
@@ -799,6 +799,7 @@ def execute_code_task(
                 repair_rounds=repair_rounds,
                 max_batches=max_batches,
                 cost_cap_usd=cost_cap_usd,
+                llm_client=llm_client,
                 model=model,
                 repair_model=repair_model,
                 use_llm=use_llm,
@@ -826,6 +827,7 @@ def execute_code_task(
             python_executable=python_executable,
             stream_output=stream_benchmark_output,
             output_callback=_benchmark_output_callback(message_callback),
+            budget_ledger=budget_ledger, session_id=session_id, attempt_id=attempt_id,
         )
         _record(steps, "run", "done", f"status {result.status}")
         _memory_event(
@@ -856,6 +858,7 @@ def execute_code_task(
                 repair_rounds=repair_rounds,
                 max_batches=max_batches,
                 cost_cap_usd=cost_cap_usd,
+                llm_client=llm_client,
                 model=model,
                 repair_model=repair_model,
                 use_llm=use_llm,
@@ -870,6 +873,7 @@ def execute_code_task(
             review = review_code_task_changes(
                 root,
                 phase="post_run",
+                llm_client=llm_client,
                 model=reviewer_model or model,
                 use_llm=use_llm,
                 max_source_chars_per_file=max_source_chars_per_file,
@@ -895,6 +899,40 @@ def execute_code_task(
     return _result(paths, steps, "completed", "Review code_task/summary.md.")
 
 
+def implement_code_task(run_dir: Path, *, approval_note: str, **options: Any) -> CodeTaskExecuteResult:
+    """Run the existing preparation gates through validation, never a benchmark.
+
+    The caller supplies explicit isolated-workspace approval and owns measurement.
+    Rejected plans remain rejected; retries reuse durable plans and proposals.
+    """
+    if not approval_note.strip():
+        raise ValueError("CodeTask implementation requires an explicit approval note.")
+    options = {**options, "baseline_policy": "skip"}
+    planned = execute_code_task(run_dir, to_step="plan", **options)
+    if planned.stop_reason == "approval_required":
+        record_plan_decision(run_dir, decision="approve", note=approval_note, reviewer="research-application")
+    elif planned.stop_reason != "stop_point":
+        return planned
+    proposed = execute_code_task(run_dir, to_step="propose-edits", **options)
+    if proposed.stop_reason not in {"proposal_review_required", "stop_point"}:
+        return proposed
+    try:
+        return execute_code_task(run_dir, to_step="validate", apply_proposed_edits=True, **options)
+    except PermissionError as exc:
+        if "budget" not in str(exc).lower():
+            raise
+        # A larger proposal is intentionally a review boundary, not an
+        # implementation crash.  Keep the durable proposal available so a
+        # caller can resume with an explicit budget approval.
+        return CodeTaskExecuteResult(
+            run_dir=Path(run_dir),
+            steps=proposed.steps,
+            stop_reason="budget_approval_required",
+            next_action=str(exc),
+            summary_path=code_task_paths(run_dir).task_dir / "summary.md",
+        )
+
+
 def _execute_greenfield_code_task(
     root: Path,
     paths: object,
@@ -902,6 +940,7 @@ def _execute_greenfield_code_task(
     *,
     to_step: str,
     dry_run: bool,
+    llm_client: LLMClient | None = None,
     model: str | None,
     planner_model: str | None,
     writer_model: str | None,
@@ -923,9 +962,6 @@ def _execute_greenfield_code_task(
     planning_review_rounds: int,
     llm_retry_attempts: int,
     repair_rounds: int,
-    repair_context: str,
-    use_repair_memory: bool,
-    contract_context: str,
     planning_snapshot_from: str | Path | None,
     review_gate: str,
     implementation_provider: str,
@@ -936,6 +972,9 @@ def _execute_greenfield_code_task(
     implementation_agent_args: tuple[str, ...],
     implementation_agent_timeout_sec: int,
     message_callback: MessageCallback | None,
+    budget_ledger: BudgetLedger | None,
+    session_id: str,
+    attempt_id: str,
 ) -> CodeTaskExecuteResult:
     """Execute the unified greenfield code-task path.
 
@@ -988,6 +1027,7 @@ def _execute_greenfield_code_task(
             _emit(message_callback, "Planning and generating greenfield project.")
             result = generate_greenfield_code_task(
                 root,
+                llm_client=llm_client,
                 model=model,
                 planner_model=planner_model or model,
                 writer_model=writer_model or model,
@@ -1007,7 +1047,6 @@ def _execute_greenfield_code_task(
                 implementation_agent_binary=implementation_agent_binary,
                 implementation_agent_args=implementation_agent_args,
                 implementation_agent_timeout_sec=implementation_agent_timeout_sec,
-                contract_context=contract_context,
                 planning_snapshot_from=planning_snapshot_from,
                 message_callback=message_callback,
             )
@@ -1036,6 +1075,7 @@ def _execute_greenfield_code_task(
                         root,
                         paths,
                         steps,
+                        llm_client=llm_client,
                         model=model,
                         reviewer_model=reviewer_model or model,
                         repair_model=repair_model or model,
@@ -1043,8 +1083,6 @@ def _execute_greenfield_code_task(
                         repair_rounds=repair_rounds,
                         max_files=max_files,
                         max_generated_lines=max_generated_lines,
-                        use_repair_memory=use_repair_memory,
-                        contract_context=contract_context,
                         message_callback=message_callback,
                         summary="Repaired generated project after review failure and passed deterministic rereview.",
                     ):
@@ -1077,7 +1115,6 @@ def _execute_greenfield_code_task(
                     paths,
                     max_files=max_files,
                     max_generated_lines=max_generated_lines,
-                    contract_context=contract_context,
                 )
                 _record(steps, "review", "done", f"refreshed status {review.get('status', 'unknown')}")
             else:
@@ -1088,6 +1125,7 @@ def _execute_greenfield_code_task(
                         root,
                         paths,
                         steps,
+                        llm_client=llm_client,
                         model=model,
                         reviewer_model=reviewer_model or model,
                         repair_model=repair_model or model,
@@ -1095,8 +1133,6 @@ def _execute_greenfield_code_task(
                         repair_rounds=repair_rounds,
                         max_files=max_files,
                         max_generated_lines=max_generated_lines,
-                        use_repair_memory=use_repair_memory,
-                        contract_context=contract_context,
                         message_callback=message_callback,
                         summary="Repaired existing generated project after review failure and passed deterministic rereview.",
                     ):
@@ -1148,44 +1184,46 @@ def _execute_greenfield_code_task(
     if _should_run("run", to_step):
         if dry_run:
             return _dry_result(paths, steps, "run", "run generated project benchmark")
-        _emit(message_callback, "Running generated project benchmark.")
-        result = run_code_task_benchmark(
-            root,
-            timeout_sec=timeout_sec,
-            # Static validation just ran in this execute path unless the user
-            # stopped earlier, so do not duplicate it inside the runner.
-            skip_validation=True,
-            run_label="patched",
-            env_mode=env_mode,
-            python_executable=python_executable,
-            stream_output=stream_benchmark_output,
-            output_callback=_benchmark_output_callback(message_callback),
-        )
-        _record(steps, "run", "done", f"status {result.status}")
-        _memory_event(
-            root,
-            "generated_run",
-            f"Generated project benchmark finished with status {result.status}.",
-            status=result.status,
-            artifacts=[
-                _relative_to_run(root, result.report_path),
-                _relative_to_run(root, result.metrics_path),
-            ],
-            metadata={"metrics": result.metrics},
-        )
-        while result.status != "passed":
+        after_repair = False
+        while True:
+            _emit(message_callback, "Running generated project benchmark after repair." if after_repair else "Running generated project benchmark.")
+            result = run_code_task_benchmark(
+                root,
+                timeout_sec=timeout_sec,
+                # Static validation just ran in this execute path unless the user
+                # stopped earlier, so do not duplicate it inside the runner.
+                skip_validation=True,
+                run_label="patched",
+                env_mode=env_mode,
+                python_executable=python_executable,
+                stream_output=stream_benchmark_output,
+                output_callback=_benchmark_output_callback(message_callback),
+                budget_ledger=budget_ledger, session_id=session_id, attempt_id=attempt_id,
+            )
+            _record(steps, "run", "done", f"status {result.status}")
+            _memory_event(
+                root,
+                "generated_run_repair" if after_repair else "generated_run",
+                f"Generated project benchmark{' after repair' if after_repair else ''} finished with status {result.status}.",
+                status=result.status,
+                artifacts=[
+                    _relative_to_run(root, result.report_path),
+                    _relative_to_run(root, result.metrics_path),
+                    *(["code_task/meta/run_repair.json"] if after_repair else []),
+                ],
+                metadata={"metrics": result.metrics},
+            )
+            if result.status == "passed":
+                break
             repaired = _attempt_greenfield_run_repair(
                 root,
                 paths,
                 steps,
                 repair_rounds=repair_rounds,
+                llm_client=llm_client,
                 model=model,
                 repair_model=repair_model or model,
                 use_llm=use_llm,
-                max_generated_lines=max_generated_lines,
-                repair_context=repair_context,
-                use_repair_memory=use_repair_memory,
-                contract_context=contract_context,
                 message_callback=message_callback,
             )
             if not repaired:
@@ -1195,7 +1233,6 @@ def _execute_greenfield_code_task(
                 paths,
                 max_files=max_files,
                 max_generated_lines=max_generated_lines,
-                contract_context=contract_context,
             )
             _record(steps, "review", "done", f"post-run-repair status {review.get('status', 'unknown')}")
             if isinstance(review, dict) and review.get("status") == "failed":
@@ -1203,6 +1240,7 @@ def _execute_greenfield_code_task(
                     root,
                     paths,
                     steps,
+                    llm_client=llm_client,
                     model=model,
                     reviewer_model=reviewer_model or model,
                     repair_model=repair_model or model,
@@ -1210,8 +1248,6 @@ def _execute_greenfield_code_task(
                     repair_rounds=repair_rounds,
                     max_files=max_files,
                     max_generated_lines=max_generated_lines,
-                    use_repair_memory=use_repair_memory,
-                    contract_context=contract_context,
                     message_callback=message_callback,
                     summary="Repaired generated project after run repair introduced review-blocking contract issues.",
                 ):
@@ -1236,30 +1272,7 @@ def _execute_greenfield_code_task(
                     "Review code_task/meta/validation_report.json after generated project repair.",
                 )
             write_code_task_summary(root)
-            _emit(message_callback, "Run repair patched generated project; rerunning benchmark.")
-            result = run_code_task_benchmark(
-                root,
-                timeout_sec=timeout_sec,
-                skip_validation=True,
-                run_label="patched",
-                env_mode=env_mode,
-                python_executable=python_executable,
-                stream_output=stream_benchmark_output,
-                output_callback=_benchmark_output_callback(message_callback),
-            )
-            _record(steps, "run", "done", f"post-repair status {result.status}")
-            _memory_event(
-                root,
-                "generated_run_repair",
-                f"Generated project benchmark after repair finished with status {result.status}.",
-                status=result.status,
-                artifacts=[
-                    _relative_to_run(root, result.report_path),
-                    _relative_to_run(root, result.metrics_path),
-                    "code_task/meta/run_repair.json",
-                ],
-                metadata={"metrics": result.metrics},
-            )
+            after_repair = True
         write_code_task_summary(root)
     if _stop_after("run", to_step):
         write_code_task_summary(root)
@@ -1279,6 +1292,7 @@ def _handle_failure(
     repair_rounds: int,
     max_batches: int | None,
     cost_cap_usd: float | None,
+    llm_client: LLMClient | None = None,
     model: str | None,
     repair_model: str | None,
     use_llm: bool,
@@ -1331,6 +1345,7 @@ def _handle_failure(
     _emit(message_callback, "Generating bounded repair proposal.")
     repair = propose_repair_edits(
         run_dir,
+        llm_client=llm_client,
         model=repair_model or model,
         use_llm=use_llm,
         max_files=max_files,
@@ -1503,23 +1518,17 @@ def _review_report_exists(paths: object, phase: str) -> bool:
     return (paths.meta_dir / name).is_file()
 
 
-def _greenfield_review_repair_available(run_dir: Path, repair_rounds: int) -> bool:
+def _greenfield_repair_available(run_dir: Path, repair_rounds: int, *, phase: str) -> bool:
     if repair_rounds <= 0:
         return False
     manifest = load_code_task_manifest(run_dir)
-    repair = manifest.get("repair", {})
-    if not isinstance(repair, dict):
-        return True
-    try:
-        used = int(repair.get("review_repair_count", 0) or 0)
-    except (TypeError, ValueError):
-        used = 0
-    return used < repair_rounds
+    return _repair_count(manifest, field=f"{phase}_repair_count") < repair_rounds
 
 
 def _greenfield_repair_client(
     meta_dir: Path,
     *,
+    llm_client: LLMClient | None = None,
     model: str | None,
     use_llm: bool,
     message_callback: MessageCallback | None,
@@ -1527,36 +1536,21 @@ def _greenfield_repair_client(
     if not use_llm:
         return None
     try:
-        return LLMClient.from_env(
+        return LLMClient.for_task(
+            client=llm_client,
             model=model,
-            usage_callback=lambda usage: _record_greenfield_repair_usage(
+            usage_callback=lambda usage: record_usage(
                 meta_dir,
                 usage,
+                stage="code_task.greenfield_review_repair",
                 message_callback=message_callback,
             ),
         )
     except LLMError as exc:
-        _emit(message_callback, f"LLM unavailable for review repair; using deterministic repair only. {exc}")
+        _emit(message_callback, f"LLM unavailable for review repair; retaining the failed review and original files. {exc}")
         return None
 
 
-def _record_greenfield_repair_usage(
-    meta_dir: Path,
-    usage: LLMUsage,
-    *,
-    message_callback: MessageCallback | None,
-) -> None:
-    usage_path = meta_dir / "llm_usage.jsonl"
-    row = usage.to_row()
-    row["stage"] = "code_task.greenfield_review_repair"
-    append_jsonl(usage_path, row)
-    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
-    _emit(
-        message_callback,
-        f"LLM usage {row.get('label', '')}: "
-        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
-        f"{row['total_tokens']} tokens ({row['source']}).",
-    )
 
 
 def _attempt_greenfield_review_repair(
@@ -1564,6 +1558,7 @@ def _attempt_greenfield_review_repair(
     paths: object,
     steps: list[ExecuteStepRecord],
     *,
+    llm_client: LLMClient | None = None,
     model: str | None,
     reviewer_model: str | None,
     repair_model: str | None,
@@ -1571,12 +1566,10 @@ def _attempt_greenfield_review_repair(
     repair_rounds: int,
     max_files: int,
     max_generated_lines: int,
-    use_repair_memory: bool,
-    contract_context: str,
     message_callback: MessageCallback | None,
     summary: str,
 ) -> bool:
-    if not _greenfield_review_repair_available(run_dir, repair_rounds):
+    if not _greenfield_repair_available(run_dir, repair_rounds, phase="review"):
         _record(steps, "repair", "skipped", "review repair budget exhausted or disabled")
         return False
     _emit(message_callback, "Generated project review failed; attempting bounded review repair.")
@@ -1584,13 +1577,10 @@ def _attempt_greenfield_review_repair(
     repair = _repair_greenfield_review_failure(
         run_dir,
         paths,
+        llm_client=llm_client,
         model=repair_model or model,
         use_llm=use_llm,
         message_callback=message_callback,
-        max_files=max_files,
-        max_generated_lines=max_generated_lines,
-        use_repair_memory=use_repair_memory,
-        contract_context=contract_context,
     )
     _record(steps, "repair", "done", f"review repair {repair.get('status', 'unknown')}")
     made_changes = bool(repair.get("changed_files") or repair.get("regenerated_files"))
@@ -1605,12 +1595,10 @@ def _attempt_greenfield_review_repair(
         paths,
         max_files=max_files,
         max_generated_lines=max_generated_lines,
-        contract_context=contract_context,
     )
     _record(steps, "review", "done", f"status {review.get('status', 'unknown')}")
     if review.get("status") == "failed":
         return False
-    _mark_greenfield_review_repair_recovered(run_dir, paths, review)
     _memory_event(
         run_dir,
         "greenfield_review_repair",
@@ -1624,31 +1612,6 @@ def _attempt_greenfield_review_repair(
     return True
 
 
-def _mark_greenfield_review_repair_recovered(run_dir: Path, paths: object, review: Mapping[str, object]) -> None:
-    final_status = str(review.get("status", "unknown"))
-    repair_path = paths.meta_dir / "review_repair.json"
-    if repair_path.is_file():
-        repair = read_json(repair_path)
-        if isinstance(repair, dict):
-            repair["final_review_status"] = final_status
-            repair["recovered_by_followup_review"] = final_status != "failed"
-            if final_status != "failed" and repair.get("status") != "patched":
-                repair["effective_status"] = "recovered"
-            write_json(repair_path, repair)
-
-    manifest = load_code_task_manifest(run_dir)
-    repair_section = manifest_section(manifest, "repair")
-    repair_section["review_after_repair_status"] = final_status
-    if final_status != "failed" and repair_section.get("status") != "patched":
-        repair_section["effective_status"] = "recovered"
-    manifest["repair"] = repair_section
-
-    implementation = manifest_section(manifest, "implementation")
-    implementation["review_after_repair_status"] = final_status
-    if final_status != "failed" and implementation.get("review_repair_status") != "patched":
-        implementation["review_repair_effective_status"] = "recovered"
-    manifest["implementation"] = implementation
-    save_code_task_manifest(run_dir, manifest)
 
 
 def _attempt_greenfield_run_repair(
@@ -1657,19 +1620,16 @@ def _attempt_greenfield_run_repair(
     steps: list[ExecuteStepRecord],
     *,
     repair_rounds: int,
+    llm_client: LLMClient | None = None,
     model: str | None,
     repair_model: str | None,
     use_llm: bool,
-    max_generated_lines: int,
-    repair_context: str,
-    use_repair_memory: bool,
-    contract_context: str,
     message_callback: MessageCallback | None,
 ) -> bool:
     _emit(message_callback, "Analyzing generated project benchmark failure.")
     analysis = analyze_code_task_failure(run_dir)
     _record(steps, "analyze-failure", "done", f"source {analysis.source}; status {analysis.status}")
-    if not _greenfield_run_repair_available(run_dir, repair_rounds):
+    if not _greenfield_repair_available(run_dir, repair_rounds, phase="run"):
         _record(steps, "repair", "skipped", "run repair budget exhausted or disabled")
         write_code_task_summary(run_dir)
         return False
@@ -1688,11 +1648,10 @@ def _attempt_greenfield_run_repair(
     )
     previous_context = (
         task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
-        if use_repair_memory
-        else ""
     )
     client = _greenfield_repair_client(
         paths.meta_dir,
+        llm_client=llm_client,
         model=repair_model or model,
         use_llm=use_llm,
         message_callback=message_callback,
@@ -1713,26 +1672,16 @@ def _attempt_greenfield_run_repair(
         code_artifacts=_read_optional_dict(paths.meta_dir / "code_artifacts.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
         result_schema=_greenfield_result_schema_from_manifest(load_code_task_manifest(run_dir)),
-        contract=contract_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
+        contract=_greenfield_contract_for_review(paths),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         previous_repair_context=previous_context,
-        repair_context_mode=repair_context,
         client=client,
     )
     _record(steps, "repair", "done", f"run repair {repair.get('status', 'unknown')}")
-    if repair.get("changed_files") or repair.get("regenerated_files"):
-        code_artifacts_path = paths.meta_dir / "code_artifacts.json"
-        if code_artifacts_path.is_file():
-            code_artifacts = read_json(code_artifacts_path)
-            if isinstance(code_artifacts, dict):
-                _apply_greenfield_review_repair_metadata(code_artifacts, repair)
-                _refresh_greenfield_code_artifacts(
-                    code_artifacts,
-                    project_dir=paths.workspace_dir / "generated_project",
-                    max_generated_lines=max_generated_lines,
-                )
-                write_json(code_artifacts_path, code_artifacts)
-    _update_greenfield_run_repair_manifest(run_dir, repair=repair)
+    _update_generated_repair_artifacts(
+        paths.meta_dir, paths.workspace_dir / "generated_project", repair,
+    )
+    repair_section = _record_greenfield_repair_result(run_dir, phase="run", repair=repair)
     write_code_task_summary(run_dir)
     changed_files = _greenfield_repair_changed_files(repair)
     record_repair_memory(
@@ -1749,11 +1698,11 @@ def _attempt_greenfield_run_repair(
             "changed_files": changed_files,
             "stderr_signature": _failure_signature(runtime_output_text or stderr_text),
             "repair_status": repair.get("status", "unknown"),
-            "run_repair_count": _greenfield_run_repair_count(load_code_task_manifest(run_dir)),
+            "run_repair_count": repair_section["run_repair_count"],
         },
         key=(
             "greenfield-run-repair:"
-            f"{_greenfield_run_repair_count(load_code_task_manifest(run_dir))}:"
+            f"{repair_section['run_repair_count']}:"
             f"{_failure_signature(runtime_output_text or stderr_text)[:40]}"
         ),
     )
@@ -1777,13 +1726,10 @@ def _repair_greenfield_review_failure(
     run_dir: Path,
     paths: object,
     *,
+    llm_client: LLMClient | None = None,
     model: str | None,
     use_llm: bool,
     message_callback: MessageCallback | None,
-    max_files: int,
-    max_generated_lines: int,
-    use_repair_memory: bool,
-    contract_context: str,
 ) -> dict[str, Any]:
     review_path = paths.meta_dir / "review_report.json"
     review = read_json(review_path) if review_path.is_file() else {}
@@ -1793,11 +1739,10 @@ def _repair_greenfield_review_failure(
     code_artifacts = _read_optional_dict(paths.meta_dir / "code_artifacts.json")
     previous_context = (
         task_memory_context(run_dir, max_events=14, max_findings=8, max_repairs=8)
-        if use_repair_memory
-        else ""
     )
     client = _greenfield_repair_client(
         paths.meta_dir,
+        llm_client=llm_client,
         model=model,
         use_llm=use_llm,
         message_callback=message_callback,
@@ -1809,41 +1754,15 @@ def _repair_greenfield_review_failure(
         code_artifacts=code_artifacts,
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
         result_schema=_greenfield_result_schema_from_manifest(manifest),
-        contract=contract_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
+        contract=_greenfield_contract_for_review(paths),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         previous_repair_context=previous_context,
         client=client,
     )
-    manifest = load_code_task_manifest(run_dir)
-    repair_section = manifest_section(manifest, "repair")
-    previous_count = int(repair_section.get("review_repair_count", 0) or 0)
-    repair_section.update(
-        {
-            "status": repair.get("status", "unknown"),
-            "review_repair_count": previous_count + 1,
-            "latest_review_repair": "code_task/meta/review_repair.json",
-            "latest_review_repair_at": utcnow_iso(),
-            "latest_review_repair_changed_files": repair.get("changed_files", []),
-        }
+    repair_section = _record_greenfield_repair_result(run_dir, phase="review", repair=repair)
+    _update_generated_repair_artifacts(
+        paths.meta_dir, paths.workspace_dir / "generated_project", repair,
     )
-    manifest["repair"] = repair_section
-    implementation = manifest_section(manifest, "implementation")
-    implementation["review_repair_status"] = repair.get("status", "unknown")
-    implementation["review_repair_changed_files"] = repair.get("changed_files", [])
-    manifest["implementation"] = implementation
-    save_code_task_manifest(run_dir, manifest)
-    if repair.get("changed_files") or repair.get("regenerated_files"):
-        code_artifacts_path = paths.meta_dir / "code_artifacts.json"
-        if code_artifacts_path.is_file():
-            code_artifacts = read_json(code_artifacts_path)
-            if isinstance(code_artifacts, dict):
-                _apply_greenfield_review_repair_metadata(code_artifacts, repair)
-                _refresh_greenfield_code_artifacts(
-                    code_artifacts,
-                    project_dir=paths.workspace_dir / "generated_project",
-                    max_generated_lines=max_generated_lines,
-                )
-                write_json(code_artifacts_path, code_artifacts)
     changed_files = _greenfield_repair_changed_files(repair)
     record_repair_memory(
         run_dir,
@@ -1868,7 +1787,6 @@ def _rerun_greenfield_review(
     *,
     max_files: int,
     max_generated_lines: int,
-    contract_context: str = "full",
 ) -> dict[str, Any]:
     manifest = load_code_task_manifest(run_dir)
     code_artifacts = _read_optional_dict(paths.meta_dir / "code_artifacts.json")
@@ -1877,7 +1795,7 @@ def _rerun_greenfield_review(
         code_artifacts=code_artifacts,
         result_schema=_greenfield_result_schema_from_manifest(manifest),
         resource_plan=_greenfield_resource_plan(paths, max_files=max_files, max_generated_lines=max_generated_lines),
-        contract=contract_prompt_context(_greenfield_contract_for_review(paths), mode=contract_context),
+        contract=_greenfield_contract_for_review(paths),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         implementation_memory=_read_optional_dict(paths.task_dir / "memory" / "implementation_memory.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
@@ -1974,39 +1892,24 @@ def _review_finding_blocks_runtime(finding: Mapping[str, Any]) -> bool:
     return any(marker in text for marker in GREENFIELD_RUNTIME_REVIEW_BLOCKERS)
 
 
-def _greenfield_run_repair_available(run_dir: Path, repair_rounds: int) -> bool:
-    if repair_rounds <= 0:
-        return False
-    manifest = load_code_task_manifest(run_dir)
-    repair = manifest.get("repair", {})
-    if not isinstance(repair, dict):
-        return True
-    try:
-        used = int(repair.get("run_repair_count", 0) or 0)
-    except (TypeError, ValueError):
-        used = 0
-    return used < repair_rounds
 
 
-def _update_greenfield_run_repair_manifest(run_dir: Path, *, repair: dict[str, Any]) -> None:
+def _record_greenfield_repair_result(run_dir: Path, *, phase: str, repair: dict[str, Any]) -> dict[str, Any]:
     manifest = load_code_task_manifest(run_dir)
     repair_section = manifest_section(manifest, "repair")
-    previous_count = int(repair_section.get("run_repair_count", 0) or 0)
+    previous_count = _repair_count(manifest, field=f"{phase}_repair_count")
     repair_section.update(
         {
             "status": repair.get("status", "unknown"),
-            "run_repair_count": previous_count + 1,
-            "latest_run_repair": "code_task/meta/run_repair.json",
-            "latest_run_repair_at": utcnow_iso(),
-            "latest_run_repair_changed_files": repair.get("changed_files", []),
+            f"{phase}_repair_count": previous_count + 1,
+            f"latest_{phase}_repair": f"code_task/meta/{phase}_repair.json",
+            f"latest_{phase}_repair_at": utcnow_iso(),
+            f"latest_{phase}_repair_changed_files": repair.get("changed_files", []),
         }
     )
     manifest["repair"] = repair_section
-    implementation = manifest_section(manifest, "implementation")
-    implementation["run_repair_status"] = repair.get("status", "unknown")
-    implementation["run_repair_changed_files"] = repair.get("changed_files", [])
-    manifest["implementation"] = implementation
     save_code_task_manifest(run_dir, manifest)
+    return repair_section
 
 
 def _greenfield_result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -2075,90 +1978,41 @@ def _positive_int(value: object, default: int) -> int:
     return number if number > 0 else default
 
 
-def _refresh_greenfield_code_artifacts(
-    code_artifacts: dict[str, Any],
-    *,
-    project_dir: Path,
-    max_generated_lines: int,
+
+
+
+
+
+
+def _update_generated_repair_artifacts(
+    meta_dir: Path, project_dir: Path, repair: dict[str, Any],
 ) -> None:
-    generated = code_artifacts.get("generated_files")
-    rows = [row for row in generated if isinstance(row, dict)] if isinstance(generated, list) else []
-    filtered_rows: list[dict[str, Any]] = []
-    total_lines = 0
-    for row in rows:
-        path = str(row.get("path") or "").replace("\\", "/").strip()
-        if not path or _is_non_deliverable_generated_path(path):
-            continue
-        target = project_dir / path
-        if not target.is_file():
-            continue
-        line_count = max(1, len(target.read_text(encoding="utf-8", errors="replace").splitlines()))
-        row["line_count"] = line_count
-        total_lines += line_count
-        filtered_rows.append(row)
-    code_artifacts["generated_files"] = filtered_rows
-    code_artifacts["total_lines"] = min(total_lines, max_generated_lines + 1)
-
-
-def _apply_greenfield_review_repair_metadata(code_artifacts: dict[str, Any], repair: dict[str, Any]) -> None:
-    regenerated = repair.get("regenerated_files")
-    changed_files = {
-        str(path).replace("\\", "/").strip()
-        for path in repair.get("changed_files", [])
-        if str(path).strip()
-    }
-    if not isinstance(regenerated, list):
-        regenerated = []
-    by_path = {
-        str(row.get("path") or "").replace("\\", "/").strip(): row
-        for row in regenerated
-        if isinstance(row, dict) and row.get("path")
-    }
-    rows = code_artifacts.get("generated_files")
-    if not isinstance(rows, list):
+    """Project explicit repair records and actual files into the generated inventory."""
+    if not (repair.get("changed_files") or repair.get("regenerated_files")):
         return
-    known_paths = set()
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        path = str(row.get("path") or "").replace("\\", "/").strip()
-        known_paths.add(path)
-        replacement = by_path.get(path)
-        if replacement:
-            row.update(
-                {
-                    "mode": replacement.get("mode", "llm_review_repair"),
-                    "line_count": replacement.get("line_count", row.get("line_count", 0)),
-                    "summary": replacement.get("summary", row.get("summary", "")),
-                    "public_api": replacement.get("public_api", row.get("public_api", [])),
-                }
-            )
-        elif path in changed_files and row.get("mode") == "fallback":
-            row.update(
-                {
-                    "mode": "deterministic_review_repair",
-                    "summary": "Repaired by greenfield review repair.",
-                }
-            )
-    for path, replacement in by_path.items():
-        if path in known_paths:
-            continue
-        rows.append(dict(replacement))
-
-
-def _is_non_deliverable_generated_path(value: str) -> bool:
-    normalized = value.replace("\\", "/").strip().lstrip("/")
-    if not normalized:
-        return True
-    parts = normalized.split("/")
-    lowered = normalized.lower()
-    if "__pycache__" in parts or any(part.startswith(".") and part != ".env.example" for part in parts):
-        return True
-    if lowered.endswith((".pyc", ".pyo", ".log", ".tmp")):
-        return True
-    if parts[-1] in {"agent_result.json", "ingestion.json", "review.md"}:
-        return True
-    return False
+    artifact_path = meta_dir / "code_artifacts.json"
+    if not artifact_path.is_file():
+        return
+    artifacts = read_json(artifact_path)
+    rows = {
+        row["path"].replace("\\", "/"): dict(row)
+        for row in artifacts["generated_files"]
+    }
+    for replacement in repair.get("regenerated_files", []):
+        path = replacement["path"].replace("\\", "/")
+        row = rows.setdefault(path, {"path": path})
+        for key in ("mode", "summary", "public_api"):
+            if key in replacement:
+                row[key] = replacement[key]
+    generated = []
+    for path, row in rows.items():
+        target = project_dir / path
+        if target.is_file():
+            row["line_count"] = len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+            generated.append(row)
+    artifacts["generated_files"] = generated
+    artifacts["total_lines"] = sum(row["line_count"] for row in generated)
+    write_json(artifact_path, artifacts)
 
 
 def _read_optional_dict(path: Path) -> dict[str, Any]:
@@ -2416,24 +2270,12 @@ def _greenfield_repair_attempt_summary(repair: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def _greenfield_run_repair_count(manifest: dict[str, object]) -> int:
-    repair = manifest.get("repair", {})
-    if not isinstance(repair, dict):
-        return 0
-    try:
-        return int(repair.get("run_repair_count", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _repair_count(manifest: dict[str, object]) -> int:
-    repair = manifest.get("repair", {})
-    if not isinstance(repair, dict):
-        return 0
-    try:
-        return int(repair.get("repair_count", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+def _repair_count(manifest: dict[str, Any], *, field: str = "repair_count") -> int:
+    """Missing history starts at zero; corrupt history must not grant retries."""
+    value = manifest.get("repair", {}).get(field, 0)
+    if type(value) is not int or value < 0:
+        raise ValueError(f"Invalid persisted repair counter: repair.{field}={value!r}")
+    return value
 
 
 def _emit(callback: MessageCallback | None, message: str) -> None:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json
+from simple_ar.core.artifacts import read_json, read_text, write_json
 from simple_ar.code_task.editing.scope import (
     allowed_patterns_from_manifest,
     editable_paths,
@@ -25,8 +25,8 @@ from simple_ar.code_task.runtime.state import (
 )
 from simple_ar.code_task.execution.summary import write_code_task_summary
 from simple_ar.code_task.memory import task_memory_context
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
-from simple_ar.app.usage import summarize_usage
+from simple_ar.integrations.llm import LLMClient
+from simple_ar.integrations.usage import record_usage
 
 
 CODE_TASK_REPAIR_SYSTEM = (
@@ -37,6 +37,25 @@ CODE_TASK_REPAIR_SYSTEM = (
 )
 
 MessageCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class RepairEvidence:
+    """Observed failure supplied by the owner of an external measurement.
+
+    This is input evidence, not a replacement CodeTask benchmark record.
+    Scientific regressions with a successful process are not repair failures.
+    """
+
+    source: str
+    execution_report: dict[str, Any]
+    failure_analysis: str
+
+    def __post_init__(self) -> None:
+        if not self.source.strip() or not self.failure_analysis.strip():
+            raise ValueError("Repair evidence requires a source and failure details.")
+        if self.execution_report["execution_status"] not in {"failed", "timed_out"}:
+            raise ValueError("Repair requires a failed execution, not a valid low-scoring result.")
 
 
 @dataclass(frozen=True)
@@ -64,10 +83,12 @@ def propose_repair_edits(
     run_dir: Path,
     *,
     model: str | None = None,
+    llm_client: LLMClient | None = None,
     use_llm: bool = True,
     max_files: int = 8,
     max_source_chars_per_file: int = 4000,
     message_callback: MessageCallback | None = None,
+    failure_evidence: RepairEvidence | None = None,
 ) -> RepairProposalResult:
     """Propose a bounded repair edit set from the latest failed run.
 
@@ -82,26 +103,33 @@ def propose_repair_edits(
         max_files: Maximum source files included as repair context.
         max_source_chars_per_file: Per-file source snippet budget.
         message_callback: Optional progress callback.
+        failure_evidence: Explicit external failure; skips legacy run discovery.
 
     Returns:
         Repair proposal metadata.
     """
     manifest = load_code_task_manifest(run_dir)
     paths = code_task_paths(run_dir)
-    artifacts = _latest_run_artifacts(paths, manifest)
-    analysis_path = artifacts["failure_analysis"]
-    if not analysis_path.exists():
-        analysis = analyze_code_task_failure(run_dir)
-        if analysis.status == "no_failure":
-            raise RuntimeError("Latest benchmark passed; repair proposal is not needed.")
-        manifest = load_code_task_manifest(run_dir)
+    if failure_evidence is None:
         artifacts = _latest_run_artifacts(paths, manifest)
         analysis_path = artifacts["failure_analysis"]
-    failure_analysis = read_text(analysis_path)
-    execution_report = _read_optional_json(artifacts.get("execution_report"))
-    validation_report = _read_optional_json(artifacts.get("validation_report"))
-    if execution_report.get("status") == "passed" and not _validation_failed(validation_report):
-        raise RuntimeError("Latest benchmark passed; repair proposal is not needed.")
+        if not analysis_path.exists():
+            analysis = analyze_code_task_failure(run_dir)
+            if analysis.status == "no_failure":
+                raise RuntimeError("Latest benchmark passed; repair proposal is not needed.")
+            manifest = load_code_task_manifest(run_dir)
+            artifacts = _latest_run_artifacts(paths, manifest)
+            analysis_path = artifacts["failure_analysis"]
+        failure_analysis = read_text(analysis_path)
+        execution_report = _read_optional_json(artifacts.get("execution_report"))
+        validation_report = _read_optional_json(artifacts.get("validation_report"))
+        if execution_report.get("status") == "passed" and not _validation_failed(validation_report):
+            raise RuntimeError("Latest benchmark passed; repair proposal is not needed.")
+        source_analysis = analysis_path.relative_to(paths.run_dir).as_posix()
+    else:
+        failure_analysis = failure_evidence.failure_analysis
+        execution_report = failure_evidence.execution_report
+        validation_report = {}  # No second validation outcome is invented.
 
     task_text = _read_optional_text(paths.task_dir / "task.md")
     patch_plan = _read_optional_text(paths.task_dir / "patch_plan.md")
@@ -142,40 +170,44 @@ def propose_repair_edits(
     repair_dir = _next_repair_dir(paths.repairs_dir)
     repair_dir.mkdir(parents=True, exist_ok=False)
     proposal_path = repair_dir / "proposed_edits.json"
+    if failure_evidence is not None:
+        evidence_path = repair_dir / "failure_evidence.json"
+        write_json(evidence_path, {
+            "source": failure_evidence.source, "execution_report": execution_report,
+            "failure_analysis": failure_analysis,
+        })
+        source_analysis = evidence_path.relative_to(paths.run_dir).as_posix()
 
     mode = "offline"
-    proposal: dict[str, Any] | None = None
     if use_llm:
-        try:
-            _emit(message_callback, "Calling LLM for bounded repair proposal.")
-            client = LLMClient.from_env(
-                model=model,
-                usage_callback=lambda usage: _record_repair_usage(
-                    paths.meta_dir,
-                    usage,
-                    message_callback=message_callback,
-                ),
-            )
-            proposal = client.ask_json(
-                CODE_TASK_REPAIR_SYSTEM,
-                _repair_prompt(
-                    task_text=task_text,
-                    patch_plan=patch_plan,
-                    patch_diff=patch_diff,
-                    memory_context=memory_context,
-                    failure_analysis=failure_analysis,
-                    execution_report=execution_report,
-                    validation_report=validation_report,
-                    snippets=snippets,
-                    read_only_context=read_only_context,
-                ),
-                label="code-task-repair",
-            )
-            mode = "llm"
-        except LLMError as exc:
-            _emit(message_callback, f"LLM repair proposal failed; writing offline empty proposal. {exc}")
-
-    if proposal is None:
+        _emit(message_callback, "Calling LLM for bounded repair proposal.")
+        client = LLMClient.for_task(
+            client=llm_client,
+            model=model,
+            usage_callback=lambda usage: record_usage(
+                paths.meta_dir,
+                usage,
+                stage="code_task.repair",
+                message_callback=message_callback,
+            ),
+        )
+        proposal = client.ask_json(
+            CODE_TASK_REPAIR_SYSTEM,
+            _repair_prompt(
+                task_text=task_text,
+                patch_plan=patch_plan,
+                patch_diff=patch_diff,
+                memory_context=memory_context,
+                failure_analysis=failure_analysis,
+                execution_report=execution_report,
+                validation_report=validation_report,
+                snippets=snippets,
+                read_only_context=read_only_context,
+            ),
+            label="code-task-repair",
+        )
+        mode = "llm"
+    else:
         proposal = _offline_repair(selected)
 
     normalized = _normalize_repair_proposal(
@@ -184,7 +216,7 @@ def propose_repair_edits(
         mode=mode,
         selected_files=selected,
         read_only_context=read_only_context,
-        source_analysis=analysis_path.relative_to(paths.run_dir).as_posix(),
+        source_analysis=source_analysis,
         allowed_patterns=allowed_patterns,
         protected_patterns=protected_patterns,
     )
@@ -479,23 +511,6 @@ def _update_manifest_after_repair(
     save_code_task_manifest(run_dir, manifest)
 
 
-def _record_repair_usage(
-    meta_dir: Path,
-    usage: LLMUsage,
-    *,
-    message_callback: MessageCallback | None,
-) -> None:
-    usage_path = meta_dir / "llm_usage.jsonl"
-    row = usage.to_row()
-    row["stage"] = "code_task.repair"
-    append_jsonl(usage_path, row)
-    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
-    _emit(
-        message_callback,
-        f"LLM usage {row.get('label', '')}: "
-        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
-        f"{row['total_tokens']} tokens ({row['source']}).",
-    )
 
 
 def _read_required_json(path: Path) -> dict[str, Any]:

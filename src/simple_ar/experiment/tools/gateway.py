@@ -11,7 +11,7 @@ from simple_ar.experiment.tools.specs import ExperimentToolResult
 
 
 class LocalExperimentToolGateway:
-    """Read-only local tool gateway for experiment/report/repair agents."""
+    """Read-only tools for archived eight-stage experiment directories."""
 
     def __init__(self, run_dir: Path) -> None:
         self.run_dir = Path(run_dir)

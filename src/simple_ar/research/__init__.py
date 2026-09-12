@@ -5,6 +5,7 @@ from simple_ar.research.contracts import (
     CodeLink,
     DatasetCard,
     DocumentRecord,
+    EvidenceRef,
     ExperimentContract,
     FulltextHint,
     IdeaCandidate,
@@ -18,11 +19,13 @@ from simple_ar.research.contracts import (
     SourcePlan,
     TextChunk,
 )
+from simple_ar.research.workflow_contracts import Diagnostic, ResearchAsset, ResearchBrief
 __all__ = [
     "ClaimCard",
     "CodeLink",
     "DatasetCard",
     "DocumentRecord",
+    "EvidenceRef",
     "ExperimentContract",
     "ResearchExperimentContract",
     "FulltextHint",
@@ -35,6 +38,9 @@ __all__ = [
     "ResearchQuestion",
     "SourcePlan",
     "TextChunk",
+    "Diagnostic",
+    "ResearchAsset",
+    "ResearchBrief",
     "ResearchPlanRequest",
     "ResearchPlanResult",
     "build_research_plan",
@@ -50,6 +56,14 @@ __all__ = [
     "SynthesisStatus",
     "synthesize_evidence",
     "run_synthesis_capability",
+    "IdeaAssessmentRequest",
+    "IdeaAssessment",
+    "IdeaAssessmentResult",
+    "IdeaAssessmentStatus",
+    "AssessmentBatchStatus",
+    "assess_ideas",
+    "idea_comparison_markdown",
+    "run_idea_assessment_capability",
     "ResearchDesignRequest",
     "ResearchDesignResult",
     "ResearchDesignStatus",
@@ -61,6 +75,7 @@ __all__ = [
     "read_documents",
     "run_read_capability",
     "validate_read_evidence",
+    "query_evidence",
     "ExperimentRequest",
     "experiment_request_from_synthesis",
     "ExperimentResult",
@@ -73,7 +88,6 @@ __all__ = [
     "analyze_results",
     "compare_experiment_results",
     "analyze_experiment_capability",
-    "transition_request_from_analysis",
     "ResearchBriefRequest",
     "ResearchBriefResult",
     "ResearchBriefStatus",
@@ -134,6 +148,38 @@ _LAZY_EXPORTS = {
         "simple_ar.research.synthesis",
         "run_synthesis_capability",
     ),
+    "IdeaAssessmentRequest": (
+        "simple_ar.research.assessment",
+        "IdeaAssessmentRequest",
+    ),
+    "IdeaAssessment": (
+        "simple_ar.research.assessment",
+        "IdeaAssessment",
+    ),
+    "IdeaAssessmentResult": (
+        "simple_ar.research.assessment",
+        "IdeaAssessmentResult",
+    ),
+    "IdeaAssessmentStatus": (
+        "simple_ar.research.assessment",
+        "IdeaAssessmentStatus",
+    ),
+    "AssessmentBatchStatus": (
+        "simple_ar.research.assessment",
+        "AssessmentBatchStatus",
+    ),
+    "assess_ideas": (
+        "simple_ar.research.assessment",
+        "assess_ideas",
+    ),
+    "idea_comparison_markdown": (
+        "simple_ar.research.assessment",
+        "idea_comparison_markdown",
+    ),
+    "run_idea_assessment_capability": (
+        "simple_ar.research.assessment",
+        "run_idea_assessment_capability",
+    ),
     "ResearchDesignRequest": (
         "simple_ar.research.design",
         "ResearchDesignRequest",
@@ -166,6 +212,7 @@ _LAZY_EXPORTS = {
         "simple_ar.research.evidence.reader",
         "validate_read_evidence",
     ),
+    "query_evidence": ("simple_ar.research.evidence.reader", "query_evidence"),
     "ExperimentRequest": ("simple_ar.research.experiment", "ExperimentRequest"),
     "experiment_request_from_synthesis": (
         "simple_ar.research.experiment",
@@ -189,10 +236,6 @@ _LAZY_EXPORTS = {
     "analyze_experiment_capability": (
         "simple_ar.research.analysis",
         "analyze_experiment_capability",
-    ),
-    "transition_request_from_analysis": (
-        "simple_ar.research.decisions",
-        "transition_request_from_analysis",
     ),
     "ResearchBriefRequest": ("simple_ar.research.brief", "ResearchBriefRequest"),
     "ResearchBriefResult": ("simple_ar.research.brief", "ResearchBriefResult"),

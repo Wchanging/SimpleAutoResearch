@@ -672,28 +672,12 @@ def _update_manifest_after_batch(
     attempts = manifest.get("attempts")
     if not isinstance(attempts, dict):
         attempts = {}
-    attempt_refs = attempts.get("items")
-    if not isinstance(attempt_refs, list):
-        attempt_refs = []
     attempt_path = f"code_task/attempts/{attempt['id']}/attempt_state.json"
-    attempt_refs = [item for item in attempt_refs if not (
-        isinstance(item, dict) and item.get("id") == attempt["id"]
-    )]
-    attempt_refs.append(
-        {
-            "id": attempt["id"],
-            "state": attempt.get("state", "batching"),
-            "state_path": attempt_path,
-            "batch_count": len(_object_list(attempt.get("batches"))),
-            "updated_at": attempt.get("updated_at"),
-        }
-    )
     attempts.update(
         {
             "active": attempt["id"],
             "latest_attempt": attempt_path,
             "latest_batch": batch_ref.get("state_path", ""),
-            "items": attempt_refs,
         }
     )
     manifest["attempts"] = attempts

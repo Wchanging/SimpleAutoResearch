@@ -29,6 +29,8 @@ def evaluate_result_guard(
     contract = results.get("experiment_contract")
     contract = contract if isinstance(contract, Mapping) else {}
     issues: list[GuardIssue] = []
+    if results.get("validity_status") == "invalid":
+        issues.append(GuardIssue("error", "protected_asset_changed", "A declared protected file changed or became unreadable during execution."))
     metrics = results.get("metrics")
     if not isinstance(metrics, dict):
         metrics = {}

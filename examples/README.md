@@ -1,9 +1,67 @@
 # Examples
 
 V2.8 的正式用户主线是 `research-session`，它把检索、阅读、研究设计、代码/实验、分析、
-报告和审计保留在同一个 session 中。下面的 `research-brief`、`research-experiment` 和
-`research-code-task` 主要用于分段开发、诊断或已有 handoff 接续；旧 `simple-ar run` 示例
-只用于兼容旧八阶段配置，不是另一条正在演进的产品路线。
+报告和审计保留在同一个 session 中。下面的 `research-brief`
+主要用于分段开发、诊断。旧 `research-experiment`、`research-code-task` 和 `simple-ar run/resume`
+命令已退出；尚存的旧八阶段配置只供历史参考，不再是可运行示例，后续清理随消费者一起完成。
+
+## New ResearchApplication live check (development)
+
+The new application can be checked separately from the compatibility CLI:
+
+```bash
+uv run --no-sync python examples/research_application_live.py --session runs/application-live-check
+```
+
+This uses the configured `.env` provider and real OpenAlex, Semantic Scholar,
+and arXiv search with provider failures retained, retaining up to three papers.
+It spends API budget: at most 40 provider requests / 160k tokens,
+45 seconds per request and two attempts. No GPU or training is started by default.
+If the provider is temporarily slow during planning, add
+`--deterministic-plan` to skip only that LLM call; later network retrieval,
+reading, synthesis, and report stages still use the configured LLM. The
+session records this explicit planning mode in its runtime configuration.
+`--dataset PATH` adds the small `text,label,split` CSV baseline (20 seconds, one
+process); use a matching `--topic`. It does not exercise CodeTask or replace GPU
+acceptance. Sources may be abstract-only; the report must disclose that limitation.
+
+`--medium-review` instead reuses `code_task_medium_review/project` and its task:
+the application copies it, measures a baseline, invokes CodeTask, measures the
+candidate and permits at most one repair/retest before analysis and report.
+The low-resource report recipe uses one Reviewer pass per section; increase the
+report review setting only when the session budget is deliberately raised.
+Its budget is eight process invocations / 120 process-wall seconds (20 seconds
+per experiment); the API cap is 40 requests / 320k tokens for the combined
+CodeTask and full report. This is a tiny
+weighted-feature engineering check (6 train / 14 evaluation examples), not a
+realistic research dataset or a demonstrated full-loop success. Data, evaluator,
+entrypoint and tests are protected; only the isolated implementation/config can
+change. The existing task forbids changing evaluation examples to inflate scores.
+
+`--cifar10` starts the prepared three-seed CIFAR-10 application after the data
+and interpreter are prepared. It uses the same ResearchApplication runner and
+Rich progress output; it does not download data or install packages:
+
+```bash
+uv run --no-sync python examples/research_application_live.py --cifar10 \
+  --session runs/cifar10-live --python runs/cifar-cuda-env/bin/python \
+  --data-root runs/assets/cifar10 --epochs 1 --device cuda --max-actions 1
+```
+
+Use `--resume --session runs/cifar10-live` to continue the persisted session.
+Freeze the epoch count only after the short device probe and keep `--max-actions`
+small while checking the plan; the configured process budget is consumed only
+when experiment actions actually start.
+
+Use `--max-actions 1` for a single application action. Resume the same session
+with `--resume`; add `--retry` only when explicitly retrying a paused action.
+For slow providers, `--request-timeout 90` adjusts the per-request deadline;
+it does not reset or increase the session's request/token budget. The default
+remains 45 seconds. Longer deadlines do not remedy invalid evidence references.
+`--max-output-tokens 1200` can lower the per-request response cap for a slow or
+reasoning-heavy gateway; it changes neither the session budget nor the evidence
+validation rules. The default remains 2400.
+Do not change the framework mid-run and call the result a clean acceptance run.
 
 ## Research Brief
 
@@ -18,8 +76,9 @@ uv run simple-ar research-brief --topic "reliable agents" \
 The session keeps plan, search, document-ingest, read, and synthesis handoffs in
 separate attempt directories. The fixture is intentionally small and offline.
 
-After a `research-session` reaches `ready_for_report`, continue it through the
-existing report Writer/Reviewer and audit boundary:
+For a session created with `--no-report`, continue it through the canonical
+report Writer/Reviewer and audit boundary without rerunning research or the
+experiment:
 
 ```bash
 uv run simple-ar research-report \
@@ -27,10 +86,14 @@ uv run simple-ar research-report \
   --model "$SIMPLE_AR_MODEL"
 ```
 
-For a new model-backed session, `research-session` now appends the report and
-audit by default, so the command below is the explicit equivalent. Use
+For a new model-backed session, `research-session` includes the report and
+audit by default, so the command below is the explicit one-command flow. Use
 `--no-report` when inspecting only the research and experiment handoff; it
 does not introduce an automatic retry loop.
+
+For literature-only use, omit both `--command` and `--code-task-config`. Without
+`--model` this writes the evidence-backed summary and exits without launching a
+process; with `--model` it writes the research-only report path.
 
 For a laptop-safe complete smoke, run the checked-in example below. It uses
 the local fixture and a one-line experiment, but still writes the complete
@@ -78,8 +141,8 @@ not permission to silently switch to fixture output.
 
 The same session can use the existing Code-Task backend for its experiment
 attempt. Omit `--command`, pass a Code-Task TOML, and provide `--model`; the
-session keeps the Code-Task workspace and canonical result under
-`experiment-001` while reusing the normal Analysis handoff:
+session keeps the Code-Task workspace under its preparation/implementation
+attempts while reusing the normal canonical Analysis handoff:
 
 ```bash
 uv run simple-ar research-session \
@@ -99,6 +162,12 @@ stops at the explicit large-edit approval boundary.
 
 ## AutoDL / 3090 low-resource acceptance
 
+The prepared [CIFAR-10 calibration baseline](cifar10_calibration/README.md) defines
+the planned user-scale GPU task's shared data, protected evaluator and editable
+method. Its new scripts still require CUDA/Linux dependency locking, real CPU
+training confirmation and live three-seed matrix acceptance; they are not a
+completed GPU acceptance.
+
 When a GPU server is available, validate in this order; do not start with
 long training runs or candidate batches:
 
@@ -116,16 +185,17 @@ long training runs or candidate batches:
    and a few epochs; keep the complete session directory as the reproduction
    record.
 
-For the V2.8 normal-user-scale acceptance, use the prepared
-`full_pipeline_tiny_mlp` project as the first direction: lightweight image
-classification on the packaged `sklearn.datasets.load_digits` data. It has a
-real data split, model/training/metrics modules, tests, a benchmark, and
-parseable progress/metric output, while remaining small enough to run without
-long training. The acceptance target is approximately 30--50 raw literature
- records, 10--20 bounded Read candidates, one baseline/modified experiment,
- and the full Markdown `experiment` report profile. Start with the CPU path;
- use the available 3090 only for a separately bounded Torch/CUDA check after
- the CPU/data path is known to work.
+For the current V2.8 normal-user-scale acceptance, use the prepared
+[CIFAR-10 calibration baseline](cifar10_calibration/README.md): a fixed low-data
+image-classification task with an editable method, protected evaluator and
+paired three-seed measurements. The target is approximately 30--50 raw
+literature records, 10--20 bounded Read candidates, one constrained method
+change, the baseline/candidate matrix and the full Markdown `experiment`
+report profile. Start with the CPU/data path; use the 3090 only for the bounded
+CUDA probe and frozen matrix after that path is known to work.
+
+The `code_task_digits_mlp` / `load_digits` project is a cheap standalone CPU
+coding example, not the GPU acceptance direction or an eight-stage pipeline.
 
 This scale acceptance has been completed once on AutoDL with the prepared
 project: v13 retained 60 raw records and 10 selected documents, used the real
@@ -149,7 +219,11 @@ failed artifacts and fix the model/gateway configuration; never substitute
 fixture output for a real closed loop.
 
 For a Linux/AutoDL server, the checked-in helper records non-secret
-environment information and runs the local fixture by default:
+environment information (including untracked-code dirty state) and runs a focused
+CPU preflight by default: real process accounting, new-application report,
+baseline recovery, code modification and bounded repair. Model responses in this
+preflight are fixtures; passing it is not live research acceptance. CUDA is hidden
+and numerical-library threads are limited to two. No GPU rental is needed.
 
 ```bash
 uv sync --frozen
@@ -165,9 +239,18 @@ SIMPLE_AR_AUTODL_OUTPUT_ROOT=runs/autodl-online \
 bash examples/autodl_low_resource_smoke.sh
 ```
 
-Add `SIMPLE_AR_RUN_CODE_TASK=1` to also run the prepared single-project
-research-to-CodeTask path. The helper never stores the API key and exits
-before any LLM call when the model or key is missing.
+`SIMPLE_AR_RUN_ONLINE=1` runs the new application's literature/report path,
+without synthetic experiment metrics. Set `SIMPLE_AR_RUN_CODE_TASK=1` for the
+isolated medium-review baseline/CodeTask/candidate/report path instead (or both
+flags to request two separate sessions). Export the model and API key in the
+shell; the helper never stores the key and stops before model calls if absent.
+The general online session retains the example's 40-request/160k-token ceiling;
+the bundled medium-review CodeTask path uses a separate 320k-token ceiling for
+its full implementation plus sectioned experiment report. Neither ceiling is
+a guarantee that an arbitrary full paper fits. A pause or budget stop is not acceptance.
+Do not rerun the helper to erase a failed run: inspect its artifacts and explicitly
+resume with `research_application_live.py --session <path> --resume --retry`.
+The medium-review data is a small engineering fixture, not user-scale GPU research.
 
 SimpleAutoResearch keeps a small set of public example entrypoints. Each one mirrors
 a common user workflow and keeps its config next to the project or task it
@@ -180,21 +263,18 @@ examples/
   research_brief/
     fixtures/reliable_agents.md       offline input for the brief example
 
-  research_report/
-    configs/research_report.toml    search -> read -> synthesize -> report
-
   code_task_medium_review/
     configs/code_task.toml          standalone code-task workflow
     project/                        editable example repository
     task.md                         requested code change
 
-  full_pipeline_tiny_mlp/
-    configs/pipeline.toml           legacy 8-stage compatibility run with embedded code-task
+  code_task_digits_mlp/
+    configs/code_task.toml          standalone CPU code-task
     project/                        editable example repository
-    task.md                         embedded code-task request
+    task.md                         requested MLP improvement
 
   greenfield_lightweight_training/
-    configs/greenfield_training.toml advanced/compatibility greenfield generation workflow
+    configs/code_task.toml          standalone bounded greenfield generation
     task.md                         from-scratch local training task
 
   code_task_greenfield_ml_suite/
@@ -207,25 +287,32 @@ examples/
 ```
 
 Use `research_session_smoke.py` or the `research-session` commands above for the
-formal V2.8 mainline. Use `research_report` when you want a research-only survey,
+formal V2.8 mainline, including literature-only reports. Use
 `code_task_medium_review` when you want to test automated code edits in an
-isolated workspace, and `full_pipeline_tiny_mlp` when you need the legacy
-stage-shaped pipeline around an existing project. Use `greenfield_lightweight_training` when you want a bounded from-zero
+isolated workspace, and `code_task_digits_mlp` for a small CPU training baseline.
+Use `greenfield_lightweight_training` when you want a bounded from-zero
 implementation task that exercises a medium-light CPU-only experiment suite with
 multiple model conditions, parseable metrics, review, and run diagnosis.
 Use `code_task_greenfield_ml_suite` when you want a larger pure code-task
 greenfield acceptance run on a stronger local machine or server.
+
+The small CPU examples use the same standalone commands (run from the repository root):
+
+```bash
+uv run simple-ar code-task init --config examples/greenfield_lightweight_training/configs/code_task.toml
+uv run simple-ar code-task execute runs/<run-id> --config examples/greenfield_lightweight_training/configs/code_task.toml
+```
+
+Use `examples/code_task_digits_mlp/configs/code_task.toml` for the prepared digits
+project instead. These coding examples do not themselves claim search-to-report
+acceptance. They require the active Python environment and configured LLM access;
+no automatic dependency installation is enabled.
 
 Use `capability_package_minimal` when adding a replaceable V2.8 capability. It
 is offline, has no domain-specific schema, and demonstrates the expected
 `CapabilityContext` -> `ArtifactStore` -> `CapabilityResult` handoff. Its
 contract test is included in `uv run simple-ar-checks core`.
 
-For a split research-to-code experiment, `research-brief` can be run first and
-its `synthesis_result.json` passed to `research-code-task` together with an existing
-Code-Task TOML. For normal V2.8 use, prefer `research-session` with the same Code-Task
-configuration so the complete handoff stays in one session. Both paths reuse the normal isolated Code-Task backend and keep
-execution and analysis artifacts in a new session. The V2.8 path intentionally
-runs one selected direction; multi-candidate comparison is deferred until this
-single-direction path is validated on a real prepared project. Add `--with-report`
-to pass the successful session to the existing report/audit path.
+Use `research-session --code-task-config` for a complete research-to-code experiment.
+The former segmented `research-code-task` creator has been retired; historical
+results remain readable. For coding-only work, use the standalone `code-task` flow.

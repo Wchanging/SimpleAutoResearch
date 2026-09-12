@@ -227,6 +227,38 @@ class TextChunk:
 
 
 @dataclass(frozen=True)
+class EvidenceRef:
+    """A stable, source-backed reference to one evidence chunk.
+
+    ``chunk_id`` remains the canonical identity used by existing cards.  This
+    projection adds the document identity/version and the exact source span so
+    reports and later assessments can verify what was actually read.  The
+    optional context is made from real neighboring chunks in the same
+    document; it is never substituted for a missing target chunk.
+    """
+
+    evidence_id: str
+    document_id: str
+    chunk_id: str
+    source: str
+    source_id: str | None = None
+    document_revision: str | None = None
+    source_path: str | None = None
+    page: int | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    extraction_status: ExtractionStatus = "metadata_only"
+    text: str = ""
+    adjacent_chunk_ids: tuple[str, ...] = ()
+    context_text: str = ""
+    schema_version: str = "evidence_ref.v1"
+
+    def to_row(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class DocumentSection:
     """A section-aware text span extracted from one document.
 
@@ -468,6 +500,12 @@ class ResearchExperimentContract:
     risks: list[str] = field(default_factory=list)
     report_claim_plan: list[str] = field(default_factory=list)
     schema_version: str = "experiment_contract.v1"
+    protocol_revision: int = 1
+    dataset_refs: list[dict[str, Any]] = field(default_factory=list)
+    split_spec: dict[str, Any] = field(default_factory=dict)
+    metric_specs: list[dict[str, Any]] = field(default_factory=list)
+    comparison_conditions: dict[str, Any] = field(default_factory=dict)
+    protected_assets: list[dict[str, Any]] = field(default_factory=list)
 
     def to_row(self) -> dict[str, Any]:
         """Return a JSON-serializable representation."""
@@ -492,6 +530,12 @@ class ResearchExperimentContract:
             risks=_string_list(row.get("risks")),
             report_claim_plan=_string_list(row.get("report_claim_plan")),
             schema_version=str(row.get("schema_version") or "experiment_contract.v1"),
+            protocol_revision=int(row.get("protocol_revision", 1)),
+            dataset_refs=[dict(item) for item in row.get("dataset_refs", [])],
+            split_spec=dict(row.get("split_spec", {})),
+            metric_specs=[dict(item) for item in row.get("metric_specs", [])],
+            comparison_conditions=dict(row.get("comparison_conditions", {})),
+            protected_assets=[dict(item) for item in row.get("protected_assets", [])],
         )
 
 

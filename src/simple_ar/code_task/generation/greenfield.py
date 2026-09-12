@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.app.usage import summarize_usage
+from simple_ar.integrations.usage import record_usage
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.analysis.repo_map import build_repo_map
 from simple_ar.code_task.editing.scope import (
@@ -21,7 +21,7 @@ from simple_ar.code_task.runtime.state import (
     save_code_task_manifest,
     utcnow_iso,
 )
-from simple_ar.core.artifacts import append_jsonl, read_json, read_jsonl, read_text, write_json, write_text
+from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
 from simple_ar.code_task.generation.architecture import (
     build_architecture_plan,
     file_plan_from_architecture,
@@ -36,9 +36,8 @@ from simple_ar.code_task.generation.task_contract import (
 )
 from simple_ar.code_task.generation.writer import write_generated_project
 from simple_ar.code_task.generation.implementation_memory import initial_implementation_memory
-from simple_ar.code_task.generation.prompt_context import contract_prompt_context
 from simple_ar.code_task.generation.review import review_generated_project
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
+from simple_ar.integrations.llm import LLMClient, LLMError
 
 from .agent_backend import (
     should_use_agent_backend,
@@ -187,6 +186,7 @@ def _json_hash(value: object) -> str:
 def generate_greenfield_code_task(
     run_dir: Path,
     *,
+    llm_client: LLMClient | None = None,
     model: str | None = None,
     planner_model: str | None = None,
     writer_model: str | None = None,
@@ -206,7 +206,6 @@ def generate_greenfield_code_task(
     llm_retry_attempts: int = 1,
     planning_mode: str = "tool_agent",
     planning_review_rounds: int = 2,
-    contract_context: str = "full",
     planning_snapshot_from: str | Path | None = None,
     message_callback: MessageCallback | None = None,
 ) -> GreenfieldCodeTaskResult:
@@ -253,14 +252,8 @@ def generate_greenfield_code_task(
     contract = finalize_task_contract(contract)
     save_task_contract(paths.meta_dir, contract)
     source_snapshot = Path(planning_snapshot_from) if planning_snapshot_from else None
-    if contract_context == "plan_only" and source_snapshot is None:
-        raise ValueError("contract_context='plan_only' requires planning_snapshot_from")
-    prompt_contract = contract_prompt_context(contract, mode=contract_context)
-    result_schema = _result_schema_for_prompt(
-        result_schema,
-        contract=contract,
-        contract_context=contract_context,
-    )
+    prompt_contract = contract
+    result_schema = _result_schema_with_contract_metrics(result_schema, contract)
     resource_plan = _resource_plan(
         resource_decision,
         task_text=task_text,
@@ -278,6 +271,7 @@ def generate_greenfield_code_task(
 
     writer_client = _llm_client(
         paths.meta_dir,
+        llm_client=llm_client,
         model=writer_model or model,
         use_llm=use_llm,
         allow_fallback=allow_planning_fallback,
@@ -285,6 +279,7 @@ def generate_greenfield_code_task(
     )
     reviewer_client = _llm_client(
         paths.meta_dir,
+        llm_client=llm_client,
         model=reviewer_model or model,
         use_llm=use_llm,
         allow_fallback=allow_planning_fallback,
@@ -303,6 +298,7 @@ def generate_greenfield_code_task(
     else:
         planner_client = _llm_client(
             paths.meta_dir,
+            llm_client=llm_client,
             model=planner_model or model,
             use_llm=use_llm,
             allow_fallback=allow_planning_fallback,
@@ -343,7 +339,6 @@ def generate_greenfield_code_task(
             "planning_mode": effective_planning_mode,
             "planning_review_rounds": effective_planning_review_rounds,
             "ablation": {
-                "contract_context": contract_context,
                 "planning_snapshot": planning_snapshot,
             },
             "planning_dir": "code_task/meta/planning",
@@ -472,6 +467,7 @@ def generate_greenfield_code_task(
 def _llm_client(
     meta_dir: Path,
     *,
+    llm_client: LLMClient | None = None,
     model: str | None,
     use_llm: bool,
     allow_fallback: bool,
@@ -480,11 +476,13 @@ def _llm_client(
     if not use_llm:
         return None
     try:
-        return LLMClient.from_env(
+        return LLMClient.for_task(
+            client=llm_client,
             model=model,
-            usage_callback=lambda usage: _record_usage(
+            usage_callback=lambda usage: record_usage(
                 meta_dir,
                 usage,
+                stage="code_task.greenfield",
                 message_callback=message_callback,
             ),
         )
@@ -498,23 +496,6 @@ def _llm_client(
         ) from exc
 
 
-def _record_usage(
-    meta_dir: Path,
-    usage: LLMUsage,
-    *,
-    message_callback: MessageCallback | None,
-) -> None:
-    usage_path = meta_dir / "llm_usage.jsonl"
-    row = usage.to_row()
-    row["stage"] = "code_task.greenfield"
-    append_jsonl(usage_path, row)
-    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
-    _emit(
-        message_callback,
-        f"LLM usage {row.get('label', '')}: "
-        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
-        f"{row['total_tokens']} tokens ({row['source']}).",
-    )
 
 
 def _contract_from_task(
@@ -570,23 +551,6 @@ def _result_schema_with_contract_metrics(
     return merged
 
 
-def _result_schema_for_prompt(
-    result_schema: dict[str, Any],
-    *,
-    contract: dict[str, Any],
-    contract_context: str,
-) -> dict[str, Any]:
-    """Return the execution interface visible to downstream generation prompts.
-
-    The manifest schema is an external execution interface and remains available
-    to every condition. Only the Full condition enriches it with canonical
-    contract metrics. In the shared-plan ``plan_only`` ablation, adding those
-    metrics would leak post-planning contract content back into the writer.
-    """
-
-    if str(contract_context).strip().lower().replace("-", "_") == "plan_only":
-        return dict(result_schema)
-    return _result_schema_with_contract_metrics(result_schema, contract)
 
 
 def _resource_plan(
@@ -647,8 +611,6 @@ def _execution_budget(*, task_text: str, profile: str, max_files: int) -> dict[s
         "scale": scale,
         "max_runtime_sec_hint": max_runtime,
         "max_model_fit_operations_hint": 600 if is_ml and scale == "medium" else 180,
-        "resource_risk_warning_score": 4,
-        "resource_risk_blocking_score": 18,
         "guidance": [
             "Keep benchmark paths bounded and deterministic; prefer smoke/standard presets over exhaustive sweeps.",
             "When using model fitting, cap dataset, seed, fold, candidate, query, and hyperparameter loops explicitly.",

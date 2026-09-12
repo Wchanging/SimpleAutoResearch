@@ -14,7 +14,6 @@ from simple_ar.code_task.analysis.entrypoints import analyze_entrypoint_debuggab
 from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.generation.common import safe_relative_path, string_list
-from simple_ar.code_task.generation.compat_patches import apply_generated_project_compatibility_patch
 from simple_ar.code_task.generation.review import review_generated_project
 from simple_ar.code_task.generation.writer import _response_self_reports_defect, write_generated_project
 from simple_ar.code_task import initialize_code_task, review_code_task_changes
@@ -27,22 +26,6 @@ class CodeTaskInterfaceTests(unittest.TestCase):
         self.assertEqual(safe_relative_path("../escape.py"), "")
         self.assertEqual(safe_relative_path("/absolute.py"), "absolute.py")
         self.assertEqual(string_list([" a ", "", 3], limit=2), ["a", "3"])
-
-    def test_generated_project_compat_patch_isolated_from_repair_flow(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            project = Path(tmp)
-            write_json(project / "config.json", {"base": {"max_items": 20}, "presets": {}})
-
-            result = apply_generated_project_compatibility_patch(
-                project_dir=project,
-                stderr_text="ERROR: Unknown preset 'standard'",
-            )
-            payload = read_json(project / "config.json")
-
-            self.assertTrue(result.applied)
-            self.assertEqual(result.patch_id, "missing_greenfield_preset")
-            self.assertIn("standard", payload["presets"])
-            self.assertEqual(result.changed_files, ("config.json",))
 
     def test_file_specs_are_ordered_dependencies_first(self) -> None:
         files = [

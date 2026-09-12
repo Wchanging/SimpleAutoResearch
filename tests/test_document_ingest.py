@@ -6,15 +6,13 @@ import unittest
 from unittest.mock import patch
 
 from simple_ar.core.artifacts import write_jsonl
-from simple_ar.core.pipeline import Context
-from simple_ar.core.stages import Stage
 from simple_ar.literature.models import Paper
-from simple_ar.pipeline_stages.research import _write_read_cards
+from simple_ar.research.evidence.reader import ReadRequest, read_documents
 from simple_ar.research.contracts import DocumentRecord, SourcePlan, TextChunk
 from simple_ar.research.documents.fulltext import build_fulltext_manifest
 from simple_ar.research.documents.ingest import build_document_bundle
 from simple_ar.research.sources.base import build_source_plan
-from simple_ar.research.service import load_search_document_bundle
+from simple_ar._legacy.documents import load_search_document_bundle
 
 
 class DocumentIngestTests(unittest.TestCase):
@@ -155,7 +153,7 @@ class DocumentIngestTests(unittest.TestCase):
             )
 
             bundle = load_search_document_bundle(
-                Context(run_dir=run_dir, topic="topic", current_stage=Stage.READ)
+                run_dir / "02-search"
             )
 
             self.assertEqual([record.document_id for record in bundle.records], ["openalex-p1"])
@@ -188,15 +186,13 @@ class DocumentIngestTests(unittest.TestCase):
                     ).to_row()
                 ],
             )
-            write_jsonl(
-                run_dir / "03-read" / "review" / "shortlist.jsonl",
-                [{"paper_id": "p1"}],
+            bundle = load_search_document_bundle(
+                run_dir / "02-search"
             )
-
-            _write_read_cards(Context(run_dir=run_dir, topic="topic", current_stage=Stage.READ))
-
-            cards = (run_dir / "03-read" / "cards" / "paper_cards.jsonl").read_text(encoding="utf-8")
-            self.assertIn('"title": "A paper"', cards)
+            result = read_documents(ReadRequest(bundle=bundle, paper_ids=("p1",)))
+            self.assertEqual(len(result.paper_cards), 1)
+            self.assertEqual(result.paper_cards[0].title, "A paper")
+            self.assertEqual(result.paper_cards[0].paper_id, "openalex-p1")
 
 
 if __name__ == "__main__":

@@ -19,11 +19,15 @@ _HANDLER_NAMES = (
     "document_ingest",
     "read",
     "synthesize",
+    "assess_ideas",
     "research_design",
+    "prepare_execution",
+    "implement",
     "experiment",
     "analysis",
     "analyze",
     "report",
+    "report_write",
     "report_audit",
 )
 
@@ -106,10 +110,22 @@ def _load_handlers(names: tuple[str, ...]) -> dict[str, CapabilityHandler]:
         from simple_ar.research.synthesis import run_synthesis_capability
 
         handlers["synthesize"] = run_synthesis_capability
+    if "assess_ideas" in names:
+        from simple_ar.research.assessment import run_idea_assessment_capability
+
+        handlers["assess_ideas"] = run_idea_assessment_capability
     if "research_design" in names:
         from simple_ar.research.design import run_research_design_capability
 
         handlers["research_design"] = run_research_design_capability
+    if "prepare_execution" in names:
+        from simple_ar.research.preparation import run_preparation_capability
+
+        handlers["prepare_execution"] = run_preparation_capability
+    if "implement" in names:
+        from simple_ar.research.implementation import run_implementation_capability
+
+        handlers["implement"] = run_implementation_capability
     if "experiment" in names:
         from simple_ar.research.experiment import run_experiment_capability
 
@@ -121,6 +137,10 @@ def _load_handlers(names: tuple[str, ...]) -> dict[str, CapabilityHandler]:
             handlers["analysis"] = analyze_experiment_capability
         if "analyze" in names:
             handlers["analyze"] = analyze_experiment_capability
+    if "report_write" in names:
+        from simple_ar.report.writing import run_report_writing_capability
+
+        handlers["report_write"] = run_report_writing_capability
     if "report" in names:
         from simple_ar.report.capability import run_report_capability
 

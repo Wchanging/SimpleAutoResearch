@@ -6,14 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from simple_ar.core.artifacts import (
-    append_jsonl,
-    read_json,
-    read_jsonl,
-    read_text,
-    write_json,
-    write_text,
-)
+from simple_ar.core.artifacts import read_json, read_text, write_json, write_text
 from simple_ar.code_task.editing.budget import budget_profiles_json
 from simple_ar.code_task.analysis.context import (
     LoadedCodeTaskContextPack,
@@ -34,8 +27,8 @@ from simple_ar.code_task.runtime.state import (
 )
 from simple_ar.code_task.memory import task_memory_context
 from simple_ar.code_task.analysis.interfaces import snippet_api_contract
-from simple_ar.integrations.llm import LLMClient, LLMError, LLMUsage
-from simple_ar.app.usage import summarize_usage
+from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.integrations.usage import record_usage
 
 
 CODE_TASK_WORK_PLAN_SYSTEM = (
@@ -85,6 +78,7 @@ def generate_code_task_work_plan(
     max_files: int = 8,
     max_source_chars_per_file: int = 2500,
     message_callback: MessageCallback | None = None,
+    llm_client: LLMClient | None = None,
 ) -> CodeTaskWorkPlanResult:
     """Generate a staged implementation plan for an initialized code-task run.
 
@@ -176,11 +170,13 @@ def generate_code_task_work_plan(
             try:
                 suffix = f" (attempt {attempt}/{llm_retry_attempts})" if llm_retry_attempts > 1 else ""
                 _emit(message_callback, f"Calling LLM for code-task work planning{suffix}.")
-                client = LLMClient.from_env(
+                client = LLMClient.for_task(
+                    client=llm_client,
                     model=model,
-                    usage_callback=lambda usage: _record_code_task_usage(
+                    usage_callback=lambda usage: record_usage(
                         paths.meta_dir,
                         usage,
+                        stage="code_task.work_plan",
                         message_callback=message_callback,
                     ),
                 )
@@ -595,6 +591,14 @@ def _normalize_work_items(
         budget = _string(raw.get("budget_profile")).lower() or "normal"
         if budget not in VALID_BUDGET_PROFILES:
             budget = "normal"
+        # A normal proposal can touch at most two files.  Keep the work plan
+        # and the proposal budget consistent when a single cohesive item
+        # names more files; otherwise the model receives an impossible task
+        # and can only return an empty proposal.  The large profile still
+        # carries its explicit approval gate at apply time.
+        normal_max_files = budget_profiles_json()["normal"]["max_files"]
+        if budget == "normal" and len(target_files) > normal_max_files:
+            budget = "large"
         context_request = _context_request(raw.get("context_request"), known_paths)
         item_id = _string(raw.get("id")) or f"W{len(items) + 1}"
         item = {
@@ -614,33 +618,21 @@ def _normalize_work_items(
             "parallelizable": bool(raw.get("parallelizable", False)),
             "budget_profile": budget,
             "requires_budget_override": bool(raw.get("requires_budget_override")) or budget != "normal",
-            "suggested_budget_override": _string(raw.get("suggested_budget_override")),
+            "suggested_budget_override": (
+                _string(raw.get("suggested_budget_override"))
+                or (
+                    "This cohesive work item names more files than the normal "
+                    "proposal budget; review the larger edit before applying."
+                    if budget == "large" and len(target_files) > normal_max_files
+                    else ""
+                )
+            ),
             "context_request": context_request,
         }
         items.append(item)
     return _renumber_duplicate_ids(items)
 
 
-def _record_code_task_usage(
-    meta_dir: Path,
-    usage: LLMUsage,
-    *,
-    message_callback: MessageCallback | None,
-) -> None:
-    usage_path = meta_dir / "llm_usage.jsonl"
-    row = usage.to_row()
-    row["stage"] = "code_task.work_plan"
-
-    append_jsonl(usage_path, row)
-    write_json(meta_dir / "llm_usage_summary.json", summarize_usage(read_jsonl(usage_path)))
-    cost = row.get("estimated_cost_usd")
-    cost_text = f", est cost ${cost:.6f}" if isinstance(cost, (int, float)) else ""
-    _emit(
-        message_callback,
-        f"LLM usage {row.get('label', '')}: "
-        f"{row['prompt_tokens']} input + {row['completion_tokens']} output = "
-        f"{row['total_tokens']} tokens ({row['source']}{cost_text}).",
-    )
 
 
 def _update_manifest_after_work_plan(

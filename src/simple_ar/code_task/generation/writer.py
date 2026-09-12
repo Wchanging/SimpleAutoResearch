@@ -160,36 +160,6 @@ def _ensure_required_entrypoint(
     return total_lines + line_count
 
 
-def build_greenfield_harness_script(project_dir_name: str = "generated_project") -> str:
-    return f'''from __future__ import annotations
-
-import subprocess
-import sys
-from pathlib import Path
-
-
-def main() -> int:
-    stage_dir = Path(__file__).resolve().parent
-    project_dir = stage_dir / {project_dir_name!r}
-    completed = subprocess.run(
-        [sys.executable, "main.py"],
-        cwd=project_dir,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.stdout:
-        print(completed.stdout.rstrip())
-    if completed.stderr:
-        print(completed.stderr.rstrip(), file=sys.stderr)
-    return completed.returncode
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-'''
-
-
 def _file_content(
     *,
     file_spec: Mapping[str, Any],

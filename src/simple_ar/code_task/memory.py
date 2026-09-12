@@ -52,7 +52,6 @@ class TaskMemory(BaseModel):
     updated_at: str = Field(default_factory=utcnow_iso)
     objective: str = ""
     constraints: list[str] = Field(default_factory=list)
-    current_status: str = ""
     events: list[TaskMemoryEvent] = Field(default_factory=list)
     artifacts: list[str] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
@@ -145,7 +144,6 @@ class CompactedTaskMemory(BaseModel):
     review_findings: list[CompactedReviewFinding] = Field(default_factory=list)
     repair_lessons: list[CompactedRepairLesson] = Field(default_factory=list)
     open_risks: list[str] = Field(default_factory=list)
-    next_actions: list[str] = Field(default_factory=list)
     artifact_pointers: list[str] = Field(default_factory=list)
 
 
@@ -239,27 +237,11 @@ def record_code_task_memory_event(
     else:
         memory.events.append(event)
     memory.events = memory.events[-80:]
-    if _should_update_current_status(event):
-        memory.current_status = event.summary
     memory.artifacts = _dedupe_strings([*memory.artifacts, *artifact_rows])[-120:]
     memory.updated_at = utcnow_iso()
     _write_task_memory(root, memory)
     maybe_compact_task_memory(root)
     return memory
-
-
-def _should_update_current_status(event: TaskMemoryEvent) -> bool:
-    """Keep the headline status focused on workflow progress.
-
-    Review findings are preserved in the event stream and review_findings.jsonl,
-    but routine info/warning findings should not replace a useful stage outcome
-    such as "patched benchmark passed". Blocking findings still become the
-    headline because they require immediate action.
-    """
-
-    if event.event_type != "review_finding":
-        return True
-    return event.status == "blocking"
 
 
 def record_edit_history(
@@ -481,10 +463,6 @@ def _render_task_memory_context(
         lines.append("")
     lines.extend(
         [
-            "## Current Status",
-            "",
-            memory.current_status or "(no status recorded yet)",
-            "",
             "## Constraints",
             "",
         ]
@@ -614,7 +592,7 @@ def _compressed_context_lines(compressed: CompactedTaskMemory) -> list[str]:
         lines.extend(["", "### Durable Constraints"])
         lines.extend(f"- {item}" for item in compressed.hard_constraints[:10])
     if compressed.current_strategy:
-        lines.extend(["", "### Current Strategy And Decisions"])
+        lines.extend(["", "### Historical Implementation Decisions"])
         lines.extend(f"- {item}" for item in compressed.current_strategy[:12])
     if compressed.touched_files:
         lines.extend(["", "### Touched Files"])
@@ -647,9 +625,6 @@ def _compressed_context_lines(compressed: CompactedTaskMemory) -> list[str]:
     if compressed.open_risks:
         lines.extend(["", "### Open Risks"])
         lines.extend(f"- {item}" for item in compressed.open_risks[-10:])
-    if compressed.next_actions:
-        lines.extend(["", "### Likely Next Actions"])
-        lines.extend(f"- {item}" for item in compressed.next_actions[-8:])
     return lines
 
 
@@ -768,7 +743,7 @@ def _deterministic_compaction(
         }
     ]
     compressed.current_strategy = _merge_unique(
-        [*compressed.current_strategy, *strategy_rows, memory.current_status],
+        [*compressed.current_strategy, *strategy_rows],
         limit=28,
     )
 
@@ -856,10 +831,6 @@ def _deterministic_compaction(
         if str(row.get("severity", "")).lower() == "blocking" and str(row.get("summary", "")).strip()
     ]
     compressed.open_risks = _merge_unique([*compressed.open_risks, *memory.open_questions, *blocking], limit=36)
-    compressed.next_actions = _merge_unique(
-        [memory.current_status, *compressed.next_actions],
-        limit=16,
-    )
     return compressed
 
 

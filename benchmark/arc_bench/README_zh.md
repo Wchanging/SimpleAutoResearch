@@ -152,37 +152,7 @@ uv run python benchmark/arc_bench/batch_runner.py run \
   --native-score-model gpt-4o
 ```
 
-低成本消融建议每组都写入独立 state file 或 refresh variant，避免和主实验混在一起。下面这些开关会透传给 `simple-ar code-task execute`：
-
-```bash
-# 不给 repair prompt 结构化 failure-graph 上下文。
-uv run python benchmark/arc_bench/batch_runner.py run \
-  --topics ML06 ML09 ML10 \
-  --repair-context raw_logs_only \
-  --analyze \
-  --native-score \
-  --native-score-model gpt-4o \
-  --state-file benchmark/arc_bench/batch_state/ablation-no-failure-graph.json
-
-# 不给 repair prompt 之前的 repair memory。
-uv run python benchmark/arc_bench/batch_runner.py run \
-  --topics ML06 ML09 ML10 \
-  --no-repair-memory \
-  --analyze \
-  --native-score \
-  --native-score-model gpt-4o \
-  --state-file benchmark/arc_bench/batch_state/ablation-no-repair-memory.json
-
-# 使用最小 task-contract prompt 视图，可作为 Plan-then-Code 风格近似 baseline。
-uv run python benchmark/arc_bench/batch_runner.py run \
-  --topics ML06 ML09 ML10 \
-  --contract-context minimal \
-  --repair-rounds 0 \
-  --analyze \
-  --native-score \
-  --native-score-model gpt-4o \
-  --state-file benchmark/arc_bench/batch_state/ablation-minimal-contract.json
-```
+合同裁剪和关闭修复历史的消融开关已退出；正常运行保留完整合同和有界历史上下文。
 
 ```text
 benchmark/arc_bench/runs/ml/ML04/<run-id>/arc_task_stats.json

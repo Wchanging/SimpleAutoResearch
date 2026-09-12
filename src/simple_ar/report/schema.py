@@ -49,7 +49,6 @@ class ReportLongformConfig(ReportModel):
     min_citations_per_section: int = 3
     target_tables: int = 0
     evidence_audit: bool = True
-    planning_artifacts: bool = True
 
 
 ReportSurveyConfig = ReportLongformConfig
@@ -65,7 +64,6 @@ class ReportRuntimeConfig(ReportModel):
     section_numbering: Literal["auto", "off", "academic"] = "off"
     cost_profile: Literal["auto", "fast", "balanced", "thorough"] = "auto"
     outline_strategy: Literal["auto", "template", "adaptive"] = "auto"
-    survey_contract: bool = True
     draft_sections: bool = False
     debug_artifacts: bool = False
     allow_llm_fallback: bool = False
@@ -124,6 +122,13 @@ class MetricSource(ReportModel):
     artifact: str
     label: str = ""
     direction: str = ""
+    measurement_id: str | None = None
+    protocol_id: str | None = None
+    protocol_revision: int | None = None
+    protocol_fingerprint: str | None = None
+    condition_id: str | None = None
+    unit: str = ""
+    source_kind: str = "legacy_unverified"
 
 
 class ClaimEvidenceRecord(ReportModel):
@@ -389,6 +394,7 @@ class ReportAudit(ReportModel):
 
     schema_version: int = 1
     status: Literal["passed", "warning", "failed"] = "passed"
+    semantic_review_status: Literal["semantic_unchecked"] = "semantic_unchecked"
     citation_audit: CitationAudit = Field(default_factory=CitationAudit)
     metric_audit: MetricAudit = Field(default_factory=MetricAudit)
     claim_audit: ClaimAudit = Field(default_factory=ClaimAudit)

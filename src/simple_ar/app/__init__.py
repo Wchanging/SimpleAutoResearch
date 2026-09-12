@@ -1,2 +1,2 @@
-"""Application-level state and configuration models."""
+"""Research application lifecycle and user-facing use cases."""
 

@@ -14,20 +14,20 @@ from simple_ar.core.session import (
     SessionController,
     SessionManifest,
 )
-from simple_ar.core.transitions import (
-    FailureKind,
-    TransitionAction,
-    TransitionDecision,
-    TransitionPolicy,
-    TransitionRecipe,
-    TransitionRequest,
-    classify_failure,
-)
 from simple_ar.core.profiles import (
     LifecycleProfile,
     lifecycle_profile_names,
     resolve_lifecycle_profile,
 )
+from simple_ar.core.budget import (
+    BudgetEntry,
+    BudgetError,
+    BudgetExceededError,
+    BudgetLedger,
+    BudgetConflictError,
+    BudgetUnknownError,
+)
+from simple_ar.core.locking import SessionBusyError, SessionFileLock, SessionLockError
 
 __all__ = [
     "ArtifactRef",
@@ -40,15 +40,17 @@ __all__ = [
     "DecisionRecord",
     "SessionController",
     "SessionManifest",
-    "FailureKind",
-    "TransitionAction",
-    "TransitionDecision",
-    "TransitionPolicy",
-    "TransitionRecipe",
-    "TransitionRequest",
-    "classify_failure",
     "LifecycleProfile",
     "lifecycle_profile_names",
     "resolve_lifecycle_profile",
+    "BudgetEntry",
+    "BudgetError",
+    "BudgetExceededError",
+    "BudgetLedger",
+    "BudgetConflictError",
+    "BudgetUnknownError",
+    "SessionBusyError",
+    "SessionFileLock",
+    "SessionLockError",
 ]
 

@@ -16,6 +16,7 @@ from simple_ar.research.contracts import (
     CodeLink,
     DatasetCard,
     DocumentRecord,
+    EvidenceRef,
     MethodCard,
     PaperCard,
 )
@@ -34,6 +35,92 @@ from simple_ar.research.evidence.screening import (
 
 
 ReadStatus = Literal["completed", "partial", "empty"]
+
+
+def query_evidence(
+    bundle: DocumentBundle,
+    *,
+    document_id: str | None = None,
+    chunk_ids: tuple[str, ...] | None = None,
+    adjacent_chunks: int = 0,
+) -> tuple[EvidenceRef, ...]:
+    """Resolve real source chunks into stable evidence references.
+
+    ``chunk_ids=None`` selects all chunks, while ``chunk_ids=()`` explicitly
+    selects none.  Unknown IDs and duplicate chunk identities are errors so a
+    caller cannot silently turn a dangling citation into a different source.
+    Neighboring context is restricted to the same document and follows the
+    bundle's persisted order.
+    """
+
+    if adjacent_chunks < 0:
+        raise ValueError("adjacent_chunks must be non-negative.")
+    chunks_by_id: dict[str, Any] = {}
+    positions_by_document: dict[str, list[Any]] = {}
+    for position, chunk in enumerate(bundle.chunks):
+        if chunk.chunk_id in chunks_by_id:
+            raise ValueError(f"Duplicate evidence chunk ID: {chunk.chunk_id}")
+        entry = (position, chunk)
+        chunks_by_id[chunk.chunk_id] = entry
+        positions_by_document.setdefault(chunk.document_id, []).append(entry)
+
+    records = {record.document_id: record for record in bundle.records}
+    if document_id is not None and document_id not in records:
+        raise ValueError(f"Unknown evidence document ID: {document_id}")
+    if chunk_ids == ():
+        return ()
+    selected_ids = (
+        tuple(chunk.chunk_id for chunk in bundle.chunks
+              if document_id is None or chunk.document_id == document_id)
+        if chunk_ids is None
+        else tuple(dict.fromkeys(chunk_ids))
+    )
+    missing = [chunk_id for chunk_id in selected_ids if chunk_id not in chunks_by_id]
+    if missing:
+        raise ValueError("Unknown evidence chunk ID(s): " + ", ".join(missing))
+
+    refs: list[EvidenceRef] = []
+    for chunk_id in selected_ids:
+        _, chunk = chunks_by_id[chunk_id]
+        if document_id is not None and chunk.document_id != document_id:
+            raise ValueError(
+                f"Evidence chunk {chunk_id} does not belong to document {document_id}."
+            )
+        record = records.get(chunk.document_id)
+        if record is None:
+            raise ValueError(f"Missing document record for evidence chunk {chunk_id}.")
+        document_entries = positions_by_document[chunk.document_id]
+        local_index = next(index for index, (_, item) in enumerate(document_entries) if item.chunk_id == chunk_id)
+        start = max(0, local_index - adjacent_chunks)
+        end = min(len(document_entries), local_index + adjacent_chunks + 1)
+        context_entries = document_entries[start:end]
+        context_ids = tuple(item.chunk_id for _, item in context_entries if item.chunk_id != chunk_id)
+        context_text = "\n\n".join(item.text for _, item in context_entries if item.text.strip())
+        revision = str(
+            record.content_hash
+            or record.metadata.get("revision")
+            or record.metadata.get("document_revision")
+            or ""
+        ).strip() or None
+        refs.append(
+            EvidenceRef(
+                evidence_id=chunk.chunk_id,
+                document_id=record.document_id,
+                chunk_id=chunk.chunk_id,
+                source=record.source,
+                source_id=record.source_id,
+                document_revision=revision,
+                source_path=chunk.source_path,
+                page=chunk.page,
+                line_start=chunk.line_start,
+                line_end=chunk.line_end,
+                extraction_status=record.extraction_status,
+                text=chunk.text,
+                adjacent_chunk_ids=context_ids,
+                context_text=context_text,
+            )
+        )
+    return tuple(refs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,15 +196,9 @@ class ReadResult:
             "status": self.status,
             "documents": [_document_handoff_row(record) for record in self.bundle.records],
             "source_spans": [
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "document_id": chunk.document_id,
-                    "source_path": chunk.source_path,
-                    "page": chunk.page,
-                    "line_start": chunk.line_start,
-                    "line_end": chunk.line_end,
-                }
-                for chunk in self.bundle.chunks
+                {key: value for key, value in ref.to_row().items()
+                 if key not in {"text", "context_text"}}
+                for ref in query_evidence(self.bundle)
             ],
             "paper_cards": [card.to_row() for card in self.paper_cards],
             "claim_cards": [card.to_row() for card in self.claim_cards],

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import tempfile
+import sys
+import os
 import unittest
 from pathlib import Path
 
-from simple_ar.experiment.runner import run_experiment
+from simple_ar.experiment.execution.backend import LocalExecutionBackend, RunRequest
 from simple_ar.experiment.templates import build_experiment_code
 
 
@@ -23,7 +25,9 @@ class ExperimentRunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = run_experiment(script, timeout_sec=5)
+            result = LocalExecutionBackend().run(
+                RunRequest([sys.executable, script.name], script.parent, 5)
+            )
 
             self.assertEqual(result.returncode, 0)
             self.assertFalse(result.timed_out)
@@ -41,7 +45,9 @@ class ExperimentRunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = run_experiment(script, timeout_sec=1)
+            result = LocalExecutionBackend().run(
+                RunRequest([sys.executable, script.name], script.parent, 1)
+            )
 
             self.assertIsNone(result.returncode)
             self.assertTrue(result.timed_out)
@@ -62,7 +68,10 @@ class ExperimentRunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = run_experiment(script, timeout_sec=30)
+            result = LocalExecutionBackend().run(
+                RunRequest([sys.executable, script.name], script.parent, 30,
+                           env={**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"})
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("keyword_accuracy", result.metrics)

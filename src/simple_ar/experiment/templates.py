@@ -8,7 +8,7 @@ class ExperimentTemplateError(RuntimeError):
     """Raised when an experiment plan asks for an unsupported template."""
 
 
-SUPPORTED_TEMPLATES = {"toy_text_classification"}
+SUPPORTED_TEMPLATES = {"toy_text_classification", "csv_text_classification"}
 
 
 def build_experiment_code(plan: dict[str, Any]) -> str:
@@ -26,7 +26,40 @@ def build_experiment_code(plan: dict[str, Any]) -> str:
     template = str(plan.get("template", "toy_text_classification"))
     if template not in SUPPORTED_TEMPLATES:
         raise ExperimentTemplateError(f"Unsupported experiment template: {template}")
+    if template == "csv_text_classification":
+        return _csv_text_classification_code()
     return _toy_text_classification_code(plan)
+
+
+def _csv_text_classification_code() -> str:
+    """The existing bag-of-words baseline, fitted only on prepared train rows."""
+    return '''"""Prepared CSV baseline; scores are measured, not template constants."""
+import os
+for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ[variable] = "1"
+import json
+from pathlib import Path
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.pipeline import make_pipeline
+
+def main():
+    rows = json.loads(Path("dataset.json").read_text(encoding="utf-8"))
+    train = [row for row in rows if row["split"] == "train"]
+    evaluation = [row for row in rows if row["split"] == "eval"]
+    model = make_pipeline(CountVectorizer(lowercase=True), LogisticRegression(max_iter=200, random_state=0))
+    model.fit([row["text"] for row in train], [row["label"] for row in train])
+    predictions = model.predict([row["text"] for row in evaluation])
+    truth = [row["label"] for row in evaluation]
+    print("accuracy:", float(accuracy_score(truth, predictions)))
+    print("macro_f1:", float(f1_score(truth, predictions, average="macro", zero_division=0)))
+    print("train_examples:", len(train))
+    print("eval_examples:", len(evaluation))
+
+if __name__ == "__main__":
+    main()
+'''
 
 
 def _toy_text_classification_code(plan: dict[str, Any]) -> str:

@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Literal
+import re
+from contextlib import contextmanager
+from functools import wraps
+from threading import RLock
+from typing import Any, Callable, Iterable, Iterator, Literal, TypeVar
 
 from simple_ar.core.capabilities import (
     ArtifactRef,
@@ -13,24 +17,49 @@ from simple_ar.core.capabilities import (
     CapabilityContext,
     CapabilityResult,
 )
-from simple_ar.core.transitions import (
-    TransitionDecision,
-    TransitionPolicy,
-    TransitionRecipe,
-    TransitionRequest,
-)
 from simple_ar.core.profiles import resolve_lifecycle_profile
+from simple_ar.core.locking import SessionFileLock
 
 
-SessionStatus = Literal["created", "running", "completed", "partial", "blocked", "failed"]
+SessionStatus = Literal[
+    "created",
+    "running",
+    "paused",
+    "completed",
+    "partial",
+    "blocked",
+    "failed",
+]
 DecisionAction = Literal["accept", "revise", "repair", "block"]
 
-_SESSION_STATUSES = {"created", "running", "completed", "partial", "blocked", "failed"}
+_SESSION_STATUSES = {
+    "created",
+    "running",
+    "paused",
+    "completed",
+    "partial",
+    "blocked",
+    "failed",
+}
 _DECISION_ACTIONS = {"accept", "revise", "repair", "block"}
+_SESSION_MANIFEST_SCHEMAS = {"session_manifest.v1", "session_manifest.v2"}
+_SESSION_MANIFEST_SCHEMA = "session_manifest.v2"
+_ControllerMethod = TypeVar("_ControllerMethod", bound=Callable[..., Any])
 
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _locked_method(method: _ControllerMethod) -> _ControllerMethod:
+    """Apply the session mutation boundary without changing method semantics."""
+
+    @wraps(method)
+    def wrapped(self: "SessionController", *args: Any, **kwargs: Any) -> Any:
+        with self._mutation_scope():
+            return method(self, *args, **kwargs)
+
+    return wrapped  # type: ignore[return-value]
 
 
 @dataclass
@@ -41,35 +70,57 @@ class BudgetState:
     max_no_progress: int = 2
     attempts: int = 0
     no_progress: int = 0
+    recorded_attempts: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1 or self.max_no_progress < 1:
             raise ValueError("Session budgets must be positive.")
         if self.attempts < 0 or self.no_progress < 0:
             raise ValueError("Session budget counters cannot be negative.")
+        if any(not item.strip() for item in self.recorded_attempts):
+            raise ValueError("Recorded attempt ids cannot be blank.")
+        if len(set(self.recorded_attempts)) != len(self.recorded_attempts):
+            raise ValueError("Recorded attempt ids must be unique.")
 
-    def record(self, progressed: bool) -> None:
+    def record(self, progressed: bool, *, attempt_id: str | None = None) -> bool:
+        normalized_attempt_id = attempt_id.strip() if attempt_id is not None else None
+        if attempt_id is not None and not normalized_attempt_id:
+            raise ValueError("Attempt id cannot be blank when recording a budget entry.")
+        if normalized_attempt_id and normalized_attempt_id in self.recorded_attempts:
+            return False
         self.attempts += 1
         self.no_progress = 0 if progressed else self.no_progress + 1
+        if normalized_attempt_id:
+            self.recorded_attempts.append(normalized_attempt_id)
+        return True
 
     def exhausted(self) -> bool:
         return self.attempts >= self.max_attempts or self.no_progress >= self.max_no_progress
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "max_attempts": self.max_attempts,
             "max_no_progress": self.max_no_progress,
             "attempts": self.attempts,
             "no_progress": self.no_progress,
+            "recorded_attempts": list(self.recorded_attempts),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "BudgetState":
+        raw_recorded_attempts = data.get("recorded_attempts", [])
+        if not isinstance(raw_recorded_attempts, (list, tuple)):
+            raise ValueError("BudgetState.recorded_attempts must be an array.")
         return cls(
             max_attempts=int(data.get("max_attempts", 3)),
             max_no_progress=int(data.get("max_no_progress", 2)),
             attempts=int(data.get("attempts", 0)),
             no_progress=int(data.get("no_progress", 0)),
+            recorded_attempts=[
+                str(item).strip()
+                for item in raw_recorded_attempts
+                if str(item).strip()
+            ],
         )
 
 
@@ -163,6 +214,13 @@ class SessionManifest:
     created_at: str = field(default_factory=_utcnow_iso)
     updated_at: str = field(default_factory=_utcnow_iso)
     transition_recipe: str = "research-v1"
+    status_reason: str = ""
+    revision: int = 0
+    next_attempt_sequence: int = 1
+    state_refs: dict[str, ArtifactRef] = field(default_factory=dict)
+    budget_ledger_ref: ArtifactRef | None = None
+    lifecycle_owner: str = "session_controller"
+    parent_session: str | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.topic.strip():
@@ -171,16 +229,46 @@ class SessionManifest:
             raise ValueError("SessionManifest.transition_recipe cannot be empty.")
         if self.status not in _SESSION_STATUSES:
             raise ValueError(f"Unsupported session status: {self.status}")
+        if self.revision < 0:
+            raise ValueError("SessionManifest.revision cannot be negative.")
+        if self.next_attempt_sequence < 1:
+            raise ValueError("SessionManifest.next_attempt_sequence must be positive.")
+        if not self.lifecycle_owner.strip():
+            raise ValueError("SessionManifest.lifecycle_owner cannot be empty.")
+        if self.parent_session is not None and not self.parent_session.strip():
+            raise ValueError("SessionManifest.parent_session cannot be blank.")
+        for name, ref in self.state_refs.items():
+            if not str(name).strip():
+                raise ValueError("SessionManifest state reference names cannot be empty.")
+            if not isinstance(ref, ArtifactRef):
+                raise TypeError("SessionManifest state references must be ArtifactRef instances.")
+        if self.budget_ledger_ref is not None and not isinstance(
+            self.budget_ledger_ref, ArtifactRef
+        ):
+            raise TypeError("SessionManifest.budget_ledger_ref must be an ArtifactRef.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "session_manifest.v1",
+            "schema_version": _SESSION_MANIFEST_SCHEMA,
             "session_id": self.session_id,
             "topic": self.topic,
             "profile": self.profile,
             "transition_recipe": self.transition_recipe,
             "status": self.status,
+            "status_reason": self.status_reason,
+            "revision": self.revision,
             "current_attempt": self.current_attempt,
+            "next_attempt_sequence": self.next_attempt_sequence,
+            "state_refs": {
+                name: ref.to_dict() for name, ref in self.state_refs.items()
+            },
+            "budget_ledger_ref": (
+                self.budget_ledger_ref.to_dict()
+                if self.budget_ledger_ref is not None
+                else None
+            ),
+            "lifecycle_owner": self.lifecycle_owner,
+            "parent_session": self.parent_session,
             "budget": self.budget.to_dict(),
             "decisions": [decision.to_dict() for decision in self.decisions],
             "created_at": self.created_at,
@@ -189,14 +277,45 @@ class SessionManifest:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SessionManifest":
+        schema_version = str(data.get("schema_version", "session_manifest.v1"))
+        if schema_version not in _SESSION_MANIFEST_SCHEMAS:
+            raise ValueError(f"Unsupported session manifest schema: {schema_version}")
+        raw_state_refs = data.get("state_refs", {})
+        if not isinstance(raw_state_refs, dict):
+            raise ValueError("SessionManifest.state_refs must be an object.")
+        state_refs: dict[str, ArtifactRef] = {}
+        for name, ref in raw_state_refs.items():
+            if not isinstance(ref, dict):
+                raise ValueError(
+                    f"SessionManifest state reference {name!r} must be an object."
+                )
+            state_refs[str(name)] = ArtifactRef.from_dict(ref)
+        raw_ledger_ref = data.get("budget_ledger_ref")
+        if raw_ledger_ref is not None and not isinstance(raw_ledger_ref, dict):
+            raise ValueError("SessionManifest.budget_ledger_ref must be an object or null.")
         return cls(
             session_id=str(data["session_id"]),
             topic=str(data["topic"]),
             profile=str(data["profile"]) if data.get("profile") else None,
             transition_recipe=str(data.get("transition_recipe", "research-v1")),
             status=str(data.get("status", "created")),  # type: ignore[arg-type]
+            status_reason=str(data.get("status_reason", "")),
+            revision=int(data.get("revision", 0)),
             current_attempt=(
                 str(data["current_attempt"]) if data.get("current_attempt") else None
+            ),
+            next_attempt_sequence=int(data.get("next_attempt_sequence", 1)),
+            state_refs=state_refs,
+            budget_ledger_ref=(
+                ArtifactRef.from_dict(raw_ledger_ref)
+                if isinstance(raw_ledger_ref, dict)
+                else None
+            ),
+            lifecycle_owner=str(data.get("lifecycle_owner", "session_controller")),
+            parent_session=(
+                str(data["parent_session"])
+                if data.get("parent_session")
+                else None
             ),
             budget=BudgetState.from_dict(data.get("budget", {})),
             decisions=[
@@ -240,6 +359,8 @@ def _reconcile_declared_outputs(
     )
 
 
+
+
 class SessionController:
     """Run bounded capability attempts without knowing stage-specific logic."""
 
@@ -249,12 +370,60 @@ class SessionController:
         registry: CapabilityRegistry,
         manifest: SessionManifest,
         *,
-        recipe: TransitionRecipe | None = None,
+        legacy_read_only: bool = False,
     ):
         self.store = store
         self.registry = registry
         self.manifest = manifest
-        self.transition_policy = TransitionPolicy(recipe)
+        self._file_lock = SessionFileLock(self.store.root / ".session.lock")
+        self._lock_guard = RLock()
+        self._lock_depth = 0
+        self._legacy_read_only = legacy_read_only
+        self._saved_manifest: dict[str, Any] | None = None
+
+    @contextmanager
+    def _mutation_scope(self) -> Iterator[None]:
+        """Hold one process and OS lock across a complete mutation."""
+
+        if self._legacy_read_only:
+            raise RuntimeError(
+                "Legacy session_manifest.v1 is read-only; "
+                "use research-session-migrate to import evidence into a new session."
+            )
+        self._lock_guard.acquire()
+        outermost = self._lock_depth == 0
+        if outermost:
+            try:
+                self._file_lock.acquire()
+            except Exception:
+                self._lock_guard.release()
+                raise
+        try:
+            self._lock_depth += 1
+            if outermost and self._saved_manifest is not None:
+                if self.store.read_json("session_manifest.json") != self._saved_manifest:
+                    raise RuntimeError("Session changed since loading; reload before modifying it.")
+            yield
+        finally:
+            self._lock_depth -= 1
+            try:
+                if outermost:
+                    self._file_lock.release()
+            finally:
+                self._lock_guard.release()
+
+    @contextmanager
+    def mutation_scope(self) -> Iterator[None]:
+        """Group an application mutation and its state refs under one lock.
+
+        Capability-level methods already acquire this scope themselves.  A
+        higher-level application may use this public wrapper to keep a
+        capability result and the corresponding session-state reference from
+        being observed separately by another writer.
+        """
+
+        with self._mutation_scope():
+            yield
 
     @classmethod
     def create(
@@ -266,12 +435,8 @@ class SessionController:
         registry: CapabilityRegistry,
         profile: str | None = None,
         budget: BudgetState | None = None,
-        recipe: TransitionRecipe | None = None,
     ) -> "SessionController":
         store = ArtifactStore(root)
-        if store.exists("session_manifest.json"):
-            raise FileExistsError("Session manifest already exists.")
-        selected_recipe = recipe or TransitionRecipe.default()
         session_budget = (
             budget if budget is not None else _default_session_budget(profile)
         )
@@ -279,11 +444,13 @@ class SessionController:
             session_id=session_id,
             topic=topic,
             profile=profile,
-            transition_recipe=selected_recipe.name,
             budget=session_budget,
         )
-        controller = cls(store, registry, manifest, recipe=selected_recipe)
-        controller.save()
+        controller = cls(store, registry, manifest)
+        with controller._mutation_scope():
+            if store.exists("session_manifest.json"):
+                raise FileExistsError("Session manifest already exists.")
+            controller._save_unlocked()
         return controller
 
     @classmethod
@@ -292,69 +459,25 @@ class SessionController:
         root: str | Path,
         *,
         registry: CapabilityRegistry,
-        recipe: TransitionRecipe | None = None,
     ) -> "SessionController":
         store = ArtifactStore(root)
         payload = store.read_json("session_manifest.json")
         if not isinstance(payload, dict):
             raise ValueError("Session manifest must be a JSON object.")
         manifest = SessionManifest.from_dict(payload)
-        selected_recipe = recipe or TransitionRecipe.default()
-        if manifest.transition_recipe != selected_recipe.name:
-            raise ValueError(
-                f"Session uses transition recipe {manifest.transition_recipe!r}; "
-                f"load it with the matching recipe {selected_recipe.name!r}."
-            )
-        return cls(store, registry, manifest, recipe=selected_recipe)
+        schema_version = str(payload.get("schema_version", "session_manifest.v1"))
+        controller = cls(
+            store,
+            registry,
+            manifest,
+            legacy_read_only=schema_version == "session_manifest.v1",
+        )
+        controller._saved_manifest = payload
+        return controller
 
-    def plan_transition(
-        self,
-        request: TransitionRequest,
-    ) -> TransitionDecision:
-        """Validate one proposed transition within the optional lifecycle scope."""
 
-        decision = self.transition_policy.decide(request)
-        lifecycle = resolve_lifecycle_profile(self.manifest.profile)
-        if lifecycle is None:
-            return decision
 
-        source = request.source.strip()
-        if not lifecycle.allows(source):
-            return TransitionDecision(
-                action="block",
-                failure_kind=decision.failure_kind,
-                target=None,
-                reason=(
-                    f"Capability {source} is outside lifecycle profile "
-                    f"{lifecycle.name}."
-                ),
-                expected_delta=decision.expected_delta,
-            )
-        if decision.target is not None and not lifecycle.allows(decision.target):
-            return TransitionDecision(
-                action="block",
-                failure_kind=decision.failure_kind,
-                target=None,
-                reason=(
-                    f"Transition {source} -> {decision.target} is outside "
-                    f"lifecycle profile {lifecycle.name}."
-                ),
-                expected_delta=decision.expected_delta,
-            )
-        return decision
-
-    def allowed_targets(self, source: str) -> tuple[str, ...]:
-        """Return recipe targets visible within this session's profile."""
-
-        targets = self.transition_policy.recipe.allowed_targets(source)
-        lifecycle = resolve_lifecycle_profile(self.manifest.profile)
-        if lifecycle is None:
-            return targets
-        if not lifecycle.allows(source):
-            return ()
-        return tuple(target for target in targets if lifecycle.allows(target))
-
-    def status_snapshot(self, source: str | None = None) -> dict[str, Any]:
+    def status_snapshot(self) -> dict[str, Any]:
         """Return a compact, read-only view for status UIs and handoffs.
 
         The snapshot summarizes persisted attempt manifests and the current
@@ -369,6 +492,8 @@ class SessionController:
             "topic": self.manifest.topic,
             "profile": self.manifest.profile,
             "status": self.manifest.status,
+            "status_reason": self.manifest.status_reason,
+            "revision": self.manifest.revision,
             "current_attempt": self.manifest.current_attempt,
             "attempt_count": len(attempts),
             "running_attempts": sum(item.status == "running" for item in attempts),
@@ -391,9 +516,6 @@ class SessionController:
                 else None
             ),
         }
-        if source is not None:
-            snapshot["source"] = source
-            snapshot["allowed_targets"] = list(self.allowed_targets(source))
         return snapshot
 
     def list_attempts(self) -> tuple[AttemptManifest, ...]:
@@ -504,58 +626,152 @@ class SessionController:
             )
         return matches[0]
 
-    def save(self) -> ArtifactRef:
+    def _save_unlocked(self) -> ArtifactRef:
         self.manifest.updated_at = _utcnow_iso()
-        return self.store.write_json(
+        payload = self.manifest.to_dict()
+        ref = self.store.write_json(
             "session_manifest.json",
-            self.manifest.to_dict(),
+            payload,
             kind="session",
-            schema="session_manifest.v1",
+            schema=_SESSION_MANIFEST_SCHEMA,
             producer="session_controller",
         )
+        self._saved_manifest = payload
+        return ref
 
-    def execute(
+    @_locked_method
+    def save(self) -> ArtifactRef:
+        return self._save_unlocked()
+
+    @_locked_method
+    def allocate_attempt_id(self, capability: str) -> str:
+        """Reserve a readable, persistent attempt id for the new API.
+
+        The sequence is advanced before the handler starts.  A skipped number
+        after a crash is acceptable; reusing an id could overwrite an attempt
+        that already contains execution evidence.
+        """
+
+        return self._allocate_attempt_id_unlocked(capability)
+
+    def _allocate_attempt_id_unlocked(self, capability: str) -> str:
+        """Allocate an id while the caller already owns the mutation lock."""
+
+        normalized = capability.strip()
+        if not normalized:
+            raise ValueError("Capability name cannot be empty.")
+        self._ensure_can_execute()
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", normalized).strip("-._")
+        slug = slug or "attempt"
+        sequence = max(1, self.manifest.next_attempt_sequence)
+        existing = {item.attempt_id for item in self.list_attempts()}
+        while f"{slug}-{sequence:04d}" in existing:
+            sequence += 1
+        attempt_id = f"{slug}-{sequence:04d}"
+        self.manifest.next_attempt_sequence = sequence + 1
+        self.save()
+        return attempt_id
+
+    @_locked_method
+    def pause(self, reason: str) -> SessionManifest:
+        """Pause the session without inventing a research completion result."""
+
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise ValueError("Pause reason cannot be empty.")
+        if self.manifest.status in {"completed", "blocked"}:
+            raise RuntimeError(
+                f"Session is {self.manifest.status}; start an explicit revision first."
+            )
+        self._ensure_no_running_attempt()
+        self.manifest.status = "paused"
+        self.manifest.status_reason = normalized_reason
+        self.save()
+        return self.manifest
+
+    @_locked_method
+    def complete(self, reason: str = "") -> SessionManifest:
+        """Mark an application-validated session as complete.
+
+        The core only checks lifecycle legality and durable execution state.
+        It deliberately does not decide whether requested research outputs are
+        scientifically sufficient; that check belongs to the application layer.
+        """
+
+        if self.manifest.status == "completed":
+            return self.manifest
+        if self.manifest.status == "blocked":
+            raise RuntimeError(
+                "Blocked session cannot be completed; start an explicit revision first."
+            )
+        self._ensure_no_running_attempt()
+        if not self.list_attempts():
+            raise RuntimeError("Session cannot be completed before an attempt exists.")
+        self.manifest.status = "completed"
+        self.manifest.status_reason = reason.strip() or "Completed by application."
+        self.save()
+        return self.manifest
+
+    @_locked_method
+    def continue_with_revision(self, reason: str) -> int:
+        """Reopen a settled session with an explicit, budget-preserving revision."""
+
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise ValueError("Revision reason cannot be empty.")
+        if self.manifest.status == "running":
+            raise RuntimeError("Session is already running.")
+        self._ensure_no_running_attempt()
+        if self.manifest.status == "created":
+            raise RuntimeError("Session has no settled work to continue.")
+        if self.manifest.budget.exhausted():
+            raise RuntimeError(
+                "Session budget is exhausted; continuation cannot reset the budget."
+            )
+        self.manifest.revision += 1
+        self.manifest.status = "running"
+        self.manifest.status_reason = normalized_reason
+        self.save()
+        return self.manifest.revision
+
+    @_locked_method
+    def execute_attempt(
         self,
         capability: str,
         *,
-        attempt_id: str,
+        attempt_id: str | None = None,
         trigger: str = "initial",
         profile: str | None = None,
         inputs: Iterable[ArtifactRef] = (),
         parent_attempt_id: str | None = None,
-        expected_delta: str = "",
         progressed: bool | None = None,
-        failure_kind: str | None = None,
-        next_capability: str | None = None,
-        evidence_sufficient: bool | None = None,
-        hypothesis_supported: bool | None = None,
-        experiment_needed: bool | None = None,
-        report_auditable: bool | None = None,
         **kwargs: Any,
-    ) -> tuple[CapabilityResult, DecisionRecord]:
-        """Execute exactly one attempt and persist its decision.
+    ) -> CapabilityResult:
+        """Execute one capability without choosing its research next step.
 
-        The controller never retries implicitly. A caller must explicitly ask
-        for another attempt, so a failed capability cannot create an unseen
-        loop or overwrite its parent attempt.
+        The application owns research decisions. This boundary owns validation,
+        attempt persistence, result reconciliation, and execution accounting.
         """
+
+        selected_attempt_id = (
+            attempt_id.strip() if attempt_id is not None and attempt_id.strip() else None
+        )
+        if attempt_id is not None and selected_attempt_id is None:
+            raise ValueError("Attempt id cannot be empty.")
         capability = capability.strip()
-        attempt_id = attempt_id.strip()
         if not capability:
             raise ValueError("Capability name cannot be empty.")
-        if not attempt_id:
-            raise ValueError("Attempt id cannot be empty.")
+        attempt_id = selected_attempt_id or self._allocate_attempt_id_unlocked(capability)
         self._ensure_can_execute()
         input_refs = tuple(inputs)
         attempt_profile = self._resolve_attempt_profile(profile)
         self._ensure_profile_capability(capability)
-        self._ensure_transition_target(capability, next_capability)
         parent_id = self._resolve_parent_attempt_id(parent_attempt_id)
-        self._ensure_capability_transition(capability, parent_attempt_id=parent_id)
         self.registry.resolve(capability)
         self._validate_input_refs(input_refs)
         if "context" in kwargs:
             raise ValueError("Capability context is managed by SessionController.")
+
         attempt_store, attempt = self.store.new_attempt(
             attempt_id,
             parent_attempt=parent_id,
@@ -566,6 +782,7 @@ class SessionController:
         )
         self.manifest.status = "running"
         self.manifest.current_attempt = attempt_id
+        self.manifest.status_reason = ""
         attempt = replace(attempt, status="running", updated_at=_utcnow_iso())
         attempt_store.write_attempt_manifest(attempt)
         self.save()
@@ -599,56 +816,12 @@ class SessionController:
             if progressed is not None
             else result.status in {"completed", "partial"}
         )
-        self.manifest.budget.record(has_progress)
-        transition = self.plan_transition(
-            TransitionRequest(
-                source=capability,
-                result_status=result.status,
-                failure_kind=failure_kind,
-                target=next_capability,
-                evidence_sufficient=evidence_sufficient,
-                hypothesis_supported=hypothesis_supported,
-                experiment_needed=experiment_needed,
-                report_auditable=report_auditable,
-                expected_delta=expected_delta,
-                signals=result.diagnostics,
-            )
-        )
-        action = transition.action
-        reason = transition.reason
-        if action != "accept" and self.manifest.budget.exhausted():
-            action = "block"
-            reason = f"{reason} Session budget exhausted."
-
-        status = (
-            "completed"
-            if action == "accept" and transition.target is None
-            else "blocked"
-            if action == "block"
-            else "running"
-        )
-        self.manifest.status = status  # type: ignore[assignment]
-        decision = DecisionRecord(
-            capability=capability,
-            attempt_id=attempt_id,
-            action=action,
-            result_status=result.status,
-            reason=reason,
-            progressed=has_progress,
-            expected_delta=transition.expected_delta,
-            input_paths=tuple(item.path for item in input_refs),
-            output_paths=tuple(item.path for item in result.artifacts),
-            failure_kind=transition.failure_kind,
-            next_capability=transition.target,
-            budget_attempts=self.manifest.budget.attempts,
-            budget_no_progress=self.manifest.budget.no_progress,
-        )
-        self.manifest.decisions.append(decision)
+        self.manifest.budget.record(has_progress, attempt_id=attempt_id)
         attempt_status = (
-            "blocked"
-            if action == "block"
-            else "failed"
+            "failed"
             if result.status == "failed"
+            else "blocked"
+            if result.status == "blocked"
             else "completed"
         )
         attempt_store.write_attempt_manifest(
@@ -660,17 +833,86 @@ class SessionController:
             )
         )
         self.save()
-        return result, decision
+        return result
 
+
+    @_locked_method
+    def reconcile_attempt(self, attempt_id: str | None = None) -> CapabilityResult:
+        """Reconcile a persisted result, including an unindexed terminal attempt.
+
+        This is intentionally separate from ``recover_interrupted``.  The
+        latter records a confirmed missing-result interruption as failed; this
+        method trusts only the persisted capability result and never runs a
+        handler again.
+        """
+
+        selected_id = (attempt_id or self.manifest.current_attempt or "").strip()
+        if not selected_id:
+            raise ValueError("An attempt id is required when no current attempt exists.")
+        attempt = next(
+            (item for item in self.list_attempts() if item.attempt_id == selected_id),
+            None,
+        )
+        if attempt is None:
+            raise KeyError(f"Unknown attempt: {selected_id}")
+        if attempt.status not in {"running", "completed", "failed", "blocked"}:
+            raise ValueError(
+                f"Attempt {selected_id} is {attempt.status}, not running."
+            )
+        attempt_store = ArtifactStore(self.store.root / "attempts" / selected_id)
+        if not attempt_store.exists("capability_result.json"):
+            raise RuntimeError(
+                f"Attempt {selected_id} has no persisted result; "
+                "use recover_interrupted() after confirming the interruption."
+            )
+
+        result = _reconcile_declared_outputs(
+            attempt_store.read_capability_result("capability_result.json"),
+            attempt_store,
+        )
+        result_ref = attempt_store.ref(
+            "capability_result.json",
+            kind="capability_result",
+            schema="capability_result.v1",
+            producer="capability_runtime",
+        )
+        if all(artifact.path != result_ref.path for artifact in result.artifacts):
+            result = replace(result, artifacts=(*result.artifacts, result_ref))
+
+        has_progress = result.status in {"completed", "partial"}
+        self.manifest.budget.record(has_progress, attempt_id=selected_id)
+        attempt_status = (
+            "failed"
+            if result.status == "failed"
+            else "blocked"
+            if result.status == "blocked"
+            else "completed"
+        )
+        attempt_store.write_attempt_manifest(
+            replace(
+                attempt,
+                status=attempt_status,  # type: ignore[arg-type]
+                outputs=result.artifacts,
+                updated_at=_utcnow_iso(),
+            )
+        )
+        if attempt.status == "running":
+            self.manifest.current_attempt = selected_id
+            self.manifest.status = "running"
+            self.manifest.status_reason = "Reconciled persisted attempt result."
+        self.save()
+        return result
+
+    @_locked_method
     def recover_interrupted(
         self,
         attempt_id: str | None = None,
         *,
         reason: str = "Process interrupted before the capability result was persisted.",
-    ) -> tuple[CapabilityResult, DecisionRecord]:
+    ) -> CapabilityResult:
         """Close one manually confirmed interrupted attempt as a failure.
 
-        A process-level interruption can happen before ``execute`` reaches its
+        A process-level interruption can happen before ``execute_attempt`` reaches its
         normal result persistence path.  This explicit operation makes that
         state visible without retrying or selecting a replacement capability;
         callers remain responsible for deciding whether to create a new
@@ -716,48 +958,40 @@ class SessionController:
         )
         result_ref = attempt_store.write_capability_result(result)
         result = replace(result, artifacts=(result_ref,))
-        self.manifest.budget.record(False)
-        transition = self.plan_transition(
-            TransitionRequest(
-                source=capability,
-                result_status=result.status,
-                signals=result.diagnostics,
-            )
+        self.manifest.budget.record(False, attempt_id=selected_id)
+        exhausted = self.manifest.budget.exhausted()
+        self.manifest.status = "blocked" if exhausted else "running"
+        self.manifest.status_reason = (
+            "Session budget exhausted." if exhausted else reason.strip()
         )
-        action = transition.action
-        reason_text = transition.reason
-        if action != "accept" and self.manifest.budget.exhausted():
-            action = "block"
-            reason_text = f"{reason_text} Session budget exhausted."
-        self.manifest.status = "blocked" if action == "block" else "running"
-        decision = DecisionRecord(
-            capability=capability,
-            attempt_id=selected_id,
-            action=action,
-            result_status=result.status,
-            reason=reason_text,
-            progressed=False,
-            output_paths=(result_ref.path,),
-            failure_kind=transition.failure_kind,
-            next_capability=transition.target,
-            budget_attempts=self.manifest.budget.attempts,
-            budget_no_progress=self.manifest.budget.no_progress,
-        )
-        self.manifest.decisions.append(decision)
         attempt_store.write_attempt_manifest(
             replace(
                 attempt,
-                status="blocked" if action == "block" else "failed",
+                status="failed",
                 outputs=(result_ref,),
                 updated_at=_utcnow_iso(),
             )
         )
         self.save()
-        return result, decision
+        return result
 
     def _ensure_can_execute(self) -> None:
-        if self.manifest.status in {"completed", "blocked"}:
+        if self.manifest.status in {"completed", "blocked", "paused"}:
+            if self.manifest.status == "paused":
+                raise RuntimeError(
+                    "Session is paused; call continue_with_revision() before creating another attempt."
+                )
             raise RuntimeError(f"Session is {self.manifest.status}; no further attempt is allowed.")
+        self._ensure_no_running_attempt()
+        if self.manifest.budget.exhausted():
+            self.manifest.status = "blocked"
+            self.manifest.status_reason = "Session budget exhausted."
+            self.save()
+            raise RuntimeError("Session budget is exhausted.")
+
+    def _ensure_no_running_attempt(self) -> None:
+        """Reject lifecycle changes while an attempt still needs recovery."""
+
         running_attempts = tuple(
             item.attempt_id for item in self.list_attempts() if item.status == "running"
         )
@@ -767,10 +1001,6 @@ class SessionController:
                 + ", ".join(running_attempts)
                 + "; call recover_interrupted() before creating another attempt."
             )
-        if self.manifest.budget.exhausted():
-            self.manifest.status = "blocked"
-            self.save()
-            raise RuntimeError("Session budget is exhausted.")
 
     def _validate_input_refs(self, inputs: tuple[ArtifactRef, ...]) -> None:
         """Reject missing handoffs before creating an attempt or calling a handler."""
@@ -812,23 +1042,6 @@ class SessionController:
             return session_profile
         return session_profile or requested_profile
 
-    def _ensure_transition_target(
-        self,
-        capability: str,
-        target: str | None,
-    ) -> None:
-        """Reject an impossible target before invoking a capability handler."""
-        if target is None:
-            return
-        decision = self.plan_transition(
-            TransitionRequest(
-                source=capability,
-                result_status="completed",
-                target=target,
-            )
-        )
-        if decision.action == "block":
-            raise ValueError(decision.reason)
 
     def _resolve_parent_attempt_id(self, parent_attempt_id: str | None) -> str | None:
         """Resolve the linear parent or an explicitly requested branch parent."""
@@ -850,43 +1063,3 @@ class SessionController:
                 "only completed or failed attempts can be branched from."
             )
         return parent.attempt_id
-
-    def _ensure_capability_transition(
-        self,
-        capability: str,
-        *,
-        parent_attempt_id: str | None = None,
-    ) -> None:
-        """Reject an actual capability jump not allowed by the recipe.
-
-        ``next_capability`` validates the route proposed by the caller for the
-        current attempt. This check validates the next invocation as well, so
-        a caller cannot bypass the recipe by omitting that proposal or by
-        replacing it before creating the next attempt. An explicit
-        ``parent_attempt_id`` deliberately validates against that earlier
-        attempt, allowing a bounded branch without turning the controller into
-        a graph scheduler.
-        """
-        previous_id = (
-            parent_attempt_id
-            if parent_attempt_id is not None
-            else self.manifest.current_attempt
-        )
-        if not previous_id:
-            return
-        previous = next(
-            (item for item in self.list_attempts() if item.attempt_id == previous_id),
-            None,
-        )
-        previous_capability = (previous.capability or "").strip() if previous else ""
-        if not previous_capability:
-            return
-        decision = self.plan_transition(
-            TransitionRequest(
-                source=previous_capability,
-                result_status="completed",
-                target=capability,
-            )
-        )
-        if decision.action == "block":
-            raise ValueError(decision.reason)

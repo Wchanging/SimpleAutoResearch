@@ -8,12 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from rich.console import Console
 
 from simple_ar.core.artifacts import read_json, write_json
-from simple_ar.cli import _resume_config, main
+from simple_ar.core import ArtifactStore
+from simple_ar.cli import main
 from simple_ar.cli.parser import build_parser
 from simple_ar.cli.code_task_view import confirm_review_gate, render_execute_message
 from simple_ar.core.reporting import style_progress_message
@@ -23,6 +24,150 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_research_report_does_not_rewrite_or_execute_a_historical_session(self):
+        from legacy_session_fixture import historical_session
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "session"
+            historical_session(root)
+            before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            with patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()):
+                with self.assertRaisesRegex(SystemExit, "No legacy workflow was executed"):
+                    main(["research-report", "--session-root", str(root), "--model", "scripted"])
+            after = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+            self.assertEqual(before, after)
+
+    def test_segmented_code_task_report_retires_before_loading_config(self):
+        with self.assertRaisesRegex(SystemExit, "research-session"):
+            main(["research-code-task", "--topic", "task", "--synthesis-file", "missing.json",
+                  "--code-task-config", "missing.toml", "--with-report"])
+
+    def test_historical_stage_status_is_readable_without_running_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = {"topic": "Historical research", "stages": [
+                {"stage_number": 1, "stage": "plan", "status": "done", "outputs": ["problem.md"]}
+            ]}
+            write_json(root / "manifest.json", manifest)
+            write_json(root / "pipeline_state.json", {
+                "status": "failed", "last_stage": "search", "next_stage": "read",
+            })
+            write_json(root / "state.json", {
+                "schema_version": "workspace_state.v1", "run_id": "archived",
+                "topic": "Historical research", "search": {"status": "failed"},
+                "artifact_aliases": {"papers.jsonl": "02-search/papers.jsonl"},
+            })
+            before = {p.name: p.read_bytes() for p in root.iterdir()}
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                main(["status", str(root)])
+            self.assertIn("Historical research", output.getvalue())
+            self.assertIn("01 plan:", output.getvalue())
+            self.assertIn("Pipeline: failed (last=search, next=read)", output.getvalue())
+            self.assertEqual(read_json(root / "manifest.json"), manifest)
+            self.assertEqual({p.name: p.read_bytes() for p in root.iterdir()}, before)
+
+    def test_retired_pipeline_commands_do_not_read_config_or_write_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for command in ("run", "resume", "research-code-task", "research-experiment"):
+                with self.subTest(command=command), self.assertRaisesRegex(SystemExit, "retired.*research-session"):
+                    main([command, "--config", str(root / "missing.toml"),
+                          "--output-root", str(root / "runs")])
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_research_session_parser_allows_literature_only_mode(self) -> None:
+        args = build_parser().parse_args(
+            ["research-session", "--topic", "reliable agents", "--no-report"]
+        )
+
+        self.assertIsNone(args.command_argv)
+        self.assertIsNone(args.code_task_config)
+
+    def test_research_session_cli_without_command_stays_literature_only(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            session_root = root / "sessions" / "research-session"
+            final_view = SimpleNamespace(
+                session_root=session_root,
+                status="completed",
+                status_reason="",
+                next_action=None,
+                state_refs={"summary": SimpleNamespace(path="outputs/research_summary.md")},
+                attempts=(),
+            )
+            app = MagicMock()
+            app.services = SimpleNamespace(max_attempts=5)
+            app.view.side_effect = [
+                SimpleNamespace(
+                    session_root=session_root, status="running", status_reason="",
+                    next_action="plan", state_refs={}, attempts=(),
+                ),
+                final_view,
+            ]
+            app.advance.return_value = final_view
+            stdout = io.StringIO()
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=None),
+                patch("simple_ar.app.research_application.create_session", return_value=app) as creator,
+                contextlib.redirect_stdout(stdout),
+            ):
+                main([
+                    "research-session",
+                    "--topic", "reliable agents",
+                    "--output-root", str(root / "sessions"),
+                    "--no-report",
+                ])
+
+            brief = creator.call_args.args[0]
+            services = creator.call_args.kwargs["services"]
+            self.assertEqual(brief.requested_outputs, ("summary",))
+            self.assertEqual(brief.intents, ("research",))
+            self.assertNotIn("execution", services.config)
+            self.assertEqual(services.budget_limits["process_invocations"], 0)
+            self.assertIn("summary: ", stdout.getvalue())
+
+    def test_research_session_cli_without_command_with_model_requests_survey_report(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            session_root = root / "sessions" / "research-session"
+            final_view = SimpleNamespace(
+                session_root=session_root,
+                status="completed",
+                status_reason="",
+                next_action=None,
+                state_refs={"report": SimpleNamespace(path="attempts/report/report.md")},
+                attempts=(),
+            )
+            app = MagicMock()
+            app.services = SimpleNamespace(max_attempts=5)
+            app.view.side_effect = [
+                SimpleNamespace(
+                    session_root=session_root, status="running", status_reason="",
+                    next_action="plan", state_refs={}, attempts=(),
+                ),
+                final_view,
+            ]
+            app.advance.return_value = final_view
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch("simple_ar.app.research_application.create_session", return_value=app) as creator,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main([
+                    "research-session",
+                    "--topic", "reliable agents",
+                    "--output-root", str(root / "sessions"),
+                ])
+
+            brief = creator.call_args.args[0]
+            services = creator.call_args.kwargs["services"]
+            self.assertEqual(brief.requested_outputs, ("report",))
+            self.assertEqual(services.config["report"]["mode"], "research_only")
+            self.assertEqual(services.config["report"]["template"], "survey")
+            self.assertEqual(services.budget_limits["process_wall_seconds"], 0)
+
     def test_research_session_parser_accepts_shared_cache_dir(self) -> None:
         args = build_parser().parse_args(
             [
@@ -61,11 +206,138 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.command, "research-session-continue")
-        self.assertEqual(args.parent_attempt_id, "experiment-001")
+        self.assertIsNone(args.parent_attempt_id)
         self.assertEqual(
             args.command_argv,
             [sys.executable, "-c", "print('accuracy: 0.9')"],
         )
+
+    def test_canonical_recovery_cli_uses_application_retry_boundary(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp) / "session"
+            root.mkdir()
+            (root / "session_manifest.json").write_text("{}", encoding="utf-8")
+            view = SimpleNamespace(
+                session_root=root,
+                status="completed",
+                next_action=None,
+                state_refs={
+                    "experiment": SimpleNamespace(
+                        path="attempts/experiment-0002/experiment_result.json"
+                    )
+                },
+            )
+            app = MagicMock()
+            app.retry_experiment.return_value = view
+            stdout = io.StringIO()
+            with patch(
+                "simple_ar.app.research_application.load_session", return_value=app
+            ), contextlib.redirect_stdout(stdout):
+                main([
+                    "research-session-continue",
+                    "--session-root",
+                    str(root),
+                    "--cwd",
+                    str(root),
+                    "--command",
+                    sys.executable,
+                    "-c",
+                    "print('accuracy: 0.9')",
+                ])
+
+            call = app.retry_experiment.call_args
+            self.assertEqual(call.kwargs["command"], (sys.executable, "-c", "print('accuracy: 0.9')"))
+            self.assertIsNone(call.kwargs["parent_attempt_id"])
+            self.assertIn("Status: completed", stdout.getvalue())
+            self.assertIn("experiment-0002", stdout.getvalue())
+
+    def test_legacy_session_continue_does_not_execute_or_rewrite_history(self) -> None:
+        from legacy_session_fixture import historical_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "legacy"
+            historical_session(root, failed=True)
+            before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            with self.assertRaises(SystemExit):
+                main([
+                    "research-session-continue", "--session-root", str(root),
+                    "--cwd", str(root), "--command", sys.executable, "-c",
+                    "from pathlib import Path; Path('unexpected-execution').touch()",
+                ])
+            after = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            self.assertEqual(after, before)
+
+    def test_research_session_migrate_parser_accepts_explicit_artifacts(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "research-session-migrate",
+                "--source-root",
+                "runs/legacy",
+                "--destination-root",
+                "runs/successor",
+                "--artifact",
+                "search",
+                "--requested-output",
+                "report",
+            ]
+        )
+
+        self.assertEqual(args.command, "research-session-migrate")
+        self.assertEqual(args.artifact_names, ["search"])
+        self.assertEqual(args.requested_outputs, ["report"])
+
+    def test_research_session_migrate_cli_reports_new_successor(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            legacy = root / "legacy"
+            successor = root / "successor"
+            store = ArtifactStore(legacy)
+            search_ref = store.write_json(
+                "state/search.json",
+                {"legacy": True},
+                kind="search",
+                schema="legacy_search.v1",
+                producer="legacy",
+            )
+            store.write_json(
+                "session_manifest.json",
+                {
+                    "schema_version": "session_manifest.v1",
+                    "session_id": "legacy-cli-session",
+                    "topic": "CLI migration",
+                    "status": "created",
+                    "state_refs": {"search": search_ref.to_dict()},
+                    "budget": {},
+                    "decisions": [],
+                },
+                kind="session",
+                schema="session_manifest.v1",
+                producer="legacy",
+            )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                main(
+                    [
+                        "research-session-migrate",
+                        "--source-root",
+                        str(legacy),
+                        "--destination-root",
+                        str(successor),
+                        "--artifact",
+                        "search",
+                    ]
+                )
+
+            self.assertIn("Successor session:", stdout.getvalue())
+            self.assertIn("Historical budget: unknown_not_imported", stdout.getvalue())
+            manifest = ArtifactStore(successor).read_json("session_manifest.json")
+            self.assertEqual(manifest["parent_session"], "legacy-cli-session")
+            self.assertTrue(
+                (successor / "compatibility" / "imported" / "01-search.json").is_file()
+            )
 
     def test_code_task_execute_messages_use_shared_rich_styles(self) -> None:
         self.assertEqual(style_progress_message("LLM usage greenfield-file-main.py: 1 input"), "gold1")
@@ -106,57 +378,6 @@ class CliTests(unittest.TestCase):
         self.assertTrue(confirm_review_gate("Approve?", console=console, assume_yes=True))
         self.assertTrue(any("No interactive input" in message for message in console.messages))
 
-    def test_resume_uses_pipeline_state_and_status_reports_progress(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            output_root = Path(tmp) / "runs"
-
-            with contextlib.redirect_stdout(io.StringIO()):
-                main(
-                    [
-                        "run",
-                        "--topic",
-                        "toy topic",
-                        "--to-stage",
-                        "plan",
-                        "--output-root",
-                        str(output_root),
-                        "--no-llm",
-                        "--offline-search",
-                        "--quiet",
-                    ]
-                )
-
-            run_dir = next(output_root.iterdir())
-            state = read_json(run_dir / "pipeline_state.json")
-            self.assertEqual(state["next_stage"], "search")
-
-            with contextlib.redirect_stdout(io.StringIO()):
-                main(
-                    [
-                        "resume",
-                        str(run_dir),
-                        "--to-stage",
-                        "search",
-                        "--no-llm",
-                        "--offline-search",
-                        "--quiet",
-                    ]
-                )
-
-            state = read_json(run_dir / "pipeline_state.json")
-            self.assertEqual(state["last_stage"], "search")
-            self.assertEqual(state["next_stage"], "read")
-
-            stdout = io.StringIO()
-            with contextlib.redirect_stdout(stdout):
-                main(["status", str(run_dir)])
-
-            status_text = stdout.getvalue()
-            self.assertIn("Pipeline: done", status_text)
-            self.assertIn("01 plan: done", status_text)
-            self.assertIn("02 search: done", status_text)
-            self.assertIn("03 read: pending", status_text)
 
     def test_status_reports_persisted_research_session_checkpoint(self) -> None:
         from simple_ar.core.capabilities import CapabilityRegistry
@@ -185,105 +406,66 @@ class CliTests(unittest.TestCase):
             self.assertIn("Attempts:\n- none", status_text)
 
     def test_status_reports_ready_for_report_handoff(self) -> None:
-        from simple_ar.core.capabilities import CapabilityContext, CapabilityRegistry, CapabilityResult
-        from simple_ar.core.session import SessionController
+        from simple_ar.core import ArtifactStore
 
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             session_root = Path(tmp) / "session"
-            registry = CapabilityRegistry()
-
-            def complete(*, context: CapabilityContext) -> CapabilityResult:
-                return CapabilityResult(status="completed")
-
-            registry.register("analysis", complete)
-            controller = SessionController.create(
-                session_root,
-                session_id="session-handoff-test",
-                topic="handoff topic",
-                profile="full_research",
-                registry=registry,
-            )
-            controller.execute(
-                "analysis",
-                attempt_id="analysis-001",
-                next_capability="report",
-            )
+            # Recorded legacy shape: status inspection must not require a
+            # functioning old workflow executor to reconstruct history.
+            ArtifactStore(session_root).write_json("session_manifest.json", {
+                "schema_version": "session_manifest.v1",
+                "session_id": "historical-status",
+                "topic": "historical handoff",
+                "status": "running",
+                "budget": {"attempts": 1},
+                "decisions": [{
+                    "capability": "analysis", "attempt_id": "analysis-001",
+                    "action": "accept", "result_status": "completed",
+                    "next_capability": "report",
+                }],
+            })
+            original = (session_root / "session_manifest.json").read_bytes()
 
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 main(["status", str(session_root)])
+            self.assertEqual((session_root / "session_manifest.json").read_bytes(), original)
 
             self.assertIn("Handoff: ready_for_report (next=report)", stdout.getvalue())
 
     def test_status_reports_explicit_failure_continuation(self) -> None:
-        from simple_ar.core.capabilities import CapabilityContext, CapabilityRegistry, CapabilityResult
-        from simple_ar.core.session import SessionController
+        from simple_ar.core import ArtifactStore
 
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             session_root = Path(tmp) / "session"
-            registry = CapabilityRegistry()
-
-            def fail(*, context: CapabilityContext) -> CapabilityResult:
-                del context
-                return CapabilityResult(
-                    status="failed",
-                    diagnostics=("temporary provider failure",),
-                )
-
-            registry.register("analysis", fail)
-            controller = SessionController.create(
-                session_root,
-                session_id="session-failure-status-test",
-                topic="failure status topic",
-                registry=registry,
-            )
-            controller.execute(
-                "analysis",
-                attempt_id="analysis-001",
-                next_capability="analysis",
-            )
+            # Recorded legacy shape: status inspection must not require a
+            # functioning old workflow executor to reconstruct history.
+            ArtifactStore(session_root).write_json("session_manifest.json", {
+                "schema_version": "session_manifest.v1",
+                "session_id": "historical-status",
+                "topic": "historical handoff",
+                "status": "running",
+                "budget": {"attempts": 1},
+                "decisions": [{
+                    "capability": "analysis", "attempt_id": "analysis-001",
+                    "action": "repair", "result_status": "failed",
+                    "next_capability": "analysis",
+                }],
+            })
+            original = (session_root / "session_manifest.json").read_bytes()
 
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 main(["status", str(session_root)])
+            self.assertEqual((session_root / "session_manifest.json").read_bytes(), original)
 
             status_text = stdout.getvalue()
             self.assertIn("Status: running", status_text)
             self.assertIn("Continuation: explicit repair -> analysis", status_text)
             self.assertIn("0 running", status_text)
 
-    def test_research_only_report_run_skips_experiment_stages(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            output_root = Path(tmp) / "runs"
-
-            with contextlib.redirect_stdout(io.StringIO()):
-                main(
-                    [
-                        "run",
-                        "--topic",
-                        "toy topic",
-                        "--to-stage",
-                        "report",
-                        "--output-root",
-                        str(output_root),
-                        "--report-mode",
-                        "research_only",
-                        "--no-llm",
-                        "--offline-search",
-                        "--quiet",
-                    ]
-                )
-
-            run_dir = next(output_root.iterdir())
-            self.assertTrue((run_dir / "04-synthesize" / "stage_meta.json").is_file())
-            self.assertTrue((run_dir / "08-report" / "report.md").is_file())
-            self.assertTrue((run_dir / "08-report" / "citation_map.json").is_file())
-            self.assertFalse((run_dir / "05-design" / "stage_meta.json").exists())
-            self.assertFalse((run_dir / "06-code" / "stage_meta.json").exists())
-            self.assertFalse((run_dir / "07-run" / "stage_meta.json").exists())
 
     def test_research_report_cli_reads_existing_session_without_rerunning_it(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -318,19 +500,44 @@ class CliTests(unittest.TestCase):
                     ]
                 )
             session_root = next(output_root.iterdir())
-            fake_report = SimpleNamespace(
+            final_view = SimpleNamespace(
                 session_root=session_root,
                 status="completed",
-                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
-                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+                status_reason="",
+                next_action=None,
+                state_refs={
+                    "report": SimpleNamespace(path="attempts/report-001/report.md"),
+                    "report_audit": SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+                },
+                attempts=(),
             )
+            app = MagicMock()
+            app.brief = SimpleNamespace(requested_outputs=("experiments",))
+            app.services = SimpleNamespace(max_attempts=4)
+            app.view.return_value = SimpleNamespace(
+                session_root=session_root,
+                status="completed",
+                status_reason="",
+                next_action=None,
+                state_refs={},
+                attempts=(),
+            )
+            app.request_report.return_value = SimpleNamespace(
+                session_root=session_root,
+                status="running",
+                status_reason="",
+                next_action="report_write",
+                state_refs={},
+                attempts=(),
+            )
+            app.advance.return_value = final_view
             stdout = io.StringIO()
             with (
                 patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
                 patch(
-                    "simple_ar.app.research_report.run_research_session_report_agent",
-                    return_value=fake_report,
-                ) as runner,
+                    "simple_ar.app.research_application.load_session",
+                    return_value=app,
+                ) as loader,
                 contextlib.redirect_stdout(stdout),
             ):
                 main(
@@ -343,7 +550,9 @@ class CliTests(unittest.TestCase):
                     ]
                 )
 
-            runner.assert_called_once()
+            loader.assert_called_once()
+            app.request_report.assert_called_once()
+            app.advance.assert_called_once_with(max_actions=1)
             self.assertIn("Status: completed", stdout.getvalue())
             self.assertIn(
                 str(session_root / "attempts" / "report-001" / "report.md"),
@@ -360,36 +569,34 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             output_root = root / "sessions"
-            session = SimpleNamespace(
-                session_root=output_root / "research-session",
-                status="ready_for_report",
-                plan=SimpleNamespace(query_plan=SimpleNamespace(planner="fixture")),
-                brief=SimpleNamespace(generation_mode="deterministic"),
-                search=SimpleNamespace(papers=[object()]),
-                documents=SimpleNamespace(records=[object()]),
-                execution_ref=SimpleNamespace(path="attempts/experiment-001/results.json"),
-                analysis_ref=SimpleNamespace(path="attempts/analysis-001/analysis.json"),
-            )
-            report = SimpleNamespace(
-                session_root=session.session_root,
+            session_root = output_root / "research-session"
+            final_view = SimpleNamespace(
+                session_root=session_root,
                 status="completed",
-                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
-                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+                status_reason="",
+                next_action=None,
+                state_refs={
+                    "report": SimpleNamespace(path="attempts/report-001/report.md"),
+                    "report_audit": SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+                },
+                attempts=(),
             )
+            app = MagicMock()
+            app.services = SimpleNamespace(max_attempts=5)
+            app.view.side_effect = [
+                SimpleNamespace(
+                    session_root=session_root, status="running", status_reason="",
+                    next_action="plan", state_refs={}, attempts=(),
+                ),
+                final_view,
+            ]
+            app.advance.return_value = final_view
             with (
                 patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
                 patch(
-                    "simple_ar.app.research_session.run_research_session",
-                    return_value=session,
-                ) as session_runner,
-                patch(
-                    "simple_ar.app.research_report.run_research_session_report_agent",
-                    return_value=report,
-                ) as report_runner,
-                patch(
-                    "simple_ar.report.templates.load_report_template_bundle",
-                    return_value=object(),
-                ),
+                    "simple_ar.app.research_application.create_session",
+                    return_value=app,
+                ) as creator,
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 main(
@@ -417,8 +624,9 @@ class CliTests(unittest.TestCase):
                     ]
                 )
 
-            session_runner.assert_called_once()
-            report_runner.assert_called_once()
+            creator.assert_called_once()
+            self.assertEqual(creator.call_args.args[0].requested_outputs, ("experiments", "report"))
+            app.advance.assert_called_once_with(max_actions=1)
 
     def test_research_session_cli_defaults_to_report_with_model(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -430,36 +638,34 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             output_root = root / "sessions"
-            session = SimpleNamespace(
-                session_root=output_root / "research-session",
-                status="ready_for_report",
-                plan=SimpleNamespace(query_plan=SimpleNamespace(planner="fixture")),
-                brief=SimpleNamespace(generation_mode="llm"),
-                search=SimpleNamespace(papers=[object()]),
-                documents=SimpleNamespace(records=[object()]),
-                execution_ref=SimpleNamespace(path="attempts/experiment-001/results.json"),
-                analysis_ref=SimpleNamespace(path="attempts/analysis-001/analysis.json"),
-            )
-            report = SimpleNamespace(
-                session_root=session.session_root,
+            session_root = output_root / "research-session"
+            final_view = SimpleNamespace(
+                session_root=session_root,
                 status="completed",
-                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
-                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+                status_reason="",
+                next_action=None,
+                state_refs={
+                    "report": SimpleNamespace(path="attempts/report-001/report.md"),
+                    "report_audit": SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
+                },
+                attempts=(),
             )
+            app = MagicMock()
+            app.services = SimpleNamespace(max_attempts=5)
+            app.view.side_effect = [
+                SimpleNamespace(
+                    session_root=session_root, status="running", status_reason="",
+                    next_action="plan", state_refs={}, attempts=(),
+                ),
+                final_view,
+            ]
+            app.advance.return_value = final_view
             with (
                 patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
                 patch(
-                    "simple_ar.app.research_session.run_research_session",
-                    return_value=session,
-                ) as session_runner,
-                patch(
-                    "simple_ar.app.research_report.run_research_session_report_agent",
-                    return_value=report,
-                ) as report_runner,
-                patch(
-                    "simple_ar.report.templates.load_report_template_bundle",
-                    return_value=object(),
-                ),
+                    "simple_ar.app.research_application.create_session",
+                    return_value=app,
+                ) as creator,
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 main(
@@ -482,8 +688,9 @@ class CliTests(unittest.TestCase):
                     ]
                 )
 
-            session_runner.assert_called_once()
-            report_runner.assert_called_once()
+            creator.assert_called_once()
+            self.assertEqual(creator.call_args.args[0].requested_outputs, ("experiments", "report"))
+            app.advance.assert_called_once_with(max_actions=1)
 
     def test_research_session_cli_builds_code_task_request_from_config(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
@@ -509,22 +716,19 @@ class CliTests(unittest.TestCase):
                 'baseline_policy = "skip"\n',
                 encoding="utf-8",
             )
-            fake_result = SimpleNamespace(
-                session_root=root / "session",
-                status="ready_for_report",
-                plan=SimpleNamespace(query_plan=SimpleNamespace(planner="fixture")),
-                brief=SimpleNamespace(generation_mode="llm"),
-                search=SimpleNamespace(papers=[]),
-                documents=SimpleNamespace(records=[]),
-                execution_ref=SimpleNamespace(path="attempts/experiment-001/results.json"),
-                analysis_ref=SimpleNamespace(path="attempts/analysis-001/analysis.json"),
+            app = MagicMock()
+            app.services = SimpleNamespace(max_attempts=5)
+            app.view.return_value = SimpleNamespace(
+                session_root=root / "session", status="completed", status_reason="",
+                next_action=None, state_refs={}, attempts=(),
             )
+            app.advance.return_value = app.view.return_value
             with (
                 patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
                 patch(
-                    "simple_ar.app.research_session.run_research_session",
-                    return_value=fake_result,
-                ) as runner,
+                    "simple_ar.app.research_application.create_session",
+                    return_value=app,
+                ) as creator,
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 main(
@@ -544,209 +748,27 @@ class CliTests(unittest.TestCase):
                     ]
                 )
 
-            request = runner.call_args.args[0]
-            self.assertEqual(request.command, ())
-            self.assertEqual(request.code_task_spec.code_root, project)
-            self.assertEqual(request.code_task_spec.task_file, task_file)
-            self.assertEqual(request.timeout_sec, 7)
-            self.assertEqual(request.baseline_policy, "skip")
-            self.assertEqual(request.code_task_model, "gpt-5.4")
+            brief = creator.call_args.args[0]
+            services = creator.call_args.kwargs["services"]
+            execution = services.config["execution"]
+            self.assertEqual(brief.requested_outputs, ("experiments",))
+            self.assertIn("Improve the fixture.", brief.request_text)
+            self.assertEqual(execution["cwd"], str(project.resolve()))
+            self.assertEqual(execution["timeout_sec"], 7)
+            self.assertEqual(execution["code_task"]["code_root"], str(project.resolve()))
+            self.assertEqual(execution["code_task"]["max_repairs"], 0)
 
-    def test_research_code_task_cli_builds_request_from_existing_config(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
-            project = root / "project"
-            project.mkdir()
-            task_file = root / "task.md"
-            task_file.write_text("Improve the fixture.", encoding="utf-8")
-            synthesis_file = root / "synthesis.json"
-            synthesis_file.write_text("{}", encoding="utf-8")
-            config = root / "code_task.toml"
-            config.write_text(
-                "[code_task]\n"
-                f'code_root = "{project.as_posix()}"\n'
-                f'task_file = "{task_file.as_posix()}"\n'
-                "[benchmark]\n"
-                'command = "python benchmark.py"\n'
-                'primary_metric = "accuracy"\n'
-                "[benchmark.metric_directions]\n"
-                'accuracy = "higher"\n'
-                "[execute]\n"
-                "use_llm = true\n"
-                "timeout_sec = 7\n"
-                'baseline_policy = "skip"\n',
-                encoding="utf-8",
-            )
-            fake_result = SimpleNamespace(
-                session_root=root / "session",
-                status="partial",
-                execution_path=root / "session" / "execution.json",
-                analysis_path=root / "session" / "analysis.json",
-            )
-            with patch(
-                "simple_ar.app.research_code_task.run_research_code_task_session",
-                return_value=fake_result,
-            ) as runner:
-                stdout = io.StringIO()
-                with contextlib.redirect_stdout(stdout):
-                    with self.assertRaises(SystemExit) as raised:
-                        main(
-                            [
-                                "research-code-task",
-                                "--topic",
-                                "fixture research",
-                                "--synthesis-file",
-                                str(synthesis_file),
-                                "--code-task-config",
-                                str(config),
-                                "--output-root",
-                                str(root / "runs"),
-                            ]
-                        )
 
-            request = runner.call_args.args[0]
-            self.assertEqual(request.topic, "fixture research")
-            self.assertEqual(request.spec.code_root, project)
-            self.assertEqual(request.spec.task_file, task_file)
-            self.assertEqual(request.timeout_sec, 7)
-            self.assertEqual(request.baseline_policy, "skip")
-            self.assertIn("Status: partial", stdout.getvalue())
-            self.assertIn("ended with status 'partial'", str(raised.exception))
 
-    def test_research_code_task_cli_can_append_report_after_one_candidate(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
-            project = root / "project"
-            project.mkdir()
-            task_file = root / "task.md"
-            task_file.write_text("Improve the fixture.", encoding="utf-8")
-            synthesis_file = root / "synthesis.json"
-            synthesis_file.write_text("{}", encoding="utf-8")
-            config = root / "code_task.toml"
-            config.write_text(
-                "[code_task]\n"
-                f'code_root = "{project.as_posix()}"\n'
-                f'task_file = "{task_file.as_posix()}"\n'
-                "[benchmark]\n"
-                'command = "python benchmark.py"\n'
-                'primary_metric = "accuracy"\n'
-                "[execute]\n"
-                "use_llm = true\n",
-                encoding="utf-8",
-            )
-            session = SimpleNamespace(
-                session_root=root / "session",
-                status="completed",
-                execution_path=root / "session" / "execution.json",
-                analysis_path=root / "session" / "analysis.json",
-            )
-            report = SimpleNamespace(
-                session_root=session.session_root,
-                status="completed",
-                report_ref=SimpleNamespace(path="attempts/report-001/report.md"),
-                audit_ref=SimpleNamespace(path="attempts/report-audit-001/report_audit.json"),
-            )
-            with (
-                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
-                patch(
-                    "simple_ar.app.research_code_task.run_research_code_task_session",
-                    return_value=session,
-                ) as runner,
-                patch(
-                    "simple_ar.app.research_code_task_report.run_research_code_task_report_agent",
-                    return_value=report,
-                ) as report_runner,
-                patch(
-                    "simple_ar.report.templates.load_report_template_bundle",
-                    return_value=object(),
-                ),
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                main(
-                    [
-                        "research-code-task",
-                        "--topic",
-                        "fixture research",
-                        "--synthesis-file",
-                        str(synthesis_file),
-                        "--code-task-config",
-                        str(config),
-                        "--output-root",
-                        str(root / "runs"),
-                        "--model",
-                        "gpt-5.4",
-                        "--with-report",
-                    ]
-                )
-
-            self.assertEqual(runner.call_args.kwargs["next_capability"], "report")
-            report_runner.assert_called_once()
-
-    def test_research_code_task_cli_rejects_non_positive_timeout_override(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
-            project = root / "project"
-            project.mkdir()
-            task_file = root / "task.md"
-            task_file.write_text("Improve the fixture.", encoding="utf-8")
-            synthesis_file = root / "synthesis.json"
-            synthesis_file.write_text("{}", encoding="utf-8")
-            config = root / "code_task.toml"
-            config.write_text(
-                "[code_task]\n"
-                f'code_root = "{project.as_posix()}"\n'
-                f'task_file = "{task_file.as_posix()}"\n'
-                "[benchmark]\n"
-                'command = "python benchmark.py"\n'
-                'primary_metric = "accuracy"\n'
-                "[benchmark.metric_directions]\n"
-                'accuracy = "higher"\n'
-                "[execute]\n"
-                "use_llm = true\n"
-                "timeout_sec = 7\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(SystemExit) as raised:
-                main(
-                    [
-                        "research-code-task",
-                        "--topic",
-                        "fixture research",
-                        "--synthesis-file",
-                        str(synthesis_file),
-                        "--code-task-config",
-                        str(config),
-                        "--timeout-sec",
-                        "0",
-                    ]
-                )
-            self.assertIn("must be positive", str(raised.exception))
 
     def test_inspect_and_search_artifacts_commands_write_retrieval_files(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            output_root = Path(tmp) / "runs"
-
-            with contextlib.redirect_stdout(io.StringIO()):
-                main(
-                    [
-                        "run",
-                        "--topic",
-                        "toy topic",
-                        "--to-stage",
-                        "plan",
-                        "--output-root",
-                        str(output_root),
-                        "--no-llm",
-                        "--offline-search",
-                        "--quiet",
-                    ]
-                )
-
-            run_dir = next(output_root.iterdir())
+            run_dir = Path(tmp) / "historical-run"
+            (run_dir / "01-plan").mkdir(parents=True)
+            (run_dir / "01-plan" / "problem.md").write_text(
+                "# Research problem\n\nStudy reliable research agents.\n", encoding="utf-8"
+            )
 
             inspect_stdout = io.StringIO()
             with contextlib.redirect_stdout(inspect_stdout):
@@ -951,125 +973,6 @@ class CliTests(unittest.TestCase):
             self.assertIn("literature", output)
             self.assertIn("agent_handoff_archives", output)
 
-    def test_resume_config_preserves_saved_values_without_cli_overrides(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            run_dir = Path(tmp) / "run"
-            run_dir.mkdir()
-            write_json(
-                run_dir / "config_snapshot.json",
-                {
-                    "mode": "offline",
-                    "model": "saved-model",
-                    "llm_max_workers": 2,
-                    "max_papers": 3,
-                    "experiment_template": "llm_code_task_toy_spam",
-                    "experiment_timeout_sec": 60,
-                    "use_llm": False,
-                    "use_arxiv": False,
-                    "allow_fixture_fallback": True,
-                    "strict_search": False,
-                    "use_retrieval": True,
-                    "retrieval_top_k": 7,
-                },
-            )
-            args = SimpleNamespace(
-                to_stage="report",
-                model=None,
-                llm_workers=None,
-                max_papers=None,
-                search_query=None,
-                experiment_template=None,
-                experiment_timeout=None,
-                retrieval_top_k=None,
-                report_mode=None,
-                no_llm=False,
-                offline_search=False,
-                allow_fixture_fallback=False,
-                strict_search=False,
-                no_retrieval=False,
-            )
-
-            config = _resume_config(run_dir, args, "report")
-
-            self.assertEqual(config["experiment_template"], "llm_code_task_toy_spam")
-            self.assertEqual(config["experiment_timeout_sec"], 60)
-            self.assertEqual(config["retrieval_top_k"], 7)
-            self.assertEqual(config["use_llm"], False)
-            self.assertEqual(config["use_arxiv"], False)
-
-            args.experiment_timeout = 15
-            args.no_retrieval = True
-            overridden = _resume_config(run_dir, args, "report")
-            self.assertEqual(overridden["experiment_timeout_sec"], 15)
-            self.assertEqual(overridden["use_retrieval"], False)
-
-    def test_run_config_can_drive_code_task_project_design(self) -> None:
-        TEST_ROOT.mkdir(exist_ok=True)
-        repo_root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
-            root = Path(tmp)
-            output_root = root / "configured_runs"
-            config_path = root / "pipeline.toml"
-            config_path.write_text(
-                "\n".join(
-                    [
-                        "[run]",
-                        'topic = "configured tiny digits"',
-                        f'output_root = "{output_root.as_posix()}"',
-                        'to_stage = "design"',
-                        "",
-                        "[llm]",
-                        "enabled = false",
-                        "",
-                        "[search]",
-                        "offline = true",
-                        "max_papers = 1",
-                        "",
-                        "[experiment]",
-                        'template = "code_task_project"',
-                        "timeout = 11",
-                        "",
-                        "[code_task]",
-                        f'code_root = "{(repo_root / "examples" / "full_pipeline_tiny_mlp" / "project").as_posix()}"',
-                        f'task_file = "{(repo_root / "examples" / "code_tasks" / "tasks" / "improve_tiny_digits_mlp.md").as_posix()}"',
-                        'name = "configured-pipeline-task"',
-                        "",
-                        "[benchmark]",
-                        'command = "python benchmark.py"',
-                        'primary_metric = "accuracy"',
-                        "",
-                        "[benchmark.metric_directions]",
-                        'accuracy = "higher"',
-                        "",
-                        "[workspace]",
-                        'mode = "copy"',
-                        'include = ["src/**", "benchmark.py"]',
-                        'exclude = ["data/**"]',
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-
-            with contextlib.redirect_stdout(io.StringIO()):
-                main(["run", "--config", str(config_path), "--quiet"])
-
-            run_dir = next(output_root.iterdir())
-            snapshot = read_json(run_dir / "config_snapshot.json")
-            self.assertEqual(snapshot["experiment_template"], "code_task_project")
-            self.assertEqual(snapshot["experiment_timeout_sec"], 11)
-            self.assertEqual(snapshot["use_llm"], False)
-            self.assertEqual(snapshot["use_arxiv"], False)
-            self.assertEqual(snapshot["code_task_config"], str(config_path))
-
-            plan = read_json(run_dir / "05-design" / "experiment_plan.json")
-            self.assertEqual(plan["template"], "code_task_project")
-            self.assertEqual(plan["code_task"]["benchmark_command"], "python benchmark.py")
-            self.assertEqual(plan["code_task"]["primary_metric"], "accuracy")
-            self.assertEqual(plan["code_task"]["workspace_mode"], "copy")
-            self.assertEqual(plan["code_task"]["workspace_include"], ["src/**", "benchmark.py"])
-            self.assertEqual(plan["code_task"]["workspace_exclude"], ["data/**"])
 
     def test_code_task_init_git_worktree_error_gives_next_steps(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

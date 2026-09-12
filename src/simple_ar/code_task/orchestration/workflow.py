@@ -71,7 +71,6 @@ def initialize_code_task(
     workspace_include: tuple[str, ...] = (),
     workspace_exclude: tuple[str, ...] = (),
     workspace_reuse_source_venv: bool = False,
-    workspace_setup_hook: str = "",
     env_mode: str = "current",
     python_executable: str | Path | None = None,
     primary_metric: str | None = None,
@@ -100,8 +99,6 @@ def initialize_code_task(
             mode.
         workspace_reuse_source_venv: Whether a detected source ``.venv`` may
             be used as the initial external Python interpreter.
-        workspace_setup_hook: Optional setup command recorded for future
-            managed-environment support. It is not executed during init.
         env_mode: Execution environment mode. V2.1 supports ``current`` and
             ``external``.
         python_executable: External interpreter path or executable name when
@@ -154,7 +151,6 @@ def initialize_code_task(
             include=workspace_include,
             exclude=workspace_exclude,
             reuse_source_venv=workspace_reuse_source_venv,
-            setup_hook=workspace_setup_hook,
         )
     )
     workspace_dir = workspace.project_root

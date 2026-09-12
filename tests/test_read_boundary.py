@@ -4,10 +4,28 @@ import unittest
 
 from simple_ar.research.contracts import DocumentRecord, TextChunk
 from simple_ar.research.documents.ingest import DocumentBundle
-from simple_ar.research.evidence.reader import ReadRequest, ReadResult, read_documents
+from simple_ar.research.evidence.reader import (
+    ReadRequest,
+    ReadResult,
+    query_evidence,
+    read_documents,
+)
 
 
 class ReadBoundaryTests(unittest.TestCase):
+    def test_document_query_filters_other_documents(self) -> None:
+        bundle = self._bundle()
+        bundle.chunks.append(TextChunk(chunk_id="p2-c1", document_id="openalex-p2", text="Other paper"))
+        refs = query_evidence(bundle, document_id="openalex-p1", adjacent_chunks=1)
+        self.assertEqual([ref.document_id for ref in refs], ["openalex-p1"])
+        self.assertNotIn("Other paper", refs[0].context_text)
+        handoff = read_documents(ReadRequest(bundle=bundle)).to_handoff_dict()
+        self.assertEqual(handoff["source_spans"][0]["evidence_id"], refs[0].evidence_id)
+        self.assertIn("extraction_status", handoff["source_spans"][0])
+        self.assertNotIn("text", handoff["source_spans"][0])
+        with self.assertRaisesRegex(ValueError, "does not belong"):
+            query_evidence(bundle, document_id="openalex-p1", chunk_ids=("p2-c1",))
+
     def _bundle(self, *, with_chunks: bool = True) -> DocumentBundle:
         records = [
             DocumentRecord(
@@ -60,12 +78,103 @@ class ReadBoundaryTests(unittest.TestCase):
         self.assertEqual(result.bundle.chunks, [])
         self.assertTrue(result.diagnostics)
 
+    def test_model_dropping_every_paper_does_not_restore_the_input(self) -> None:
+        class DropAllClient:
+            model = "scripted-drop-all"
+
+            def ask_json(self, *args, **kwargs):
+                return {"ranked_papers": []}
+
+            def ask_json_many(self, requests, *, max_workers):
+                return [{"decisions": [
+                    {"paper_id": paper_id, "decision": "drop",
+                     "coarse_relevance_score": 0, "reason": "Outside the topic."}
+                    for paper_id in ("openalex-p1", "openalex-p2")
+                ]} for _ in requests]
+
+        result = read_documents(ReadRequest(
+            bundle=self._bundle(), topic="unrelated topic",
+            use_llm=True, llm_client=DropAllClient(),
+        ))
+        self.assertEqual(result.bundle.records, [])
+        self.assertEqual(result.paper_notes, ())
+        self.assertTrue(result.screening_decisions)
+        self.assertTrue(all(row["decision"] == "drop" for row in result.screening_decisions))
+
     def test_metadata_only_read_is_partial(self) -> None:
         result = read_documents(ReadRequest(bundle=self._bundle(with_chunks=False)))
 
         self.assertEqual(result.status, "partial")
         self.assertEqual(result.bundle.records[0].document_id, "openalex-p1")
         self.assertEqual(result.bundle.chunks, [])
+
+    def test_query_evidence_preserves_source_identity_and_real_adjacent_context(self) -> None:
+        record = DocumentRecord(
+            document_id="doc-1",
+            source_id="paper-1",
+            title="Paper one",
+            source="fixture",
+            content_hash="sha256:abc",
+            extraction_status="parsed",
+        )
+        bundle = DocumentBundle(
+            records=[record],
+            fulltext_manifest={},
+            fulltext_extraction={},
+            sections=[],
+            chunks=[
+                TextChunk(
+                    chunk_id="doc-1#chunk-001",
+                    document_id="doc-1",
+                    text="Introduction evidence.",
+                    source_path="paper.md",
+                    line_start=3,
+                    line_end=4,
+                ),
+                TextChunk(
+                    chunk_id="doc-1#chunk-002",
+                    document_id="doc-1",
+                    text="The measured result is 0.75.",
+                    source_path="paper.md",
+                    line_start=6,
+                    line_end=7,
+                ),
+                TextChunk(
+                    chunk_id="doc-1#chunk-003",
+                    document_id="doc-1",
+                    text="The limitation is a small fixture.",
+                    source_path="paper.md",
+                    line_start=9,
+                    line_end=10,
+                ),
+            ],
+        )
+
+        refs = query_evidence(
+            bundle,
+            document_id="doc-1",
+            chunk_ids=("doc-1#chunk-002",),
+            adjacent_chunks=1,
+        )
+
+        self.assertEqual(len(refs), 1)
+        ref = refs[0]
+        self.assertEqual(ref.evidence_id, "doc-1#chunk-002")
+        self.assertEqual(ref.source_id, "paper-1")
+        self.assertEqual(ref.document_revision, "sha256:abc")
+        self.assertEqual(ref.source_path, "paper.md")
+        self.assertEqual((ref.line_start, ref.line_end), (6, 7))
+        self.assertEqual(ref.extraction_status, "parsed")
+        self.assertEqual(ref.text, "The measured result is 0.75.")
+        self.assertEqual(
+            ref.adjacent_chunk_ids,
+            ("doc-1#chunk-001", "doc-1#chunk-003"),
+        )
+        self.assertIn("Introduction evidence.", ref.context_text)
+        self.assertIn("The limitation is a small fixture.", ref.context_text)
+
+        with self.assertRaisesRegex(ValueError, "Unknown evidence chunk ID"):
+            query_evidence(bundle, chunk_ids=("missing",))
 
     def test_model_read_records_screening_and_notes_in_the_handoff(self) -> None:
         class FakeClient:

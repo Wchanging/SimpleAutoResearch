@@ -13,11 +13,15 @@ model="${SIMPLE_AR_MODEL:-}"
 run_online="${SIMPLE_AR_RUN_ONLINE:-0}"
 run_code_task="${SIMPLE_AR_RUN_CODE_TASK:-0}"
 
+# Keep CPU preflight small; no CUDA workloads or provider calls by default.
+export CUDA_VISIBLE_DEVICES=""
+export OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 MKL_NUM_THREADS=2
+
 mkdir -p "$output_root"
 
 {
   echo "repository_commit=$(git rev-parse HEAD)"
-  if git diff --quiet && git diff --cached --quiet; then
+  if [[ -z "$(git status --porcelain --untracked-files=normal)" ]]; then
     echo "repository_dirty=no"
   else
     echo "repository_dirty=yes"
@@ -39,13 +43,19 @@ mkdir -p "$output_root"
   echo "code_task_requested=$run_code_task"
 } > "$output_root/environment.txt"
 
-echo "[1/3] Running local complete fixture smoke."
-uv run --no-sync python examples/research_session_smoke.py \
-  --output-root "$output_root/fixture"
+echo "[1/3] Running focused CPU preflight (fixture models, real processes)."
+uv run --no-sync python -m unittest -v \
+  tests.test_process_control \
+  tests.test_research_application.ResearchApplicationTests.test_literature_report_does_not_require_or_launch_experiments \
+  tests.test_research_application.ResearchApplicationTests.test_paired_experiment_recovers_baseline_and_finishes_negative_result \
+  tests.test_code_task.CodeTaskTests.test_application_modifies_code_between_two_canonical_measurements \
+  tests.test_code_task.CodeTaskTests.test_application_repairs_failed_candidate_without_repeating_baseline \
+  tests.test_code_task.CodeTaskTests.test_application_stops_after_authorized_repair_limit \
+  2>&1 | tee "$output_root/cpu-preflight.log"
 
 if [[ "$run_online" == "1" || "$run_code_task" == "1" ]]; then
   if [[ -z "$model" ]]; then
-    echo "SIMPLE_AR_MODEL must be set for an LLM-backed smoke." >&2
+    echo "Export SIMPLE_AR_MODEL for an LLM-backed smoke." >&2
     exit 2
   fi
   if [[ -z "${OPENAI_API_KEY:-}" ]]; then
@@ -55,42 +65,17 @@ if [[ "$run_online" == "1" || "$run_code_task" == "1" ]]; then
 fi
 
 if [[ "$run_online" == "1" ]]; then
-  echo "[2/3] Running bounded online research-session smoke."
-  SIMPLE_AR_LLM_RETRY_ATTEMPTS="${SIMPLE_AR_LLM_RETRY_ATTEMPTS:-1}" \
-  SIMPLE_AR_LLM_TIMEOUT_SEC="${SIMPLE_AR_LLM_TIMEOUT_SEC:-90}" \
-  uv run --no-sync simple-ar research-session \
-    --topic "lightweight language model agents" \
-    --query "large language model agents" \
-    --provider arxiv \
-    --max-results 1 \
-    --max-chunks 5 \
-    --idea-limit 1 \
-    --timeout-sec 30 \
-    --model "$model" \
-    --report-reviewer disabled \
-    --max-review-iterations 0 \
-    --output-root "$output_root/online" \
-    --command python -c "print('accuracy: 0.75')"
+  echo "[2/3] Running new-application literature/report check (no experiment)."
+  uv run --no-sync python examples/research_application_live.py \
+    --session "$output_root/online" --request-timeout 90
 else
   echo "[2/3] Online smoke skipped (set SIMPLE_AR_RUN_ONLINE=1 to enable)."
 fi
 
 if [[ "$run_code_task" == "1" ]]; then
-  echo "[3/3] Running one prepared research-to-CodeTask direction."
-  SIMPLE_AR_LLM_RETRY_ATTEMPTS="${SIMPLE_AR_LLM_RETRY_ATTEMPTS:-1}" \
-  SIMPLE_AR_LLM_TIMEOUT_SEC="${SIMPLE_AR_LLM_TIMEOUT_SEC:-90}" \
-  uv run --no-sync simple-ar research-session \
-    --topic "reliable agents" \
-    --local-document examples/research_brief/fixtures/reliable_agents.md \
-    --max-results 1 \
-    --max-chunks 5 \
-    --idea-limit 1 \
-    --code-task-config examples/code_task_medium_review/configs/code_task.toml \
-    --model "$model" \
-    --timeout-sec "${SIMPLE_AR_EXPERIMENT_TIMEOUT_SEC:-60}" \
-    --report-reviewer disabled \
-    --max-review-iterations 0 \
-    --output-root "$output_root/code-task"
+  echo "[3/3] Running new-application isolated CPU baseline/CodeTask/candidate/report."
+  uv run --no-sync python examples/research_application_live.py \
+    --session "$output_root/code-task" --medium-review --request-timeout 90
 else
   echo "[3/3] CodeTask smoke skipped (set SIMPLE_AR_RUN_CODE_TASK=1 to enable)."
 fi

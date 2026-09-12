@@ -5,10 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
-from typing import TYPE_CHECKING, Any, Iterable
-
-if TYPE_CHECKING:
-    from simple_ar.app.state import WorkspaceState
+from typing import Any, Iterable
 
 
 def write_text(path: Path, text: str) -> None:
@@ -79,45 +76,6 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
         if stripped:
             rows.append(json.loads(stripped))
     return rows
-
-
-def state_path(run_dir: Path) -> Path:
-    return run_dir / "state.json"
-
-
-def stage_contract_path(stage_dir: Path) -> Path:
-    return stage_dir / "contract.json"
-
-
-def stage_report_path(stage_dir: Path) -> Path:
-    return stage_dir / "report.md"
-
-
-def write_stage_contract(stage_dir: Path, data: dict[str, Any]) -> Path:
-    path = stage_contract_path(stage_dir)
-    write_json(path, data)
-    return path
-
-
-def write_stage_report(stage_dir: Path, markdown: str) -> Path:
-    path = stage_report_path(stage_dir)
-    write_text(path, markdown)
-    return path
-
-
-def load_workspace_state(run_dir: Path) -> WorkspaceState | None:
-    path = state_path(run_dir)
-    if not path.exists():
-        return None
-    from simple_ar.app.state import WorkspaceState
-
-    return WorkspaceState.load(path)
-
-
-def save_workspace_state(run_dir: Path, state: WorkspaceState) -> Path:
-    path = state_path(run_dir)
-    state.save(path)
-    return path
 
 
 def relative_to_run(run_dir: Path, path: Path | None) -> str | None:
