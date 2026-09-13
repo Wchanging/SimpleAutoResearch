@@ -8,6 +8,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Removed the blanket non-ASCII identifier rejection from generated code,
+  repair, and review, along with its dedicated scanner. Python compilation,
+  interface checks, and edit boundaries remain authoritative. Review contract
+  13 refreshes older cached reviews without rerunning the benchmark.
 - Closed attempts reconcile outstanding usage reservations as unknown while
   retaining their budget occupancy; recovery does not refund unmeasured calls.
 - Writer and Reviewer receive compact metric records without repeated storage

@@ -12,7 +12,6 @@ from typing import Any, Callable, Mapping
 from simple_ar.core.artifacts import write_json, write_text
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.code_task.analysis.interfaces import dependency_context, order_file_specs, public_api
-from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.generation.agent_step import run_json_agent_step
 from simple_ar.code_task.generation.common import mapping_list, safe_relative_path, string_list
 from simple_ar.code_task.generation.file_specs import is_model_generated_file, is_runtime_placeholder
@@ -588,13 +587,6 @@ def _validate_file_content(value: str, *, filename: str) -> FileContentValidatio
                 f"{exc.msg} at line {exc.lineno or '?'} offset {exc.offset or '?'}"
                 + (f": {line.strip()[:180]}" if line else ""),
             )
-        identifiers = non_ascii_identifiers(value, path=filename)
-        if identifiers:
-            preview = "; ".join(
-                f"{row.get('kind')} `{row.get('identifier')}` line {row.get('line')}"
-                for row in identifiers[:5]
-            )
-            return FileContentValidation(False, "non_ascii_identifier", preview)
     if filename.endswith(".json"):
         try:
             json.loads(value)
@@ -609,12 +601,6 @@ def _file_validation_feedback(validation: FileContentValidation) -> str:
             "The previous file did not compile as Python. "
             f"Exact validation error: {validation.detail}. "
             "Return one smaller, complete Python file in the JSON content field. Preserve exact dependency APIs."
-        )
-    if validation.reason == "non_ascii_identifier":
-        return (
-            "The previous Python file used non-ASCII identifiers, which break stable imports/patching. "
-            f"Problem identifiers: {validation.detail}. "
-            "Use ASCII names for functions, classes, variables, imports, and attributes; non-ASCII text is allowed only in strings/comments."
         )
     if validation.reason == "json_decode_error":
         return (

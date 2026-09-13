@@ -21,7 +21,6 @@ from simple_ar.code_task.analysis.interfaces import (
     find_return_contract_mismatches,
     project_api_contract,
 )
-from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.analysis.resource_static import resource_review_findings
 from simple_ar.code_task.review_pipeline import (
     build_review_clusters,
@@ -31,7 +30,7 @@ from simple_ar.code_task.review_pipeline import (
 )
 
 
-GREENFIELD_REVIEW_CONTRACT_VERSION = 12
+GREENFIELD_REVIEW_CONTRACT_VERSION = 13
 _STDLIB_SHADOW_MODULES = set(getattr(sys, "stdlib_module_names", ())) | {
     "types",
     "typing",
@@ -211,7 +210,6 @@ def _deterministic_findings(
                 py_compile.compile(str(target), doraise=True)
             except py_compile.PyCompileError as exc:
                 findings.append(_finding("blocking", "python_compile_failed", f"{path}: {exc.msg}"))
-            findings.extend(_non_ascii_identifier_findings(target, rel_path=path))
     for metric in _required_metrics(result_schema):
         if not _metric_name_visible(project_dir, metric):
             findings.append(
@@ -347,30 +345,6 @@ def _entrypoint_debuggability_findings(project_dir: Path) -> list[ReviewFinding]
                 recommendation=(
                     "Preserve debuggability in generated entrypoints: print a friendly message only after "
                     "traceback.print_exc(), logging.exception/logger.exception, or re-raising the original exception."
-                ),
-            )
-        )
-    return findings
-
-
-def _non_ascii_identifier_findings(path: Path, *, rel_path: str) -> list[ReviewFinding]:
-    try:
-        source = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    findings: list[ReviewFinding] = []
-    for row in non_ascii_identifiers(source, path=rel_path)[:8]:
-        findings.append(
-            _finding(
-                "blocking",
-                "non_ascii_python_identifier",
-                (
-                    f"`{rel_path}` contains non-ASCII Python identifier `{row.get('identifier')}` "
-                    f"near line {row.get('line') or 'unknown'}."
-                ),
-                recommendation=(
-                    "Use ASCII-only function, class, variable, import, and attribute names in generated code. "
-                    "Non-ASCII identifiers often indicate provider encoding corruption and break cross-file repair."
                 ),
             )
         )

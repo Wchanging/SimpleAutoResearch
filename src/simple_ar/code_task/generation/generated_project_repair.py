@@ -25,7 +25,6 @@ from simple_ar.code_task.analysis.interfaces import (
 )
 from simple_ar.code_task.analysis.entrypoints import source_suppresses_entrypoint_traceback
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
-from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.editing.actions import apply_repair_actions
 from simple_ar.code_task.editing.snapshots import FileSnapshotSet, create_file_snapshot_set
 from simple_ar.code_task.generation.common import safe_relative_path
@@ -331,13 +330,6 @@ def _post_write_static_guard(*, target: Path, rel_path: str) -> str:
         return (
             f"{suppressed}; generated entrypoints must preserve the original traceback "
             "or re-raise broad exceptions so runtime repair can localize the true failing file."
-        )
-    identifiers = non_ascii_identifiers(source, path=rel_path)
-    if identifiers:
-        first = identifiers[0]
-        return (
-            f"non_ascii_python_identifier:{rel_path}:{first.get('line') or 'unknown'}:"
-            f"{first.get('identifier')}; generated Python identifiers must be ASCII-only."
         )
     return ""
 

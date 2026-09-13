@@ -1189,14 +1189,14 @@ primary_metric = "accuracy"
             # Refresh retired review rules without regenerating or rerunning the experiment.
             review_path = run_dir / "code_task/meta/review_report.json"
             prior_review = read_json(review_path)
-            prior_review["metadata"]["review_contract_version"] = 11
+            prior_review["metadata"]["review_contract_version"] = 12
             write_json(review_path, prior_review)
             metrics_path = run_dir / "code_task/run/patched/metrics.json"
             measured_bytes = metrics_path.read_bytes()
             with patch("simple_ar.code_task.orchestration.execute.run_code_task_benchmark") as benchmark:
                 refreshed = execute_code_task(run_dir, use_llm=False, to_step="review", max_files=8)
             benchmark.assert_not_called()
-            self.assertEqual(read_json(review_path)["metadata"]["review_contract_version"], 12)
+            self.assertEqual(read_json(review_path)["metadata"]["review_contract_version"], 13)
             self.assertTrue(any(step.step == "review" and step.detail.startswith("refreshed status")
                                 for step in refreshed.steps))
             self.assertEqual(metrics_path.read_bytes(), measured_bytes)

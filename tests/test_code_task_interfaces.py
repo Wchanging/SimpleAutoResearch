@@ -11,7 +11,6 @@ from simple_ar.code_task.analysis.interfaces import (
     snippet_api_contract,
 )
 from simple_ar.code_task.analysis.entrypoints import analyze_entrypoint_debuggability
-from simple_ar.code_task.analysis.python_source import non_ascii_identifiers
 from simple_ar.code_task.analysis.resource_static import analyze_resource_risks
 from simple_ar.code_task.generation.common import safe_relative_path, string_list
 from simple_ar.code_task.generation.review import review_generated_project
@@ -199,30 +198,20 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             self.assertEqual(len(analysis["findings"]), 1)
             self.assertEqual(analysis["findings"][0]["path"], "main.py")
 
-    def test_python_source_flags_non_ascii_identifier_only(self) -> None:
-        source = (
-            "message = '中文 text is fine in strings'\n"
-            "def write喟距_results_json():\n"
-            "    return message\n"
-        )
-
-        findings = non_ascii_identifiers(source, path="main.py")
-
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0]["kind"], "function")
-
-    def test_review_blocks_non_ascii_python_identifier(self) -> None:
+    def test_valid_unicode_identifiers_survive_generation_review_and_repair_guards(self) -> None:
+        import subprocess
+        import sys
+        from simple_ar.code_task.generation.writer import _validate_file_content
+        from simple_ar.code_task.generation.generated_project_repair import _post_write_static_guard
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)
+            source = "def 求和(数值):\n    return sum(数值)\n\ndef main():\n    print(求和([1, 2]))\n\nif __name__ == '__main__':\n    main()\n"
             write_text(
                 project / "main.py",
-                (
-                    "def write喟距_results_json():\n"
-                    "    return None\n\n"
-                    "def main():\n"
-                    "    print('score: 1.0')\n"
-                ),
+                source,
             )
+            self.assertTrue(_validate_file_content(source, filename="main.py").valid)
+            self.assertEqual(_post_write_static_guard(target=project / "main.py", rel_path="main.py"), "")
 
             review = review_generated_project(
                 project_dir=project,
@@ -232,8 +221,11 @@ class CodeTaskInterfaceTests(unittest.TestCase):
                 use_llm=False,
             )
 
-            self.assertEqual(review["status"], "failed")
-            self.assertTrue(any(row["category"] == "non_ascii_python_identifier" for row in review["findings"]))
+            self.assertFalse(any(row["severity"] == "blocking" for row in review["findings"]))
+            executed = subprocess.run([sys.executable, str(project / "main.py")], capture_output=True, text=True, timeout=5)
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            self.assertEqual(executed.stdout.strip(), "3")
+            self.assertFalse(_validate_file_content("def 求和(:", filename="main.py").valid)
 
     def test_writer_rejects_self_reported_defective_response(self) -> None:
         self.assertTrue(
