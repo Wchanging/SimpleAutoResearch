@@ -61,6 +61,10 @@ class PatchValidationError(RuntimeError):
     """Raised when proposed edits fail safety or consistency validation."""
 
 
+class EditBudgetApprovalRequired(PermissionError):
+    """The proposed edit needs explicit large-edit approval, not filesystem access."""
+
+
 @dataclass(frozen=True)
 class ProposedEditsResult:
     """Result returned after generating a controlled edit proposal.
@@ -410,7 +414,7 @@ def apply_patch_edits(
         and not budget_info.get("approved")
         and not allow_large_edits
     ):
-        raise PermissionError(
+        raise EditBudgetApprovalRequired(
             "Proposal exceeds the normal edit budget. Review it and rerun with "
             "`--allow-large-edits` only if the larger patch is intentional."
         )

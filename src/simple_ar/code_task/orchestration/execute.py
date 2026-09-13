@@ -24,7 +24,7 @@ from simple_ar.code_task.analysis.context import (
     build_code_task_context_pack,
     load_latest_code_task_context_pack,
 )
-from simple_ar.code_task.editing.patching import PatchValidationError, apply_patch_edits, propose_patch_edits
+from simple_ar.code_task.editing.patching import EditBudgetApprovalRequired, PatchValidationError, apply_patch_edits, propose_patch_edits
 from simple_ar.code_task.editing.planning import generate_patch_plan, record_plan_decision
 from simple_ar.code_task.generation.greenfield import generate_greenfield_code_task
 from simple_ar.code_task.generation.task_contract import (
@@ -194,7 +194,7 @@ def execute_code_task(
 ) -> CodeTaskExecuteResult:
     """Run a conservative state-aware code-task workflow.
 
-    The orchestrator is intentionally thin. It calls the existing primitive
+    The orchestrator coordinates the existing primitive
     steps, skips artifacts that are already present, and stops at review gates
     instead of silently applying model proposals.
 
@@ -656,48 +656,30 @@ def execute_code_task(
             _emit(message_callback, "Applying reviewed edit proposal.")
             try:
                 result = apply_patch_edits(root, allow_large_edits=allow_large_edits)
-            except PatchValidationError as exc:
+            except (PatchValidationError, EditBudgetApprovalRequired) as exc:
+                if isinstance(exc, EditBudgetApprovalRequired):
+                    key, category, stop_reason = "apply-edits-large-edit-approval-required", "edit_budget", "large_edit_approval_required"
+                    recommendation = "Confirm the broader edit is intentional before rerunning with large-edit approval."
+                    next_action = "Review the larger proposal, then rerun with --allow-large-edits if it is intentional."
+                else:
+                    key, category, stop_reason = "apply-edits-validation-failed", "patch_validation", "patch_apply_failed"
+                    recommendation = "Review and regenerate the proposed edit JSON before applying it."
+                    next_action = "Review code_task/meta/proposed_edits.json; patch validation failed before workspace files were changed."
                 detail = _first_error_line(str(exc))
                 _record(steps, "apply-edits", "blocked", detail)
                 record_review_finding(
                     root,
                     {
-                        "key": "apply-edits-validation-failed",
+                        "key": key,
                         "severity": "blocking",
-                        "category": "patch_validation",
+                        "category": category,
                         "summary": detail,
                         "evidence": ["code_task/meta/proposed_edits.json"],
-                        "recommendation": "Review and regenerate the proposed edit JSON before applying it.",
+                        "recommendation": recommendation,
                         "source": "code-task.execute",
                     },
                 )
-                return _result(
-                    paths,
-                    steps,
-                    "patch_apply_failed",
-                    "Review code_task/meta/proposed_edits.json; patch validation failed before workspace files were changed.",
-                )
-            except PermissionError as exc:
-                detail = _first_error_line(str(exc))
-                _record(steps, "apply-edits", "blocked", detail)
-                record_review_finding(
-                    root,
-                    {
-                        "key": "apply-edits-large-edit-approval-required",
-                        "severity": "blocking",
-                        "category": "edit_budget",
-                        "summary": detail,
-                        "evidence": ["code_task/meta/proposed_edits.json"],
-                        "recommendation": "Confirm the broader edit is intentional before rerunning with large-edit approval.",
-                        "source": "code-task.execute",
-                    },
-                )
-                return _result(
-                    paths,
-                    steps,
-                    "large_edit_approval_required",
-                    "Review the larger proposal, then rerun with --allow-large-edits if it is intentional.",
-                )
+                return _result(paths, steps, stop_reason, next_action)
             _record(steps, "apply-edits", "done", f"changed {len(result.changed_files)} file(s)")
             record_edit_history(
                 root,
@@ -916,21 +898,7 @@ def implement_code_task(run_dir: Path, *, approval_note: str, **options: Any) ->
     proposed = execute_code_task(run_dir, to_step="propose-edits", **options)
     if proposed.stop_reason not in {"proposal_review_required", "stop_point"}:
         return proposed
-    try:
-        return execute_code_task(run_dir, to_step="validate", apply_proposed_edits=True, **options)
-    except PermissionError as exc:
-        if "budget" not in str(exc).lower():
-            raise
-        # A larger proposal is intentionally a review boundary, not an
-        # implementation crash.  Keep the durable proposal available so a
-        # caller can resume with an explicit budget approval.
-        return CodeTaskExecuteResult(
-            run_dir=Path(run_dir),
-            steps=proposed.steps,
-            stop_reason="budget_approval_required",
-            next_action=str(exc),
-            summary_path=code_task_paths(run_dir).task_dir / "summary.md",
-        )
+    return execute_code_task(run_dir, to_step="validate", apply_proposed_edits=True, **options)
 
 
 def _execute_greenfield_code_task(

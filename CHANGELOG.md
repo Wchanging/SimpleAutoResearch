@@ -8,6 +8,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- CodeTask distinguishes edit-budget approval from filesystem permission errors.
+  Patch failures share one recording path; the research bridge no longer
+  reinterprets permission errors by matching the word "budget".
 - Removed the blanket non-ASCII identifier rejection from generated code,
   repair, and review, along with its dedicated scanner. Python compilation,
   interface checks, and edit boundaries remain authoritative. Review contract

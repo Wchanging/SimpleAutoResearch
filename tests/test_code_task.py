@@ -3356,6 +3356,8 @@ protected_patterns = ["pyproject.toml"]
             self.assertNotIn("post_patch_manifest", manifest["patch"])
 
     def test_apply_large_edits_records_apply_time_approval(self) -> None:
+        from simple_ar.code_task.editing.patching import EditBudgetApprovalRequired
+        from simple_ar.code_task.orchestration.execute import implement_code_task
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             root = Path(tmp)
@@ -3377,8 +3379,12 @@ protected_patterns = ["pyproject.toml"]
             }
             write_json(proposal_path, proposal)
 
-            with self.assertRaises(PermissionError):
+            with self.assertRaises(EditBudgetApprovalRequired):
                 apply_patch_edits(run_dir, edits_file=proposal_path)
+
+            pending = implement_code_task(run_dir, approval_note="Review this isolated patch", use_llm=False)
+            self.assertEqual(pending.stop_reason, "large_edit_approval_required")
+            self.assertFalse((run_dir / "code_task" / "meta" / "applied_edits.json").exists())
 
             apply_patch_edits(run_dir, edits_file=proposal_path, allow_large_edits=True)
 
@@ -4900,6 +4906,13 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(result.steps[-1].step, "apply-edits")
             self.assertEqual(result.steps[-1].status, "blocked")
             self.assertIn("old text was not found", result.steps[-1].detail)
+
+            # File permissions are not an edit-budget approval request, even
+            # when the failing file happens to contain 'budget' in its name.
+            with patch("simple_ar.code_task.orchestration.execute.apply_patch_edits",
+                       side_effect=PermissionError("budget.json: access denied")):
+                with self.assertRaisesRegex(PermissionError, "access denied"):
+                    execute_code_task(run_dir, use_llm=False, timeout_sec=10, apply_proposed_edits=True)
 
     def test_analyze_validation_failure_without_benchmark_run(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
