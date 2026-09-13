@@ -1440,6 +1440,17 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
         }
 
     compact: dict[str, Any] = {}
+    implementation = _mapping(results.get("implementation"))
+    if implementation is not None:
+        compact["implementation"] = {
+            key: implementation[key] for key in ("artifact", "status", "asset_integrity", "interpretation")
+            if key in implementation
+        }
+        evidence = _mapping(implementation.get("evidence"))
+        if evidence is not None and "patch" in evidence:
+            # The patch is already bounded at the artifact boundary. Keep its
+            # provenance/truncation marker; omit bulky validation/review logs.
+            compact["implementation"]["evidence"] = {"patch": evidence["patch"]}
     for key in ("status", "primary_metric"):
         if key in results:
             compact[key] = results[key]

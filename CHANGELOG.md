@@ -8,6 +8,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Writer and Reviewer now receive the frozen implementation patch through their
+  shared execution-evidence projection, including provenance and truncation
+  markers. Previously it was accessible through tools but omitted from prompts;
+  full validation/review logs remain outside the compact projection.
 - Research implementation now enters CodeTask once through validation instead
   of replaying preparation for plan, proposal, and validation separately.
   Existing explicit authorization continues pending plans/proposals; rejected

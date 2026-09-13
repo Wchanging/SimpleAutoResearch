@@ -33,6 +33,31 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             self.assertTrue(evidence["truncated"])
             self.assertEqual(evidence["artifact"], "attempts/implement-1/code_task/patch.diff")
             self.assertNotIn("review", implementation["evidence"])
+            # Tool accessibility alone does not prove the agents received it.
+            import json
+            from simple_ar.report.agent import run_report_agent
+            from simple_ar.report.schema import ReportRuntimeConfig, ReportSectionPlan
+            from simple_ar.report.templates import load_report_template_bundle
+            received = {}
+
+            class Client:
+                def ask_json(self, system, user, *, label="", **kwargs):
+                    payload = json.loads(user[user.index("{"):])
+                    if "reviewer" in label:
+                        received["reviewer"] = payload["verified_execution_results"]["implementation"]
+                        return {"section_id": "method", "verdict": "pass", "findings": []}
+                    received["writer"] = payload["global_research_context"]["verified_execution_results"]["implementation"]
+                    return {"section_id": "method", "heading": "Method", "draft_markdown": "The recorded patch enables phrase features; the remainder is truncated."}
+
+            config = ReportRuntimeConfig(max_review_iterations=0)
+            memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe actual changes")])
+            run_report_agent(client=Client(), context=context, memory=memory, config=config,
+                             template=load_report_template_bundle(report_mode="experiment", config=config),
+                             gateway=ReportToolGateway(context))
+            self.assertEqual(set(received), {"writer", "reviewer"})
+            for view in received.values():
+                self.assertEqual(view["evidence"]["patch"], evidence)
+                self.assertEqual(view["asset_integrity"], implementation["asset_integrity"])
 
     def test_swapped_values_or_conditions_fail_even_when_all_numbers_are_present(self):
         metrics = [MetricSource(metric_id=f"metric:{label}:accuracy", name="accuracy", value=value,
