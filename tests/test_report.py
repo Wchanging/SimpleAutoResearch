@@ -656,7 +656,7 @@ class ReportSafetyTests(unittest.TestCase):
         original_ask = failing_client.ask_json
 
         def fail_after_first_section(*args, **kwargs):
-            if checkpoints:
+            if checkpoints and checkpoints[-1]["sections"]:
                 raise LLMError("provider unavailable after first section")
             return original_ask(*args, **kwargs)
 
@@ -666,8 +666,7 @@ class ReportSafetyTests(unittest.TestCase):
                 config=ReportRuntimeConfig(template="survey", max_review_iterations=1),
                 gateway=gateway, checkpoint_sink=checkpoints.append,
             )
-        self.assertEqual(len(checkpoints), 1)
-        saved = checkpoints[0]
+        saved = checkpoints[-1]
         self.assertEqual(len(saved["sections"]), 1)
         self.assertTrue(saved["iterations"])
 

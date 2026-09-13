@@ -16,6 +16,39 @@ from simple_ar.report.writing import ReportWritingRequest, run_report_writing_ca
 
 
 class ReportCheckpointTests(unittest.TestCase):
+    def test_reviewer_failure_preserves_draft_without_repeating_writer(self):
+        context = ReportContext(topic="Calibration", report_mode="experiment")
+        memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])
+        config = ReportRuntimeConfig(allow_llm_fallback=False, max_review_iterations=0)
+        template = load_report_template_bundle(report_mode="experiment", config=config)
+        saved = []
+
+        class Client:
+            fail_review = True
+            writes = 0
+
+            def ask_json(self, *args, label="", **kwargs):
+                if "reviewer" in label:
+                    if self.fail_review:
+                        raise LLMError("review unavailable")
+                    return {"section_id": "method", "verdict": "pass", "findings": []}
+                self.writes += 1
+                return {"section_id": "method", "heading": "Method", "draft_markdown": "No empirical validation was performed."}
+
+        client = Client()
+        kwargs = dict(client=client, context=context, memory=memory, config=config,
+                      template=template, gateway=ReportToolGateway(context), checkpoint_sink=saved.append)
+        with self.assertRaises(LLMError):
+            run_report_agent(**kwargs)
+        self.assertEqual(client.writes, 1)
+        self.assertEqual(saved[-1]["sections"], [])
+        self.assertEqual(saved[-1]["pending_draft"]["section_id"], "method")
+        client.fail_review = False
+        result = run_report_agent(**kwargs, completed_checkpoint=saved[-1])
+        self.assertEqual(client.writes, 1)
+        self.assertEqual(result.sections[0].draft_markdown, "No empirical validation was performed.")
+        self.assertIsNone(saved[-1]["pending_draft"])
+
     def test_prompt_metrics_preserve_all_conditions_without_storage_metadata(self):
         from simple_ar.report.agent import _prompt_metrics
         from simple_ar.report.schema import MetricSource

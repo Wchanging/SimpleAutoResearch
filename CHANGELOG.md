@@ -8,6 +8,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Report checkpoints retain a completed draft awaiting its first review;
+  resuming after Reviewer failure reuses that draft without treating it as a
+  reviewed section or repeating the Writer call.
 - CodeTask configuration, CLI, and execution now share the same step order and
   review-mode normalization; removed duplicate rule tables without changing
   supported modes, defaults, or configuration/direct-call error types.

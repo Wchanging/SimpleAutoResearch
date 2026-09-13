@@ -134,6 +134,12 @@ def run_report_agent(
         if [section.section_id for section in sections] != expected[:len(sections)]:
             raise ValueError("Report checkpoint sections do not match the planned draft sequence.")
     completed_count = len(sections)
+    pending = completed_checkpoint.get("pending_draft") if completed_checkpoint else None
+    pending_draft = ReportSectionDraft.model_validate(pending) if pending is not None else None
+    if pending_draft is not None:
+        planned = _draft_sequence(current.section_plan)
+        if completed_count >= len(planned) or pending_draft.section_id != planned[completed_count].section_id:
+            raise ValueError("Pending report draft does not match the next planned section.")
 
     def checkpoint() -> None:
         if checkpoint_sink is not None:
@@ -141,73 +147,80 @@ def run_report_agent(
                              "sections": [row.model_dump(mode="json") for row in sections],
                              "iterations": [row.model_dump(mode="json") for row in iterations],
                              "reviewer_findings": [row.model_dump(mode="json") for row in all_findings],
-                             "tool_results": [row.model_dump(mode="json") for row in all_tool_results]})
+                             "tool_results": [row.model_dump(mode="json") for row in all_tool_results],
+                             "pending_draft": pending_draft.model_dump(mode="json") if pending_draft else None})
 
     try:
         for section_index, section in enumerate(_draft_sequence(current.section_plan), start=1):
             if section_index <= completed_count:
                 continue
-            # Long reports still need multiple evidence windows. Each window
-            # revises the same complete section so the Writer can reconcile
-            # new evidence without accumulating duplicate prose.
-            source_batches = _source_batches(
-                section.evidence_handles,
-                config,
-            )
-            first_batch = source_batches[0] if source_batches else section.evidence_handles
-            draft_section = _section_with_evidence(section, first_batch)
-            _emit(emit, f"Writer drafting `{section.heading}`.")
-            draft = _draft_section_with_recovery(
-                client=client,
-                context=context,
-                template=template,
-                memory=current,
-                section=draft_section,
-                config=config,
-                extra_context=[],
-                label=f"report-writer-{section.section_id}",
-                source_batch_index=1,
-                source_batch_count=len(source_batches),
-                emit=emit,
-            )
-            iterations.append(_iteration(section_index, section, "draft", draft.status, draft.used_sources))
+            if pending_draft is not None:
+                draft = pending_draft
+            else:
+                # Long reports still need multiple evidence windows. Each window
+                # revises the same complete section so the Writer can reconcile
+                # new evidence without accumulating duplicate prose.
+                source_batches = _source_batches(
+                    section.evidence_handles,
+                    config,
+                )
+                first_batch = source_batches[0] if source_batches else section.evidence_handles
+                draft_section = _section_with_evidence(section, first_batch)
+                _emit(emit, f"Writer drafting `{section.heading}`.")
+                draft = _draft_section_with_recovery(
+                    client=client,
+                    context=context,
+                    template=template,
+                    memory=current,
+                    section=draft_section,
+                    config=config,
+                    extra_context=[],
+                    label=f"report-writer-{section.section_id}",
+                    source_batch_index=1,
+                    source_batch_count=len(source_batches),
+                    emit=emit,
+                )
+                iterations.append(_iteration(section_index, section, "draft", draft.status, draft.used_sources))
 
-            if config.source_strategy == "batch_refine" and len(source_batches) > 1:
-                for batch_index, batch in enumerate(source_batches[1:], start=2):
-                    _emit(
-                        emit,
-                        (
-                            f"Writer integrating source batch {batch_index}/"
-                            f"{len(source_batches)} for `{section.heading}`."
-                        ),
-                    )
-                    batch_section = _section_with_evidence(section, batch)
-                    revised = _draft_section_with_recovery(
-                        client=client,
-                        context=context,
-                        template=template,
-                        memory=current,
-                        section=batch_section,
-                        config=config,
-                        extra_context=[],
-                        previous_draft=draft,
-                        label=f"report-integrator-{section.section_id}-{batch_index}",
-                        source_batch_index=batch_index,
-                        source_batch_count=len(source_batches),
-                        emit=emit,
-                        draft_mode="section_revision",
-                    )
-                    draft = _merge_revision_draft(draft, revised)
-                    iterations.append(
-                        _iteration(section_index, section, "integrate_sources", draft.status, draft.used_sources)
-                    )
+                if config.source_strategy == "batch_refine" and len(source_batches) > 1:
+                    for batch_index, batch in enumerate(source_batches[1:], start=2):
+                        _emit(
+                            emit,
+                            (
+                                f"Writer integrating source batch {batch_index}/"
+                                f"{len(source_batches)} for `{section.heading}`."
+                            ),
+                        )
+                        batch_section = _section_with_evidence(section, batch)
+                        revised = _draft_section_with_recovery(
+                            client=client,
+                            context=context,
+                            template=template,
+                            memory=current,
+                            section=batch_section,
+                            config=config,
+                            extra_context=[],
+                            previous_draft=draft,
+                            label=f"report-integrator-{section.section_id}-{batch_index}",
+                            source_batch_index=batch_index,
+                            source_batch_count=len(source_batches),
+                            emit=emit,
+                            draft_mode="section_revision",
+                        )
+                        draft = _merge_revision_draft(draft, revised)
+                        iterations.append(
+                            _iteration(section_index, section, "integrate_sources", draft.status, draft.used_sources)
+                        )
             if config.reviewer == "disabled":
                 sections.append(draft)
                 _merge_draft_into_memory(current, draft, [])
+                pending_draft = None
                 checkpoint()
                 continue
 
             section_findings: list[ReviewerFinding] = []
+            pending_draft = draft
+            checkpoint()
             # A review pass is always recorded. Each allowed correction then
             # receives another review, so max_review_iterations means actual
             # review -> revise cycles rather than extra reviews without edits.
@@ -274,6 +287,7 @@ def run_report_agent(
 
             sections.append(draft)
             _merge_draft_into_memory(current, draft, section_findings)
+            pending_draft = None
             checkpoint()
 
         body = assemble_report_sections(title=context.topic, sections=_final_sequence(current.section_plan, sections))
