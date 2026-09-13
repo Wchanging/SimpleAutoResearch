@@ -25,7 +25,7 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 class CliTests(unittest.TestCase):
     def test_research_report_does_not_rewrite_or_execute_a_historical_session(self):
-        from legacy_session_fixture import historical_session
+        from tests.legacy_session_fixture import historical_session
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "session"
             historical_session(root)
@@ -253,7 +253,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("experiment-0002", stdout.getvalue())
 
     def test_legacy_session_continue_does_not_execute_or_rewrite_history(self) -> None:
-        from legacy_session_fixture import historical_session
+        from tests.legacy_session_fixture import historical_session
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "legacy"
