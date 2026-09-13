@@ -56,12 +56,15 @@ class ReportCheckpointTests(unittest.TestCase):
                                 label="baseline" if i < 10 else "candidate",
                                 artifact="results.json", protocol_fingerprint="a" * 64)
                    for i in range(20)]
-        rows = _prompt_metrics(ReportMemory(metric_sources=metrics))
+        table = _prompt_metrics(ReportMemory(metric_sources=metrics))
+        rows = [dict(zip(table["columns"], row)) for row in table["rows"]]
         self.assertEqual(len(rows), 20)
         self.assertEqual([row["value"] for row in rows], [metric.value for metric in metrics])
         self.assertEqual(rows[-1]["label"], "candidate")
         self.assertTrue(all("protocol_fingerprint" not in row and "artifact" not in row for row in rows))
         self.assertEqual(metrics[0].artifact, "results.json")
+        for actual, metric in zip(rows, metrics):
+            self.assertEqual(actual, metric.model_dump(include=set(table["columns"])))
 
     def test_reviewer_failure_obeys_explicit_fallback_setting(self):
         context = ReportContext(topic="Calibration", report_mode="experiment")

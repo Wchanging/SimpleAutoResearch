@@ -8,6 +8,13 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- CodeTask generation, resumed review, and post-repair review share one bounded
+  review-resolution path; existing review gates and stop points are preserved.
+- Patch reviews share invocation and cached-result handling. Resuming a saved
+  failed review no longer bypasses the gate just because its report exists;
+  passing or advisory reviews remain reusable without another model call.
+- Report prompts tabulate metric columns once while retaining every value,
+  condition, unit, and evidence ID; the duplicate Writer brief is removed.
 - Writer and Reviewer now receive the frozen implementation patch through their
   shared execution-evidence projection, including provenance and truncation
   markers. Previously it was accessible through tools but omitted from prompts;

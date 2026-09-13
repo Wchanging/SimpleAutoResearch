@@ -310,24 +310,6 @@ def run_report_agent(
         return None
 
 
-def build_writer_brief(
-    *,
-    context: ReportContext,
-    template: ReportTemplateBundle,
-    memory: ReportMemory,
-) -> str:
-    """Build a compact prompt-side brief for writer/reviewer calls."""
-    sections = ", ".join(section.heading for section in memory.section_plan[:8])
-    return (
-        f"Report mode: {context.report_mode}\n"
-        f"Template: {template.name}\n"
-        f"Sections: {sections}\n"
-        f"Source handles: {len(context.source_handles)}\n"
-        f"Metric sources: {len(context.metric_sources)}\n"
-        f"Document plan: {'resolved' if memory.document_plan is not None else 'template-only'}\n"
-    )
-
-
 def _maybe_adapt_survey_outline(
     *,
     client: LLMClient,
@@ -1161,7 +1143,6 @@ def _writer_prompt(
             ),
         },
         "template_markdown": template.template_markdown,
-        "writer_brief": build_writer_brief(context=context, template=template, memory=memory),
         "objective": memory.objective,
         "document_plan": _compact_document_plan(memory),
         "visual_requirements": section_visuals,
@@ -1912,11 +1893,12 @@ def _final_sequence(
     return sorted(drafts, key=lambda draft: (order.get(draft.section_id, 9999), draft.section_id))
 
 
-def _prompt_metrics(memory: ReportMemory) -> list[dict[str, Any]]:
-    """Keep every condition/value; full provenance is available by metric ID."""
-    return [metric.model_dump(mode="json", include={
-        "metric_id", "name", "value", "label", "direction", "condition_id", "unit", "source_kind",
-    }, exclude_none=True) for metric in memory.metric_sources]
+def _prompt_metrics(memory: ReportMemory) -> dict[str, Any]:
+    """Tabulate all measurements without repeating column names per value."""
+    columns = ["metric_id", "name", "value", "label", "direction", "condition_id", "unit", "source_kind"]
+    return {"columns": columns, "rows": [
+        [getattr(metric, column) for column in columns] for metric in memory.metric_sources
+    ]}
 
 
 def _prompt_handle_view(handle: Any) -> dict[str, Any]:

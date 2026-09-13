@@ -4830,6 +4830,30 @@ protected_patterns = ["pyproject.toml"]
             manifest = read_json(run_dir / "manifest.json")
             self.assertEqual(manifest["work_plan"]["status"], "completed")
 
+            # A saved failure must not turn into success merely on resume.
+            report_path = run_dir / "code_task" / "meta" / "review_report.json"
+            saved_review = read_json(report_path)
+            for status, expected in (("failed", "review_failed"), ("warning", "stop_point"), ("passed", "stop_point")):
+                with self.subTest(cached_review=status):
+                    write_json(report_path, {**saved_review, "status": status})
+                    before = report_path.read_bytes()
+                    with patch("simple_ar.code_task.orchestration.execute.review_code_task_changes") as reviewer, \
+                         patch("simple_ar.code_task.orchestration.execute.run_code_task_benchmark") as benchmark:
+                        resumed = execute_code_task(run_dir, use_llm=False, to_step="review")
+                    self.assertEqual(resumed.stop_reason, expected)
+                    reviewer.assert_not_called()
+                    benchmark.assert_not_called()
+                    self.assertEqual(report_path.read_bytes(), before)
+
+            post_run = run_dir / "code_task" / "meta" / "review_report_post_run.json"
+            write_json(post_run, {**read_json(post_run), "status": "failed"})
+            before = post_run.read_bytes()
+            with patch("simple_ar.code_task.orchestration.execute.review_code_task_changes") as reviewer:
+                resumed = execute_code_task(run_dir, use_llm=False, to_step="run", timeout_sec=10)
+            self.assertEqual(resumed.stop_reason, "review_failed")
+            reviewer.assert_not_called()
+            self.assertEqual(post_run.read_bytes(), before)
+
     def test_execute_generates_repair_proposal_after_failed_run(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

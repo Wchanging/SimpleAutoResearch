@@ -320,6 +320,23 @@ def execute_code_task(
             message_callback=message_callback,
         )
 
+    def review_patch(phase: str) -> str:
+        report_path = paths.meta_dir / ("review_report.json" if phase == "post_apply" else "review_report_post_run.json")
+        if report_path.is_file():
+            status = read_json(report_path)["status"]
+            _record(steps, "review", "skipped", f"{phase} review already recorded: {status}")
+            return status
+        _emit(message_callback, f"Running {phase} code review.")
+        review = review_code_task_changes(
+            root, phase=phase, llm_client=llm_client,
+            model=reviewer_model or model, use_llm=use_llm,
+            max_source_chars_per_file=max_source_chars_per_file,
+            message_callback=message_callback,
+        )
+        _record(steps, "review", "done",
+                f"{phase} status {review.status}; blocking {review.blocking_count}; warnings {review.warning_count}")
+        return review.status
+
     if _should_run("probe", to_step):
         manifest = load_code_task_manifest(root)
         if _environment_report_exists(paths):
@@ -689,34 +706,11 @@ def execute_code_task(
     if _should_run("review", to_step):
         if _patch_status(load_code_task_manifest(root)) != "applied":
             return _result(paths, steps, "patch_not_applied", "Apply reviewed edits before review.")
-        if _review_report_exists(paths, "post_apply"):
-            _record(steps, "review", "skipped", "post-apply review_report.json already exists")
-        elif dry_run:
+        if dry_run and not _review_report_exists(paths, "post_apply"):
             return _dry_result(paths, steps, "review", "review applied patch for scope, interface, and risk")
-        else:
-            _emit(message_callback, "Running post-apply code review.")
-            review = review_code_task_changes(
-                root,
-                phase="post_apply",
-                llm_client=llm_client,
-                model=reviewer_model or model,
-                use_llm=use_llm,
-                max_source_chars_per_file=max_source_chars_per_file,
-                message_callback=message_callback,
-            )
-            _record(
-                steps,
-                "review",
-                "done",
-                f"status {review.status}; blocking {review.blocking_count}; warnings {review.warning_count}",
-            )
-            if review.status == "failed":
-                return _result(
-                    paths,
-                    steps,
-                    "review_failed",
-                    "Review code_task/meta/review_report.json before validation or benchmark execution.",
-                )
+        if review_patch("post_apply") == "failed":
+            return _result(paths, steps, "review_failed",
+                           "Review code_task/meta/review_report.json before validation or benchmark execution.")
     if _stop_after("review", to_step):
         return _result(paths, steps, "stop_point", "Stopped after review as requested.")
 
@@ -841,32 +835,9 @@ def execute_code_task(
                 max_source_chars_per_file=max_source_chars_per_file,
                 message_callback=message_callback,
             )
-        if _review_report_exists(paths, "post_run"):
-            _record(steps, "review", "skipped", "post-run review_report_post_run.json already exists")
-        else:
-            _emit(message_callback, "Running post-run code review.")
-            review = review_code_task_changes(
-                root,
-                phase="post_run",
-                llm_client=llm_client,
-                model=reviewer_model or model,
-                use_llm=use_llm,
-                max_source_chars_per_file=max_source_chars_per_file,
-                message_callback=message_callback,
-            )
-            _record(
-                steps,
-                "review",
-                "done",
-                f"post-run status {review.status}; blocking {review.blocking_count}; warnings {review.warning_count}",
-            )
-            if review.status == "failed":
-                return _result(
-                    paths,
-                    steps,
-                    "review_failed",
-                    "Review code_task/meta/review_report_post_run.json before treating the patch as complete.",
-                )
+        if review_patch("post_run") == "failed":
+            return _result(paths, steps, "review_failed",
+                           "Review code_task/meta/review_report_post_run.json before treating the patch as complete.")
 
     if _stop_after("run", to_step):
         return _result(paths, steps, "completed", "Review code_task/summary.md and patch.diff.")
@@ -937,6 +908,20 @@ def _execute_greenfield_code_task(
     runner, and summary artifacts. The mode-specific part is limited to
     generating an implementation inside the empty workspace.
     """
+
+    def resolve_review(review: Mapping[str, Any] | Path, *, summary: str, gate: str = review_gate) -> bool:
+        """Apply the same review policy to newly generated and resumed code."""
+        if not _greenfield_review_should_block(review, review_gate=gate):
+            _emit(message_callback, "Generated project review has non-runtime blockers; continuing to validation/run.")
+            _record(steps, "review-gate", "warning", "review gate runtime mode allowed benchmark execution")
+            return True
+        return _attempt_greenfield_review_repair(
+            root, paths, steps, llm_client=llm_client, model=model,
+            repair_model=repair_model or model, use_llm=use_llm,
+            repair_rounds=repair_rounds, max_files=max_files,
+            max_generated_lines=max_generated_lines,
+            message_callback=message_callback, summary=summary,
+        )
 
     if _should_run("probe", to_step):
         if _environment_report_exists(paths):
@@ -1025,31 +1010,12 @@ def _execute_greenfield_code_task(
             )
             _record_review_report_findings(root, result.review_report_path)
             if result.review_status == "failed":
-                if _greenfield_review_should_block(result.review_report_path, review_gate=review_gate):
-                    if not _attempt_greenfield_review_repair(
-                        root,
-                        paths,
-                        steps,
-                        llm_client=llm_client,
-                        model=model,
-                        reviewer_model=reviewer_model or model,
-                        repair_model=repair_model or model,
-                        use_llm=use_llm,
-                        repair_rounds=repair_rounds,
-                        max_files=max_files,
-                        max_generated_lines=max_generated_lines,
-                        message_callback=message_callback,
-                        summary="Repaired generated project after review failure and passed deterministic rereview.",
-                    ):
-                        return _result(
-                            paths,
-                            steps,
-                            "review_failed",
-                            "Review code_task/meta/review_report.json before validation or execution.",
-                        )
-                else:
-                    _emit(message_callback, "Generated project review has non-runtime blockers; continuing to validation/run.")
-                    _record(steps, "review-gate", "warning", "review gate runtime mode allowed benchmark execution")
+                if not resolve_review(
+                    result.review_report_path,
+                    summary="Repaired generated project after review failure and passed deterministic rereview.",
+                ):
+                    return _result(paths, steps, "review_failed",
+                                   "Review code_task/meta/review_report.json before validation or execution.")
         if _stop_after("work-plan", to_step):
             return _result(paths, steps, "stop_point", "Stopped after greenfield generation as requested.")
 
@@ -1075,31 +1041,12 @@ def _execute_greenfield_code_task(
             else:
                 _record(steps, "review", "skipped", "greenfield review_report.json is current")
             if isinstance(review, dict) and review.get("status") == "failed":
-                if _greenfield_review_should_block(review, review_gate=review_gate):
-                    if not _attempt_greenfield_review_repair(
-                        root,
-                        paths,
-                        steps,
-                        llm_client=llm_client,
-                        model=model,
-                        reviewer_model=reviewer_model or model,
-                        repair_model=repair_model or model,
-                        use_llm=use_llm,
-                        repair_rounds=repair_rounds,
-                        max_files=max_files,
-                        max_generated_lines=max_generated_lines,
-                        message_callback=message_callback,
-                        summary="Repaired existing generated project after review failure and passed deterministic rereview.",
-                    ):
-                        return _result(
-                            paths,
-                            steps,
-                            "review_failed",
-                            "Review code_task/meta/review_report.json before validation or execution.",
-                        )
-                else:
-                    _emit(message_callback, "Generated project review has non-runtime blockers; continuing to validation/run.")
-                    _record(steps, "review-gate", "warning", "review gate runtime mode allowed benchmark execution")
+                if not resolve_review(
+                    review,
+                    summary="Repaired existing generated project after review failure and passed deterministic rereview.",
+                ):
+                    return _result(paths, steps, "review_failed",
+                                   "Review code_task/meta/review_report.json before validation or execution.")
         elif dry_run:
             return _dry_result(paths, steps, "review", "review generated project")
         else:
@@ -1191,19 +1138,8 @@ def _execute_greenfield_code_task(
             )
             _record(steps, "review", "done", f"post-run-repair status {review.get('status', 'unknown')}")
             if isinstance(review, dict) and review.get("status") == "failed":
-                if not _attempt_greenfield_review_repair(
-                    root,
-                    paths,
-                    steps,
-                    llm_client=llm_client,
-                    model=model,
-                    reviewer_model=reviewer_model or model,
-                    repair_model=repair_model or model,
-                    use_llm=use_llm,
-                    repair_rounds=repair_rounds,
-                    max_files=max_files,
-                    max_generated_lines=max_generated_lines,
-                    message_callback=message_callback,
+                if not resolve_review(
+                    review, gate="strict",
                     summary="Repaired generated project after run repair introduced review-blocking contract issues.",
                 ):
                     return _result(
@@ -1515,7 +1451,6 @@ def _attempt_greenfield_review_repair(
     *,
     llm_client: LLMClient | None = None,
     model: str | None,
-    reviewer_model: str | None,
     repair_model: str | None,
     use_llm: bool,
     repair_rounds: int,
@@ -1528,7 +1463,6 @@ def _attempt_greenfield_review_repair(
         _record(steps, "repair", "skipped", "review repair budget exhausted or disabled")
         return False
     _emit(message_callback, "Generated project review failed; attempting bounded review repair.")
-    _ = reviewer_model
     repair = _repair_greenfield_review_failure(
         run_dir,
         paths,
