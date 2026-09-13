@@ -57,6 +57,7 @@ def create_cifar_session(*, root: Path, python: Path, data_root: Path, epochs: i
                 "research_sources": ["openalex", "semantic_scholar", "arxiv"],
                 "research_max_documents": 20, "research_use_fulltext": True,
                 "research_allow_pdf_download": True,
+                "research_keep_raw_pdf": True,
                 "report": {"max_review_iterations": 1, "max_section_tokens": 1800,
                            "figures": {"enabled": True, "max_figures": 3}}},
             budget_limits={"llm_requests": 80, "total_tokens": 300000,
