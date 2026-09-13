@@ -315,6 +315,14 @@ class ResearchApplication:
             raise ValueError("max_actions must be positive.")
         with self.controller.mutation_scope():
             self._reconcile_running_attempt()
+            terminal = {attempt.attempt_id for attempt in self.controller.list_attempts()
+                        if attempt.status in {"completed", "failed"}}
+            for entry in self.budget_ledger.entries:
+                if entry.status == "reserved" and entry.attempt_id in terminal:
+                    self.budget_ledger.mark_unknown(
+                        entry.reservation_id, retain_reservation=True,
+                        reason="Attempt ended without persisted usage; retain its reservation, not zero consumption.",
+                    )
             if self.controller.manifest.status in {"paused", "blocked", "completed"}:
                 return self.view()
             for _ in range(max_actions):

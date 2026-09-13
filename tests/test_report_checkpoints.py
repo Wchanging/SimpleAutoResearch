@@ -16,6 +16,20 @@ from simple_ar.report.writing import ReportWritingRequest, run_report_writing_ca
 
 
 class ReportCheckpointTests(unittest.TestCase):
+    def test_prompt_metrics_preserve_all_conditions_without_storage_metadata(self):
+        from simple_ar.report.agent import _prompt_metrics
+        from simple_ar.report.schema import MetricSource
+        metrics = [MetricSource(metric_id=f"m{i}", name="accuracy", value=i / 20,
+                                label="baseline" if i < 10 else "candidate",
+                                artifact="results.json", protocol_fingerprint="a" * 64)
+                   for i in range(20)]
+        rows = _prompt_metrics(ReportMemory(metric_sources=metrics))
+        self.assertEqual(len(rows), 20)
+        self.assertEqual([row["value"] for row in rows], [metric.value for metric in metrics])
+        self.assertEqual(rows[-1]["label"], "candidate")
+        self.assertTrue(all("protocol_fingerprint" not in row and "artifact" not in row for row in rows))
+        self.assertEqual(metrics[0].artifact, "results.json")
+
     def test_reviewer_failure_obeys_explicit_fallback_setting(self):
         context = ReportContext(topic="Calibration", report_mode="experiment")
         memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])

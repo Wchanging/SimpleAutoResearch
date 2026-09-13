@@ -1160,7 +1160,7 @@ def _writer_prompt(
         },
         "limitations": memory.limitations[:8],
         "source_handles": _handles_for_section(memory, section),
-        "metric_sources": [metric.model_dump(mode="json") for metric in memory.metric_sources[:12]],
+        "metric_sources": _prompt_metrics(memory),
         "prior_claim_notes": _writer_prior_claim_notes(memory),
         "previous_draft": (
             previous_draft.model_dump(mode="json")
@@ -1326,7 +1326,7 @@ def _reviewer_prompt(
         "visual_requirements": section_visuals,
         "known_limitations": memory.limitations[:8],
         "allowed_sources": _handles_for_section(memory, section),
-        "metric_sources": [metric.model_dump(mode="json") for metric in memory.metric_sources[:12]],
+        "metric_sources": _prompt_metrics(memory),
         "verified_execution_results": _compact_execution_results(context.results),
         "draft": draft.model_dump(mode="json"),
         "tool_policy": {
@@ -1887,6 +1887,13 @@ def _final_sequence(
     return sorted(drafts, key=lambda draft: (order.get(draft.section_id, 9999), draft.section_id))
 
 
+def _prompt_metrics(memory: ReportMemory) -> list[dict[str, Any]]:
+    """Keep every condition/value; full provenance is available by metric ID."""
+    return [metric.model_dump(mode="json", include={
+        "metric_id", "name", "value", "label", "direction", "condition_id", "unit", "source_kind",
+    }, exclude_none=True) for metric in memory.metric_sources]
+
+
 def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     """Return a compact model-facing handle with short citation guidance.
 
@@ -1894,7 +1901,7 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     prose citations should use ``cite_as``. This keeps long provider ids out of
     normal body citation generation.
     """
-    data = handle.model_dump(mode="json")
+    data = handle.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
     citation_key = data.get("citation_key") or ""
     if citation_key:
         data["cite_as"] = f"[@{citation_key}]"

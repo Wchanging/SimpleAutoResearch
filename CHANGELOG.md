@@ -8,6 +8,11 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Closed attempts reconcile outstanding usage reservations as unknown while
+  retaining their budget occupancy; recovery does not refund unmeasured calls.
+- Writer and Reviewer receive compact metric records without repeated storage
+  paths or protocol hashes, and no longer truncate the list to twelve metrics.
+  Full metric provenance remains in the stored report inputs and metric tools.
 - Report checkpoint identity uses template/criteria content, not their install
   paths; source locations remain recorded. This applies to newly written
   checkpoints, without rewriting historical snapshots.

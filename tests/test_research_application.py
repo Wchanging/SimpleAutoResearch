@@ -20,6 +20,23 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_terminal_attempt_reservation_becomes_unknown_without_refunding_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(ResearchBrief(request_text="Study agents"), root=tmp,
+                                 services=ResearchApplicationServices(budget_limits={"total_tokens": 100}))
+            app.advance()
+            attempt_id = app.controller.list_attempts()[0].attempt_id
+            app.budget_ledger.reserve("interrupted-call", {"total_tokens": 60}, attempt_id=attempt_id)
+            app.controller.pause("Inspect recovery without starting another action.")
+            resumed = load_session(tmp)
+            resumed.advance()
+            self.assertEqual(resumed.budget_ledger.entries[-1].status, "unknown")
+            self.assertEqual(resumed.budget_ledger.entries[-1].actual, {})
+            self.assertEqual(resumed.budget_ledger.remaining("total_tokens"), 40)
+            saved = (Path(tmp) / "budget_ledger.json").read_bytes()
+            resumed.advance()
+            self.assertEqual((Path(tmp) / "budget_ledger.json").read_bytes(), saved)
+
     def test_real_code_task_modification_is_measured_by_application_once(self):
         """Keep the old real bridge check, but exercise the formal lifecycle."""
         class FakeClient:
