@@ -8,6 +8,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- CodeTask configuration, CLI, and execution now share the same step order and
+  review-mode normalization; removed duplicate rule tables without changing
+  supported modes, defaults, or configuration/direct-call error types.
 - CodeTask distinguishes edit-budget approval from filesystem permission errors.
   Patch failures share one recording path; the research bridge no longer
   reinterprets permission errors by matching the word "budget".

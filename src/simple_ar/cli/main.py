@@ -55,7 +55,7 @@ from simple_ar.app.cleanup import (
     confirm_clean_plan,
     render_clean_plan,
 )
-from simple_ar.code_task.orchestration.execute import EXECUTE_STEPS
+from simple_ar.code_task.runtime.config import EXECUTE_STEPS
 from simple_ar.core.console import print_line
 from simple_ar.integrations.llm import LLMClient, LLMError
 from simple_ar.retrieval.index import build_artifact_index

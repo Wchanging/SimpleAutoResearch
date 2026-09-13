@@ -19,7 +19,7 @@ DEFAULT_GREENFIELD_WORKSPACE_MODE = "empty"
 CODE_TASK_KIND_EXISTING = "existing_project"
 CODE_TASK_KIND_GREENFIELD = "greenfield"
 CODE_TASK_KINDS = {CODE_TASK_KIND_EXISTING, CODE_TASK_KIND_GREENFIELD}
-VALID_EXECUTE_STEPS = {
+EXECUTE_STEPS = (
     "probe",
     "baseline",
     "work-plan",
@@ -32,7 +32,7 @@ VALID_EXECUTE_STEPS = {
     "run",
     "analyze-failure",
     "repair",
-}
+)
 
 
 class CodeTaskConfigError(RuntimeError):
@@ -316,10 +316,10 @@ def load_code_task_execute_options(
     resource = config.resource
 
     to_step = _config_string(execute.to_step) or "run"
-    if to_step not in VALID_EXECUTE_STEPS:
+    if to_step not in EXECUTE_STEPS:
         raise CodeTaskConfigError(
             "Unsupported [execute].to_step. Expected one of: "
-            + ", ".join(sorted(VALID_EXECUTE_STEPS))
+            + ", ".join(EXECUTE_STEPS)
         )
     budget_profile = (
         _config_string(execute.budget_profile)
@@ -752,14 +752,22 @@ def _planning_mode(value: str | None) -> str:
 
 
 def _review_gate_mode(value: str | None) -> str:
-    text = (_config_string(value) or "strict").lower().replace("-", "_")
+    try:
+        return normalize_review_gate(value)
+    except ValueError as exc:
+        raise CodeTaskConfigError(
+            "Unsupported [execute.ablation].review_gate. Expected `strict` or `runtime`."
+        ) from exc
+
+
+def normalize_review_gate(value: str | None) -> str:
+    """One interpretation for configuration files and direct execution calls."""
+    text = (value or "strict").strip().lower().replace("-", "_") or "strict"
     if text in {"strict", "full", "quality"}:
         return "strict"
     if text in {"runtime", "run", "execution", "safety", "safety_only", "runtime_only", "soft", "nonblocking"}:
         return "runtime"
-    raise CodeTaskConfigError(
-        "Unsupported [execute.ablation].review_gate. Expected `strict` or `runtime`."
-    )
+    raise ValueError("review_gate must be `strict` or `runtime`")
 
 
 def _resolve_string_list(

@@ -64,24 +64,10 @@ from simple_ar.code_task.execution.summary import write_code_task_summary
 from simple_ar.code_task.execution.validation import validate_code_task
 from simple_ar.code_task.editing.work_plan import generate_code_task_work_plan
 from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.code_task.runtime.config import EXECUTE_STEPS, normalize_review_gate
 
 
 MessageCallback = Callable[[str], None]
-
-EXECUTE_STEPS = (
-    "probe",
-    "baseline",
-    "work-plan",
-    "batch",
-    "plan",
-    "propose-edits",
-    "apply-edits",
-    "review",
-    "validate",
-    "run",
-    "analyze-failure",
-    "repair",
-)
 
 GREENFIELD_RUNTIME_REVIEW_BLOCKERS = (
     "unsafe",
@@ -275,7 +261,7 @@ def execute_code_task(
         raise ValueError("repair_rounds must be non-negative")
     if planning_review_rounds < 0:
         raise ValueError("planning_review_rounds must be non-negative")
-    review_gate = _normalize_review_gate(review_gate)
+    review_gate = normalize_review_gate(review_gate)
     if max_batches is not None and max_batches < 1:
         raise ValueError("max_batches must be at least 1 when provided")
     if cost_cap_usd is not None and cost_cap_usd < 0:
@@ -1809,28 +1795,6 @@ def _record_review_report_findings(run_dir: Path, report_path: Path) -> None:
                 "source": row.get("source", "greenfield-reviewer"),
             },
         )
-
-
-def _normalize_review_gate(value: object) -> str:
-    text = str(value or "strict").strip().lower().replace("-", "_")
-    aliases = {
-        "": "strict",
-        "strict": "strict",
-        "full": "strict",
-        "quality": "strict",
-        "runtime": "runtime",
-        "run": "runtime",
-        "execution": "runtime",
-        "safety": "runtime",
-        "safety_only": "runtime",
-        "runtime_only": "runtime",
-        "nonblocking": "runtime",
-        "soft": "runtime",
-    }
-    normalized = aliases.get(text)
-    if normalized is None:
-        raise ValueError("review_gate must be `strict` or `runtime`")
-    return normalized
 
 
 def _greenfield_review_should_block(review_or_path: Mapping[str, Any] | Path, *, review_gate: str) -> bool:

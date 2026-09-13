@@ -15,6 +15,24 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class RunConfigTests(unittest.TestCase):
+    def test_config_and_direct_execution_share_step_and_review_rules(self) -> None:
+        from simple_ar.code_task.runtime.config import EXECUTE_STEPS, normalize_review_gate
+        from simple_ar.code_task.orchestration.execute import execute_code_task
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "task.toml"
+            for step in EXECUTE_STEPS:
+                config.write_text(f'[execute]\nto_step = "{step}"\n', encoding="utf-8")
+                self.assertEqual(load_code_task_execute_options(config_path=str(config)).to_step, step)
+            for mode in ("strict", "full", "quality", "runtime", "safety-only", "runtime_only", "soft", "nonblocking", ""):
+                config.write_text(f'[execute.ablation]\nreview_gate = "{mode}"\n', encoding="utf-8")
+                self.assertEqual(load_code_task_execute_options(config_path=str(config)).review_gate,
+                                 normalize_review_gate(mode))
+            config.write_text('[execute.ablation]\nreview_gate = "invalid"\n', encoding="utf-8")
+            with self.assertRaises(CodeTaskConfigError):
+                load_code_task_execute_options(config_path=str(config))
+            with self.assertRaisesRegex(ValueError, "review_gate"):
+                execute_code_task(Path(tmp), review_gate="invalid")
+
     def test_retired_workspace_hook_is_not_silently_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "code_task.toml"
