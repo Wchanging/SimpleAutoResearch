@@ -546,7 +546,7 @@ class ReportSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             packaged = root / "package"
-            shutil.copytree(Path.cwd() / "templates" / "report", packaged / "report_templates")
+            shutil.copytree(Path(__file__).resolve().parents[1] / "templates" / "report", packaged / "report_templates")
             project_root = root / "outside-checkout"
             project_root.mkdir()
             with patch(

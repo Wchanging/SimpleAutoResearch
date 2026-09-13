@@ -24,35 +24,6 @@ NUMBER_PATTERN = re.compile(
     r"(?:[eE][-+]?\d+)?"
     r"(?:%|ms|s|sec|seconds)?(?![A-Za-z0-9_])"
 )
-NUMBER_WORD_PATTERN = re.compile(
-    r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
-    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
-    r"eighteen|nineteen|twenty)\b",
-    re.IGNORECASE,
-)
-NUMBER_WORDS = {
-    "zero": "0",
-    "one": "1",
-    "two": "2",
-    "three": "3",
-    "four": "4",
-    "five": "5",
-    "six": "6",
-    "seven": "7",
-    "eight": "8",
-    "nine": "9",
-    "ten": "10",
-    "eleven": "11",
-    "twelve": "12",
-    "thirteen": "13",
-    "fourteen": "14",
-    "fifteen": "15",
-    "sixteen": "16",
-    "seventeen": "17",
-    "eighteen": "18",
-    "nineteen": "19",
-    "twenty": "20",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +210,7 @@ def _citation_audit(report_body: str, context: ReportContext) -> CitationAudit:
 
 
 def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
+    """Check metric visibility and ledger attribution, not arbitrary prose numbers."""
     if not context.metric_sources:
         errors = _measurement_table_errors(report_body, context)
         return MetricAudit(status="failed" if errors else "passed", warnings=errors)
@@ -255,13 +227,6 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
     if unmatched:
         warnings.append("Some experiment metrics were not visible with their values in the report body.")
         status = "warning"
-    unmatched_numbers = _unmatched_numbers(report_body, context)
-    if unmatched_numbers:
-        warnings.append(
-            "Report contains numeric values not found in experiment metrics or selected source metadata."
-        )
-        if status == "passed":
-            status = "warning"
     table_errors = _measurement_table_errors(report_body, context)
     if table_errors:
         warnings.extend(table_errors)
@@ -270,7 +235,6 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
         status=status,
         matched_metrics=matched,
         unmatched_metrics=unmatched,
-        unmatched_numbers=unmatched_numbers,
         warnings=warnings,
     )
 
@@ -340,33 +304,6 @@ def _mechanical_findings(messages: list[str]) -> list[ReviewerFinding]:
     ]
 
 
-def _unmatched_numbers(report_body: str, context: ReportContext) -> list[str]:
-    metric_values = {
-        value_text
-        for metric in context.metric_sources
-        for value_text in _metric_value_variants(metric.value)
-    }
-    allowed = (
-        metric_values
-        | _source_number_values(context)
-        | {"0", "1", "2", "3", "4", "5", "8", "10"}
-    )
-    citation_free = CITATION_PATTERN.sub("", report_body)
-    found = sorted(set(NUMBER_PATTERN.findall(citation_free)))
-    allowed_numeric = {
-        numeric
-        for value in allowed
-        if (numeric := _numeric_token_key(value)) is not None
-    }
-    unmatched: list[str] = []
-    for value in found:
-        if value in allowed:
-            continue
-        numeric = _numeric_token_key(value)
-        if numeric is not None and numeric in allowed_numeric:
-            continue
-        unmatched.append(value)
-    return unmatched[:12]
 
 
 def _metric_is_visible(report_body: str, lower_report: str, metric: Any) -> bool:
@@ -462,29 +399,6 @@ def _contains_phrase(text: str, phrase: str) -> bool:
     ) is not None
 
 
-def _source_number_values(context: ReportContext) -> set[str]:
-    """Return numeric values explicitly present in selected source metadata.
-
-    Reports routinely restate source facts such as "twelve papers" or a
-    publication's sample size. Those values are source-grounded even when
-    they are not experiment metrics. Keep the mechanical metric gate focused
-    on numbers that are absent from both the measured results and the
-    selected evidence surface.
-    """
-
-    values: set[str] = set()
-    for paper in context.papers:
-        for field in ("title", "abstract", "published"):
-            text = paper.get(field)
-            if not isinstance(text, str):
-                continue
-            values.update(NUMBER_PATTERN.findall(text))
-            values.update(
-                NUMBER_WORDS[word.lower()]
-                for word in NUMBER_WORD_PATTERN.findall(text)
-                if word.lower() in NUMBER_WORDS
-            )
-    return values
 
 
 def _format_metric(value: Any) -> str:

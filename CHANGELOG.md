@@ -8,6 +8,18 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Greenfield generation, review, and repair reuse one result-schema builder
+  instead of maintaining an identical definition in the CodeTask executor.
+- Remove the arbitrary prose-number whitelist from metric auditing. Structured
+  measurement attribution and metric visibility checks remain; their success
+  does not verify prose claims. Historical unmatched-number warnings stay readable.
+- Final report memory uses the latest valid review of each section for audit,
+  while iteration records retain superseded findings. Failed/fallback reviews
+  do not clear earlier unresolved issues; final semantic support remains unchecked.
+- Report formatting retries now distinguish invalid responses from provider or
+  budget failures, avoiding another report-level request after transport retries
+  are exhausted. Explicit fallback remains labeled; Writer format recovery keeps
+  the same implementation evidence and measurement table.
 - CodeTask generation, resumed review, and post-repair review share one bounded
   review-resolution path; existing review gates and stop points are preserved.
 - Patch reviews share invocation and cached-result handling. Resuming a saved

@@ -12,6 +12,7 @@ from simple_ar.core.budget import BudgetLedger
 from simple_ar.integrations.llm import (
     LLMClient,
     LLMError,
+    LLMResponseError,
     LLMRequest,
     LLMSettings,
     LLMUsage,
@@ -22,6 +23,18 @@ from simple_ar.integrations.llm import (
 
 
 class LLMParsingTests(unittest.TestCase):
+    def test_json_format_failure_is_distinct_from_provider_failure(self):
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
+        with patch.object(client, "ask", return_value="not JSON"):
+            with self.assertRaises(LLMResponseError):
+                client.ask_json("system", "user")
+        failure = LLMError("provider timed out")
+        with patch.object(client, "ask", side_effect=failure) as ask:
+            with self.assertRaises(LLMError) as caught:
+                client.ask_json("system", "user")
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(ask.call_count, 1)
+
     def test_usage_recording_keeps_batch_projection_and_unknown_cost(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             meta = Path(tmp) / "meta"

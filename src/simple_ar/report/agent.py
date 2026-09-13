@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from simple_ar.integrations.llm import LLMClient, LLMError
+from simple_ar.integrations.llm import LLMClient, LLMError, LLMResponseError
 from simple_ar.report.assembler import assemble_report_sections
 from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
 from simple_ar.report.schema import (
@@ -291,7 +291,22 @@ def run_report_agent(
             checkpoint()
 
         body = assemble_report_sections(title=context.topic, sections=_final_sequence(current.section_plan, sections))
-        current.reviewer_findings = _dedupe_findings(current.reviewer_findings + all_findings)
+        # Audit the latest reviewed draft, not the union of issues from every
+        # superseded draft. Iterations/all_findings retain the complete history.
+        latest: dict[str, list[ReviewerFinding]] = {}
+        for record in iterations:
+            if record.action not in {"review", "review_revision"}:
+                continue
+            if any(finding.type == "review_agent_fallback" for finding in record.findings):
+                latest.setdefault(record.section_id, [
+                    finding for finding in current.reviewer_findings if finding.section_id == record.section_id
+                ]).extend(record.findings)
+            else:
+                latest[record.section_id] = list(record.findings)
+        current.reviewer_findings = _dedupe_findings(
+            [finding for finding in current.reviewer_findings if finding.section_id not in latest]
+            + [finding for findings in latest.values() for finding in findings]
+        )
         return AgentReportResult(
             report_body=body,
             memory=current,
@@ -896,13 +911,13 @@ def _draft_section(
         max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
     )
     if _is_claim_record_response(response):
-        raise LLMError(
+        raise LLMResponseError(
             "Writer returned a claim-level metadata record instead of the required section draft."
         )
     draft = ReportSectionDraft.model_validate(_normalize_draft_response(response, section))
     if not draft.draft_markdown.strip() and draft.status != "skipped":
         keys = ", ".join(sorted(str(key) for key in response)[:12])
-        raise LLMError(f"Writer returned empty draft for {section.section_id}; response keys: {keys or '(none)'}")
+        raise LLMResponseError(f"Writer returned empty draft for {section.section_id}; response keys: {keys or '(none)'}")
     return draft
 
 
@@ -959,58 +974,29 @@ def _draft_section_with_recovery(
     include_previous_draft: bool = True,
     draft_mode: str = "section",
 ) -> ReportSectionDraft:
-    try:
-        return _draft_section(
-            client=client,
-            context=context,
-            template=template,
-            memory=memory,
-            section=section,
-            config=config,
-            extra_context=extra_context,
-            label=label,
-            previous_draft=previous_draft,
-            review=review,
-            source_batch_index=source_batch_index,
-            source_batch_count=source_batch_count,
-            prompt_suffix=prompt_suffix,
-            include_previous_draft=include_previous_draft,
-            draft_mode=draft_mode,
-        )
-    except (LLMError, ValidationError, ValueError) as exc:
-        _emit(emit, f"Writer JSON validation failed for `{section.heading}`; retrying once. {exc}")
-    try:
-        return _draft_section(
-            client=client,
-            context=context,
-            template=template,
-            memory=memory,
-            section=section,
-            config=config,
-            extra_context=extra_context,
-            label=f"{label}-retry",
-            previous_draft=previous_draft,
-            review=review,
-            source_batch_index=source_batch_index,
-            source_batch_count=source_batch_count,
-            prompt_suffix=(prompt_suffix + "\n\n" if prompt_suffix else "") + (
-                "The previous response was not accepted as valid JSON. "
-                "Return exactly one JSON object matching the requested schema. "
-                "`draft_markdown` is mandatory and must contain the complete section prose. "
-                "You may leave claims, open_questions, and limitations empty if needed. "
-                "Do not include Markdown fences, commentary, or partial prose outside JSON."
-            ),
-            include_previous_draft=include_previous_draft,
-            draft_mode=draft_mode,
-            recovery=True,
-        )
-    except (LLMError, ValidationError, ValueError) as exc:
-        if not config.allow_llm_fallback:
-            raise LLMError(
-                f"Writer failed for `{section.heading}` after bounded retry and LLM fallback is disabled: {exc}"
-            ) from exc
-        _emit(emit, f"Writer fallback used for `{section.heading}` after retry failed. {exc}")
-        return _fallback_section_draft(section)
+    for attempt in range(2):
+        try:
+            return _draft_section(
+                client=client, context=context, template=template, memory=memory,
+                section=section, config=config, extra_context=extra_context,
+                label=f"{label}-retry" if attempt else label,
+                previous_draft=previous_draft, review=review,
+                source_batch_index=source_batch_index, source_batch_count=source_batch_count,
+                prompt_suffix=prompt_suffix,
+                include_previous_draft=include_previous_draft, draft_mode=draft_mode,
+                recovery=bool(attempt),
+            )
+        except (LLMError, ValueError) as exc:
+            failure = exc
+            # Transport retries belong to the provider. A format retry requires
+            # an actual response; budget/transport failures have no draft to fix.
+            if attempt or (isinstance(exc, LLMError) and not isinstance(exc, LLMResponseError)):
+                break
+            _emit(emit, f"Writer JSON validation failed for `{section.heading}`; retrying once. {exc}")
+    if not config.allow_llm_fallback:
+        raise LLMError(f"Writer failed for `{section.heading}` and LLM fallback is disabled: {failure}") from failure
+    _emit(emit, f"Writer fallback used for `{section.heading}`. {failure}")
+    return _fallback_section_draft(section)
 
 
 def _review_section_with_recovery(
@@ -1025,58 +1011,41 @@ def _review_section_with_recovery(
     label: str,
     emit: Callable[[str], None] | None = None,
 ) -> ReportSectionReview:
-    try:
-        return _review_section(
-            client=client,
-            context=context,
-            template=template,
-            memory=memory,
-            section=section,
-            draft=draft,
-            max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
-            label=label,
-        )
-    except (LLMError, ValidationError, ValueError) as exc:
-        _emit(emit, f"Reviewer JSON validation failed for `{section.heading}`; retrying once. {exc}")
-    try:
-        return _review_section(
-            client=client,
-            context=context,
-            template=template,
-            memory=memory,
-            section=section,
-            draft=draft,
-            max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
-            label=f"{label}-retry",
-            prompt_suffix=(
-                "The previous response was not accepted as valid JSON. "
-                "Return exactly one JSON object matching the reviewer schema, with "
-                "`revision_instructions` as a list of strings."
-            ),
-        )
-    except (LLMError, ValidationError, ValueError) as exc:
-        if not config.allow_llm_fallback:
-            raise LLMError(
-                f"Reviewer failed for `{section.heading}` after bounded retry and LLM fallback is disabled: {exc}"
-            ) from exc
-        _emit(emit, f"Reviewer fallback used for `{section.heading}` after retry failed. {exc}")
-        return ReportSectionReview(
+    for attempt in range(2):
+        try:
+            return _review_section(
+                client=client, context=context, template=template, memory=memory,
+                section=section, draft=draft,
+                max_output_tokens=config.max_section_tokens if config.max_section_tokens > 0 else None,
+                label=f"{label}-retry" if attempt else label,
+                prompt_suffix=(
+                    "Return exactly one JSON object matching the reviewer schema, "
+                    "with `revision_instructions` as a list of strings."
+                ) if attempt else "",
+            )
+        except (LLMError, ValueError) as exc:
+            failure = exc
+            if attempt or (isinstance(exc, LLMError) and not isinstance(exc, LLMResponseError)):
+                break
+            _emit(emit, f"Reviewer JSON validation failed for `{section.heading}`; retrying once. {exc}")
+    if not config.allow_llm_fallback:
+        raise LLMError(f"Reviewer failed for `{section.heading}` and LLM fallback is disabled: {failure}") from failure
+    _emit(emit, f"Reviewer fallback used for `{section.heading}`. {failure}")
+    return ReportSectionReview(
+        section_id=section.section_id,
+        verdict="warning",
+        findings=[ReviewerFinding(
+            finding_id=f"{section.section_id}-review-fallback",
+            type="review_agent_fallback",
+            severity="minor",
+            message=f"Reviewer could not complete: {failure}. Section kept with fallback warning.",
             section_id=section.section_id,
-            verdict="warning",
-            findings=[
-                ReviewerFinding(
-                    finding_id=f"{section.section_id}-review-fallback",
-                    type="review_agent_fallback",
-                    severity="minor",
-                    message="Reviewer returned invalid structured output; section kept with fallback warning.",
-                    section_id=section.section_id,
-                    evidence_handles=section.evidence_handles[:5],
-                    suggested_action="Manually inspect this section before publishing.",
-                )
-            ],
-            revision_instructions=["Manually inspect this section before publishing."],
-            notes="Reviewer fallback used after invalid structured output.",
-        )
+            evidence_handles=section.evidence_handles[:5],
+            suggested_action="Manually inspect this section before publishing.",
+        )],
+        revision_instructions=["Manually inspect this section before publishing."],
+        notes="Reviewer fallback used; semantic review is incomplete.",
+    )
 
 
 def _fallback_section_draft(section: ReportSectionPlan) -> ReportSectionDraft:
@@ -1236,6 +1205,8 @@ def _writer_recovery_prompt(
         "topic": context.topic,
         "objective": memory.objective,
         "execution_context": context.execution_context[:8000],
+        "verified_execution_results": _compact_execution_results(context.results),
+        "metric_sources": _prompt_metrics(memory),
         "section": {
             "section_id": section.section_id,
             "heading": section.heading,

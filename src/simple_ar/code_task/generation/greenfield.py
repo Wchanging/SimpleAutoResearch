@@ -229,7 +229,7 @@ def generate_greenfield_code_task(
 
     task_text = _read_task(paths.task_dir / "task.md", limit=max_source_chars_per_file * 2)
     resource_decision = _optional_json(paths.meta_dir / "resource_decision.json")
-    result_schema = _result_schema_from_manifest(manifest)
+    result_schema = result_schema_from_manifest(manifest)
     benchmark_command = _benchmark_command(manifest)
     existing_contract = load_task_contract(paths.meta_dir)
     if existing_contract:
@@ -519,7 +519,7 @@ def _contract_from_task(
     )
 
 
-def _result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+def result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     benchmark = manifest.get("benchmark", {}) if isinstance(manifest.get("benchmark"), dict) else {}
     primary = str(benchmark.get("primary_metric") or "score").strip() or "score"
     directions = benchmark.get("metric_directions")

@@ -26,7 +26,7 @@ from simple_ar.code_task.analysis.context import (
 )
 from simple_ar.code_task.editing.patching import EditBudgetApprovalRequired, PatchValidationError, apply_patch_edits, propose_patch_edits
 from simple_ar.code_task.editing.planning import generate_patch_plan, record_plan_decision
-from simple_ar.code_task.generation.greenfield import generate_greenfield_code_task
+from simple_ar.code_task.generation.greenfield import generate_greenfield_code_task, result_schema_from_manifest
 from simple_ar.code_task.generation.task_contract import (
     build_greenfield_task_contract,
     contract_coverage,
@@ -1560,7 +1560,7 @@ def _attempt_greenfield_run_repair(
         output_path=paths.meta_dir / "run_repair.json",
         code_artifacts=_read_optional_dict(paths.meta_dir / "code_artifacts.json"),
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
-        result_schema=_greenfield_result_schema_from_manifest(load_code_task_manifest(run_dir)),
+        result_schema=result_schema_from_manifest(load_code_task_manifest(run_dir)),
         contract=_greenfield_contract_for_review(paths),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         previous_repair_context=previous_context,
@@ -1642,7 +1642,7 @@ def _repair_greenfield_review_failure(
         output_path=repair_path,
         code_artifacts=code_artifacts,
         architecture_plan=_read_optional_dict(paths.meta_dir / "architecture_plan.json"),
-        result_schema=_greenfield_result_schema_from_manifest(manifest),
+        result_schema=result_schema_from_manifest(manifest),
         contract=_greenfield_contract_for_review(paths),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
         previous_repair_context=previous_context,
@@ -1682,7 +1682,7 @@ def _rerun_greenfield_review(
     review = review_generated_project(
         project_dir=paths.workspace_dir / "generated_project",
         code_artifacts=code_artifacts,
-        result_schema=_greenfield_result_schema_from_manifest(manifest),
+        result_schema=result_schema_from_manifest(manifest),
         resource_plan=_greenfield_resource_plan(paths, max_files=max_files, max_generated_lines=max_generated_lines),
         contract=_greenfield_contract_for_review(paths),
         dependency_advice=_read_optional_dict(paths.meta_dir / "dependency_advice.json"),
@@ -1779,21 +1779,6 @@ def _record_greenfield_repair_result(run_dir: Path, *, phase: str, repair: dict[
     return repair_section
 
 
-def _greenfield_result_schema_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    benchmark = manifest.get("benchmark", {}) if isinstance(manifest.get("benchmark"), dict) else {}
-    primary = str(benchmark.get("primary_metric") or "score").strip() or "score"
-    directions = benchmark.get("metric_directions")
-    required = [primary]
-    if isinstance(directions, dict):
-        required.extend(str(name) for name in directions if str(name).strip() and str(name) != primary)
-    return {
-        "schema_version": "code_task_greenfield_result_schema.v1",
-        "primary_metric": primary,
-        "required_metrics": list(dict.fromkeys(required)),
-        "metric_directions": directions if isinstance(directions, dict) else {},
-    }
-
-
 def _greenfield_resource_plan(paths: object, *, max_files: int, max_generated_lines: int) -> dict[str, Any]:
     decision = _read_optional_dict(paths.meta_dir / "resource_decision.json")
     return {
@@ -1815,7 +1800,7 @@ def _greenfield_contract_for_review(paths: object) -> dict[str, Any]:
     task_path = paths.task_dir / "task.md"
     task = read_text(task_path) if task_path.is_file() else ""
     manifest = load_code_task_manifest(paths.run_dir)
-    result_schema = _greenfield_result_schema_from_manifest(manifest)
+    result_schema = result_schema_from_manifest(manifest)
     architecture = _read_optional_dict(paths.meta_dir / "architecture_plan.json")
     generation_plan = architecture.get("generation_plan") if isinstance(architecture.get("generation_plan"), dict) else {}
     contract = build_greenfield_task_contract(

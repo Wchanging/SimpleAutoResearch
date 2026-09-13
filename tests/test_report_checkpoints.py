@@ -16,6 +16,70 @@ from simple_ar.report.writing import ReportWritingRequest, run_report_writing_ca
 
 
 class ReportCheckpointTests(unittest.TestCase):
+    def test_final_audit_uses_latest_review_without_erasing_history_or_failed_review(self):
+        from simple_ar.report.audit import build_report_audit
+        context = ReportContext(topic="Calibration", report_mode="experiment")
+        memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])
+        config = ReportRuntimeConfig(allow_llm_fallback=True, max_review_iterations=1)
+        finding = {"finding_id": "unsupported", "type": "unsupported_claim", "severity": "critical",
+                   "section_id": "method", "message": "Unsupported performance claim"}
+        for final_review in ("pass", "fail", "unavailable"):
+            with self.subTest(final_review=final_review):
+                class Client:
+                    reviews = 0
+
+                    def ask_json(self, *args, label="", **kwargs):
+                        if "reviewer" not in label:
+                            return {"section_id": "method", "heading": "Method", "draft_markdown": "No empirical validation is claimed."}
+                        self.reviews += 1
+                        if self.reviews > 1 and final_review == "unavailable":
+                            raise LLMError("review unavailable")
+                        passed = self.reviews > 1 and final_review == "pass"
+                        return {"section_id": "method", "verdict": "pass" if passed else "revise_required",
+                                "findings": [] if passed else [finding]}
+
+                result = run_report_agent(client=Client(), context=context, memory=memory, config=config,
+                                          template=load_report_template_bundle(report_mode="experiment", config=config),
+                                          gateway=ReportToolGateway(context))
+                self.assertTrue(any(f.severity == "critical" for f in result.reviewer_findings))
+                self.assertTrue(any(f.severity == "critical" for f in result.iterations[1].findings))
+                audit = build_report_audit(report=result.report_body, report_body=result.report_body,
+                                           context=context, memory=result.memory)
+                self.assertEqual(audit.status, "passed" if final_review == "pass" else "failed")
+                self.assertEqual(audit.semantic_review_status, "semantic_unchecked")
+
+    def test_format_retry_does_not_repeat_transport_or_budget_failure(self):
+        from simple_ar.integrations.llm import LLMResponseError
+        context = ReportContext(topic="Calibration", report_mode="experiment")
+        memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])
+        config = ReportRuntimeConfig(allow_llm_fallback=False, max_review_iterations=0)
+        template = load_report_template_bundle(report_mode="experiment", config=config)
+        for phase in ("writer", "reviewer"):
+            for error in (LLMError("provider unavailable"), LLMError("budget exhausted"), LLMResponseError("invalid JSON")):
+                with self.subTest(phase=phase, error=str(error)):
+                    calls = []
+
+                    class Client:
+                        def ask_json(self, *args, label="", **kwargs):
+                            if f"report-{phase}" in label:
+                                calls.append(label)
+                                if len(calls) == 1:
+                                    raise error
+                            if "reviewer" in label:
+                                return {"section_id": "method", "verdict": "pass", "findings": []}
+                            return {"section_id": "method", "heading": "Method", "draft_markdown": "No measurements were taken."}
+
+                    kwargs = dict(client=Client(), context=context, memory=memory, config=config,
+                                  template=template, gateway=ReportToolGateway(context))
+                    if isinstance(error, LLMResponseError):
+                        result = run_report_agent(**kwargs)
+                        self.assertEqual(len(result.sections), 1)
+                        self.assertEqual(len(calls), 2)
+                    else:
+                        with self.assertRaisesRegex(LLMError, str(error)):
+                            run_report_agent(**kwargs)
+                        self.assertEqual(len(calls), 1)
+
     def test_reviewer_failure_preserves_draft_without_repeating_writer(self):
         context = ReportContext(topic="Calibration", report_mode="experiment")
         memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])

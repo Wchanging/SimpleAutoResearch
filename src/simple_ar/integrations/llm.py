@@ -25,6 +25,10 @@ class LLMError(RuntimeError):
     """Raised when the LLM layer cannot satisfy a request."""
 
 
+class LLMResponseError(LLMError):
+    """A completed response cannot satisfy the requested output format."""
+
+
 @dataclass(frozen=True)
 class LLMSettings:
     """Connection settings for an OpenAI-compatible chat provider.
@@ -571,7 +575,7 @@ class LLMClient:
                 raise
         parsed = parse_json_object(raw)
         if parsed is None:
-            raise LLMError(
+            raise LLMResponseError(
                 "LLM response did not contain a JSON object "
                 f"(received {len(raw.strip())} characters)"
             )

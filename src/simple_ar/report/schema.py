@@ -378,6 +378,7 @@ class MetricAudit(ReportModel):
     status: Literal["passed", "warning", "failed"] = "passed"
     matched_metrics: list[str] = Field(default_factory=list)
     unmatched_metrics: list[str] = Field(default_factory=list)
+    # Read historical audits; new audits do not infer support from a number whitelist.
     unmatched_numbers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
