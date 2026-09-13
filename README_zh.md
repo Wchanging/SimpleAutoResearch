@@ -100,6 +100,9 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 
 ### 1. V2.8 canonical research-session 主线
 
+配置文件入口：`simple-ar research-session --config examples/research_config/minimal.toml`。
+轻量模板和完整参考共用一套格式，说明见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
+
 当前主线是 `research-session`：从计划、网络/本地检索、文档证据，到一个准备好的实验、
 结果分析、报告和审计，沿一条有界 handoff 完成。先运行适合笔记本的完整 fixture：
 

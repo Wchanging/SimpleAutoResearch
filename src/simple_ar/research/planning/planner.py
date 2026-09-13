@@ -520,7 +520,7 @@ def _negative_scope(problem_markdown: str) -> list[str]:
     lines = []
     for line in problem_markdown.splitlines():
         lowered = line.strip().lower()
-        if any(marker in lowered for marker in ("non-goal", "out of scope", "exclude", "not ")):
+        if any(marker in lowered for marker in ("non-goal", "out of scope", "exclude")):
             lines.append(" ".join(line.strip("#-* ").split())[:180])
     return _unique(lines[:5])
 

@@ -73,6 +73,14 @@ LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求�
 
 ### `simple-ar research-session`（V2.8 正式唯一主入口）
 
+可加 `--session-root PATH` 续接相同目标和 outputs 的会话，补齐缺少的实验配置；
+已有证据、研究设置和预算消费保持不变，详见配置参考的续接说明。
+
+可使用 `simple-ar research-session --config examples/research_config/minimal.toml`。
+显式 CLI 覆盖文件值；`--outputs summary report experiments` 按需选择交付。
+预算覆盖项为 `--total-tokens`、`--llm-requests`、`--max-output-tokens`、
+`--process-invocations`、`--process-wall-seconds`。见[配置参考](CONFIG_REFERENCE_zh.md)。
+
 **一句话说明**：在同一个 session 中运行 V2.8 正式主线。提供实验命令或
 `--code-task-config` 时，运行有界的 research-to-experiment 流程：
 `plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`。

@@ -1,0 +1,13 @@
+# Simple to configure; this does not select a reduced-quality pipeline.
+[task]
+goal = "Survey small-memory continual learning for image classification, compare feasible methods and explain open questions with evidence."
+outputs = ["report"]
+output_root = "../../runs/research-session"
+
+[model]
+name = "env" # Use SIMPLE_AR_MODEL from .env; or supply a model name.
+max_output_tokens = 8192
+
+[budget]
+total_tokens = 2000000
+llm_requests = 120

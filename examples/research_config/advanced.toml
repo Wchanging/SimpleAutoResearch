@@ -1,0 +1,37 @@
+# Same configuration format as minimal.toml. Only currently supported options.
+[task]
+goal = "Survey small-memory continual learning and compare evidence-supported research directions."
+outputs = ["report"] # experiments preserves the execution goal even without a prepared command.
+output_root = "../../runs/research-session"
+
+[model]
+name = "env"
+max_output_tokens = 8192
+
+[budget]
+total_tokens = 2000000
+llm_requests = 120
+process_invocations = 0 # No execution requested by this survey example.
+process_wall_seconds = 0
+
+[research]
+providers = ["openalex", "semantic_scholar", "arxiv"]
+max_results = 30
+max_chunks = 300
+idea_limit = 3
+
+[assets]
+papers = [] # Paths relative to this configuration file.
+
+[report]
+template = "survey"
+reviewer = "llm"
+max_review_iterations = 1
+
+# For prepared-project experiments, set task.outputs to ["experiments", "report"].
+# Then provide an execution command OR an existing CodeTask TOML:
+# [execution]
+# code_task_config = "../code_task_medium_review/configs/code_task.toml"
+# timeout_sec = 300
+# Also explicitly grant process_invocations/process_wall_seconds above.
+# Natural-goal-to-project preparation is not yet implemented; do not infer it from this template.

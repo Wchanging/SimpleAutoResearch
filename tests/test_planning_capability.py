@@ -21,6 +21,15 @@ from simple_ar.research.planning.capability import (
 
 
 class PlanningCapabilityTests(unittest.TestCase):
+    def test_caution_in_user_goal_does_not_exclude_the_research_topic(self) -> None:
+        result = build_research_plan(ResearchPlanRequest(
+            topic="continual learning",
+            problem_markdown=("Study continual learning with a small replay memory. "
+                              "Do not assume a particular algorithm.\n"
+                              "Out of scope: large language model training.")))
+        self.assertEqual(result.query_plan.negative_terms,
+                         ["Out of scope: large language model training."])
+
     def test_capability_can_use_explicit_llm_planner(self) -> None:
         class FakeClient:
             model = "fake-research-model"

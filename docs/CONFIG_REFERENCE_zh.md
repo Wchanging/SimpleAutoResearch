@@ -2,11 +2,32 @@
 
 [English version](CONFIG_REFERENCE.md)
 
-本文说明 code-task 与 research-session --code-task-config 使用的 CodeTask TOML。
-研究目标、来源和会话预算使用[研究CLI](CLI_REFERENCE_zh.md)或明确类型的应用输入。
+研究任务使用 `simple-ar research-session --config PATH`。先复制
+[轻量模板](../examples/research_config/minimal.toml)，需要更多控制时参考
+[完整示例](../examples/research_config/advanced.toml)。两者是同一格式、同一默认值，不是两套运行模式。
+CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 旧八阶段外层配置解析器及别名转换已经退出，历史快照仍可读取，但不是可执行工作流。
 
 ## 加载规则
+
+- 优先级：内置默认 → 研究 TOML → 显式 CLI 覆盖。CLI 列表覆盖整份文件列表。
+- 研究文件中的相对路径以 TOML 所在目录为基准；命令 argv 原样传给实验进程。
+- `[task]`：`goal`、`outputs`（summary/report/experiments）、`output_root`。
+- `[model]`：`name`（`env` 使用 `.env` 的 SIMPLE_AR_MODEL）、`max_output_tokens`。
+  配置文件省略模型时默认使用环境模型；显式 `name = ""` 用于不调用模型的确定性摘要。
+  API key/base URL 继续来自环境，禁止在模板写密钥。
+- `[budget]`：`total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds`。
+  总 token 与单次输出上限不是同一个限制。配置预算用于新会话；恢复继续使用已有账本。
+- `[research]`：`providers`、`queries`、`max_results`、`max_chunks`、`idea_limit`、`cache_dir`。
+- `[assets].papers`：本地文献路径列表。
+- `[execution]`：`command`（字符串数组）、`cwd`、`timeout_sec`，或 `code_task_config`；
+  可附 `primary_metric`、`metrics`、`metric_directions`（如 `["accuracy=higher"]）。
+- `[report]`：`template`、`reviewer`、`max_review_iterations`。
+- 显式 outputs 与 --with-report/--no-report 二选一。只调研不会因配置了材料而训练。
+  请求 experiments 但没有执行配置时保留该目标，并在实验处报告准备缺口；自动仓库准备尚未实现。
+- 未实现字段和拼写错误显式报错。暂不接受研究阶段模型或多模型协作配置。
+- 生效预算、研究参数和输入保存在会话 runtime_config/brief 产物中；认证配置不写入。
+  模型连接仍来自当前运行环境，不应将这些产物视为完整的连接配置快照。
 
 - code-task init --config PATH 读取初始化配置。
 - code-task execute --config PATH 读取执行、模型与预算配置。
@@ -15,6 +36,26 @@
 - 安装与命令说明：[使用手册](USAGE_zh.md)、[CLI参考](CLI_REFERENCE_zh.md)。
 
 ## CodeTask 字段参考
+
+### 研究会话补齐条件与续接
+
+```bash
+simple-ar research-session --config research.toml --session-root runs/research-session/<session>
+```
+
+保持原目标和 outputs，在 TOML 中补充 `[execution]` 的 command/cwd/timeout_sec，
+或引用已有 CodeTask 配置即可继续缺少实验条件的暂停会话。已有研究产物复用，
+CodeTask task_file 中的补充实现要求会保留；不会重新检索或覆盖已有实验协议。
+完整会话重复运行不会再次训练。若要修改已有实验条件，使用显式实验修订入口。
+
+续接沿用已保存的研究/报告设置和预算，只有模型连接来自本次环境。
+修改配置中的预算不会增加原会话额度；计划稍后实验时，应在首次启动就填写允许的
+process_invocations/process_wall_seconds。自动寻找、下载并配置仓库仍不是已实现能力。
+
+研究准备复用 CodeTask 的 auto/copy/git_worktree 选项及自定义保护路径。
+auto 对干净仓库使用 worktree；有未提交源码或无法创建 worktree 时使用 copy 并记录原因。
+显式 git_worktree 使用已提交 HEAD，不包含未提交修改。准备产物记录 Git 版本和隔离位置；
+这不是每轮候选自动提交 Git。sparse_copy/empty 仍限独立 CodeTask 使用。
 
 ### Code-Task 字段
 

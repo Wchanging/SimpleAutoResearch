@@ -8,6 +8,16 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Resume research-session with --session-root, reusing evidence and budgets while accepting missing execution settings without replacing an existing experiment.
+- Research preparation honors CodeTask workspace selection and custom protected paths; auto uses copy for uncommitted source instead of silently selecting committed HEAD.
+
+- Add research-session --config with shared CLI defaults, explicit overrides, file-relative paths,
+  model/output limits, session budgets, and minimal/advanced TOML examples. Explicit experiment goals survive missing execution settings.
+- Explicit additional budget authorization preserves unknown historical usage and bounds subsequent consumption; replaying authorization does not replenish it.
+- Research planning no longer treats any sentence containing "not" as an excluded topic; explicit scope exclusions remain supported.
+- Report writing applies minor factual corrections about metrics or unsupported
+  claims within the existing revision limit; informational suggestions alone do not trigger a rewrite.
+- Accept reviewed rewrites without silently restoring the old text based on word count; the next review evaluates the revised prose.
 - Greenfield generation, review, and repair reuse one result-schema builder
   instead of maintaining an identical definition in the CodeTask executor.
 - Remove the arbitrary prose-number whitelist from metric auditing. Structured

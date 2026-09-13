@@ -1747,13 +1747,9 @@ def _merge_revision_draft(
     previous: ReportSectionDraft,
     revised: ReportSectionDraft,
 ) -> ReportSectionDraft:
-    """Accept reviewer rewrites only when they preserve the prior draft's scale."""
+    """Keep provenance and let the following review assess the corrected prose."""
     merged = _merge_draft_metadata(previous, revised)
-    previous_words = _draft_word_count(previous)
-    revised_words = _draft_word_count(revised)
-    if previous_words <= 0 or revised_words >= max(120, int(previous_words * 0.9)):
-        return merged.model_copy(update={"draft_markdown": revised.draft_markdown})
-    return merged.model_copy(update={"draft_markdown": previous.draft_markdown})
+    return merged.model_copy(update={"draft_markdown": revised.draft_markdown})
 
 
 def _stable_union(first: list[str], second: list[str]) -> list[str]:
@@ -1892,7 +1888,13 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
 def _needs_revision(review: ReportSectionReview) -> bool:
     if review.verdict in {"revise_required", "fail"}:
         return True
-    return any(finding.severity in {"major", "critical"} for finding in review.findings)
+    # Factual corrections still need a revision when the reviewer labels them
+    # minor. Informational/style suggestions do not spend another writing pass.
+    return any(
+        finding.severity in {"major", "critical"}
+        or (finding.severity == "minor" and finding.type in {"metric_mismatch", "unsupported_claim"})
+        for finding in review.findings
+    )
 
 
 def _merge_draft_into_memory(

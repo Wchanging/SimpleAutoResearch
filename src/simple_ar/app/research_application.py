@@ -361,6 +361,24 @@ class ResearchApplication:
                 self._persist_application_views()
             return self.view()
 
+    def supply_execution(self, execution: Mapping[str, object], *, task_text: str = "") -> ResearchApplicationView:
+        """Attach missing execution inputs; retain research evidence and resource limits."""
+        if not self._requires_execution_output():
+            raise ResearchApplicationError("This session has not requested experiments.")
+        if self.services.config.get("execution") is not None:
+            raise ResearchApplicationError("Execution is already configured; use an explicit experiment revision instead.")
+        if self.controller.manifest.status != "paused":
+            raise ResearchApplicationError("Supply execution to a paused session before continuing it.")
+        execution_request(execution)  # Validate argv and location without launching a process.
+        with self.controller.mutation_scope():
+            self.controller.continue_with_revision("User supplied the missing experiment configuration; budgets unchanged.")
+            self.services = replace(self.services, config={**self.services.config, "execution": dict(execution)})
+            if task_text.strip():
+                self.brief = replace(self.brief, request_text=self.brief.request_text + "\n\n## Implementation task\n\n" + task_text.strip(),
+                                     revision=self.brief.revision + 1, parent_revision=self.brief.revision)
+            self._persist_inputs(validate_brief(self.brief, self.assets))
+            return self.view()
+
     def request_report(
         self,
         *,

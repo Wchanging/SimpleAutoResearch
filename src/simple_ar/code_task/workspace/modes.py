@@ -284,6 +284,8 @@ def _create_git_worktree_workspace(
     commit = _git_head_commit(repo_root)
     branch = _git_output(repo_root, "branch", "--show-current") or "detached"
     dirty_status = _git_output(repo_root, "status", "--short")
+    if requested_mode == "auto" and dirty_status.strip():
+        raise WorkspaceModeError("Source repository has uncommitted files; use copy to preserve the current source, or explicitly select git_worktree for committed HEAD.")
     workspace.parent.mkdir(parents=True, exist_ok=True)
     _run_git(repo_root, "worktree", "add", "--detach", str(workspace), commit)
     if not project_root.exists() or not project_root.is_dir():

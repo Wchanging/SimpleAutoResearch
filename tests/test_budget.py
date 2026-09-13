@@ -14,6 +14,27 @@ from simple_ar.core.budget import (
 
 
 class BudgetLedgerTests(unittest.TestCase):
+    def test_explicit_allowance_preserves_unknown_history_and_does_not_reset_on_reload(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "budget.json"
+            ledger = BudgetLedger({"total_tokens": 100, "llm_requests": 3}, storage_path=path)
+            ledger.reserve("timeout", {"total_tokens": 40, "llm_requests": 1})
+            ledger.mark_unknown("timeout", reason="provider timeout", known_actual={"llm_requests": 1})
+            historical = ledger.entries[0].to_dict()
+            ledger.authorize_remaining("total_tokens", 60, authorization_id="user-1", reason="User permits 60 additional tokens")
+            ledger.reserve("next", {"total_tokens": 20, "llm_requests": 1})
+            ledger.settle("next", {"total_tokens": 15, "llm_requests": 1})
+            loaded = BudgetLedger.load(path)
+            loaded.authorize_remaining("total_tokens", 60, authorization_id="user-1", reason="Replay same authorization")
+            self.assertEqual(loaded.entries[0].to_dict(), historical)
+            self.assertEqual(loaded.unknown_dimensions(), ("total_tokens",))
+            self.assertEqual(loaded.remaining("total_tokens"), 45)
+            self.assertEqual(loaded.remaining("llm_requests"), 1)
+            with self.assertRaises(BudgetExceededError):
+                loaded.reserve("too-much", {"total_tokens": 46})
+            with self.assertRaises(BudgetConflictError):
+                loaded.authorize_remaining("total_tokens", 100, authorization_id="user-1", reason="Changed terms")
+
     def test_bounded_unknown_consumption_retains_capacity_after_reload(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "budget.json"

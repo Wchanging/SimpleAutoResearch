@@ -29,15 +29,20 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     task = dict(config["code_task"])
     if set(task) - {
         "code_root", "approval_note", "max_repairs", "allowed_patterns",
-        "budget_profile", "allow_large_edits",
+        "budget_profile", "allow_large_edits", "workspace_mode", "protected_patterns",
     }:
         raise ValueError(
             "Preparing code_task accepts code_root, approval_note, max_repairs, "
-            "allowed_patterns, budget_profile and allow_large_edits."
+            "allowed_patterns, protected_patterns, budget_profile, allow_large_edits and workspace_mode."
         )
     allowed = task.pop("allowed_patterns", None)
-    if allowed is not None and (not isinstance(allowed, (list, tuple)) or not allowed or any(not isinstance(p, str) or not p.strip() for p in allowed)):
-        raise ValueError("allowed_patterns must be a nonempty list of workspace-relative edit patterns.")
+    protected = task.pop("protected_patterns", ())
+    workspace_mode = task.pop("workspace_mode", "auto")
+    if workspace_mode not in {"auto", "copy", "git_worktree"}:
+        raise ValueError("Research project preparation supports auto, copy or git_worktree; sparse/empty workspaces require standalone CodeTask.")
+    for name, patterns in (("allowed_patterns", () if allowed is None else allowed), ("protected_patterns", protected)):
+        if not isinstance(patterns, (list, tuple)) or any(not isinstance(p, str) or not p.strip() for p in patterns):
+            raise ValueError(f"{name} must be a list of workspace-relative patterns; empty uses CodeTask defaults.")
     root = Path(task["code_root"])
     if not root.is_absolute() or not root.is_dir():
         raise ValueError("code_task.code_root must be an existing absolute project directory.")
@@ -51,8 +56,9 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     initialized = initialize_code_task(
         run_dir=context.store.root / "project_run", code_root=root,
         task_file=context.store.resolve(task_ref), benchmark_command=command,
-        workspace_mode="copy",
+        workspace_mode=workspace_mode,
         edit_scope_allowed_patterns=tuple(allowed or ()),
+        edit_scope_protected_patterns=tuple(protected),
     )
     config["cwd"] = str(initialized.workspace_dir)
     if "baseline" in config:
@@ -67,8 +73,10 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
         "schema_version": "prepared_execution.v1", "execution": config,
         "source_project": str(root), "workspace": str(initialized.workspace_dir),
         "copy_report": initialized.copy_report.to_json(),
-        "limitations": ["Prepared by copying existing source; no dependency installation or dataset download.",
-                         "Copy rules may exclude large files; shared datasets remain external assets."],
+        "workspace_info": initialized.workspace.to_manifest(run_dir=initialized.run_dir),
+        "limitations": ["No dependency installation or dataset download; shared datasets remain external assets.",
+                         "Copy modes may exclude large files; inspect the recorded copy report.",
+                         *initialized.workspace.warnings],
     }, kind="prepared_execution", schema="prepared_execution.v1", producer="research.preparation")
     return CapabilityResult(status="completed", artifacts=(task_ref, ref))
 

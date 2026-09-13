@@ -170,10 +170,16 @@ class ResearchApplicationTests(unittest.TestCase):
                 requested_outputs=("experiments",),
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=ResearchApplicationServices(
-                max_results=1, config={"execution": execution, "research_queries": ["reliable agents"]},
+                max_results=1, config={"research_queries": ["reliable agents"]},
                 budget_limits={"process_invocations": 2, "process_wall_seconds": 40},
             ))
-            app.advance(max_actions=10)
+            paused = app.advance(max_actions=10)
+            self.assertEqual(paused.status, "paused")
+            app.supply_execution(execution, task_text="Keep the existing prediction API unchanged.")
+            app = load_session(root / "session")
+            self.assertIn("Keep the existing prediction API", app.brief.request_text)
+            self.assertEqual(app.view().state_refs["design"], paused.state_refs["design"])
+            app.advance(max_actions=2)
             self.assertEqual(app.view().next_action, "implement", app.view().status_reason)
             client = FakeClient()
             app.services = replace(app.services, llm_client=client)

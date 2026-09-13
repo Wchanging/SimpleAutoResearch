@@ -83,6 +83,15 @@ Domain capabilities remain composable at library level; historical artifacts rem
 
 ### `simple-ar research-session` (V2.8 formal mainline)
 
+Use `simple-ar research-session --config examples/research_config/minimal.toml`
+for a file-based start. The [configuration reference](CONFIG_REFERENCE.md) describes
+the minimal and advanced templates, which share the same parser and defaults.
+Explicit CLI options override the file. `--outputs` selects `summary`, `report`,
+and/or `experiments`; `--total-tokens`, `--llm-requests`, `--max-output-tokens`,
+`--process-invocations`, and `--process-wall-seconds` expose the corresponding limits.
+Add `--session-root PATH` to resume the same goal/outputs or supply missing execution settings;
+existing evidence, research settings, and budget consumption are retained.
+
 **Purpose**: run the V2.8 formal composition in one session. If an execution
 command or `--code-task-config` is supplied, it continues through the bounded
 research-to-experiment path

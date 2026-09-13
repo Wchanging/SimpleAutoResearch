@@ -73,7 +73,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             "for canonical sessions. Historical outputs remain readable with status; "
             "legacy stage options are not silently translated or executed."
         )
-    parser = build_parser()
+    from simple_ar.cli.research_config import research_defaults
+    try:
+        parser = build_parser(research_defaults=research_defaults(arguments))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"Invalid research configuration: {exc}") from exc
     args = parser.parse_args(arguments)
 
 
@@ -282,6 +286,15 @@ def _print_research_session(args: argparse.Namespace) -> None:
     if args.max_review_iterations < 0:
         raise SystemExit("--max-review-iterations cannot be negative.")
     command = tuple(args.command_argv or ())
+    outputs = getattr(args, "outputs", None)
+    if outputs and "experiments" not in outputs and (command or getattr(args, "code_task_config", None)):
+        raise SystemExit("Execution configuration requires experiments in --outputs/task.outputs.")
+    if outputs and (args.with_report or args.no_report):
+        raise SystemExit("Use explicit outputs or --with-report/--no-report, not both.")
+    for field in ("total_tokens", "llm_requests", "max_output_tokens", "process_invocations", "process_wall_seconds"):
+        value = getattr(args, field, None)
+        if value is not None and value < (0 if field.startswith("process_") else 1):
+            raise SystemExit(f"Invalid {field}: {value}")
     code_task_spec = None
     code_task_baseline_policy = "auto"
     code_task_config = getattr(args, "code_task_config", None)
@@ -319,11 +332,14 @@ def _print_research_session(args: argparse.Namespace) -> None:
         timeout_sec = args.timeout_sec if args.timeout_sec is not None else 300
     if args.with_report and args.no_report:
         raise SystemExit("Use either --with-report or --no-report for research-session, not both.")
-    llm_client = _optional_research_llm_client(args.model, "research session")
+    llm_client = _optional_research_llm_client(args.model, "research session", max_output_tokens=getattr(args, "max_output_tokens", None))
     report_requested = bool(args.with_report or (llm_client is not None and not args.no_report))
+    if outputs is not None:
+        report_requested = "report" in outputs
     if report_requested and llm_client is None:
         raise SystemExit("--with-report requires --model for report generation.")
-    session_root = new_research_session_root(args.output_root, args.topic)
+    resume_root = getattr(args, "session_root", None)
+    session_root = resume_root or new_research_session_root(args.output_root, args.topic)
     execution: dict[str, object] | None = None
     task_text = ""
     if code_task_spec is not None:
@@ -341,9 +357,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 raise SystemExit(f"Could not read Code-Task task file: {exc}") from exc
         task = {
             "code_root": str(code_task_spec.code_root.resolve()),
+            "workspace_mode": code_task_spec.workspace_mode,
             "approval_note": code_task_spec.approval_note,
             "max_repairs": execute_options.repair_rounds,
             "allowed_patterns": list(code_task_spec.edit_scope_allowed_patterns),
+            "protected_patterns": list(code_task_spec.edit_scope_protected_patterns),
             "budget_profile": execute_options.budget_profile,
             "allow_large_edits": bool(
                 execute_options.allow_large_edits or code_task_spec.allow_large_edits
@@ -375,13 +393,14 @@ def _print_research_session(args: argparse.Namespace) -> None:
             "result_schema": _experiment_result_schema(args),
         }
     request_text = args.topic.strip()
+    experiment_requested = execution is not None or bool(outputs and "experiments" in outputs)
     if task_text.strip():
         request_text += "\n\n## Implementation task\n\n" + task_text.strip()
     config: dict[str, object] = {
         "research_max_documents": args.max_results,
         "report": {
-            "mode": "experiment" if execution is not None else "research_only",
-            "template": args.report_template if execution is not None else (
+            "mode": "experiment" if experiment_requested else "research_only",
+            "template": args.report_template if experiment_requested else (
                 "survey" if args.report_template == "experiment" else args.report_template
             ),
             "reviewer": args.report_reviewer,
@@ -413,25 +432,39 @@ def _print_research_session(args: argparse.Namespace) -> None:
         input_base_dir=Path.cwd(),
         config=config,
         budget_limits={
-            "llm_requests": 40,
-            "total_tokens": 160_000,
-            "process_invocations": 8 if execution is not None else 0,
-            "process_wall_seconds": max(60, timeout_sec * 8) if execution is not None else 0,
+            "llm_requests": getattr(args, "llm_requests", 40),
+            "total_tokens": getattr(args, "total_tokens", 160_000),
+            "process_invocations": args.process_invocations if getattr(args, "process_invocations", None) is not None else (8 if execution is not None else 0),
+            "process_wall_seconds": args.process_wall_seconds if getattr(args, "process_wall_seconds", None) is not None else (max(60, timeout_sec * 8) if execution is not None else 0),
         },
         max_attempts=32 if code_task_spec is not None else 20,
     )
     brief = ResearchBrief(
         request_text=request_text,
         objective=args.topic.strip(),
-        intents=("research", "experiment") if execution is not None else ("research",),
-        requested_outputs=("experiments", "report") if execution is not None and report_requested
+        intents=("research", "experiment") if experiment_requested else ("research",),
+        requested_outputs=tuple(outputs) if outputs is not None else ("experiments", "report") if execution is not None and report_requested
         else ("experiments",) if execution is not None
         else ("report",) if report_requested
         else ("summary",),
         asset_requests=assets,
     )
     try:
-        app = create_session(brief, root=session_root, services=services)
+        if resume_root is None:
+            app = create_session(brief, root=session_root, services=services)
+        else:
+            from simple_ar.app.research_application import load_session
+            from dataclasses import replace
+            app = load_session(session_root, services=replace(services, config={}))
+            if app.brief.objective != brief.objective or app.brief.requested_outputs != brief.requested_outputs:
+                raise ResearchApplicationError("Resume requires the same goal and outputs; it does not revise the research brief.")
+            existing = app.services.config.get("execution")
+            if execution is not None and existing is None:
+                app.supply_execution(execution, task_text=task_text)
+            elif execution is not None and execution != existing:
+                raise ResearchApplicationError("Cannot replace an existing experiment configuration while resuming.")
+            elif app.view().status != "completed":
+                app.continue_session(reason="Resume from research-session; reuse persisted evidence and budgets.")
         view = app.view()
         for _ in range(services.max_attempts + 8):
             if view.next_action is None:
@@ -457,6 +490,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         "Implementation: "
         + ("existing Code-Task backend" if code_task_spec is not None
            else "explicit command" if execution is not None
+           else "preparation required" if outputs and "experiments" in outputs
            else "not requested (literature-only)")
     )
     for name in ("summary", "experiment", "matrix_results", "analysis", "report", "report_audit"):
@@ -579,13 +613,14 @@ def _print_research_session_migrate(args: argparse.Namespace) -> None:
 def _optional_research_llm_client(
     model: str | None,
     purpose: str,
+    *, max_output_tokens: int | None = None,
 ) -> LLMClient | None:
     """Create the shared client only when a research command opts into LLMs."""
 
     if not model:
         return None
     try:
-        return LLMClient.from_env(model=model)
+        return LLMClient.from_env(model=None if model == "env" else model, **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {}))
     except LLMError as exc:
         raise SystemExit(f"Cannot enable LLM-backed {purpose}: {exc}") from exc
 

@@ -151,6 +151,9 @@ Responses to Chat after the bounded retries.
 
 ### 1. V2.8 canonical research session
 
+For file-based use, start with `simple-ar research-session --config examples/research_config/minimal.toml`.
+See the [configuration reference](docs/CONFIG_REFERENCE.md) for the shared minimal/advanced format.
+
 The mainline is `research-session`: it keeps one bounded handoff from
 planning and network/local search through document evidence, one prepared
 experiment, result analysis, report writing, and audit. Start with the

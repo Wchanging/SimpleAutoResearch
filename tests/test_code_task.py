@@ -2258,6 +2258,15 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["workspace"]["selected_mode"], "git_worktree")
             self.assertEqual(manifest["workspace"]["fallback_reason"], "")
 
+            write_text(code_root / "uncommitted.py", "VALUE = 7\n")
+            dirty = initialize_code_task(
+                run_dir=root / "runs" / "dirty-auto", code_root=code_root,
+                task_file=task_file, workspace_mode="auto",
+            )
+            self.assertEqual(dirty.workspace.mode, "copy")
+            self.assertIn("uncommitted", dirty.workspace.fallback_reason)
+            self.assertEqual((dirty.workspace_dir / "uncommitted.py").read_text(), "VALUE = 7\n")
+
     def test_git_worktree_supports_project_subdirectory(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git executable is not available")

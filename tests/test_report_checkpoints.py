@@ -16,6 +16,32 @@ from simple_ar.report.writing import ReportWritingRequest, run_report_writing_ca
 
 
 class ReportCheckpointTests(unittest.TestCase):
+    def test_minor_factual_finding_is_revised_within_existing_limit(self):
+        context = ReportContext(topic="Calibration", report_mode="experiment")
+        memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])
+        for kind in ("metric_mismatch", "unsupported_claim", "missing_limitation"):
+            with self.subTest(kind=kind):
+                calls = []
+
+                class Client:
+                    def ask_json(self, *args, label="", **kwargs):
+                        calls.append(label)
+                        if "reviewer" in label:
+                            return {"section_id": "method", "verdict": "pass", "findings": [
+                                {"finding_id": "wording", "type": kind, "severity": "minor",
+                                 "message": "Accuracy is not a likelihood-based metric."}]}
+                        return {"section_id": "method", "heading": "Method",
+                                "draft_markdown": "Accuracy measures classification correctness."
+                                if "reviser" in label else "Accuracy is likelihood-based."}
+
+                config = ReportRuntimeConfig(allow_llm_fallback=False, max_review_iterations=1)
+                result = run_report_agent(client=Client(), context=context, memory=memory, config=config,
+                    template=load_report_template_bundle(report_mode="experiment", config=config),
+                    gateway=ReportToolGateway(context))
+                revise = kind != "missing_limitation"
+                self.assertEqual(sum("reviser" in label for label in calls), int(revise))
+                self.assertEqual("classification correctness" in result.report_body, revise)
+
     def test_final_audit_uses_latest_review_without_erasing_history_or_failed_review(self):
         from simple_ar.report.audit import build_report_audit
         context = ReportContext(topic="Calibration", report_mode="experiment")

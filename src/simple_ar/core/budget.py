@@ -292,6 +292,41 @@ class BudgetLedger:
             self._persist_unlocked()
             return entry
 
+    def authorize_remaining(self, dimension: str, amount: BudgetNumber, *, authorization_id: str, reason: str) -> None:
+        """Start an explicitly authorized allowance; preserve all earlier usage.
+
+        The allowance covers subsequent calls, not unknown historical charges.
+        Replaying the same authorization never replenishes spent capacity.
+        """
+        dimension = _required_text(dimension, "dimension")
+        amount = _number(amount, field="allowance")
+        authorization_id = _required_text(authorization_id, "authorization_id")
+        reason = _required_text(reason, "reason")
+        with self._lock:
+            existing = self._entries.get(authorization_id)
+            if existing is not None:
+                if existing.actual_source != "user_authorization" or existing.reserved != {dimension: amount}:
+                    raise BudgetConflictError("Authorization ID already exists with different terms")
+                return
+            if any(e.status == "reserved" and dimension in e.reserved for e in self._entries.values()):
+                raise BudgetConflictError("Cannot replace an allowance while calls remain in flight")
+            now = _utc_now()
+            self._entries[authorization_id] = BudgetEntry(
+                authorization_id, {dimension: amount}, {}, "released",
+                actual_source="user_authorization", reason=reason,
+                created_at=now, updated_at=now,
+            )
+            self.limits[dimension] = amount
+            self._persist_unlocked()
+
+    def _allowance_entries(self, dimension: str) -> tuple[BudgetEntry, ...]:
+        entries = tuple(self._entries.values())
+        start = 0
+        for index, entry in enumerate(entries):
+            if entry.actual_source == "user_authorization" and dimension in entry.reserved:
+                start = index + 1
+        return entries[start:]
+
     def remaining(self, dimension: str) -> BudgetNumber | None:
         """Return finite remaining capacity, or ``None`` when unlimited/unknown."""
 
@@ -397,20 +432,20 @@ class BudgetLedger:
             entry.status == "unknown" and dimension in entry.reserved
             and dimension not in entry.actual
             and entry.actual_source != "reservation_bound"
-            for entry in self._entries.values()
+            for entry in self._allowance_entries(dimension)
         )
 
     def _committed(self, dimension: str) -> BudgetNumber:
         return sum(
             entry.actual.get(dimension, 0)
-            for entry in self._entries.values()
+            for entry in self._allowance_entries(dimension)
             if entry.status in {"settled", "unknown"}
         )
 
     def _reserved(self, dimension: str) -> BudgetNumber:
         return sum(
             entry.reserved.get(dimension, 0)
-            for entry in self._entries.values()
+            for entry in self._allowance_entries(dimension)
             if entry.status == "reserved" or (
                 entry.status == "unknown" and dimension not in entry.actual
                 and entry.actual_source == "reservation_bound"

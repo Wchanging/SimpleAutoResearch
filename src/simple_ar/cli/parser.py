@@ -6,7 +6,7 @@ from pathlib import Path
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, parse_metric_direction_arg
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="simple-ar")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -60,7 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
         "research-session",
         help="Run a bounded literature-only or literature-to-experiment research session.",
     )
-    session_parser.add_argument("--topic", required=True)
+    session_parser.add_argument("--config", type=Path, help="Research TOML; explicit CLI options override file values.")
+    session_parser.add_argument("--session-root", type=Path, help="Continue this session with the same goal; attach execution only if missing. Existing budgets stay unchanged.")
+    session_parser.add_argument("--topic", required=not bool(research_defaults and research_defaults.get("topic")))
+    session_parser.add_argument("--outputs", nargs="+", choices=("summary", "report", "experiments"))
+    session_parser.add_argument("--total-tokens", type=int, default=160000)
+    session_parser.add_argument("--llm-requests", type=int, default=40)
+    session_parser.add_argument("--max-output-tokens", type=int, default=None)
+    session_parser.add_argument("--process-invocations", type=int, default=None)
+    session_parser.add_argument("--process-wall-seconds", type=int, default=None)
     session_parser.add_argument(
         "--model",
         default=None,
@@ -169,6 +177,9 @@ def build_parser() -> argparse.ArgumentParser:
             "literature-only summary/report or when using --code-task-config."
         ),
     )
+
+    if research_defaults:
+        session_parser.set_defaults(**research_defaults)
 
     continuation_parser = subparsers.add_parser(
         "research-session-continue",

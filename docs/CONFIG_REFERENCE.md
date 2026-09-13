@@ -2,9 +2,30 @@
 
 [中文版本](CONFIG_REFERENCE_zh.md)
 
-This reference covers CodeTask TOML for `code-task` and
-`research-session --code-task-config`. Research objectives, sources and session
-budgets use the [research CLI](CLI_REFERENCE.md) or typed application inputs.
+## Research configuration
+
+Run `simple-ar research-session --config examples/research_config/minimal.toml`.
+The [minimal](../examples/research_config/minimal.toml) and
+[advanced](../examples/research_config/advanced.toml) examples share one format and defaults.
+Precedence is built-in defaults, TOML, then explicit CLI options. CLI lists replace file lists.
+File-relative paths resolve from the TOML directory; command argv remains literal.
+
+Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens),
+`budget` (total_tokens, llm_requests, process_invocations, process_wall_seconds),
+`research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir),
+`assets` (papers), `execution` (command, cwd, timeout_sec, code_task_config,
+primary_metric, metrics, metric_directions), and `report` (template, reviewer, max_review_iterations).
+Use model name `env` for SIMPLE_AR_MODEL; credentials remain in the environment.
+This is the file-based default; explicit `name = ""` selects deterministic processing without LLM calls.
+Outputs may be summary, report, and/or experiments. Explicit outputs cannot be combined
+with --with-report/--no-report. Missing execution settings preserve the experiment goal
+and pause at that boundary; automatic repository preparation is not yet implemented.
+Budget limits initialize new sessions; resuming uses the persisted ledger, not a refreshed allowance.
+Unknown fields are rejected; stage-specific research models are not supported yet.
+
+The sections below cover the existing CodeTask TOML for `code-task` and
+`research-session --code-task-config`. Research TOML can reference this file through
+`execution.code_task_config`; it does not duplicate CodeTask's implementation settings.
 
 The old eight-stage outer-pipeline parser and its alias mapping are retired.
 Historical configuration snapshots remain readable files, not executable workflows.
@@ -18,6 +39,21 @@ Historical configuration snapshots remain readable files, not executable workflo
 - Setup and command details: [Usage](USAGE.md), [CLI Reference](CLI_REFERENCE.md).
 
 ## CodeTask Field Reference
+
+### Continue a research session after preparing execution
+
+Run `simple-ar research-session --config research.toml --session-root runs/research-session/<session>`.
+Keep the original goal/outputs and add the missing execution command or CodeTask configuration.
+Existing evidence is reused, implementation task-file instructions are retained, and completed
+sessions do not train again. Existing execution settings cannot be silently replaced.
+Saved research/report settings and budget limits remain authoritative; editing TOML does not
+replenish the ledger. Declare intended process limits when creating a session that will later run experiments.
+Automatic repository discovery/download/setup is not implemented.
+
+Research preparation honors CodeTask auto/copy/git_worktree and protected paths. Auto preserves
+uncommitted source by falling back to copy with a recorded reason; explicit git_worktree uses
+committed HEAD. Preparation records workspace/Git provenance, not an automatic commit per candidate.
+Sparse/empty workspace options remain limited to standalone CodeTask.
 
 ### Code-Task Fields
 

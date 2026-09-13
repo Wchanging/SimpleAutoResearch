@@ -393,7 +393,7 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(normalized["open_questions"], ["How stable is the conclusion?"])
         self.assertEqual(normalized["limitations"], ["Evidence is incomplete."])
 
-    def test_short_reviewer_revision_cannot_erase_substantive_draft(self) -> None:
+    def test_short_reviewer_revision_replaces_prose_and_preserves_provenance(self) -> None:
         previous = ReportSectionDraft(
             section_id="methods",
             heading="Methods",
@@ -409,7 +409,7 @@ class ReportSafetyTests(unittest.TestCase):
 
         merged = _merge_revision_draft(previous, revised)
 
-        self.assertEqual(merged.draft_markdown, previous.draft_markdown)
+        self.assertEqual(merged.draft_markdown, revised.draft_markdown)
         self.assertEqual(merged.citations, ["P1", "P2"])
 
     def test_substantive_reviewer_revision_replaces_prior_draft(self) -> None:
