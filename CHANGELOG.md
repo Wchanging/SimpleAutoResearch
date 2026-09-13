@@ -8,6 +8,11 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Research implementation now enters CodeTask once through validation instead
+  of replaying preparation for plan, proposal, and validation separately.
+  Existing explicit authorization continues pending plans/proposals; rejected
+  plans, interactive defaults, edit budgets, and application-owned experiments
+  remain unchanged.
 - Report checkpoints retain a completed draft awaiting its first review;
   resuming after Reviewer failure reuses that draft without treating it as a
   reviewed section or repeating the Writer call.

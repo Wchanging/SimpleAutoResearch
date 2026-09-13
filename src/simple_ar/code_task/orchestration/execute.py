@@ -151,6 +151,7 @@ def execute_code_task(
     baseline_policy: str = "auto",
     baseline_metrics_file: str | Path | None = None,
     apply_proposed_edits: bool = False,
+    approval_note: str = "",
     allow_large_edits: bool = False,
     allow_planning_fallback: bool = False,
     planning_mode: str = "tool_agent",
@@ -188,6 +189,8 @@ def execute_code_task(
         run_dir: Existing code-task run directory created by ``code-task init``.
         to_step: Last step the orchestrator may attempt.
         dry_run: Preview the next executable action without writing artifacts.
+        approval_note: Explicit authorization to continue a pending plan and
+            its proposal in this call. Empty preserves interactive review gates.
         model: Optional fallback LLM model override for planning/edit/repair
             steps.
         planner_model: Optional model override for work-plan and patch-plan
@@ -545,6 +548,9 @@ def execute_code_task(
                 metadata={"selected_files": list(result.selected_files)},
             )
             plan_status = "pending_approval"
+        if plan_status == "pending_approval" and approval_note.strip() and not dry_run:
+            record_plan_decision(root, decision="approve", note=approval_note, reviewer="research-application")
+            plan_status = "approved"
         if plan_status == "pending_approval":
             return _result(
                 paths,
@@ -613,12 +619,13 @@ def execute_code_task(
                     "no_edits_proposed",
                     "Review code_task/meta/proposed_edits.json or rerun with LLM enabled.",
                 )
-            return _result(
-                paths,
-                steps,
-                "proposal_review_required",
-                "Review code_task/meta/proposed_edits.json, then rerun execute with --apply-proposed-edits.",
-            )
+            if not (approval_note.strip() and apply_proposed_edits):
+                return _result(
+                    paths,
+                    steps,
+                    "proposal_review_required",
+                    "Review code_task/meta/proposed_edits.json, then rerun execute with --apply-proposed-edits.",
+                )
 
     if _stop_after("propose-edits", to_step):
         return _result(paths, steps, "stop_point", "Stopped after propose-edits as requested.")
@@ -875,16 +882,10 @@ def implement_code_task(run_dir: Path, *, approval_note: str, **options: Any) ->
     """
     if not approval_note.strip():
         raise ValueError("CodeTask implementation requires an explicit approval note.")
-    options = {**options, "baseline_policy": "skip"}
-    planned = execute_code_task(run_dir, to_step="plan", **options)
-    if planned.stop_reason == "approval_required":
-        record_plan_decision(run_dir, decision="approve", note=approval_note, reviewer="research-application")
-    elif planned.stop_reason != "stop_point":
-        return planned
-    proposed = execute_code_task(run_dir, to_step="propose-edits", **options)
-    if proposed.stop_reason not in {"proposal_review_required", "stop_point"}:
-        return proposed
-    return execute_code_task(run_dir, to_step="validate", apply_proposed_edits=True, **options)
+    return execute_code_task(run_dir, **{
+        **options, "baseline_policy": "skip", "to_step": "validate",
+        "apply_proposed_edits": True, "approval_note": approval_note,
+    })
 
 
 def _execute_greenfield_code_task(

@@ -59,6 +59,27 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CodeTaskTests(unittest.TestCase):
+    def test_implementation_authorization_preserves_rejections_and_dry_run(self):
+        from simple_ar.code_task.orchestration.execute import implement_code_task
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_toy_project(root / "project")
+            write_text(root / "task.md", "Improve the existing classifier.")
+            run_dir = root / "run"
+            initialize_code_task(run_dir=run_dir, code_root=root / "project", task_file=root / "task.md")
+            execute_code_task(run_dir, to_step="plan", baseline_policy="skip", use_llm=False)
+            before = read_json(run_dir / "manifest.json")["plan"]
+            result = implement_code_task(run_dir, approval_note="Isolated implementation only", use_llm=False, dry_run=True)
+            self.assertEqual(result.stop_reason, "dry_run")
+            self.assertEqual(read_json(run_dir / "manifest.json")["plan"], before)
+            for decision, expected in (("reject", "plan_rejected"), ("revise", "plan_revision_requested")):
+                record_plan_decision(run_dir, decision=decision)
+                before = read_json(run_dir / "manifest.json")["plan"]
+                result = implement_code_task(run_dir, approval_note="Isolated implementation only", use_llm=False)
+                self.assertEqual(result.stop_reason, expected)
+                self.assertEqual(read_json(run_dir / "manifest.json")["plan"], before)
+            self.assertFalse((run_dir / "code_task" / "meta" / "applied_edits.json").exists())
+
     def test_repair_accounting_keeps_review_and_run_facts_out_of_implementation(self):
         from simple_ar.code_task.orchestration.execute import (
             _greenfield_repair_available, _record_greenfield_repair_result,
