@@ -342,6 +342,7 @@ class ResearchApplication:
         *,
         reason: str = "Continue the research application.",
         revised_brief: ResearchBrief | None = None,
+        allow_no_progress_exhausted: bool = False,
     ) -> ResearchApplicationView:
         prepared = self._prepare_revision(revised_brief) if revised_brief else None
         if self.controller.manifest.status == "completed" and prepared is None:
@@ -349,7 +350,10 @@ class ResearchApplication:
         if self.controller.manifest.status == "paused" and prepared is None and self._next_action() is None:
             raise ResearchApplicationError("This paused session has no enabled next action.")
         with self.controller.mutation_scope():
-            self.controller.continue_with_revision(reason)
+            self.controller.continue_with_revision(
+                reason,
+                allow_no_progress_exhausted=allow_no_progress_exhausted,
+            )
             if prepared is not None:
                 self.brief, self.assets, diagnostics = prepared
                 self.controller.manifest.current_attempt = None
@@ -899,6 +903,7 @@ class ResearchApplication:
                 ReportWritingRequest(report_context, memory, config,
                                      load_report_template_bundle(report_mode=report_context.report_mode, config=config), self.services.llm_client, resume_ref),
                 sources + ((resume_ref,) if resume_ref else ()),
+                allow_no_progress_exhausted=True,
             )
         if action in {"report", "report_audit"}:
             from simple_ar.report.schema import ReportContext, ReportMemory
@@ -937,6 +942,7 @@ class ResearchApplication:
         self, capability: str, state_name: str,
         request: Any, inputs: tuple[ArtifactRef, ...], *, allow_partial: bool = False,
         parent_attempt_id: str | None = None,
+        allow_no_progress_exhausted: bool = False,
         **kwargs: Any,
     ) -> bool:
         _, artifact_kind, _ = _CAPABILITY_OUTPUTS[capability]
@@ -946,7 +952,9 @@ class ResearchApplication:
             kwargs["request"] = request
         result = self.controller.execute_attempt(
             capability, attempt_id=attempt_id, inputs=inputs, parent_attempt_id=parent_attempt_id,
-            trigger=f"application:{state_name}", **kwargs,
+            trigger=f"application:{state_name}",
+            allow_no_progress_exhausted=allow_no_progress_exhausted,
+            **kwargs,
         )
         accepted = {"completed", "partial"} if allow_partial else {"completed"}
         # Failed measurements and their diagnostic analyses remain outputs,

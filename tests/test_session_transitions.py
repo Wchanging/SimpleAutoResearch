@@ -784,6 +784,41 @@ class SessionTransitionTests(unittest.TestCase):
             self.assertEqual(controller.manifest.budget.attempts, 1)
             self.assertEqual(controller.manifest.status, "completed")
 
+    def test_explicit_recovery_can_use_remaining_attempts_after_no_progress_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CapabilityRegistry()
+
+            def broken(**_: object) -> CapabilityResult:
+                return CapabilityResult(status="failed", diagnostics=("provider unavailable",))
+
+            registry.register("report_write", broken)
+            controller = SessionController.create(
+                tmp,
+                session_id="report-recovery-budget",
+                topic="report provider recovery",
+                registry=registry,
+                budget=BudgetState(max_attempts=3, max_no_progress=1),
+            )
+
+            controller.execute_attempt("report_write", attempt_id="report_write-001")
+            controller.pause("Report provider was unavailable.")
+            with self.assertRaisesRegex(RuntimeError, "cannot reset the budget"):
+                controller.continue_with_revision("Retry report")
+
+            revision = controller.continue_with_revision(
+                "Retry report with a replacement provider.",
+                allow_no_progress_exhausted=True,
+            )
+            self.assertEqual(revision, 1)
+            second = controller.execute_attempt(
+                "report_write",
+                attempt_id="report_write-002",
+                allow_no_progress_exhausted=True,
+            )
+            self.assertEqual(second.status, "failed")
+            self.assertEqual(controller.manifest.budget.attempts, 2)
+            self.assertEqual(controller.manifest.budget.no_progress, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -688,8 +688,11 @@ def _print_research_report(args: argparse.Namespace) -> None:
             item.strip().lower() for item in app.brief.requested_outputs
         }):
             view = app.request_report()
-        elif view.status == "paused" and view.next_action is not None:
-            view = app.continue_session(reason="Resume the canonical report lifecycle.")
+        elif view.status in {"paused", "blocked"} and view.next_action is not None:
+            view = app.continue_session(
+                reason="Resume the canonical report lifecycle after an explicit report recovery.",
+                allow_no_progress_exhausted=True,
+            )
         for _ in range(app.services.max_attempts + 8):
             if view.next_action is None:
                 break

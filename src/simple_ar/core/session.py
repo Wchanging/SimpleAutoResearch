@@ -713,8 +713,18 @@ class SessionController:
         return self.manifest
 
     @_locked_method
-    def continue_with_revision(self, reason: str) -> int:
-        """Reopen a settled session with an explicit, budget-preserving revision."""
+    def continue_with_revision(
+        self,
+        reason: str,
+        *,
+        allow_no_progress_exhausted: bool = False,
+    ) -> int:
+        """Reopen a settled session with an explicit, budget-preserving revision.
+
+        The recovery escape hatch only permits use of remaining attempts after
+        repeated no-progress failures. It does not reset persisted counters or
+        bypass the total attempt limit.
+        """
 
         normalized_reason = reason.strip()
         if not normalized_reason:
@@ -724,7 +734,11 @@ class SessionController:
         self._ensure_no_running_attempt()
         if self.manifest.status == "created":
             raise RuntimeError("Session has no settled work to continue.")
-        if self.manifest.budget.exhausted():
+        budget = self.manifest.budget
+        if budget.attempts >= budget.max_attempts or (
+            budget.no_progress >= budget.max_no_progress
+            and not allow_no_progress_exhausted
+        ):
             raise RuntimeError(
                 "Session budget is exhausted; continuation cannot reset the budget."
             )
@@ -745,6 +759,7 @@ class SessionController:
         inputs: Iterable[ArtifactRef] = (),
         parent_attempt_id: str | None = None,
         progressed: bool | None = None,
+        allow_no_progress_exhausted: bool = False,
         **kwargs: Any,
     ) -> CapabilityResult:
         """Execute one capability without choosing its research next step.
@@ -762,7 +777,9 @@ class SessionController:
         if not capability:
             raise ValueError("Capability name cannot be empty.")
         attempt_id = selected_attempt_id or self._allocate_attempt_id_unlocked(capability)
-        self._ensure_can_execute()
+        self._ensure_can_execute(
+            allow_no_progress_exhausted=allow_no_progress_exhausted
+        )
         input_refs = tuple(inputs)
         attempt_profile = self._resolve_attempt_profile(profile)
         self._ensure_profile_capability(capability)
@@ -975,7 +992,7 @@ class SessionController:
         self.save()
         return result
 
-    def _ensure_can_execute(self) -> None:
+    def _ensure_can_execute(self, *, allow_no_progress_exhausted: bool = False) -> None:
         if self.manifest.status in {"completed", "blocked", "paused"}:
             if self.manifest.status == "paused":
                 raise RuntimeError(
@@ -983,7 +1000,11 @@ class SessionController:
                 )
             raise RuntimeError(f"Session is {self.manifest.status}; no further attempt is allowed.")
         self._ensure_no_running_attempt()
-        if self.manifest.budget.exhausted():
+        budget = self.manifest.budget
+        if budget.attempts >= budget.max_attempts or (
+            budget.no_progress >= budget.max_no_progress
+            and not allow_no_progress_exhausted
+        ):
             self.manifest.status = "blocked"
             self.manifest.status_reason = "Session budget exhausted."
             self.save()
