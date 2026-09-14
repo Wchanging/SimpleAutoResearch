@@ -20,8 +20,13 @@ def references_markdown(
     lines = []
     for paper in papers:
         label = f"[{citation_map[paper.id]}]" if citation_map and paper.id in citation_map else f"[@{paper.id}]"
+        authors = ", ".join(author.strip() for author in paper.authors if author.strip())
+        year = paper.published[:4] if paper.published else ""
+        attribution = f"{authors} ({year}). " if authors and year else (
+            f"{authors}. " if authors else (f"({year}) " if year else "")
+        )
         url = f" {paper.url}" if paper.url else ""
-        lines.append(f"- {label} {paper.title}.{url}")
+        lines.append(f"- {label} {attribution}{paper.title}.{url}")
     return "\n".join(lines)
 
 

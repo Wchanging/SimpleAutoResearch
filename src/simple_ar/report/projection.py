@@ -282,6 +282,7 @@ def attach_paired_report_measurements(
     context.source_handles = handles
     memory.source_handles = handles
     context.experiment_plan = {
+        **context.experiment_plan,
         "paired_protocols": [
             {
                 "seed": seed,

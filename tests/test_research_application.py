@@ -296,6 +296,8 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIn("Planned pairs: 2", analysis["analysis"]["readme_markdown"])
             context, memory = app.report_inputs()
             self.assertEqual(len(context.results.get("comparisons", [])), 2, context.results)
+            self.assertTrue(context.experiment_plan.get("hypothesis"))
+            self.assertEqual(len(context.experiment_plan["paired_protocols"]), 4)
             measured_sources = [m for m in context.metric_sources if m.source_kind == "measured"]
             self.assertEqual({m.label for m in measured_sources},
                              {f"{role}:seed={seed}" for role in ("baseline", "candidate") for seed in (0, 1)})

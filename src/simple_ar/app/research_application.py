@@ -599,7 +599,7 @@ class ResearchApplication:
             # Comparisons stay in results as interpreted evidence; measured ledger
             # entries below come from their own canonical artifacts, not this projection.
             context, memory = build_research_report_inputs(
-                topic=self.brief.objective or self.brief.request_text, brief=self._load_synthesis(),
+                topic=self._experiment_report_topic(), brief=self._load_synthesis(),
                 search=self._load_search(), documents=self._load_documents(),
                 execution={"status": evidence["status"], "metrics": {}}, analysis=analysis.analysis,
                 brief_ref=refs["synthesis"], execution_ref=refs["matrix_results"], analysis_ref=refs["analysis"],
@@ -630,7 +630,7 @@ class ResearchApplication:
         if "comparison" in refs:
             execution["comparisons"] = [dict(self._state_payload("comparison"))]
         context, memory = build_research_report_inputs(
-            topic=self.brief.objective or self.brief.request_text, brief=self._load_synthesis(),
+            topic=self._experiment_report_topic(), brief=self._load_synthesis(),
             search=self._load_search(), documents=self._load_documents(), execution=execution,
             analysis=analysis.analysis, brief_ref=refs["synthesis"], execution_ref=analysis.execution_ref,
             analysis_ref=refs["analysis"], design=ResearchDesignResult.from_handoff_dict(self._state_payload("design")),
@@ -1546,6 +1546,17 @@ class ResearchApplication:
         if directions:
             context["metric_directions"] = directions
         return context
+
+    def _experiment_report_topic(self) -> str:
+        """Use the selected idea as the paper title when it has one."""
+        design_ref = self.controller.manifest.state_refs.get("design")
+        if design_ref is not None:
+            design = self.controller.store.read_json(design_ref)
+            selected = design.get("selected_idea") if isinstance(design, Mapping) else None
+            title = selected.get("title") if isinstance(selected, Mapping) else None
+            if str(title or "").strip():
+                return str(title).strip()
+        return (self.brief.objective or self.brief.request_text).strip()
 
     def _input_diagnostics(self) -> tuple[str, ...]:
         return tuple(d.message for asset in self.assets for d in asset.diagnostics)

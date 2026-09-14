@@ -502,6 +502,20 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertIn("- [1] Known Paper.", report)
         self.assertNotIn("[@paper-1]", report)
 
+    def test_references_include_available_authors_and_year(self) -> None:
+        paper = Paper(
+            id="paper-1",
+            title="Known Paper",
+            authors=["Ada Lovelace"],
+            abstract="",
+            url="https://example.com/paper-1",
+            published="2024-01-01",
+        )
+        report = _append_references_section(
+            "Evidence [@paper-1].", [paper], {"paper-1": 1}
+        )
+        self.assertIn("- [1] Ada Lovelace (2024). Known Paper.", report)
+
     def test_citation_map_records_model_keys(self) -> None:
         paper = Paper(
             id="paper-1",

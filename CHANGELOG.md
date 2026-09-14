@@ -18,6 +18,11 @@ This file records user-visible project changes in reverse chronological order. P
   detailed per-seed records in artifacts; regression coverage distinguishes
   report-visible summary metrics from retained raw measurements.
 
+- Preserve the selected research contract when paired measurements are attached,
+  so the report retains the hypothesis alongside per-seed execution protocols.
+  Use the selected idea title for experiment reports when available, and include
+  available author and publication-year metadata in verified references.
+
 - Make report section output uncapped by default (`max_section_tokens = 0`),
   while retaining explicit CLI/TOML limits for expert runs. Add a generic
   reasoning-effort capability for compatible Chat providers and explain
