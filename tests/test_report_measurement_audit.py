@@ -2,7 +2,11 @@
 
 import unittest
 
-from simple_ar.report.projection import _metric_ledger, attach_implementation_evidence
+from simple_ar.report.projection import (
+    _metric_ledger,
+    _verified_experiment_evidence,
+    attach_implementation_evidence,
+)
 from simple_ar.core import ArtifactStore
 from pathlib import Path
 import tempfile
@@ -11,6 +15,54 @@ from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory
 
 
 class ReportMeasurementAuditTests(unittest.TestCase):
+    def test_paired_report_keeps_detailed_measurements_out_of_paper_body(self):
+        summary = {
+            "metric": "accuracy",
+            "n": 3,
+            "baseline_mean": 0.60,
+            "candidate_mean": 0.65,
+            "delta_mean": 0.05,
+            "delta_sample_std": 0.01,
+        }
+        metrics = [
+            MetricSource(
+                metric_id=f"metric:summary:{field}",
+                name=f"accuracy.{field}",
+                value=value,
+                artifact="outputs/experiment_set.json",
+                label="paired_summary:0",
+            )
+            for field, value in (
+                ("n", 3),
+                ("baseline_mean", 0.60),
+                ("candidate_mean", 0.65),
+                ("delta_mean", 0.05),
+                ("delta_sample_std", 0.01),
+            )
+        ]
+        context = ReportContext(
+            topic="Continual learning",
+            report_mode="experiment",
+            metric_sources=metrics,
+            results={
+                "paired_summary": [summary],
+                "collection_ref": {"path": "outputs/experiment_set.json"},
+            },
+        )
+        body = _verified_experiment_evidence(context)
+        self.assertIn("Aggregate Paired Metrics", body)
+        self.assertIn("0.65", body)
+        self.assertNotIn("accuracy_after_task_", body)
+        self.assertLess(len(body.splitlines()), 20)
+        audit = build_report_audit(
+            report=body,
+            report_body=body,
+            context=context,
+            memory=ReportMemory(),
+        )
+        self.assertEqual(audit.metric_audit.status, "passed")
+        self.assertEqual(audit.metric_audit.unmatched_metrics, [])
+
     def test_numeric_prose_is_not_a_measurement_or_a_proof_of_support(self):
         from simple_ar.report.schema import ReportAudit
         metrics = [MetricSource(metric_id="accuracy", name="accuracy", value=0.8, artifact="candidate.json",

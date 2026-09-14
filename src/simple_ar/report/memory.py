@@ -189,13 +189,14 @@ def _fallback_headings(report_mode: str) -> list[str]:
     if report_mode == "experiment":
         return [
             "Abstract",
-            "Problem And Motivation",
+            "Introduction",
             "Related Work",
-            "Method / Change Summary",
+            "Method",
             "Experimental Setup",
             "Results",
             "Discussion",
             "Limitations",
+            "Conclusion",
         ]
     return [
         "Abstract",

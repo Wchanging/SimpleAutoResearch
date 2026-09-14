@@ -214,10 +214,11 @@ def _metric_audit(report_body: str, context: ReportContext) -> MetricAudit:
     if not context.metric_sources:
         errors = _measurement_table_errors(report_body, context)
         return MetricAudit(status="failed" if errors else "passed", warnings=errors)
+    metrics = _report_metric_sources(context)
     lower = report_body.lower()
     matched: list[str] = []
     unmatched: list[str] = []
-    for metric in context.metric_sources:
+    for metric in metrics:
         if _metric_is_visible(report_body, lower, metric):
             matched.append(metric.metric_id)
         else:
@@ -330,12 +331,35 @@ def _metric_is_visible(report_body: str, lower_report: str, metric: Any) -> bool
     )
 
 
+def _report_metric_sources(context: ReportContext) -> list[Any]:
+    """Audit compact paired summaries while retaining raw metrics in artifacts."""
+    summaries = context.results.get("paired_summary") if isinstance(context.results, Mapping) else None
+    if not isinstance(summaries, list) or not summaries:
+        return context.metric_sources
+    aggregate_names = {
+        str(row.get("metric") or "").strip()
+        for row in summaries
+        if isinstance(row, Mapping)
+        and str(row.get("metric") or "").strip()
+        and "_after_task_" not in str(row.get("metric") or "")
+    }
+    selected = [
+        metric for metric in context.metric_sources
+        if metric.label.startswith("paired_summary:")
+        and metric.name.split(".", 1)[0] in aggregate_names
+    ]
+    return selected or context.metric_sources
+
+
 def _metric_name_variants(name: str) -> set[str]:
     raw = name.lower().strip()
     normalized = re.sub(r"[_-]+", " ", raw).strip()
     if not normalized:
         return set()
     variants = {normalized, raw}
+    if "." in raw:
+        base = raw.split(".", 1)[0].strip()
+        variants.update({base, re.sub(r"[_-]+", " ", base).strip()})
     words = normalized.split()
     if words and words[-1] in {
         "s",

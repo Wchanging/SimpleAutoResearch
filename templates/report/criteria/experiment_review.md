@@ -14,6 +14,9 @@ metrics, source artifacts, and citations.
 - Code-task claims must describe recorded patch and validation evidence only.
 - Literature citations should support motivation or related work, not local
   benchmark outcomes unless the paper actually reports that outcome.
+- The report should contain a recognizable Abstract, Introduction, Method,
+  Experimental Setup, Results, Discussion, Limitations, and Conclusion; the
+  conclusion must not introduce new results.
 - Limitations should include runtime, data, hardware, and search/evidence
   boundaries when available.
 

@@ -8,24 +8,24 @@ implementation and metric evidence without overclaiming.
 
 ## Writing Workflow
 
-Draft order: Method / Change Summary -> Experimental Setup -> Results -> Discussion -> Related Work -> Limitations -> Problem And Motivation -> Abstract / Executive Summary
+Draft order: Method -> Experimental Setup -> Results -> Discussion -> Related Work -> Introduction -> Limitations -> Abstract -> Conclusion
 
-## Abstract / Executive Summary
+## Abstract
 
 Summarize the problem, the controlled change or experiment, the main metric
 outcome, and the strongest limitation.
 
-## Problem And Motivation
+## Introduction
 
-Explain the practical or research problem using cited literature and the user
-goal.
+Explain the practical or research problem, its motivation, and the question
+addressed by this study using cited literature and the user goal.
 
 ## Related Work
 
 Describe directly relevant work. Do not cite papers for claims they do not
 support.
 
-## Method / Change Summary
+## Method
 
 Describe the implementation, template, or code-task change using recorded
 artifacts. Do not invent architecture or training details.
@@ -48,6 +48,12 @@ small local benchmarks.
 ## Limitations
 
 Disclose scope, runtime, hardware, data, search, and evidence limitations.
+
+## Conclusion
+
+Summarize the evidence-backed answer to the research question, state whether
+the result is conclusive, and identify the next validation that would be most
+informative. Do not introduce new results.
 
 ## References
 

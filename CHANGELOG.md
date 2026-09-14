@@ -8,6 +8,11 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Make experiment reports paper-shaped with explicit Abstract, Introduction,
+  Method, Results, Limitations, and Conclusion sections. Keep detailed
+  per-task measurements in persisted artifacts while rendering a compact
+  aggregate/seed summary in the paper body.
+
 - Preserve an explicitly selected research hypothesis for bounded validation while retaining uncertain-science review status; stop CodeTask preparation before experiments when no selected contract exists.
 
 - Pass explicit full-text/PDF options from research TOML to the existing ingestion pipeline; the advanced template enables them.

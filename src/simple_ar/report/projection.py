@@ -459,7 +459,13 @@ def _append_verified_experiment_evidence(
 
 
 def _verified_experiment_evidence(context: ReportContext) -> str:
-    """Render persisted metrics and comparisons without asking the Writer."""
+    """Render a compact measured summary without asking the Writer.
+
+    Per-task measurements remain in the immutable experiment artifacts.  They
+    are useful for audit and follow-up analysis, but expanding every value into
+    the paper makes the paper unreadable.  Paired sessions therefore expose
+    aggregate metrics and a small seed-level primary-metric table here.
+    """
 
     if not context.metric_sources:
         return ""
@@ -468,6 +474,24 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
         "and are included to keep the quantitative record complete."
     ]
     comparisons = context.results.get("comparisons") if isinstance(context.results, Mapping) else None
+    summaries = context.results.get("paired_summary") if isinstance(context.results, Mapping) else None
+    if isinstance(summaries, list) and summaries:
+        table = _paired_summary_markdown(summaries)
+        if table:
+            lines.extend(["", "### Aggregate Paired Metrics", "", table])
+        seed_table = _paired_primary_metric_markdown(comparisons)
+        if seed_table:
+            lines.extend(["", "### Seed-Level Primary Metric", "", seed_table])
+        collection_ref = context.results.get("collection_ref")
+        if isinstance(collection_ref, Mapping) and collection_ref.get("path"):
+            lines.extend([
+                "",
+                "Detailed per-task and raw per-seed measurements are preserved "
+                f"in the persisted artifact `{collection_ref['path']}` and the "
+                "individual experiment result artifacts; this paper shows the "
+                "compact aggregate view.",
+            ])
+        return "\n".join(lines)
     if isinstance(comparisons, list):
         for comparison in comparisons:
             if not isinstance(comparison, Mapping):
@@ -480,6 +504,78 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
     if ledger:
         lines.extend(["", "### Metric Provenance", "", ledger])
     return "\n".join(lines)
+
+
+def _paired_summary_markdown(summaries: list[Mapping[str, Any]]) -> str:
+    """Render aggregate paired summaries, excluding task-by-task diagnostics."""
+    rows = [
+        row
+        for row in summaries
+        if isinstance(row, Mapping)
+        and str(row.get("metric") or "").strip()
+        and "_after_task_" not in str(row.get("metric") or "")
+    ]
+    if not rows:
+        return ""
+    table = [
+        "| Metric | Seeds | Baseline mean | Candidate mean | Mean delta | Delta std |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        table.append(
+            "| "
+            + " | ".join(
+                (
+                    f"`{_markdown_cell(str(row['metric']))}`",
+                    _format_report_metric(row.get("n")),
+                    _format_report_metric(row.get("baseline_mean")),
+                    _format_report_metric(row.get("candidate_mean")),
+                    _format_report_metric(row.get("delta_mean")),
+                    _format_report_metric(row.get("delta_sample_std")),
+                )
+            )
+            + " |"
+        )
+    return "\n".join(table)
+
+
+def _paired_primary_metric_markdown(comparisons: object) -> str:
+    """Render one measured primary-metric row per seed when available."""
+    if not isinstance(comparisons, list):
+        return ""
+    table = [
+        "| Seed | Baseline | Candidate | Delta |",
+        "| ---: | ---: | ---: | ---: |",
+    ]
+    for comparison in comparisons:
+        if not isinstance(comparison, Mapping):
+            continue
+        metrics = comparison.get("metrics")
+        if not isinstance(metrics, list):
+            continue
+        metric = next(
+            (
+                row
+                for row in metrics
+                if isinstance(row, Mapping) and str(row.get("name")) == "accuracy"
+            ),
+            None,
+        )
+        if not isinstance(metric, Mapping):
+            continue
+        table.append(
+            "| "
+            + " | ".join(
+                (
+                    _format_report_metric(comparison.get("seed")),
+                    _format_report_metric(metric.get("baseline")),
+                    _format_report_metric(metric.get("candidate")),
+                    _format_report_metric(metric.get("delta")),
+                )
+            )
+            + " |"
+        )
+    return "\n".join(table) if len(table) > 2 else ""
 
 
 def _comparison_markdown(comparison: Mapping[str, Any]) -> str:
