@@ -8,6 +8,8 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Preserve an explicitly selected research hypothesis for bounded validation while retaining uncertain-science review status; stop CodeTask preparation before experiments when no selected contract exists.
+
 - Pass explicit full-text/PDF options from research TOML to the existing ingestion pipeline; the advanced template enables them.
 
 - Research TOML exposes existing paired experiment commands and protected protocols through the canonical application; completed-session resume does not rerun the matrix.

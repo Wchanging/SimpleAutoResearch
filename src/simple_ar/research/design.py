@@ -141,7 +141,8 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
     """
 
     synthesis = request.normalized_synthesis()
-    if synthesis.status != "ready":
+    selected_for_validation = synthesis.status == "needs_review" and request.idea_id is not None
+    if synthesis.status != "ready" and not selected_for_validation:
         return ResearchDesignResult(
             status="needs_review",
             contract=None,
@@ -201,6 +202,10 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
         contract,
         execution_schema=request.execution_schema,
     )
+    if selected_for_validation:
+        diagnostics = [*synthesis.diagnostics,
+                       "Selected for bounded validation; source synthesis still needs review, not scientific approval.",
+                       *diagnostics]
     return ResearchDesignResult(
         status="ready" if not diagnostics else "needs_review",
         contract=contract,

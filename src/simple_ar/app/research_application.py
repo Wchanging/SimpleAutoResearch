@@ -777,6 +777,10 @@ class ResearchApplication:
             )
         if action == "prepare_execution":
             config = dict(self._effective_config()["execution"])
+            if "code_task" in config and self._state_payload("design").get("contract") is None:
+                self.controller.pause("CodeTask preparation requires a selected research design contract; review the candidate assessment before running its experiment matrix.")
+                self._persist_application_views()
+                return False
             try:
                 run = None
                 if "dataset" not in config:

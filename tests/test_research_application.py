@@ -20,6 +20,27 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_missing_selected_design_stops_code_preparation_before_processes(self):
+        from simple_ar.research.design import ResearchDesignResult
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Replay\nA small memory retains prior examples.", encoding="utf-8")
+            app = create_session(ResearchBrief(request_text="Study replay", requested_outputs=("experiments",),
+                asset_requests=({"locator": str(paper), "kind": "file", "role": "paper"},)), root=root / "session",
+                services=ResearchApplicationServices(max_attempts=20, config={"execution": {
+                    "command": [sys.executable, "-c", "print('accuracy: 1')"], "cwd": str(root), "timeout_sec": 5,
+                    "code_task": {"code_root": str(root), "approval_note": "Only isolated edits."},
+                }}, budget_limits={"process_invocations": 2, "process_wall_seconds": 10}))
+            with patch("simple_ar.research.design.build_research_design", return_value=ResearchDesignResult(
+                status="needs_review", contract=None, diagnostics=("No candidate selected.",),
+            )):
+                view = app.advance(max_actions=20)
+            self.assertEqual(view.status, "paused")
+            self.assertIn("selected research design contract", view.status_reason)
+            self.assertNotIn("preparation", view.state_refs)
+            self.assertFalse(any("process_invocations" in e.reserved for e in app.budget_ledger.entries))
+
     def test_terminal_attempt_reservation_becomes_unknown_without_refunding_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = create_session(ResearchBrief(request_text="Study agents"), root=tmp,

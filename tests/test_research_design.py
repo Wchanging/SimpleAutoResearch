@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from simple_ar.core import ArtifactStore, AttemptManifest
@@ -190,6 +191,19 @@ class ResearchDesignTests(unittest.TestCase):
         self.assertEqual(result.status, "needs_review")
         self.assertIsNone(result.contract)
         self.assertIn("needs_review", result.diagnostics[0])
+
+    def test_explicit_candidate_keeps_contract_without_approving_uncertain_science(self):
+        synthesis = replace(self._synthesis(), status="needs_review", diagnostics=("Novelty is uncertain.",))
+        result = build_research_design(ResearchDesignRequest(
+            synthesis=synthesis, idea_id="idea-002", selection_rationale="Compare the bounded hypothesis.",
+        ))
+        self.assertEqual(result.status, "needs_review")
+        self.assertEqual(result.source_synthesis_status, "needs_review")
+        self.assertEqual(result.selected_idea.idea_id, "idea-002")
+        self.assertEqual(result.contract.contract_id, "contract-1/idea-002")
+        self.assertIn("Novelty is uncertain.", result.diagnostics)
+        missing = build_research_design(ResearchDesignRequest(synthesis=synthesis))
+        self.assertIsNone(missing.contract)
 
     def test_missing_contract_is_blocked(self) -> None:
         result = build_research_design(
