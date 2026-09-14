@@ -19,6 +19,8 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 - `[budget]`：`total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds`。
   总 token 与单次输出上限不是同一个限制。配置预算用于新会话；恢复继续使用已有账本。
 - `[research]`：`providers`、`queries`、`max_results`、`max_chunks`、`idea_limit`、`cache_dir`。
+  可用布尔项 `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf` 启用已有全文摄取；
+  高级模板显式开启。下载或解析失败仍须保留摘要级/不可用状态，不能称为全文阅读。
 - `[assets].papers`：本地文献路径列表。
 - `[execution]`：`command`（字符串数组）、`cwd`、`timeout_sec`，或 `code_task_config`；
   可附 `primary_metric`、`metrics`、`metric_directions`（如 `["accuracy=higher"]）。

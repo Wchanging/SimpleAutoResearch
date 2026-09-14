@@ -12,7 +12,8 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 
 Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens),
 `budget` (total_tokens, llm_requests, process_invocations, process_wall_seconds),
-`research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir),
+`research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir,
+use_fulltext, allow_pdf_download, keep_raw_pdf),
 `assets` (papers), `execution` (command, cwd, timeout_sec, code_task_config,
 primary_metric, metrics, metric_directions, pairs, protocol), and `report` (template, reviewer, max_review_iterations).
 Use model name `env` for SIMPLE_AR_MODEL; credentials remain in the environment.
@@ -22,6 +23,8 @@ with --with-report/--no-report. Missing execution settings preserve the experime
 and pause at that boundary; automatic repository preparation is not yet implemented.
 Budget limits initialize new sessions; resuming uses the persisted ledger, not a refreshed allowance.
 Unknown fields are rejected; stage-specific research models are not supported yet.
+The three full-text options are explicit booleans. The advanced template enables
+them; retrieval failures must still be reported as abstract-only or unavailable.
 
 Advanced experiments may use `[[execution.pairs]]` rows with a unique integer
 `seed`, `baseline_command` and `candidate_command` (literal argv arrays). Do not

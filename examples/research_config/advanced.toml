@@ -19,6 +19,9 @@ providers = ["openalex", "semantic_scholar", "arxiv"]
 max_results = 30
 max_chunks = 300
 idea_limit = 3
+use_fulltext = true
+allow_pdf_download = true
+keep_raw_pdf = true
 
 [assets]
 papers = [] # Paths relative to this configuration file.

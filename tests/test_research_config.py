@@ -93,7 +93,7 @@ class ResearchConfigTests(unittest.TestCase):
             (root / "paper.md").write_text("# Replay learning\nA small memory stores previous examples for classification.", encoding="utf-8")
             path = root / "research.toml"
             path.write_text('[task]\ngoal="Replay learning"\noutputs=["summary"]\noutput_root="out"\n'
-                            '[model]\nname=""\n[research]\nproviders=["local_files"]\n[assets]\npapers=["paper.md"]\n'
+                            '[model]\nname=""\n[research]\nproviders=["local_files"]\nuse_fulltext=false\nallow_pdf_download=false\nkeep_raw_pdf=false\n[assets]\npapers=["paper.md"]\n'
                             '[budget]\ntotal_tokens=123456\nprocess_invocations=0\nprocess_wall_seconds=0\n', encoding="utf-8")
             with redirect_stdout(io.StringIO()):
                 main(["research-session", "--config", str(path)])
@@ -101,6 +101,9 @@ class ResearchConfigTests(unittest.TestCase):
             ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
             self.assertEqual(ledger["limits"]["total_tokens"], 123456)
             self.assertEqual(ledger["entries"], [])
+            runtime = json.loads((ledger_path.parent / "inputs/runtime_config.json").read_text())
+            for name in ("research_use_fulltext", "research_allow_pdf_download", "research_keep_raw_pdf"):
+                self.assertIs(runtime["config"][name], False)
             self.assertTrue((ledger_path.parent / "outputs/research_summary.md").is_file())
             path.write_text(path.read_text(encoding="utf-8").replace('outputs=["summary"]', 'outputs=["experiments"]'), encoding="utf-8")
             output = io.StringIO()
@@ -133,6 +136,7 @@ class ResearchConfigTests(unittest.TestCase):
             for source in ('[budget]\ntotal_token=100', '[budget]\ntotal_tokens=true',
                            '[task]\noutputs=["anything"]', '[model]\napi_key="secret"',
                            '[execution]\npairs=["not a pair"]', '[execution]\nprotocol="not a table"',
+                           '[research]\nuse_fulltext="true"',
                            '[[execution.pairs]]\nseed=0\nbaseline_command=[]\ncandidate_command=["python"]'):
                 with self.subTest(source=source):
                     path.write_text(source, encoding="utf-8")
@@ -150,3 +154,7 @@ class ResearchConfigTests(unittest.TestCase):
             args = build_parser(research_defaults=research_defaults(argv)).parse_args(argv)
             self.assertTrue(args.topic)
             self.assertEqual(args.max_output_tokens, 8192)
+            if name == "advanced":
+                self.assertTrue(args.research_use_fulltext)
+                self.assertTrue(args.research_allow_pdf_download)
+                self.assertTrue(args.research_keep_raw_pdf)

@@ -426,6 +426,10 @@ def _print_research_session(args: argparse.Namespace) -> None:
         config["research_queries"] = list(args.queries)
     if args.providers:
         config["research_sources"] = list(args.providers)
+    for name in ("research_use_fulltext", "research_allow_pdf_download", "research_keep_raw_pdf"):
+        value = getattr(args, name, None)
+        if value is not None:
+            config[name] = value
     assets = tuple(
         {
             "locator": str(Path(path)),

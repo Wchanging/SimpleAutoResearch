@@ -8,6 +8,8 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Pass explicit full-text/PDF options from research TOML to the existing ingestion pipeline; the advanced template enables them.
+
 - Research TOML exposes existing paired experiment commands and protected protocols through the canonical application; completed-session resume does not rerun the matrix.
 - Research synthesis distinguishes the user's goal from a verified prepared execution environment.
 - Add a Mammoth/CIFAR-100 diagnostic adapter reusing upstream training, with task-level measurement provenance. Full research-to-paper acceptance remains pending.
