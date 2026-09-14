@@ -14,7 +14,7 @@ def research_handoff_text(
         "## Research handoff",
         "",
         "The following context comes from the evidence-to-design handoff. The",
-        "original task, configured benchmark, and project interfaces remain the",
+        "selected design, configured benchmark, and project interfaces remain the",
         "acceptance authority.",
         "",
         "### Hypothesis",

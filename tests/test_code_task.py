@@ -221,6 +221,10 @@ class CodeTaskTests(unittest.TestCase):
             design = app.controller.store.read_json(app.controller.manifest.state_refs["design"])
             self.assertIn(design["contract"]["hypothesis"], sent)
             frozen = read_json(code_task_paths(code_run).task_dir / "research_handoff.json")
+            implementation_task = (code_task_paths(code_run).task_dir / "task.md").read_text(encoding="utf-8")
+            self.assertIn("Implementation-only CodeTask", implementation_task)
+            self.assertIn("outer ResearchApplication owns", implementation_task)
+            self.assertNotIn("complete academic Markdown paper", implementation_task)
             if paired:
                 self.assertEqual(len(frozen["consumed"]["paired_baselines"]), 2)
                 self.assertEqual([row["metrics"]["accuracy"] for row in frozen["consumed"]["paired_baselines"]], [0.5, 0.5])

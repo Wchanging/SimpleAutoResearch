@@ -18,6 +18,10 @@ from simple_ar.code_task.editing.scope import protected_patterns_from_manifest
 from simple_ar.experiment.execution.measurement import snapshot_protocol_assets, reconcile_protocol_assets
 
 
+IMPLEMENTATION_CONTEXT_MAX_FILES = 6
+IMPLEMENTATION_CONTEXT_MAX_SOURCE_CHARS = 12_000
+
+
 @dataclass(frozen=True)
 class ImplementationRequest:
     run_dir: Path
@@ -61,6 +65,8 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
             llm_client=request.llm_client, use_llm=True, allow_planning_fallback=False,
             budget_profile=request.budget_profile,
             allow_large_edits=request.allow_large_edits,
+            max_files=IMPLEMENTATION_CONTEXT_MAX_FILES,
+            max_source_chars_per_file=IMPLEMENTATION_CONTEXT_MAX_SOURCE_CHARS,
         )
         stop_reason, next_action = outcome.stop_reason, outcome.next_action
         steps = [asdict(step) for step in outcome.steps]
@@ -155,8 +161,23 @@ def _prepare_research_task(
             raise ValueError("CodeTask already has a plan without this research handoff; use a fresh initialized run.")
         original = task_path.read_text(encoding="utf-8")
         write_json(snapshot, {"consumed": consumed, "original_task": original})
-    task = original.rstrip() + "\n\n" + research_handoff_text(
-        design.contract, execution_context="Use the configured protocol in the execution-boundary JSON below." if request.protocol else "",
+    task = (
+        "# Implementation-only CodeTask\n\n"
+        "This action only proposes and validates the selected code change in the "
+        "isolated workspace. The outer ResearchApplication owns literature review, "
+        "experiment execution, result analysis, and academic report writing. Do "
+        "not create a paper, report, citations, or documentation as part of this "
+        "CodeTask action.\n\n"
+        "Use the selected research design and the configured execution boundary "
+        "below as the implementation requirements. Keep the change within the "
+        "existing CodeTask edit scope and preserve all protected assets.\n\n"
+        + research_handoff_text(
+            design.contract,
+            execution_context=(
+                "Use the configured protocol in the execution-boundary JSON below."
+                if request.protocol else ""
+            ),
+        )
     )
     task += "\n## Execution boundary and observed baseline\n\n"
     task += "The configured protocol and existing edit scope remain authoritative.\n"
