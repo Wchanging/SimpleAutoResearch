@@ -262,8 +262,8 @@ def hypothesis_placeholder_claims(context: AnalysisContext, metric_summary: dict
                 claim_id=str(row.get("id") or f"hypothesis-{index}"),
                 claim=statement,
                 verdict="not_evaluated",
-                evidence=[],
-                metric_refs=[],
+                evidence=normalize_evidence(row.get("evidence") or row.get("evidence_refs")),
+                metric_refs=normalize_metric_refs(row.get("metric_refs") or row.get("metrics")),
                 limitations=["No grounded verdict was found in the run artifacts."],
                 confidence="low",
             )

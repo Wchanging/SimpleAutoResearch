@@ -8,6 +8,16 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Feed the selected research design, or the explicit prepared execution
+  protocol when no design artifact is available, into result analysis. Preserve
+  the hypothesis, metric references, evidence references, and metric directions
+  instead of reducing the handoff to the research question alone.
+
+- Pass the existing experiment plan to both Report Writer and Reviewer. Paired
+  reports now expose compact measurement provenance labels while retaining
+  detailed per-seed records in artifacts; regression coverage distinguishes
+  report-visible summary metrics from retained raw measurements.
+
 - Make report section output uncapped by default (`max_section_tokens = 0`),
   while retaining explicit CLI/TOML limits for expert runs. Add a generic
   reasoning-effort capability for compatible Chat providers and explain

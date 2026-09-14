@@ -279,6 +279,15 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(len(app.budget_ledger.entries), 4)
             analysis = app.controller.store.read_json(final.state_refs["analysis"])
             self.assertEqual(analysis["execution_ref"], final.state_refs["matrix_results"].to_dict())
+            self.assertTrue(analysis["analysis"]["claims"])
+            self.assertEqual(
+                analysis["analysis"]["claims"][0]["claim"],
+                "Compare measured classifier outcomes.",
+            )
+            self.assertEqual(
+                analysis["analysis"]["claims"][0]["verdict"],
+                "not_evaluated",
+            )
             paired = app.controller.store.read_json(
                 app.controller.store.ref(Path(final.state_refs["analysis"].path).parent / "paired_analysis.json")
             )
@@ -313,7 +322,14 @@ class ResearchApplicationTests(unittest.TestCase):
             for metric in context.metric_sources:
                 self.assertIn(metric.label, report)
             audit = app.controller.store.read_json(final.state_refs["report_audit"])
-            self.assertEqual(set(audit["metric_audit"]["matched_metrics"]), {m.metric_id for m in context.metric_sources})
+            self.assertEqual(
+                set(audit["metric_audit"]["matched_metrics"]),
+                {
+                    m.metric_id
+                    for m in context.metric_sources
+                    if m.source_kind == "derived_summary"
+                },
+            )
             report_dir = Path(final.state_refs["report"].path).parent
             report_text = app.controller.store.read_text(final.state_refs["report"])
             self.assertIn("Measured comparisons", report_text, msg=report_text)

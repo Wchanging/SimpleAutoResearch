@@ -482,6 +482,14 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
         seed_table = _paired_primary_metric_markdown(comparisons)
         if seed_table:
             lines.extend(["", "### Seed-Level Primary Metric", "", seed_table])
+        source_labels = _metric_source_labels(context.metric_sources)
+        if source_labels:
+            lines.extend(
+                [
+                    "",
+                    "Measurement provenance labels: " + source_labels + ".",
+                ]
+            )
         collection_ref = context.results.get("collection_ref")
         if isinstance(collection_ref, Mapping) and collection_ref.get("path"):
             lines.extend([
@@ -629,6 +637,14 @@ def _metric_ledger(metrics: list[MetricSource]) -> str:
             + " |"
         )
     return "\n".join(table) if len(table) > 2 else ""
+
+
+def _metric_source_labels(metrics: list[MetricSource]) -> str:
+    """Keep paired evidence labels visible without expanding every measurement."""
+    labels = dict.fromkeys(
+        metric.label.strip() for metric in metrics if metric.label.strip()
+    )
+    return ", ".join(f"`{_markdown_cell(label)}`" for label in labels)
 
 
 def _format_report_metric(value: object) -> str:

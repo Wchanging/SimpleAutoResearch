@@ -49,6 +49,7 @@ from simple_ar.research.sources import (
 )
 from simple_ar.research.synthesis import SynthesisRequest, SynthesisResult, allowed_evidence_refs
 from simple_ar.research.workflow_contracts import Diagnostic, ResearchAsset, ResearchBrief
+from simple_ar.result_analysis.metrics import normalize_direction
 
 
 class ResearchApplicationError(RuntimeError):
@@ -841,7 +842,7 @@ class ResearchApplication:
                              for role in ("baseline", "candidate") if row[role] is not None)
             return self._execute("analysis", "analysis",
                 None, (collection_ref, *children), allow_partial=True, result_ref=collection_ref,
-                analysis_context={"research_question": self.brief.objective or self.brief.request_text}, use_llm=False)
+                analysis_context=self._analysis_context(), use_llm=False)
         if action in {"baseline", "experiment"} or action.startswith(("retest:", "matrix_baseline_", "matrix_candidate_")):
             try:
                 matrix = action.startswith("matrix_")
@@ -881,8 +882,7 @@ class ResearchApplication:
                 None, (result_ref, baseline_ref) if baseline_ref else (result_ref,),
                 allow_partial=True, baseline_ref=baseline_ref,
                 result_ref=result_ref,
-                analysis_context={"research_question": self.brief.objective or self.brief.request_text},
-                use_llm=False,
+                analysis_context=self._analysis_context(), use_llm=False,
             )
         if action == "report_write":
             from simple_ar.report.writing import ReportWritingRequest
@@ -1454,6 +1454,98 @@ class ResearchApplication:
         if context:
             lines += ["", "## Prepared Experiment Boundary (hard)", "", context[:8000]]
         return "\n".join(lines) + "\n"
+
+    def _analysis_context(
+        self, *, result_schema: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Project the selected design into the result-analysis contract.
+
+        Analysis owns verdict computation, while the application owns the
+        handoff from the research design to an observed execution. Keeping
+        this projection here avoids a second persisted hypothesis store and
+        makes the same context work for single and paired measurements.
+        """
+
+        objective = (self.brief.objective or self.brief.request_text).strip()
+        context: dict[str, Any] = {
+            "task_id": self.controller.manifest.session_id,
+            "title": objective,
+            "research_question": objective,
+        }
+        schema = dict(result_schema or {})
+        execution = self._effective_config().get("execution")
+        if not schema and isinstance(execution, Mapping):
+            configured = execution.get("result_schema")
+            if isinstance(configured, Mapping):
+                schema = dict(configured)
+
+        contract: dict[str, Any] = {}
+        design_ref = self.controller.manifest.state_refs.get("design")
+        design: Mapping[str, Any] = {}
+        if design_ref is not None:
+            payload = self.controller.store.read_json(design_ref)
+            if isinstance(payload, Mapping):
+                design = payload
+                candidate = payload.get("contract")
+                if isinstance(candidate, Mapping):
+                    contract = dict(candidate)
+        if not contract and isinstance(execution, Mapping):
+            configured_contract = execution.get("protocol")
+            if isinstance(configured_contract, Mapping):
+                contract = dict(configured_contract)
+
+        if contract:
+            selected = design.get("selected_idea")
+            selected_id = (
+                selected.get("idea_id")
+                if isinstance(selected, Mapping) and selected.get("idea_id")
+                else contract.get("contract_id") or "research-hypothesis"
+            )
+            hypothesis = str(contract.get("hypothesis") or "").strip()
+            if hypothesis:
+                context["hypotheses"] = [{
+                    "id": str(selected_id),
+                    "statement": hypothesis,
+                    "metric_refs": list(contract.get("metrics") or []),
+                    "evidence": [
+                        {"source": str(ref)}
+                        for ref in contract.get("motivation_refs", [])
+                        if str(ref).strip()
+                    ],
+                    "expected_outcome": str(contract.get("expected_outcome") or ""),
+                }]
+            context["task_contract"] = contract
+
+        names: list[str] = []
+        primary = str(schema.get("primary_metric") or "").strip()
+        if primary:
+            names.append(primary)
+        required = schema.get("required_metrics")
+        if isinstance(required, (list, tuple)):
+            names.extend(str(name).strip() for name in required if str(name).strip())
+        for row in contract.get("metric_specs", []):
+            if isinstance(row, Mapping) and str(row.get("name") or "").strip():
+                names.append(str(row["name"]).strip())
+        names.extend(str(name).strip() for name in contract.get("metrics", []) if str(name).strip())
+        names = list(dict.fromkeys(names))
+        raw_directions = schema.get("metric_directions")
+        raw_directions = raw_directions if isinstance(raw_directions, Mapping) else {}
+        if names:
+            context["expected_metrics"] = [
+                {
+                    "name": name,
+                    "direction": normalize_direction(raw_directions.get(name)),
+                }
+                for name in names
+            ]
+        directions = {
+            str(name): normalize_direction(value)
+            for name, value in raw_directions.items()
+            if str(name).strip()
+        }
+        if directions:
+            context["metric_directions"] = directions
+        return context
 
     def _input_diagnostics(self) -> tuple[str, ...]:
         return tuple(d.message for asset in self.assets for d in asset.diagnostics)

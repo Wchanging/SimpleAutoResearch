@@ -93,7 +93,12 @@ class ReportMeasurementAuditTests(unittest.TestCase):
                 "status": "validated", "asset_integrity": {"status": "observed_unchanged"},
                 "artifact_refs": {"patch": {"path": "code_task/patch.diff"}},
             })
-            context = ReportContext(topic="Classifier", report_mode="experiment", results={"metrics": {"accuracy": 0.8}})
+            context = ReportContext(
+                topic="Classifier",
+                report_mode="experiment",
+                experiment_plan={"contract_id": "fixture-v1", "metric": "accuracy"},
+                results={"metrics": {"accuracy": 0.8}},
+            )
             attach_implementation_evidence(context, store, ref)
             result = ReportToolGateway(context).call(ReportToolCall(tool_name="get_code_task_result", arguments={}))
             implementation = result.content["results"]["implementation"]
@@ -117,12 +122,14 @@ class ReportMeasurementAuditTests(unittest.TestCase):
                     payload = json.loads(user[user.index("{"):])
                     if "reviewer" in label:
                         received["reviewer"] = payload["verified_execution_results"]["implementation"]
+                        received["reviewer_plan"] = payload["experiment_plan"]
                         return {"section_id": "method", "verdict": "pass", "findings": []}
                     if self.fail_first_draft and not label.endswith("-retry"):
                         from simple_ar.integrations.llm import LLMResponseError
                         raise LLMResponseError("invalid section JSON")
                     evidence_context = payload if label.endswith("-retry") else payload["global_research_context"]
                     received["writer"] = evidence_context["verified_execution_results"]["implementation"]
+                    received["writer_plan"] = evidence_context["experiment_plan"]
                     return {"section_id": "method", "heading": "Method", "draft_markdown": "The recorded patch enables phrase features; the remainder is truncated."}
 
             config = ReportRuntimeConfig(max_review_iterations=0)
@@ -130,8 +137,14 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             run_report_agent(client=Client(), context=context, memory=memory, config=config,
                              template=load_report_template_bundle(report_mode="experiment", config=config),
                              gateway=ReportToolGateway(context))
-            self.assertEqual(set(received), {"writer", "reviewer"})
-            for view in received.values():
+            self.assertEqual(
+                set(received),
+                {"writer", "reviewer", "writer_plan", "reviewer_plan"},
+            )
+            self.assertEqual(received["writer_plan"], context.experiment_plan)
+            self.assertEqual(received["reviewer_plan"], context.experiment_plan)
+            for role in ("writer", "reviewer"):
+                view = received[role]
                 self.assertEqual(view["evidence"]["patch"], evidence)
                 self.assertEqual(view["asset_integrity"], implementation["asset_integrity"])
             received.clear()
@@ -140,9 +153,14 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             run_report_agent(client=retry_client, context=context, memory=memory, config=config,
                              template=load_report_template_bundle(report_mode="experiment", config=config),
                              gateway=ReportToolGateway(context))
-            self.assertEqual(set(received), {"writer", "reviewer"})
-            for view in received.values():
-                self.assertEqual(view["evidence"]["patch"], evidence)
+            self.assertEqual(
+                set(received),
+                {"writer", "reviewer", "writer_plan", "reviewer_plan"},
+            )
+            self.assertEqual(received["writer_plan"], context.experiment_plan)
+            self.assertEqual(received["reviewer_plan"], context.experiment_plan)
+            for role in ("writer", "reviewer"):
+                self.assertEqual(received[role]["evidence"]["patch"], evidence)
 
     def test_swapped_values_or_conditions_fail_even_when_all_numbers_are_present(self):
         metrics = [MetricSource(metric_id=f"metric:{label}:accuracy", name="accuracy", value=value,

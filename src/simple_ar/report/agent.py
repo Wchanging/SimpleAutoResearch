@@ -1118,6 +1118,7 @@ def _writer_prompt(
         "global_research_context": {
             "evidence_summary": context.evidence_summary[:3000],
             "execution_context": context.execution_context[:8000],
+            "experiment_plan": context.experiment_plan,
             "verified_execution_results": _compact_execution_results(context.results),
             "synthesis": context.synthesis_markdown[:3000],
             "hypothesis": context.hypothesis_markdown[:1500],
@@ -1205,6 +1206,7 @@ def _writer_recovery_prompt(
         "topic": context.topic,
         "objective": memory.objective,
         "execution_context": context.execution_context[:8000],
+        "experiment_plan": context.experiment_plan,
         "verified_execution_results": _compact_execution_results(context.results),
         "metric_sources": _prompt_metrics(memory),
         "section": {
@@ -1291,6 +1293,7 @@ def _reviewer_prompt(
         "document_plan": _compact_document_plan(memory),
         "visual_requirements": section_visuals,
         "known_limitations": memory.limitations[:8],
+        "experiment_plan": context.experiment_plan,
         "allowed_sources": _handles_for_section(memory, section),
         "metric_sources": _prompt_metrics(memory),
         "verified_execution_results": _compact_execution_results(context.results),
