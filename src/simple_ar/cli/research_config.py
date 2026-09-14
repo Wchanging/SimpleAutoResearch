@@ -21,7 +21,8 @@ FIELDS = {
                   "primary_metric": ("primary_metric", str), "metrics": ("metric", list),
                   "metric_directions": ("metric_direction", list)},
     "report": {"template": ("report_template", str), "reviewer": ("report_reviewer", str),
-               "max_review_iterations": ("max_review_iterations", int)},
+               "max_review_iterations": ("max_review_iterations", int),
+               "figures": ("report_figures", dict)},
 }
 PATHS = {"output_root", "cache_dir", "cwd", "code_task_config", "local_document"}
 LIST_FLAGS = {"providers": "--provider", "queries": "--query", "local_document": "--local-document",

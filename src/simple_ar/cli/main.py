@@ -409,16 +409,19 @@ def _print_research_session(args: argparse.Namespace) -> None:
     experiment_requested = execution is not None or bool(outputs and "experiments" in outputs)
     if task_text.strip():
         request_text += "\n\n## Implementation task\n\n" + task_text.strip()
+    report_config: dict[str, object] = {
+        "mode": "experiment" if experiment_requested else "research_only",
+        "template": args.report_template if experiment_requested else (
+            "survey" if args.report_template == "experiment" else args.report_template
+        ),
+        "reviewer": args.report_reviewer,
+        "max_review_iterations": args.max_review_iterations,
+    }
+    if getattr(args, "report_figures", None):
+        report_config["figures"] = args.report_figures
     config: dict[str, object] = {
         "research_max_documents": args.max_results,
-        "report": {
-            "mode": "experiment" if experiment_requested else "research_only",
-            "template": args.report_template if experiment_requested else (
-                "survey" if args.report_template == "experiment" else args.report_template
-            ),
-            "reviewer": args.report_reviewer,
-            "max_review_iterations": args.max_review_iterations,
-        },
+        "report": report_config,
     }
     if execution is not None:
         config["execution"] = execution

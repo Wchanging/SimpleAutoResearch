@@ -13,6 +13,9 @@ This file records user-visible project changes in reverse chronological order. P
   per-task measurements in persisted artifacts while rendering a compact
   aggregate/seed summary in the paper body.
 
+- Forward the existing report figure options from nested research TOML instead
+  of rejecting `[report.figures]` at the CLI configuration boundary.
+
 - Preserve an explicitly selected research hypothesis for bounded validation while retaining uncertain-science review status; stop CodeTask preparation before experiments when no selected contract exists.
 
 - Pass explicit full-text/PDF options from research TOML to the existing ingestion pipeline; the advanced template enables them.

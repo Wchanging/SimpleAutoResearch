@@ -158,3 +158,14 @@ class ResearchConfigTests(unittest.TestCase):
                 self.assertTrue(args.research_use_fulltext)
                 self.assertTrue(args.research_allow_pdf_download)
                 self.assertTrue(args.research_keep_raw_pdf)
+
+    def test_report_figures_are_forwarded_as_existing_report_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text(
+                '[task]\ngoal="Measured report"\noutputs=["experiments", "report"]\n'
+                '[report]\n[report.figures]\nenabled=true\nmax_figures=2\n',
+                encoding="utf-8",
+            )
+            defaults = research_defaults(["research-session", "--config", str(path)])
+            self.assertEqual(defaults["report_figures"], {"enabled": True, "max_figures": 2})
