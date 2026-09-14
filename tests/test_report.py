@@ -241,6 +241,13 @@ class ReportSafetyTests(unittest.TestCase):
                                 "patched": 0.89,
                                 "delta": 0.12,
                                 "direction": "higher",
+                            },
+                            {
+                                "name": "accuracy_after_task_1_on_task_1",
+                                "baseline": 0.2,
+                                "patched": 0.3,
+                                "delta": 0.1,
+                                "direction": "higher",
                             }
                         ],
                         "stdout": "should not be copied",
@@ -253,6 +260,7 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(compact["baseline"]["metrics"]["accuracy"], 0.77)
         self.assertEqual(compact["comparisons"][0]["verdict"], "improved")
         self.assertEqual(compact["comparisons"][0]["metrics"][0]["delta"], 0.12)
+        self.assertEqual(len(compact["comparisons"][0]["metrics"]), 1)
         self.assertNotIn("stdout", compact["metrics"])
         self.assertNotIn("stdout", compact["comparisons"][0])
 

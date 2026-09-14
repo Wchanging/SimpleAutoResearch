@@ -1398,6 +1398,13 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
             key: implementation[key] for key in ("artifact", "status", "asset_integrity", "interpretation")
             if key in implementation
         }
+        integrity = _mapping(implementation.get("asset_integrity"))
+        if integrity is not None:
+            compact["implementation"]["asset_integrity"] = {
+                key: integrity[key]
+                for key in ("status", "changed_assets", "errors", "content_fingerprint")
+                if key in integrity
+            }
         evidence = _mapping(implementation.get("evidence"))
         if evidence is not None and "patch" in evidence:
             # The patch is already bounded at the artifact boundary. Keep its
@@ -1441,8 +1448,9 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
                             for key in ("name", "baseline", "patched", "candidate", "delta", "direction", "status")
                             if key in metric
                         }
-                        for metric in metric_rows[:16]
+                        for metric in metric_rows
                         if isinstance(metric, Mapping)
+                        and "_after_task_" not in str(metric.get("name") or "")
                     ]
                 else:
                     row["metrics"] = _metrics(metric_rows)
