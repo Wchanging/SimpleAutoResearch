@@ -67,6 +67,12 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
     session_parser.add_argument("--total-tokens", type=int, default=160000)
     session_parser.add_argument("--llm-requests", type=int, default=40)
     session_parser.add_argument("--max-output-tokens", type=int, default=None)
+    session_parser.add_argument(
+        "--max-section-tokens",
+        type=int,
+        default=None,
+        help="Report Writer/Reviewer output cap per section; use 0 to omit the cap.",
+    )
     session_parser.add_argument("--process-invocations", type=int, default=None)
     session_parser.add_argument("--process-wall-seconds", type=int, default=None)
     session_parser.add_argument(
@@ -290,6 +296,12 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
         type=int,
         default=1,
         help="Maximum Writer revision cycles per section.",
+    )
+    report_parser.add_argument(
+        "--max-section-tokens",
+        type=int,
+        default=None,
+        help="Report Writer/Reviewer output cap per section; use 0 to omit the cap.",
     )
 
 

@@ -22,6 +22,7 @@ FIELDS = {
                   "metric_directions": ("metric_direction", list)},
     "report": {"template": ("report_template", str), "reviewer": ("report_reviewer", str),
                "max_review_iterations": ("max_review_iterations", int),
+               "max_section_tokens": ("max_section_tokens", int),
                "figures": ("report_figures", dict)},
 }
 PATHS = {"output_root", "cache_dir", "cwd", "code_task_config", "local_document"}
@@ -60,7 +61,7 @@ def research_defaults(arguments: list[str]) -> dict:
             dest, expected = FIELDS[section][name]
             if type(value) is not expected or (expected is list and any(type(item) is not str for item in value)):
                 raise ValueError(f"Invalid type for {section}.{name}: expected {expected.__name__}")
-            if expected is int and value < (0 if dest in {"max_review_iterations", "process_invocations", "process_wall_seconds"} else 1):
+            if expected is int and value < (0 if dest in {"max_review_iterations", "max_section_tokens", "process_invocations", "process_wall_seconds"} else 1):
                 raise ValueError(f"Invalid value for {section}.{name}: {value}")
             if dest in PATHS:
                 def resolve(item):

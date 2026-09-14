@@ -8,6 +8,11 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Make report section output uncapped by default (`max_section_tokens = 0`),
+  while retaining explicit CLI/TOML limits for expert runs. Add a generic
+  reasoning-effort capability for compatible Chat providers and explain
+  reasoning-only responses instead of treating them as usable JSON.
+
 - Make experiment reports paper-shaped with explicit Abstract, Introduction,
   Method, Results, Limitations, and Conclusion sections. Keep detailed
   per-task measurements in persisted artifacts while rendering a compact

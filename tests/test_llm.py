@@ -17,6 +17,7 @@ from simple_ar.integrations.llm import (
     LLMSettings,
     LLMUsage,
     _call_openai_sdk,
+    _request_for_api_mode,
     estimate_tokens,
     parse_json_object,
 )
@@ -144,6 +145,8 @@ class LLMParsingTests(unittest.TestCase):
                 "SIMPLE_AR_LLM_RETRY_ATTEMPTS": "5",
                 "SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC": "0.5",
                 "SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC": "9",
+                "SIMPLE_AR_LLM_REASONING_EFFORT": "low",
+                "SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS": "8192",
             },
             clear=True,
         ), patch("simple_ar.integrations.llm._call_openai_sdk") as openai_call:
@@ -158,7 +161,59 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(client._settings.retry_attempts, 5)
         self.assertEqual(client._settings.retry_base_delay_sec, 0.5)
         self.assertEqual(client._settings.retry_max_delay_sec, 9)
+        self.assertEqual(client._settings.reasoning_effort, "low")
+        self.assertEqual(client._settings.reasoning_output_tokens, 8192)
         openai_call.assert_not_called()
+
+    def test_reasoning_provider_options_expand_only_an_explicit_output_cap(self) -> None:
+        client = LLMClient(
+            LLMSettings(
+                model="glm-5.3-flash",
+                api_key="test-key",
+                api_mode="chat",
+                reasoning_effort="low",
+                reasoning_output_tokens=8192,
+            )
+        )
+        response = {"choices": [{"message": {"content": "ok"}}]}
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response) as call:
+            self.assertEqual(client.ask("system", "user", max_output_tokens=1200), "ok")
+
+        request = call.call_args.args[1]
+        self.assertEqual(request["max_tokens"], 8192)
+        self.assertEqual(request["extra_body"], {"reasoning_effort": "low"})
+
+    def test_reasoning_option_is_added_only_when_chat_mode_is_selected(self) -> None:
+        request = {
+            "model": "glm-5.3-flash",
+            "instructions": "system",
+            "input": [{"role": "user", "content": "user"}],
+            "api_key": "test-key",
+        }
+        responses_request = _request_for_api_mode(
+            request, "responses", reasoning_effort="low"
+        )
+        chat_request = _request_for_api_mode(
+            request, "chat", reasoning_effort="low"
+        )
+
+        self.assertNotIn("extra_body", responses_request)
+        self.assertEqual(chat_request["extra_body"], {"reasoning_effort": "low"})
+
+    def test_empty_reasoning_only_response_has_actionable_error(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
+        response = {
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "content": "",
+                    "reasoning_content": "internal reasoning",
+                },
+            }]
+        }
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response):
+            with self.assertRaisesRegex(LLMResponseError, "reasoning content"):
+                client.ask("system", "user")
 
     def test_ask_retries_transient_connection_error(self) -> None:
         usage: list[object] = []

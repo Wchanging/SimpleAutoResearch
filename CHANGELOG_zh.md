@@ -6,6 +6,8 @@
 
 ## 2026-09-14
 
+- 报告章节默认不再强制设置单次输出上限（`max_section_tokens = 0`），仍保留 CLI/TOML 的专家级显式限制；为兼容推理模型的 Chat provider 增加通用推理强度选项，并在只有 reasoning、没有最终正文时给出明确诊断，不再把它当作可用 JSON。
+
 - 实验报告模板补齐 Abstract、Introduction、Method、Results、Limitations、Conclusion 等论文式章节；逐任务详细指标继续保存在持久化产物中，正文改为紧凑的聚合与逐种子摘要，避免报告被机器明细表淹没。
 
 - 配置入口转发已有的报告绘图选项，允许在研究 TOML 中使用 `[report.figures]`，不再在 CLI 配置边界误报未知字段。

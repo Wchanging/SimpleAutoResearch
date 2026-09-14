@@ -132,8 +132,9 @@ retry 或 repair。若还没有准备好的可执行实验，`research-brief` �
 使用 `--no-report` 创建的 session 之后可用窄的 `simple-ar research-report` 命令补齐报告；
 它只重新打开 canonical application 的报告动作，复用已持久化的 synthesis、测量和 analysis。
 如果希望一次显式调用完成前缀和报告，可以在最后的 `--command` 之前加入
-`--model NAME --with-report`；`--report-reviewer` 和 `--max-review-iterations` 会进入同一份
-application 配置。
+`--model NAME --with-report`；`--report-reviewer`、`--max-review-iterations` 和
+`--max-section-tokens` 会进入同一份 application 配置；最后一个参数设为 `0` 时不设置章节
+单次调用的 provider 输出上限。
 Writer 执行和检查点统一由正式应用调用 `report/writing.py`。历史报告输入投影只读保留，
 原来的独立 report-session 执行 API 已退出。
 
@@ -207,6 +208,9 @@ uv run simple-ar research-report \
   --session-root runs/research-session/<session> \
   --model "$SIMPLE_AR_MODEL"
 ```
+
+可用 `--max-section-tokens N` 显式设置 Writer/Reviewer 每个章节的输出上限；设为 `0`
+表示不添加该单次调用上限，这也是报告运行时配置的默认值。会话级 token 预算仍然有效。
 
 报告和审查会作为新的 attempt 写入原 session。canonical session 已有报告时再次调用是幂等读取，
 不会重新运行 Writer。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit

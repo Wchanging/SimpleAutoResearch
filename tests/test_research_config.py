@@ -164,8 +164,9 @@ class ResearchConfigTests(unittest.TestCase):
             path = Path(directory) / "research.toml"
             path.write_text(
                 '[task]\ngoal="Measured report"\noutputs=["experiments", "report"]\n'
-                '[report]\n[report.figures]\nenabled=true\nmax_figures=2\n',
+                '[report]\nmax_section_tokens=0\n[report.figures]\nenabled=true\nmax_figures=2\n',
                 encoding="utf-8",
             )
             defaults = research_defaults(["research-session", "--config", str(path)])
             self.assertEqual(defaults["report_figures"], {"enabled": True, "max_figures": 2})
+            self.assertEqual(defaults["max_section_tokens"], 0)

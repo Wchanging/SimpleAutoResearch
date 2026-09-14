@@ -417,6 +417,10 @@ def _print_research_session(args: argparse.Namespace) -> None:
         "reviewer": args.report_reviewer,
         "max_review_iterations": args.max_review_iterations,
     }
+    if getattr(args, "max_section_tokens", None) is not None:
+        if args.max_section_tokens < 0:
+            raise SystemExit("--max-section-tokens cannot be negative; use 0 to omit the cap.")
+        report_config["max_section_tokens"] = args.max_section_tokens
     if getattr(args, "report_figures", None):
         report_config["figures"] = args.report_figures
     config: dict[str, object] = {
@@ -650,6 +654,8 @@ def _print_research_report(args: argparse.Namespace) -> None:
 
     if args.max_review_iterations < 0:
         raise SystemExit("--max-review-iterations cannot be negative.")
+    if args.max_section_tokens is not None and args.max_section_tokens < 0:
+        raise SystemExit("--max-section-tokens cannot be negative; use 0 to omit the cap.")
     session_root = Path(args.session_root)
     client = _optional_research_llm_client(args.model, "research report")
     if client is None:
@@ -662,19 +668,21 @@ def _print_research_report(args: argparse.Namespace) -> None:
         load_session,
     )
 
+    report_config = {
+        "mode": "experiment",
+        "template": args.template,
+        "reviewer": args.reviewer,
+        "max_review_iterations": args.max_review_iterations,
+    }
+    if args.max_section_tokens is not None:
+        report_config["max_section_tokens"] = args.max_section_tokens
+
     try:
         app = load_session(
             session_root,
             services=ResearchApplicationServices(
                 llm_client=client,
-                config={
-                    "report": {
-                        "mode": "experiment",
-                        "template": args.template,
-                        "reviewer": args.reviewer,
-                        "max_review_iterations": args.max_review_iterations,
-                    }
-                },
+                config={"report": report_config},
             ),
         )
     except ResearchApplicationError as exc:

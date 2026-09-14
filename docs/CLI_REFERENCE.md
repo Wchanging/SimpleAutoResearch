@@ -155,8 +155,9 @@ For a session created with `--no-report`, use the narrow
 canonical application only for the missing report actions and reuses the
 persisted synthesis, measurements, and analysis. For a single explicit
 invocation, add `--model NAME --with-report` before the final `--command`;
-`--report-reviewer` and `--max-review-iterations` are stored in the same
-application configuration.
+`--report-reviewer`, `--max-review-iterations`, and `--max-section-tokens` are
+stored in the same application configuration. The last option accepts `0` to
+leave the per-section provider output cap unset.
 Writer execution and checkpoints belong to `report/writing.py` in the canonical
 application. Historical report-input projections are read-only; the former
 standalone report-session execution APIs have been retired.
@@ -250,6 +251,10 @@ uv run simple-ar research-report \
   --session-root runs/research-session/<session> \
   --model "$SIMPLE_AR_MODEL"
 ```
+
+Use `--max-section-tokens N` to set an explicit Writer/Reviewer output cap
+per section. `0` omits that per-call cap, which is the default for report
+runtime configuration; the session budget still applies.
 
 The report and audit are appended as new attempts under the same session. A
 second invocation with an existing canonical report is idempotent: it reads

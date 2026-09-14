@@ -57,6 +57,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_BACKEND=openai
 SIMPLE_AR_LLM_API=responses
+SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
+SIMPLE_AR_LLM_REASONING_EFFORT=
+SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_TIMEOUT_SEC=
 SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
@@ -80,6 +83,14 @@ Notes:
   API only; `chat` sends Chat Completions-style `messages` directly. The
   explicit `auto` mode tries Responses and then Chat after bounded retries for
   compatibility with gateways that expose only one surface.
+- `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` optionally selects `max_tokens` or
+  `max_completion_tokens` for Chat Completions; `auto` selects from the model
+  name when possible.
+- `SIMPLE_AR_LLM_REASONING_EFFORT` is an optional documented model capability
+  such as `low` or `high`, forwarded only to Chat Completions through the
+  provider extension field. `SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` can expand
+  an explicit per-call output cap to leave room for reasoning; it does not add
+  a cap when the caller has left output unlimited.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` is optional. Leave it empty, or set it to
   `0`/`off`/`none`, to omit a client-side timeout; set a positive value only
   when you deliberately want to bound request time.

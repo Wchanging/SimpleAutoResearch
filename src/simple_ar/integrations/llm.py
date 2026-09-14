@@ -66,6 +66,16 @@ class LLMSettings:
             ``auto`` uses ``max_completion_tokens`` for newer reasoning-style
             models such as GPT-5/o-series/Codex and ``max_tokens`` otherwise.
             Override only when a provider gateway requires a specific name.
+        reasoning_effort: Optional provider-specific reasoning effort forwarded
+            to a compatible Chat Completions request through ``extra_body``.
+            Leave empty unless the selected model/provider documents the
+            option. This is a capability setting, not a provider-specific
+            client branch.
+        reasoning_output_tokens: Optional transport cap used to expand an
+            explicit caller cap when ``reasoning_effort`` is configured. It
+            can be larger than a caller's visible-content cap so reasoning
+            models have room to finish a structured response; when no caller
+            cap exists it does not introduce a new cap.
     """
 
     model: str = "gpt-4o-mini"
@@ -82,6 +92,8 @@ class LLMSettings:
     api_mode: str = "responses"
     json_response_format: str = "off"
     chat_token_limit_param: str = "auto"
+    reasoning_effort: str = ""
+    reasoning_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +241,8 @@ class LLMClient:
             api_mode=_llm_api_mode_value(api_mode) if api_mode else _llm_api_mode("SIMPLE_AR_LLM_API"),
             json_response_format=_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"),
             chat_token_limit_param=_chat_token_limit_param_mode("SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM"),
+            reasoning_effort=_reasoning_effort_mode("SIMPLE_AR_LLM_REASONING_EFFORT"),
+            reasoning_output_tokens=_optional_positive_int("SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS", default=None),
         )
         return cls(
             settings,
@@ -286,6 +300,8 @@ class LLMClient:
                 raise LLMError("max_output_tokens must be a positive integer") from exc
             if output_cap < 1:
                 raise LLMError("max_output_tokens must be a positive integer")
+            if self._settings.reasoning_effort and self._settings.reasoning_output_tokens:
+                output_cap = max(output_cap, self._settings.reasoning_output_tokens)
             request["max_output_tokens"] = output_cap
         if response_format is not None:
             if self._settings.api_mode in {"responses", "auto"}:
@@ -317,6 +333,8 @@ class LLMClient:
             raise
         self._settle_budget(reservation_id, usage)
         self._notify_usage(usage)
+        if not output:
+            raise LLMResponseError(_empty_response_message(response))
         return output
 
     def with_budget(
@@ -369,17 +387,19 @@ class LLMClient:
             }
             if self._settings.request_timeout_sec is not None:
                 request["timeout"] = self._settings.request_timeout_sec
-            return request
-        request = {
-            "model": self._model_for_backend(),
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "api_key": self._settings.api_key,
-        }
-        if self._settings.request_timeout_sec is not None:
-            request["timeout"] = self._settings.request_timeout_sec
+        else:
+            request = {
+                "model": self._model_for_backend(),
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "api_key": self._settings.api_key,
+            }
+            if self._settings.request_timeout_sec is not None:
+                request["timeout"] = self._settings.request_timeout_sec
+        if self._settings.api_mode == "chat" and self._settings.reasoning_effort:
+            request["extra_body"] = {"reasoning_effort": self._settings.reasoning_effort}
         return request
 
     def _model_for_backend(self) -> str:
@@ -407,6 +427,7 @@ class LLMClient:
                 request,
                 api_mode,
                 chat_token_limit_param=self._settings.chat_token_limit_param,
+                reasoning_effort=self._settings.reasoning_effort,
             )
             attempted = 0
             for attempt in range(1, attempts + 1):
@@ -896,6 +917,60 @@ def _content_from_response(response: object) -> str:
     return ""
 
 
+def _empty_response_message(response: object) -> str:
+    """Explain why a provider response had no usable final text."""
+    finish_reason = _finish_reason_from_response(response)
+    reasoning = _reasoning_content_from_response(response)
+    if reasoning:
+        message = (
+            "LLM response contained reasoning content but no final content "
+            f"({len(reasoning)} reasoning characters)."
+        )
+        if finish_reason:
+            message += f" finish_reason={finish_reason!r}."
+        message += " Lower reasoning effort or increase the provider output cap."
+        return message
+    message = "LLM response did not contain final text."
+    if finish_reason:
+        message += f" finish_reason={finish_reason!r}."
+    return message
+
+
+def _finish_reason_from_response(response: object) -> str:
+    choices = _get_value(response, "choices")
+    if isinstance(choices, list) and choices:
+        finish_reason = _get_value(choices[0], "finish_reason")
+        if finish_reason is not None:
+            return str(finish_reason)
+    status = _get_value(response, "status")
+    return str(status) if status is not None else ""
+
+
+def _reasoning_content_from_response(response: object) -> str:
+    """Read provider reasoning only for diagnostics, never as final output."""
+    choices = _get_value(response, "choices")
+    if isinstance(choices, list) and choices:
+        message = _get_value(choices[0], "message")
+        for name in ("reasoning_content", "reasoning"):
+            value = _get_value(message, name)
+            if value is not None:
+                return _text_from_content(value)
+    for name in ("reasoning_content", "reasoning"):
+        value = _get_value(response, name)
+        if value is not None:
+            return _text_from_content(value)
+    output = _get_value(response, "output")
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            if str(_get_value(item, "type") or "").lower() == "reasoning":
+                content = _get_value(item, "content")
+                if content is not None:
+                    parts.append(_text_from_content(content))
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
 def _text_from_content(content: object) -> str:
     """Return textual content from string or OpenAI-style content blocks."""
     if isinstance(content, str):
@@ -1081,6 +1156,16 @@ def _chat_token_limit_param_mode(env_name: str) -> str:
     return aliases.get(value, "auto")
 
 
+def _reasoning_effort_mode(env_name: str) -> str:
+    """Read an optional provider-documented reasoning effort value."""
+    value = os.environ.get(env_name, "").strip().lower().replace("-", "_")
+    if value in {"", "auto", "off", "disabled"}:
+        return ""
+    if value in {"none", "minimal", "low", "medium", "high", "max", "xhigh"}:
+        return value
+    return ""
+
+
 def _chat_token_limit_param(mode: str, model: str) -> str:
     normalized = (mode or "auto").strip().lower().replace("-", "_")
     if normalized in {"max_tokens", "max_completion_tokens"}:
@@ -1153,11 +1238,16 @@ def _request_for_api_mode(
     api_mode: str,
     *,
     chat_token_limit_param: str = "auto",
+    reasoning_effort: str = "",
 ) -> dict[str, Any]:
     if api_mode == "responses":
         return _as_responses_request(request)
     if api_mode == "chat":
-        return _as_chat_request(request, chat_token_limit_param=chat_token_limit_param)
+        return _as_chat_request(
+            request,
+            chat_token_limit_param=chat_token_limit_param,
+            reasoning_effort=reasoning_effort,
+        )
     raise ValueError(f"Unsupported LLM API mode: {api_mode}")
 
 
@@ -1198,7 +1288,12 @@ def _as_responses_request(request: dict[str, Any]) -> dict[str, Any]:
     return _drop_none_values(converted)
 
 
-def _as_chat_request(request: dict[str, Any], *, chat_token_limit_param: str = "auto") -> dict[str, Any]:
+def _as_chat_request(
+    request: dict[str, Any],
+    *,
+    chat_token_limit_param: str = "auto",
+    reasoning_effort: str = "",
+) -> dict[str, Any]:
     if "messages" in request:
         converted = dict(request)
     else:
@@ -1222,6 +1317,11 @@ def _as_chat_request(request: dict[str, Any], *, chat_token_limit_param: str = "
         converted.pop("max_tokens", None)
         converted.pop("max_completion_tokens", None)
         converted[_chat_token_limit_param(chat_token_limit_param, str(converted.get("model") or ""))] = output_cap
+    if reasoning_effort:
+        provider_options = converted.get("extra_body")
+        extra_body = dict(provider_options) if isinstance(provider_options, dict) else {}
+        extra_body["reasoning_effort"] = reasoning_effort
+        converted["extra_body"] = extra_body
     return _drop_none_values(converted)
 
 

@@ -70,8 +70,10 @@ class ReportRuntimeConfig(ReportModel):
     agent: str = "llm"
     reviewer: str = "llm"
     max_review_iterations: int = 2
-    max_section_tokens: int = 1200
-    max_report_tokens: int = 5000
+    # Zero means that the report writer/reviewer does not add a per-call
+    # provider output cap. The provider or session token budget still bounds
+    # the run when configured. A positive value is an explicit expert limit.
+    max_section_tokens: int = 0
     max_section_sources: int = 8
     source_strategy: Literal["full", "batch_refine"] = "full"
     source_batch_size: int = 10

@@ -114,6 +114,9 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_BACKEND=openai
 SIMPLE_AR_LLM_API=responses
+SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
+SIMPLE_AR_LLM_REASONING_EFFORT=
+SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_TIMEOUT_SEC=
 SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
@@ -146,6 +149,12 @@ to bound request time or output size.
 when your provider should always use Chat Completions directly. Use the
 explicit `auto` mode only when you want a compatibility fallback from
 Responses to Chat after the bounded retries.
+For compatible reasoning models, `SIMPLE_AR_LLM_REASONING_EFFORT` forwards a
+documented effort value such as `low` to the Chat request; leave it empty for
+models that do not document this option. `SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS`
+can expand an explicit per-call cap to leave room for reasoning, but does not
+create a cap when the caller has not set one. These are generic capability
+settings, not a hard-coded provider integration.
 
 ## Quickstart
 
