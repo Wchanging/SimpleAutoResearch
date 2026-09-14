@@ -286,8 +286,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
     if args.max_review_iterations < 0:
         raise SystemExit("--max-review-iterations cannot be negative.")
     command = tuple(args.command_argv or ())
+    execution_details = getattr(args, "execution_details", {})
+    if command and execution_details.get("pairs"):
+        raise SystemExit("Use execution.pairs or a single command, not both; paired argv must be explicit.")
     outputs = getattr(args, "outputs", None)
-    if outputs and "experiments" not in outputs and (command or getattr(args, "code_task_config", None)):
+    if outputs and "experiments" not in outputs and (command or execution_details or getattr(args, "code_task_config", None)):
         raise SystemExit("Execution configuration requires experiments in --outputs/task.outputs.")
     if outputs and (args.with_report or args.no_report):
         raise SystemExit("Use explicit outputs or --with-report/--no-report, not both.")
@@ -384,7 +387,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 "The canonical research-session does not import provided baseline metrics; "
                 "use baseline_policy=run/auto or skip for this entrypoint."
             )
-    elif command:
+    elif command or execution_details.get("pairs"):
         execution = {
             "command": list(command),
             "cwd": str(Path(args.cwd).resolve()),
@@ -392,6 +395,16 @@ def _print_research_session(args: argparse.Namespace) -> None:
             "label": args.label,
             "result_schema": _experiment_result_schema(args),
         }
+    if execution_details:
+        if execution is None:
+            raise SystemExit("execution.protocol requires a command, pairs or code_task_config.")
+        if execution_details.get("pairs") and code_task_spec is not None and code_task_baseline_policy not in {"auto", "run"}:
+            raise SystemExit("Paired experiments require CodeTask baseline_policy=auto/run.")
+        execution.update(execution_details)
+        if execution_details.get("pairs"):
+            execution.pop("baseline", None)  # Pair rows own both commands.
+        from simple_ar.app.research_execution import execution_request
+        execution_request(execution)
     request_text = args.topic.strip()
     experiment_requested = execution is not None or bool(outputs and "experiments" in outputs)
     if task_text.strip():

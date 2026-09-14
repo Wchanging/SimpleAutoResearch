@@ -43,6 +43,14 @@ def research_defaults(arguments: list[str]) -> dict:
         if section not in FIELDS or not isinstance(values, dict):
             raise ValueError(f"Unknown research configuration section: {section}")
         for name, value in values.items():
+            if section == "execution" and name in {"pairs", "protocol"}:
+                if name == "pairs":
+                    from simple_ar.app.research_execution import execution_pairs
+                    execution_pairs({"pairs": value})
+                elif not isinstance(value, dict):
+                    raise ValueError("execution.protocol must be a table")
+                defaults.setdefault("execution_details", {})[name] = value
+                continue
             if name not in FIELDS[section]:
                 raise ValueError(f"Unknown research configuration field: {section}.{name}")
             dest, expected = FIELDS[section][name]

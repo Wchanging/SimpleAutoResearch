@@ -14,7 +14,7 @@ Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens)
 `budget` (total_tokens, llm_requests, process_invocations, process_wall_seconds),
 `research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir),
 `assets` (papers), `execution` (command, cwd, timeout_sec, code_task_config,
-primary_metric, metrics, metric_directions), and `report` (template, reviewer, max_review_iterations).
+primary_metric, metrics, metric_directions, pairs, protocol), and `report` (template, reviewer, max_review_iterations).
 Use model name `env` for SIMPLE_AR_MODEL; credentials remain in the environment.
 This is the file-based default; explicit `name = ""` selects deterministic processing without LLM calls.
 Outputs may be summary, report, and/or experiments. Explicit outputs cannot be combined
@@ -22,6 +22,17 @@ with --with-report/--no-report. Missing execution settings preserve the experime
 and pause at that boundary; automatic repository preparation is not yet implemented.
 Budget limits initialize new sessions; resuming uses the persisted ledger, not a refreshed allowance.
 Unknown fields are rejected; stage-specific research models are not supported yet.
+
+Advanced experiments may use `[[execution.pairs]]` rows with a unique integer
+`seed`, `baseline_command` and `candidate_command` (literal argv arrays). Do not
+combine pairs with a single execution command. With `code_task_config`, pairs
+replace its benchmark commands for the research matrix; baseline policy must be
+`auto` or `run`. CodeTask still owns edit scope and implementation settings.
+`[execution.protocol]` uses the existing research experiment contract: dataset_refs,
+split_spec, metric_specs, comparison_conditions and protected_assets, optionally
+contract_id/hypothesis. Protected file paths are relative to the experiment cwd,
+not the TOML directory; shared data may use absolute paths. No seed interpolation
+or extra scheduler is introduced. Grant process budgets for every matrix run.
 
 The sections below cover the existing CodeTask TOML for `code-task` and
 `research-session --code-task-config`. Research TOML can reference this file through

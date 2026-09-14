@@ -589,7 +589,10 @@ def _evidence_notes_markdown(pack: Mapping[str, Any]) -> str:
     if execution_context:
         lines.extend(
             [
-                "\n## Prepared Experiment Boundary (hard)",
+                "\n## User research request and execution context",
+                "A requested goal is not evidence that code, data or an environment is ready. "
+                "Preserve explicitly supplied execution constraints; otherwise identify what must be prepared, "
+                "without describing missing assets as a prepared boundary.",
                 execution_context[:8000],
             ]
         )

@@ -22,6 +22,13 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 - `[assets].papers`：本地文献路径列表。
 - `[execution]`：`command`（字符串数组）、`cwd`、`timeout_sec`，或 `code_task_config`；
   可附 `primary_metric`、`metrics`、`metric_directions`（如 `["accuracy=higher"]）。
+- 高级实验可用 `[[execution.pairs]]`：每行包含唯一整数 `seed` 与显式 argv 数组
+  `baseline_command`、`candidate_command`，不与单个 command 混用。引用 CodeTask 时，
+  这些命令用于研究矩阵，baseline_policy 必须为 auto/run；改码范围仍由 CodeTask 配置负责。
+  `[execution.protocol]` 直接使用已有实验契约的 dataset_refs、split_spec、metric_specs、
+  comparison_conditions、protected_assets，可附 contract_id/hypothesis。
+  保护文件相对路径以实验 cwd 为基准，共享数据可用绝对路径；不是以 TOML 目录为基准。
+  不提供种子插值或新调度器；进程预算须覆盖整个矩阵。
 - `[report]`：`template`、`reviewer`、`max_review_iterations`。
 - 显式 outputs 与 --with-report/--no-report 二选一。只调研不会因配置了材料而训练。
   请求 experiments 但没有执行配置时保留该目标，并在实验处报告准备缺口；自动仓库准备尚未实现。

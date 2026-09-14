@@ -202,6 +202,13 @@ class SynthesisCapabilityTests(unittest.TestCase):
         self.assertEqual(result.execution_context, context_text)
         self.assertIn("sklearn digits", client.user)
         self.assertIn("do not substitute a dataset or task", client.user.lower())
+        synthesize_evidence(SynthesisRequest(
+            evidence_pack={**_pack(), "execution_context": "Find public code for continual learning on one 3090."},
+            use_llm=True, llm_client=client,
+        ))
+        self.assertIn("Find public code", client.user)
+        self.assertIn("not evidence that code, data or an environment is ready", client.user)
+        self.assertNotIn("## Prepared Experiment Boundary (hard)", client.user)
 
     def test_llm_synthesis_context_exposes_closed_evidence_allowlist(self) -> None:
         context = _bounded_pack_json(_pack())

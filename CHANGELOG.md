@@ -4,6 +4,14 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-14
+
+### Changed
+
+- Research TOML exposes existing paired experiment commands and protected protocols through the canonical application; completed-session resume does not rerun the matrix.
+- Research synthesis distinguishes the user's goal from a verified prepared execution environment.
+- Add a Mammoth/CIFAR-100 diagnostic adapter reusing upstream training, with task-level measurement provenance. Full research-to-paper acceptance remains pending.
+
 ## 2026-09-13
 
 ### Changed
