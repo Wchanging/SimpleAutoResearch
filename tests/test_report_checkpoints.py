@@ -156,6 +156,24 @@ class ReportCheckpointTests(unittest.TestCase):
         for actual, metric in zip(rows, metrics):
             self.assertEqual(actual, metric.model_dump(include=set(table["columns"])))
 
+    def test_prompt_metrics_compact_paired_task_level_measurements(self):
+        from simple_ar.report.agent import _prompt_metrics
+        from simple_ar.report.schema import MetricSource
+        metrics = [
+            MetricSource(metric_id="raw", name="accuracy", value=0.5,
+                         label="baseline:seed=0", artifact="results.json"),
+            MetricSource(metric_id="task", name="accuracy_after_task_1_on_task_1", value=0.6,
+                         label="baseline:seed=0", artifact="results.json"),
+            MetricSource(metric_id="summary", name="accuracy.delta_mean", value=0.1,
+                         label="paired_summary:0", artifact="paired.json", source_kind="derived_summary"),
+            MetricSource(metric_id="summary_task", name="accuracy_after_task_1_on_task_1.delta_mean", value=0.2,
+                         label="paired_summary:0", artifact="paired.json", source_kind="derived_summary"),
+        ]
+        table = _prompt_metrics(ReportMemory(metric_sources=metrics))
+        rows = [dict(zip(table["columns"], row)) for row in table["rows"]]
+        self.assertEqual([row["metric_id"] for row in rows], ["summary", "raw"])
+        self.assertTrue(all("_after_task_" not in row["name"] for row in rows))
+
     def test_reviewer_failure_obeys_explicit_fallback_setting(self):
         context = ReportContext(topic="Calibration", report_mode="experiment")
         memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])

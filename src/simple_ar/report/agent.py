@@ -1861,10 +1861,29 @@ def _final_sequence(
 
 
 def _prompt_metrics(memory: ReportMemory) -> dict[str, Any]:
-    """Tabulate all measurements without repeating column names per value."""
+    """Build a compact model-facing table while retaining raw evidence elsewhere.
+
+    Paired experiments also keep task-by-task measurements in the session for
+    audit and export.  Sending those rows to every section writer duplicates a
+    large amount of context without helping ordinary paper prose; aggregate
+    and non-task-level seed rows are sufficient for the Writer.
+    """
     columns = ["metric_id", "name", "value", "label", "direction", "condition_id", "unit", "source_kind"]
+    metrics = list(memory.metric_sources)
+    paired_summary = [
+        metric for metric in metrics
+        if metric.label.startswith("paired_summary:")
+        and "_after_task_" not in metric.name
+    ]
+    if paired_summary:
+        seed_metrics = [
+            metric for metric in metrics
+            if not metric.label.startswith("paired_summary:")
+            and "_after_task_" not in metric.name
+        ]
+        metrics = [*paired_summary, *seed_metrics]
     return {"columns": columns, "rows": [
-        [getattr(metric, column) for column in columns] for metric in memory.metric_sources
+        [getattr(metric, column) for column in columns] for metric in metrics
     ]}
 
 
