@@ -810,9 +810,13 @@ class SessionTransitionTests(unittest.TestCase):
                 allow_no_progress_exhausted=True,
             )
             self.assertEqual(revision, 1)
+            second_id = controller.allocate_attempt_id(
+                "report_write",
+                allow_no_progress_exhausted=True,
+            )
             second = controller.execute_attempt(
                 "report_write",
-                attempt_id="report_write-002",
+                attempt_id=second_id,
                 allow_no_progress_exhausted=True,
             )
             self.assertEqual(second.status, "failed")

@@ -644,7 +644,12 @@ class SessionController:
         return self._save_unlocked()
 
     @_locked_method
-    def allocate_attempt_id(self, capability: str) -> str:
+    def allocate_attempt_id(
+        self,
+        capability: str,
+        *,
+        allow_no_progress_exhausted: bool = False,
+    ) -> str:
         """Reserve a readable, persistent attempt id for the new API.
 
         The sequence is advanced before the handler starts.  A skipped number
@@ -652,15 +657,25 @@ class SessionController:
         that already contains execution evidence.
         """
 
-        return self._allocate_attempt_id_unlocked(capability)
+        return self._allocate_attempt_id_unlocked(
+            capability,
+            allow_no_progress_exhausted=allow_no_progress_exhausted,
+        )
 
-    def _allocate_attempt_id_unlocked(self, capability: str) -> str:
+    def _allocate_attempt_id_unlocked(
+        self,
+        capability: str,
+        *,
+        allow_no_progress_exhausted: bool = False,
+    ) -> str:
         """Allocate an id while the caller already owns the mutation lock."""
 
         normalized = capability.strip()
         if not normalized:
             raise ValueError("Capability name cannot be empty.")
-        self._ensure_can_execute()
+        self._ensure_can_execute(
+            allow_no_progress_exhausted=allow_no_progress_exhausted
+        )
         slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", normalized).strip("-._")
         slug = slug or "attempt"
         sequence = max(1, self.manifest.next_attempt_sequence)
@@ -776,7 +791,10 @@ class SessionController:
         capability = capability.strip()
         if not capability:
             raise ValueError("Capability name cannot be empty.")
-        attempt_id = selected_attempt_id or self._allocate_attempt_id_unlocked(capability)
+        attempt_id = selected_attempt_id or self._allocate_attempt_id_unlocked(
+            capability,
+            allow_no_progress_exhausted=allow_no_progress_exhausted,
+        )
         self._ensure_can_execute(
             allow_no_progress_exhausted=allow_no_progress_exhausted
         )

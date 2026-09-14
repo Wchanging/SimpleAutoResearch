@@ -946,7 +946,10 @@ class ResearchApplication:
         **kwargs: Any,
     ) -> bool:
         _, artifact_kind, _ = _CAPABILITY_OUTPUTS[capability]
-        attempt_id = self.controller.allocate_attempt_id(capability)
+        attempt_id = self.controller.allocate_attempt_id(
+            capability,
+            allow_no_progress_exhausted=allow_no_progress_exhausted,
+        )
         request = self._request_for_attempt(request, attempt_id)
         if request is not None:
             kwargs["request"] = request
