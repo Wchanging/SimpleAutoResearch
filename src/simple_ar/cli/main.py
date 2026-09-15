@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from simple_ar.core.artifacts import read_json, read_text
+from simple_ar.cli.research_view import ResearchConsole
 from simple_ar.cli.code_task_view import (
     confirm_next_step,
     confirm_review_gate,
@@ -450,6 +451,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         }
         for path in args.local_document
     )
+    display = ResearchConsole()
     services = ResearchApplicationServices(
         llm_client=llm_client,
         max_results=args.max_results,
@@ -465,7 +467,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
             "process_wall_seconds": args.process_wall_seconds if getattr(args, "process_wall_seconds", None) is not None else (max(60, timeout_sec * 8) if execution is not None else 0),
         },
         max_attempts=32 if code_task_spec is not None else 20,
-        message_callback=lambda message: print_line(f"  - {message}"),
+        message_callback=display.message,
     )
     brief = ResearchBrief(
         request_text=request_text,
@@ -494,16 +496,14 @@ def _print_research_session(args: argparse.Namespace) -> None:
             elif app.view().status != "completed":
                 app.continue_session(reason="Resume from research-session; reuse persisted evidence and budgets.")
         view = app.view()
+        display.start(view, model=llm_client.model if llm_client is not None else "deterministic", topic=app.brief.objective)
         for _ in range(services.max_attempts + 8):
             if view.next_action is None:
                 view = app.advance(max_actions=1)
                 break
-            print_line(f"Action: {view.next_action}")
-            view = app.advance(max_actions=1)
-            print_line(
-                f"Status: {view.status}; next: {view.next_action or 'none'}"
-                + (f"; {view.status_reason}" if view.status_reason else "")
-            )
+            with display.action(view.next_action):
+                view = app.advance(max_actions=1)
+            display.state(view)
             if view.status in {"completed", "paused", "blocked", "failed"}:
                 break
         app.export_session()
@@ -521,9 +521,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
            else "preparation required" if outputs and "experiments" in outputs
            else "not requested (literature-only)")
     )
-    for name in ("summary", "experiment", "matrix_results", "analysis", "report", "report_audit"):
-        if name in view.state_refs:
-            print_line(f"{name}: {view.session_root / view.state_refs[name].path}")
+    display.finish(view)
     _ensure_research_cli_success(
         view.status,
         operation="Research session",

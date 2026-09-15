@@ -3,7 +3,7 @@
 from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
 from simple_ar.core.artifacts import read_json, write_json, write_text
@@ -32,6 +32,7 @@ class ImplementationRequest:
     failure_ref: ArtifactRef | None = None
     budget_profile: str | None = None
     allow_large_edits: bool = False
+    message_callback: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
 
 
 def run_implementation_capability(*, context: CapabilityContext, request: ImplementationRequest) -> CapabilityResult:
@@ -67,6 +68,7 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
             allow_large_edits=request.allow_large_edits,
             max_files=IMPLEMENTATION_CONTEXT_MAX_FILES,
             max_source_chars_per_file=IMPLEMENTATION_CONTEXT_MAX_SOURCE_CHARS,
+            message_callback=request.message_callback,
         )
         stop_reason, next_action = outcome.stop_reason, outcome.next_action
         steps = [asdict(step) for step in outcome.steps]

@@ -8,6 +8,12 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Fixed
 
+- Restore Rich research-session panels, action descriptions, elapsed-time indicators
+  and artifact tables; relay existing CodeTask progress within research runs.
+  Redirected output retains static milestones without animated frames.
+  Search shows provider/query results, reading relays LLM batch messages, and
+  experiments display bounded process output and the persisted log directory.
+
 - Research TOML can record an explicit candidate idea selection for a prepared
   experiment, preserving the choice in the canonical session instead of
   requiring an out-of-band edit.

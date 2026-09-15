@@ -234,6 +234,7 @@ def search_sources(
     request: SearchRequest,
     *,
     registry: SearchProviderRegistry,
+    emit: Callable[[str], None] | None = None,
 ) -> SearchResult:
     """Run the requested provider/query pairs without writing run artifacts.
 
@@ -249,6 +250,8 @@ def search_sources(
     stop = False
     for provider_name in request.providers:
         for query in request.queries:
+            if emit:
+                emit(f"Searching {provider_name}: {query}")
             response = _run_provider(
                 registry,
                 provider_name,
@@ -265,6 +268,8 @@ def search_sources(
                 request=request,
             )
             responses.append(response)
+            if emit:
+                emit(f"{provider_name}: {response.status}; {len(response.papers)} papers returned.")
             if _response_succeeded(response):
                 papers.extend(response.papers)
             elif response.message:
@@ -356,6 +361,7 @@ def run_search_capability(
     request: SearchRequest,
     registry: SearchProviderRegistry,
     selection_policy: SearchSelectionPolicy | None = None,
+    emit: Callable[[str], None] | None = None,
 ) -> CapabilityResult:
     """Persist one explicit search handoff for a controller-managed attempt.
 
@@ -364,10 +370,12 @@ def run_search_capability(
     turn an empty/failed search into a successful result.
     """
 
-    result = search_sources(request, registry=registry)
+    result = search_sources(request, registry=registry, emit=emit)
     if selection_policy is not None:
         result = select_search_result(result, policy=selection_policy)
     diagnostics = list(result.diagnostics)
+    if emit:
+        emit(f"Search selection: {len(result.selected_papers)} papers retained.")
     if result.status == "empty":
         diagnostics.append("Search returned no papers.")
     output = context.store.write_json(

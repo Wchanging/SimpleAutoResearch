@@ -8,7 +8,7 @@ legacy facade. It does not search, write files, or require a pipeline Context.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.research.contracts import (
@@ -144,6 +144,7 @@ class ReadRequest:
     config: Mapping[str, object] = field(default_factory=dict)
     use_llm: bool = False
     llm_client: Any | None = field(default=None, repr=False, compare=False)
+    emit: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.use_llm and self.llm_client is None:
@@ -278,6 +279,7 @@ def read_documents(request: ReadRequest) -> ReadResult:
                 topic=request.topic or "research topic",
                 problem_markdown=request.problem_markdown,
                 research_plan_json=request.research_plan_json or "{}",
+                emit=request.emit,
                 papers=[record.to_row() for record in bundle.records],
                 config=request.config,
             )
@@ -288,6 +290,7 @@ def read_documents(request: ReadRequest) -> ReadResult:
                 client,
                 papers=[record.to_row() for record in bundle.records],
                 evidence_snippets=format_bundle_evidence_snippets(bundle),
+                emit=request.emit,
                 config=request.config,
             )
             paper_notes = tuple(notes)

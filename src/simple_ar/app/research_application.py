@@ -539,7 +539,7 @@ class ResearchApplication:
             self._execute(
                 "experiment", "experiment",
                 request, inputs,
-                backend=LocalExecutionBackend(budget_ledger=self.budget_ledger),
+                backend=LocalExecutionBackend(budget_ledger=self.budget_ledger, message_callback=self.services.message_callback),
                 parent_attempt_id=parent_id,
             )
         return self.advance(max_actions=1)
@@ -685,6 +685,7 @@ class ResearchApplication:
                 "search", "search",
                 self._search_request(plan), self._input_refs("plan"),
                 registry=self._provider_registry(),
+                emit=self.services.message_callback,
                 selection_policy=SearchSelectionPolicy(
                     topic=self.controller.manifest.topic, questions=plan.questions,
                     query_plan=plan.query_plan, max_documents=self._search_limit(plan),
@@ -696,6 +697,8 @@ class ResearchApplication:
             return accepted
         if action == "document_ingest":
             plan, search = self._load_plan(), self._load_search()
+            if self.services.message_callback:
+                self.services.message_callback(f"Fetching/extracting {len(search.selected_papers)} selected papers; downloads and parsers may wait on external services.")
             if not search.selected_papers:
                 self.controller.pause("Document ingest needs at least one selected paper.")
                 return False
@@ -709,6 +712,8 @@ class ResearchApplication:
             )
             if accepted:
                 documents = self._load_documents()
+                if self.services.message_callback:
+                    self.services.message_callback(f"Document ingest: {len(documents.records)} records, {len(documents.chunks)} text chunks; details in the attempt artifacts.")
                 if not documents.records or not documents.chunks:
                     self.controller.pause("Document ingest produced no usable text; inspect extraction diagnostics.")
                     return False
@@ -723,6 +728,7 @@ class ResearchApplication:
                     research_plan_json=json.dumps(plan.to_handoff_dict(), ensure_ascii=False, indent=2),
                     config=self._effective_config(), use_llm=self.services.llm_client is not None,
                     llm_client=self.services.llm_client,
+                    emit=self.services.message_callback,
                 ), self._input_refs("plan", "documents"), allow_partial=True,
             )
         if action == "synthesize":
@@ -804,6 +810,7 @@ class ResearchApplication:
         if action == "implement" or action.startswith(("repair:", "matrix_repair_")):
             try:
                 request = implementation_request(self._effective_config()["execution"], self.services.llm_client)
+                request = replace(request, message_callback=self.services.message_callback)
             except ValueError as exc:
                 self.controller.pause(str(exc))
                 return False
@@ -871,7 +878,7 @@ class ResearchApplication:
             return self._execute(
                 "experiment", state_name,
                 request, inputs,
-                backend=LocalExecutionBackend(budget_ledger=self.budget_ledger),
+                backend=LocalExecutionBackend(budget_ledger=self.budget_ledger, message_callback=self.services.message_callback),
             )
         if action == "analysis":
             baseline_ref = self.controller.manifest.state_refs.get("baseline")

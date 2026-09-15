@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 import os
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from simple_ar.experiment.metrics import parse_metric_lines
 from simple_ar.core.process import ProcessSpec, run_process
@@ -67,6 +67,7 @@ class ExecutionBackend(Protocol):
 class LocalExecutionBackend:
     name: str = "local"
     budget_ledger: BudgetLedger | None = field(default=None, repr=False)
+    message_callback: Callable[[str], None] | None = field(default=None, repr=False)
 
     def run(self, request: RunRequest) -> RunResult:
         if request.timeout_sec < 1:
@@ -86,7 +87,12 @@ class LocalExecutionBackend:
             environment = dict(os.environ if request.env is None else request.env)
             environment["SIMPLE_AR_OUTPUT_DIR"] = str(invocation_dir / "outputs")
             spec = replace(spec, output_dir=invocation_dir, env=environment)
-        result = run_process(spec, budget_ledger=self.budget_ledger)
+        if self.message_callback:
+            self.message_callback(f"Experiment {request.label}: cwd={request.cwd}; timeout={request.timeout_sec}s")
+            if spec.output_dir:
+                self.message_callback(f"Process logs: {spec.output_dir}")
+        result = run_process(spec, budget_ledger=self.budget_ledger,
+                             output_callback=self._output if self.message_callback else None)
         timed_out = result.stop_reason == "timeout"
         stderr = result.stderr
         if timed_out:
@@ -99,3 +105,11 @@ class LocalExecutionBackend:
             duration_sec=result.duration_sec, process_record=result.record,
             backend=self.name, label=request.label,
         )
+
+    def _output(self, stream: str, chunk: str) -> None:
+        # Preserve complete output on disk; only display a bounded tail of each
+        # read to keep chatty training processes from flooding the terminal.
+        lines = [line for line in chunk.replace("\r", "\n").splitlines() if line.strip()]
+        for line in lines[-3:]:
+            if line.strip() and self.message_callback:
+                self.message_callback(f"{stream}: {line[:500]}")
