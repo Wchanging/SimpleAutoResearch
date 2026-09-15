@@ -81,6 +81,26 @@ class ReportMeasurementAuditTests(unittest.TestCase):
         self.assertEqual(old.metric_audit.unmatched_numbers, ["20"])
         self.assertEqual(old.status, "warning")
 
+    def test_experiment_sections_keep_design_sources_beyond_search_prefix(self):
+        from simple_ar.report.memory import initialize_report_memory
+        from simple_ar.report.schema import SourceHandle, ReportRuntimeConfig
+        from simple_ar.report.templates import load_report_template_bundle
+
+        papers = [SourceHandle(handle=f"paper:p{i}", kind="paper", paper_id=f"p{i}",
+                               title="General research survey") for i in range(12)]
+        papers[-1].title = "Original replay method"
+        context = ReportContext(
+            topic="Replay", report_mode="experiment", max_section_sources=3,
+            experiment_plan={"motivation_refs": ["p11#claim-001"]},
+            source_handles=[SourceHandle(handle="execution", kind="experiment"), *papers],
+        )
+        template = load_report_template_bundle(report_mode="experiment", config=ReportRuntimeConfig())
+        memory = initialize_report_memory(context=context, template=template)
+        for section in memory.section_plan:
+            self.assertIn("paper:p11", section.evidence_handles)
+            self.assertIn("execution", section.evidence_handles)
+            self.assertLessEqual(len(section.evidence_handles), 3)
+
     def test_writer_tool_reads_frozen_patch_with_truncation_and_provenance(self):
         from simple_ar.report.tool_gateway import ReportToolGateway
         from simple_ar.report.schema import ReportToolCall

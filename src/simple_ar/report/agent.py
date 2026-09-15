@@ -27,6 +27,22 @@ from simple_ar.report.survey import is_survey_report, route_section_sources
 from simple_ar.report.tool_gateway import ReportToolGateway
 
 
+_EXPERIMENT_EVIDENCE_RULES = """
+Distinguish changes shown by the frozen patch from reused existing code and
+unimplemented proposals. Do not describe an invoked utility as modified unless
+its implementation appears in the patch.
+An unchanged protocol isolates the implemented candidate as a whole, not a
+unique causal mechanism. Without an ablation, do not attribute all differences
+to one loss term: extra forward passes, stored targets and other implementation
+effects remain possible contributors. Review such attribution as an unsupported
+claim requiring revision, not merely a style suggestion.
+Means and sample standard deviations are descriptive: they do not establish
+statistical significance or rule out seed variance. Such claims require an
+actual appropriate statistical analysis in the supplied evidence.
+Cite directly relevant original method papers when available in the supplied
+sources; surveys are not a substitute for attribution of the adopted method.
+"""
+
 WRITER_SYSTEM = """You are the SimpleAutoResearch report Writer.
 Write only evidence-bounded Markdown sections for the current run.
 Do not invent citations, metrics, datasets, methods, or external references.
@@ -46,7 +62,7 @@ When many sources are available, use them to improve coverage and confidence;
 do not make the report grow linearly by writing one paragraph per paper.
 Never write prompt-planning language such as "Hint:", "Use this paper as", or
 "Additional synthesis detail is available".
-Return one JSON object matching the requested schema."""
+Return one JSON object matching the requested schema.""" + _EXPERIMENT_EVIDENCE_RULES
 
 
 REVIEWER_SYSTEM = """You are the SimpleAutoResearch report Reviewer.
@@ -65,7 +81,7 @@ missing cross-paper comparison, and performance claims without boundary
 conditions.
 Prefer revision instructions that improve synthesis density, evidence coverage,
 and section structure over requests to add more paper-by-paper detail.
-Return one JSON object matching the requested schema."""
+Return one JSON object matching the requested schema.""" + _EXPERIMENT_EVIDENCE_RULES
 
 
 OUTLINE_PLANNER_SYSTEM = """You are the SimpleAutoResearch survey Outline Planner.

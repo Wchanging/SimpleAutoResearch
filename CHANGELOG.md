@@ -8,6 +8,16 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Fixed
 
+- `research-report --refresh` reanalyzes existing measurements and writes new
+  report attempts without retraining or deleting old reports. Model-backed
+  research now uses the existing LLM analysis path instead of forcing directional
+  heuristics. Writer/Reviewer distinguish candidate comparisons from causal ablations.
+
+- Experiment reports prioritize the selected design's sources within the section
+  source budget instead of repeating the search prefix. Writer and Reviewer share
+  patch-reuse and descriptive-statistics boundaries. Mixed metric directions no
+  longer imply partial hypothesis support in deterministic analysis.
+
 - Carry referenced reading-card content and explicit source-link limitations into
   idea comparison. Preserve strict reference validation and expose comparison
   failure diagnostics. Explicit continuation retries a fallback comparison

@@ -258,7 +258,12 @@ runtime configuration; the session budget still applies.
 
 The report and audit are appended as new attempts under the same session. A
 second invocation with an existing canonical report is idempotent: it reads
-the completed state and does not rerun the Writer. Use `--reviewer disabled`
+the completed state and does not rerun the Writer. Explicit `--refresh` reanalyzes
+existing measurements and creates new report/audit attempts while retaining old
+reports, without rerunning search, implementation or training. Model-backed
+sessions use the model to interpret hypotheses; numeric and execution-status
+checks remain deterministic. Refresh uses the remaining session budget.
+Use `--reviewer disabled`
 only when an explicit writer-only comparison is wanted; the final audit still
 runs. Legacy sessions remain readable but cannot be resumed by a second report
 executor. An invalid canonical session fails explicitly instead of falling back

@@ -112,6 +112,30 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(result.claims[0].verdict, "unsupported")
         self.assertTrue(any("unavailable" in item for item in result.claims[0].limitations))
 
+    def test_secondary_improvement_does_not_imply_partial_hypothesis_support(self) -> None:
+        context = AnalysisContext(
+            hypotheses=[{
+                "id": "h1", "statement": "Reduce forgetting without harming accuracy.",
+                "metric_refs": ["forgetting", "accuracy", "average_incremental_accuracy"],
+            }],
+            expected_metrics=[
+                {"name": "forgetting", "direction": "lower"},
+                {"name": "accuracy", "direction": "higher"},
+                {"name": "average_incremental_accuracy", "direction": "higher"},
+            ],
+            metrics={"forgetting": 0.71, "accuracy": 0.12, "average_incremental_accuracy": 0.28},
+            project_results={"paired_summary": [
+                {"metric": "forgetting", "n": 3, "delta_mean": 0.025},
+                {"metric": "accuracy", "n": 3, "delta_mean": -0.011},
+                {"metric": "average_incremental_accuracy", "n": 3, "delta_mean": 0.008},
+            ]},
+        )
+        result = run_result_analysis(context)
+        claim = result.claims[0]
+        self.assertEqual(claim.verdict, "not_evaluated")
+        self.assertEqual(len(claim.evidence), 3)
+        self.assertTrue(any("Mixed metric directions" in item for item in claim.limitations))
+
     def test_llm_supported_claim_without_evidence_is_downgraded(self) -> None:
         context = AnalysisContext(
             task_id="T2",

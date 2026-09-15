@@ -694,7 +694,9 @@ def _print_research_report(args: argparse.Namespace) -> None:
         ) from exc
     try:
         view = app.view()
-        if not ({"report", "paper", "full_paper"} & {
+        if args.refresh:
+            view = app.request_report(refresh=True, reason="Explicitly regenerate the report from existing research evidence.")
+        elif not ({"report", "paper", "full_paper"} & {
             item.strip().lower() for item in app.brief.requested_outputs
         }):
             view = app.request_report()

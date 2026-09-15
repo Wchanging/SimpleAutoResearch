@@ -276,6 +276,10 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
         help="Existing research-session directory with a ready-for-report handoff.",
     )
     report_parser.add_argument(
+        "--refresh", action="store_true",
+        help="Write new report attempts from existing evidence; retain old reports and do not rerun experiments.",
+    )
+    report_parser.add_argument(
         "--model",
         required=True,
         help="Model used by the existing report Writer/Reviewer agent.",

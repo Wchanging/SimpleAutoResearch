@@ -11,7 +11,7 @@ from simple_ar.report.schema import (
     ReportSectionPlan,
     ReportTemplateBundle,
 )
-from simple_ar.report.survey import enrich_survey_sections
+from simple_ar.report.survey import enrich_survey_sections, route_section_sources
 
 
 SECTION_PATTERN = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
@@ -76,13 +76,31 @@ def _section_plan(template_markdown: str, context: ReportContext) -> list[Report
     for index, heading in enumerate(headings, start=1):
         section_id = _slug(heading) or f"section_{index}"
         goal = _section_goal(heading, context.report_mode)
+        section_handles = evidence_handles
+        if context.report_mode == "experiment" and context.max_section_sources > 0:
+            execution_handles = [h.handle for h in context.source_handles if h.kind == "experiment"]
+            budget = context.max_section_sources
+            section_handles = execution_handles[:budget]
+            # Evidence-card IDs are created as <paper_id>#claim-N / #method-N.
+            # Keep the selected design's actual sources ahead of lexical ranking.
+            motivation_papers = {
+                ref.partition("#")[0] for ref in context.experiment_plan.get("motivation_refs", [])
+            }
+            motivated = [h.handle for h in context.source_handles
+                         if h.kind == "paper" and h.paper_id in motivation_papers]
+            ranked = route_section_sources(
+                context=context, heading=heading,
+                goal=f"{context.hypothesis_markdown} {goal}",
+                contract={}, budget=budget,
+            )
+            section_handles = list(dict.fromkeys([*section_handles, *motivated, *ranked]))[:budget]
         draft_order = draft_order_map.get(_heading_key(heading), index)
         sections.append(
             ReportSectionPlan(
                 section_id=section_id,
                 heading=heading,
                 goal=goal,
-                evidence_handles=evidence_handles,
+                evidence_handles=section_handles,
                 final_order=index,
                 draft_order=draft_order,
             )

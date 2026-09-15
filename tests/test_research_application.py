@@ -416,6 +416,16 @@ class ResearchApplicationTests(unittest.TestCase):
                 view = app.advance(max_actions=3)
             audit = app.controller.store.read_json(view.state_refs["report_audit"])
             self.assertEqual(audit["status"], "warning")
+            old_report = view.state_refs["report"]
+            old_body = app.controller.store.read_text(old_report)
+            old_read = view.state_refs["read"]
+            refreshed = app.request_report(refresh=True)
+            self.assertEqual(refreshed.next_action, "report_write")
+            self.assertEqual(refreshed.state_refs["read"], old_read)
+            with patch("simple_ar.report.writing.run_report_agent", side_effect=writer):
+                view = app.advance(max_actions=3)
+            self.assertNotEqual(view.state_refs["report"], old_report)
+            self.assertEqual(app.controller.store.read_text(old_report), old_body)
 
         self.assertEqual(view.status, "completed", view.status_reason)
 

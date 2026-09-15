@@ -213,7 +213,9 @@ uv run simple-ar research-report \
 表示不添加该单次调用上限，这也是报告运行时配置的默认值。会话级 token 预算仍然有效。
 
 报告和审查会作为新的 attempt 写入原 session。canonical session 已有报告时再次调用是幂等读取，
-不会重新运行 Writer。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit
+不会重新运行 Writer。显式添加 `--refresh` 会基于已有测量重新分析并创建新的报告/审查 attempts，
+保留历史稿件，不重复检索、改码或训练；模型会话使用模型解释假设，数值和执行状态仍由确定性分析负责。
+刷新仍使用会话剩余预算。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit
 仍会运行。历史 session 可读取，但不再由第二套报告执行器续写；损坏的正式 session 会明确失败，
 不会回退到另一条流程。
 

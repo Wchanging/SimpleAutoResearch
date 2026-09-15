@@ -395,6 +395,7 @@ class ResearchApplication:
     def request_report(
         self,
         *,
+        refresh: bool = False,
         reason: str = "Request the report deliverable from the completed research evidence.",
     ) -> ResearchApplicationView:
         """Add the report deliverable without rerunning settled research work.
@@ -406,7 +407,7 @@ class ResearchApplication:
         """
 
         requested = {item.strip().lower() for item in self.brief.requested_outputs}
-        if requested & {"report", "paper", "full_paper"}:
+        if requested & {"report", "paper", "full_paper"} and not refresh:
             return self.view()
         if self.controller.manifest.status == "running":
             raise ResearchApplicationError(
@@ -414,11 +415,17 @@ class ResearchApplication:
             )
         with self.controller.mutation_scope():
             self.controller.continue_with_revision(reason)
+            if refresh:
+                # Retire only delivery pointers; prior attempts and all research
+                # measurements remain immutable and available for inspection.
+                for name in ("analysis", "comparison", "writer", "report", "report_audit"):
+                    self.controller.manifest.state_refs.pop(name, None)
+                self.controller.manifest.current_attempt = None
             self.brief = replace(
                 self.brief,
                 revision=self.brief.revision + 1,
                 parent_revision=self.brief.revision,
-                requested_outputs=(*self.brief.requested_outputs, "report"),
+                requested_outputs=tuple(dict.fromkeys((*self.brief.requested_outputs, "report"))),
             )
             diagnostics = validate_brief(self.brief, self.assets)
             _raise_on_errors(diagnostics)
@@ -859,7 +866,8 @@ class ResearchApplication:
                              for role in ("baseline", "candidate") if row[role] is not None)
             return self._execute("analysis", "analysis",
                 None, (collection_ref, *children), allow_partial=True, result_ref=collection_ref,
-                analysis_context=self._analysis_context(), use_llm=False)
+                analysis_context=self._analysis_context(),
+                use_llm=self.services.llm_client is not None, client=self.services.llm_client)
         if action in {"baseline", "experiment"} or action.startswith(("retest:", "matrix_baseline_", "matrix_candidate_")):
             try:
                 matrix = action.startswith("matrix_")
@@ -899,7 +907,8 @@ class ResearchApplication:
                 None, (result_ref, baseline_ref) if baseline_ref else (result_ref,),
                 allow_partial=True, baseline_ref=baseline_ref,
                 result_ref=result_ref,
-                analysis_context=self._analysis_context(), use_llm=False,
+                analysis_context=self._analysis_context(),
+                use_llm=self.services.llm_client is not None, client=self.services.llm_client,
             )
         if action == "report_write":
             from simple_ar.report.writing import ReportWritingRequest

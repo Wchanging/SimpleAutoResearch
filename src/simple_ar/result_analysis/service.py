@@ -30,6 +30,10 @@ SYSTEM_PROMPT = """You are a rigorous benchmark and experiment result analyst.
 Use only the provided task, criteria, metrics, artifacts, and writeup.
 Do not invent metrics, datasets, judge outcomes, or unsupported claims.
 Every supported or partially_supported claim must cite metric_refs or concrete evidence.
+Evaluate the stated hypothesis, not a vote across favorable metrics. An ancillary
+improvement does not support a contradicted primary objective or non-regression condition.
+Mean changes and sample standard deviations alone do not establish significance
+or exclude seed variance as an explanation.
 If evidence is missing, mark the claim as not_evaluated or unsupported.
 Prefer concise, reviewable evidence over promotional language."""
 
@@ -367,11 +371,13 @@ def _evaluate_paired_hypothesis(
         # metric actually favors the claim.
         if not any(evaluated):
             return "unsupported", added_evidence, limitations
-        return "partially_supported", added_evidence, limitations
+        limitations.append("Metric directions alone cannot determine support for the stated hypothesis when evidence is incomplete.")
+        return "not_evaluated", added_evidence, limitations
     if all(evaluated):
         return "supported", added_evidence, limitations
     if any(evaluated):
-        return "partially_supported", added_evidence, limitations
+        limitations.append("Mixed metric directions require evaluation against the stated hypothesis; an ancillary improvement is not partial support by itself.")
+        return "not_evaluated", added_evidence, limitations
     return "unsupported", added_evidence, limitations
 
 

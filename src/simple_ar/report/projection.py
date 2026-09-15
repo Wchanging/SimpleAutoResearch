@@ -54,7 +54,7 @@ def attach_implementation_evidence(
     context.results = {**context.results, "implementation": {
         "artifact": implementation_ref.path, "status": record["status"],
         "asset_integrity": record["asset_integrity"], "evidence": evidence,
-        "interpretation": "Patch records code changes; validation and review are checks, not proof of scientific improvement. Missing or truncated evidence cannot support unseen implementation details.",
+        "interpretation": "The frozen patch, not the proposed plan, defines what was modified. Calling an existing utility with new arguments is reuse, not evidence that the utility implementation was changed. Validation and review are checks, not proof of scientific improvement. Missing or truncated evidence cannot support unseen implementation details.",
     }}
     context.source_handles.append(SourceHandle(
         handle="artifact:implementation", kind="implementation_result",
