@@ -8,6 +8,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Fixed
 
+- Research TOML can record an explicit candidate idea selection for a prepared
+  experiment, preserving the choice in the canonical session instead of
+  requiring an out-of-band edit.
+
 - Keep an explicit per-call output-token cap authoritative. The optional
   reasoning output setting is now only a fallback when no caller or client
   cap exists, so provider-specific reasoning configuration cannot silently

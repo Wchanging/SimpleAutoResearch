@@ -5,7 +5,8 @@ import tomllib
 
 
 FIELDS = {
-    "task": {"goal": ("topic", str), "outputs": ("outputs", list), "output_root": ("output_root", str)},
+    "task": {"goal": ("topic", str), "outputs": ("outputs", list), "output_root": ("output_root", str),
+              "selected_idea_id": ("selected_idea_id", str)},
     "model": {"name": ("model", str), "max_output_tokens": ("max_output_tokens", int)},
     "budget": {"total_tokens": ("total_tokens", int), "llm_requests": ("llm_requests", int),
                "process_invocations": ("process_invocations", int), "process_wall_seconds": ("process_wall_seconds", int)},

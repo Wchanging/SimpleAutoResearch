@@ -427,6 +427,9 @@ def _print_research_session(args: argparse.Namespace) -> None:
         "research_max_documents": args.max_results,
         "report": report_config,
     }
+    selected_idea_id = str(getattr(args, "selected_idea_id", "") or "").strip()
+    if selected_idea_id:
+        config["research_selected_idea_id"] = selected_idea_id
     if execution is not None:
         config["execution"] = execution
     if args.queries:

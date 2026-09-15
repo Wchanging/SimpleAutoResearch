@@ -130,6 +130,20 @@ class ResearchConfigTests(unittest.TestCase):
             self.assertIsNone(args.command_argv)
             self.assertEqual(args.max_chunks, 300)
 
+    def test_config_can_record_an_explicit_idea_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text(
+                '[task]\ngoal="Continual learning"\noutputs=["experiments"]\n'
+                'selected_idea_id="idea-replay"\n',
+                encoding="utf-8",
+            )
+            argv = ["research-session", "--config", str(path)]
+            defaults = research_defaults(argv)
+            self.assertEqual(defaults["selected_idea_id"], "idea-replay")
+            args = build_parser(research_defaults=defaults).parse_args(argv)
+            self.assertEqual(args.selected_idea_id, "idea-replay")
+
     def test_unknown_or_invalid_values_do_not_silently_use_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "research.toml"
