@@ -1,13 +1,20 @@
 """Writer checkpoint input identity at the persisted capability boundary."""
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
-from simple_ar.report.schema import ReportContext, ReportMemory, ReportRuntimeConfig, ReportSectionPlan
+from simple_ar.report.schema import (
+    ReportContext,
+    ReportMemory,
+    ReportRuntimeConfig,
+    ReportSectionPlan,
+    SourceHandle,
+)
 from simple_ar.report.agent import run_report_agent
 from simple_ar.report.tool_gateway import ReportToolGateway
 from simple_ar.integrations.llm import LLMError
@@ -19,7 +26,12 @@ class ReportCheckpointTests(unittest.TestCase):
     def test_minor_factual_finding_is_revised_within_existing_limit(self):
         context = ReportContext(topic="Calibration", report_mode="experiment")
         memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])
-        for kind in ("metric_mismatch", "unsupported_claim", "missing_limitation"):
+        for kind in (
+            "metric_mismatch",
+            "unsupported_claim",
+            "citation_misuse",
+            "missing_limitation",
+        ):
             with self.subTest(kind=kind):
                 calls = []
 
@@ -173,6 +185,72 @@ class ReportCheckpointTests(unittest.TestCase):
         rows = [dict(zip(table["columns"], row)) for row in table["rows"]]
         self.assertEqual([row["metric_id"] for row in rows], ["summary", "raw"])
         self.assertTrue(all("_after_task_" not in row["name"] for row in rows))
+
+    def test_report_prompt_projects_repeated_protocol_and_source_metadata(self):
+        from simple_ar.report.agent import _writer_prompt
+
+        section = ReportSectionPlan(
+            section_id="method",
+            heading="Method",
+            goal="Describe the executed method.",
+            evidence_handles=["paper:p1"],
+        )
+        source = SourceHandle(
+            handle="paper:p1",
+            kind="paper",
+            citation_key="P1",
+            paper_id="p1",
+            title="A paper",
+            summary="S" * 2000,
+            section="Section " + "x" * 500,
+            metadata={"method": "M" * 500, "full_text": "X" * 5000},
+            claim="Relevant evidence.",
+        )
+        protocol = {
+            "contract_id": "contract-1",
+            "dataset": "CIFAR-100",
+            "metrics": ["accuracy"],
+            "proposed_change": "Use the approved loss.",
+            "raw_protocol_detail": "R" * 5000,
+        }
+        context = ReportContext(
+            topic="Calibration",
+            report_mode="experiment",
+            experiment_plan={
+                "hypothesis": "The change improves retention.",
+                "paired_protocols": [
+                    {"seed": 0, "condition": "baseline", "artifact": "b.json", "protocol": protocol},
+                    {"seed": 0, "condition": "candidate", "artifact": "c.json", "protocol": protocol},
+                ],
+            },
+        )
+        memory = ReportMemory(section_plan=[section], source_handles=[source])
+        config = ReportRuntimeConfig()
+        template = load_report_template_bundle(report_mode="experiment", config=config)
+        prompt = _writer_prompt(
+            context=context,
+            template=template,
+            memory=memory,
+            section=section,
+            config=config,
+            extra_context=[],
+            previous_draft=None,
+            review=None,
+            source_batch_index=1,
+            source_batch_count=1,
+            include_previous_draft=False,
+            draft_mode="initial",
+        )
+        payload = json.loads(prompt[prompt.find("{"):])
+        plan = payload["global_research_context"]["experiment_plan"]
+        self.assertEqual(len(plan["paired_runs"]), 2)
+        self.assertEqual(len(plan["paired_protocols"]), 1)
+        self.assertNotIn("raw_protocol_detail", json.dumps(plan))
+        projected_source = payload["source_handles"][0]
+        self.assertEqual(len(projected_source["summary"]), 800)
+        self.assertEqual(len(projected_source["section"]), 240)
+        self.assertNotIn("full_text", projected_source["metadata"])
+        self.assertEqual(len(projected_source["metadata"]["method"]), 160)
 
     def test_reviewer_failure_obeys_explicit_fallback_setting(self):
         context = ReportContext(topic="Calibration", report_mode="experiment")

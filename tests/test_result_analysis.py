@@ -51,6 +51,37 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertIn("f1", result.audit.missing_required_metrics)
         self.assertIn("all comparable metrics are zero", result.audit.weak_metric_signals)
 
+    def test_paired_hypothesis_uses_directional_summary_evidence(self) -> None:
+        context = AnalysisContext(
+            task_id="paired",
+            hypotheses=[{
+                "id": "h1",
+                "statement": "The candidate lowers forgetting.",
+                "metric_refs": ["forgetting"],
+                "evidence": [{"source": "paper-1"}],
+            }],
+            expected_metrics=[{"name": "forgetting", "direction": "lower"}],
+            metrics={"forgetting": 0.6},
+            project_results={
+                "execution_result": {"status": "passed"},
+                "paired_summary": [{
+                    "metric": "forgetting",
+                    "n": 3,
+                    "baseline_mean": 0.7,
+                    "candidate_mean": 0.6,
+                    "delta_mean": -0.1,
+                }],
+            },
+        )
+
+        result = run_result_analysis(context)
+
+        self.assertEqual(result.claims[0].verdict, "supported")
+        self.assertIn("paired_summary:forgetting", {
+            item.get("source") for item in result.claims[0].evidence
+        })
+        self.assertIn("no significance test", result.claims[0].limitations[0])
+
     def test_llm_supported_claim_without_evidence_is_downgraded(self) -> None:
         context = AnalysisContext(
             task_id="T2",

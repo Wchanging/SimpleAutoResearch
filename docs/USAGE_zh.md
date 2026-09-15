@@ -56,7 +56,7 @@ SIMPLE_AR_LLM_API=responses
 SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
 SIMPLE_AR_LLM_REASONING_EFFORT=
 SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_TIMEOUT_SEC=
+SIMPLE_AR_LLM_TIMEOUT_SEC=180
 SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
@@ -75,7 +75,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `SIMPLE_AR_LLM_API` 控制请求形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`，临时错误只在同一接口内有限重试；`chat` 会直接发送 Chat Completions 风格的 `messages`。已有的 `auto` 模式才会在 Responses 重试后再尝试 Chat，用于兼容只暴露其中一种接口的网关。
 - `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` 可选地指定 Chat Completions 的输出参数名：`max_tokens` 或 `max_completion_tokens`；`auto` 会在可能时根据模型名选择。
 - `SIMPLE_AR_LLM_REASONING_EFFORT` 是可选的、由模型文档定义的推理强度，例如 `low` 或 `high`，只会通过 Chat Completions 的 provider 扩展字段转发。`SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` 可以在调用方设置了输出上限时为推理过程扩大传输上限；调用方未设置上限时不会凭空增加新的上限。
-- `SIMPLE_AR_LLM_TIMEOUT_SEC` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传客户端超时。只有你确实想限制单次请求等待时间时才设置正数。
+- `SIMPLE_AR_LLM_TIMEOUT_SEC` 默认是每次 provider 尝试 180 秒；慢速服务商可以设置更大的正数，只有明确设为 `0` / `off` / `none` / `unlimited` 才不向 provider 传客户端超时。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传输出上限。只有你确实想限制模型输出长度时才设置正数。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时、5xx 响应和 Cloudflare 524 origin timeout。
 - 在线 pipeline 阶段在这些重试耗尽后默认失败，并保留可恢复状态。只有明确设置

@@ -60,7 +60,7 @@ SIMPLE_AR_LLM_API=responses
 SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
 SIMPLE_AR_LLM_REASONING_EFFORT=
 SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_TIMEOUT_SEC=
+SIMPLE_AR_LLM_TIMEOUT_SEC=180
 SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
@@ -91,9 +91,9 @@ Notes:
   provider extension field. `SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` can expand
   an explicit per-call output cap to leave room for reasoning; it does not add
   a cap when the caller has left output unlimited.
-- `SIMPLE_AR_LLM_TIMEOUT_SEC` is optional. Leave it empty, or set it to
-  `0`/`off`/`none`, to omit a client-side timeout; set a positive value only
-  when you deliberately want to bound request time.
+- `SIMPLE_AR_LLM_TIMEOUT_SEC` defaults to 180 seconds per provider attempt.
+  Set a larger positive value for a slow provider, or explicitly set
+  `0`/`off`/`none` to disable the client-side timeout.
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` is optional. Leave it empty, or set it to
   `0`/`off`/`none`, to omit provider output-limit parameters; set a positive
   value only when you deliberately want to bound response size.

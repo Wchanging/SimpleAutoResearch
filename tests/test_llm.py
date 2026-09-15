@@ -362,7 +362,7 @@ class LLMParsingTests(unittest.TestCase):
         completion.assert_not_called()
         sleep.assert_called_once_with(0.25)
 
-    def test_default_env_omits_implicit_timeout_but_honors_explicit_output_cap(self) -> None:
+    def test_default_env_uses_bounded_timeout_but_honors_explicit_output_cap(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -374,7 +374,7 @@ class LLMParsingTests(unittest.TestCase):
         ):
             client = LLMClient.from_env()
 
-        self.assertIsNone(client._settings.request_timeout_sec)
+        self.assertEqual(client._settings.request_timeout_sec, 180.0)
         self.assertIsNone(client._settings.max_output_tokens)
 
         response = {"choices": [{"message": {"content": "ok"}}]}
@@ -384,7 +384,7 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(output, "ok")
         api_mode, request = openai_call.call_args.args
         self.assertEqual(api_mode, "chat")
-        self.assertNotIn("timeout", request)
+        self.assertEqual(request["timeout"], 180.0)
         self.assertEqual(request["max_completion_tokens"], 999)
 
     def test_chat_cap_uses_completion_token_param_for_newer_models(self) -> None:

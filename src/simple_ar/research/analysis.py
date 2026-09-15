@@ -494,8 +494,9 @@ def _experiment_set_payload(context: CapabilityContext, collection: Mapping[str,
                 "delta_mean": sum(values) / len(values), "delta_sample_std": sample_std(values),
                 "protocol": group["protocol"], "sources": [{"baseline_ref": pair["baseline_ref"],
                     "candidate_ref": pair["candidate_ref"]} for pair, _ in selected]})
+    metrics = _unique_candidate_summary_metrics(summaries)
     return {"status": "passed" if statuses and not missing and all(s == "passed" for s in statuses) else "incomplete",
-            "metrics": {}, "comparisons": comparisons, "seed_evidence": rows,
+            "metrics": metrics, "comparisons": comparisons, "seed_evidence": rows,
             "paired_summary": summaries,
             "implementation_ref": collection.get("implementation_ref"),
             "candidate_revision": collection.get("candidate_revision", 0),
@@ -503,6 +504,27 @@ def _experiment_set_payload(context: CapabilityContext, collection: Mapping[str,
             "missing_measurements": missing, "failed_measurements": failed, "planned_pairs": len(collection["pairs"]),
             "limitations": ["Paired summaries are descriptive, grouped by declared protocol and observed protected-file identity. "
                 "Only the current candidate revision is included; no significance test or population uncertainty is established."]}
+
+
+def _unique_candidate_summary_metrics(
+    summaries: list[Mapping[str, Any]],
+) -> dict[str, float]:
+    """Expose only unambiguous candidate aggregates as analysis metrics."""
+    values_by_name: dict[str, list[float]] = {}
+    for summary in summaries:
+        name = str(summary.get("metric") or "").strip()
+        value = summary.get("candidate_mean")
+        if (not name or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))):
+            continue
+        values_by_name.setdefault(name, []).append(float(value))
+    return {
+        name: values[0]
+        for name, values in values_by_name.items()
+        if values and all(math.isclose(value, values[0], rel_tol=1e-12,
+                                       abs_tol=1e-12) for value in values)
+    }
 
 
 def analyze_experiment_capability(
@@ -575,6 +597,7 @@ def analyze_experiment_capability(
     if is_collection:
         project_results["seed_evidence"] = payload["seed_evidence"]
         project_results["comparisons"] = payload["comparisons"]
+        project_results["paired_summary"] = payload["paired_summary"]
     analysis = analyze_results(
         AnalysisRequest(
             context=base_context.model_copy(

@@ -117,7 +117,7 @@ SIMPLE_AR_LLM_API=responses
 SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
 SIMPLE_AR_LLM_REASONING_EFFORT=
 SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_TIMEOUT_SEC=
+SIMPLE_AR_LLM_TIMEOUT_SEC=180
 SIMPLE_AR_MAX_OUTPUT_TOKENS=
 SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
 SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
@@ -140,10 +140,11 @@ provider compatibility. Set `SIMPLE_AR_JSON_RESPONSE_FORMAT=auto` or
 `SIMPLE_AR_LLM_BACKEND=openai` uses the OpenAI Python SDK directly and is the
 default transport. Set it to `litellm` only when you need the older LiteLLM
 compatibility layer for a non-standard provider.
-Leave `SIMPLE_AR_LLM_TIMEOUT_SEC` and `SIMPLE_AR_MAX_OUTPUT_TOKENS` empty
-or set them to `0`/`off`/`none` to omit client-side timeout and provider
-output-limit parameters. Set positive values only when you intentionally want
-to bound request time or output size.
+`SIMPLE_AR_LLM_TIMEOUT_SEC` defaults to 180 seconds per provider attempt;
+set it to a larger positive value for slow providers, or to `0`/`off`/`none`
+to explicitly disable the client-side timeout. `SIMPLE_AR_MAX_OUTPUT_TOKENS`
+remains uncapped by default; set a positive value only when you intentionally
+want to bound response size.
 `SIMPLE_AR_LLM_API=responses` uses Responses API-style `instructions` and
 `input` and retries transient failures on that same API only. Set it to `chat`
 when your provider should always use Chat Completions directly. Use the

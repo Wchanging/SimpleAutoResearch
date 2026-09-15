@@ -42,7 +42,9 @@ class LLMSettings:
         output_price_per_million: Optional output-token price used for local
             cost estimates.
         request_timeout_sec: Optional per-request provider timeout in
-            seconds. ``None`` means do not pass a client-side timeout.
+            seconds. Direct ``LLMSettings`` instances may use ``None`` to
+            disable it; ``from_env`` uses a documented finite default unless
+            the environment explicitly disables the timeout.
         max_output_tokens: Optional client-wide default output-token budget per
             request. ``None`` disables the client-wide default; an explicit
             per-call cap supplied by a pipeline step still applies.
@@ -232,7 +234,7 @@ class LLMClient:
             base_url=os.environ.get("OPENAI_BASE_URL", ""),
             input_price_per_million=_optional_float("SIMPLE_AR_INPUT_PRICE_PER_1M"),
             output_price_per_million=_optional_float("SIMPLE_AR_OUTPUT_PRICE_PER_1M"),
-            request_timeout_sec=_optional_positive_float("SIMPLE_AR_LLM_TIMEOUT_SEC", default=None),
+            request_timeout_sec=_optional_positive_float("SIMPLE_AR_LLM_TIMEOUT_SEC", default=180.0),
             max_output_tokens=max_output_tokens if max_output_tokens is not None else _optional_positive_int("SIMPLE_AR_MAX_OUTPUT_TOKENS", default=None),
             retry_attempts=_positive_int("SIMPLE_AR_LLM_RETRY_ATTEMPTS", default=3),
             retry_base_delay_sec=_positive_float("SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC", default=1.0),

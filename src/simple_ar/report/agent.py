@@ -1117,15 +1117,17 @@ def _writer_prompt(
         "visual_requirements": section_visuals,
         "global_research_context": {
             "evidence_summary": context.evidence_summary[:3000],
-            "execution_context": context.execution_context[:8000],
-            "experiment_plan": context.experiment_plan,
+            "execution_context": _compact_execution_context(context.execution_context),
+            "experiment_plan": _compact_experiment_plan(context.experiment_plan),
             "verified_execution_results": _compact_execution_results(context.results),
             "synthesis": context.synthesis_markdown[:3000],
             "hypothesis": context.hypothesis_markdown[:1500],
         },
         "limitations": memory.limitations[:8],
         "source_handles": _handles_for_section(memory, section),
-        "metric_sources": _prompt_metrics(memory),
+        "metric_sources": _prompt_metrics(
+            memory, detail=_report_metric_detail(section.heading)
+        ),
         "prior_claim_notes": _writer_prior_claim_notes(memory),
         "previous_draft": (
             previous_draft.model_dump(mode="json")
@@ -1205,10 +1207,12 @@ def _writer_recovery_prompt(
         ),
         "topic": context.topic,
         "objective": memory.objective,
-        "execution_context": context.execution_context[:8000],
-        "experiment_plan": context.experiment_plan,
+        "execution_context": _compact_execution_context(context.execution_context),
+        "experiment_plan": _compact_experiment_plan(context.experiment_plan),
         "verified_execution_results": _compact_execution_results(context.results),
-        "metric_sources": _prompt_metrics(memory),
+        "metric_sources": _prompt_metrics(
+            memory, detail=_report_metric_detail(section.heading)
+        ),
         "section": {
             "section_id": section.section_id,
             "heading": section.heading,
@@ -1293,9 +1297,11 @@ def _reviewer_prompt(
         "document_plan": _compact_document_plan(memory),
         "visual_requirements": section_visuals,
         "known_limitations": memory.limitations[:8],
-        "experiment_plan": context.experiment_plan,
+        "experiment_plan": _compact_experiment_plan(context.experiment_plan),
         "allowed_sources": _handles_for_section(memory, section),
-        "metric_sources": _prompt_metrics(memory),
+        "metric_sources": _prompt_metrics(
+            memory, detail=_report_metric_detail(section.heading)
+        ),
         "verified_execution_results": _compact_execution_results(context.results),
         "draft": draft.model_dump(mode="json"),
         "tool_policy": {
@@ -1459,6 +1465,77 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
                     row["metrics"] = _metrics(metric_rows)
             compact["comparisons"].append(row)
     return compact
+
+
+def _compact_experiment_plan(plan: Mapping[str, Any] | object) -> dict[str, Any]:
+    """Keep report prompts focused while preserving the executed protocol.
+
+    The persisted report snapshot keeps the complete experiment contract.  A
+    Writer or Reviewer only needs the user-facing plan plus one compact copy of
+    each distinct paired protocol; the same protocol was previously repeated
+    once per seed and could dominate a long provider request.
+    """
+    if not isinstance(plan, Mapping):
+        return {}
+
+    compact = {
+        str(key): value
+        for key, value in plan.items()
+        if key != "paired_protocols"
+    }
+    paired = plan.get("paired_protocols")
+    if not isinstance(paired, list):
+        return compact
+
+    runs: list[dict[str, Any]] = []
+    protocols: list[dict[str, Any]] = []
+    seen_protocols: set[str] = set()
+    protocol_keys = (
+        "contract_id",
+        "schema_version",
+        "protocol_revision",
+        "dataset_refs",
+        "split_spec",
+        "metric_specs",
+        "comparison_conditions",
+        "protected_assets",
+    )
+    for item in paired:
+        if not isinstance(item, Mapping):
+            continue
+        run = {
+            key: item[key]
+            for key in ("seed", "condition", "artifact")
+            if key in item
+        }
+        if run:
+            runs.append(run)
+        protocol = item.get("protocol")
+        if not isinstance(protocol, Mapping):
+            continue
+        projection = {
+            key: protocol[key]
+            for key in protocol_keys
+            if key in protocol and protocol[key] not in (None, "", [], {})
+        }
+        identity = json.dumps(projection, sort_keys=True, ensure_ascii=False)
+        if projection and identity not in seen_protocols:
+            seen_protocols.add(identity)
+            protocols.append(projection)
+
+    if runs:
+        compact["paired_runs"] = runs
+    if protocols:
+        compact["paired_protocols"] = protocols
+    return compact
+
+
+def _compact_execution_context(value: object) -> str:
+    """Keep the narrative boundary, not repeated commands and artifact paths."""
+    if not isinstance(value, str):
+        return ""
+    narrative = value.split("## Prepared execution specification", 1)[0].strip()
+    return narrative[:5000]
 
 
 def _compact_survey_contract(contract: dict[str, Any]) -> dict[str, Any]:
@@ -1871,7 +1948,7 @@ def _final_sequence(
     return sorted(drafts, key=lambda draft: (order.get(draft.section_id, 9999), draft.section_id))
 
 
-def _prompt_metrics(memory: ReportMemory) -> dict[str, Any]:
+def _prompt_metrics(memory: ReportMemory, *, detail: str = "full") -> dict[str, Any]:
     """Build a compact model-facing table while retaining raw evidence elsewhere.
 
     Paired experiments also keep task-by-task measurements in the session for
@@ -1892,10 +1969,21 @@ def _prompt_metrics(memory: ReportMemory) -> dict[str, Any]:
             if not metric.label.startswith("paired_summary:")
             and "_after_task_" not in metric.name
         ]
-        metrics = [*paired_summary, *seed_metrics]
+        metrics = (
+            paired_summary
+            if detail == "summary"
+            else [*paired_summary, *seed_metrics]
+        )
     return {"columns": columns, "rows": [
         [getattr(metric, column) for column in columns] for metric in metrics
     ]}
+
+
+def _report_metric_detail(heading: str) -> str:
+    """Send per-seed rows only to sections that interpret measured results."""
+    return (
+        "full" if heading.strip().lower() in {"results", "result"} else "summary"
+    )
 
 
 def _prompt_handle_view(handle: Any) -> dict[str, Any]:
@@ -1906,6 +1994,14 @@ def _prompt_handle_view(handle: Any) -> dict[str, Any]:
     normal body citation generation.
     """
     data = handle.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    if "title" in data:
+        data["title"] = str(data["title"])[:240]
+    if "summary" in data:
+        data["summary"] = str(data["summary"])[:800]
+    metadata = _compact_source_metadata(data.get("metadata", {}))
+    data["metadata"] = {key: value[:160] for key, value in metadata.items()}
+    if "section" in data:
+        data["section"] = str(data["section"])[:240]
     citation_key = data.get("citation_key") or ""
     if citation_key:
         data["cite_as"] = f"[@{citation_key}]"
@@ -1922,7 +2018,11 @@ def _needs_revision(review: ReportSectionReview) -> bool:
     # minor. Informational/style suggestions do not spend another writing pass.
     return any(
         finding.severity in {"major", "critical"}
-        or (finding.severity == "minor" and finding.type in {"metric_mismatch", "unsupported_claim"})
+        or (
+            finding.severity == "minor"
+            and finding.type
+            in {"metric_mismatch", "unsupported_claim", "citation_misuse"}
+        )
         for finding in review.findings
     )
 

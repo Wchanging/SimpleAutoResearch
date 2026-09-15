@@ -8,10 +8,17 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Changed
 
+- Bound OpenAI-compatible provider requests to 180 seconds per attempt by
+  default, while keeping `SIMPLE_AR_LLM_TIMEOUT_SEC=0`/`off`/`none` as an
+  explicit opt-out. Output tokens remain uncapped unless configured.
+
 - Feed the selected research design, or the explicit prepared execution
   protocol when no design artifact is available, into result analysis. Preserve
   the hypothesis, metric references, evidence references, and metric directions
   instead of reducing the handoff to the research question alone.
+
+- Let the report reviewer spend its bounded revision pass on minor citation
+  misuse findings as well as factual metric mismatches and unsupported claims.
 
 - Pass the existing experiment plan to both Report Writer and Reviewer. Paired
   reports now expose compact measurement provenance labels while retaining

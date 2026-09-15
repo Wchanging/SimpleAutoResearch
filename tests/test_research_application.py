@@ -288,6 +288,13 @@ class ResearchApplicationTests(unittest.TestCase):
                 analysis["analysis"]["claims"][0]["verdict"],
                 "not_evaluated",
             )
+            self.assertIn(
+                "accuracy",
+                {
+                    row["name"]
+                    for row in analysis["analysis"]["metric_summary"]["metrics"]
+                },
+            )
             paired = app.controller.store.read_json(
                 app.controller.store.ref(Path(final.state_refs["analysis"].path).parent / "paired_analysis.json")
             )

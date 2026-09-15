@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -255,20 +256,118 @@ def hypothesis_placeholder_claims(context: AnalysisContext, metric_summary: dict
             )
         ]
     claims: list[AnalysisClaim] = []
+    paired_summaries = _paired_summary_rows(context.project_results)
     for index, row in enumerate(hypotheses, start=1):
         statement = str(row.get("statement") or row.get("claim") or row).strip()
+        evidence = normalize_evidence(row.get("evidence") or row.get("evidence_refs"))
+        metric_refs = normalize_metric_refs(row.get("metric_refs") or row.get("metrics"))
+        verdict = "not_evaluated"
+        limitations = ["No grounded verdict was found in the run artifacts."]
+        if paired_summaries:
+            verdict, evidence, limitations = _evaluate_paired_hypothesis(
+                metric_refs, evidence, paired_summaries, metric_summary
+            )
         claims.append(
             AnalysisClaim(
                 claim_id=str(row.get("id") or f"hypothesis-{index}"),
                 claim=statement,
-                verdict="not_evaluated",
-                evidence=normalize_evidence(row.get("evidence") or row.get("evidence_refs")),
-                metric_refs=normalize_metric_refs(row.get("metric_refs") or row.get("metrics")),
-                limitations=["No grounded verdict was found in the run artifacts."],
+                verdict=verdict,
+                evidence=evidence,
+                metric_refs=metric_refs,
+                limitations=limitations,
                 confidence="low",
             )
         )
     return claims
+
+
+def _paired_summary_rows(project_results: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the canonical paired summaries available to result analysis."""
+    candidates: list[Any] = [project_results.get("paired_summary")]
+    execution = project_results.get("execution_result")
+    if isinstance(execution, Mapping):
+        candidates.append(execution.get("paired_summary"))
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return [row for row in candidate if isinstance(row, dict)]
+    return []
+
+
+def _evaluate_paired_hypothesis(
+    metric_refs: list[str],
+    evidence: list[dict[str, Any]],
+    summaries: list[dict[str, Any]],
+    metric_summary: Mapping[str, Any],
+) -> tuple[str, list[dict[str, Any]], list[str]]:
+    """Evaluate declared metric directions from paired summaries.
+
+    This is a directional, descriptive verdict. It never treats an unknown
+    direction, an ambiguous metric, or a zero change as support.
+    """
+    directions = {
+        str(row.get("name")): str(row.get("direction") or "unknown")
+        for row in metric_summary.get("metrics", []) or []
+        if isinstance(row, Mapping) and row.get("name")
+    }
+    evaluated: list[bool] = []
+    unavailable: list[str] = []
+    added_evidence = list(evidence)
+    for reference in metric_refs:
+        names = [reference]
+        if ":" in reference:
+            names.append(reference.split(":", 1)[0])
+        matches = [
+            row for name in names for row in summaries
+            if str(row.get("metric") or "").strip() == name
+        ]
+        if len(matches) != 1:
+            unavailable.append(reference)
+            continue
+        row = matches[0]
+        metric = str(row.get("metric") or reference).strip()
+        direction = directions.get(metric, "unknown")
+        delta = row.get("delta_mean")
+        if (direction not in {"higher", "lower"}
+                or isinstance(delta, bool)
+                or not isinstance(delta, (int, float))
+                or not math.isfinite(float(delta))
+                or not row.get("n")):
+            unavailable.append(reference)
+            continue
+        delta_value = float(delta)
+        favorable = (delta_value > 0) if direction == "higher" else (delta_value < 0)
+        evaluated.append(favorable)
+        added_evidence.append({
+            "source": f"paired_summary:{metric}",
+            "metric": metric,
+            "baseline_mean": row.get("baseline_mean"),
+            "candidate_mean": row.get("candidate_mean"),
+            "delta": delta_value,
+            "direction": direction,
+            "n": row.get("n"),
+            "favorable": favorable,
+        })
+
+    if not evaluated:
+        return (
+            "not_evaluated",
+            added_evidence,
+            ["No unique paired measurement with a known direction was available for the declared metrics."],
+        )
+    limitations = [
+        "Directional comparison is descriptive; no significance test or population uncertainty was established."
+    ]
+    if unavailable:
+        limitations.append(
+            "Some declared metrics were unavailable, ambiguous, or had no usable direction: "
+            + ", ".join(unavailable) + "."
+        )
+        return "partially_supported", added_evidence, limitations
+    if all(evaluated):
+        return "supported", added_evidence, limitations
+    if any(evaluated):
+        return "partially_supported", added_evidence, limitations
+    return "unsupported", added_evidence, limitations
 
 
 def deterministic_markdown(
