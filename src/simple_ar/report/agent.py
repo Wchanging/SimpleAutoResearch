@@ -39,6 +39,10 @@ claim requiring revision, not merely a style suggestion.
 Means and sample standard deviations are descriptive: they do not establish
 statistical significance or rule out seed variance. Such claims require an
 actual appropriate statistical analysis in the supplied evidence.
+With a small number of seeds and no significance test, do not call a result
+conclusive, rule out seed noise, or imply stable general improvement. Use
+bounded wording such as "under this protocol" and "descriptive across the
+observed seeds".
 Cite directly relevant original method papers when available in the supplied
 sources; surveys are not a substitute for attribution of the adopted method.
 """
@@ -79,6 +83,10 @@ without paragraph breaks or comparison bullets.
 Flag paper-by-paper note dumps, prompt/planning residue, missing taxonomy,
 missing cross-paper comparison, and performance claims without boundary
 conditions.
+Flag conclusive language, claims that seed noise has been ruled out, or claims
+of stable general improvement when the supplied evidence has only a small seed
+set and descriptive statistics. Ask the Writer to bound those statements to
+the observed protocol unless an appropriate statistical analysis is present.
 Prefer revision instructions that improve synthesis density, evidence coverage,
 and section structure over requests to add more paper-by-paper detail.
 Return one JSON object matching the requested schema.""" + _EXPERIMENT_EVIDENCE_RULES

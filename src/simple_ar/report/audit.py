@@ -272,15 +272,22 @@ def _measurement_table_errors(report_body: str, context: ReportContext) -> list[
 def _claim_audit(memory: ReportMemory) -> ClaimAudit:
     findings: list[ReviewerFinding] = []
     for claim in memory.claims_evidence_matrix:
-        if claim.status == "unsupported":
+        # ``unsupported`` is a valid scientific outcome when the analysis
+        # recorded the measured evidence that failed to support a hypothesis.
+        # It is not the same as an unsupported assertion in the report. Only
+        # flag a rejected claim when its record has no evidence or measurement
+        # link at all; the Writer/Reviewer remains responsible for wording.
+        if claim.status == "unsupported" and not (
+            claim.evidence_handles or claim.metric_ids or claim.citation_ids
+        ):
             findings.append(
                 ReviewerFinding(
                     finding_id=f"claim-{len(findings)+1:03d}",
                     type="unsupported_claim",
                     severity="major",
-                    message=f"Unsupported claim remains in report memory: {claim.claim}",
+                    message=f"Rejected claim has no linked evidence: {claim.claim}",
                     claim_id=claim.claim_id,
-                    suggested_action="Remove, weaken, or move to limitations/future work.",
+                    suggested_action="Link the measured evidence or remove the claim.",
                 )
             )
     status = "warning" if findings else "passed"

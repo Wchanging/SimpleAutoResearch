@@ -26,6 +26,10 @@ from simple_ar.report.schema import (
 
 
 class ReportAuditCapabilityTests(unittest.TestCase):
+    def test_experiment_figures_are_enabled_by_default_and_can_be_disabled(self):
+        self.assertTrue(ReportFigureConfig().enabled)
+        self.assertEqual(ReportFigureConfig(mode="off").mode, "off")
+
     def test_measured_figures_use_declared_groups_and_keep_source_refs(self):
         import xml.etree.ElementTree as ET
         pair = {"seed": 0, "comparability": "declared_match", "baseline": {"status": "passed"},

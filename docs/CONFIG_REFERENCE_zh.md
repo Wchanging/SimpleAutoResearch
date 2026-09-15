@@ -31,9 +31,10 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
   comparison_conditions、protected_assets，可附 contract_id/hypothesis。
   保护文件相对路径以实验 cwd 为基准，共享数据可用绝对路径；不是以 TOML 目录为基准。
   不提供种子插值或新调度器；进程预算须覆盖整个矩阵。
-- `[report]`：`template`、`reviewer`、`max_review_iterations`、`max_section_tokens`。
+- `[report]`：`template`、`reviewer`、`max_review_iterations`、`max_section_tokens`、`figures`。
   `max_section_tokens = 0` 表示不添加报告单次调用的 provider 输出上限；只有确实需要专家级
-  限制时才填写正数。
+  限制时才填写正数。支持的确定性图表默认启用；如需纯文本输出，可设置
+  `[report.figures] enabled = false` 或 `mode = "off"`。
 - 显式 outputs 与 --with-report/--no-report 二选一。只调研不会因配置了材料而训练。
   请求 experiments 但没有执行配置时保留该目标，并在实验处报告准备缺口；自动仓库准备尚未实现。
 - 未实现字段和拼写错误显式报错。暂不接受研究阶段模型或多模型协作配置。

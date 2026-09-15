@@ -35,6 +35,7 @@ from simple_ar.report.citations import (
 )
 from simple_ar.report.memory import initialize_report_memory
 from simple_ar.report.schema import (
+    ClaimEvidenceRecord,
     MetricSource,
     ReportContext,
     SourceHandle,
@@ -976,6 +977,50 @@ class ReportSafetyTests(unittest.TestCase):
             )
         )
         self.assertEqual(wrapped.status, audit.status)
+
+    def test_report_audit_accepts_evidence_backed_negative_hypothesis(self) -> None:
+        context = _report_fixture(
+            [],
+            topic="Replay study",
+            report_mode="experiment",
+            results={"metrics": {"accuracy": 0.12}},
+        )
+        memory = ReportMemory(
+            claims_evidence_matrix=[ClaimEvidenceRecord(
+                claim_id="hypothesis-1",
+                claim="The candidate improves accuracy.",
+                status="unsupported",
+                metric_ids=["metric:accuracy"],
+                notes="Analysis verdict: unsupported.",
+            )]
+        )
+
+        audit = build_report_audit(
+            report="# Results\n\nThe hypothesis was not supported by the measured result.\n",
+            report_body="# Results\n\nThe hypothesis was not supported by the measured result.\n",
+            context=context,
+            memory=memory,
+        )
+
+        self.assertEqual(audit.claim_audit.status, "passed")
+        self.assertEqual(audit.claim_audit.findings, [])
+
+    def test_report_audit_flags_rejected_hypothesis_without_evidence(self) -> None:
+        memory = ReportMemory(claims_evidence_matrix=[ClaimEvidenceRecord(
+            claim_id="hypothesis-1",
+            claim="The candidate improves accuracy.",
+            status="unsupported",
+        )])
+
+        audit = build_report_audit(
+            report="# Results\n\nNo measured result was supplied.\n",
+            report_body="# Results\n\nNo measured result was supplied.\n",
+            context=_report_fixture([], topic="Replay study", report_mode="experiment"),
+            memory=memory,
+        )
+
+        self.assertEqual(audit.claim_audit.status, "warning")
+        self.assertEqual(audit.claim_audit.findings[0].type, "unsupported_claim")
 
     def test_report_audit_does_not_treat_pass_at_k_as_citation(self) -> None:
         paper = Paper(

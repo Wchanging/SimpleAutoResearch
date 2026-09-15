@@ -16,8 +16,10 @@ Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens)
 use_fulltext, allow_pdf_download, keep_raw_pdf),
 `assets` (papers), `execution` (command, cwd, timeout_sec, code_task_config,
 primary_metric, metrics, metric_directions, pairs, protocol), and `report` (template, reviewer,
-max_review_iterations, max_section_tokens). A report section token value of `0` omits the
+max_review_iterations, max_section_tokens, figures). A report section token value of `0` omits the
 per-call provider output cap; use a positive value only as an explicit expert limit.
+Supported deterministic figures are enabled by default for user-facing reports;
+set `[report.figures] enabled = false` or `mode = "off"` for text-only output.
 Use model name `env` for SIMPLE_AR_MODEL; credentials remain in the environment.
 This is the file-based default; explicit `name = ""` selects deterministic processing without LLM calls.
 Outputs may be summary, report, and/or experiments. Explicit outputs cannot be combined

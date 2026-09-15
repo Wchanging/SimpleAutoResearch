@@ -25,9 +25,13 @@ class ReportAuditConfig(ReportModel):
 
 
 class ReportFigureConfig(ReportModel):
-    """Optional deterministic figure generation for report artifacts."""
+    """Deterministic figure generation for report artifacts.
 
-    enabled: bool = False
+    User-facing reports render supported figures by default. ``mode=\"off\"``
+    or an explicit ``enabled=False`` remains the opt-out for text-only output.
+    """
+
+    enabled: bool = True
     max_figures: int = 0
     format: Literal["svg"] = "svg"
     mode: Literal["auto", "off"] = "auto"
