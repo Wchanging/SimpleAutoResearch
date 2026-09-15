@@ -8,6 +8,11 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Fixed
 
+- Carry referenced reading-card content and explicit source-link limitations into
+  idea comparison. Preserve strict reference validation and expose comparison
+  failure diagnostics. Explicit continuation retries a fallback comparison
+  without replaying completed research or discarding historical artifacts.
+
 - Restore Rich research-session panels, action descriptions, elapsed-time indicators
   and artifact tables; relay existing CodeTask progress within research runs.
   Redirected output retains static milestones without animated frames.

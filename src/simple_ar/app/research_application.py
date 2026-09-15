@@ -364,6 +364,13 @@ class ResearchApplication:
                     self.controller.manifest.state_refs.pop(key, None)
                 self._persist_inputs(diagnostics)
             else:
+                # An invalid comparison is not a user decision to reject every
+                # idea. Explicit continuation retries only this missing result.
+                if self._next_action() == "research_design" and "assessment" in self.controller.manifest.state_refs:
+                    assessment = self.controller.store.read_json(self.controller.manifest.state_refs["assessment"])
+                    if assessment.get("generation_mode") == "deterministic_fallback":
+                        self.controller.manifest.state_refs.pop("assessment")
+                        self.controller.manifest.current_attempt = None
                 self._persist_application_views()
             return self.view()
 
@@ -759,6 +766,7 @@ class ResearchApplication:
                     constraints={"hard_constraints": list(self.brief.hard_constraints),
                                  "research_request": self._problem_markdown()},
                     evidence_chunks=tuple(read.bundle.chunks),
+                    evidence_cards=(*read.claim_cards, *read.method_cards),
                     llm_client=self.services.llm_client,
                 ), self._input_refs("synthesis", "read", "brief", "runtime_config"), allow_partial=True,
             )
@@ -773,7 +781,8 @@ class ResearchApplication:
                 selected = assessment.get("recommended_idea_id")
                 reason = assessment.get("recommendation_reason", "")
             if not selected and self.services.llm_client is not None:
-                self.controller.pause("No model recommendation is available. Review idea_comparison and select a candidate before design.")
+                details = " ".join(assessment.get("diagnostics", []))
+                self.controller.pause("No validated model recommendation is available. " + details + " Review idea_comparison before continuing.")
                 self._persist_application_views()
                 return False
             if not selected:

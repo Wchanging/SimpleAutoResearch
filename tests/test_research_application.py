@@ -1041,10 +1041,37 @@ class ResearchApplicationTests(unittest.TestCase):
             assessment_ref = view.state_refs["assessment"]
             self.assertTrue((root / "session" / assessment_ref.path).is_file())
             self.assertIn("design", view.state_refs)
+
             self.assertEqual(view.work_plan["status"], "partial")
             outputs = {row["name"]: row for row in view.work_plan["requested_outputs"]}
             self.assertEqual(outputs["experiment"]["status"], "blocked")
             self.assertEqual(outputs["report"]["status"], "pending")
+
+    def test_continue_retries_invalid_assessment_without_replaying_research(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "agents.md"
+            paper.write_text("# Results\n\nValidation reports accuracy 0.75 for reliable agents.\n", encoding="utf-8")
+            app = create_session(
+                ResearchBrief(request_text="Study reliable agents.", requested_outputs=("experiment", "report"),
+                              asset_requests=({"locator": str(paper), "role": "paper"},)),
+                root=root / "session", services=ResearchApplicationServices(max_results=1))
+            app.advance(max_actions=7)
+            self.assertEqual(app.view().next_action, "research_design")
+            retained = {k: app.view().state_refs[k] for k in ("plan", "search", "read", "synthesis")}
+            original = app.view().state_refs["assessment"]
+            failed = app.controller.store.write_json(
+                "invalid-assessment.json", {"generation_mode": "deterministic_fallback"},
+                kind="idea_assessment", schema="idea_assessment.v1", producer="test")
+            app.controller.manifest.state_refs["assessment"] = failed
+            app.controller.pause("Invalid comparison")
+            app.continue_session(reason="Retry comparison")
+            self.assertEqual(app.view().next_action, "assess_ideas")
+            app.advance(max_actions=1)
+            self.assertEqual(app.view().next_action, "research_design")
+            self.assertNotEqual(app.view().state_refs["assessment"], original)
+            self.assertEqual(retained, {k: app.view().state_refs[k] for k in retained})
+            self.assertTrue((app.controller.store.root / original.path).exists())
 
     def test_deterministic_plan_mode_keeps_later_llm_stages_available(self) -> None:
         class Client:

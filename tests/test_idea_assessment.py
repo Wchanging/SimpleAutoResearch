@@ -11,11 +11,40 @@ from simple_ar.research.assessment import (
     assess_ideas,
     run_idea_assessment_capability,
 )
-from simple_ar.research.contracts import IdeaCandidate, NoveltyCheck, TextChunk
+from simple_ar.research.contracts import ClaimCard, IdeaCandidate, NoveltyCheck, TextChunk
 from simple_ar.integrations.llm import LLMError
 
 
 class IdeaAssessmentTests(unittest.TestCase):
+    def test_comparison_accepts_source_backed_card_but_not_unresolved_card(self):
+        candidate = IdeaCandidate(idea_id="a", title="Candidate", hypothesis="Effect",
+                                  proposed_change="Change training", expected_outcome="Improvement",
+                                  motivation_refs=["claim-a"], metrics=["accuracy"])
+        class Client:
+            def ask_json(self, system, user, **kwargs):
+                self.payload = json.loads(user)
+                return dict(assessments=[dict(
+                    idea_id="a", relevance="Relevant", differentiation="Unknown",
+                    feasibility="Small", cost="One run", falsifiability="No gain",
+                    recommendation="Validate", supporting_evidence_refs=["claim-a"],
+                    counter_evidence_refs=[], unknowns=[])], recommended_idea_id="a",
+                    recommendation_reason="Bounded validation")
+        client = Client()
+        from dataclasses import replace
+        request = IdeaAssessmentRequest(
+            candidates=(candidate,), available_evidence_refs=("claim-a", "chunk-a"),
+            evidence_chunks=(TextChunk(chunk_id="chunk-a", document_id="p", text="Source"),),
+            evidence_cards=(ClaimCard(claim_id="claim-a", paper_id="p", claim="Scoped finding",
+                                      evidence_refs=["chunk-a"]),), llm_client=client)
+        result = assess_ideas(request)
+        self.assertEqual(result.recommended_idea_id, "a")
+        self.assertIn("Scoped finding", client.payload["evidence"][-1]["text"])
+        self.assertEqual(result.model_context[-1]["source_chunk_ids"], ["chunk-a"])
+        invalid = assess_ideas(replace(request, evidence_cards=(
+            replace(request.evidence_cards[0], evidence_refs=["missing"]),)))
+        self.assertIsNone(invalid.recommended_idea_id)
+        self.assertIn("outside the supplied context", invalid.diagnostics[-1])
+
     def test_model_comparison_uses_shared_sources_without_upgrading_readiness(self):
         candidate = IdeaCandidate(
             idea_id="a", title="Candidate", hypothesis="A testable effect",
