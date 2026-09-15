@@ -10,8 +10,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 - Experiment reports now render supported deterministic paired-measurement
   figures by default; `[report.figures] enabled = false` or `mode = "off"`
-  remains an explicit text-only opt-out. Negative, evidence-linked hypothesis
-  outcomes no longer raise the audit's unsupported-claim warning.
+  remains an explicit text-only opt-out. Automatic paired reports select at
+  most four representative metrics instead of producing one figure per task
+  metric. Negative, evidence-linked hypothesis outcomes no longer raise the
+  audit's unsupported-claim warning.
 
 - `research-report --refresh` reanalyzes existing measurements and writes new
   report attempts without retraining or deleting old reports. Model-backed

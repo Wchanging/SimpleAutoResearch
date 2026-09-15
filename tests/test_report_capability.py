@@ -56,6 +56,56 @@ class ReportAuditCapabilityTests(unittest.TestCase):
             absent = assemble_report_document(replace(request, paired_summaries=()), report_dir=root / "no-data")
             self.assertEqual(absent.figures, ())
 
+    def test_default_paired_figures_stay_compact_and_prioritize_core_metrics(self):
+        metrics = [
+            "accuracy", "forgetting", "average_incremental_accuracy",
+            "backward_transfer", "accuracy_after_task_10_on_task_1",
+        ]
+        pair = {
+            "seed": 0,
+            "comparability": "declared_match",
+            "baseline": {"status": "passed"},
+            "candidate": {"status": "passed"},
+            "baseline_ref": {"path": "baseline.json"},
+            "candidate_ref": {"path": "candidate.json"},
+            "metrics": [
+                {"name": name, "baseline": 0.4, "candidate": 0.5}
+                for name in metrics
+            ],
+        }
+        summaries = [
+            {
+                "group_id": 0,
+                "metric": name,
+                "unit": "fraction",
+                "sources": [{
+                    "baseline_ref": pair["baseline_ref"],
+                    "candidate_ref": pair["candidate_ref"],
+                }],
+            }
+            for name in metrics
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = assemble_report_document(
+                ReportAssemblyRequest(
+                    title="Compact paired evaluation",
+                    sections=(ReportSectionDraft(
+                        section_id="results",
+                        heading="Results",
+                        draft_markdown="Measured results.",
+                    ),),
+                    paired_comparisons=(pair,),
+                    paired_summaries=tuple(summaries),
+                ),
+                report_dir=Path(tmp),
+            )
+
+        self.assertEqual(len(result.figures), 4)
+        titles = " ".join(figure.title for figure in result.figures)
+        self.assertIn("accuracy", titles)
+        self.assertIn("forgetting", titles)
+        self.assertNotIn("accuracy_after_task_10_on_task_1", titles)
+
     def test_report_capability_assembles_explicit_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = CapabilityRegistry()

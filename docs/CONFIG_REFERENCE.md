@@ -20,6 +20,8 @@ max_review_iterations, max_section_tokens, figures). A report section token valu
 per-call provider output cap; use a positive value only as an explicit expert limit.
 Supported deterministic figures are enabled by default for user-facing reports;
 set `[report.figures] enabled = false` or `mode = "off"` for text-only output.
+For paired experiments, `max_figures = 0` selects up to four representative
+metrics; set a positive value only when a different figure count is intended.
 Use model name `env` for SIMPLE_AR_MODEL; credentials remain in the environment.
 This is the file-based default; explicit `name = ""` selects deterministic processing without LLM calls.
 Outputs may be summary, report, and/or experiments. Explicit outputs cannot be combined

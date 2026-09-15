@@ -13,6 +13,14 @@ from simple_ar.report.document_plan import visual_plan_for_renderer
 from simple_ar.report.schema import ReportDocumentPlan, ReportFigureConfig
 
 
+_DEFAULT_PAIRED_METRICS = (
+    "accuracy",
+    "forgetting",
+    "average_incremental_accuracy",
+    "backward_transfer",
+)
+
+
 class ReportFigureRecord(BaseModel):
     """One deterministic report figure artifact."""
 
@@ -94,8 +102,19 @@ def add_paired_measurement_figures(*, report_markdown: str, report_dir: Path,
             if group is not None:
                 groups[group].append((comparison, metric))
     figures, blocks = [], []
-    limit = config.max_figures or len(groups)
-    for index, ((group_id, name, unit), pairs) in enumerate(groups.items()):
+    ordered_groups = list(groups.items())
+    if config.max_figures <= 0:
+        preferred = {
+            name: index for index, name in enumerate(_DEFAULT_PAIRED_METRICS)
+        }
+        ordered_groups.sort(key=lambda item: (
+            preferred.get(item[0][1], len(preferred)),
+            item[0][1],
+        ))
+        limit = min(len(ordered_groups), len(_DEFAULT_PAIRED_METRICS))
+    else:
+        limit = config.max_figures
+    for index, ((group_id, name, unit), pairs) in enumerate(ordered_groups):
         if index >= limit:
             break
         values = [row[role] for _, row in pairs for role in ("baseline", "candidate")]

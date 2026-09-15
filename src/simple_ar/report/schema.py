@@ -32,6 +32,8 @@ class ReportFigureConfig(ReportModel):
     """
 
     enabled: bool = True
+    # Zero selects a compact set of representative paired metrics; a positive
+    # value is an explicit expert limit.
     max_figures: int = 0
     format: Literal["svg"] = "svg"
     mode: Literal["auto", "off"] = "auto"
