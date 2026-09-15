@@ -4,6 +4,23 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-15
+
+### Fixed
+
+- Keep an explicit per-call output-token cap authoritative. The optional
+  reasoning output setting is now only a fallback when no caller or client
+  cap exists, so provider-specific reasoning configuration cannot silently
+  enlarge a request.
+
+- Do not classify a hypothesis as partially supported when its only measured
+  direction is unfavorable and another declared metric is unavailable. The
+  result remains unsupported with the missing-evidence limitation preserved.
+
+- Relay report Writer/Reviewer progress through the canonical research CLI,
+  so long section drafting and review expose their existing checkpoint-level
+  messages while retaining the same bounded recovery behavior.
+
 ## 2026-09-14
 
 ### Changed

@@ -362,6 +362,11 @@ def _evaluate_paired_hypothesis(
             "Some declared metrics were unavailable, ambiguous, or had no usable direction: "
             + ", ".join(unavailable) + "."
         )
+        # An unavailable metric does not turn an observed refutation into
+        # support. Only return partial support when at least one measured
+        # metric actually favors the claim.
+        if not any(evaluated):
+            return "unsupported", added_evidence, limitations
         return "partially_supported", added_evidence, limitations
     if all(evaluated):
         return "supported", added_evidence, limitations

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from simple_ar.app.research_intake import normalize_assets, validate_brief, write_intake_artifacts
 from simple_ar.app.research_execution import execution_pairs, execution_request, implementation_request, repair_limit
@@ -76,6 +76,7 @@ class ResearchApplicationServices:
     )
     max_attempts: int = 16
     max_no_progress: int = 3
+    message_callback: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.max_results < 1 or self.idea_limit < 1:
@@ -901,7 +902,8 @@ class ResearchApplication:
             return self._execute(
                 "report_write", "writer",
                 ReportWritingRequest(report_context, memory, config,
-                                     load_report_template_bundle(report_mode=report_context.report_mode, config=config), self.services.llm_client, resume_ref),
+                                     load_report_template_bundle(report_mode=report_context.report_mode, config=config), self.services.llm_client, resume_ref,
+                                     self.services.message_callback),
                 sources + ((resume_ref,) if resume_ref else ()),
                 allow_no_progress_exhausted=True,
             )

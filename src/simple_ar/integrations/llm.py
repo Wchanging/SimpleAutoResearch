@@ -73,11 +73,10 @@ class LLMSettings:
             Leave empty unless the selected model/provider documents the
             option. This is a capability setting, not a provider-specific
             client branch.
-        reasoning_output_tokens: Optional transport cap used to expand an
-            explicit caller cap when ``reasoning_effort`` is configured. It
-            can be larger than a caller's visible-content cap so reasoning
-            models have room to finish a structured response; when no caller
-            cap exists it does not introduce a new cap.
+        reasoning_output_tokens: Optional fallback output cap used only when
+            ``reasoning_effort`` is configured and neither the caller nor the
+            client settings provide a cap. An explicit caller cap always wins;
+            reasoning configuration never silently raises it.
     """
 
     model: str = "gpt-4o-mini"
@@ -302,8 +301,11 @@ class LLMClient:
                 raise LLMError("max_output_tokens must be a positive integer") from exc
             if output_cap < 1:
                 raise LLMError("max_output_tokens must be a positive integer")
-            if self._settings.reasoning_effort and self._settings.reasoning_output_tokens:
-                output_cap = max(output_cap, self._settings.reasoning_output_tokens)
+            request["max_output_tokens"] = output_cap
+        elif self._settings.reasoning_effort and self._settings.reasoning_output_tokens:
+            # Keep precedence visible: per-call cap, client default, then the
+            # optional reasoning fallback.
+            output_cap = self._settings.reasoning_output_tokens
             request["max_output_tokens"] = output_cap
         if response_format is not None:
             if self._settings.api_mode in {"responses", "auto"}:

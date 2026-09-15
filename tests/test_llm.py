@@ -165,7 +165,7 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual(client._settings.reasoning_output_tokens, 8192)
         openai_call.assert_not_called()
 
-    def test_reasoning_provider_options_expand_only_an_explicit_output_cap(self) -> None:
+    def test_reasoning_provider_options_do_not_raise_an_explicit_output_cap(self) -> None:
         client = LLMClient(
             LLMSettings(
                 model="glm-5.3-flash",
@@ -180,8 +180,25 @@ class LLMParsingTests(unittest.TestCase):
             self.assertEqual(client.ask("system", "user", max_output_tokens=1200), "ok")
 
         request = call.call_args.args[1]
-        self.assertEqual(request["max_tokens"], 8192)
+        self.assertEqual(request["max_tokens"], 1200)
         self.assertEqual(request["extra_body"], {"reasoning_effort": "low"})
+
+    def test_reasoning_output_cap_is_used_only_when_no_other_cap_exists(self) -> None:
+        client = LLMClient(
+            LLMSettings(
+                model="glm-5.3-flash",
+                api_key="test-key",
+                api_mode="chat",
+                reasoning_effort="low",
+                reasoning_output_tokens=8192,
+            )
+        )
+        response = {"choices": [{"message": {"content": "ok"}}]}
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response) as call:
+            self.assertEqual(client.ask("system", "user"), "ok")
+
+        request = call.call_args.args[1]
+        self.assertEqual(request["max_tokens"], 8192)
 
     def test_reasoning_option_is_added_only_when_chat_mode_is_selected(self) -> None:
         request = {

@@ -462,6 +462,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
             "process_wall_seconds": args.process_wall_seconds if getattr(args, "process_wall_seconds", None) is not None else (max(60, timeout_sec * 8) if execution is not None else 0),
         },
         max_attempts=32 if code_task_spec is not None else 20,
+        message_callback=lambda message: print_line(f"  - {message}"),
     )
     brief = ResearchBrief(
         request_text=request_text,

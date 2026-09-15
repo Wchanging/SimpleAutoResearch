@@ -82,6 +82,36 @@ class ResultAnalysisTests(unittest.TestCase):
         })
         self.assertIn("no significance test", result.claims[0].limitations[0])
 
+    def test_missing_metric_does_not_turn_only_refuted_evidence_into_partial_support(self) -> None:
+        context = AnalysisContext(
+            task_id="paired-incomplete",
+            hypotheses=[{
+                "id": "h1",
+                "statement": "The candidate lowers forgetting and improves accuracy.",
+                "metric_refs": ["forgetting", "accuracy"],
+            }],
+            expected_metrics=[
+                {"name": "forgetting", "direction": "lower"},
+                {"name": "accuracy", "direction": "higher"},
+            ],
+            metrics={"forgetting": 0.8},
+            project_results={
+                "execution_result": {"status": "passed"},
+                "paired_summary": [{
+                    "metric": "forgetting",
+                    "n": 3,
+                    "baseline_mean": 0.7,
+                    "candidate_mean": 0.8,
+                    "delta_mean": 0.1,
+                }],
+            },
+        )
+
+        result = run_result_analysis(context)
+
+        self.assertEqual(result.claims[0].verdict, "unsupported")
+        self.assertTrue(any("unavailable" in item for item in result.claims[0].limitations))
+
     def test_llm_supported_claim_without_evidence_is_downgraded(self) -> None:
         context = AnalysisContext(
             task_id="T2",

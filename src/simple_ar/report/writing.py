@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any
+from typing import Any, Callable
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
 from simple_ar.report.agent import run_report_agent
@@ -20,6 +20,7 @@ class ReportWritingRequest:
     template: ReportTemplateBundle
     llm_client: Any
     resume_ref: ArtifactRef | None = None
+    emit: Callable[[str], None] | None = None
 
 
 def run_report_writing_capability(*, context: CapabilityContext, request: ReportWritingRequest) -> CapabilityResult:
@@ -55,7 +56,8 @@ def run_report_writing_capability(*, context: CapabilityContext, request: Report
     result = run_report_agent(client=request.llm_client, context=request.report_context, memory=memory,
                               config=request.config, template=request.template,
                               gateway=ReportToolGateway(request.report_context),
-                              completed_checkpoint=completed, checkpoint_sink=save_checkpoint)
+                              emit=request.emit, completed_checkpoint=completed,
+                              checkpoint_sink=save_checkpoint)
     artifacts = (source, checkpoint_ref) if context.store.resolve(checkpoint_ref).is_file() else (source,)
     if result is None or not any(section.draft_markdown.strip() for section in result.sections):
         return CapabilityResult(status="failed", artifacts=artifacts, diagnostics=("Writer returned no usable sections.",))

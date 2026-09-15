@@ -278,9 +278,11 @@ class ReportCheckpointTests(unittest.TestCase):
 
     def test_only_matching_inputs_reuse_completed_sections(self):
         config = ReportRuntimeConfig()
+        events = []
         request = ReportWritingRequest(
             ReportContext(topic="Calibration", report_mode="experiment"), ReportMemory(), config,
             load_report_template_bundle(report_mode="experiment", config=config), object(),
+            emit=events.append,
         )
         saved = {"sections": [{"section_id": "method", "draft_markdown": "Saved method."}]}
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,12 +290,14 @@ class ReportCheckpointTests(unittest.TestCase):
             first = CapabilityContext(store=store, attempt=AttemptManifest("writer-1"))
 
             def interrupted(**kwargs):
+                kwargs["emit"]("writer callback reached")
                 kwargs["checkpoint_sink"](saved)
                 return None
 
             with patch("simple_ar.report.writing.run_report_agent", side_effect=interrupted):
                 result = run_report_writing_capability(context=first, request=request)
             self.assertEqual(result.status, "failed")
+            self.assertEqual(events, ["writer callback reached"])
             checkpoint = next(ref for ref in result.artifacts if ref.kind == "report_checkpoint")
             for change in ("none", "location", "topic", "template", "criteria"):
                 changed = change in {"topic", "template", "criteria"}
