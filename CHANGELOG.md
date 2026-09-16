@@ -15,6 +15,11 @@ This file records user-visible project changes in reverse chronological order. P
   metric. Negative, evidence-linked hypothesis outcomes no longer raise the
   audit's unsupported-claim warning.
 
+- If the optional model-based idea comparison returns invalid evidence links or
+  is unavailable, a ready candidate can now continue through an explicitly
+  recorded deterministic-readiness fallback; sessions still pause when no
+  execution-ready candidate exists.
+
 - `research-report --refresh` reanalyzes existing measurements and writes new
   report attempts without retraining or deleting old reports. Model-backed
   research now uses the existing LLM analysis path instead of forcing directional

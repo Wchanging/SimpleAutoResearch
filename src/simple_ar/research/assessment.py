@@ -296,9 +296,25 @@ def _compare_with_model(
                        model_context=context, model_response=response,
                        recommended_idea_id=recommended, recommendation_reason=comparison.recommendation_reason)
     except (LLMError, ValueError) as exc:
+        fallback = next(
+            (item.idea_id for item in result.assessments if item.status == "ready"),
+            None,
+        )
+        if fallback:
+            reason = (
+                f"Model comparison unavailable: {exc}. "
+                "Selected the first execution-ready candidate by deterministic readiness."
+            )
+        else:
+            reason = (
+                f"Model comparison unavailable: {exc}. "
+                "No execution-ready candidate was selected."
+            )
         return replace(result, status="partial" if result.status != "blocked" else "blocked",
                        generation_mode="deterministic_fallback", model_context=context,
                        model_response=response,
+                       recommended_idea_id=fallback,
+                       recommendation_reason=reason,
                        diagnostics=(*result.diagnostics, f"Model comparison unavailable: {exc}"))
 
 

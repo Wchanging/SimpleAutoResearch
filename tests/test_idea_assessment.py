@@ -42,7 +42,8 @@ class IdeaAssessmentTests(unittest.TestCase):
         self.assertEqual(result.model_context[-1]["source_chunk_ids"], ["chunk-a"])
         invalid = assess_ideas(replace(request, evidence_cards=(
             replace(request.evidence_cards[0], evidence_refs=["missing"]),)))
-        self.assertIsNone(invalid.recommended_idea_id)
+        self.assertEqual(invalid.recommended_idea_id, "a")
+        self.assertIn("deterministic readiness", invalid.recommendation_reason)
         self.assertIn("outside the supplied context", invalid.diagnostics[-1])
 
     def test_model_comparison_uses_shared_sources_without_upgrading_readiness(self):
@@ -97,7 +98,8 @@ class IdeaAssessmentTests(unittest.TestCase):
         ))
         self.assertEqual(result.status, "partial")
         self.assertEqual(result.assessments[0].source_kind, "deterministic_readiness")
-        self.assertIsNone(result.recommended_idea_id)
+        self.assertEqual(result.recommended_idea_id, "a")
+        self.assertIn("deterministic readiness", result.recommendation_reason)
         self.assertIn("provider timeout", result.diagnostics[-1])
 
     def test_assessment_keeps_readiness_and_unknowns_explicit(self) -> None:
