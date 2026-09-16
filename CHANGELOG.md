@@ -8,6 +8,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Fixed
 
+- Report Writer/Reviewer now distinguish declared hardware and runtime
+  conditions from observed execution evidence, so reports do not present a
+  task-specified accelerator as a measured fact when the run record lacks it.
+
 - Experiment reports now render supported deterministic paired-measurement
   figures by default; `[report.figures] enabled = false` or `mode = "off"`
   remains an explicit text-only opt-out. Automatic paired reports select at

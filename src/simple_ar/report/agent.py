@@ -43,6 +43,11 @@ With a small number of seeds and no significance test, do not call a result
 conclusive, rule out seed noise, or imply stable general improvement. Use
 bounded wording such as "under this protocol" and "descriptive across the
 observed seeds".
+Hardware, accelerator, operating-system, and runtime details stated only in the
+task or prepared context are declared conditions, not observed execution
+evidence. Unless verified_execution_results contains those details, describe
+them as requested or configured conditions and say that hardware was not
+recorded; do not write that the runs executed on that hardware.
 Cite directly relevant original method papers when available in the supplied
 sources; surveys are not a substitute for attribution of the adopted method.
 """
