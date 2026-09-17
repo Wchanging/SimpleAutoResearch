@@ -132,6 +132,30 @@ class ResearchReportApplicationTests(unittest.TestCase):
             self.assertTrue(any(item.name == "accuracy" for item in context.metric_sources))
             self.assertTrue(any(item.kind == "analysis" for item in memory.source_handles))
 
+    def test_report_projection_assigns_model_citation_keys(self) -> None:
+        from simple_ar.core.capabilities import ArtifactRef
+        from simple_ar.literature.models import Paper
+        from simple_ar.report.projection import build_literature_report_inputs
+        from simple_ar.research.documents.ingest import DocumentBundle
+        from simple_ar.research.sources.capability import SearchResult
+        from simple_ar.research.synthesis import SynthesisResult
+
+        paper = Paper(
+            id="openalex-W1", title="A retrieved paper", authors=[], abstract="Evidence.", url="https://example.test/paper"
+        )
+        search = SearchResult(status="completed", responses=(), papers=(paper,), selected_papers=(paper,))
+        brief = SynthesisResult(status="ready", gap_summary="", ideas=(), novelty_checks=())
+        documents = DocumentBundle(records=[], fulltext_manifest={}, fulltext_extraction={}, sections=[], chunks=[])
+
+        context, memory = build_literature_report_inputs(
+            topic="A topic", brief=brief, search=search, documents=documents,
+            brief_ref=ArtifactRef("synthesis.json"),
+        )
+
+        self.assertEqual(context.citation_key_map, {"P1": "openalex-W1"})
+        self.assertEqual(context.source_handles[1].citation_key, "P1")
+        self.assertEqual(memory.source_handles[1].citation_key, "P1")
+
 
 if __name__ == "__main__":
     unittest.main()

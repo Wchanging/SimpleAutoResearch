@@ -4,6 +4,15 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-17
+
+### Fixed
+
+- Research report inputs now assign one compact, per-run citation map (`P1`,
+  `P2`, ...) to the selected papers. The same keys are exposed to the Writer,
+  report tools, and deterministic assembly, so valid model citations are not
+  removed as unknown references.
+
 ## 2026-09-15
 
 ### Fixed

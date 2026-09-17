@@ -11,10 +11,11 @@ entry point.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from simple_ar.core import ArtifactRef, ArtifactStore
-from pathlib import Path
+from simple_ar.literature.models import Paper
 from simple_ar.report.schema import (
     ClaimEvidenceRecord,
     MetricSource,
@@ -163,6 +164,7 @@ def build_research_report_inputs(
         artifact=execution_ref.path,
     )
     selected_papers = search.selected_papers
+    citation_key_map = _citation_key_map(selected_papers)
     evidence_summary = (
         f"Search returned {len(search.papers)} raw paper record(s) and retained "
         f"{len(selected_papers)} selected paper(s); "
@@ -191,6 +193,7 @@ def build_research_report_inputs(
         papers=[paper.to_row() for paper in selected_papers],
         source_handles=source_handles,
         metric_sources=metric_sources,
+        citation_key_map=citation_key_map,
     )
     memory = ReportMemory(
         objective=contract.hypothesis,
@@ -226,6 +229,7 @@ def build_literature_report_inputs(
         SourceHandle(handle="artifact:synthesis", kind="synthesis", artifact=brief_ref.path),
         *_paper_source_handles(search),
     ]
+    citation_key_map = _citation_key_map(search.selected_papers)
     limitation = (
         "No experiment was requested or executed; cited results describe "
         "prior work, not measurements from this session."
@@ -246,6 +250,7 @@ def build_literature_report_inputs(
         },
         papers=[paper.to_row() for paper in search.selected_papers],
         source_handles=handles,
+        citation_key_map=citation_key_map,
     )
     memory = ReportMemory(
         objective=topic,
@@ -806,7 +811,7 @@ def _paper_source_handles(search: SearchResult) -> list[SourceHandle]:
         SourceHandle(
             handle=f"paper:{paper.id}",
             kind="paper",
-            citation_key=paper.id,
+            citation_key=f"P{index}",
             paper_id=paper.id,
             title=paper.title,
             summary=paper.abstract,
@@ -817,8 +822,14 @@ def _paper_source_handles(search: SearchResult) -> list[SourceHandle]:
                 "published": paper.published,
             },
         )
-        for paper in search.selected_papers
+        for index, paper in enumerate(search.selected_papers, start=1)
     ]
+
+
+def _citation_key_map(papers: Sequence[Paper]) -> dict[str, str]:
+    """Assign stable, compact keys for the current selected-paper order."""
+
+    return {f"P{index}": paper.id for index, paper in enumerate(papers, start=1)}
 
 
 __all__ = [
