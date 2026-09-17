@@ -1445,9 +1445,16 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
             }
         evidence = _mapping(implementation.get("evidence"))
         if evidence is not None and "patch" in evidence:
-            # The patch is already bounded at the artifact boundary. Keep its
-            # provenance/truncation marker; omit bulky validation/review logs.
-            compact["implementation"]["evidence"] = {"patch": evidence["patch"]}
+            # Patches are already bounded at the artifact boundary. Keep the
+            # cumulative lineage when a repair attempt stores only a delta;
+            # omit bulky validation/review logs.
+            compact_evidence: dict[str, Any] = {"patch": evidence["patch"]}
+            patches = evidence.get("patches")
+            if isinstance(patches, list):
+                compact_evidence["patches"] = [
+                    item for item in patches[:6] if isinstance(item, Mapping)
+                ]
+            compact["implementation"]["evidence"] = compact_evidence
     for key in ("status", "primary_metric"):
         if key in results:
             compact[key] = results[key]

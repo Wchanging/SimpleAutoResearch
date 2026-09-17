@@ -8,6 +8,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### Fixed
 
+- Reports now retain the complete implementation lineage when a candidate is
+  repaired: the Writer/Reviewer receive the initial patch together with each
+  repair delta, instead of treating the last repair diff as the whole change.
+
 - Report Writer/Reviewer now distinguish declared hardware and runtime
   conditions from observed execution evidence, so reports do not present a
   task-specified accelerator as a measured fact when the run record lacks it.

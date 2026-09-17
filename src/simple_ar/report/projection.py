@@ -38,22 +38,76 @@ class ReportProjectionError(ValueError):
 
 
 def attach_implementation_evidence(
-    context: ReportContext, store: ArtifactStore, implementation_ref: ArtifactRef,
+    context: ReportContext,
+    store: ArtifactStore,
+    implementation_ref: ArtifactRef,
+    *,
+    lineage_refs: Sequence[ArtifactRef] = (),
 ) -> None:
-    """Expose the measured revision's frozen patch through existing report tools."""
-    record = store.read_json(implementation_ref)
-    evidence = {}
-    for name in ("patch", "validation", "review"):
-        ref = record["artifact_refs"].get(name)
-        if ref is None:
+    """Expose the cumulative implementation lineage through report tools.
+
+    A repair attempt stores only its incremental patch.  When a report points
+    at that attempt, the initial implementation must remain visible as well;
+    otherwise the report can mistake a repair-only diff for the whole change.
+    ``implementation_ref`` is the final revision and ``lineage_refs`` are
+    earlier implementation results in chronological order.
+    """
+    ordered_refs: list[ArtifactRef] = []
+    seen: set[str] = set()
+    for ref in (*lineage_refs, implementation_ref):
+        if ref.path in seen:
             continue
-        path = Path(implementation_ref.path).parent / ref["path"]
-        text = store.read_text(path)
-        evidence[name] = {"artifact": path.as_posix(), "text": text[:12000],
-                          "truncated": len(text) > 12000}
+        seen.add(ref.path)
+        ordered_refs.append(ref)
+
+    revisions: list[dict[str, Any]] = []
+    for ref in ordered_refs:
+        record = store.read_json(ref)
+        evidence: dict[str, dict[str, Any]] = {}
+        for name in ("patch", "validation", "review"):
+            artifact_ref = record.get("artifact_refs", {}).get(name)
+            if artifact_ref is None:
+                continue
+            path = Path(ref.path).parent / artifact_ref["path"]
+            text = store.read_text(path)
+            evidence[name] = {
+                "artifact": path.as_posix(),
+                "text": text[:12000],
+                "truncated": len(text) > 12000,
+            }
+        revisions.append({
+            "artifact": ref.path,
+            "status": record.get("status", "unknown"),
+            "failure_ref": record.get("failure_ref"),
+            "asset_integrity": record.get("asset_integrity", {}),
+            "evidence": evidence,
+        })
+
+    final = revisions[-1]
+    final_evidence = dict(final["evidence"])
+    patches = [
+        {
+            "revision": index + 1,
+            "implementation_artifact": revision["artifact"],
+            **revision["evidence"]["patch"],
+        }
+        for index, revision in enumerate(revisions)
+        if "patch" in revision["evidence"]
+    ]
+    if len(patches) > 1:
+        final_evidence["patches"] = patches
     context.results = {**context.results, "implementation": {
-        "artifact": implementation_ref.path, "status": record["status"],
-        "asset_integrity": record["asset_integrity"], "evidence": evidence,
+        "artifact": implementation_ref.path, "status": final["status"],
+        "asset_integrity": final["asset_integrity"], "evidence": final_evidence,
+        "lineage": [
+            {
+                "artifact": revision["artifact"],
+                "status": revision["status"],
+                "failure_ref": revision["failure_ref"],
+                "evidence_kinds": sorted(revision["evidence"]),
+            }
+            for revision in revisions
+        ],
         "interpretation": "The frozen patch, not the proposed plan, defines what was modified. Calling an existing utility with new arguments is reuse, not evidence that the utility implementation was changed. Validation and review are checks, not proof of scientific improvement. Missing or truncated evidence cannot support unseen implementation details.",
     }}
     context.source_handles.append(SourceHandle(

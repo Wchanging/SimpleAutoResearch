@@ -633,7 +633,12 @@ class ResearchApplication:
             context.source_handles.append(SourceHandle(handle="artifact:paired_analysis", kind="experiment_set_analysis", artifact=evidence_ref.path))
             if collection.get("implementation_ref") is not None:
                 implementation_ref = ArtifactRef.from_dict(collection["implementation_ref"])
-                attach_implementation_evidence(context, self.controller.store, implementation_ref)
+                attach_implementation_evidence(
+                    context,
+                    self.controller.store,
+                    implementation_ref,
+                    lineage_refs=self._implementation_lineage_refs(implementation_ref),
+                )
             memory.source_handles = list(context.source_handles)
             return attach_report_read_evidence(context, memory, documents=self._load_documents(),
                                                read=self._load_read(), read_ref=refs["read"])
@@ -670,13 +675,37 @@ class ResearchApplication:
             None,
         )
         if implementation_ref is not None:
-            attach_implementation_evidence(context, self.controller.store, implementation_ref)
+            attach_implementation_evidence(
+                context,
+                self.controller.store,
+                implementation_ref,
+                lineage_refs=self._implementation_lineage_refs(implementation_ref),
+            )
             memory.source_handles = list(context.source_handles)
         if "experiment_contract" in execution:
             context.experiment_plan = dict(execution["experiment_contract"])
             memory.key_decisions.append("Experiment protocol comes from the measured execution; research design records motivation, not proof of implementation.")
         return attach_report_read_evidence(context, memory, documents=self._load_documents(),
                                            read=self._load_read(), read_ref=refs["read"])
+
+    def _implementation_lineage_refs(self, final_ref: ArtifactRef) -> tuple[ArtifactRef, ...]:
+        """Return implementation attempts in order, including repair deltas."""
+        refs = self.controller.manifest.state_refs
+        keys = ["implementation"]
+        keys.extend(sorted(
+            (key for key in refs if key.startswith(("repair_", "matrix_repair_"))),
+            key=lambda key: refs[key].path,
+        ))
+        ordered: list[ArtifactRef] = []
+        seen: set[str] = set()
+        for key in keys:
+            ref = refs.get(key)
+            if ref is not None and ref.path not in seen:
+                ordered.append(ref)
+                seen.add(ref.path)
+        if final_ref.path not in seen:
+            ordered.append(final_ref)
+        return tuple(ordered)
 
     def _run_action(self, action: str) -> bool:
         if action == "plan":

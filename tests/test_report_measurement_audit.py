@@ -182,6 +182,40 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             for role in ("writer", "reviewer"):
                 self.assertEqual(received[role]["evidence"]["patch"], evidence)
 
+    def test_implementation_report_keeps_initial_patch_and_repair_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ArtifactStore(Path(tmp))
+            initial_patch = "--- utils/buffer.py\n+++ utils/buffer.py\n+gradient admission\n"
+            repair_patch = "--- models/er.py\n+++ models/er.py\n+enable grad\n"
+            store.write_text("attempts/implement-1/code_task/patch.diff", initial_patch)
+            initial_ref = store.write_json("attempts/implement-1/implementation.json", {
+                "status": "validated",
+                "asset_integrity": {"status": "observed_unchanged"},
+                "artifact_refs": {"patch": {"path": "code_task/patch.diff"}},
+            })
+            store.write_text("attempts/implement-2/code_task/patch.diff", repair_patch)
+            repair_ref = store.write_json("attempts/implement-2/implementation.json", {
+                "status": "validated",
+                "failure_ref": {"path": "attempts/experiment-1/results.json"},
+                "asset_integrity": {"status": "observed_unchanged"},
+                "artifact_refs": {"patch": {"path": "code_task/patch.diff"}},
+            })
+            context = ReportContext(topic="Replay", report_mode="experiment")
+
+            attach_implementation_evidence(
+                context, store, repair_ref, lineage_refs=(initial_ref,)
+            )
+
+            implementation = context.results["implementation"]
+            self.assertEqual(
+                [item["artifact"] for item in implementation["lineage"]],
+                ["attempts/implement-1/implementation.json", "attempts/implement-2/implementation.json"],
+            )
+            patches = implementation["evidence"]["patches"]
+            self.assertEqual(len(patches), 2)
+            self.assertEqual(patches[0]["text"], initial_patch)
+            self.assertEqual(patches[1]["text"], repair_patch)
+
     def test_swapped_values_or_conditions_fail_even_when_all_numbers_are_present(self):
         metrics = [MetricSource(metric_id=f"metric:{label}:accuracy", name="accuracy", value=value,
                                artifact=f"{label}.json", label=label, condition_id=label, unit="fraction", source_kind="measured")
