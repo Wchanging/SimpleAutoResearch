@@ -1164,6 +1164,7 @@ def _writer_prompt(
             else {}
         ),
         "review_findings": [finding.model_dump(mode="json") for finding in (review.findings if review else [])],
+        "review_instructions": review.revision_instructions if review else [],
         "revision_preservation_requirement": _revision_preservation_requirement(
             section=section,
             previous_draft=previous_draft if include_previous_draft else None,
@@ -1260,9 +1261,12 @@ def _writer_recovery_prompt(
             else {}
         ),
         "review_instructions": [
-            finding.suggested_action or finding.message
-            for finding in (review.findings if review else [])
-        ][:6],
+            *(review.revision_instructions if review else []),
+            *(
+                finding.suggested_action or finding.message
+                for finding in (review.findings if review else [])
+            ),
+        ],
         "style_rules": [
             "Write evidence-bounded academic prose using only the supplied source handles.",
             "When a prepared execution context is supplied, keep the executed project, dataset, benchmark, and runtime limits authoritative.",
@@ -1961,7 +1965,7 @@ def _revision_preservation_requirement(
     return (
         "This is a reviewer-directed revision, not a fresh summary. Return the complete "
         f"section with at least about {minimum_words} substantive words, preserving valid prior "
-        "analysis and citations while addressing the review findings."
+        "analysis and citations while addressing the review findings and any explicit revision instructions."
     )
 
 

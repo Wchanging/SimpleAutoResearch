@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from legacy_session_fixture import historical_session
+from tests.legacy_session_fixture import historical_session
 from pathlib import Path
 
 from simple_ar.app.research_report import build_research_session_report_inputs

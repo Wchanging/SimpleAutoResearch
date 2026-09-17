@@ -54,6 +54,56 @@ class ReportCheckpointTests(unittest.TestCase):
                 self.assertEqual(sum("reviser" in label for label in calls), int(revise))
                 self.assertEqual("classification correctness" in result.report_body, revise)
 
+    def test_writer_revision_prompts_preserve_all_review_guidance(self):
+        from simple_ar.report.agent import _writer_prompt, _writer_recovery_prompt
+        from simple_ar.report.schema import ReportSectionReview, ReviewerFinding
+
+        context = ReportContext(topic="Calibration", report_mode="experiment")
+        memory = ReportMemory()
+        section = ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")
+        config = ReportRuntimeConfig()
+        template = load_report_template_bundle(report_mode="experiment", config=config)
+        instructions = [f"Explicit instruction {index}." for index in range(7)]
+        finding_action = "Remove the unsupported generalization."
+        review = ReportSectionReview(
+            section_id="method",
+            verdict="revise_required",
+            findings=[ReviewerFinding(
+                finding_id="unsupported",
+                type="unsupported_claim",
+                message="The claim is broader than the evidence.",
+                suggested_action=finding_action,
+            )],
+            revision_instructions=instructions,
+        )
+
+        ordinary = json.loads(_writer_prompt(
+            context=context,
+            template=template,
+            memory=memory,
+            section=section,
+            config=config,
+            extra_context=[],
+            previous_draft=None,
+            review=review,
+            source_batch_index=1,
+            source_batch_count=1,
+            include_previous_draft=False,
+            draft_mode="section_revision",
+        ).split("\n\n", 1)[1])
+        recovery = json.loads(_writer_recovery_prompt(
+            context=context,
+            memory=memory,
+            section=section,
+            config=config,
+            previous_draft=None,
+            review=review,
+            draft_mode="section_revision",
+        ).split("\n\n", 1)[1])
+
+        self.assertEqual(ordinary["review_instructions"], instructions)
+        self.assertEqual(recovery["review_instructions"], [*instructions, finding_action])
+
     def test_final_audit_uses_latest_review_without_erasing_history_or_failed_review(self):
         from simple_ar.report.audit import build_report_audit
         context = ReportContext(topic="Calibration", report_mode="experiment")

@@ -12,6 +12,9 @@ This file records user-visible project changes in reverse chronological order. P
   `P2`, ...) to the selected papers. The same keys are exposed to the Writer,
   report tools, and deterministic assembly, so valid model citations are not
   removed as unknown references.
+- Reviewer-directed report revisions now pass explicit `revision_instructions`
+  to both the ordinary and schema-recovery Writer prompts, so structured review
+  guidance is not dropped before the bounded revision pass.
 
 ## 2026-09-15
 

@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 
-from legacy_session_fixture import historical_session
+from tests.legacy_session_fixture import historical_session
 from pathlib import Path
 
 from simple_ar.app.research_session import (

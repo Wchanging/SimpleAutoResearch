@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from legacy_session_fixture import historical_session
+from tests.legacy_session_fixture import historical_session
 from simple_ar.core.artifacts import read_json, write_json
 from simple_ar.app.research_code_task import (
     ResearchCodeTaskSessionError,
