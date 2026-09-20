@@ -4,6 +4,17 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-21
+
+### Documentation
+
+- Close V2.8 as a prepared-project end-to-end milestone and clarify its scope
+  in the README. Historical runs included framework fixes and recovery, not
+  strict frozen-version acceptance or fully validated paper quality.
+- Carry report factual-correction validation, explicit attempt-limit
+  continuation, and frozen-version acceptance into V2.9. This is a scope
+  decision, not a new feature or a claim that those issues are fixed.
+
 ## 2026-09-17
 
 ### Fixed

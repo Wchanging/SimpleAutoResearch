@@ -13,6 +13,18 @@ The goal is not to reproduce every feature of a large agent framework. The goal
 is to build a clear, inspectable version that is useful for learning,
 experimentation, and gradual extension.
 
+## Version status
+
+V2.8 is a milestone baseline for an end-to-end workflow with prepared code,
+data, and an execution protocol. Real runs cover search, research and design,
+scoped code changes, experiments, analysis, and Markdown reports. Those runs
+included framework fixes and recovery; they are not evidence of a single
+frozen-version acceptance run or fully validated paper quality. Remaining
+report factual-correction validation, an explicit attempt-limit extension
+entrypoint, and frozen-version acceptance move to V2.9 recovery, delivery, and
+release work. Task-driven capability composition and bounded scientific
+iteration are V2.9 goals, not claims about implemented functionality.
+
 ## Goals
 
 - Keep research steps explicit and file-based.
