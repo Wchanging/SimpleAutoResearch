@@ -232,6 +232,7 @@ class ResearchDesignTests(unittest.TestCase):
                     "primary_metric": "accuracy",
                     "required_metrics": ["accuracy", "macro_f1"],
                 },
+                execution_boundary={"code_task": {"code_root": "examples/code_task_digits_mlp/project"}},
                 execution_context=(
                     "Prepared project: examples/code_task_digits_mlp/project."
                 ),
@@ -248,6 +249,16 @@ class ResearchDesignTests(unittest.TestCase):
             "prepared project dataset (see execution boundary)",
         )
         self.assertEqual(result.contract.metrics, ["accuracy", "macro_f1"])
+        self.assertEqual(result.contract.dataset_refs[0]["asset_id"], "prepared_execution")
+        self.assertEqual(result.contract.split_spec["status"], "not_declared_by_framework")
+        self.assertEqual(
+            result.contract.comparison_conditions["mode"],
+            "same_declared_evaluator",
+        )
+        self.assertEqual(
+            [item["name"] for item in result.contract.metric_specs],
+            ["accuracy", "macro_f1"],
+        )
 
     def test_default_selection_prefers_a_more_executable_candidate(self) -> None:
         synthesis = SynthesisResult(

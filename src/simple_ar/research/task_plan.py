@@ -195,7 +195,26 @@ The application will validate and execute the plan.""",
         model = str(getattr(client, "model", ""))
 
     steps = _normalize_steps(rows)
-    _validate_sequence(request, steps)
+    try:
+        _validate_sequence(request, steps)
+    except ValueError as exc:
+        if not request.use_llm:
+            raise
+        # A model may omit a required evidence handoff even when every
+        # proposed action is otherwise valid.  Keep the authorization checks
+        # strict, then use the small deterministic plan as the recovery path
+        # instead of pausing a user session for a repairable omission.
+        _validate_authorized_boundaries(request, steps)
+        fallback_rows = default_task_steps(request)
+        fallback_steps = _normalize_steps(fallback_rows)
+        _validate_sequence(request, fallback_steps)
+        steps = fallback_steps
+        mode = "deterministic_fallback"
+        diagnostics = (
+            f"LLM task plan rejected ({exc}); used the validated deterministic plan.",
+        )
+    else:
+        diagnostics = ()
     return TaskPlanResult(
         task_kind=request.task_kind,
         goal=request.goal.strip(),
@@ -203,6 +222,7 @@ The application will validate and execute the plan.""",
         mode=mode,
         model=model,
         assumptions=tuple(str(item).strip() for item in request.hard_constraints if str(item).strip()),
+        diagnostics=diagnostics,
     )
 
 

@@ -1385,7 +1385,7 @@ def compact_project_results_for_prompt(data: Any, metric_summary: dict[str, Any]
         "available_keys": sorted(str(key) for key in data.keys()),
         "result_tables": metric_summary.get("result_tables", {}),
     }
-    for key in ("claims", "hypothesis_verdicts", "verdicts", "hypotheses", "metrics", "metric_bundle", "limitations", "comparisons", "paired_summary"):
+    for key in ("claims", "hypothesis_verdicts", "verdicts", "hypotheses", "metrics", "metric_bundle", "limitations", "comparisons", "paired_summary", "implementation"):
         value = data.get(key)
         if value is not None:
             compact[key] = value
@@ -1397,6 +1397,7 @@ def compact_project_results_for_prompt(data: Any, metric_summary: dict[str, Any]
                 "status", "execution_status", "returncode", "timed_out", "metrics",
                 "command", "measurement", "experiment_contract", "comparisons",
                 "limitations", "missing_measurements", "failed_measurements",
+                "implementation_ref", "candidate_revision", "superseded_candidates",
             ) if key in execution
         }
     if isinstance(data.get("summary"), dict):

@@ -214,6 +214,7 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
         contract,
         execution_schema=request.execution_schema,
         execution_context=request.execution_context,
+        prepared_execution=isinstance(request.execution_boundary.get("code_task"), Mapping),
     )
 
     execution_protocol = _resolve_execution_protocol(
@@ -249,6 +250,7 @@ def _apply_execution_boundary(
     *,
     execution_schema: Mapping[str, Any],
     execution_context: str,
+    prepared_execution: bool,
 ) -> ResearchExperimentContract:
     """Make a prepared project the execution contract's source of truth.
 
@@ -268,11 +270,52 @@ def _apply_execution_boundary(
         if isinstance(raw_metrics, list)
         else []
     )
+    metric_directions = execution_schema.get("metric_directions")
+    metric_directions = metric_directions if isinstance(metric_directions, Mapping) else {}
+    metric_specs = [dict(item) for item in contract.metric_specs]
+    known_metrics = {
+        str(item.get("name") or "").strip()
+        for item in metric_specs
+        if str(item.get("name") or "").strip()
+    }
+    for name in dict.fromkeys(metrics or contract.metrics):
+        name = str(name).strip()
+        if not name or name in known_metrics:
+            continue
+        spec: dict[str, Any] = {"name": name}
+        direction = str(metric_directions.get(name) or "").strip()
+        if direction:
+            spec["direction"] = direction
+        metric_specs.append(spec)
+        known_metrics.add(name)
+    boundary_fields: dict[str, Any] = {}
+    if prepared_execution:
+        # A prepared CodeTask has an executable project boundary but usually
+        # no literature-level dataset/split metadata.  Make that limitation
+        # explicit for comparison and reporting.  Do not add these synthetic
+        # fields to generic command boundaries: an explicit protocol there is
+        # already the source of truth and must remain byte-for-byte stable
+        # across a plan revision.
+        boundary_fields = {
+            "dataset_refs": contract.dataset_refs or [
+                {"asset_id": "prepared_execution", "source": "execution_boundary"}
+            ],
+            "split_spec": contract.split_spec or {
+                "source": "execution_boundary",
+                "status": "not_declared_by_framework",
+            },
+            "metric_specs": metric_specs,
+            "comparison_conditions": contract.comparison_conditions or {
+                "source": "execution_boundary",
+                "mode": "same_declared_evaluator",
+            },
+        }
     return replace(
         contract,
         baseline="prepared project baseline (see execution boundary)",
         dataset="prepared project dataset (see execution boundary)",
         metrics=list(dict.fromkeys(metrics or contract.metrics)),
+        **boundary_fields,
     )
 
 

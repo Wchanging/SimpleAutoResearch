@@ -50,6 +50,37 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(projected["comparisons"], [comparison])
         self.assertNotIn("execution", projected)
 
+    def test_prompt_preserves_implementation_lineage_for_paired_results(self) -> None:
+        import json
+        from simple_ar.result_analysis.service import build_prompt, build_metric_summary
+
+        implementation = {
+            "status": "validated",
+            "steps": [{"name": "patch", "status": "passed"}],
+            "artifact_refs": {"patch": {"path": "attempts/implement/code_task/patch.diff"}},
+        }
+        context = AnalysisContext(
+            task_id="paired-implementation",
+            metrics={"accuracy": 0.93},
+            project_results={
+                "execution_result": {
+                    "status": "passed",
+                    "implementation_ref": {"path": "attempts/implement/implementation.json"},
+                    "candidate_revision": 0,
+                },
+                "implementation": implementation,
+            },
+        )
+
+        prompt = build_prompt(context, build_metric_summary(context), run_result_analysis(context))
+        payload = json.loads(prompt.split("\n\n")[-1])
+        projected = payload["context"]["project_results"]
+        self.assertEqual(projected["implementation"]["status"], "validated")
+        self.assertEqual(
+            projected["execution_result"]["implementation_ref"]["path"],
+            "attempts/implement/implementation.json",
+        )
+
     def test_llm_mode_without_client_does_not_fallback(self) -> None:
         with self.assertRaisesRegex(LLMError, "refusing deterministic fallback"):
             run_result_analysis(

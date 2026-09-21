@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from simple_ar.core.capabilities import (
     ArtifactRef,
@@ -18,9 +19,48 @@ from simple_ar.research.analysis import (
     compare_experiment_results,
 )
 from simple_ar.result_analysis.schema import AnalysisContext
+from simple_ar.result_analysis.schema import AnalysisResult
 
 
 class AnalysisCapabilityTests(unittest.TestCase):
+    def test_single_execution_analysis_receives_implementation_lineage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ArtifactStore(Path(tmp))
+            result_ref = store.write_json(
+                "result.json",
+                {"status": "passed", "metrics": {"accuracy": 0.8}},
+                kind="experiment_result",
+            )
+            implementation_ref = store.write_json(
+                "implementation.json",
+                {"status": "validated", "steps": [{"name": "patch", "status": "passed"}]},
+                kind="implementation_result",
+            )
+            captured = {}
+            analysis = AnalysisResult(readme_markdown="ok", status="passed")
+
+            def capture(request, *, client=None):
+                captured["context"] = request.context
+                return analysis
+
+            with patch("simple_ar.research.analysis.analyze_results", side_effect=capture):
+                analyze_experiment_capability(
+                    context=CapabilityContext(
+                        store=store,
+                        attempt=AttemptManifest(attempt_id="analysis-implementation"),
+                        inputs=(result_ref, implementation_ref),
+                    ),
+                    result_ref=result_ref,
+                    analysis_context={
+                        "project_results": {"implementation_ref": implementation_ref.to_dict()},
+                    },
+                )
+
+            self.assertEqual(
+                captured["context"].project_results["implementation"]["status"],
+                "validated",
+            )
+
     def test_paired_summary_groups_conditions_and_preserves_singleton_uncertainty(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ArtifactStore(Path(tmp))

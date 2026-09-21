@@ -738,7 +738,19 @@ class ResearchApplication:
                 return False
             plan_config = self._plan_config()
             planner_mode = str(plan_config.get("research_plan_mode") or "llm").strip().lower()
-            use_llm = self.services.llm_client is not None and planner_mode != "deterministic"
+            protocol_accepted = (
+                "design" in self.controller.manifest.state_refs
+                and isinstance(self._state_payload("design").get("contract"), Mapping)
+            )
+            # Once research_design has fixed the executable protocol, the
+            # extension only materializes its deterministic process steps.
+            # Asking the model to rewrite matrix conditions adds no research
+            # value and can drop an authorization condition on resume.
+            use_llm = (
+                self.services.llm_client is not None
+                and planner_mode != "deterministic"
+                and not protocol_accepted
+            )
             task_plan = TaskPlanRequest(
                 task_kind=self._task_kind(),
                 goal=(self.brief.objective or self.brief.request_text).strip(),
@@ -753,10 +765,7 @@ class ResearchApplication:
                 execution=plan_config.get("execution")
                 if isinstance(plan_config.get("execution"), Mapping)
                 else None,
-                execution_protocol_accepted=(
-                    "design" in self.controller.manifest.state_refs
-                    and isinstance(self._state_payload("design").get("contract"), Mapping)
-                ),
+                execution_protocol_accepted=protocol_accepted,
                 use_llm=use_llm,
                 llm_client=self.services.llm_client,
             )
@@ -899,6 +908,31 @@ class ResearchApplication:
                 # These optional fields are absent in the first v1 assessments.
                 selected = assessment.get("recommended_idea_id")
                 reason = assessment.get("recommendation_reason", "")
+            if (
+                not selected
+                and has_execution
+                and isinstance(execution.get("code_task"), Mapping)
+            ):
+                # A CodeTask is the repository-inspection boundary.  When the
+                # evidence assessor correctly refuses to invent a method before
+                # inspecting source, keep the task moving with the first
+                # execution-ready direction; implementation must still inspect,
+                # scope, patch, and validate it before any result is accepted.
+                candidates = assessment.get("assessments", [])
+                ready = [
+                    row for row in candidates
+                    if isinstance(row, Mapping)
+                    and row.get("status") == "ready"
+                    and str(row.get("idea_id") or "").strip()
+                ]
+                ready.sort(key=lambda row: int(row.get("readiness_rank", 10**9)))
+                if ready:
+                    selected = str(ready[0]["idea_id"])
+                    reason = (
+                        "The evidence assessor did not recommend a concrete method before "
+                        "repository inspection; selected the first execution-ready direction "
+                        "provisionally. CodeTask must inspect and validate the bounded change."
+                    )
             if not selected and self.services.llm_client is not None:
                 details = " ".join(assessment.get("diagnostics", []))
                 self.controller.pause("No validated model recommendation is available. " + details + " Review idea_comparison before continuing.")
@@ -1050,6 +1084,11 @@ class ResearchApplication:
             collection = self.controller.store.read_json(collection_ref)
             children = tuple(ArtifactRef.from_dict(row[role]) for row in collection["pairs"]
                              for role in ("baseline", "candidate") if row[role] is not None)
+            implementation_ref = collection.get("implementation_ref")
+            if isinstance(implementation_ref, Mapping):
+                implementation = ArtifactRef.from_dict(implementation_ref)
+                if implementation not in children:
+                    children += (implementation,)
             return self._execute("analysis", "analysis",
                 None, (collection_ref, *children), allow_partial=True, result_ref=collection_ref,
                 analysis_context=self._analysis_context(),
@@ -1092,9 +1131,15 @@ class ResearchApplication:
             result_ref = self.latest_experiment_ref()
             if result_ref is None:
                 raise ResearchApplicationError("Analysis requires an existing candidate measurement.")
+            analysis_inputs = [result_ref]
+            if baseline_ref is not None:
+                analysis_inputs.append(baseline_ref)
+            implementation_ref = self.controller.manifest.state_refs.get("implementation")
+            if implementation_ref is not None:
+                analysis_inputs.append(implementation_ref)
             return self._execute(
                 "analysis", "analysis",
-                None, (result_ref, baseline_ref) if baseline_ref else (result_ref,),
+                None, tuple(analysis_inputs),
                 allow_partial=True, baseline_ref=baseline_ref,
                 result_ref=result_ref,
                 analysis_context=self._analysis_context(),
@@ -1984,9 +2029,15 @@ class ResearchApplication:
             payload = self.controller.store.read_json(ref)
             if not isinstance(payload, Mapping) or str(payload.get("status") or "").lower() != "passed":
                 return False
+            contract = self._execution_contract()
+            if contract is None and isinstance(execution.get("protocol"), Mapping):
+                # A brief revision can invalidate the old design artifact
+                # before the next design step runs.  An explicitly supplied
+                # execution protocol is still a valid reuse boundary.
+                contract = dict(execution["protocol"])
             expected = execution_request(
                 execution, condition="baseline", pair_index=pair_index,
-                task_text=self.brief.request_text, contract=self._execution_contract(),
+                task_text=self.brief.request_text, contract=contract,
             )
         except (KeyError, TypeError, ValueError, OSError):
             return False
@@ -2219,6 +2270,11 @@ class ResearchApplication:
         }
         if directions:
             context["metric_directions"] = directions
+        implementation_ref = self.controller.manifest.state_refs.get("implementation")
+        if implementation_ref is not None:
+            context["project_results"] = {
+                "implementation_ref": implementation_ref.to_dict(),
+            }
         return context
 
     def _experiment_report_topic(self) -> str:

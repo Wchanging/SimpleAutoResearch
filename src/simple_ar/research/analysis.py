@@ -594,6 +594,14 @@ def analyze_experiment_capability(
         )
     project_results = dict(base_context.project_results)
     project_results["execution_result"] = dict(payload)
+    implementation_ref = payload.get("implementation_ref") if is_collection else None
+    if not isinstance(implementation_ref, Mapping):
+        candidate_ref = project_results.get("implementation_ref")
+        implementation_ref = candidate_ref if isinstance(candidate_ref, Mapping) else None
+    if isinstance(implementation_ref, Mapping):
+        implementation = ArtifactRef.from_dict(dict(implementation_ref))
+        if implementation in context.inputs:
+            project_results["implementation"] = context.read_input_json(implementation)
     if is_collection:
         project_results["seed_evidence"] = payload["seed_evidence"]
         project_results["comparisons"] = payload["comparisons"]

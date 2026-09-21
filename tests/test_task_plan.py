@@ -185,6 +185,40 @@ class TaskPlanTests(unittest.TestCase):
         build_task_plan(replace(request, config={"research_task_planning_max_output_tokens": 2048}))
         self.assertEqual(client.tokens, 2048)
 
+    def test_invalid_llm_sequence_uses_deterministic_plan_without_relaxing_boundaries(self) -> None:
+        request = TaskPlanRequest(
+            task_kind="research",
+            goal="Compare a supplied classifier.",
+            request_text="Compare a supplied classifier.",
+            requested_outputs=("experiments",),
+            config={
+                "research_materials_only": True,
+                "research_local_documents": ["notes.md"],
+            },
+            execution={"command": [sys.executable, "benchmark.py"]},
+        )
+
+        class Client:
+            model = "fixture-invalid-planner"
+
+            def ask_json(self, *args, **kwargs):
+                return {
+                    "steps": [
+                        {"action": "document_ingest"},
+                        {"action": "read"},
+                        {"action": "assess_ideas"},
+                        {"action": "research_design"},
+                    ]
+                }
+
+        result = build_task_plan(replace(request, use_llm=True, llm_client=Client()))
+
+        self.assertEqual(result.mode, "deterministic_fallback")
+        self.assertIn("rejected", result.diagnostics[0])
+        actions = [step.action for step in result.steps]
+        self.assertLess(actions.index("synthesize"), actions.index("assess_ideas"))
+        self.assertLess(actions.index("assess_ideas"), actions.index("research_design"))
+
     def test_bug_application_uses_code_task_without_literature_or_experiment(self) -> None:
         from tests.test_code_task import _FakeCodeTaskClient
 
