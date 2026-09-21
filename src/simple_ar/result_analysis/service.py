@@ -466,6 +466,9 @@ def build_prompt(
         "- analysis_audit: object with missing_required_metrics, weak_metric_signals, unsupported_claims, limitations, notes.\n\n"
         "Rules:\n"
         "- Use only provided metrics and artifacts.\n"
+        "- Canonical execution comparisons remain evidence even when result_tables are empty; "
+        "preserve their source references and comparability limitations. Missing protocol metadata "
+        "does not mean the measured baseline is absent.\n"
         "- Do not claim judge success unless judge evidence appears in context.\n"
         "- supported/partially_supported claims must include metric_refs or evidence.\n"
         "- Use metric_refs from result_tables evidence_id values, not raw JSON objects.\n"
@@ -1382,10 +1385,20 @@ def compact_project_results_for_prompt(data: Any, metric_summary: dict[str, Any]
         "available_keys": sorted(str(key) for key in data.keys()),
         "result_tables": metric_summary.get("result_tables", {}),
     }
-    for key in ("claims", "hypothesis_verdicts", "verdicts", "hypotheses", "metrics", "metric_bundle", "limitations"):
+    for key in ("claims", "hypothesis_verdicts", "verdicts", "hypotheses", "metrics", "metric_bundle", "limitations", "comparisons", "paired_summary"):
         value = data.get(key)
         if value is not None:
             compact[key] = value
+    execution = data.get("execution_result")
+    if isinstance(execution, dict):
+        # Keep canonical measurements and their meaning, not process logs.
+        compact["execution_result"] = {
+            key: execution[key] for key in (
+                "status", "execution_status", "returncode", "timed_out", "metrics",
+                "command", "measurement", "experiment_contract", "comparisons",
+                "limitations", "missing_measurements", "failed_measurements",
+            ) if key in execution
+        }
     if isinstance(data.get("summary"), dict):
         compact["summary"] = data["summary"]
     source = data.get("_artifact_source")

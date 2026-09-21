@@ -334,10 +334,12 @@ def _llm_query_budget(config: Mapping[str, object]) -> int:
     return 6
 
 
-def _planning_output_tokens(config: Mapping[str, object]) -> int:
-    """Keep the structured planning response small enough for a fast pass."""
+def _planning_output_tokens(config: Mapping[str, object]) -> int | None:
+    """Inherit the client limit unless planning has an explicit override."""
 
-    value = config.get("research_planning_max_output_tokens", 1200)
+    value = config.get("research_planning_max_output_tokens")
+    if value is None:
+        return None
     try:
         value = int(value)
     except (TypeError, ValueError):

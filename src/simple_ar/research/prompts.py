@@ -406,6 +406,24 @@ def research_design_user_prompt(
         "`baseline_command`, `pairs`, `seeds`, `seed_count`, `seed_flag`, "
         "`baseline_policy`, `result_schema`, `comparison_required`, "
         "`decision_reason`, `stopping_criteria`, and `input_refs`.\n"
+        "- Omit unused optional fields entirely (no null or empty placeholders). "
+        "Use either explicit `pairs` OR compact `seeds`/`seed_count` with "
+        "`seed_flag`, never both. For one fixed benchmark invocation, omit all "
+        "pair and seed fields. Do not invent a seed flag unless the inspected "
+        "entrypoint supports it.\n"
+        "- Field types: command/baseline_command are non-empty arrays of strings; "
+        "baseline_policy is one of run, skip, reuse; comparison_required is a "
+        "JSON boolean; decision_reason is a string; stopping_criteria is an "
+        "array of non-empty strings (NOT an object). result_schema is an object. "
+        "seeds is an array of distinct integers; seed_count is a positive integer "
+        "(choose seeds or seed_count); seed_flag is a non-empty string. Each pairs "
+        "item has exactly seed (integer), baseline_command and candidate_command "
+        "(argv arrays). input_refs is an array copied from supplied references.\n"
+        '- Minimal execution_protocol example for a single comparison using the '
+        'configured evaluator: {"baseline_policy":"run","comparison_required":true,'
+        '"decision_reason":"Compare the candidate with the original under the same evaluation",'
+        '"stopping_criteria":["Stop after the bounded comparison"]}. '
+        "Do not expand this object with unused fields.\n"
         "- Commands must be literal argv lists derived from the inspected authorized "
         "entrypoint. Do not return shell text, cwd, timeout, budget, installers, "
         "network actions, or arbitrary file paths.\n"

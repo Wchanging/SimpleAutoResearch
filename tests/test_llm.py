@@ -109,6 +109,29 @@ class LLMParsingTests(unittest.TestCase):
         with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response):
             self.assertEqual(client.ask_json("system", "user"), {"ok": True})
 
+    def test_streamed_chat_chunks_are_assembled_and_usage_is_settled(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", stream=True))
+        chunks = iter([
+            {"choices": [{"delta": {"content": "hel"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}},
+        ])
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=chunks) as call:
+            self.assertEqual(client.ask("system", "user", label="stream-test"), "hello")
+
+        request = call.call_args.args[1]
+        self.assertTrue(request["stream"])
+
+    def test_from_env_reads_stream_setting(self) -> None:
+        with patch.dict(os.environ, {
+            "OPENAI_API_KEY": "test-key",
+            "SIMPLE_AR_LLM_API": "chat",
+            "SIMPLE_AR_LLM_STREAM": "true",
+        }, clear=True):
+            client = LLMClient.from_env()
+
+        self.assertTrue(client._settings.stream)
+
     def test_ask_json_many_preserves_input_order(self) -> None:
         client = object.__new__(LLMClient)
 
@@ -210,11 +233,15 @@ class LLMParsingTests(unittest.TestCase):
         responses_request = _request_for_api_mode(
             request, "responses", reasoning_effort="low"
         )
+        responses_stream_request = _request_for_api_mode(
+            request, "responses", reasoning_effort="low", stream=True
+        )
         chat_request = _request_for_api_mode(
             request, "chat", reasoning_effort="low"
         )
 
         self.assertNotIn("extra_body", responses_request)
+        self.assertNotIn("stream", responses_stream_request)
         self.assertEqual(chat_request["extra_body"], {"reasoning_effort": "low"})
 
     def test_empty_reasoning_only_response_has_actionable_error(self) -> None:

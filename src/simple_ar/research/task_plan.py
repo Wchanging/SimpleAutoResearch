@@ -497,7 +497,9 @@ def _matrix_candidate_key(revision: int, index: int) -> str:
     return f"matrix_candidate_r{revision}_{index}" if revision else f"matrix_candidate_{index}"
 
 
-def _planning_output_tokens(config: Mapping[str, object]) -> int:
+def _planning_output_tokens(config: Mapping[str, object]) -> int | None:
+    if config.get("research_task_planning_max_output_tokens") is None:
+        return None
     try:
         value = int(config.get("research_task_planning_max_output_tokens", 1200))
     except (TypeError, ValueError):

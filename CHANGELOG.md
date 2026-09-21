@@ -41,6 +41,20 @@ This file records user-visible project changes in reverse chronological order. P
 
 ### V2.9 Stage B
 
+- Planning calls inherit the configured client output limit when no per-planner
+  override is supplied, rather than imposing a hidden 1,200-token default that
+  can exhaust a reasoning model's allowance before it returns final JSON.
+- Specify execution-protocol field types and mutually exclusive seed/pair forms
+  in the design prompt. Unused fields are omitted rather than filled with nulls;
+  the existing validator and execution authorization remain unchanged.
+- Explicit continuation retries a failed capability call without a domain result,
+  rather than repeatedly recovering the same failure; measured results are retained.
+- Preserve canonical baseline/candidate comparisons, references and comparability
+  limitations when compacting analysis prompts, including when condition tables
+  are unavailable. Do not mistake missing protocol metadata for a missing baseline.
+- Add an opt-in streamed Chat Completions transport (`SIMPLE_AR_LLM_STREAM=true`)
+  with chunk assembly and usage preservation; Responses remains non-streamed.
+
 - Do not infer a control run from literature baseline names or ordinary seed/split
   metadata. Repeated measurements alone do not require a baseline. Extend execution
   plans only for requested execution outputs; missing execution settings retain
@@ -68,10 +82,11 @@ This file records user-visible project changes in reverse chronological order. P
   retry platform, or arbitrary action registry was added.
 - Keep open-web survey rate-limit evidence and frozen end-to-end acceptance
   explicitly unresolved; these local Stage B checks are not those gates.
-- The latest live digits acceptance remains paused at planning: after increasing
-  the client timeout to 300 seconds, the provider gateway returned HTTP 524 at
-  its 120-second upstream timeout. Focused regression checks pass; live model
-  design/code/experiment acceptance is still pending, not certified by this commit.
+- A resumed GLM digits diagnostic completed design, isolated modification,
+  measured baseline/candidate runs and analysis; reload did not repeat execution.
+  This is not full Stage B acceptance: protocol and implementation evidence remain
+  incomplete in analysis, one model review timed out, and live multi-seed/reuse/skip
+  coverage is still pending. The earlier provider-524 run remains failed evidence.
 
 ## 2026-09-17
 

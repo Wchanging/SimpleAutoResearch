@@ -57,6 +57,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_BACKEND=openai
 SIMPLE_AR_LLM_API=responses
+SIMPLE_AR_LLM_STREAM=false
 SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
 SIMPLE_AR_LLM_REASONING_EFFORT=
 SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
@@ -83,6 +84,11 @@ Notes:
   API only; `chat` sends Chat Completions-style `messages` directly. The
   explicit `auto` mode tries Responses and then Chat after bounded retries for
   compatibility with gateways that expose only one surface.
+- `SIMPLE_AR_LLM_STREAM=true` uses streamed Chat Completions when
+  `SIMPLE_AR_LLM_API=chat`. The client assembles chunks before parsing and
+  records provider usage when the gateway supplies it; Responses calls remain
+  non-streamed. This can avoid long non-stream connection stalls on compatible
+  gateways, but it does not remove provider or client timeouts.
 - `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` optionally selects `max_tokens` or
   `max_completion_tokens` for Chat Completions; `auto` selects from the model
   name when possible.

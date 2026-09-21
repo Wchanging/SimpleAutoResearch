@@ -53,6 +53,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 SIMPLE_AR_MODEL=gpt-4o-mini
 SIMPLE_AR_LLM_BACKEND=openai
 SIMPLE_AR_LLM_API=responses
+SIMPLE_AR_LLM_STREAM=false
 SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
 SIMPLE_AR_LLM_REASONING_EFFORT=
 SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
@@ -73,6 +74,9 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `SIMPLE_AR_MODEL` 是没有传入 `--model` 时的默认模型。
 - `SIMPLE_AR_LLM_BACKEND` 控制传输实现。默认 `openai` 使用 OpenAI Python SDK 直连；`litellm` 保留旧的 LiteLLM 兼容层。
 - `SIMPLE_AR_LLM_API` 控制请求形态。`responses` 会发送 Responses API 风格的 `instructions` 和 `input`，临时错误只在同一接口内有限重试；`chat` 会直接发送 Chat Completions 风格的 `messages`。已有的 `auto` 模式才会在 Responses 重试后再尝试 Chat，用于兼容只暴露其中一种接口的网关。
+- `SIMPLE_AR_LLM_STREAM=true` 在 `SIMPLE_AR_LLM_API=chat` 时启用 Chat Completions
+  流式传输；客户端会在解析前拼接 chunks，服务商提供最终 usage 时仍会记录它。Responses
+  调用保持非流式。流式可以减少兼容网关的长时间非流式连接卡顿，但不会取消服务商或客户端超时。
 - `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` 可选地指定 Chat Completions 的输出参数名：`max_tokens` 或 `max_completion_tokens`；`auto` 会在可能时根据模型名选择。
 - `SIMPLE_AR_LLM_REASONING_EFFORT` 是可选的、由模型文档定义的推理强度，例如 `low` 或 `high`，只会通过 Chat Completions 的 provider 扩展字段转发。`SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` 可以在调用方设置了输出上限时为推理过程扩大传输上限；调用方未设置上限时不会凭空增加新的上限。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 默认是每次 provider 尝试 180 秒；慢速服务商可以设置更大的正数，只有明确设为 `0` / `off` / `none` / `unlimited` 才不向 provider 传客户端超时。

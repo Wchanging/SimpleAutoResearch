@@ -357,6 +357,15 @@ class ResearchApplication:
         if self.controller.manifest.status == "paused" and prepared is None and self._next_action() is None:
             raise ResearchApplicationError("This paused session has no enabled next action.")
         with self.controller.mutation_scope():
+            # Explicit continuation retries a failed call with no domain result.
+            # Completed results and measured failures remain available to recovery.
+            current = next((item for item in self.controller.list_attempts()
+                            if item.attempt_id == self.controller.manifest.current_attempt), None)
+            if current is not None and current.status == "failed":
+                result = self.controller.reconcile_attempt(current.attempt_id)
+                output = _CAPABILITY_OUTPUTS.get(current.capability)
+                if output is not None and not any(ref.kind == output[1] for ref in result.artifacts):
+                    self.controller.manifest.current_attempt = None
             self.controller.continue_with_revision(
                 reason,
                 allow_no_progress_exhausted=allow_no_progress_exhausted,

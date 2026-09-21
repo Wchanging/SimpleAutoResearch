@@ -1059,6 +1059,33 @@ class ResearchApplicationTests(unittest.TestCase):
             ledger = BudgetLedger.load(Path(tmp) / "budget_ledger.json")
             self.assertEqual(ledger.entries[0].attempt_id, "plan-0001")
 
+    def test_continue_retries_failed_analysis_without_repeating_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Evaluation\nMeasure classifier accuracy.\n", encoding="utf-8")
+            app = create_session(
+                ResearchBrief(request_text="Measure classifier accuracy.", requested_outputs=("experiments",),
+                              asset_requests=({"locator": str(paper), "role": "paper"},)),
+                root=root / "session",
+                services=ResearchApplicationServices(budget_limits={"process_invocations": 1, "process_wall_seconds": 5}, config={"execution": {
+                    "command": [sys.executable, "-c", "print('accuracy: 0.5')"],
+                    "cwd": str(root), "timeout_sec": 5,
+                    "result_schema": {"primary_metric": "accuracy", "required_metrics": ["accuracy"]},
+                }}),
+            )
+            self.advance_to(app, "analysis")
+            measurement = app.view().state_refs["experiment"]
+            with patch("simple_ar.research.analysis.run_result_analysis", side_effect=RuntimeError("provider budget exhausted")):
+                self.assertEqual(app.advance().status, "paused")
+            resumed = load_session(root / "session")
+            resumed.continue_session(reason="Budget available; retry analysis only.")
+            view = resumed.advance(max_actions=5)
+            self.assertEqual(view.status, "completed", view.status_reason)
+            self.assertEqual(view.state_refs["experiment"], measurement)
+            self.assertEqual(sum(a["capability"] == "experiment" for a in view.attempts), 1)
+            self.assertEqual(sum(a["capability"] == "analysis" for a in view.attempts), 2)
+
     def test_reload_reuses_completed_result_before_state_reference_is_saved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = create_session(ResearchBrief(request_text="Study agents"), root=tmp)

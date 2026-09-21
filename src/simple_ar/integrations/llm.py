@@ -77,6 +77,9 @@ class LLMSettings:
             ``reasoning_effort`` is configured and neither the caller nor the
             client settings provide a cap. An explicit caller cap always wins;
             reasoning configuration never silently raises it.
+        stream: Use streamed Chat Completions responses and assemble their
+            content before returning. Responses API calls remain non-streamed
+            because this client only normalizes Chat Completions chunks.
     """
 
     model: str = "gpt-4o-mini"
@@ -95,6 +98,7 @@ class LLMSettings:
     chat_token_limit_param: str = "auto"
     reasoning_effort: str = ""
     reasoning_output_tokens: int | None = None
+    stream: bool = False
 
 
 @dataclass(frozen=True)
@@ -244,6 +248,7 @@ class LLMClient:
             chat_token_limit_param=_chat_token_limit_param_mode("SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM"),
             reasoning_effort=_reasoning_effort_mode("SIMPLE_AR_LLM_REASONING_EFFORT"),
             reasoning_output_tokens=_optional_positive_int("SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS", default=None),
+            stream=_boolean_env("SIMPLE_AR_LLM_STREAM", default=False),
         )
         return cls(
             settings,
@@ -432,6 +437,7 @@ class LLMClient:
                 api_mode,
                 chat_token_limit_param=self._settings.chat_token_limit_param,
                 reasoning_effort=self._settings.reasoning_effort,
+                stream=self._settings.stream,
             )
             attempted = 0
             for attempt in range(1, attempts + 1):
@@ -444,15 +450,14 @@ class LLMClient:
                     reserved_total_tokens=reserved_total_tokens,
                 )
                 try:
-                    return (
-                        _call_provider(
-                            self._settings.transport_backend,
-                            api_mode,
-                            mode_request,
-                        ),
-                        provider_attempts,
-                        reservation_id,
+                    response = _call_provider(
+                        self._settings.transport_backend,
+                        api_mode,
+                        mode_request,
                     )
+                    if mode_request.get("stream") is True:
+                        response = _collect_chat_stream(response)
+                    return response, provider_attempts, reservation_id
                 except Exception as exc:
                     last_error = exc
                     self._reconcile_failed_budget_attempt(
@@ -921,6 +926,58 @@ def _content_from_response(response: object) -> str:
     return ""
 
 
+def _collect_chat_stream(stream_response: object) -> dict[str, Any]:
+    """Normalize Chat Completions chunks into the existing response shape.
+
+    Streaming is a transport choice, not a second LLM result contract. The
+    caller still receives one assembled response, so parsing, usage settlement
+    and retry handling remain unchanged. Providers that omit a final usage
+    chunk are accounted for by the existing estimated-token path.
+    """
+
+    if isinstance(stream_response, (dict, list, str, bytes)):
+        return stream_response  # type: ignore[return-value]
+    try:
+        chunks = iter(stream_response)  # type: ignore[arg-type]
+    except TypeError:
+        return stream_response  # type: ignore[return-value]
+
+    parts: list[str] = []
+    usage: tuple[int, int, int] | None = None
+    finish_reason: str | None = None
+    for chunk in chunks:
+        chunk_usage = _usage_from_response(chunk)
+        if chunk_usage is not None:
+            usage = chunk_usage
+        choices = _get_value(chunk, "choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0]
+        delta = _get_value(choice, "delta")
+        content = _get_value(delta, "content") if delta is not None else None
+        if content is None:
+            content = _get_value(choice, "text")
+        if content is not None:
+            rendered = _text_from_content(content)
+            if rendered:
+                parts.append(rendered)
+        value = _get_value(choice, "finish_reason")
+        if value is not None:
+            finish_reason = str(value)
+
+    message: dict[str, Any] = {"content": "".join(parts)}
+    response: dict[str, Any] = {
+        "choices": [{"message": message, "finish_reason": finish_reason}],
+    }
+    if usage is not None:
+        response["usage"] = {
+            "prompt_tokens": usage[0],
+            "completion_tokens": usage[1],
+            "total_tokens": usage[2],
+        }
+    return response
+
+
 def _empty_response_message(response: object) -> str:
     """Explain why a provider response had no usable final text."""
     finish_reason = _finish_reason_from_response(response)
@@ -1069,6 +1126,17 @@ def _optional_positive_int(env_name: str, *, default: int | None) -> int | None:
     except ValueError:
         return default
     return parsed if parsed > 0 else None
+
+
+def _boolean_env(env_name: str, *, default: bool) -> bool:
+    value = os.environ.get(env_name, "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if value in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return default
 
 
 def _positive_int(env_name: str, *, default: int) -> int:
@@ -1243,15 +1311,21 @@ def _request_for_api_mode(
     *,
     chat_token_limit_param: str = "auto",
     reasoning_effort: str = "",
+    stream: bool = False,
 ) -> dict[str, Any]:
     if api_mode == "responses":
         return _as_responses_request(request)
     if api_mode == "chat":
-        return _as_chat_request(
+        converted = _as_chat_request(
             request,
             chat_token_limit_param=chat_token_limit_param,
             reasoning_effort=reasoning_effort,
         )
+        if stream:
+            converted["stream"] = True
+        else:
+            converted.pop("stream", None)
+        return converted
     raise ValueError(f"Unsupported LLM API mode: {api_mode}")
 
 
@@ -1289,6 +1363,10 @@ def _as_responses_request(request: dict[str, Any]) -> dict[str, Any]:
             converted["max_output_tokens"] = converted["max_tokens"]
     converted.pop("max_completion_tokens", None)
     converted.pop("max_tokens", None)
+    # Stream normalization is intentionally Chat-only in this lightweight
+    # client; Responses events have a different shape and are not consumed by
+    # _collect_chat_stream.
+    converted.pop("stream", None)
     return _drop_none_values(converted)
 
 

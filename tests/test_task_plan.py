@@ -178,8 +178,12 @@ class TaskPlanTests(unittest.TestCase):
         self.assertEqual(result.mode, "llm")
         self.assertEqual(result.model, "fixture-task-planner")
         self.assertEqual(client.label, "task-plan")
-        self.assertGreater(client.tokens, 0)
+        self.assertIsNone(client.tokens)
         self.assertNotIn("experiment", [step.action for step in result.steps])
+        from dataclasses import replace
+
+        build_task_plan(replace(request, config={"research_task_planning_max_output_tokens": 2048}))
+        self.assertEqual(client.tokens, 2048)
 
     def test_bug_application_uses_code_task_without_literature_or_experiment(self) -> None:
         from tests.test_code_task import _FakeCodeTaskClient

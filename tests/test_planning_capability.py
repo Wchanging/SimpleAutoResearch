@@ -78,8 +78,22 @@ class PlanningCapabilityTests(unittest.TestCase):
         self.assertEqual(result.provenance["mode"], "llm")
         self.assertEqual(result.provenance["model"], "fake-research-model")
         self.assertEqual(client.label, "research-planner")
-        self.assertEqual(client.max_output_tokens, 1200)
+        self.assertIsNone(client.max_output_tokens)
         self.assertEqual(payload["planner"], "llm")
+        with tempfile.TemporaryDirectory() as tmp:
+            run_research_plan_capability(
+                context=CapabilityContext(
+                    store=ArtifactStore(Path(tmp)),
+                    attempt=AttemptManifest(attempt_id="plan-override", capability="plan"),
+                ),
+                request=ResearchPlanRequest(
+                    topic="reliable coding agents",
+                    config={"research_planning_max_output_tokens": 2048},
+                    use_llm=True,
+                    llm_client=client,
+                ),
+            )
+        self.assertEqual(client.max_output_tokens, 2048)
 
     def test_plan_reuses_existing_deterministic_planners(self) -> None:
         result = build_research_plan(

@@ -32,6 +32,24 @@ class FakeAnalysisClient:
 
 
 class ResultAnalysisTests(unittest.TestCase):
+    def test_prompt_preserves_canonical_comparison_without_condition_tables(self) -> None:
+        import json
+        from simple_ar.result_analysis.service import build_prompt, build_metric_summary
+
+        comparison = {"comparability": "unknown", "reasons": ["Protocol incomplete"],
+                      "baseline": {"metrics": {"accuracy": 0.7}},
+                      "candidate": {"metrics": {"accuracy": 0.9}},
+                      "baseline_ref": {"path": "baseline/results.json"}}
+        execution = {"status": "passed", "metrics": {"accuracy": 0.9},
+                     "comparisons": [comparison], "execution": {"stdout": "large process log"}}
+        context = AnalysisContext(task_id="comparison", metrics={"accuracy": 0.9},
+                                  project_results={"execution_result": execution})
+        prompt = build_prompt(context, build_metric_summary(context), run_result_analysis(context))
+        payload = json.loads(prompt.split("\n\n")[-1])
+        projected = payload["context"]["project_results"]["execution_result"]
+        self.assertEqual(projected["comparisons"], [comparison])
+        self.assertNotIn("execution", projected)
+
     def test_llm_mode_without_client_does_not_fallback(self) -> None:
         with self.assertRaisesRegex(LLMError, "refusing deterministic fallback"):
             run_result_analysis(
