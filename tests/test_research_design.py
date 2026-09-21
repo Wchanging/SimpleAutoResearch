@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+import sys
 
 from simple_ar.core import ArtifactStore, AttemptManifest
 from simple_ar.core.capabilities import CapabilityContext
@@ -23,6 +24,141 @@ from simple_ar.research.synthesis import SynthesisResult
 
 
 class ResearchDesignTests(unittest.TestCase):
+    def test_literature_baseline_does_not_request_a_control_run(self) -> None:
+        result = build_research_design(ResearchDesignRequest(
+            synthesis=self._synthesis(),
+            execution_boundary={"command": [sys.executable, "benchmark.py"]},
+        ))
+        self.assertFalse(result.execution_protocol["comparison_required"])
+        self.assertEqual(result.execution_protocol["baseline_policy"], "skip")
+
+    def test_explicit_execution_boundary_overrides_conflicting_model_protocol(self) -> None:
+        class FakeClient:
+            model = "fake-protocol-model"
+
+            def ask_json(self, _system: str, _user: str, *, label: str = "", **kwargs: object):
+                return {
+                    "selected_idea_id": "idea-002",
+                    "rationale": "Use the inspected benchmark with the caller's declared conditions.",
+                    "execution_protocol": {
+                        "command": [sys.executable, "benchmark.py", "--batch-size", "4"],
+                        "pairs": [
+                            {
+                                "seed": 0,
+                                "baseline_command": [sys.executable, "benchmark.py", "--seed", "0"],
+                                "candidate_command": [sys.executable, "benchmark.py", "--seed", "0"],
+                            },
+                        ],
+                        "comparison_required": False,
+                        "baseline_policy": "skip",
+                        "result_schema": {"primary_metric": "loss"},
+                    },
+                }
+
+        result = build_research_design(
+            ResearchDesignRequest(
+                synthesis=self._synthesis(),
+                use_llm=True,
+                llm_client=FakeClient(),
+                execution_schema={"primary_metric": "f1"},
+                execution_boundary={
+                    "command": [sys.executable, "benchmark.py"],
+                    "seeds": [7, 9],
+                    "seed_flag": "--seed",
+                    "baseline_policy": "run",
+                    "result_schema": {"primary_metric": "f1"},
+                },
+                entry_facts={
+                    "benchmark_argv": [sys.executable, "benchmark.py"],
+                    "authorized_argv_prefixes": [[sys.executable, "benchmark.py"]],
+                },
+            )
+        )
+
+        self.assertEqual(result.execution_protocol["seeds"], [7, 9])
+        self.assertNotIn("pairs", result.execution_protocol)
+        self.assertEqual(result.execution_protocol["baseline_policy"], "run")
+        self.assertTrue(result.execution_protocol["comparison_required"])
+        self.assertEqual(result.execution_protocol["result_schema"], {"primary_metric": "f1"})
+
+    def test_llm_design_rejects_pair_command_outside_inspected_entry(self) -> None:
+        class FakeClient:
+            model = "fake-protocol-model"
+
+            def ask_json(self, _system: str, _user: str, *, label: str = "", **kwargs: object):
+                return {
+                    "selected_idea_id": "idea-002",
+                    "rationale": "Try an uninspected command.",
+                    "execution_protocol": {
+                        "pairs": [
+                            {
+                                "seed": 0,
+                                "baseline_command": [sys.executable, "other.py"],
+                                "candidate_command": [sys.executable, "benchmark.py"],
+                            },
+                        ],
+                    },
+                }
+
+        with self.assertRaises(LLMError):
+            build_research_design(
+                ResearchDesignRequest(
+                    synthesis=self._synthesis(),
+                    use_llm=True,
+                    llm_client=FakeClient(),
+                    entry_facts={
+                        "authorized_argv_prefixes": [[sys.executable, "benchmark.py"]],
+                    },
+                )
+            )
+
+    def test_llm_design_binds_inspected_entry_facts_to_execution_protocol(self) -> None:
+        class FakeClient:
+            model = "fake-protocol-model"
+
+            def ask_json(self, _system: str, _user: str, *, label: str = "", **kwargs: object):
+                self.label = label
+                return {
+                    "selected_idea_id": "idea-002",
+                    "rationale": "The supplied entrypoint supports a small measured comparison.",
+                    "execution_protocol": {
+                        "command": [sys.executable, "benchmark.py", "--batch-size", "4"],
+                        "seeds": [0, 1],
+                        "seed_flag": "--seed",
+                        "baseline_policy": "run",
+                        "comparison_required": True,
+                        "decision_reason": "The selected direction needs two comparable seed conditions.",
+                        "stopping_criteria": ["Stop after both bounded conditions pass."],
+                    },
+                }
+
+        result = build_research_design(
+            ResearchDesignRequest(
+                synthesis=self._synthesis(),
+                use_llm=True,
+                llm_client=FakeClient(),
+                execution_schema={"primary_metric": "f1"},
+                execution_boundary={"result_schema": {"primary_metric": "f1"}},
+                entry_facts={
+                    "benchmark_argv": [sys.executable, "benchmark.py"],
+                    "authorized_argv_prefixes": [[sys.executable, "benchmark.py"]],
+                    "input_refs": ["preparation:entry-facts"],
+                },
+            )
+        )
+
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.execution_protocol["seeds"], [0, 1])
+        self.assertEqual(result.execution_protocol["command"][-2:], ["--batch-size", "4"])
+        from simple_ar.app.research_execution import merge_execution_protocol, normalize_execution_config
+
+        execution = normalize_execution_config(merge_execution_protocol({}, result.execution_protocol))
+        self.assertEqual(
+            execution["pairs"][0]["baseline_command"],
+            execution["pairs"][0]["candidate_command"],
+        )
+        self.assertEqual(result.execution_protocol["input_refs"], ["preparation:entry-facts"])
+
     def test_llm_mode_selects_only_an_existing_candidate(self) -> None:
         class FakeClient:
             model = "fake-design-model"

@@ -22,8 +22,13 @@ included framework fixes and recovery; they are not evidence of a single
 frozen-version acceptance run or fully validated paper quality. Remaining
 report factual-correction validation, an explicit attempt-limit extension
 entrypoint, and frozen-version acceptance move to V2.9 recovery, delivery, and
-release work. Task-driven capability composition and bounded scientific
-iteration are V2.9 goals, not claims about implemented functionality.
+release work. The V2.9 development branch has exercised supplied-material analysis
+and a small code repair through short task plans; live open-web acceptance still
+has a provider rate-limit blocker. Protocol-driven experiments, research-informed
+iteration and full continuation remain in development, not completed features.
+The target input is a natural-language task, available assets and necessary resource
+and permission settings, not a user-authored stage sequence. Module upgrades accompany
+the core stages; see [development targets and handoffs](docs/DEVELOPMENT.md#v29-development-target-decision-context-and-handoffs).
 
 ## Goals
 
@@ -195,6 +200,27 @@ For a literature-only pass, omit both `--command` and
 `--code-task-config`. Without `--model` the session ends with an evidence-backed
 summary; with `--model` it can continue to the research-only Markdown report.
 No experiment process is created in this mode.
+
+For a prepared low-cost experiment, one literal command can serve a bounded
+seed protocol without hand-writing every pair:
+
+```toml
+[execution]
+command = ["python", "measure.py"]
+cwd = "."
+timeout_sec = 30
+seed_count = 2
+seed_flag = "--seed"
+baseline_policy = "skip" # run, skip, or reuse a same-condition artifact
+```
+
+The accepted plan records the selected conditions and runs only the existing
+execution backend. `reuse` requires a passed framework-produced `baseline_ref`;
+it checks the command, result schema, and the declared data/split/metric/condition
+and preparation lineage before binding it. A cwd match or narrative contract
+match alone is not sufficient. These compact settings do not grant shell,
+installer, or arbitrary model-execution authority; in LLM mode, design proposals
+must remain within an inspected entrypoint boundary and explicit configuration wins.
 
 The commands below are segmented or compatibility surfaces, not a second V2.8
 full workflow. Use them for debugging, persisted handoff continuation, legacy

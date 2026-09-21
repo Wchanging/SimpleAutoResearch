@@ -8,7 +8,7 @@ for model-assisted question and query planning.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -22,6 +22,7 @@ from simple_ar.research.prompts import (
     research_planner_user_prompt,
 )
 from simple_ar.research.sources.base import build_source_plan, primary_query
+from simple_ar.research.task_plan import TaskPlanRequest, build_task_plan
 
 from .planner import (
     build_llm_research_plan,
@@ -49,6 +50,8 @@ class ResearchPlanRequest:
     default_max_results: int = 10
     use_llm: bool = False
     llm_client: Any | None = field(default=None, repr=False, compare=False)
+    task_plan_request: TaskPlanRequest | None = field(default=None, repr=False, compare=False)
+    task_plan_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.topic.strip():
@@ -57,6 +60,8 @@ class ResearchPlanRequest:
             raise ValueError("default_max_results must be positive.")
         if self.use_llm and self.llm_client is None:
             raise ValueError("ResearchPlanRequest.llm_client is required when use_llm is true.")
+        if self.task_plan_only and self.task_plan_request is None:
+            raise ValueError("task_plan_only requires a task_plan_request.")
         object.__setattr__(self, "config", dict(self.config))
 
 
@@ -212,26 +217,48 @@ def run_research_plan_capability(
 ) -> CapabilityResult:
     """Persist one planning handoff for a session attempt."""
 
-    result = build_requested_research_plan(request)
-    output = context.store.write_json(
-        "research_plan.json",
-        result.to_handoff_dict(),
-        kind="research_plan",
-        schema="research_plan.v1",
-        producer="research.planning",
-    )
-    return CapabilityResult(
-        status="completed",
-        artifacts=(output,),
-        usage={
+    artifacts = []
+    usage: dict[str, Any] = {}
+    result: ResearchPlanResult | None = None
+    if not request.task_plan_only:
+        result = build_requested_research_plan(request)
+        output = context.store.write_json(
+            "research_plan.json",
+            result.to_handoff_dict(),
+            kind="research_plan",
+            schema="research_plan.v1",
+            producer="research.planning",
+        )
+        artifacts.append(output)
+        usage.update({
             "question_count": len(result.questions),
             "query_count": len(result.query_plan.queries),
             "source_count": len(result.source_plan.sources),
-        },
+        })
+    if request.task_plan_request is not None:
+        task_request = request.task_plan_request
+        if task_request.use_llm and task_request.llm_client is None:
+            task_request = replace(task_request, llm_client=request.llm_client)
+        task_plan = build_task_plan(task_request)
+        artifacts.append(context.store.write_json(
+            "task_plan.json",
+            task_plan.to_handoff_dict(),
+            kind="task_plan",
+            schema="research_task_plan.v1",
+            producer="research.task_planning",
+        ))
+        usage["task_step_count"] = len(task_plan.steps)
+        usage["task_plan_mode"] = task_plan.mode
+    if not artifacts:
+        raise ValueError("Research planning requires a research plan or accepted task plan request.")
+    return CapabilityResult(
+        status="completed",
+        artifacts=tuple(artifacts),
+        usage=usage,
         provenance={
             "capability": "plan",
-            "planner": result.query_plan.planner,
-            "result_schema": "research_plan.v1",
+            "planner": result.query_plan.planner if result is not None else "task_planner",
+            "result_schema": "research_plan.v1" if result is not None else "research_task_plan.v1",
             "mode": "llm" if request.use_llm else "deterministic",
             "model": str(getattr(request.llm_client, "model", ""))
             if request.use_llm

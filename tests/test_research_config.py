@@ -11,6 +11,39 @@ from simple_ar.cli.research_config import research_defaults
 
 
 class ResearchConfigTests(unittest.TestCase):
+    def test_config_accepts_compact_seed_protocol_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            (Path(directory) / "paper.md").write_text(
+                "# Seed fixture\nA small supplied document supports a bounded comparison.\n",
+                encoding="utf-8",
+            )
+            (Path(directory) / "measure.py").write_text(
+                "import sys\nfrom pathlib import Path\n"
+                "with Path('calls.txt').open('a') as handle: handle.write(sys.argv[-1] + '\\n')\n"
+                "print('accuracy:', 0.5 + int(sys.argv[-1]) / 10)\n",
+                encoding="utf-8",
+            )
+            path.write_text(
+                '[task]\ngoal="Run two different seeds for the seed fixture"\noutputs=["experiments"]\noutput_root="out"\n'
+                '[model]\nname=""\n[research]\nproviders=["local_files"]\nmaterials_only=true\n'
+                '[assets]\npapers=["paper.md"]\n[budget]\nprocess_invocations=2\nprocess_wall_seconds=20\n'
+                f'[execution]\ncommand={json.dumps([sys.executable, "measure.py"])}\ncwd="."\n'
+                'timeout_sec=5\nseed_count=2\nseed_flag="--seed"\nbaseline_policy="skip"\n',
+                encoding="utf-8",
+            )
+            defaults = research_defaults(["research-session", "--config", str(path)])
+            self.assertEqual(defaults["execution_details"]["seed_count"], 2)
+            self.assertEqual(defaults["execution_details"]["seed_flag"], "--seed")
+            self.assertEqual(defaults["execution_details"]["baseline_policy"], "skip")
+            from simple_ar.cli.main import main
+            from simple_ar.app.research_application import load_session
+            with redirect_stdout(io.StringIO()):
+                main(["research-session", "--config", str(path)])
+            session = next((Path(directory) / "out").iterdir())
+            self.assertEqual(load_session(session).view().status, "completed")
+            self.assertEqual((Path(directory) / "calls.txt").read_text(encoding="utf-8").splitlines(), ["0", "1"])
+
     def test_config_pair_protocol_real_processes_and_completed_resume(self):
         from simple_ar.cli.main import main
         from simple_ar.app.research_application import load_session
@@ -77,8 +110,9 @@ class ResearchConfigTests(unittest.TestCase):
             after = app.view()
             self.assertEqual(after.status, "completed")
             for key, ref in before.state_refs.items():
-                if key not in {"runtime_config", "diagnostics"}:
+                if key not in {"runtime_config", "diagnostics", "task_plan"}:
                     self.assertEqual(after.state_refs[key], ref)
+            self.assertNotEqual(after.state_refs["task_plan"], before.state_refs["task_plan"])
             self.assertEqual(app.budget_ledger.limits["total_tokens"], 123456)
             self.assertEqual((root / "calls.txt").read_text(), "x")
             with redirect_stdout(io.StringIO()):
@@ -110,7 +144,8 @@ class ResearchConfigTests(unittest.TestCase):
             with redirect_stdout(output), self.assertRaisesRegex(SystemExit, "status 'paused'"):
                 main(["research-session", "--config", str(path)])
             self.assertIn("Implementation: preparation required", output.getvalue())
-            self.assertIn("Next action: experiment", output.getvalue())
+            self.assertIn("Next action: none", output.getvalue())
+            self.assertIn("Provide execution settings", output.getvalue())
 
     def test_file_paths_and_explicit_cli_overrides(self):
         with tempfile.TemporaryDirectory() as directory:

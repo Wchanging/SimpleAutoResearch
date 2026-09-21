@@ -20,6 +20,14 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def advance_to(self, app, action):
+        for _ in range(app.services.max_attempts):
+            view = app.view()
+            if view.next_action == action or view.status in {"paused", "blocked", "completed"}:
+                break
+            app.advance()
+        self.assertEqual(app.view().next_action, action, app.view().status_reason)
+
     def test_missing_selected_design_stops_code_preparation_before_processes(self):
         from simple_ar.research.design import ResearchDesignResult
         with tempfile.TemporaryDirectory() as tmp:
@@ -57,6 +65,42 @@ class ResearchApplicationTests(unittest.TestCase):
             saved = (Path(tmp) / "budget_ledger.json").read_bytes()
             resumed.advance()
             self.assertEqual((Path(tmp) / "budget_ledger.json").read_bytes(), saved)
+
+    def test_design_receives_omitted_policy_as_omitted(self):
+        from simple_ar.research import design as design_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Fixture\nA small measured comparison.\n", encoding="utf-8")
+            seen = {}
+            real = design_module.build_research_design
+
+            def capture(request):
+                seen["boundary"] = dict(request.execution_boundary)
+                return real(request)
+
+            app = create_session(
+                ResearchBrief(
+                    request_text="Measure the supplied fixture.",
+                    requested_outputs=("experiments",),
+                    asset_requests=({"locator": str(paper), "role": "paper"},),
+                ),
+                root=root / "session",
+                services=ResearchApplicationServices(
+                    config={
+                        "research_materials_only": True,
+                        "execution": {
+                            "command": [sys.executable, "-c", "print('accuracy: 1')"],
+                            "cwd": str(root), "timeout_sec": 5,
+                        },
+                    },
+                ),
+            )
+            with patch.object(design_module, "build_research_design", side_effect=capture):
+                app.advance(max_actions=20)
+            self.assertIn("boundary", seen)
+            self.assertNotIn("baseline_policy", seen["boundary"])
 
     def test_real_code_task_modification_is_measured_by_application_once(self):
         """Keep the old real bridge check, but exercise the formal lifecycle."""
@@ -256,6 +300,11 @@ class ResearchApplicationTests(unittest.TestCase):
             plan = app.controller.store.read_json(app.view().state_refs["work_plan"])
             self.assertEqual(plan["requested_outputs"][0]["status"], "pending")
             app.advance(max_actions=8)
+            self.assertEqual(app.view().next_action, "plan")
+            # The first plan ends at the design checkpoint.  The same plan
+            # capability then binds the accepted execution protocol before
+            # any measurement action is selected.
+            app.advance(max_actions=1)
             self.assertEqual(app.view().next_action, "matrix_baseline_0")
             with patch.object(app, "_persist_application_views", side_effect=RuntimeError("after measurement")):
                 with self.assertRaisesRegex(RuntimeError, "after measurement"):
@@ -345,6 +394,145 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertTrue((app.controller.store.resolve(report_dir / "figures" / "paired-1.svg")).is_file())
             self.assertIn("paired-1.svg", report_text)
             self.assertEqual(len(app.budget_ledger.entries), 4)
+
+    def test_compact_seed_protocol_skips_baseline_and_reloads_without_rerun(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Seed comparison\nA bounded fixture supports two measured conditions.\n", encoding="utf-8")
+            script = root / "measure.py"
+            script.write_text(
+                "import sys\nfrom pathlib import Path\n"
+                "with Path('calls.txt').open('a') as handle: handle.write(sys.argv[-1] + '\\n')\n"
+                "print('accuracy:', 0.5 + int(sys.argv[-1]) / 10)\n",
+                encoding="utf-8",
+            )
+            app = create_session(
+                ResearchBrief(
+                    request_text="Run two different seeds for this bounded fixture.",
+                    requested_outputs=("experiments",),
+                    asset_requests=({"locator": str(paper), "role": "paper"},),
+                ),
+                root=root / "session",
+                services=ResearchApplicationServices(
+                    max_results=1,
+                    max_chunks=10,
+                    max_attempts=20,
+                    config={
+                        "research_materials_only": True,
+                        "execution": {
+                            "command": [sys.executable, str(script)],
+                            "cwd": str(root),
+                            "timeout_sec": 5,
+                            "seeds": [0, 1],
+                            "seed_flag": "--seed",
+                            "baseline_policy": "skip",
+                            "result_schema": {"primary_metric": "accuracy", "direction": "higher"},
+                        },
+                    },
+                    budget_limits={"process_invocations": 2, "process_wall_seconds": 20},
+                ),
+            )
+            finished = app.advance(max_actions=20)
+            self.assertEqual(finished.status, "completed", finished.status_reason)
+            plan = app.controller.store.read_json(finished.state_refs["work_plan"])
+            actions = [row["action"] for row in plan["accepted_plan"]["steps"]]
+            self.assertNotIn("matrix_baseline_0", actions)
+            self.assertEqual(plan["execution_protocol"]["seeds"], [0, 1])
+            self.assertEqual(plan["execution_decision"]["baseline"]["mode"], "skip")
+            collection = app.controller.store.read_json(finished.state_refs["matrix_results"])
+            self.assertTrue(all(row["baseline"] is None and row["candidate"] for row in collection["pairs"]))
+            self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["0", "1"])
+            attempts = len(finished.attempts)
+            restored = load_session(root / "session")
+            resumed = restored.advance(max_actions=20)
+            self.assertEqual(len(resumed.attempts), attempts)
+            self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["0", "1"])
+
+    def test_same_condition_baseline_can_be_reused_after_plan_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Baseline reuse\nA fixture keeps the comparison boundary explicit.\n", encoding="utf-8")
+            script = root / "measure.py"
+            script.write_text(
+                "import sys\nfrom pathlib import Path\n"
+                "with Path('calls.txt').open('a') as handle: handle.write(sys.argv[1] + '\\n')\n"
+                "print('accuracy: 0.7')\n",
+                encoding="utf-8",
+            )
+            execution = {
+                "command": [sys.executable, str(script), "candidate"],
+                "baseline": {"command": [sys.executable, str(script), "baseline"]},
+                "cwd": str(root), "timeout_sec": 5,
+                "result_schema": {"primary_metric": "accuracy", "direction": "higher"},
+                "protocol": {
+                    "contract_id": "reuse-fixture-v1",
+                    "hypothesis": "The same evaluator condition remains comparable.",
+                    "dataset_refs": [{"asset_id": "fixture", "revision": "v1"}],
+                    "split_spec": {"name": "test"},
+                    "metric_specs": [{"name": "accuracy", "unit": "fraction"}],
+                    "comparison_conditions": {"method": "fixture"},
+                    "protected_assets": [{"asset_id": "evaluator", "path": "measure.py"}],
+                },
+            }
+            app = create_session(
+                ResearchBrief(request_text="Measure the fixture.", requested_outputs=("experiments",),
+                              asset_requests=({"locator": str(paper), "role": "paper"},)),
+                root=root / "session",
+                services=ResearchApplicationServices(
+                    max_results=1, max_chunks=10, max_attempts=20,
+                    config={"research_materials_only": True, "execution": execution},
+                    budget_limits={"process_invocations": 2, "process_wall_seconds": 20},
+                ),
+            )
+            for _ in range(20):
+                if app.view().next_action == "baseline":
+                    break
+                app.advance(max_actions=1)
+            self.assertEqual(app.view().next_action, "baseline")
+            after_baseline = app.advance(max_actions=1)
+            baseline_ref = after_baseline.state_refs["baseline"]
+            self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["baseline"])
+            original_evaluator = script.read_text(encoding="utf-8")
+            script.write_text(original_evaluator + "\n# protected evaluator changed\n", encoding="utf-8")
+            self.assertFalse(app._baseline_ref_matches(baseline_ref, execution))
+            script.write_text(original_evaluator, encoding="utf-8")
+            self.assertTrue(app._baseline_ref_matches(baseline_ref, execution))
+            app.services = replace(app.services, config={
+                **app.services.config,
+                "execution": {**execution, "baseline_policy": "reuse", "baseline_ref": baseline_ref.path},
+            })
+            revised = replace(app.brief, request_text="Measure the fixture again without repeating a valid baseline.")
+            with app.controller.mutation_scope():
+                app.controller.pause("Pause before the explicit protocol revision.")
+            app.continue_session(reason="Reuse the passed same-condition baseline.", revised_brief=revised)
+            finished = app.advance(max_actions=20)
+            self.assertEqual(finished.status, "completed", finished.status_reason)
+            self.assertEqual(finished.work_plan["execution_decision"]["baseline"]["mode"], "reuse")
+            self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["baseline", "candidate"])
+
+            mismatched_protocol = {
+                **execution["protocol"],
+                "dataset_refs": [{"asset_id": "different", "revision": "v2"}],
+            }
+            app.services = replace(app.services, config={
+                **app.services.config,
+                "execution": {
+                    **execution,
+                    "baseline_policy": "reuse",
+                    "baseline_ref": baseline_ref.path,
+                    "protocol": mismatched_protocol,
+                },
+            })
+            app.continue_session(
+                reason="Check that a changed protocol cannot reuse the old baseline.",
+                revised_brief=replace(app.brief, request_text="Measure the fixture under a changed dataset reference."),
+            )
+            rejected = app.advance(max_actions=20)
+            self.assertEqual(rejected.status, "paused")
+            self.assertIn("Baseline reuse requested", rejected.status_reason)
+            self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["baseline", "candidate"])
 
     def test_literature_report_does_not_require_or_launch_experiments(self):
         from dataclasses import replace
@@ -488,7 +676,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 ), root=root / "session", services=ResearchApplicationServices(max_results=1,
                     config={"execution": {"dataset": str(data), "timeout_sec": 10}},
                     budget_limits={"process_invocations": 1, "process_wall_seconds": 10}))
-                prepared = app.advance(max_actions=9)
+                prepared = app.advance(max_actions=10)
                 self.assertIn("preparation", prepared.state_refs, prepared.status_reason)
                 self.assertNotIn("experiment", prepared.state_refs)
                 self.assertEqual(app.budget_ledger.remaining("process_invocations"), 1)
@@ -619,8 +807,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 max_results=1, config={"execution": execution},
                 budget_limits={"process_invocations": 2, "process_wall_seconds": 10},
             ))
-            app.advance(max_actions=8)
-            self.assertEqual(app.view().next_action, "baseline")
+            self.advance_to(app, "baseline")
             with patch.object(app, "_persist_application_views", side_effect=RuntimeError("interrupted baseline")):
                 with self.assertRaisesRegex(RuntimeError, "interrupted baseline"):
                     app.advance()
@@ -686,7 +873,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 request_text="Evaluate classifier accuracy.", requested_outputs=("experiment",),
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=services)
-            app.advance(max_actions=8)
+            self.advance_to(app, "experiment")
             failed = app.advance()
             self.assertEqual(failed.next_action, "analysis")
             first_attempt = next(item["attempt_id"] for item in failed.attempts if item["capability"] == "experiment")
@@ -744,7 +931,7 @@ class ResearchApplicationTests(unittest.TestCase):
                     request_text="Evaluate classifier validation.", requested_outputs=("experiment",),
                     asset_requests=({"locator": str(paper), "role": "paper"},),
                 ), root=root / "session", services=services)
-                app.advance(max_actions=8)
+                self.advance_to(app, "experiment")
                 if exitcode:
                     # Simulate process termination after the physical result
                     # is durable but before application references are saved.
@@ -798,6 +985,10 @@ class ResearchApplicationTests(unittest.TestCase):
 
                     def ask_json(self, system, user, **kwargs):
                         self.calls += 1
+                        if kwargs.get("label") == "research-design":
+                            return dict(selected_idea_id=self.selected,
+                                        rationale="Chosen from shared evidence",
+                                        execution_protocol={"comparison_required": False, "baseline_policy": "skip"})
                         payload = json.loads(user)
                         assert "heldout.csv" in payload["constraints"]["research_request"]
                         self.selected = payload["candidates"][-1]["idea_id"] if recommend else None
@@ -827,7 +1018,7 @@ class ResearchApplicationTests(unittest.TestCase):
                     view = app.advance(max_actions=2)
                 assessment = app.controller.store.read_json(view.state_refs["assessment"])
                 self.assertFalse(any("unresolved evidence refs" in item for item in assessment["diagnostics"]))
-                self.assertEqual(client.calls, 1)
+                self.assertEqual(client.calls, 2 if recommend else 1)
                 self.assertIn("summary", view.state_refs)
                 if recommend:
                     self.assertEqual(view.status, "completed")
@@ -961,7 +1152,7 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIsNone(final.next_action)
             self.assertEqual(
                 [item["capability"] for item in final.attempts],
-                ["document_ingest", "plan", "read", "search", "synthesize"],
+                ["document_ingest", "plan", "read", "search", "summary", "synthesize"],
             )
             self.assertTrue(
                 (root / "session" / "outputs" / "research_summary.md").is_file()
@@ -969,7 +1160,7 @@ class ResearchApplicationTests(unittest.TestCase):
             summary = (
                 root / "session" / "outputs" / "research_summary.md"
             ).read_text(encoding="utf-8")
-            self.assertIn("## Abstract", summary)
+            self.assertIn("## Research question", summary)
             self.assertIn("## Evidence collection", summary)
             self.assertIn("## Synthesis", summary)
             self.assertIn("summary", final.state_refs)
@@ -979,6 +1170,11 @@ class ResearchApplicationTests(unittest.TestCase):
 
             restored = load_session(root / "session")
             self.assertEqual(restored.view().status, "completed")
+            restored_view = restored.advance(max_actions=1)
+            self.assertEqual(
+                sum(item["capability"] == "summary" for item in restored_view.attempts),
+                1,
+            )
             export_ref = restored.export_session()
             self.assertEqual(export_ref.kind, "session_snapshot")
             self.assertTrue((root / "session" / export_ref.path).is_file())
@@ -989,7 +1185,7 @@ class ResearchApplicationTests(unittest.TestCase):
             ))
             revised = restored.advance()
             self.assertEqual(revised.next_action, "search")
-            self.assertEqual(revised.budget["attempts"], 6)
+            self.assertEqual(revised.budget["attempts"], 7)
             self.assertNotEqual(revised.state_refs["plan"], final.state_refs["plan"])
 
     def test_application_can_be_advanced_in_small_steps(self) -> None:
@@ -1018,7 +1214,7 @@ class ResearchApplicationTests(unittest.TestCase):
             resumed = load_session(root / "session")
             final = resumed.advance(max_actions=4)
             self.assertEqual(final.status, "completed")
-            self.assertEqual(final.budget["attempts"], 5)
+            self.assertEqual(final.budget["attempts"], 6)
 
     def test_requested_experiment_preserves_summary_and_design_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1044,7 +1240,7 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIn("Provide execution", view.status_reason)
             self.assertEqual(
                 [item["capability"] for item in view.attempts],
-                ["assess_ideas", "document_ingest", "plan", "read", "research_design", "search", "synthesize"],
+                ["assess_ideas", "document_ingest", "plan", "read", "research_design", "search", "summary", "synthesize"],
             )
             self.assertNotIn("experiment", {item["capability"] for item in view.attempts})
             self.assertTrue((root / "session" / "outputs" / "research_summary.md").is_file())

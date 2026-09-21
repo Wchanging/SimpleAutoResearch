@@ -77,7 +77,7 @@ class ResearchConsole:
     def finish(self, view):
         self.state(view)
         table = Table("Artifact", "Location", header_style="bold cyan")
-        for name in ("summary", "experiment", "matrix_results", "analysis", "report", "report_audit"):
+        for name in ("summary", "implementation", "experiment", "matrix_results", "analysis", "report", "report_audit"):
             if name in view.state_refs:
                 table.add_row(name, Text(str(view.session_root / view.state_refs[name].path)))
         self.console.print(table)

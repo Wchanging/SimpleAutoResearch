@@ -63,7 +63,11 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
     session_parser.add_argument("--config", type=Path, help="Research TOML; explicit CLI options override file values.")
     session_parser.add_argument("--session-root", type=Path, help="Continue this session with the same goal; attach execution only if missing. Existing budgets stay unchanged.")
     session_parser.add_argument("--topic", required=not bool(research_defaults and research_defaults.get("topic")))
-    session_parser.add_argument("--outputs", nargs="+", choices=("summary", "report", "experiments"))
+    session_parser.add_argument(
+        "--task-kind", choices=("auto", "survey", "bug_fix"), default="auto",
+        help="Task-driven path: survey reuses evidence/report; bug_fix reuses isolated CodeTask patching and short validation.",
+    )
+    session_parser.add_argument("--outputs", nargs="+", choices=("summary", "report", "experiments", "bug_fix"))
     session_parser.add_argument("--total-tokens", type=int, default=160000)
     session_parser.add_argument("--llm-requests", type=int, default=40)
     session_parser.add_argument("--max-output-tokens", type=int, default=None)

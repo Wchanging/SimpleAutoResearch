@@ -17,8 +17,12 @@ SYNTHESIZE_SYSTEM = (
 )
 
 RESEARCH_DESIGN_SYSTEM = (
-    "You select one evidence-grounded research direction for a bounded experiment. "
-    "You do not invent commands, datasets, metrics, results, or implementation details."
+    "You select one evidence-grounded research direction and propose a small, "
+    "structured execution protocol for a bounded experiment. The supplied project "
+    "entry facts and execution boundary are authoritative. You may choose seeds, "
+    "comparison need, metrics, stopping criteria, and literal argv parameters only "
+    "within inspected entrypoints; you never grant yourself permissions, change the "
+    "working directory, install software, access the network, or invent results."
 )
 
 RESEARCH_PLANNER_SYSTEM = (
@@ -368,8 +372,11 @@ def research_design_user_prompt(
     novelty_checks_json: str,
     contract_json: str,
     execution_context: str = "",
+    execution_boundary_json: str = "{}",
+    entry_facts_json: str = "{}",
+    requested_idea_id: str = "",
 ) -> str:
-    """Build the bounded model prompt for selecting an existing idea."""
+    """Build the bounded model prompt for selecting an idea and protocol."""
 
     boundary = (
         "\n\nPrepared Experiment Boundary (hard):\n"
@@ -378,18 +385,41 @@ def research_design_user_prompt(
         if execution_context.strip()
         else ""
     )
+    requested_clause = (
+        f"- An explicit idea id was supplied; return `{requested_idea_id}` exactly.\n"
+        if requested_idea_id.strip()
+        else ""
+    )
     return (
-        "Select exactly one candidate research idea for the next bounded experiment. "
-        "Return a JSON object with exactly these fields: "
-        "`selected_idea_id` and `rationale`.\n\n"
+        "Select exactly one candidate research idea for the next bounded experiment "
+        "and return a JSON object with `selected_idea_id`, `rationale`, and an "
+        "`execution_protocol` object.\n\n"
         "Rules:\n"
         "- `selected_idea_id` must be copied exactly from the candidate list.\n"
-        "- Prefer a measurable, feasible direction with clear evidence references "
+        + requested_clause
+        + "- Prefer a measurable, feasible direction with clear evidence references "
         "and lower unresolved risk.\n"
         "- The rationale must be concise and refer only to supplied candidates, "
         "novelty checks, and the existing contract.\n"
-        "- Do not create a new idea or change the baseline, dataset, metrics, "
-        "hypothesis, proposed change, or execution command.\n\n"
+        "- Do not create a new idea or change the hypothesis or proposed change.\n"
+        "- `execution_protocol` may contain only these fields: `command`, "
+        "`baseline_command`, `pairs`, `seeds`, `seed_count`, `seed_flag`, "
+        "`baseline_policy`, `result_schema`, `comparison_required`, "
+        "`decision_reason`, `stopping_criteria`, and `input_refs`.\n"
+        "- Commands must be literal argv lists derived from the inspected authorized "
+        "entrypoint. Do not return shell text, cwd, timeout, budget, installers, "
+        "network actions, or arbitrary file paths.\n"
+        "- If `input_refs` is returned, copy only references present in the inspected "
+        "entry facts; the application binds the actual attempt inputs.\n"
+        "- Explicit execution settings win over this proposal. Never invent a metric "
+        "or result; use the configured result schema when present.\n\n"
+        "- Decide comparison_required and baseline_policy from the actual task: "
+        "measuring an existing method or repeating seeds does not itself require "
+        "a separate control run. A baseline mentioned in source literature is not "
+        "an instruction to execute it. For an improvement comparison, explain the "
+        "required control and choose run or reuse based on supplied evidence; "
+        "otherwise choose skip. Do not claim a measured improvement without "
+        "comparable control evidence.\n"
         "- When a Prepared Experiment Boundary is supplied, preserve its project, "
         "dataset, benchmark, and runtime constraints; select only a compatible "
         "candidate.\n\n"
@@ -397,6 +427,8 @@ def research_design_user_prompt(
         f"Candidate ideas JSON:\n{ideas_json}\n\n"
         f"Novelty checks JSON:\n{novelty_checks_json}\n\n"
         f"Existing experiment contract JSON:\n{contract_json}\n"
+        f"Execution boundary JSON:\n{execution_boundary_json}\n\n"
+        f"Inspected project entry facts JSON:\n{entry_facts_json}\n"
         f"{boundary}"
     )
 

@@ -6,14 +6,72 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-21
 
+- Support `research.materials_only` and model plans that ingest supplied documents
+  without a fabricated search artifact. Remove unused plan input declarations.
+- Constrain process actions and repair conditions to the configured protocol,
+  including dynamically named matrix actions in literature-only plans.
+
 ### Documentation
 
+- Clarify V2.9 development status and document decision-context, prompt and result
+  handoff responsibilities, including how module upgrades accompany core delivery.
+  This documents implementation targets, not newly completed research-loop features.
 - Close V2.8 as a prepared-project end-to-end milestone and clarify its scope
   in the README. Historical runs included framework fixes and recovery, not
   strict frozen-version acceptance or fully validated paper quality.
 - Carry report factual-correction validation, explicit attempt-limit
   continuation, and frozen-version acceptance into V2.9. This is a scope
   decision, not a new feature or a claim that those issues are fixed.
+
+### V2.9 Stage A
+
+- The canonical research application now accepts a short task plan through the
+  existing planning attempt, validates its capability/state boundaries, and
+  dispatches from the persisted plan and its own result/attempt references.
+  Deterministic defaults and the existing LLM client share this execution path;
+  the application no longer uses a fixed `_steps()` pipeline as its dispatch
+  authority.
+- Summary materialization now also runs as an accepted-plan capability attempt;
+  the historical `outputs/research_summary.*` paths remain compatibility copies.
+- The research-session CLI keeps a stable `summary: <path>` line alongside its
+  Rich artifact table.
+- Added the bounded bug-fix path through the existing CodeTask workspace and a
+  short `patched` validation command. Bug tasks do not fabricate research
+  design artifacts or enter literature, baseline, or experiment execution.
+
+### V2.9 Stage B
+
+- Do not infer a control run from literature baseline names or ordinary seed/split
+  metadata. Repeated measurements alone do not require a baseline. Extend execution
+  plans only for requested execution outputs; missing execution settings retain
+  available evidence and pause instead of repeatedly extending a report plan.
+- When importing a CodeTask configuration into `research-session`, leave `auto`
+  undecided for research design instead of turning it into an explicit baseline;
+  preserve explicit `run` and `skip`/`none` choices.
+
+- Bind a declared compact execution protocol (literal command plus explicit seed
+  settings) to runner pairs through the existing experiment adapter; natural-language
+  seed intent is handled by research design only after entrypoint inspection and
+  cannot invent shell commands or process actions.
+- Preserve an omitted baseline policy until research design resolves it. A
+  resolved `run` decision without a separate evaluator uses the inspected,
+  configured literal evaluator as the pre-candidate baseline; explicit `skip`
+  still creates no baseline process.
+- Add explainable baseline `run`, `skip`, and same-condition framework `reuse`
+  decisions to the persisted work-plan view, with command/result-schema and
+  data/split/metric/condition or preparation-lineage checks before a canonical
+  result is reused. Reuse also checks the current explicitly protected assets;
+  ordinary candidate edits outside that set do not invalidate the original
+  baseline. CodeTask's separate `auto`/`none` compatibility policy is unchanged.
+- Reuse the existing Preparation/CodeTask, experiment, budget, and recovery
+  boundaries for real low-cost execution; no second scheduler, memory store,
+  retry platform, or arbitrary action registry was added.
+- Keep open-web survey rate-limit evidence and frozen end-to-end acceptance
+  explicitly unresolved; these local Stage B checks are not those gates.
+- The latest live digits acceptance remains paused at planning: after increasing
+  the client timeout to 300 seconds, the provider gateway returned HTTP 524 at
+  its 120-second upstream timeout. Focused regression checks pass; live model
+  design/code/experiment acceptance is still pending, not certified by this commit.
 
 ## 2026-09-17
 

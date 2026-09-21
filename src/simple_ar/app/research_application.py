@@ -1,11 +1,12 @@
-"""Small persistent application entry for the P04 research path.
+"""Small persistent application entry for the task-driven research path.
 
 The application orders existing capabilities and owns session state. It does
 not duplicate planning, search, reading, synthesis or design logic. Research
 summary, candidate comparison, design and explicit user-command execution /
 analysis, bounded preparation/repair and experimental report writing/assembly/audit
-are connected. Research revision is deliberately limited to explicit, bounded
-experiment retries; it does not infer a new research direction.
+are connected. Survey tasks reuse the evidence/report capabilities; scoped bug
+tasks reuse the isolated CodeTask implementation boundary without entering the
+experiment path.
 """
 
 from __future__ import annotations
@@ -18,9 +19,19 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from simple_ar.app.research_intake import normalize_assets, validate_brief, write_intake_artifacts
-from simple_ar.app.research_execution import execution_pairs, execution_request, implementation_request, repair_limit
-from simple_ar.research.preparation import PreparationRequest
+from simple_ar.app.research_execution import (
+    execution_pairs,
+    execution_protocol,
+    execution_request,
+    implementation_request,
+    merge_execution_protocol,
+    normalize_execution_config,
+    repair_limit,
+)
+from simple_ar.literature.models import Paper
+from simple_ar.research.preparation import PreparationRequest, inspect_execution_entry
 from simple_ar.experiment.execution.backend import LocalExecutionBackend
+from simple_ar.experiment.execution.measurement import snapshot_protocol_assets
 from simple_ar.research.experiment import ExperimentRequest
 from simple_ar.core import (
     ArtifactRef,
@@ -40,6 +51,7 @@ from simple_ar.research.planning.capability import (
     ResearchPlanResult,
     search_request_from_plan,
 )
+from simple_ar.research.task_plan import TaskPlanRequest, TaskPlanResult
 from simple_ar.research.registry import register_research_capabilities
 from simple_ar.research.sources import (
     SearchProviderRegistry,
@@ -47,7 +59,10 @@ from simple_ar.research.sources import (
     SearchSelectionPolicy,
     default_search_provider_registry,
 )
+from simple_ar.research.sources.capability import provided_materials_result
+from simple_ar.research.contracts import SourcePlan
 from simple_ar.research.synthesis import SynthesisRequest, SynthesisResult, allowed_evidence_refs
+from simple_ar.research.summary import SummaryRequest, run_summary_capability
 from simple_ar.research.workflow_contracts import Diagnostic, ResearchAsset, ResearchBrief
 from simple_ar.result_analysis.metrics import normalize_direction
 
@@ -146,17 +161,12 @@ _CAPABILITY_OUTPUTS = {
     "report_write": ("writer", "report_writer_result", "report_agent_result.v1"),
     "report": ("report", "report", "report.v1"),
     "report_audit": ("report_audit", "report_audit", "report_audit.v1"),
+    "summary": ("summary", "research_summary", "research_summary.v1"),
 }
 
 
-_BASE_STEPS = (
-    ("plan", "plan"),
-    ("search", "search"),
-    ("document_ingest", "documents"),
-    ("read", "read"),
-    ("synthesize", "synthesis"),
-)
-_DERIVED_KEYS = {name for _, name in _BASE_STEPS} | {
+_DERIVED_KEYS = {
+    "plan", "task_plan", "search", "documents", "read", "synthesis",
     "assessment", "idea_comparison", "summary", "summary_snapshot",
     "work_plan", "work_plan_markdown", "readiness", "design", "preparation", "baseline", "implementation", "experiment", "analysis", "comparison", "writer", "report", "report_audit"
 }
@@ -168,8 +178,6 @@ _DESIGN_OUTPUTS = {"design", "research_design"}
 _INPUT_REF_NAMES = {
     "brief", "brief_markdown", "assets", "runtime_config", "diagnostics"
 }
-
-
 class ResearchApplication:
     """Compose the canonical plan-to-synthesis capabilities."""
 
@@ -331,9 +339,6 @@ class ResearchApplication:
                 action = self._next_action()
                 if action is None:
                     break
-                if action == "summarize":
-                    self._write_summary()
-                    continue
                 if not self._run_action(action):
                     break
             self._finish_available_work()
@@ -376,20 +381,26 @@ class ResearchApplication:
 
     def supply_execution(self, execution: Mapping[str, object], *, task_text: str = "") -> ResearchApplicationView:
         """Attach missing execution inputs; retain research evidence and resource limits."""
-        if not self._requires_execution_output():
-            raise ResearchApplicationError("This session has not requested experiments.")
+        if not (self._requires_execution_output() or self._task_kind() == "bug_fix"):
+            raise ResearchApplicationError("This session has not requested an executable task.")
         if self.services.config.get("execution") is not None:
             raise ResearchApplicationError("Execution is already configured; use an explicit experiment revision instead.")
         if self.controller.manifest.status != "paused":
             raise ResearchApplicationError("Supply execution to a paused session before continuing it.")
-        execution_request(execution)  # Validate argv and location without launching a process.
+        execution_request(execution, task_text=task_text)  # Validate argv and location without launching a process.
         with self.controller.mutation_scope():
             self.controller.continue_with_revision("User supplied the missing experiment configuration; budgets unchanged.")
             self.services = replace(self.services, config={**self.services.config, "execution": dict(execution)})
             if task_text.strip():
                 self.brief = replace(self.brief, request_text=self.brief.request_text + "\n\n## Implementation task\n\n" + task_text.strip(),
                                      revision=self.brief.revision + 1, parent_revision=self.brief.revision)
+            self.controller.manifest.current_attempt = None
+            dynamic = {key for key in self.controller.manifest.state_refs if key.startswith(("repair_", "experiment_repair_", "matrix_"))}
+            for key in {"task_plan", "preparation", "baseline", "implementation", "experiment", "analysis", "comparison", "writer", "report", "report_audit", "diagnostics"} | dynamic:
+                self.controller.manifest.state_refs.pop(key, None)
             self._persist_inputs(validate_brief(self.brief, self.assets))
+            if self._next_action() == "plan":
+                self._run_action("plan")
             return self.view()
 
     def request_report(
@@ -542,7 +553,11 @@ class ResearchApplication:
             for name in ("experiment", "analysis", "comparison", "writer", "report", "report_audit"):
                 self.controller.manifest.state_refs.pop(name, None)
             self._persist_inputs(diagnostics)
-            request = execution_request(revised_execution)
+            request = execution_request(
+                revised_execution,
+                task_text=self.brief.request_text,
+                contract=self._execution_contract(),
+            )
             inputs = self._input_refs("design", "runtime_config")
             baseline_ref = self.controller.manifest.state_refs.get("baseline")
             if baseline_ref is not None:
@@ -670,8 +685,9 @@ class ResearchApplication:
         context.metric_sources, memory.metric_sources = metrics, metrics
         context.source_handles, memory.source_handles = handles, handles
         implementation_ref = next(
-            (refs[state] for action, state in reversed(self._steps())
-             if (action == "implement" or action.startswith("repair:")) and state in refs),
+            (refs[str(row["state_name"])] for row in reversed(self._accepted_plan_steps())
+             if (str(row["action"]) == "implement" or str(row["action"]).startswith("repair:"))
+             and str(row["state_name"]) in refs),
             None,
         )
         if implementation_ref is not None:
@@ -709,19 +725,68 @@ class ResearchApplication:
 
     def _run_action(self, action: str) -> bool:
         if action == "plan":
-            planner_mode = str(self._effective_config().get("research_plan_mode") or "llm").strip().lower()
+            if not self._bind_reused_baseline():
+                return False
+            plan_config = self._plan_config()
+            planner_mode = str(plan_config.get("research_plan_mode") or "llm").strip().lower()
+            use_llm = self.services.llm_client is not None and planner_mode != "deterministic"
+            task_plan = TaskPlanRequest(
+                task_kind=self._task_kind(),
+                goal=(self.brief.objective or self.brief.request_text).strip(),
+                request_text=self.brief.request_text,
+                objective=self.brief.objective,
+                hard_constraints=self.brief.hard_constraints,
+                preferences=self.brief.preferences,
+                requested_outputs=_requested_outputs(self.brief),
+                intents=self.brief.intents,
+                assets=tuple(asset.to_dict() for asset in self.assets),
+                config=plan_config,
+                execution=plan_config.get("execution")
+                if isinstance(plan_config.get("execution"), Mapping)
+                else None,
+                execution_protocol_accepted=(
+                    "design" in self.controller.manifest.state_refs
+                    and isinstance(self._state_payload("design").get("contract"), Mapping)
+                ),
+                use_llm=use_llm,
+                llm_client=self.services.llm_client,
+            )
             return self._execute(
                 "plan", "plan",
                 ResearchPlanRequest(
                     topic=self.controller.manifest.topic,
                     problem_markdown=self._problem_markdown(),
-                    config=self._plan_config(),
+                    config=plan_config,
                     default_query=self.controller.manifest.topic,
                     default_max_results=self.services.max_results,
-                    use_llm=self.services.llm_client is not None and planner_mode != "deterministic",
+                    use_llm=use_llm,
                     llm_client=self.services.llm_client,
+                    task_plan_request=task_plan,
+                    task_plan_only=self._task_kind() == "bug_fix" or "plan" in self.controller.manifest.state_refs,
                 ), self._input_refs("brief", "assets", "runtime_config")
             )
+        if action == "summarize":
+            state_refs = tuple(
+                (name, ref)
+                for name, ref in self.controller.manifest.state_refs.items()
+                if name not in {"work_plan", "work_plan_markdown", "readiness"}
+            )
+            accepted = self._execute(
+                "summary", "summary",
+                SummaryRequest(
+                    brief_ref=self.controller.manifest.state_refs["brief"],
+                    search_ref=self.controller.manifest.state_refs.get("search"),
+                    documents_ref=self.controller.manifest.state_refs["documents"],
+                    read_ref=self.controller.manifest.state_refs["read"],
+                    synthesis_ref=self.controller.manifest.state_refs["synthesis"],
+                    state_refs=state_refs,
+                ),
+                self._input_refs("brief", "documents", "read", "synthesis")
+                + (self._input_refs("search") if "search" in self.controller.manifest.state_refs else ()),
+            )
+            if accepted:
+                self._materialize_summary_compatibility()
+            return accepted
         if action == "search":
             plan = self._load_plan()
             accepted = self._execute(
@@ -739,19 +804,21 @@ class ResearchApplication:
                 return False
             return accepted
         if action == "document_ingest":
-            plan, search = self._load_plan(), self._load_search()
+            plan = self._load_plan()
+            has_search = "search" in self.controller.manifest.state_refs
+            papers = self._load_search().selected_papers if has_search else ()
             if self.services.message_callback:
-                self.services.message_callback(f"Fetching/extracting {len(search.selected_papers)} selected papers; downloads and parsers may wait on external services.")
-            if not search.selected_papers:
+                self.services.message_callback(f"Ingesting {len(papers)} selected papers and {len(plan.source_plan.local_documents)} supplied documents.")
+            if not papers and not plan.source_plan.local_documents:
                 self.controller.pause("Document ingest needs at least one selected paper.")
                 return False
             accepted = self._execute(
                 "document_ingest", "documents",
                 DocumentIngestRequest(
-                    papers=search.selected_papers, source_plan=plan.source_plan,
+                    papers=papers, source_plan=plan.source_plan,
                     cache_dir=self._cache_dir("literature"), extraction_dir=self._extraction_dir(),
                     max_chunks=self.services.max_chunks,
-                ), self._input_refs("plan", "search"), allow_partial=True,
+                ), self._input_refs("plan", "search") if has_search else self._input_refs("plan", "assets"), allow_partial=True,
             )
             if accepted:
                 documents = self._load_documents()
@@ -785,7 +852,7 @@ class ResearchApplication:
                         execution_context=self._problem_markdown(),
                     ), idea_limit=self.services.idea_limit,
                     use_llm=self.services.llm_client is not None, llm_client=self.services.llm_client,
-                ), self._input_refs("plan", "search", "read", "brief", "runtime_config"), allow_partial=True,
+                ), self._input_refs("plan", "read", "brief", "runtime_config", "search" if "search" in self.controller.manifest.state_refs else "documents"), allow_partial=True,
             )
         if action == "assess_ideas":
             synthesis, read = self._load_synthesis(), self._load_read()
@@ -807,8 +874,15 @@ class ResearchApplication:
                 ), self._input_refs("synthesis", "read", "brief", "runtime_config"), allow_partial=True,
             )
         if action == "research_design":
-            execution = self.services.config.get("execution")
+            execution_config = self._execution_config()
+            execution = execution_config.get("execution")
             has_execution = isinstance(execution, Mapping)
+            configured_execution = self.services.config.get("execution")
+            execution_boundary = (
+                dict(configured_execution)
+                if isinstance(configured_execution, Mapping)
+                else {}
+            )
             assessment = self.controller.store.read_json(self.controller.manifest.state_refs["assessment"])
             selected = self._effective_config().get("research_selected_idea_id")
             reason = "Explicit candidate selection from research_selected_idea_id."
@@ -823,6 +897,24 @@ class ResearchApplication:
                 return False
             if not selected:
                 reason = "Deterministic execution-readiness selection; scientific preference has not been assessed."
+            entry_facts: dict[str, Any] = {}
+            if has_execution:
+                try:
+                    # Keep omitted policy fields omitted at the design
+                    # boundary.  _execution_config is normalized for running
+                    # commands, but its defaults must not become explicit
+                    # user choices that override the model's proposal.
+                    entry_facts = inspect_execution_entry(
+                        execution_boundary if execution_boundary else execution
+                    )
+                except (OSError, TypeError, ValueError) as exc:
+                    self.controller.pause(f"Could not inspect the supplied execution entry: {exc}")
+                    self._persist_application_views()
+                    return False
+                entry_facts["input_refs"] = [
+                    ref.to_dict()
+                    for ref in self._input_refs("brief", "assessment", "runtime_config")
+                ]
             return self._execute(
                 "research_design", "design",
                 ResearchDesignRequest(
@@ -830,11 +922,27 @@ class ResearchApplication:
                     idea_id=str(selected) if selected else None, selection_rationale=reason,
                     execution_context=self._problem_markdown() if has_execution or self.services.config.get("research_execution_context") else "",
                     execution_schema=execution.get("result_schema", {}) if has_execution else {},
+                    execution_boundary=execution_boundary if execution_boundary else {},
+                    entry_facts=entry_facts,
+                    use_llm=self.services.llm_client is not None,
+                    llm_client=self.services.llm_client,
                 ), self._input_refs("synthesis", "assessment", "brief", "runtime_config"), allow_partial=True,
             )
         if action == "prepare_execution":
-            config = dict(self._effective_config()["execution"])
-            if "code_task" in config and self._state_payload("design").get("contract") is None:
+            execution = self._execution_config().get("execution")
+            if not isinstance(execution, Mapping):
+                self.controller.pause(
+                    "This task needs an explicit execution.code_task specification before preparation."
+                )
+                self._persist_application_views()
+                return False
+            config = dict(execution)
+            if "dataset" in config:
+                # The existing CSV preparation contract is intentionally
+                # smaller than the application-level protocol projection.
+                config.pop("baseline_policy", None)
+                config.pop("protocol_seed_reason", None)
+            if self._task_kind() != "bug_fix" and "code_task" in config and self._state_payload("design").get("contract") is None:
                 self.controller.pause("CodeTask preparation requires a selected research design contract; review the candidate assessment before running its experiment matrix.")
                 self._persist_application_views()
                 return False
@@ -842,7 +950,10 @@ class ResearchApplication:
                 run = None
                 if "dataset" not in config:
                     config.setdefault("cwd", config["code_task"]["code_root"])
-                    run = execution_request(config).run
+                    run = execution_request(
+                        config, task_text=self.brief.request_text,
+                        contract=self._execution_contract(),
+                    ).run
                 repair_limit(config)
             except ValueError as exc:
                 self.controller.pause(str(exc))
@@ -850,18 +961,55 @@ class ResearchApplication:
             return self._execute(
                 "prepare_execution", "preparation",
                 PreparationRequest(config, self._problem_markdown(), run),
-                self._input_refs("brief", "design", "runtime_config"),
+                self._input_refs("brief", "runtime_config")
+                if self._task_kind() == "bug_fix"
+                else self._input_refs("brief", "design", "runtime_config"),
             )
         if action == "implement" or action.startswith(("repair:", "matrix_repair_")):
+            if self._task_kind() == "bug_fix":
+                execution = self._execution_config().get("execution")
+                if not isinstance(execution, Mapping) or not isinstance(execution.get("code_task"), Mapping):
+                    self.controller.pause("Bug repair requires an explicit existing-project CodeTask configuration.")
+                    self._persist_application_views()
+                    return False
+                try:
+                    request = implementation_request(
+                        execution, self.services.llm_client, validate=True,
+                        task_text=self.brief.request_text,
+                        contract=self._execution_contract(),
+                    )
+                    request = replace(
+                        request,
+                        message_callback=self.services.message_callback,
+                        budget_ledger=self.budget_ledger,
+                        session_id=self.controller.manifest.session_id,
+                    )
+                except ValueError as exc:
+                    self.controller.pause(str(exc))
+                    return False
+                inputs = self._input_refs("brief", "runtime_config")
+                if "preparation" in self.controller.manifest.state_refs:
+                    inputs += self._input_refs("preparation")
+                return self._execute(
+                    "implement", "implementation", request, inputs, allow_partial=True,
+                )
             try:
-                request = implementation_request(self._effective_config()["execution"], self.services.llm_client)
+                request = implementation_request(
+                    self._execution_config()["execution"], self.services.llm_client,
+                    task_text=self.brief.request_text,
+                    contract=self._execution_contract(),
+                )
                 request = replace(request, message_callback=self.services.message_callback)
             except ValueError as exc:
                 self.controller.pause(str(exc))
                 return False
             baseline = self.controller.manifest.state_refs.get("baseline")
-            pairs = execution_pairs(self._effective_config()["execution"])
-            matrix_baselines = tuple(self.controller.manifest.state_refs[f"matrix_baseline_{i}"] for i in range(len(pairs)))
+            pairs = execution_pairs(self._execution_config()["execution"], task_text=self.brief.request_text)
+            matrix_baselines = tuple(
+                self.controller.manifest.state_refs[f"matrix_baseline_{i}"]
+                for i in range(len(pairs))
+                if f"matrix_baseline_{i}" in self.controller.manifest.state_refs
+            )
             if any(self.controller.store.read_json(ref)["status"] != "passed" for ref in matrix_baselines):
                 self.controller.pause("A paired baseline failed; resolve its diagnostics before changing the candidate code.")
                 return False
@@ -901,8 +1049,12 @@ class ResearchApplication:
             try:
                 matrix = action.startswith("matrix_")
                 condition = "baseline" if action.startswith("matrix_baseline_") else action
-                request = execution_request(self._effective_config().get("execution"), condition=condition,
-                                            pair_index=int(action.rsplit("_", 1)[1]) if matrix else None)
+                request = execution_request(
+                    self._execution_config().get("execution"), condition=condition,
+                    pair_index=int(action.rsplit("_", 1)[1]) if matrix else None,
+                    task_text=self.brief.request_text,
+                    contract=self._execution_contract(),
+                )
                 for resource in ("process_invocations", "process_wall_seconds"):
                     if self.budget_ledger.remaining(resource) is None:
                         raise ValueError(f"Execution requires an explicit finite {resource} budget.")
@@ -1033,7 +1185,21 @@ class ResearchApplication:
         """Bind the same declared outputs after normal execution or recovery."""
 
         _, kind, schema = _CAPABILITY_OUTPUTS[capability]
-        outputs = [(state_name, kind, schema)]
+        if capability == "plan":
+            outputs: list[tuple[str, str, str]] = []
+            if any(ref.kind == "research_plan" for ref in result.artifacts):
+                outputs.append(("plan", "research_plan", "research_plan.v1"))
+            if any(ref.kind == "task_plan" for ref in result.artifacts):
+                outputs.append(("task_plan", "task_plan", "research_task_plan.v1"))
+            if not outputs:
+                raise ResearchApplicationError("plan returned no declared research or task plan output.")
+        elif capability == "summary":
+            outputs = [
+                ("summary", "research_summary", "research_summary.v1"),
+                ("summary_snapshot", "research_summary_snapshot", "research_summary.v1"),
+            ]
+        else:
+            outputs = [(state_name, kind, schema)]
         if capability == "assess_ideas":
             outputs.append(("idea_comparison", "idea_comparison", "idea_comparison.v1"))
         if capability == "analysis" and any(ref.kind == "experiment_comparison" for ref in result.artifacts):
@@ -1047,56 +1213,73 @@ class ResearchApplication:
             raise ResearchApplicationError(f"{capability} has incomplete declared outputs: {exc}") from exc
         self.controller.manifest.state_refs.update(refs)
 
+    def _materialize_summary_compatibility(self) -> None:
+        """Keep the historical output paths while the attempt owns the refs."""
+
+        summary_ref = self.controller.manifest.state_refs["summary"]
+        snapshot_ref = self.controller.manifest.state_refs["summary_snapshot"]
+        self.controller.store.write_text(
+            "outputs/research_summary.md",
+            self.controller.store.read_text(summary_ref),
+            kind="research_summary", schema="research_summary.v1",
+            producer="research_application",
+        )
+        self.controller.store.write_json(
+            "outputs/research_summary.json",
+            self.controller.store.read_json(snapshot_ref),
+            kind="research_summary_snapshot", schema="research_summary.v1",
+            producer="research_application",
+        )
+
     def _request_for_attempt(self, request: Any, attempt_id: str) -> Any:
         if isinstance(request, ExperimentRequest):
             return replace(request, run=replace(
                 request.run, session_id=self.controller.manifest.session_id, attempt_id=attempt_id,
             ))
+        updates: dict[str, Any] = {}
+        if hasattr(request, "attempt_id"):
+            updates["attempt_id"] = attempt_id
+        if hasattr(request, "session_id"):
+            updates["session_id"] = self.controller.manifest.session_id
         client = getattr(request, "llm_client", None)
         binder = getattr(client, "with_budget", None) if client is not None else None
-        if not callable(binder):
-            return request
-        return replace(
-            request,
-            llm_client=binder(
+        if callable(binder):
+            bound_client = binder(
                 self.budget_ledger,
                 session_id=self.controller.manifest.session_id,
                 attempt_id=attempt_id,
-            ),
-        )
-
-    def _write_summary(self) -> None:
-        synthesis, search = self._load_synthesis(), self._load_search()
-        documents, read = self._load_documents(), self._load_read()
-        summary_ref = self.controller.store.write_text(
-            "outputs/research_summary.md",
-            _render_summary(self.brief, synthesis, search, documents, read, self.controller.manifest.state_refs),
-            kind="research_summary", schema="research_summary.v1", producer="research_application",
-        )
-        self.controller.manifest.state_refs["summary"] = summary_ref
-        snapshot_ref = self.controller.store.write_json(
-            "outputs/research_summary.json",
-            {
-                "schema_version": "research_summary.v1", "status": synthesis.status,
-                "generation_mode": synthesis.generation_mode,
-                "paper_count": len(search.papers), "selected_paper_count": len(search.selected_papers),
-                "document_count": len(documents.records), "chunk_count": len(documents.chunks),
-                "state_refs": {name: ref.to_dict() for name, ref in self.controller.manifest.state_refs.items()},
-                "diagnostics": list(synthesis.diagnostics),
-            }, kind="research_summary_snapshot", schema="research_summary.v1",
-            producer="research_application",
-        )
-        self.controller.manifest.state_refs["summary_snapshot"] = snapshot_ref
-        self._persist_application_views()
+            )
+            updates["llm_client"] = bound_client
+            nested = getattr(request, "task_plan_request", None)
+            if nested is not None and hasattr(nested, "llm_client"):
+                updates["task_plan_request"] = replace(nested, llm_client=bound_client)
+        return replace(request, **updates) if updates else request
 
     def _finish_available_work(self) -> None:
         if self._next_action() is not None or self.controller.manifest.status in {"paused", "blocked", "completed"}:
             return
+        if self._task_kind() == "bug_fix" and "implementation" in self.controller.manifest.state_refs:
+            implementation = self._state_payload("implementation")
+            if implementation.get("status") != "validated":
+                self.controller.pause(
+                    "Bug repair artifacts exist, but the short validation command did not pass."
+                )
+                self._persist_application_views()
+                return
         missing = [name for name in _requested_outputs(self.brief)
                    if _output_state_name(name) not in self.controller.manifest.state_refs
                    and not (name in {"experiment", "experiments"} and "matrix_results" in self.controller.manifest.state_refs)]
         if missing:
-            self.controller.pause("Research artifacts are ready; requested outputs are not connected yet: " + ", ".join(missing))
+            if self._requires_execution_output() and not isinstance(self._execution_config().get("execution"), Mapping):
+                reason = "Provide execution settings to continue the requested experiment; available research evidence is preserved."
+            elif self._requires_execution_output() and self._task_kind() != "bug_fix" and (
+                "design" not in self.controller.manifest.state_refs
+                or not isinstance(self._state_payload("design").get("contract"), Mapping)
+            ):
+                reason = "Execution requires a selected research design contract; review the candidate assessment."
+            else:
+                reason = "Research artifacts are ready; requested outputs are not connected yet: " + ", ".join(missing)
+            self.controller.pause(reason)
         else:
             self.controller.complete("Requested research artifacts are ready.")
         self._persist_application_views()
@@ -1151,8 +1334,8 @@ class ResearchApplication:
     def _persist_application_views(self) -> None:
         """Persist one derived progress view after a state mutation."""
 
-        execution = self._effective_config().get("execution")
-        pairs = execution_pairs(execution) if isinstance(execution, Mapping) else ()
+        execution = self._execution_config().get("execution")
+        pairs = execution_pairs(execution, task_text=self.brief.request_text) if isinstance(execution, Mapping) else ()
         if pairs:
             refs = self.controller.manifest.state_refs
             revision = max((int(key.rsplit("_", 1)[1]) for key in refs if key.startswith("matrix_repair_")), default=0)
@@ -1190,12 +1373,17 @@ class ResearchApplication:
         self.controller.save()
 
     def latest_experiment_ref(self) -> ArtifactRef | None:
-        """Read the last recorded candidate without overwriting history or status."""
-        for action, state in reversed(self._steps()):
-            if action == "experiment" or action.startswith("retest:"):
-                ref = self.controller.manifest.state_refs.get(state)
-                if ref is not None:
-                    return ref
+        """Read the last completed experiment named by the accepted plan."""
+        refs = self.controller.manifest.state_refs
+        if "task_plan" in refs:
+            for row in reversed(self._accepted_plan_steps()):
+                if _capability_for_action(str(row["action"])) != "experiment":
+                    continue
+                state = str(row["state_name"])
+                if state in refs and self._step_completed(
+                    next(step for step in self._load_task_plan().steps if step.state_name == state)
+                ):
+                    return refs[state]
         return None
 
     def _build_work_plan(self) -> dict[str, Any]:
@@ -1216,11 +1404,21 @@ class ResearchApplication:
                 artifact = self.controller.manifest.state_refs.get("matrix_results") or self.latest_experiment_ref()
                 if artifact is not None and artifact.kind == "experiment_set":
                     pairs = self.controller.store.read_json(artifact)["pairs"]
-                    measured = sum(row[role] is not None for row in pairs for role in ("baseline", "candidate"))
-                    matrix_coverage = (measured, 2 * len(pairs))
+                    execution = self._execution_config().get("execution")
+                    policy = str(execution.get("baseline_policy") or "skip").lower() if isinstance(execution, Mapping) else "skip"
+                    roles = ("candidate",) if policy == "skip" else ("baseline", "candidate")
+                    measured = sum(row[role] is not None for row in pairs for role in roles)
+                    matrix_coverage = (measured, len(roles) * len(pairs))
                     if measured == 0:
                         artifact = None
-            if artifact is not None:
+            if output.strip().lower() in {"bug_fix", "bug_repair", "code_patch"} and artifact is not None:
+                payload = self.controller.store.read_json(artifact)
+                if payload.get("status") == "validated":
+                    status, reason = "satisfied", "The isolated patch and its short validation command passed."
+                else:
+                    status, reason = "blocked", "The isolated patch was not validated successfully."
+                    gaps.append({"kind": "validation", "item": output, "reason": reason})
+            elif artifact is not None:
                 status, reason = "satisfied", "The requested artifact is available."
                 if matrix_coverage and matrix_coverage[0] < matrix_coverage[1]:
                     status, reason = "partial", f"{matrix_coverage[0]}/{matrix_coverage[1]} planned measurements are available."
@@ -1232,6 +1430,12 @@ class ResearchApplication:
                     gaps.append({"kind": "missing", "item": output, "reason": reason})
             elif output in {"report", "paper", "full_paper"}:
                 status, reason = "pending", "Report writing, assembly and audit are pending."
+            elif output.strip().lower() in {"bug_fix", "bug_repair", "code_patch"}:
+                if isinstance(self._effective_config().get("execution"), Mapping):
+                    status, reason = "pending", "The isolated CodeTask patch and short validation are pending."
+                else:
+                    status, reason = "blocked", "An existing-project CodeTask execution specification is required."
+                    gaps.append({"kind": "missing", "item": output, "reason": reason})
             elif output in _EXECUTION_OUTPUTS:
                 status, reason = "blocked", (
                     "This deliverable requires the CodeTask/report application boundary "
@@ -1253,6 +1457,29 @@ class ResearchApplication:
             deliverables.append(row)
 
         next_action = self._next_action()
+        step_rows = self._planned_step_rows(next_action)
+        task_kind = self._task_kind()
+        task = {
+            "kind": task_kind,
+            "goal": (self.brief.objective or self.brief.request_text).strip(),
+            "deliverables": list(requested),
+            "constraints": list(self.brief.hard_constraints),
+            "preferences": list(self.brief.preferences),
+            "asset_ids": [asset.asset_id for asset in self.assets],
+        }
+        if "task_plan" in self.controller.manifest.state_refs:
+            accepted_plan = self._state_payload("task_plan")
+            accepted_plan = dict(accepted_plan)
+            accepted_plan["steps"] = step_rows
+            plan_status = str(accepted_plan.get("status") or "accepted")
+        else:
+            accepted_plan = {
+                "schema_version": "research_task_plan.v1",
+                "status": "pending",
+                "producer_action": "plan",
+                "steps": [],
+            }
+            plan_status = "pending"
         if self.controller.manifest.status == "completed":
             status = "completed"
         elif self.controller.manifest.status in {"paused", "blocked"}:
@@ -1270,6 +1497,12 @@ class ResearchApplication:
             "accepted_refs": refs,
             "gaps": gaps,
             "next_action": next_action,
+            "task": {**task, "plan_status": plan_status},
+            "accepted_plan": accepted_plan,
+            "steps": step_rows,
+            "execution_protocol": self._execution_protocol_projection(),
+            "execution_decision": self._execution_decision_projection(),
+            "context": self._context_projection(task, step_rows, gaps),
             "milestones": ["evidence-backed research summary", "explicit implementation, experiment and analysis when requested", "audited report when requested"],
             "status": status,
             "stop_reason": self.controller.manifest.status_reason if self.controller.manifest.status in {"paused", "blocked"} else "",
@@ -1278,6 +1511,60 @@ class ResearchApplication:
             "input_fingerprint": _input_fingerprint(self.brief, self.assets),
         }
 
+    def _execution_protocol_projection(self) -> dict[str, Any] | None:
+        execution = self._execution_config().get("execution")
+        if not isinstance(execution, Mapping):
+            return None
+        return execution_protocol(execution, task_text=self.brief.request_text)
+
+    def _execution_decision_projection(self) -> dict[str, Any] | None:
+        execution = self._execution_config().get("execution")
+        if not isinstance(execution, Mapping):
+            return None
+        design_protocol = self._design_execution_protocol() or {}
+        pairs = execution_pairs(execution, task_text=self.brief.request_text)
+        policy = str(execution.get("baseline_policy") or "skip").strip().lower()
+        protocol_inputs = design_protocol.get("input_refs")
+        input_refs = (
+            list(protocol_inputs)
+            if isinstance(protocol_inputs, list)
+            else [ref.to_dict() for ref in self._input_refs("brief", "runtime_config")]
+        )
+        refs: list[ArtifactRef] = []
+        if pairs:
+            refs = [
+                self.controller.manifest.state_refs[key]
+                for key in (f"matrix_baseline_{i}" for i in range(len(pairs)))
+                if key in self.controller.manifest.state_refs
+            ]
+        elif "baseline" in self.controller.manifest.state_refs:
+            refs = [self.controller.manifest.state_refs["baseline"]]
+        if policy == "skip":
+            mode, reason = "skip", "The execution boundary explicitly skipped baseline comparison."
+        elif policy == "reuse":
+            mode, reason = "reuse", "Reuse the supplied or persisted passed canonical result when conditions match."
+        elif refs:
+            compatible = (not pairs or len(refs) == len(pairs)) and all(
+                self._baseline_ref_matches(ref, execution, pair_index=index if pairs else None)
+                for index, ref in enumerate(refs)
+            )
+            mode = "reuse" if compatible else "run"
+            reason = (
+                "A passed same-condition framework result is already bound."
+                if compatible else "No bound result matches the current protocol; run the baseline."
+            )
+        else:
+            mode, reason = "run", "No matching framework-produced baseline result is bound."
+        return {
+            "baseline": {
+                "mode": mode,
+                "reason": str(design_protocol.get("decision_reason") or reason),
+                "refs": [ref.to_dict() for ref in refs],
+            },
+            "input_refs": input_refs,
+            "open_items": [] if refs or mode == "skip" else ["baseline measurement pending"],
+            "stopping_criteria": list(design_protocol.get("stopping_criteria") or []),
+        }
 
     def _prepare_revision(self, brief: ResearchBrief | None):
         if brief is None:
@@ -1298,7 +1585,22 @@ class ResearchApplication:
             # A process can stop after finalizing the attempt but before the
             # application saves its state ref. Reuse that result on reload.
             next_action = self._next_action() or ""
-            capability = "analysis" if next_action == "matrix_analysis" else "implement" if next_action.startswith(("repair:", "matrix_repair_")) else (
+            current_attempt = self.controller.manifest.current_attempt
+            current_manifest = next(
+                (item for item in attempts if item.attempt_id == current_attempt),
+                None,
+            )
+            current_state = (
+                current_manifest.trigger.removeprefix("application:")
+                if current_manifest is not None and current_manifest.trigger.startswith("application:")
+                else ""
+            )
+            # A caller may have deliberately replaced a state artifact (for
+            # example, to request a fresh assessment). Never overwrite that
+            # explicit pointer with an older completed attempt during reload.
+            if current_state and current_state in self.controller.manifest.state_refs:
+                return
+            capability = "analysis" if next_action == "matrix_analysis" else "summary" if next_action == "summarize" else "implement" if next_action.startswith(("repair:", "matrix_repair_")) else (
                 "experiment" if next_action == "baseline" or next_action.startswith(("retest:", "matrix_baseline_", "matrix_candidate_")) else next_action
             )
             running = [item for item in attempts
@@ -1336,76 +1638,215 @@ class ResearchApplication:
             self.controller.save()
 
     def _next_action(self) -> str | None:
-        for action, state_name in self._steps():
-            if state_name not in self.controller.manifest.state_refs:
-                return action
+        if "task_plan" not in self.controller.manifest.state_refs:
+            return "plan"
+        plan = self._load_task_plan()
+        if self._needs_execution_plan_extension(plan):
+            # The first accepted plan intentionally ends at the design
+            # checkpoint. Reuse the same plan capability to append only the
+            # protocol-bound execution steps after design has supplied facts.
+            return "plan"
+        requested = {str(item).strip().lower() for item in self.brief.requested_outputs}
+        if requested & {"report", "paper", "full_paper"} and not any(
+            step.action in {"report_write", "report", "report_audit"} for step in plan.steps
+        ):
+            # A report request is a new task revision. Reuse the settled
+            # research plan/evidence but accept a delivery extension through
+            # the same planning attempt boundary.
+            # An execution task's first plan is intentionally a design
+            # checkpoint and therefore has no delivery steps yet. Do not
+            # mistake that bounded checkpoint for a report revision or loop
+            # the same short plan before the design is accepted.
+            execution_checkpoint = self._requires_execution_output() and (
+                not isinstance(self._execution_config().get("execution"), Mapping)
+                or "design" not in self.controller.manifest.state_refs
+                or not isinstance(self._state_payload("design").get("contract"), Mapping)
+            )
+            if not execution_checkpoint:
+                return "plan"
+        for step in plan.steps:
+            if self._step_completed(step):
+                continue
+            if not self._condition_applies(step.condition):
+                continue
+            return step.action
         return None
 
-    def _steps(self) -> tuple[tuple[str, str], ...]:
-        steps = list(_BASE_STEPS)
-        steps.append(("summarize", "summary"))
-        if self._requires_idea_assessment():
-            steps.append(("assess_ideas", "assessment"))
-        if self._requires_execution_output() or set(self.brief.requested_outputs) & _DESIGN_OUTPUTS:
-            steps.append(("research_design", "design"))
-        if set(self.brief.requested_outputs) & {"experiment", "experiments"}:
-            execution = self._effective_config().get("execution")
-            if self._needs_preparation():
-                steps.append(("prepare_execution", "preparation"))
-            pairs = execution_pairs(execution) if isinstance(execution, Mapping) else ()
-            if pairs:
-                steps.extend((f"matrix_baseline_{i}", f"matrix_baseline_{i}") for i in range(len(pairs)))
-                if "code_task" in execution:
-                    steps.append(("implement", "implementation"))
-                for revision in range(repair_limit(execution) + 1):
-                    for i in range(len(pairs)):
-                        key = _matrix_candidate_key(revision, i)
-                        steps.append((key, key))
-                        if key in self.controller.manifest.state_refs and self._state_payload(key)["execution_status"] in {"failed", "timed_out"}:
-                            break
-                    if self._matrix_failure(revision, len(pairs)) is None or revision == repair_limit(execution):
-                        break
-                    key = f"matrix_repair_{revision + 1}"
-                    steps.append((key, key))
-                steps.append(("matrix_analysis", "analysis"))
-                if set(self.brief.requested_outputs) & {"report", "paper", "full_paper"}:
-                    steps.extend((("report_write", "writer"), ("report", "report"), ("report_audit", "report_audit")))
-                return tuple(steps)
-            if isinstance(execution, Mapping) and "baseline" in execution:
-                steps.append(("baseline", "baseline"))
-            if isinstance(execution, Mapping) and "code_task" in execution:
-                steps.append(("implement", "implementation"))
-            steps.append(("experiment", "experiment"))
-            previous = "experiment"
-            for index in range(1, repair_limit(execution) + 1) if isinstance(execution, Mapping) else ():
-                if previous not in self.controller.manifest.state_refs:
-                    break
-                if self._state_payload(previous)["execution_status"] not in {"failed", "timed_out"}:
-                    break
-                steps.append((f"repair:{index}", f"repair_{index}"))
-                previous = f"experiment_repair_{index}"
-                steps.append((f"retest:{index}", previous))
-            steps.append(("analysis", "analysis"))
-        if set(self.brief.requested_outputs) & {"report", "paper", "full_paper"}:
-            steps.extend((("report_write", "writer"), ("report", "report"), ("report_audit", "report_audit")))
-        return tuple(steps)
+    def _needs_execution_plan_extension(self, plan: TaskPlanResult) -> bool:
+        if not self._requires_execution_output():
+            return False
+        if not isinstance(self._execution_config().get("execution"), Mapping):
+            return False
+        if "design" not in self.controller.manifest.state_refs:
+            return False
+        design = self._state_payload("design")
+        if not isinstance(design.get("contract"), Mapping):
+            return False
+        execution_capabilities = {"prepare_execution", "implement", "experiment", "analysis"}
+        return not any(step.capability in execution_capabilities for step in plan.steps)
+
+    def _load_task_plan(self) -> TaskPlanResult:
+        return TaskPlanResult.from_handoff_dict(self._state_payload("task_plan"))
+
+    def _accepted_plan_steps(self) -> tuple[dict[str, Any], ...]:
+        return tuple(step.to_dict() for step in self._load_task_plan().steps)
+
+    def _step_completed(self, step: Any) -> bool:
+        state_name = step.state_name
+        ref = self.controller.manifest.state_refs.get(state_name)
+        if ref is None:
+            return False
+        attempt = self._attempt_for_ref(ref)
+        return bool(
+            attempt is not None
+            and attempt.status in {"completed", "failed"}
+            and attempt.trigger == f"application:{state_name}"
+            and attempt.capability == step.capability
+        )
+
+    def _condition_applies(self, condition: str) -> bool:
+        if not condition:
+            return True
+        prefix, target = condition.split(":", 1)
+        target = target.strip()
+        if prefix == "on_failure":
+            return self._state_failed(target)
+        if prefix == "on_failure_prefix":
+            return any(
+                name.startswith(target) and self._state_failed(name)
+                for name in self.controller.manifest.state_refs
+            )
+        if prefix == "after_success":
+            return self._state_succeeded(target)
+        if prefix == "on_request":
+            requested = {str(item).strip().lower() for item in self.brief.requested_outputs}
+            return target in requested or (target == "report" and bool(requested & {"paper", "full_paper"}))
+        raise ResearchApplicationError(f"Unsupported accepted-plan condition: {condition}")
+
+    def _state_failed(self, name: str) -> bool:
+        ref = self.controller.manifest.state_refs.get(name)
+        if ref is None:
+            return False
+        payload = self.controller.store.read_json(ref)
+        status = str(payload.get("execution_status") or payload.get("status") or "").lower()
+        return status in {"failed", "timed_out"}
+
+    def _state_succeeded(self, name: str) -> bool:
+        ref = self.controller.manifest.state_refs.get(name)
+        if ref is None:
+            return False
+        payload = self.controller.store.read_json(ref)
+        status = str(payload.get("execution_status") or payload.get("status") or "").lower()
+        return status in {"passed", "completed", "validated", "partial", "satisfied"}
 
     def _matrix_failure(self, revision: int, count: int) -> str | None:
-        for i in range(count):
-            key = _matrix_candidate_key(revision, i)
-            if key in self.controller.manifest.state_refs and self._state_payload(key)["execution_status"] in {"failed", "timed_out"}:
+        """Select the failed candidate explicitly referenced by a repair step."""
+        for index in range(count):
+            key = _matrix_candidate_key(revision, index)
+            if self._state_failed(key):
                 return key
         return None
 
     def _requires_execution_output(self) -> bool:
-        return bool({item.lower().strip() for item in self.brief.requested_outputs} & _EXECUTION_OUTPUTS)
-
-    def _requires_idea_assessment(self) -> bool:
-        requested = {item.lower().strip() for item in self.brief.requested_outputs}
-        intents = {item.lower().strip() for item in self.brief.intents}
-        return bool(requested & (_EXECUTION_OUTPUTS | _ASSESSMENT_OUTPUTS | _DESIGN_OUTPUTS)) or bool(
-            intents & {"assess", "assessment", "evaluate_idea", "idea_assessment"}
+        return self._task_kind() == "bug_fix" or bool(
+            {item.lower().strip() for item in self.brief.requested_outputs} & _EXECUTION_OUTPUTS
         )
+
+    def _task_kind(self) -> str:
+        configured = str(self._effective_config().get("research_task_kind") or "").strip().lower()
+        bug_intents = {"bug", "bug_fix", "bug_repair", "repair"}
+        if configured in bug_intents:
+            return "bug_fix"
+        if any(str(item).strip().lower() in bug_intents for item in self.brief.intents):
+            return "bug_fix"
+        if configured == "survey" or any(
+            str(item).strip().lower() == "survey" for item in self.brief.intents
+        ):
+            return "survey"
+        if configured in {"research", "experiment", "prepared_research"}:
+            return "research"
+        requested = {item.strip().lower() for item in self.brief.requested_outputs}
+        if not requested & _EXECUTION_OUTPUTS:
+            return "survey"
+        return "research"
+
+    def _planned_step_rows(self, next_action: str | None) -> list[dict[str, Any]]:
+        if "task_plan" not in self.controller.manifest.state_refs:
+            return [{
+                "step_id": "plan",
+                "action": "plan",
+                "capability": "plan",
+                "state_name": "task_plan",
+                "status": "ready" if next_action == "plan" else "pending",
+                "problem_solved": "Interpret the task, assets, and constraints into an accepted sequential plan.",
+                "observation": "Persisted task-plan artifact and planning attempt.",
+            }]
+        rows: list[dict[str, Any]] = []
+        refs = self.controller.manifest.state_refs
+        for step in self._load_task_plan().steps:
+            row = step.to_dict()
+            if self._step_completed(step):
+                row["status"] = "completed"
+                row["result_ref"] = refs[step.state_name].to_dict()
+                attempt = self._attempt_for_ref(refs[step.state_name])
+                if attempt is not None:
+                    row["attempt_id"] = attempt.attempt_id
+            elif not self._condition_applies(step.condition):
+                row["status"] = "skipped"
+            else:
+                row["status"] = "ready" if step.action == next_action else "pending"
+            rows.append(row)
+        return rows
+
+    def _attempt_for_ref(self, ref: ArtifactRef):
+        for attempt in reversed(self.controller.list_attempts()):
+            prefix = (Path("attempts") / attempt.attempt_id).as_posix() + "/"
+            if any(
+                output.path == ref.path
+                or ref.path == prefix + output.path.replace("\\", "/")
+                for output in attempt.outputs
+            ):
+                return attempt
+        return None
+
+    def _context_projection(
+        self, task: Mapping[str, Any], steps: list[dict[str, Any]], gaps: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        failed = [
+            {
+                "attempt_id": attempt.attempt_id,
+                "capability": attempt.capability,
+                "status": attempt.status,
+                "action": attempt.trigger.removeprefix("application:"),
+            }
+            for attempt in self.controller.list_attempts()
+            if attempt.status in {"failed", "blocked"}
+        ]
+        return {
+            "schema_version": "research_task_context.v1",
+            "goal": task["goal"],
+            "constraints": list(task["constraints"]),
+            "current_plan": [
+                {key: row[key] for key in ("step_id", "action", "capability", "status")}
+                for row in steps
+            ],
+            "execution_protocol": self._execution_protocol_projection(),
+            "execution_decision": self._execution_decision_projection(),
+            "completed_artifacts": {
+                name: ref.to_dict()
+                for name, ref in self.controller.manifest.state_refs.items()
+                if name not in _INPUT_REF_NAMES | {"work_plan", "work_plan_markdown", "readiness"}
+            },
+            "unresolved": list(gaps),
+            "failed_attempts": failed,
+            "resources": {
+                "assets": [
+                    {"asset_id": asset.asset_id, "role": asset.role, "availability": asset.availability}
+                    for asset in self.assets
+                ],
+                "budget": self.controller.manifest.budget.to_dict(),
+            },
+        }
 
     def _input_refs(self, *names: str) -> tuple[ArtifactRef, ...]:
         try:
@@ -1414,7 +1855,7 @@ class ResearchApplication:
             raise ResearchApplicationError(f"Missing application input artifact: {exc.args[0]}") from exc
 
     def _plan_config(self) -> dict[str, object]:
-        config, local_documents = self._effective_config(), self._local_documents()
+        config, local_documents = self._execution_config(), self._local_documents()
         if local_documents:
             config.setdefault("research_sources", ["local_files"])
             config["research_local_documents"] = [str(path) for path in local_documents]
@@ -1422,6 +1863,171 @@ class ResearchApplication:
             config.setdefault("research_allow_pdf_download", False)
         config.setdefault("research_max_documents", self.services.max_results)
         return config
+
+    def _execution_config(self) -> dict[str, object]:
+        """Return the one normalized execution boundary used by plan and run."""
+
+        config = self._effective_config()
+        execution = config.get("execution")
+        if isinstance(execution, Mapping):
+            execution = merge_execution_protocol(
+                execution,
+                self._design_execution_protocol(),
+            )
+            config["execution"] = normalize_execution_config(
+                execution,
+            )
+        return config
+
+    def _design_execution_protocol(self) -> Mapping[str, Any] | None:
+        ref = self.controller.manifest.state_refs.get("design")
+        if ref is None:
+            return None
+        payload = self.controller.store.read_json(ref)
+        protocol = payload.get("execution_protocol") if isinstance(payload, Mapping) else None
+        return dict(protocol) if isinstance(protocol, Mapping) else None
+
+    def _execution_contract(self) -> Mapping[str, Any] | None:
+        ref = self.controller.manifest.state_refs.get("design")
+        if ref is None:
+            return None
+        payload = self.controller.store.read_json(ref)
+        contract = payload.get("contract") if isinstance(payload, Mapping) else None
+        return dict(contract) if isinstance(contract, Mapping) else None
+
+    def _bind_reused_baseline(self) -> bool:
+        """Bind only a passed, same-condition canonical result for reuse."""
+
+        execution = self._execution_config().get("execution")
+        if not isinstance(execution, Mapping):
+            return True
+        policy = str(execution.get("baseline_policy") or "skip").strip().lower()
+        if policy != "reuse":
+            return True
+        pairs = execution_pairs(execution, task_text=self.brief.request_text)
+        configured = execution.get("baseline_ref")
+        if pairs:
+            if configured is None:
+                configured_refs: list[object] = [
+                    self.controller.manifest.state_refs.get(f"matrix_baseline_{index}")
+                    for index in range(len(pairs))
+                ]
+            elif isinstance(configured, (list, tuple)):
+                configured_refs = list(configured)
+            else:
+                self.controller.pause(
+                    "Paired baseline reuse requires one baseline_ref per accepted seed condition."
+                )
+                self._persist_application_views()
+                return False
+            if len(configured_refs) != len(pairs) or any(item is None for item in configured_refs):
+                self.controller.pause(
+                    "Baseline reuse requested, but a passed result is missing for an accepted seed condition."
+                )
+                self._persist_application_views()
+                return False
+            for index, value in enumerate(configured_refs):
+                ref = self._coerce_reuse_ref(value)
+                if ref is None or not self._baseline_ref_matches(ref, execution, pair_index=index):
+                    self.controller.pause(
+                        f"Baseline reuse condition does not match the accepted protocol for seed index {index}."
+                    )
+                    self._persist_application_views()
+                    return False
+                self.controller.manifest.state_refs[f"matrix_baseline_{index}"] = ref
+            return True
+
+        value = configured or self.controller.manifest.state_refs.get("baseline")
+        ref = self._coerce_reuse_ref(value)
+        if ref is None or not self._baseline_ref_matches(ref, execution):
+            self.controller.pause(
+                "Baseline reuse requested, but no passed same-condition canonical result was supplied."
+            )
+            self._persist_application_views()
+            return False
+        self.controller.manifest.state_refs["baseline"] = ref
+        return True
+
+    def _coerce_reuse_ref(self, value: object) -> ArtifactRef | None:
+        try:
+            if isinstance(value, ArtifactRef):
+                ref = value
+            elif isinstance(value, Mapping):
+                ref = ArtifactRef.from_dict(dict(value))
+            elif isinstance(value, str) and value.strip():
+                ref = self.controller.store.ref(
+                    value.strip(), kind="experiment_result", schema="canonical_results.2.5",
+                )
+            else:
+                return None
+            if ref.kind != "experiment_result":
+                return None
+            if not self.controller.store.exists(ref):
+                return None
+            return ref
+        except (KeyError, TypeError, ValueError, OSError):
+            return None
+
+    def _baseline_ref_matches(
+        self, ref: ArtifactRef, execution: Mapping[str, object], *, pair_index: int | None = None,
+    ) -> bool:
+        try:
+            payload = self.controller.store.read_json(ref)
+            if not isinstance(payload, Mapping) or str(payload.get("status") or "").lower() != "passed":
+                return False
+            expected = execution_request(
+                execution, condition="baseline", pair_index=pair_index,
+                task_text=self.brief.request_text, contract=self._execution_contract(),
+            )
+        except (KeyError, TypeError, ValueError, OSError):
+            return False
+        if list(payload.get("command") or ()) != list(expected.run.command):
+            return False
+        if dict(payload.get("result_schema") or {}) != dict(expected.result_schema):
+            return False
+        expected_contract = expected.normalized_experiment_contract()
+        actual_contract = payload.get("experiment_contract")
+        if not isinstance(expected_contract, Mapping) or not isinstance(actual_contract, Mapping):
+            return False
+        if _comparable_protocol(actual_contract) != _comparable_protocol(expected_contract):
+            return False
+
+        current_preparation = self.controller.manifest.state_refs.get("preparation")
+        actual_preparation = payload.get("preparation")
+        if current_preparation is not None:
+            if not isinstance(actual_preparation, Mapping):
+                return False
+            source_ref = actual_preparation.get("source_ref")
+            if not isinstance(source_ref, Mapping):
+                return False
+            try:
+                if ArtifactRef.from_dict(dict(source_ref)).path != current_preparation.path:
+                    return False
+            except (TypeError, ValueError, KeyError):
+                return False
+        elif actual_preparation is not None:
+            # A prepared source lineage is required when the result claims one.
+            return False
+
+        protected = expected_contract.get("protected_assets")
+        if not isinstance(protected, list) or not protected:
+            # A preparation lineage alone does not prove shared external data
+            # or evaluator contents are still unchanged.
+            return False
+        integrity = (payload.get("measurement") or {}).get("asset_integrity")
+        if not isinstance(integrity, Mapping) or integrity.get("status") != "observed_unchanged":
+            return False
+        before = integrity.get("before")
+        if not isinstance(before, Mapping) or not before:
+            return False
+        try:
+            current = snapshot_protocol_assets(expected_contract, expected.run.cwd)
+        except (OSError, TypeError, ValueError):
+            return False
+        # Only the contract's explicitly protected assets are checked here;
+        # normal candidate edits elsewhere in the prepared workspace do not
+        # invalidate the original baseline.
+        return dict(before) == current
 
     def _search_request(self, plan: ResearchPlanResult):
         return replace(
@@ -1443,7 +2049,10 @@ class ResearchApplication:
         return ResearchPlanResult.from_handoff_dict(self._state_payload("plan"))
 
     def _load_search(self) -> SearchResult:
-        return SearchResult.from_handoff_dict(self._state_payload("search"))
+        if "search" in self.controller.manifest.state_refs:
+            return SearchResult.from_handoff_dict(self._state_payload("search"))
+        from simple_ar.research.sources.capability import provided_materials_result
+        return provided_materials_result(self._load_documents().records)
 
     def _load_documents(self) -> DocumentBundle:
         return DocumentBundle.from_handoff_dict(self._state_payload("documents"))
@@ -1622,6 +2231,18 @@ def _matrix_candidate_key(revision: int, index: int) -> str:
     return f"matrix_candidate_r{revision}_{index}" if revision else f"matrix_candidate_{index}"
 
 
+def _capability_for_action(action: str) -> str:
+    if action == "summarize":
+        return "summary"
+    if action == "matrix_analysis":
+        return "analysis"
+    if action.startswith(("repair:", "matrix_repair_")):
+        return "implement"
+    if action.startswith(("retest:", "matrix_baseline_", "matrix_candidate_")) or action == "baseline":
+        return "experiment"
+    return action
+
+
 def _attempt_id_from_ref(ref: ArtifactRef) -> str:
     parts = Path(ref.path).parts
     try:
@@ -1686,8 +2307,11 @@ def _research_registry() -> CapabilityRegistry:
     registry = CapabilityRegistry()
     register_research_capabilities(
         registry,
-        names=tuple(_CAPABILITY_OUTPUTS),
+        names=tuple(name for name in _CAPABILITY_OUTPUTS if name != "summary"),
     )
+    # Summary is an application-owned materialization, but it still uses the
+    # same controller attempt boundary as every other accepted-plan step.
+    registry.register("summary", run_summary_capability)
     return registry
 
 
@@ -1736,6 +2360,8 @@ def _requested_outputs(brief: ResearchBrief) -> tuple[str, ...]:
 
 def _output_state_name(output: str) -> str:
     normalized = output.strip().lower()
+    if normalized in {"bug_fix", "bug_repair", "code_patch", "patch"}:
+        return "implementation"
     if normalized in {"summary", "research_summary"}:
         return "summary"
     if normalized in {"assessment", "idea_assessment"}:
@@ -1760,17 +2386,44 @@ def _input_fingerprint(brief: ResearchBrief, assets: tuple[ResearchAsset, ...]) 
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _comparable_protocol(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep measured-condition identity, not narrative design prose."""
+
+    return {
+        key: contract.get(key)
+        for key in (
+            "protocol_revision", "dataset_refs", "split_spec", "metric_specs",
+            "comparison_conditions", "protected_assets",
+        )
+    }
+
+
 def _render_work_plan(plan: Mapping[str, Any]) -> str:
     lines = [
         "# Research work plan",
         "",
+        f"- Task kind: `{plan.get('task', {}).get('kind', 'research')}`",
+        f"- Goal: {plan.get('task', {}).get('goal', '')}",
         f"- Status: `{plan.get('status', 'unknown')}`",
         f"- Revision: `{plan.get('revision', '')}`",
         f"- Next action: `{plan.get('next_action') or 'none'}`",
         "",
-        "## Requested outputs",
+        "## Planned steps",
         "",
     ]
+    steps = plan.get("steps", [])
+    lines.extend(
+        f"- `{row.get('step_id', '')}`: **{row.get('status', 'unknown')}** — "
+        f"{row.get('problem_solved', '')}"
+        for row in steps if isinstance(row, Mapping)
+    )
+    if not steps:
+        lines.append("- None declared.")
+    lines.extend([
+        "",
+        "## Requested outputs",
+        "",
+    ])
     outputs = plan.get("requested_outputs", [])
     lines.extend(
         f"- `{row.get('name', '')}`: **{row.get('status', 'unknown')}** — {row.get('reason', '')}"
@@ -1788,28 +2441,6 @@ def _render_work_plan(plan: Mapping[str, Any]) -> str:
     stop_reason = str(plan.get("stop_reason") or "").strip()
     if stop_reason:
         lines.extend(["", "## Stop reason", "", stop_reason])
-    return "\n".join(lines) + "\n"
-
-
-def _render_summary(
-    brief: ResearchBrief, synthesis: SynthesisResult, search: SearchResult,
-    documents: DocumentBundle, read: ReadResult, state_refs: Mapping[str, ArtifactRef],
-) -> str:
-    limitations = _unique(list(search.diagnostics) + list(read.diagnostics) + list(synthesis.diagnostics))
-    lines = [
-        "# Research Summary", "", "## Abstract", "", brief.objective or brief.request_text.strip(),
-        "", "## Research question", "", brief.request_text.strip(), "", "## Evidence collection", "",
-        f"- Raw papers returned: {len(search.papers)}",
-        f"- Selected papers: {len(search.selected_papers)}",
-        f"- Ingested documents: {len(documents.records)}",
-        f"- Text chunks: {len(documents.chunks)}",
-        f"- Evidence cards: {len(read.paper_cards)} paper, {len(read.claim_cards)} claim, {len(read.method_cards)} method, {len(read.dataset_cards)} dataset",
-        "", "## Synthesis", "", synthesis.synthesis_markdown.strip() or "No synthesis prose was produced.",
-        "", "## Proposed direction", "", synthesis.hypothesis_markdown.strip() or "No explicit hypothesis was produced.",
-        "", "## Limitations", "", *[f"- {item}" for item in limitations or ("No capability limitation was reported.",)],
-        "", "## Artifact trail", "",
-        *[f"- `{name}`: `{ref.path}`" for name, ref in sorted(state_refs.items())],
-    ]
     return "\n".join(lines) + "\n"
 
 

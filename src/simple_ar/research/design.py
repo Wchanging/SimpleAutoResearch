@@ -37,6 +37,8 @@ class ResearchDesignRequest:
     topic: str = ""
     idea_id: str | None = None
     execution_schema: Mapping[str, Any] = field(default_factory=dict)
+    execution_boundary: Mapping[str, Any] = field(default_factory=dict)
+    entry_facts: Mapping[str, Any] = field(default_factory=dict)
     execution_context: str = ""
     use_llm: bool = False
     llm_client: Any | None = None
@@ -48,6 +50,8 @@ class ResearchDesignRequest:
                 "ResearchDesignRequest.llm_client is required when use_llm is true."
             )
         object.__setattr__(self, "execution_schema", dict(self.execution_schema))
+        object.__setattr__(self, "execution_boundary", dict(self.execution_boundary))
+        object.__setattr__(self, "entry_facts", dict(self.entry_facts))
         object.__setattr__(self, "execution_context", self.execution_context.strip())
 
     def normalized_synthesis(self) -> SynthesisResult:
@@ -72,6 +76,7 @@ class ResearchDesignResult:
     source_synthesis_status: str = ""
     generation_mode: str = "deterministic"
     selection_rationale: str = ""
+    execution_protocol: dict[str, Any] = field(default_factory=dict)
     diagnostics: tuple[str, ...] = ()
 
     def to_handoff_dict(self) -> dict[str, Any]:
@@ -83,6 +88,7 @@ class ResearchDesignResult:
             "source_synthesis_status": self.source_synthesis_status,
             "generation_mode": self.generation_mode,
             "selection_rationale": self.selection_rationale,
+            "execution_protocol": dict(self.execution_protocol),
             "selected_idea": (
                 self.selected_idea.to_row() if self.selected_idea is not None else None
             ),
@@ -111,6 +117,11 @@ class ResearchDesignResult:
             source_synthesis_status=str(data.get("source_synthesis_status") or ""),
             generation_mode=str(data.get("generation_mode") or "deterministic"),
             selection_rationale=str(data.get("selection_rationale") or ""),
+            execution_protocol=(
+                dict(data.get("execution_protocol"))
+                if isinstance(data.get("execution_protocol"), Mapping)
+                else {}
+            ),
             selected_idea=(
                 IdeaCandidate.from_row(selected_payload)
                 if isinstance(selected_payload, Mapping)
@@ -166,10 +177,11 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
 
     selection_rationale = request.selection_rationale
     generation_mode = "deterministic"
-    if request.idea_id is not None or not request.use_llm or not synthesis.ideas:
-        selected_idea, novelty_check = _select_idea(synthesis, request.idea_id)
-    else:
-        selected_idea, selection_rationale = _select_idea_with_llm(synthesis, request)
+    proposed_protocol: Mapping[str, Any] | None = None
+    if request.use_llm and synthesis.ideas:
+        selected_idea, selection_rationale, proposed_protocol = _select_idea_with_llm(
+            synthesis, request,
+        )
         novelty_check = next(
             (
                 check
@@ -179,6 +191,12 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
             None,
         )
         generation_mode = "llm"
+    else:
+        selected_idea, novelty_check = _select_idea(synthesis, request.idea_id)
+    if request.idea_id and selected_idea is not None and selected_idea.idea_id != request.idea_id:
+        raise LLMError(
+            f"LLM research design changed the explicitly selected idea: {request.idea_id!r}."
+        )
     if selected_idea is not None:
         contract = synthesis.for_idea(selected_idea.idea_id).experiment_contract
         if contract is None:
@@ -198,6 +216,12 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
         execution_context=request.execution_context,
     )
 
+    execution_protocol = _resolve_execution_protocol(
+        request,
+        contract,
+        proposed_protocol,
+    )
+
     diagnostics = _contract_diagnostics(
         contract,
         execution_schema=request.execution_schema,
@@ -215,6 +239,7 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
         source_synthesis_status=synthesis.status,
         generation_mode=generation_mode,
         selection_rationale=selection_rationale,
+        execution_protocol=execution_protocol,
         diagnostics=tuple(diagnostics),
     )
 
@@ -312,8 +337,8 @@ def _select_idea(
 def _select_idea_with_llm(
     synthesis: SynthesisResult,
     request: ResearchDesignRequest,
-) -> tuple[IdeaCandidate, str]:
-    """Select only from persisted candidates; never let the model create one."""
+) -> tuple[IdeaCandidate, str, dict[str, Any]]:
+    """Select a persisted idea and propose a bounded execution protocol."""
 
     client = request.llm_client
     if client is None:
@@ -337,6 +362,13 @@ def _select_idea_with_llm(
                 ensure_ascii=False,
             ),
             execution_context=request.execution_context,
+            execution_boundary_json=json.dumps(
+                dict(request.execution_boundary), ensure_ascii=False, default=str,
+            ),
+            entry_facts_json=json.dumps(
+                dict(request.entry_facts), ensure_ascii=False, default=str,
+            ),
+            requested_idea_id=request.idea_id or "",
         ),
         label="research-design",
     )
@@ -356,7 +388,217 @@ def _select_idea_with_llm(
         raise LLMError(
             f"LLM research design selected unknown idea: {selected_id.strip()!r}."
         )
-    return selected, rationale.strip()
+    protocol = response.get("execution_protocol", {})
+    if protocol is None:
+        protocol = {}
+    if not isinstance(protocol, Mapping):
+        raise LLMError("LLM research design execution_protocol must be a JSON object.")
+    return selected, rationale.strip(), dict(protocol)
+
+
+def _resolve_execution_protocol(
+    request: ResearchDesignRequest,
+    contract: ResearchExperimentContract,
+    proposed: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Ground a design proposal in inspected entry facts and explicit config."""
+
+    boundary = dict(request.execution_boundary)
+    facts = dict(request.entry_facts)
+    if not boundary and not facts and not proposed:
+        return {}
+
+    protocol: dict[str, Any] = {}
+    configured_command = boundary.get("command")
+    if isinstance(configured_command, (list, tuple)) and configured_command:
+        protocol["command"] = list(configured_command)
+    else:
+        benchmark = facts.get("benchmark_argv")
+        if isinstance(benchmark, (list, tuple)) and benchmark:
+            protocol["command"] = list(benchmark)
+
+    configured_baseline = boundary.get("baseline")
+    if isinstance(configured_baseline, Mapping) and isinstance(
+        configured_baseline.get("command"), (list, tuple),
+    ):
+        protocol["baseline_command"] = list(configured_baseline["command"])
+
+    for key in ("pairs", "seeds", "seed_count", "seed_flag", "baseline_policy", "baseline_ref"):
+        if key in boundary:
+            protocol[key] = boundary[key]
+    if isinstance(boundary.get("result_schema"), Mapping):
+        protocol["result_schema"] = dict(boundary["result_schema"])
+    elif request.execution_schema:
+        protocol["result_schema"] = dict(request.execution_schema)
+
+    comparison_required = bool(
+        protocol.get("pairs")
+        or protocol.get("baseline_command")
+    )
+    if proposed:
+        _validate_proposed_protocol(proposed, facts)
+        for key in (
+            "command", "baseline_command", "pairs", "seeds", "seed_count", "seed_flag",
+            "baseline_policy", "result_schema", "comparison_required", "decision_reason",
+            "stopping_criteria", "input_refs",
+        ):
+            if key in proposed:
+                protocol[key] = proposed[key]
+        if "comparison_required" in proposed:
+            comparison_required = proposed["comparison_required"]
+
+    # Explicit configuration is authoritative over the model proposal.
+    for key in (
+        "command", "pairs", "seeds", "seed_count", "seed_flag", "baseline_policy",
+        "baseline_ref", "result_schema",
+    ):
+        if key in boundary:
+            protocol[key] = boundary[key]
+    if "result_schema" not in boundary and request.execution_schema:
+        protocol["result_schema"] = dict(request.execution_schema)
+    if isinstance(configured_baseline, Mapping):
+        protocol["baseline_command"] = list(configured_baseline.get("command", ()))
+
+    # Do not persist two competing ways of expressing the same accepted
+    # condition.  A caller-supplied pairs/compact form wins; a model response
+    # that conflicts with itself is rejected before this point.
+    if "pairs" in boundary:
+        for key in ("seeds", "seed_count", "seed_flag"):
+            protocol.pop(key, None)
+    elif any(key in boundary for key in ("seeds", "seed_count", "seed_flag")):
+        protocol.pop("pairs", None)
+
+    explicit_policy = str(boundary.get("baseline_policy") or "").strip().lower()
+    explicit_comparison = bool(boundary.get("pairs") or isinstance(configured_baseline, Mapping))
+    if explicit_policy == "skip":
+        comparison_required = False
+    elif explicit_policy in {"run", "reuse"} or explicit_comparison:
+        comparison_required = True
+    elif not isinstance(comparison_required, bool):
+        raise LLMError("Research design comparison_required must be a boolean.")
+
+    policy = str(protocol.get("baseline_policy") or "").strip().lower()
+    if policy not in {"", "run", "skip", "reuse"}:
+        raise LLMError("Research design proposed unsupported baseline_policy; expected run, skip or reuse.")
+    if not explicit_policy:
+        if explicit_comparison and policy == "skip":
+            # A supplied pair/baseline is an explicit comparison request;
+            # model output cannot silently disable it.
+            policy = "run"
+            protocol["baseline_policy"] = policy
+        elif not explicit_comparison and policy == "skip":
+            comparison_required = False
+        elif policy in {"run", "reuse"}:
+            comparison_required = True
+    if not comparison_required:
+        protocol["baseline_policy"] = "skip"
+        default_reason = "The task and selected design do not require a comparison baseline."
+    elif not policy:
+        protocol["baseline_policy"] = "run"
+        default_reason = "The selected design requires a comparison and no reusable result was supplied."
+    else:
+        default_reason = "The baseline policy was explicitly configured or proposed within the accepted boundary."
+    protocol["comparison_required"] = comparison_required
+    protocol["decision_reason"] = str(protocol.get("decision_reason") or default_reason).strip()
+    if not protocol.get("input_refs"):
+        protocol["input_refs"] = list(facts.get("input_refs") or contract.motivation_refs)
+    if "stopping_criteria" not in protocol:
+        protocol["stopping_criteria"] = []
+    return protocol
+
+
+def _validate_proposed_protocol(
+    proposed: Mapping[str, Any],
+    entry_facts: Mapping[str, Any],
+) -> None:
+    """Reject model authority outside the inspected command boundary."""
+
+    allowed = {
+        "command", "baseline_command", "pairs", "seeds", "seed_count", "seed_flag",
+        "baseline_policy", "result_schema", "comparison_required", "decision_reason",
+        "stopping_criteria", "input_refs",
+    }
+    unknown = set(proposed) - allowed
+    if unknown:
+        raise LLMError(
+            "LLM research design proposed unsupported execution fields: "
+            + ", ".join(sorted(unknown))
+        )
+    prefixes = [
+        list(row) for row in entry_facts.get("authorized_argv_prefixes", [])
+        if isinstance(row, (list, tuple)) and row
+    ]
+    for key in ("command", "baseline_command"):
+        if key not in proposed:
+            continue
+        _validate_argv_within_boundary(proposed[key], key, prefixes)
+    if "baseline_policy" in proposed and str(proposed["baseline_policy"]).strip().lower() not in {"run", "skip", "reuse"}:
+        raise LLMError("LLM research design baseline_policy must be run, skip or reuse.")
+    if "comparison_required" in proposed and type(proposed["comparison_required"]) is not bool:
+        raise LLMError("LLM research design comparison_required must be a boolean.")
+    if "decision_reason" in proposed and not isinstance(proposed["decision_reason"], str):
+        raise LLMError("LLM research design decision_reason must be a string.")
+    if "stopping_criteria" in proposed:
+        criteria = proposed["stopping_criteria"]
+        if not isinstance(criteria, list) or any(
+            not isinstance(item, str) or not item.strip() for item in criteria
+        ):
+            raise LLMError("LLM research design stopping_criteria must be a list of non-empty strings.")
+    if "result_schema" in proposed and not isinstance(proposed["result_schema"], Mapping):
+        raise LLMError("LLM research design result_schema must be an object.")
+    if "input_refs" in proposed:
+        _validate_input_refs(proposed["input_refs"], entry_facts)
+    if "pairs" in proposed and any(key in proposed for key in ("seeds", "seed_count", "seed_flag")):
+        raise LLMError("LLM research design must choose pairs or compact seed settings, not both.")
+    if "pairs" in proposed:
+        pairs = proposed["pairs"]
+        if not isinstance(pairs, list) or not pairs:
+            raise LLMError("LLM research design pairs must be a non-empty list.")
+        seen: set[int] = set()
+        for row in pairs:
+            if not isinstance(row, Mapping) or set(row) != {"seed", "baseline_command", "candidate_command"}:
+                raise LLMError(
+                    "LLM research design pairs require seed, baseline_command and candidate_command."
+                )
+            seed = row["seed"]
+            if type(seed) is not int or seed in seen:
+                raise LLMError("LLM research design pair seeds must be unique integers.")
+            seen.add(seed)
+            for key in ("baseline_command", "candidate_command"):
+                _validate_argv_within_boundary(row[key], key, prefixes)
+    for key in ("seeds",):
+        if key in proposed:
+            values = proposed[key]
+            if not isinstance(values, list) or not values or any(type(item) is not int for item in values) or len(set(values)) != len(values):
+                raise LLMError(f"LLM research design {key} must be a non-empty list of unique integers.")
+    if "seed_count" in proposed and (type(proposed["seed_count"]) is not int or proposed["seed_count"] < 1):
+        raise LLMError("LLM research design seed_count must be a positive integer.")
+    if "seed_flag" in proposed and (not isinstance(proposed["seed_flag"], str) or not proposed["seed_flag"].strip()):
+        raise LLMError("LLM research design seed_flag must be a non-empty string.")
+
+
+def _validate_argv_within_boundary(
+    argv: object,
+    name: str,
+    prefixes: list[list[str]],
+) -> None:
+    if not isinstance(argv, (list, tuple)) or not argv or any(
+        not isinstance(arg, str) or not arg.strip() or any(token in arg for token in ("\x00", "\n", "\r"))
+        for arg in argv
+    ):
+        raise LLMError(f"LLM research design {name} must be a literal argv list.")
+    if not prefixes or not any(list(argv[:len(prefix)]) == prefix for prefix in prefixes):
+        raise LLMError(
+            f"LLM research design {name} is outside the inspected authorized entrypoint boundary."
+        )
+
+
+def _validate_input_refs(value: object, entry_facts: Mapping[str, Any]) -> None:
+    if not isinstance(value, list) or not value:
+        raise LLMError("LLM research design input_refs must be a non-empty list.")
+    known = entry_facts.get("input_refs")
+    if not isinstance(known, list) or any(item not in known for item in value):
+        raise LLMError("LLM research design input_refs must refer to inspected entry inputs.")
 
 
 def _synthesis_context(synthesis: SynthesisResult, topic: str = "") -> str:

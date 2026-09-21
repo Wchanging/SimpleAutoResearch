@@ -286,19 +286,28 @@ def _print_research_session(args: argparse.Namespace) -> None:
         raise SystemExit("--timeout-sec must be positive when provided.")
     if args.max_review_iterations < 0:
         raise SystemExit("--max-review-iterations cannot be negative.")
+    task_kind = str(getattr(args, "task_kind", "auto") or "auto").strip().lower()
+    if task_kind not in {"auto", "survey", "bug_fix"}:
+        raise SystemExit("--task-kind must be auto, survey or bug_fix.")
     command = tuple(args.command_argv or ())
     execution_details = getattr(args, "execution_details", {})
     if command and execution_details.get("pairs"):
         raise SystemExit("Use execution.pairs or a single command, not both; paired argv must be explicit.")
     outputs = getattr(args, "outputs", None)
-    if outputs and "experiments" not in outputs and (command or execution_details or getattr(args, "code_task_config", None)):
+    if outputs and task_kind != "bug_fix" and "experiments" not in outputs and (command or execution_details or getattr(args, "code_task_config", None)):
         raise SystemExit("Execution configuration requires experiments in --outputs/task.outputs.")
+    if task_kind == "bug_fix" and outputs and set(outputs) != {"bug_fix"}:
+        raise SystemExit("--task-kind bug_fix requires --outputs bug_fix or no explicit outputs.")
+    if task_kind == "survey" and (command or execution_details or getattr(args, "code_task_config", None)):
+        raise SystemExit("--task-kind survey cannot include execution or CodeTask configuration.")
     if outputs and (args.with_report or args.no_report):
         raise SystemExit("Use explicit outputs or --with-report/--no-report, not both.")
     for field in ("total_tokens", "llm_requests", "max_output_tokens", "process_invocations", "process_wall_seconds"):
         value = getattr(args, field, None)
         if value is not None and value < (0 if field.startswith("process_") else 1):
             raise SystemExit(f"Invalid {field}: {value}")
+    if task_kind == "bug_fix" and not getattr(args, "code_task_config", None):
+        raise SystemExit("--task-kind bug_fix requires --code-task-config for an existing project.")
     code_task_spec = None
     code_task_baseline_policy = "auto"
     code_task_config = getattr(args, "code_task_config", None)
@@ -322,7 +331,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 "--code-task-config requires [execute].use_llm = true because "
                 "the existing Code-Task backend generates the implementation."
             )
-        code_task_baseline_policy = execute_options.baseline_policy
+        code_task_baseline_policy = "skip" if task_kind == "bug_fix" else execute_options.baseline_policy
         timeout_sec = (
             args.timeout_sec
             if args.timeout_sec is not None
@@ -337,7 +346,9 @@ def _print_research_session(args: argparse.Namespace) -> None:
     if args.with_report and args.no_report:
         raise SystemExit("Use either --with-report or --no-report for research-session, not both.")
     llm_client = _optional_research_llm_client(args.model, "research session", max_output_tokens=getattr(args, "max_output_tokens", None))
-    report_requested = bool(args.with_report or (llm_client is not None and not args.no_report))
+    if task_kind == "bug_fix" and (args.with_report or (outputs and "report" in outputs)):
+        raise SystemExit("Bug-fix tasks produce a patch and validation evidence, not an academic report.")
+    report_requested = False if task_kind == "bug_fix" else bool(args.with_report or (llm_client is not None and not args.no_report))
     if outputs is not None:
         report_requested = "report" in outputs
     if report_requested and llm_client is None:
@@ -381,8 +392,10 @@ def _print_research_session(args: argparse.Namespace) -> None:
             ),
             "code_task": task,
         }
-        if code_task_baseline_policy in {"auto", "run"}:
+        if code_task_baseline_policy == "run":
             execution["baseline"] = {"command": command, "label": "baseline"}
+        elif code_task_baseline_policy in {"skip", "none"}:
+            execution["baseline_policy"] = "skip"
         elif code_task_baseline_policy == "provided":
             raise SystemExit(
                 "The canonical research-session does not import provided baseline metrics; "
@@ -407,7 +420,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         from simple_ar.app.research_execution import execution_request
         execution_request(execution)
     request_text = args.topic.strip()
-    experiment_requested = execution is not None or bool(outputs and "experiments" in outputs)
+    experiment_requested = task_kind != "bug_fix" and (execution is not None or bool(outputs and "experiments" in outputs))
     if task_text.strip():
         request_text += "\n\n## Implementation task\n\n" + task_text.strip()
     report_config: dict[str, object] = {
@@ -428,6 +441,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         "research_max_documents": args.max_results,
         "report": report_config,
     }
+    if task_kind != "auto":
+        config["research_task_kind"] = task_kind
     selected_idea_id = str(getattr(args, "selected_idea_id", "") or "").strip()
     if selected_idea_id:
         config["research_selected_idea_id"] = selected_idea_id
@@ -437,11 +452,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
         config["research_queries"] = list(args.queries)
     if args.providers:
         config["research_sources"] = list(args.providers)
-    for name in ("research_use_fulltext", "research_allow_pdf_download", "research_keep_raw_pdf"):
+    for name in ("research_use_fulltext", "research_allow_pdf_download", "research_keep_raw_pdf", "research_materials_only"):
         value = getattr(args, name, None)
         if value is not None:
             config[name] = value
-    assets = tuple(
+    asset_requests = [
         {
             "locator": str(Path(path)),
             "kind": "file",
@@ -450,7 +465,17 @@ def _print_research_session(args: argparse.Namespace) -> None:
             "allowed_uses": ["read", "reference"],
         }
         for path in args.local_document
-    )
+    ]
+    if task_kind == "bug_fix" and code_task_spec is not None:
+        asset_requests.append({
+            "asset_id": "code_project",
+            "locator": str(code_task_spec.code_root.resolve()),
+            "kind": "code",
+            "role": "code",
+            "mutability": "isolated_edit",
+            "allowed_uses": ["read", "isolated_edit", "validate"],
+        })
+    assets = tuple(asset_requests)
     display = ResearchConsole()
     services = ResearchApplicationServices(
         llm_client=llm_client,
@@ -463,20 +488,30 @@ def _print_research_session(args: argparse.Namespace) -> None:
         budget_limits={
             "llm_requests": getattr(args, "llm_requests", 40),
             "total_tokens": getattr(args, "total_tokens", 160_000),
-            "process_invocations": args.process_invocations if getattr(args, "process_invocations", None) is not None else (8 if execution is not None else 0),
-            "process_wall_seconds": args.process_wall_seconds if getattr(args, "process_wall_seconds", None) is not None else (max(60, timeout_sec * 8) if execution is not None else 0),
+            "process_invocations": args.process_invocations if getattr(args, "process_invocations", None) is not None else (1 if task_kind == "bug_fix" else 8 if execution is not None else 0),
+            "process_wall_seconds": args.process_wall_seconds if getattr(args, "process_wall_seconds", None) is not None else (max(30, timeout_sec) if task_kind == "bug_fix" else max(60, timeout_sec * 8) if execution is not None else 0),
         },
         max_attempts=32 if code_task_spec is not None else 20,
         message_callback=display.message,
     )
+    intents = (
+        ("bug_fix",) if task_kind == "bug_fix"
+        else ("survey",) if task_kind == "survey"
+        else ("research", "experiment") if experiment_requested else ("research",)
+    )
+    requested_outputs = (
+        tuple(outputs) if outputs is not None
+        else ("bug_fix",) if task_kind == "bug_fix"
+        else ("experiments", "report") if execution is not None and report_requested
+        else ("experiments",) if execution is not None
+        else ("report",) if report_requested
+        else ("summary",)
+    )
     brief = ResearchBrief(
         request_text=request_text,
         objective=args.topic.strip(),
-        intents=("research", "experiment") if experiment_requested else ("research",),
-        requested_outputs=tuple(outputs) if outputs is not None else ("experiments", "report") if execution is not None and report_requested
-        else ("experiments",) if execution is not None
-        else ("report",) if report_requested
-        else ("summary",),
+        intents=intents,
+        requested_outputs=requested_outputs,
         asset_requests=assets,
     )
     try:
@@ -496,7 +531,11 @@ def _print_research_session(args: argparse.Namespace) -> None:
             elif app.view().status != "completed":
                 app.continue_session(reason="Resume from research-session; reuse persisted evidence and budgets.")
         view = app.view()
-        display.start(view, model=llm_client.model if llm_client is not None else "deterministic", topic=app.brief.objective)
+        display.start(
+            view,
+            model=getattr(llm_client, "model", "configured") if llm_client is not None else "deterministic",
+            topic=app.brief.objective,
+        )
         for _ in range(services.max_attempts + 8):
             if view.next_action is None:
                 view = app.advance(max_actions=1)
@@ -516,12 +555,16 @@ def _print_research_session(args: argparse.Namespace) -> None:
     print_line(f"Artifacts: {len(view.state_refs)}; attempts: {len(view.attempts)}")
     print_line(
         "Implementation: "
-        + ("existing Code-Task backend" if code_task_spec is not None
+         + ("bug-fix CodeTask" if task_kind == "bug_fix"
+            else "existing Code-Task backend" if code_task_spec is not None
            else "explicit command" if execution is not None
            else "preparation required" if outputs and "experiments" in outputs
            else "not requested (literature-only)")
     )
     display.finish(view)
+    summary_ref = view.state_refs.get("summary")
+    if summary_ref is not None:
+        print_line(f"summary: {view.session_root / summary_ref.path}")
     _ensure_research_cli_success(
         view.status,
         operation="Research session",

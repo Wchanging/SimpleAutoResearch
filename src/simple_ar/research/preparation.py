@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from simple_ar.code_task.orchestration.workflow import initialize_code_task
+from simple_ar.code_task.review_pipeline import build_review_index
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.experiment.execution.backend import RunRequest
 from simple_ar.experiment.templates import build_experiment_code
@@ -20,6 +21,69 @@ class PreparationRequest:
     execution: Mapping[str, Any]
     task_text: str
     run: RunRequest | None = None
+
+
+def inspect_execution_entry(execution: Mapping[str, Any]) -> dict[str, Any]:
+    """Inspect the supplied project boundary without creating a workspace.
+
+    The result is a compact fact pack for research design. It records existing
+    entrypoints and the caller's benchmark argv, but never executes a process,
+    installs dependencies, or grants a model a new cwd/timeout/resource scope.
+    """
+
+    config = dict(execution)
+    facts: dict[str, Any] = {
+        "schema_version": "execution_entry_facts.v1",
+        "authorized_argv_prefixes": [],
+        "entrypoint_candidates": [],
+        "limitations": [
+            "Static entry inspection does not prove runtime success or metric correctness.",
+        ],
+    }
+    command = config.get("command")
+    if isinstance(command, (list, tuple)) and command and all(isinstance(item, str) for item in command):
+        facts["benchmark_argv"] = list(command)
+        facts["authorized_argv_prefixes"].append(list(command))
+    baseline = config.get("baseline")
+    if isinstance(baseline, Mapping):
+        baseline_command = baseline.get("command")
+        if isinstance(baseline_command, (list, tuple)) and baseline_command and all(isinstance(item, str) for item in baseline_command):
+            facts["baseline_argv"] = list(baseline_command)
+            facts["authorized_argv_prefixes"].append(list(baseline_command))
+
+    task = config.get("code_task")
+    if isinstance(task, Mapping) and task.get("code_root"):
+        root = Path(str(task["code_root"])).expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError("code_task.code_root must be an existing absolute project directory.")
+        index = build_review_index(root, result_schema=config.get("result_schema"))
+        entrypoints = [str(item) for item in index.get("entrypoints", [])]
+        facts["project"] = {
+            "root": str(root),
+            "file_count": int(index.get("file_count", 0)),
+            "python_file_count": int(index.get("python_file_count", 0)),
+            "test_file_count": sum(
+                1 for row in index.get("files", [])
+                if isinstance(row, Mapping) and "test" in str(row.get("role") or "")
+            ),
+            "entrypoint_candidates": entrypoints,
+        }
+        facts["entrypoint_candidates"] = entrypoints
+        for entrypoint in entrypoints:
+            prefix = [sys.executable, entrypoint]
+            if prefix not in facts["authorized_argv_prefixes"]:
+                facts["authorized_argv_prefixes"].append(prefix)
+    elif "dataset" in config:
+        path = Path(str(config["dataset"])).expanduser().resolve()
+        inspected = read_text_dataset(path)
+        facts["dataset"] = {
+            key: value for key, value in inspected.items() if key != "rows"
+        }
+
+    facts["configured_result_schema"] = dict(config.get("result_schema", {})) if isinstance(config.get("result_schema"), Mapping) else {}
+    facts["configured_timeout_sec"] = config.get("timeout_sec")
+    facts["configured_cwd"] = str(config.get("cwd") or "")
+    return facts
 
 
 def run_preparation_capability(*, context: CapabilityContext, request: PreparationRequest) -> CapabilityResult:

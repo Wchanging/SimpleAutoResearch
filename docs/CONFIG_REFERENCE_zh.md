@@ -12,7 +12,9 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 - 优先级：内置默认 → 研究 TOML → 显式 CLI 覆盖。CLI 列表覆盖整份文件列表。
 - 研究文件中的相对路径以 TOML 所在目录为基准；命令 argv 原样传给实验进程。
-- `[task]`：`goal`、`outputs`（summary/report/experiments）、`output_root`。
+- `[task]`：`goal`、`kind`（auto/survey/bug_fix）、`outputs`（summary/report/experiments/bug_fix）、`output_root`。
+  bug_fix 复用 CodeTask 配置的修改范围与短验证命令，不执行 baseline；需显式提供
+  `execution.code_task_config` 和有限进程预算。auto 尚不代表任意任务自主准备。
 - `[model]`：`name`（`env` 使用 `.env` 的 SIMPLE_AR_MODEL）、`max_output_tokens`。
   配置文件省略模型时默认使用环境模型；显式 `name = ""` 用于不调用模型的确定性摘要。
   API key/base URL 继续来自环境，禁止在模板写密钥。
@@ -22,11 +24,22 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
   可用布尔项 `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf` 启用已有全文摄取；
   高级模板显式开启。下载或解析失败仍须保留摘要级/不可用状态，不能称为全文阅读。
 - `[assets].papers`：本地文献路径列表。
+  设置 `[research] materials_only = true` 可明确只分析这些材料，不执行 search。
+  仍可调用 LLM 阅读和综合；并非离线模型模式。未强制此限制时，LLM 计划也可根据任务
+  选择省略搜索，但必须已有本地材料。来源不足按实际限制交付，不伪造检索结果。
+  阶段 A 的已接受计划是短顺序计划；每个动作只出现一次，输入由现有能力适配函数绑定，
+  不支持任意重复动作、任意输入重绑定或自主扩大实验协议。
 - `[execution]`：`command`（字符串数组）、`cwd`、`timeout_sec`，或 `code_task_config`；
-  可附 `primary_metric`、`metrics`、`metric_directions`（如 `["accuracy=higher"]）。
+  可附 `primary_metric`、`metrics`、`metric_directions`（如 `["accuracy=higher"]），以及
+  `seeds`/`seed_count`、`seed_flag`、`baseline_policy`、`baseline_ref`。
 - 高级实验可用 `[[execution.pairs]]`：每行包含唯一整数 `seed` 与显式 argv 数组
-  `baseline_command`、`candidate_command`，不与单个 command 混用。引用 CodeTask 时，
-  这些命令用于研究矩阵，baseline_policy 必须为 auto/run；改码范围仍由 CodeTask 配置负责。
+  `baseline_command`、`candidate_command`，不与 compact seed 设置混用。也可以只提供一个
+  literal `command`、`seed_flag` 和显式的 `seed_count`，由正式入口生成有界 pair；不会解析
+  自然语言 seed 请求或 shell，也不会把模型建议变成命令权限。未声明重复条件则保留一次执行并
+  记录默认理由。LLM 模式下，research design 只能在检查过的入口边界内提出条件或 argv 扩展，
+  显式配置优先。`baseline_policy` 只能为 `run`、`skip` 或 `reuse`；reuse 只接受当前 artifact store
+  中通过且实际命令、结果 schema、数据/划分/指标/条件及准备 lineage 相符的框架产物；仅 cwd 或
+  叙述性契约相同不足以复用。引用 CodeTask 时，改码范围仍由 CodeTask 配置负责。
   `[execution.protocol]` 直接使用已有实验契约的 dataset_refs、split_spec、metric_specs、
   comparison_conditions、protected_assets，可附 contract_id/hypothesis。
   保护文件相对路径以实验 cwd 为基准，共享数据可用绝对路径；不是以 TOML 目录为基准。

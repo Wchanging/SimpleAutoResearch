@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 from simple_ar.core.capabilities import CapabilityContext, CapabilityResult
 from simple_ar.literature.cache import get_cached, put_cache
 from simple_ar.literature.models import Paper
-from simple_ar.research.contracts import QueryPlan, ResearchQuestion
+from simple_ar.research.contracts import DocumentRecord, QueryPlan, ResearchQuestion
 from simple_ar.research.sources.base import SearchQuery, SearchResponse
 from simple_ar.research.sources.registry import SearchProviderRegistry
 
@@ -228,6 +228,22 @@ class SearchResult:
                 else {}
             ),
         )
+
+
+def provided_materials_result(records: Iterable[DocumentRecord]) -> SearchResult:
+    """Read-only compatibility projection, never a persisted search result."""
+    papers = tuple(Paper(
+        id=record.document_id, title=record.title, authors=record.authors,
+        abstract=record.abstract, url=record.url or "",
+        published=record.published, source=record.source,
+        source_id=record.source_id or record.document_id, doi=record.doi,
+    ) for record in records)
+    return SearchResult(
+        status="completed" if papers else "empty",
+        responses=(), papers=papers, selected_papers=papers,
+        diagnostics=("Search was not run; sources are supplied documents.",),
+        coverage_report={"status": "provided_materials", "source_count": len(papers)},
+    )
 
 
 def search_sources(

@@ -15,7 +15,8 @@ Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens)
 `research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir,
 use_fulltext, allow_pdf_download, keep_raw_pdf),
 `assets` (papers), `execution` (command, cwd, timeout_sec, code_task_config,
-primary_metric, metrics, metric_directions, pairs, protocol), and `report` (template, reviewer,
+primary_metric, metrics, metric_directions, pairs, seeds, seed_flag, seed_count,
+baseline_policy, baseline_ref, protocol), and `report` (template, reviewer,
 max_review_iterations, max_section_tokens, figures). A report section token value of `0` omits the
 per-call provider output cap; use a positive value only as an explicit expert limit.
 Supported deterministic figures are enabled by default for user-facing reports;
@@ -29,14 +30,37 @@ with --with-report/--no-report. Missing execution settings preserve the experime
 and pause at that boundary; automatic repository preparation is not yet implemented.
 Budget limits initialize new sessions; resuming uses the persisted ledger, not a refreshed allowance.
 Unknown fields are rejected; stage-specific research models are not supported yet.
+`task.kind` may be `auto`, `survey`, or `bug_fix`. Bug repair uses the existing
+`execution.code_task_config`, edit scope and short validation command, with explicit
+finite process budgets and no baseline. Its output is `bug_fix`; auto does not imply
+arbitrary project preparation.
+Set `[research] materials_only = true` with `[assets].papers` to analyse supplied
+documents without search. LLM reading is still allowed. Without that restriction,
+the model may also omit search when local materials satisfy the task. Stage A uses
+short sequential plans with unique actions and adapter-bound inputs, not arbitrary
+repeated actions, input rebinding, or model-expanded experiment protocols.
 The three full-text options are explicit booleans. The advanced template enables
 them; retrieval failures must still be reported as abstract-only or unavailable.
 
-Advanced experiments may use `[[execution.pairs]]` rows with a unique integer
-`seed`, `baseline_command` and `candidate_command` (literal argv arrays). Do not
-combine pairs with a single execution command. With `code_task_config`, pairs
-replace its benchmark commands for the research matrix; baseline policy must be
-`auto` or `run`. CodeTask still owns edit scope and implementation settings.
+Advanced experiments may either use `[[execution.pairs]]` rows with a unique integer
+`seed`, `baseline_command` and `candidate_command` (literal argv arrays), or declare
+one literal `execution.command` together with explicit `seed_count`/`seeds` and an
+explicit `seed_flag`. The canonical entrypoint expands the latter into bounded literal
+pairs; it does not parse natural-language seed requests or interpolate shell text.
+Omit a seed declaration to retain one configured execution and record that default
+reason. Do not combine explicit `pairs` with compact seed settings. In LLM mode,
+research design may propose conditions or an argv extension only after the supplied
+entrypoint has been inspected; the proposal remains inside the authorized process
+boundary and explicit configuration wins. With `code_task_config`, pairs replace its
+benchmark commands for the research matrix. CodeTask still owns edit scope and
+implementation settings.
+`baseline_policy` is `run` when a comparison is required, `skip` when it is not, or
+`reuse` when `baseline_ref` points to a passed, same-condition canonical result in the
+current session artifact store. Reuse checks the actual command, result schema and
+declared data/split/metric/condition and preparation lineage; cwd alone or the full
+narrative contract is not a sufficient identity. It never imports paper numbers as
+measurements. The separate CodeTask TOML keeps its own `auto`/`none` compatibility
+semantics; those aliases are not research-session execution policies.
 `[execution.protocol]` uses the existing research experiment contract: dataset_refs,
 split_spec, metric_specs, comparison_conditions and protected_assets, optionally
 contract_id/hypothesis. Protected file paths are relative to the experiment cwd,

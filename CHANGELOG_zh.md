@@ -11,6 +11,47 @@
 - 报告事实修订的真实复验、attempt 额度续接及冻结版本新会话验收转入 V2.9；
   此为范围调整，不是新增能力或将已知问题标为修复完成。
 
+### V2.9 阶段 A
+
+- 同步 README 开发状态与开发指南：明确基础记忆、prompt/结果回传的职责，以及模块
+  升级随核心阶段交付；这些是实施目标说明，不代表研究循环等能力已完成。
+- 支持通过 `research.materials_only` 直接摄取提供的论文材料，不伪造搜索产物；
+  已接受的模型计划也可在本地材料可用时省略搜索。移除未被执行消费的计划输入字段。
+- 实验动作及失败修复条件受配置协议约束，拒绝模型额外提出的矩阵索引或修复动作；
+  不再单靠固定动作名称黑名单检查纯调研边界。
+- 正式研究应用现在通过既有 planning attempt 接受短 task plan，校验 capability/state
+  边界，并依据持久化计划及其自身结果/attempt 引用选择下一步。确定性默认计划和现有
+  LLM client 共用同一执行入口，不再由固定 `_steps()` 流程作为 dispatch 权威。
+- 摘要物化现在也作为 accepted plan 的独立 capability attempt 执行；历史兼容路径
+  `outputs/research_summary.*` 仍会保留。
+- research-session CLI 在 Rich artifact 表格之外继续输出稳定的 `summary: <path>` 行。
+- bug 修复路径复用现有 CodeTask 隔离工作区和 `patched` 短验证命令；bug 任务不伪造
+  research design，不进入文献检索、baseline 或正式 experiment。
+
+### V2.9 阶段 B
+
+- 最新真实 digits 验收仍暂停于规划：客户端等待放宽到 300 秒后，服务网关在其
+  120 秒上游超时处返回 HTTP 524。定向组合回归通过不代表真实模型设计、改码和实验
+  链路已验收；本次为开发阶段提交，不宣称 B 完整完成。
+
+- 不再从文献 baseline 名称或普通 seed/划分元数据推断需要额外对照；重复测量本身
+  不要求基线。仅为明确请求的执行产物扩展实验计划；缺执行条件时保留已有证据并暂停，
+  不因报告请求反复扩展计划。
+- `research-session` 导入 CodeTask 配置时，`auto` 保持未指定，交给研究设计决定，
+  不再提前转换为显式 baseline；保留用户明确的 `run` 和 `skip`/`none` 选择。
+
+- 将 literal command 与显式 seed 设置绑定为正式执行 pair；自然语言 seed 意图只由入口检查后的
+  research design 处理，不能生成 shell 命令、任意进程或未授权动作。
+- 将省略的 baseline policy 保留到 research design 决定；解析为 `run` 且没有独立 evaluator 时，
+  使用已检查、已配置的 literal evaluator 在候选改动前执行 baseline；显式 `skip` 仍不启动 baseline 进程。
+- 在现有 work-plan 视图中记录 baseline 的 run、skip 和同条件 reuse 决策；reuse 前核对
+  canonical 结果的命令、结果 schema、数据/划分/指标/条件或准备 lineage，并重新核对当前显式
+  protected assets；保护集之外的正常候选改动不会使原 baseline 失效。CodeTask 自身的 `auto`/`none`
+  兼容策略保持不变。
+- 复用既有 Preparation/CodeTask、experiment、预算和恢复边界，未新增第二套调度器、记忆库、
+  重试平台或任意 action registry。
+- 开放网络 survey 的限流证据与冻结端到端验收仍明确未解决；本地 B 验证不替代这些门槛。
+
 ## 2026-09-17
 
 - 报告修订现在会把显式的 `revision_instructions` 同时传递给普通 Writer 和结构化恢复 prompt，避免审阅指令在有限修订轮次前丢失。

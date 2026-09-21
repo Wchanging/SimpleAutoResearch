@@ -55,6 +55,43 @@ Every review should answer at least:
 
 Locks, budgets, migration, and recovery in the implementation blueprint should be the smallest reliable versions required by the current path. The blueprint is not a checklist saying that every piece of infrastructure and protection must be complete before any user feature can ship. Its example limits are adjustable engineering starting points, not reasons to avoid real tasks. The full architecture and construction order live in the project's local `MDfiles/` planning notes; that directory is intentionally excluded from GitHub, so this document is the public contributor standard.
 
+### V2.9 Development Target: Decision Context And Handoffs
+
+These are development contracts, not claims that autonomous research iteration is complete.
+The current slice has exercised supplied-material analysis and a small code repair through short
+plans; open-web research and subsequent experimental loops need their own acceptance evidence.
+
+Stage B keeps the same entrypoint and binds a declared execution protocol to the existing
+Preparation/CodeTask and experiment capabilities. A literal command plus explicit seed settings
+may produce pairs; in LLM mode, research design may propose an argv extension only after the
+entrypoint has been inspected and only within that authorized process boundary. Baseline behavior
+is recorded as run, skip, or same-condition reuse. The accepted plan and work-plan view retain the
+protocol reason and artifact references, while model output still cannot grant itself a cwd,
+installer, repair index, or process permission. This is local B behavior, not evidence that
+open-web retrieval or frozen end-to-end acceptance has passed.
+
+- Keep one execution chain: task/assets → near-term plan → typed capability request →
+  SessionController → actual artifacts → reconsider only when needed.
+- Build basic research memory from the task, plan, relevant experience and artifact references,
+  not a second fact store. Read constraints, versions and measurements from their original records;
+  model summaries cannot overwrite them. Separate technical failures from negative research results.
+- Prompts own stable responsibilities and output contracts. Dynamic inputs distinguish user
+  requirements, observations, proposals and unknowns. Fix missing input transmission before adding
+  more instructions; correct output formats at the parsing boundary, not through layered fallbacks.
+- Reuse CapabilityResult/ArtifactRef for observations, binding actual conditions, code versions and
+  input provenance. A plan is not execution, a zero exit code is not scientific success, and reports
+  do not create measured facts.
+- Continue an accepted plan while its premises hold; reconsider when evidence changes the decision.
+  Basic recovery is required from the first working path.
+
+Module upgrades accompany delivery: A covers task interpretation, supplied materials and bug repair;
+B covers design, project inspection, scoped implementation and executable protocols; C covers
+analysis, relevant failure experience, supplemental experiments and direction changes; D covers
+continuation and removal of superseded orchestration; E verifies normal-scale quality, reports and
+user delivery. Quality is not deferred until E. Multi-agent discussion, complex PDF processing,
+template export and external Harness integration remain optional enhancements, not prerequisites
+or claims about released functionality.
+
 ### Compatibility Audit
 
 The repository has one formal research entrypoint, segmented commands, and
