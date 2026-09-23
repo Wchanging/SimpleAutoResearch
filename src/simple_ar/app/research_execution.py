@@ -342,6 +342,7 @@ def implementation_request(
     *,
     validate: bool = False,
     task_text: str = "",
+    revision_instruction: str = "",
     contract: ResearchExperimentContract | Mapping[str, Any] | None = None,
 ) -> ImplementationRequest:
     task = config.get("code_task")
@@ -376,6 +377,7 @@ def implementation_request(
         execution.normalized_experiment_contract(),
         validation_command=tuple(execution.run.command) if validate else None,
         validation_timeout_sec=execution.run.timeout_sec if validate else None,
+        revision_instruction=revision_instruction.strip(),
         budget_profile=budget_profile,
         allow_large_edits=allow_large_edits,
     )

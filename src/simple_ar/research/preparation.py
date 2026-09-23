@@ -21,6 +21,8 @@ class PreparationRequest:
     execution: Mapping[str, Any]
     task_text: str
     run: RunRequest | None = None
+    run_dir: Path | None = None
+    source_project: Path | None = None
 
 
 def inspect_execution_entry(execution: Mapping[str, Any]) -> dict[str, Any]:
@@ -110,6 +112,9 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     root = Path(task["code_root"])
     if not root.is_absolute() or not root.is_dir():
         raise ValueError("code_task.code_root must be an existing absolute project directory.")
+    lineage_root = Path(request.source_project) if request.source_project is not None else root
+    if not lineage_root.is_absolute() or not lineage_root.is_dir():
+        raise ValueError("Preparation source_project must be an existing absolute project directory.")
     if not isinstance(task.get("approval_note"), str) or not task["approval_note"].strip():
         raise ValueError("Preparing code_task requires explicit isolated-edit approval.")
     config.setdefault("cwd", str(root))
@@ -118,7 +123,7 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     task_ref = context.store.write_text("inputs/task.md", request.task_text, kind="task_input", schema="markdown.v1")
     command = subprocess.list2cmdline(request.run.command) if os.name == "nt" else shlex.join(request.run.command)
     initialized = initialize_code_task(
-        run_dir=context.store.root / "project_run", code_root=root,
+        run_dir=context.store.root / (request.run_dir or Path("project_run")), code_root=root,
         task_file=context.store.resolve(task_ref), benchmark_command=command,
         workspace_mode=workspace_mode,
         edit_scope_allowed_patterns=tuple(allowed or ()),
@@ -135,7 +140,7 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     config["code_task"] = task
     ref = context.store.write_json("execution.json", {
         "schema_version": "prepared_execution.v1", "execution": config,
-        "source_project": str(root), "workspace": str(initialized.workspace_dir),
+        "source_project": str(lineage_root.resolve()), "workspace": str(initialized.workspace_dir),
         "copy_report": initialized.copy_report.to_json(),
         "workspace_info": initialized.workspace.to_manifest(run_dir=initialized.run_dir),
         "limitations": ["No dependency installation or dataset download; shared datasets remain external assets.",

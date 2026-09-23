@@ -4,6 +4,41 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-23
+
+- Add `research-session --session-root PATH --reanalyze` to reconsider existing
+  measurements without rerunning them or implicitly requesting a report.
+  Historical artifacts and consumed budgets are retained; accepted follow-ups
+  continue through the normal research execution boundary.
+- Keep original preparation step references separate from the active revision
+  workspace. Preparation success follows its completed attempt, rather than
+  requiring experiment-only status fields in a configuration artifact.
+- Count an edit-proposal correction only after a new proposal is generated;
+  connection failures leave the correction available for continuation.
+- Give result analysis the accepted execution conditions and one bounded chance
+  to correct an unusable supplement recommendation, rather than silently
+  turning prose into an empty experiment request. Missing protocol metadata is
+  not repaired by repeating training.
+- Clarify the existing analysis prompt and checkpoint projection: a fixed
+  command disables seed supplements, not an authorized CodeTask revision, and
+  persisted measurement refs identify baseline, current candidate, and its
+  implementation. A future task deliverable is not itself a missing input.
+- Let an existing CodeTask execution regenerate one stale edit proposal after
+  exact patch validation records the failure and current source context; a
+  second validation failure still stops at the existing boundary.
+- Permit same-session reuse of a passed baseline without a protected-asset
+  snapshot when its command, protocol, and preparation lineage match; this is
+  recorded as unverified integrity, while external reuse keeps the snapshot
+  requirement.
+
+## 2026-09-22
+
+- Preserve CodeTask model edit failures at the execution boundary instead of
+  disguising them as offline empty proposals. Explicit offline mode is unchanged.
+- Pass the accepted execution protocol's seed-extension facts into result analysis;
+  follow-up recommendations cannot invent a seed mechanism or derive a seed from
+  the research iteration.
+
 ## 2026-09-21
 
 - Support `research.materials_only` and model plans that ingest supplied documents
@@ -87,6 +122,30 @@ This file records user-visible project changes in reverse chronological order. P
   This is not full Stage B acceptance: protocol and implementation evidence remain
   incomplete in analysis, one model review timed out, and live multi-seed/reuse/skip
   coverage is still pending. The earlier provider-524 run remains failed evidence.
+
+### V2.9 Stage C (bounded-loop foundation)
+
+- Research decisions now bind to the current candidate/execution references and
+  measured protocol identity; an older decision artifact is not reused merely
+  because it exists.
+- With an explicit seed protocol, a safely reconstructable baseline, and enough
+  finite process budget, the same accepted plan can run one
+  `supplement_baseline -> supplement_candidate -> reanalysis` round and stop at
+  its configured limit. Technical failures remain diagnostic evidence.
+- A prepared CodeTask supplement now prepares an isolated original baseline
+  workspace while measuring the current candidate workspace under the same
+  accepted condition. Candidate revisions explicitly choose the current
+  candidate or recorded original baseline as their workspace seed; protected
+  assets and source lineage still gate baseline reuse. Explicit `skip`/`reuse`
+  choices remain authoritative. This is bounded loop behavior, not live LLM
+  CodeTask or V2.9 release acceptance.
+- Follow-up dependencies now bind candidate measurement to the persisted
+  implementation state. Scientific history and seed guards resolve session-root
+  attempt outputs, so one pending supplement baseline can pair with its
+  candidate without allowing a completed seed to repeat.
+- The final CLI artifact table resolves the latest implementation, candidate
+  measurement, and analysis from the accepted plan while keeping earlier refs
+  navigable for lineage review.
 
 ## 2026-09-17
 

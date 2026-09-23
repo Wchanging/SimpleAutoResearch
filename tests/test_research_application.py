@@ -102,6 +102,56 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIn("boundary", seen)
             self.assertNotIn("baseline_policy", seen["boundary"])
 
+    def test_analysis_context_exposes_only_accepted_seed_extension_facts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            command = [sys.executable, "-c", "print('accuracy: 1')"]
+            app = create_session(
+                ResearchBrief(request_text="Compare the supplied fixture.", requested_outputs=("experiments",)),
+                root=root / "session",
+                services=ResearchApplicationServices(config={"execution": {
+                    "command": command,
+                    "baseline": {"command": command, "label": "baseline"},
+                    "cwd": str(root),
+                    "timeout_sec": 5,
+                    "seeds": [0, 1],
+                    "seed_flag": "--seed",
+                    "baseline_policy": "run",
+                }}),
+            )
+
+            protocol = app._analysis_context()["metadata"]["execution_protocol"]
+
+            self.assertEqual(protocol["declared_seeds"], [0, 1])
+            self.assertEqual(protocol["seed_flag"], "--seed")
+            self.assertTrue(protocol["can_extend_seed_condition"])
+            self.assertEqual(protocol["condition_mode"], "paired_seed")
+
+            fixed = dict(app.services.config["execution"])
+            fixed.pop("seeds")
+            fixed.pop("seed_flag")
+            fixed_protocol = app._analysis_execution_protocol(fixed)
+            self.assertFalse(fixed_protocol["can_extend_seed_condition"])
+            self.assertEqual(fixed_protocol["condition_mode"], "fixed_command")
+
+    def test_revision_preparation_preserves_original_step_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_session(ResearchBrief(request_text="Compare candidates."), root=Path(tmp))
+            original = app.controller.store.write_json("original.json", {"execution": {"cwd": "original"}},
+                kind="prepared_execution", schema="prepared_execution.v1", producer="test")
+            revised = app.controller.store.write_json("revised.json", {"execution": {"cwd": "revised"}},
+                kind="prepared_execution", schema="prepared_execution.v1", producer="test")
+            app.controller.manifest.state_refs["preparation"] = original
+            with patch.object(app.controller, "attempt_output_ref", return_value=revised):
+                app._record_attempt_outputs("prepare_execution", "preparation_r1", "prepare-2", None)
+            self.assertEqual(app.controller.manifest.state_refs["preparation"], original)
+            self.assertEqual(app._effective_config()["execution"]["cwd"], "revised")
+            from types import SimpleNamespace
+            with patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="completed")):
+                self.assertTrue(app._state_succeeded("preparation_r1"))
+            with patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="failed")):
+                self.assertFalse(app._state_succeeded("preparation_r1"))
+
     def test_real_code_task_modification_is_measured_by_application_once(self):
         """Keep the old real bridge check, but exercise the formal lifecycle."""
         class FakeClient:
@@ -251,6 +301,24 @@ class ResearchApplicationTests(unittest.TestCase):
             with patch.object(LLMClient, "for_task", return_value=client):
                 implemented = app.advance()
             self.assertEqual(implemented.next_action, "experiment", implemented.status_reason)
+            implementation_ref = implemented.state_refs["implementation"]
+            task_input_ref = app.controller.store.ref(
+                Path(implementation_ref.path).parent / "inputs" / "research_code_task.md",
+                kind="task_input",
+            )
+            implementation_task = app.controller.store.read_text(task_input_ref)
+            self.assertIn("## User research objective", implementation_task)
+            self.assertIn("Study reliable agents; add prize keyword support without changing tests.", implementation_task)
+            self.assertIn("selecting a concrete option within the accepted design and CodeTask scope", implementation_task)
+            prepared = app.controller.store.read_json(implemented.state_refs["preparation"])
+            candidate_workspace = Path(prepared["workspace"])
+            self.assertIn("prize", (candidate_workspace / "spam_model.py").read_text(encoding="utf-8"))
+            revision_config, revision_reason = app._revision_execution_config()
+            self.assertEqual(revision_reason, "")
+            self.assertEqual(
+                Path(revision_config["code_task"]["code_root"]).resolve(),
+                candidate_workspace.resolve(),
+            )
             app.services = replace(app.services, llm_client=None)
             final = app.advance(max_actions=5)
             self.assertEqual(final.status, "completed", final.status_reason)
@@ -260,6 +328,39 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(candidate["metrics"]["accuracy"], 1.0)
             self.assertEqual(app.budget_ledger.remaining("process_invocations"), 0)
             self.assertNotIn("'prize'", (project / "spam_model.py").read_text())
+            analysis = app.controller.store.read_json(final.state_refs["analysis"])["analysis"]
+            decision_context = analysis["decision_context"]
+            self.assertIn("prize", decision_context["research_goal"])
+            checkpoint = decision_context["analysis_checkpoint"]
+            current_candidate = checkpoint["current_candidate"]
+            self.assertEqual(current_candidate["artifact_ref"]["path"], final.state_refs["experiment"].path)
+            self.assertEqual(current_candidate["implementation_ref"]["path"], implementation_ref.path)
+            roles = {row["role"]: row for row in checkpoint["measurements"]}
+            self.assertEqual(roles["baseline"]["artifact_ref"]["path"], final.state_refs["baseline"].path)
+            self.assertEqual(roles["current_candidate"]["artifact_ref"]["path"], final.state_refs["experiment"].path)
+            self.assertEqual(checkpoint["stage"], "post_measurement_decision")
+            history = decision_context["research_history"]
+            implementation = next(row for row in history if row["capability"] == "implement")
+            implementation_output = next(
+                output for output in implementation["outputs"]
+                if output["kind"] == "implementation_result"
+            )
+            self.assertTrue(implementation_output["patch_available"])
+            self.assertIn("prize", implementation_output["patch_excerpt"])
+            self.assertFalse(implementation_output["patch_truncated"])
+            self.assertEqual(implementation_output["validation_report"]["status"], "passed")
+            history_refs = {
+                output["ref"]["path"]
+                for row in history for output in row.get("outputs", [])
+            }
+            self.assertIn(final.state_refs["baseline"].path, history_refs)
+            self.assertIn(final.state_refs["experiment"].path, history_refs)
+            measurements = [
+                output["metrics"]
+                for row in history if row["capability"] == "experiment"
+                for output in row.get("outputs", []) if output["kind"] == "experiment_result"
+            ]
+            self.assertEqual([row["accuracy"] for row in measurements], [0.5, 1.0])
             context, _ = app.report_inputs()
             self.assertIn("implementation", context.results)
             self.assertIn("prize", str(context.results["implementation"]))
@@ -268,6 +369,133 @@ class ResearchApplicationTests(unittest.TestCase):
             restored = reloaded.advance(max_actions=5)
             self.assertEqual(restored.state_refs, before)
             self.assertEqual(reloaded.budget_ledger.remaining("process_invocations"), 0)
+
+    def test_code_task_supplement_uses_original_baseline_and_current_candidate(self):
+        from simple_ar.app.research_execution import normalize_execution_config
+        from simple_ar.code_task.orchestration.workflow import initialize_code_task
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "project"
+            source.mkdir()
+            (source / "model.py").write_text(
+                "def predict(text):\n"
+                "    return 'spam' if 'win' in text.lower() else 'ham'\n",
+                encoding="utf-8",
+            )
+            (source / "benchmark.py").write_text(
+                "import sys\nfrom pathlib import Path\n"
+                "from model import predict\n"
+                "role = sys.argv[1]\nseed = sys.argv[-1]\n"
+                "with Path('runs.txt').open('a') as handle: handle.write(f'{role}:{seed}\\n')\n"
+                "rows = [('win now', 'spam'), ('prize only', 'spam')]\n"
+                "score = sum(predict(text) == label for text, label in rows) / len(rows)\n"
+                "print('accuracy:', score)\n",
+                encoding="utf-8",
+            )
+            task_file = root / "task.md"
+            task_file.write_text("Apply the bounded candidate patch in the isolated workspace.\n", encoding="utf-8")
+            initialized = initialize_code_task(
+                run_dir=root / "initial_code_task",
+                code_root=source,
+                task_file=task_file,
+                benchmark_command="python benchmark.py candidate",
+                workspace_mode="copy",
+                edit_scope_allowed_patterns=("model.py",),
+            )
+            candidate_workspace = initialized.workspace_dir
+            (candidate_workspace / "model.py").write_text(
+                "def predict(text):\n"
+                "    return 'spam' if any(word in text.lower() for word in ('win', 'prize')) else 'ham'\n",
+                encoding="utf-8",
+            )
+            contract = {
+                "contract_id": "code-task-supplement-v1",
+                "hypothesis": "The isolated candidate improves the supplied evaluator.",
+                "dataset_refs": [{"asset_id": "fixture", "revision": "1"}],
+                "split_spec": {"name": "fixed"},
+                "metric_specs": [{"name": "accuracy", "unit": "fraction", "direction": "higher"}],
+                "comparison_conditions": {"evaluator": "benchmark"},
+                "protected_assets": [{"asset_id": "evaluator", "path": "benchmark.py"}],
+            }
+            raw_execution = {
+                "command": [sys.executable, "benchmark.py", "candidate"],
+                "baseline": {"command": [sys.executable, "benchmark.py", "baseline"]},
+                "cwd": str(source), "timeout_sec": 5,
+                "seeds": [0, 1], "seed_flag": "--seed", "baseline_policy": "run",
+                "result_schema": {"primary_metric": "accuracy", "direction": "higher"},
+                "protocol": contract,
+                "code_task": {
+                    "code_root": str(source),
+                    "allowed_patterns": ["model.py"],
+                    "approval_note": "Use only the isolated model.py workspace.",
+                },
+            }
+            app = create_session(
+                ResearchBrief(request_text="Compare the supplied candidate.", requested_outputs=("experiments",)),
+                root=root / "session",
+                services=ResearchApplicationServices(
+                    config={"research_materials_only": True, "execution": raw_execution},
+                    budget_limits={"process_invocations": 2, "process_wall_seconds": 20},
+                ),
+            )
+            design_ref = app.controller.store.write_json(
+                "inputs/design.json", {"contract": contract, "execution_protocol": {}},
+                kind="research_design", schema="research_design.v1", producer="test",
+            )
+            decision_ref = app.controller.store.write_json(
+                "outputs/research_decision.json", {
+                    "recommendation": {
+                        "action": "supplement",
+                        "reason": "Check the same evaluator under one new seed.",
+                        "supplement": {"seed": 2, "gap": "one additional paired condition"},
+                    },
+                }, kind="research_decision", schema="research_decision.v1", producer="test",
+            )
+            active_execution = normalize_execution_config({
+                **raw_execution,
+                "cwd": str(candidate_workspace),
+                "code_task": {
+                    **raw_execution["code_task"],
+                    "run_dir": str(initialized.run_dir),
+                },
+            })
+            preparation_ref = app.controller.store.write_json(
+                "inputs/prepared_execution.json", {
+                    "schema_version": "prepared_execution.v1",
+                    "execution": active_execution,
+                    "source_project": str(source.resolve()),
+                    "workspace": str(candidate_workspace),
+                    "limitations": [],
+                }, kind="prepared_execution", schema="prepared_execution.v1", producer="test",
+            )
+            app.controller.manifest.state_refs.update({
+                "design": design_ref, "decision": decision_ref, "preparation": preparation_ref,
+            })
+            app.controller.save()
+
+            self.assertTrue(app._run_action("supplement_baseline:1"))
+            self.assertTrue(app._run_action("supplement_candidate:1"))
+            baseline_ref = app.controller.manifest.state_refs["baseline_supplement_1"]
+            candidate_ref = app.controller.manifest.state_refs["experiment_supplement_1"]
+            baseline = app.controller.store.read_json(baseline_ref)
+            candidate = app.controller.store.read_json(candidate_ref)
+            self.assertEqual(baseline["metrics"]["accuracy"], 0.5)
+            self.assertEqual(candidate["metrics"]["accuracy"], 1.0)
+            baseline_prep = app.controller.store.read_json(
+                app.controller.manifest.state_refs["preparation_supplement_1"]
+            )
+            self.assertNotEqual(Path(baseline_prep["workspace"]).resolve(), candidate_workspace.resolve())
+            self.assertNotIn("prize", (Path(baseline_prep["workspace"]) / "model.py").read_text(encoding="utf-8"))
+            self.assertIn("prize", (candidate_workspace / "model.py").read_text(encoding="utf-8"))
+            self.assertEqual(
+                baseline["preparation"]["source_ref"]["path"],
+                app.controller.manifest.state_refs["preparation_supplement_1"].path,
+            )
+            self.assertEqual(
+                candidate["preparation"]["source_ref"]["path"],
+                preparation_ref.path,
+            )
 
     def test_explicit_pairs_recover_each_measurement_without_repeating_baselines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -449,6 +677,133 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(len(resumed.attempts), attempts)
             self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["0", "1"])
 
+    def test_analysis_recommendation_accepts_one_supplement_then_stops_without_rerun(self):
+        from simple_ar.result_analysis import AnalysisRecommendation, AnalysisResult
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Supplement\nA bounded result supports one extra seed.\n", encoding="utf-8")
+            script = root / "measure.py"
+            script.write_text(
+                "import sys\nfrom pathlib import Path\n"
+                "role, _, seed = sys.argv[1:]\n"
+                "with Path('calls.txt').open('a') as handle: handle.write(f'{role}:{seed}\\n')\n"
+                "labels = [0, 1, 1, 0]\n"
+                "predictions = ([0, 1, 0, 0] if role == 'baseline' else\n"
+                "              ([0, 1, 1, 0] if int(seed) == 2 else [0, 0, 0, 0]))\n"
+                "correct = sum(label == prediction for label, prediction in zip(labels, predictions))\n"
+                "print('accuracy:', correct / len(labels))\n",
+                encoding="utf-8",
+            )
+            execution = {
+                "command": [sys.executable, str(script), "candidate"],
+                "baseline": {"command": [sys.executable, str(script), "baseline"]},
+                "cwd": str(root), "timeout_sec": 5,
+                "seeds": [0, 1], "seed_flag": "--seed",
+                "result_schema": {"primary_metric": "accuracy", "direction": "higher"},
+                "protocol": {
+                    "contract_id": "supplement-fixture-v1",
+                    "hypothesis": "The candidate improves the measured fixture.",
+                    "dataset_refs": [{"asset_id": "fixture", "revision": "1"}],
+                    "split_spec": {"name": "fixed"},
+                    "metric_specs": [{"name": "accuracy", "unit": "fraction"}],
+                    "comparison_conditions": {"evaluator": "fixture"},
+                    "protected_assets": [{"asset_id": "evaluator", "path": str(script)}],
+                },
+            }
+            app = create_session(
+                ResearchBrief(
+                    request_text="Compare the supplied fixture under accepted seed conditions.",
+                    requested_outputs=("experiments",),
+                    asset_requests=({"locator": str(paper), "role": "paper"},),
+                ),
+                root=root / "session",
+                services=ResearchApplicationServices(
+                    max_results=1, max_chunks=10, max_attempts=40,
+                    config={
+                        "research_materials_only": True,
+                        "research_max_iterations": 1,
+                        "execution": execution,
+                    },
+                    budget_limits={"process_invocations": 6, "process_wall_seconds": 60},
+                ),
+            )
+            analysis_calls = []
+
+            def analysis_with_bounded_proposal(request, *, client=None):
+                del client
+                analysis_calls.append(request.context)
+                if len(analysis_calls) == 1:
+                    recommendation = AnalysisRecommendation(
+                        action="supplement",
+                        reason="The first comparison needs one additional seed to check the observed directional gap.",
+                        evidence_refs=["paired_summary:accuracy"],
+                        supplement={
+                            "seed": 2,
+                            "gap": "single-seed directional evidence",
+                            "conditions": "same evaluator and split under seed 2",
+                            "metric": "accuracy",
+                        },
+                    )
+                else:
+                    recommendation = AnalysisRecommendation(
+                        action="stop",
+                        reason="The bounded supplement has been re-analyzed; retain the measured evidence.",
+                        evidence_refs=["paired_summary:accuracy"],
+                    )
+                return AnalysisResult(
+                    readme_markdown="# Fixture analysis\n",
+                    status="passed",
+                    recommendation=recommendation,
+                )
+
+            # The process computes accuracy from labels/predictions. The
+            # recommendation is a test double for the model boundary, not live
+            # model acceptance evidence.
+            with patch("simple_ar.research.analysis.analyze_results", side_effect=analysis_with_bounded_proposal):
+                final = app.advance(max_actions=40)
+            self.assertEqual(final.status, "completed", final.status_reason)
+            self.assertIn("analysis_r1", final.state_refs)
+            self.assertEqual(len(analysis_calls), 2)
+            decision = app.controller.store.read_json(final.state_refs["decision"])
+            self.assertEqual(decision["action"], "stop")
+            self.assertEqual(decision["research_iteration"], 1)
+            self.assertFalse(decision["bounded_cycle"]["automatic_follow_up"])
+            self.assertEqual(
+                decision["identity"]["analysis_ref"]["path"],
+                final.state_refs["analysis_r1"].path,
+            )
+            self.assertIn("prior_decision_ref", decision)
+            plan = app.controller.store.read_json(final.state_refs["task_plan"])
+            self.assertIn("supplement_baseline:1", [row["action"] for row in plan["steps"]])
+            self.assertEqual(
+                (root / "calls.txt").read_text(encoding="utf-8").splitlines(),
+                ["baseline:0", "baseline:1", "candidate:0", "candidate:1", "baseline:2", "candidate:2"],
+            )
+            history = app._research_history()
+            supplement_history = next(
+                row for row in history if row["action"] == "baseline_supplement_1"
+            )
+            self.assertTrue(supplement_history.get("outputs"))
+            blocked, reason = app._supplement_execution_config(
+                2,
+                {"seed": 2, "gap": "repeat the completed supplement"},
+            )
+            self.assertIsNone(blocked)
+            self.assertIn("already measured", reason)
+            first_candidate = app.controller.store.read_json(final.state_refs["matrix_candidate_0"])
+            self.assertEqual(first_candidate["metrics"]["accuracy"], 0.5)
+            attempts = len(final.attempts)
+            restored = load_session(root / "session")
+            resumed = restored.advance(max_actions=40)
+            self.assertEqual(resumed.status, "completed")
+            self.assertEqual(len(resumed.attempts), attempts)
+            self.assertEqual(
+                (root / "calls.txt").read_text(encoding="utf-8").splitlines(),
+                ["baseline:0", "baseline:1", "candidate:0", "candidate:1", "baseline:2", "candidate:2"],
+            )
+
     def test_same_condition_baseline_can_be_reused_after_plan_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -533,6 +888,49 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(rejected.status, "paused")
             self.assertIn("Baseline reuse requested", rejected.status_reason)
             self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["baseline", "candidate"])
+
+    def test_same_session_baseline_reuse_allows_missing_protected_asset_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Baseline reuse\nThe evaluator is fixed for this session.\n", encoding="utf-8")
+            script = root / "measure.py"
+            script.write_text(
+                "import sys\nprint('accuracy: 0.7')\n",
+                encoding="utf-8",
+            )
+            execution = {
+                "command": [sys.executable, str(script), "candidate"],
+                "baseline": {"command": [sys.executable, str(script), "baseline"]},
+                "cwd": str(root), "timeout_sec": 5,
+                "result_schema": {"primary_metric": "accuracy", "direction": "higher"},
+                "protocol": {
+                    "contract_id": "same-session-reuse-v1",
+                    "hypothesis": "The same evaluator condition remains comparable.",
+                    "dataset_refs": [{"asset_id": "fixture", "revision": "v1"}],
+                    "split_spec": {"name": "test"},
+                    "metric_specs": [{"name": "accuracy", "unit": "fraction"}],
+                    "comparison_conditions": {"method": "fixture"},
+                },
+            }
+            app = create_session(
+                ResearchBrief(request_text="Measure the fixture.", requested_outputs=("experiments",),
+                              asset_requests=({"locator": str(paper), "role": "paper"},)),
+                root=root / "session",
+                services=ResearchApplicationServices(
+                    max_results=1, max_chunks=10, max_attempts=20,
+                    config={"research_materials_only": True, "execution": execution},
+                    budget_limits={"process_invocations": 2, "process_wall_seconds": 20},
+                ),
+            )
+            for _ in range(20):
+                if app.view().next_action == "baseline":
+                    break
+                app.advance(max_actions=1)
+            self.assertEqual(app.view().next_action, "baseline")
+            after_baseline = app.advance(max_actions=1)
+            baseline_ref = after_baseline.state_refs["baseline"]
+            self.assertTrue(app._baseline_ref_matches(baseline_ref, execution))
 
     def test_literature_report_does_not_require_or_launch_experiments(self):
         from dataclasses import replace
@@ -647,6 +1045,21 @@ class ResearchApplicationTests(unittest.TestCase):
             completed = app.advance(max_actions=20)
             self.assertEqual(completed.status, "completed", completed.status_reason)
             analysis_ref = completed.state_refs["analysis"]
+            measurement_ref = app.latest_experiment_ref()
+            remaining_processes = app.budget_ledger.remaining("process_invocations")
+            refreshed = app.request_reanalysis()
+            self.assertEqual(refreshed.next_action, "analysis")
+            self.assertEqual(refreshed.requested_outputs, ("experiments",))
+            app = load_session(root / "session")
+            refreshed = app.advance(max_actions=1)
+            self.assertEqual(refreshed.status, "completed", refreshed.status_reason)
+            self.assertNotEqual(refreshed.state_refs["analysis"], analysis_ref)
+            self.assertTrue(app.controller.store.exists(analysis_ref))
+            self.assertEqual(app.latest_experiment_ref(), measurement_ref)
+            self.assertEqual(app.budget_ledger.remaining("process_invocations"), remaining_processes)
+            self.assertEqual(sum(a["capability"] == "experiment" for a in refreshed.attempts), 1)
+            analysis_ref = refreshed.state_refs["analysis"]
+            completed = refreshed
             attempt_count = len(completed.attempts)
 
             reopened = app.request_report()
@@ -655,7 +1068,7 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(reopened.next_action, "report_write")
             self.assertEqual(reopened.state_refs["analysis"], analysis_ref)
             self.assertEqual(len(reopened.attempts), attempt_count)
-            self.assertEqual(app.controller.manifest.revision, 1)
+            self.assertEqual(app.controller.manifest.revision, 2)
             self.assertEqual(app.brief.revision, 2)
             self.assertIn("report", app.brief.requested_outputs)
 
@@ -827,6 +1240,12 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(comparison["deltas"]["accuracy"], -0.25)
             analysis = app.controller.store.read_json(final.state_refs["analysis"])
             self.assertEqual(analysis["analysis"]["status"], "metric_below_target")
+            decision = app.controller.store.read_json(final.state_refs["decision"])
+            self.assertEqual(decision["action"], "stop")
+            # A deterministic analysis cannot choose a scientific revision;
+            # the old verdict branch supplied this option without evidence.
+            self.assertEqual(decision["continuation_options"], [])
+            self.assertIn("Deterministic", decision["decision_reason"])
             app.advance(max_actions=20)
             self.assertEqual((root / "runs.txt").read_text().splitlines(), ["baseline", "candidate"])
             self.assertEqual(app.budget_ledger.remaining("process_invocations"), 0)
@@ -955,6 +1374,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 self.assertEqual(sum(item["capability"] == "experiment" for item in view.attempts), 1)
                 analysis = app.controller.store.read_json(view.state_refs["analysis"])
                 self.assertEqual(analysis["execution_status"], "passed" if exitcode == 0 else "failed")
+                self.assertIn("decision", view.state_refs)
                 self.assertEqual(view.status, "completed")
 
     def test_model_assessment_drives_design_once_and_abstention_keeps_summary(self):
@@ -1085,6 +1505,13 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(view.state_refs["experiment"], measurement)
             self.assertEqual(sum(a["capability"] == "experiment" for a in view.attempts), 1)
             self.assertEqual(sum(a["capability"] == "analysis" for a in view.attempts), 2)
+            context = app.controller.store.read_json(view.state_refs["analysis"])["analysis"]["decision_context"]
+            failed_analysis = next(
+                row for row in context["research_history"]
+                if row["capability"] == "analysis" and row["status"] == "failed"
+            )
+            self.assertIn("provider budget exhausted", " ".join(failed_analysis["diagnostics"]))
+            self.assertEqual(context["remaining_authorized_rounds"], 1)
 
     def test_reload_reuses_completed_result_before_state_reference_is_saved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

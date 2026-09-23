@@ -9,6 +9,8 @@ MetricDirection = Literal["higher", "lower", "resource", "ignore", "unknown"]
 ClaimVerdict = Literal["supported", "partially_supported", "unsupported", "not_evaluated"]
 Confidence = Literal["high", "medium", "low"]
 AnalysisStatus = Literal["passed", "failed", "incomplete", "blocked", "metric_below_target"]
+RecommendationAction = Literal["supplement", "revise_candidate", "stop", "request_input"]
+RevisionBase = Literal["candidate", "baseline"]
 
 
 class _Model(BaseModel):
@@ -43,6 +45,18 @@ class AnalysisAudit(_Model):
     notes: list[str] = Field(default_factory=list)
 
 
+class AnalysisRecommendation(_Model):
+    """A bounded scientific next-step proposal grounded in this analysis."""
+
+    action: RecommendationAction = "stop"
+    reason: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+    revision_intent: str = ""
+    revision_constraints: list[str] = Field(default_factory=list)
+    revision_base: RevisionBase = "candidate"
+    supplement: dict[str, Any] = Field(default_factory=dict)
+
+
 class AnalysisContext(_Model):
     task_id: str = ""
     title: str = ""
@@ -70,4 +84,6 @@ class AnalysisResult(_Model):
     metric_summary: dict[str, Any] = Field(default_factory=dict)
     rubric_coverage: list[dict[str, Any]] = Field(default_factory=list)
     audit: AnalysisAudit = Field(default_factory=AnalysisAudit)
+    recommendation: AnalysisRecommendation = Field(default_factory=AnalysisRecommendation)
+    decision_context: dict[str, Any] = Field(default_factory=dict)
     raw_llm_response: dict[str, Any] | None = None

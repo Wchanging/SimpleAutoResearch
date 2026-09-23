@@ -7,7 +7,7 @@ existing planning capability and :class:`SessionController`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import re
 from typing import Any, Mapping
@@ -52,8 +52,19 @@ _STEP_TEXT = {
     "report_write": ("Write the report from the accepted evidence and measurements.", "Report sections and source lineage."),
     "report": ("Assemble the report without changing the underlying evidence.", "Assembled report and citation trace."),
     "report_audit": ("Audit the assembled report against its sources and protocol.", "Audit findings and semantic limitations."),
+    "supplement_baseline": ("Measure the unchanged baseline for an evidence-driven supplement.", "Supplement baseline measurement and diagnostics."),
+    "supplement_candidate": ("Measure the current candidate under the newly accepted condition.", "Supplement candidate measurement and diagnostics."),
+    "reanalysis": ("Re-analyze the supplement together with its explicit paired evidence.", "Updated analysis, decision basis, and limitations."),
+    "prepare_candidate": ("Create a fresh isolated workspace from the recorded original project for a candidate revision.", "Revision workspace lineage and copy report."),
+    "revise_candidate": ("Apply and validate the analysis-directed candidate revision in the isolated workspace.", "Candidate revision patch, validation, and lineage."),
+    "research_candidate": ("Measure the analysis-directed candidate revision under the accepted comparison condition.", "Candidate revision measurement and diagnostics."),
 }
-_ACTION_RE = re.compile(r"^(?:repair:\d+|retest:\d+|matrix_repair_\d+|matrix_baseline_\d+|matrix_candidate(?:_r\d+)?_\d+)$")
+_ACTION_RE = re.compile(
+    r"^(?:repair:\d+|retest:\d+|matrix_repair_\d+|matrix_baseline_\d+|"
+    r"matrix_candidate(?:_r\d+)?_\d+|supplement_baseline:\d+|"
+    r"supplement_candidate:\d+|reanalysis:\d+|prepare_candidate:\d+|"
+    r"revise_candidate:\d+|research_candidate:\d+(?:_\d+)?)$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +293,75 @@ def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
     return steps
 
 
+def append_research_followup(
+    plan: TaskPlanResult,
+    iteration: int,
+    *,
+    action: str = "supplement",
+    pair_count: int = 0,
+) -> TaskPlanResult:
+    """Extend one accepted plan with one analysis-authorized research action.
+
+    This reuses the accepted-plan artifact and existing experiment/analysis
+    capabilities. It never creates a second lifecycle or a technical repair
+    alias; the application calls it only after a persisted research decision.
+    """
+
+    if type(iteration) is not int or iteration < 1:
+        raise ValueError("Research follow-up iteration must be a positive integer.")
+    if action not in {"supplement", "revise_candidate"}:
+        raise ValueError("Research follow-up action must be supplement or revise_candidate.")
+    if type(pair_count) is not int or pair_count < 0:
+        raise ValueError("Research follow-up pair_count must be a non-negative integer.")
+    marker = f"reanalysis:{iteration}"
+    if any(step.action == marker for step in plan.steps):
+        return plan
+    rows = [step.to_dict() for step in plan.steps]
+    if action == "supplement":
+        followup_rows = (
+            _row(f"supplement_baseline:{iteration}", condition="on_decision:supplement"),
+            _row(
+                f"supplement_candidate:{iteration}",
+                condition=f"after_success:baseline_supplement_{iteration}",
+            ),
+            _row(
+                marker,
+                condition=f"after_success:experiment_supplement_{iteration}",
+            ),
+        )
+        message = f"Accepted one analysis-directed supplement round {iteration}."
+    else:
+        preparation = f"prepare_candidate:{iteration}"
+        revision = f"revise_candidate:{iteration}"
+        candidate_actions = (
+            tuple(f"research_candidate:{iteration}_{index}" for index in range(pair_count))
+            if pair_count else (f"research_candidate:{iteration}",)
+        )
+        candidate_rows = []
+        previous = _state_name(revision)
+        for candidate_action in candidate_actions:
+            candidate_rows.append(_row(candidate_action, condition=f"after_success:{previous}"))
+            previous = _state_name(candidate_action)
+        followup_rows = (
+            _row(preparation, condition="on_decision:revise_candidate"),
+            _row(revision, condition=f"after_success:{_state_name(preparation)}"),
+            *candidate_rows,
+            _row(marker, condition=f"after_success:{previous}"),
+        )
+        message = f"Accepted one analysis-directed candidate revision round {iteration}."
+    insertion = next(
+        (index for index, row in enumerate(rows)
+         if str(row.get("action") or "") in {"report_write", "report", "report_audit"}),
+        len(rows),
+    )
+    rows[insertion:insertion] = followup_rows
+    return replace(
+        plan,
+        steps=_normalize_steps(rows),
+        diagnostics=(*plan.diagnostics, message),
+    )
+
+
 def _execution_steps(execution: Mapping[str, object]) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
     if _needs_preparation(execution):
@@ -472,6 +552,16 @@ def _capability(action: str) -> str:
         return "implement"
     if action.startswith(("retest:", "matrix_baseline_", "matrix_candidate")):
         return "experiment"
+    if action.startswith(("supplement_baseline:", "supplement_candidate:")):
+        return "experiment"
+    if action.startswith("prepare_candidate:"):
+        return "prepare_execution"
+    if action.startswith("revise_candidate:"):
+        return "implement"
+    if action.startswith("research_candidate:"):
+        return "experiment"
+    if action.startswith("reanalysis:"):
+        return "analysis"
     raise ValueError(f"Unsupported task plan action: {action!r}")
 
 
@@ -493,11 +583,24 @@ def _state_name(action: str) -> str:
         return f"repair_{action.split(':', 1)[1]}"
     if action.startswith("retest:"):
         return f"experiment_repair_{action.split(':', 1)[1]}"
+    if action.startswith("supplement_baseline:"):
+        return f"baseline_supplement_{action.split(':', 1)[1]}"
+    if action.startswith("supplement_candidate:"):
+        return f"experiment_supplement_{action.split(':', 1)[1]}"
+    if action.startswith("prepare_candidate:"):
+        return f"preparation_r{action.split(':', 1)[1]}"
+    if action.startswith("revise_candidate:"):
+        return f"implementation_r{action.split(':', 1)[1]}"
+    if action.startswith("research_candidate:"):
+        suffix = action.split(":", 1)[1]
+        return f"experiment_revision_{suffix.replace('_', '_')}"
+    if action.startswith("reanalysis:"):
+        return f"analysis_r{action.split(':', 1)[1]}"
     return action
 
 
 def _valid_condition(condition: str) -> bool:
-    return condition.startswith(("on_failure:", "on_failure_prefix:", "after_success:", "on_request:")) and bool(condition.split(":", 1)[1].strip())
+    return condition.startswith(("on_failure:", "on_failure_prefix:", "after_success:", "on_request:", "on_decision:")) and bool(condition.split(":", 1)[1].strip())
 
 
 def _needs_preparation(execution: Mapping[str, object]) -> bool:
@@ -575,4 +678,4 @@ def _strings(value: object) -> tuple[str, ...]:
     return tuple(str(item).strip() for item in value if str(item).strip()) if isinstance(value, list) else ()
 
 
-__all__ = ["SCHEMA_VERSION", "TaskPlanRequest", "TaskPlanResult", "TaskPlanStep", "build_task_plan", "default_task_steps"]
+__all__ = ["SCHEMA_VERSION", "TaskPlanRequest", "TaskPlanResult", "TaskPlanStep", "append_research_followup", "build_task_plan", "default_task_steps"]

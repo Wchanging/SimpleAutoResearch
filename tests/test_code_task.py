@@ -3043,6 +3043,33 @@ protected_patterns = ["pyproject.toml"]
             )
             self.assertTrue(context.context_pack_path.is_file())
 
+    def test_failed_llm_edit_is_not_an_offline_proposal_and_can_retry(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "project"
+            _write_toy_project(code_root)
+            write_text(root / "task.md", "Improve spam prediction.")
+            run_dir = root / "run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root,
+                                 task_file=root / "task.md",
+                                 benchmark_command="python -m unittest discover -s tests")
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task"), patch(
+                "simple_ar.code_task.editing.patching._ask_llm_for_edits",
+                side_effect=LLMError("provider 524; prior consumption is unknown"),
+            ):
+                with self.assertRaisesRegex(LLMError, "provider 524; prior consumption is unknown"):
+                    propose_patch_edits(run_dir, use_llm=True)
+            self.assertFalse((run_dir / "code_task/meta/proposed_edits.json").exists())
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task"), patch(
+                "simple_ar.code_task.editing.patching._ask_llm_for_edits",
+                return_value={"edits": [], "validation": ["No change needed."]},
+            ):
+                recovered = propose_patch_edits(run_dir, use_llm=True)
+            self.assertEqual(recovered.mode, "llm")
+
     def test_propose_edits_restricts_llm_to_current_batch_targets(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
@@ -4971,6 +4998,82 @@ protected_patterns = ["pyproject.toml"]
                        side_effect=PermissionError("budget.json: access denied")):
                 with self.assertRaisesRegex(PermissionError, "access denied"):
                     execute_code_task(run_dir, use_llm=False, timeout_sec=10, apply_proposed_edits=True)
+
+    def test_execute_regenerates_one_invalid_proposal_with_failure_context(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            task_file = root / "task.md"
+            _write_toy_project(code_root)
+            write_text(task_file, "# Task\n\nImprove the spam classifier.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            execute_code_task(run_dir, use_llm=False, timeout_sec=10)
+            record_plan_decision(run_dir, decision="approve")
+            proposal_path = run_dir / "code_task" / "meta" / "proposed_edits.json"
+            write_json(proposal_path, {"edits": [{
+                "path": "spam_model.py",
+                "old": "text that is not in the file",
+                "new": "replacement",
+                "reason": "stale proposal",
+            }]})
+            workspace_file = run_dir / "code_task" / "workspace" / "spam_model.py"
+            original = workspace_file.read_text(encoding="utf-8")
+            first = execute_code_task(
+                run_dir, use_llm=False, timeout_sec=10, apply_proposed_edits=True,
+            )
+            self.assertEqual(first.stop_reason, "patch_apply_failed")
+            self.assertEqual(workspace_file.read_text(encoding="utf-8"), original)
+
+            class RecoveryClient:
+                def __init__(self) -> None:
+                    self.user = ""
+
+                def ask_json(self, _system: str, user: str, *, label: str = "", **kwargs: object) -> dict[str, object]:
+                    del label, kwargs
+                    self.user = user
+                    return {
+                        "summary": "Add the observed prize keyword handling.",
+                        "edits": [{
+                            "path": "spam_model.py",
+                            "old": "return 'spam' if 'win' in text.lower() else 'ham'",
+                            "new": "lowered = text.lower()\n    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize')) else 'ham'",
+                            "reason": "Use the exact current function body after the prior stale replacement failed.",
+                        }],
+                        "validation": ["Run the existing unit tests."],
+                        "risks": [],
+                    }
+
+            client = RecoveryClient()
+            # A connection failure has not produced a correction and must not
+            # consume the one semantic correction on subsequent continuation.
+            with patch("simple_ar.code_task.orchestration.execute.propose_patch_edits",
+                       side_effect=LLMError("Connection error")):
+                with self.assertRaisesRegex(LLMError, "Connection error"):
+                    execute_code_task(
+                        run_dir, llm_client=client, use_llm=True, timeout_sec=10,
+                        apply_proposed_edits=True, approval_note="approved isolated correction",
+                        to_step="apply-edits",
+                    )
+            self.assertEqual(workspace_file.read_text(encoding="utf-8"), original)
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task", return_value=client):
+                recovered = execute_code_task(
+                    run_dir, llm_client=client, use_llm=True, timeout_sec=10,
+                    apply_proposed_edits=True, approval_note="approved isolated correction",
+                    to_step="apply-edits",
+                )
+            self.assertEqual(recovered.stop_reason, "stop_point")
+            self.assertIn("old text was not found", client.user)
+            self.assertIn("return 'spam' if 'win' in text.lower() else 'ham'", client.user)
+            patched = workspace_file.read_text(encoding="utf-8")
+            self.assertIn("'prize'", patched)
+            self.assertTrue((run_dir / "code_task" / "meta" / "applied_edits.json").is_file())
 
     def test_analyze_validation_failure_without_benchmark_run(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)

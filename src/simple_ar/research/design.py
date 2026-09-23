@@ -290,30 +290,13 @@ def _apply_execution_boundary(
         known_metrics.add(name)
     boundary_fields: dict[str, Any] = {}
     if prepared_execution:
-        # A prepared CodeTask has an executable project boundary but usually
-        # no literature-level dataset/split metadata.  Make that limitation
-        # explicit for comparison and reporting.  Do not add these synthetic
-        # fields to generic command boundaries: an explicit protocol there is
-        # already the source of truth and must remain byte-for-byte stable
-        # across a plan revision.
-        boundary_fields = {
-            "dataset_refs": contract.dataset_refs or [
-                {"asset_id": "prepared_execution", "source": "execution_boundary"}
-            ],
-            "split_spec": contract.split_spec or {
-                "source": "execution_boundary",
-                "status": "not_declared_by_framework",
-            },
-            "metric_specs": metric_specs,
-            "comparison_conditions": contract.comparison_conditions or {
-                "source": "execution_boundary",
-                "mode": "same_declared_evaluator",
-            },
-        }
+        # A prepared CodeTask supplies an executable project boundary, not
+        # dataset, split, or evaluator facts.  Preserve only metrics that are
+        # actually declared by the execution schema; leave other protocol
+        # fields empty so measurement identity remains incomplete/unknown.
+        boundary_fields = {"dataset": "unknown", "metric_specs": metric_specs}
     return replace(
         contract,
-        baseline="prepared project baseline (see execution boundary)",
-        dataset="prepared project dataset (see execution boundary)",
         metrics=list(dict.fromkeys(metrics or contract.metrics)),
         **boundary_fields,
     )

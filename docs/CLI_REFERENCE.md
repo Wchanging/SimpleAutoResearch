@@ -92,6 +92,16 @@ and/or `experiments`; `--total-tokens`, `--llm-requests`, `--max-output-tokens`,
 Add `--session-root PATH` to resume the same goal/outputs or supply missing execution settings;
 existing evidence, research settings, and budget consumption are retained.
 
+At a paused or completed analysis checkpoint, add `--reanalyze` to reconsider
+existing measurements and resume research decisions without requesting a report.
+Historical artifacts and consumed budgets remain intact; an accepted follow-up
+may run new experiments within the existing budget. Pending research follow-ups
+must be continued before requesting reanalysis.
+
+The completion table resolves the latest implementation, candidate measurement,
+and analysis from the accepted plan. Earlier revision refs remain separately
+listed so the candidate lineage is still navigable.
+
 **Purpose**: run the V2.8 formal composition in one session. If an execution
 command or `--code-task-config` is supplied, it continues through the bounded
 research-to-experiment path

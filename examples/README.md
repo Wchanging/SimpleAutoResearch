@@ -91,6 +91,13 @@ audit by default, so the command below is the explicit one-command flow. Use
 `--no-report` when inspecting only the research and experiment handoff; it
 does not introduce an automatic retry loop.
 
+For a bounded result-driven supplement, add `--max-research-iterations 1`.
+This reuses the accepted plan for a fresh baseline/candidate condition,
+including a prepared CodeTask's isolated original baseline plus current
+candidate workspace, or for a bounded CodeTask revision and re-analysis only
+when the protocol, lineage and finite process budget support it. It is not an
+unlimited retry loop or proof of live model autonomy.
+
 For literature-only use, omit both `--command` and `--code-task-config`. Without
 `--model` this writes the evidence-backed summary and exits without launching a
 process; with `--model` it writes the research-only report path.

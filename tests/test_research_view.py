@@ -1,5 +1,7 @@
 import io
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from rich.console import Console
 from simple_ar.cli.research_view import ResearchConsole
 
@@ -38,3 +40,43 @@ class ResearchConsoleTests(unittest.TestCase):
                 raise ValueError("provider unavailable")
         self.assertIn("Interrupted/failed", stream.getvalue())
         self.assertNotIn("Action returned", stream.getvalue())
+
+    def test_finish_navigates_latest_plan_artifacts_and_preserves_history(self):
+        stream = io.StringIO()
+        display = ResearchConsole(Console(file=stream, force_terminal=False, width=160))
+        refs = {
+            name: SimpleNamespace(path=f"attempts/{name}.json")
+            for name in (
+                "summary", "baseline", "implementation", "implementation_r1",
+                "baseline_supplement_1", "experiment", "experiment_revision_1",
+                "analysis", "analysis_r1", "decision",
+            )
+        }
+        steps = [
+            {"capability": "experiment", "action": "baseline", "state_name": "baseline"},
+            {"capability": "implement", "action": "implement", "state_name": "implementation"},
+            {"capability": "experiment", "action": "experiment", "state_name": "experiment"},
+            {"capability": "analysis", "action": "analysis", "state_name": "analysis"},
+            {"capability": "implement", "action": "implement", "state_name": "implementation_r1"},
+            {"capability": "experiment", "action": "supplement_baseline:1", "state_name": "baseline_supplement_1"},
+            {"capability": "experiment", "action": "experiment_revision_1", "state_name": "experiment_revision_1"},
+            {"capability": "analysis", "action": "analysis", "state_name": "analysis_r1"},
+        ]
+        view = SimpleNamespace(
+            session_root=Path("session"), status="completed", status_reason="", next_action=None,
+            state_refs=refs, attempts=(), work_plan={"accepted_plan": {"steps": steps}},
+        )
+
+        display.finish(view)
+
+        output = stream.getvalue()
+        self.assertIn("implementation (initial)", output)
+        self.assertIn("implementation (latest: implementation_r1)", output)
+        self.assertIn("experiment (initial)", output)
+        self.assertIn("experiment (latest: experiment_revision_1)", output)
+        self.assertIn("baseline (latest: baseline_supplement_1)", output)
+        self.assertIn("analysis (initial)", output)
+        self.assertIn("analysis (latest: analysis_r1)", output)
+        self.assertIn("decision (latest)", output)
+        self.assertIn("session\\attempts\\implementation.json", output)
+        self.assertIn("session\\attempts\\implementation_r1.json", output)

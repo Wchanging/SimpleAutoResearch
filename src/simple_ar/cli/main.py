@@ -278,6 +278,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
     from simple_ar.app.session_roots import new_research_session_root
     from simple_ar.research.workflow_contracts import ResearchBrief
 
+    if getattr(args, "reanalyze", False) and not getattr(args, "session_root", None):
+        raise SystemExit("--reanalyze requires --session-root.")
     if args.max_results < 1 or args.max_chunks < 1 or args.idea_limit < 1:
         raise SystemExit(
             "--max-results, --max-chunks, and --idea-limit must be positive."
@@ -286,6 +288,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         raise SystemExit("--timeout-sec must be positive when provided.")
     if args.max_review_iterations < 0:
         raise SystemExit("--max-review-iterations cannot be negative.")
+    if args.max_research_iterations < 0:
+        raise SystemExit("--max-research-iterations cannot be negative.")
     task_kind = str(getattr(args, "task_kind", "auto") or "auto").strip().lower()
     if task_kind not in {"auto", "survey", "bug_fix"}:
         raise SystemExit("--task-kind must be auto, survey or bug_fix.")
@@ -439,6 +443,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
         report_config["figures"] = args.report_figures
     config: dict[str, object] = {
         "research_max_documents": args.max_results,
+        "research_max_iterations": args.max_research_iterations,
         "report": report_config,
     }
     if task_kind != "auto":
@@ -528,6 +533,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 app.supply_execution(execution, task_text=task_text)
             elif execution is not None and execution != existing:
                 raise ResearchApplicationError("Cannot replace an existing experiment configuration while resuming.")
+            elif getattr(args, "reanalyze", False):
+                app.request_reanalysis()
             elif app.view().status != "completed":
                 app.continue_session(reason="Resume from research-session; reuse persisted evidence and budgets.")
         view = app.view()

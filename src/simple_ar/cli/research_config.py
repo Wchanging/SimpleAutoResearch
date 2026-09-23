@@ -16,6 +16,7 @@ FIELDS = {
                  "use_fulltext": ("research_use_fulltext", bool),
                  "materials_only": ("research_materials_only", bool),
                  "allow_pdf_download": ("research_allow_pdf_download", bool),
+                  "max_iterations": ("research_max_iterations", int),
                  "keep_raw_pdf": ("research_keep_raw_pdf", bool)},
     "assets": {"papers": ("local_document", list)},
     "execution": {"command": ("command_argv", list), "cwd": ("cwd", str),

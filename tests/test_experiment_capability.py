@@ -115,6 +115,30 @@ class ExperimentCapabilityTests(unittest.TestCase):
             incomplete = measure("incomplete", 2, replace(contract, split_spec={}))
             self.assertEqual(compare_experiment_results(baseline, incomplete)["comparability"], "unknown")
 
+    def test_execution_boundary_placeholders_do_not_claim_comparability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contract = ResearchExperimentContract(
+                contract_id="prepared-placeholder",
+                hypothesis="Compare a prepared command.",
+                dataset_refs=[{"asset_id": "prepared_execution", "source": "execution_boundary"}],
+                split_spec={"source": "execution_boundary", "status": "not_declared_by_framework"},
+                metric_specs=[{"name": "accuracy", "direction": "higher"}],
+                comparison_conditions={"source": "execution_boundary", "mode": "same_declared_evaluator"},
+            )
+            schema = {"primary_metric": "accuracy", "direction": "higher"}
+
+            def measure(label, score):
+                return run_experiment(ExperimentRequest(
+                    run=RunRequest([sys.executable, "-c", f"print('accuracy:', {score})"], Path(tmp), 5, label=label),
+                    result_schema=schema, experiment_contract=contract,
+                )).canonical
+
+            baseline, candidate = measure("baseline", 0.5), measure("candidate", 0.9)
+            comparison = compare_experiment_results(baseline, candidate)
+            self.assertEqual(comparison["comparability"], "unknown")
+            self.assertEqual(comparison["verdict"], "inconclusive")
+            self.assertIn("placeholder", comparison["reasons"][0])
+
     def test_synthesis_handoff_builds_explicit_experiment_request(self) -> None:
         contract = ResearchExperimentContract(
             contract_id="synthesis-contract-001",

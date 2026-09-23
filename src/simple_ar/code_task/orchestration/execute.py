@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from simple_ar.integrations.usage import record_usage
-from simple_ar.core.artifacts import read_json, read_text, write_json
+from simple_ar.core.artifacts import read_json, read_jsonl, read_text, write_json
 from simple_ar.core.budget import BudgetLedger
 from simple_ar.code_task.editing.attempts import (
     LoadedCodeTaskBatch,
@@ -46,6 +46,7 @@ from simple_ar.code_task.execution.runner import (
     run_code_task_benchmark,
 )
 from simple_ar.code_task.memory import (
+    code_task_memory_paths,
     ensure_task_memory,
     record_code_task_memory_event,
     record_edit_history,
@@ -587,9 +588,10 @@ def execute_code_task(
         manifest = load_code_task_manifest(root)
         patch_status = _patch_status(manifest)
         proposal_exists = _proposal_exists(paths)
+        patch_recovery = proposal_exists and use_llm and _patch_validation_recovery_needed(root)
         if patch_status == "applied":
             _record(steps, "propose-edits", "skipped", "patch already applied")
-        elif proposal_exists and _proposal_edit_count(paths) > 0:
+        elif proposal_exists and _proposal_edit_count(paths) > 0 and not patch_recovery:
             _record(steps, "propose-edits", "skipped", "proposed_edits.json already exists")
         elif _plan_status(manifest) != "approved":
             return _result(paths, steps, "approval_required", "Approve the patch plan before proposing edits.")
@@ -598,7 +600,9 @@ def execute_code_task(
         elif _cost_cap_exceeded(paths.meta_dir, cost_cap_usd):
             return _result(paths, steps, "cost_cap_exceeded", "LLM cost cap reached before edit proposal.")
         else:
-            if proposal_exists:
+            if patch_recovery:
+                _emit(message_callback, "Regenerating edit proposal after patch validation failure.")
+            elif proposal_exists:
                 _emit(message_callback, "Regenerating empty edit proposal with refreshed context.")
             _ensure_context_pack_for_current_batch(
                 root,
@@ -620,6 +624,22 @@ def execute_code_task(
                 edit_budget_overrides=edit_budget_overrides,
                 message_callback=message_callback,
             )
+            if patch_recovery:
+                record_review_finding(
+                    root,
+                    {
+                        "key": "apply-edits-validation-recovery-completed",
+                        "severity": "info",
+                        "category": "patch_validation",
+                        "summary": "A corrected edit proposal was generated using the recorded failure and current source context.",
+                        "evidence": [
+                            "code_task/meta/proposed_edits.json",
+                            "code_task/memory/review_findings.jsonl",
+                        ],
+                        "recommendation": "Use exact current source snippets; stop if the corrected proposal fails validation again.",
+                        "source": "code-task.execute",
+                    },
+                )
             _record(steps, "propose-edits", "done", f"mode {result.mode}; edits {result.edit_count}")
             _memory_event(
                 root,
@@ -1342,6 +1362,21 @@ def _proposal_edit_count(paths: object) -> int:
         return 0
     edits = proposal.get("edits")
     return len(edits) if isinstance(edits, list) else 0
+
+
+def _patch_validation_recovery_needed(run_dir: Path) -> bool:
+    """Allow one model correction after a proposal failed exact patch validation."""
+
+    findings_path = code_task_memory_paths(run_dir).review_findings_jsonl
+    if not findings_path.is_file():
+        return False
+    try:
+        findings = read_jsonl(findings_path)
+    except (OSError, ValueError):
+        return False
+    keys = {str(row.get("key") or "") for row in findings if isinstance(row, dict)}
+    # Legacy 'recovery' findings record a start, not a generated proposal.
+    return "apply-edits-validation-failed" in keys and "apply-edits-validation-recovery-completed" not in keys
 
 
 def _ensure_context_pack_for_current_batch(

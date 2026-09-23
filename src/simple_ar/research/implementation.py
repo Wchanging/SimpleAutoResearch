@@ -34,6 +34,7 @@ class ImplementationRequest:
     llm_client: Any = field(repr=False, compare=False)
     protocol: Mapping[str, Any] | None = None
     failure_ref: ArtifactRef | None = None
+    revision_instruction: str = ""
     validation_command: tuple[str, ...] | None = None
     validation_timeout_sec: int | None = None
     budget_ledger: Any | None = field(default=None, repr=False, compare=False)
@@ -210,6 +211,7 @@ def _prepare_research_task(
         "brief": None if brief_ref is None else context.read_input_json(brief_ref),
         "design": None if design is None else design.to_handoff_dict(),
         "protocol": request.protocol,
+        "revision_instruction": request.revision_instruction.strip(),
         "baseline": None if baseline is None else {
             "source": baseline_refs[0].to_dict(), "status": baseline["status"],
             "metrics": baseline["metrics"], "measurement": baseline["measurement"],
@@ -223,7 +225,9 @@ def _prepare_research_task(
     task_path = task_dir / "task.md"
     if snapshot.exists():
         saved = read_json(snapshot)
-        if saved["consumed"] != consumed:
+        saved_consumed = dict(saved["consumed"])
+        saved_consumed.setdefault("revision_instruction", "")
+        if saved_consumed != consumed:
             raise ValueError("Research inputs changed; prepare a new CodeTask run instead of reusing its plan.")
         original = saved["original_task"]
     else:
@@ -250,6 +254,31 @@ def _prepare_research_task(
                 ),
             )
         )
+        brief = consumed.get("brief")
+        if isinstance(brief, Mapping):
+            objective = str(brief.get("objective") or brief.get("request_text") or "").strip()
+            if objective:
+                task += "\n## User research objective\n\n" + objective + "\n"
+            constraints = brief.get("hard_constraints")
+            if isinstance(constraints, list) and constraints:
+                task += "\n## User hard constraints\n\n"
+                task += "\n".join(f"- {item}" for item in constraints if str(item).strip()) + "\n"
+            preferences = brief.get("preferences")
+            if isinstance(preferences, list) and preferences:
+                task += "\n## User preferences\n\n"
+                task += "\n".join(f"- {item}" for item in preferences if str(item).strip()) + "\n"
+            task += (
+                "\nResolve implementation details the user objective explicitly delegates by inspecting "
+                "the project and selecting a concrete option within the accepted design and CodeTask "
+                "scope. Do not expand the approved change or alter the execution protocol.\n"
+            )
+        if request.revision_instruction.strip():
+            task += (
+                "\n\n## Evidence-directed revision\n\n"
+                "Apply this proposed research revision only after inspecting the current workspace and "
+                "existing patch. Preserve the configured edit scope and protected assets.\n\n"
+                + request.revision_instruction.strip() + "\n"
+            )
     else:
         brief = consumed["brief"]
         if not isinstance(brief, Mapping):

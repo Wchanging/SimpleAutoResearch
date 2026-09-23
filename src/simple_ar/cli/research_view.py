@@ -77,9 +77,52 @@ class ResearchConsole:
     def finish(self, view):
         self.state(view)
         table = Table("Artifact", "Location", header_style="bold cyan")
-        for name in ("summary", "implementation", "experiment", "matrix_results", "analysis", "report", "report_audit"):
-            if name in view.state_refs:
-                table.add_row(name, Text(str(view.session_root / view.state_refs[name].path)))
+        for name, ref_name in _artifact_rows(view):
+            table.add_row(name, Text(str(view.session_root / view.state_refs[ref_name].path)))
         self.console.print(table)
         self.console.print(Text(f"Artifacts: {len(view.state_refs)}; attempts: {len(view.attempts)}"))
         self.console.print("Completion describes delivered artifacts, not scientific success or paper quality.", style="dim")
+
+
+def _artifact_rows(view):
+    refs = view.state_refs
+    rows = [("summary", "summary")] if "summary" in refs else []
+    work_plan = getattr(view, "work_plan", {})
+    accepted = work_plan.get("accepted_plan") if isinstance(work_plan, dict) else None
+    steps = accepted.get("steps", []) if isinstance(accepted, dict) else []
+    by_role = {"baseline": [], "implementation": [], "experiment": [], "analysis": []}
+    role_for_capability = {"implement": "implementation", "experiment": "experiment", "analysis": "analysis"}
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        role = role_for_capability.get(step.get("capability"))
+        state_name = step.get("state_name")
+        action = str(step.get("action") or "").lower()
+        if role == "experiment" and ("baseline" in action or state_name == "baseline"):
+            role = "baseline"
+        if role is None or not isinstance(state_name, str) or state_name not in refs:
+            continue
+        if state_name not in by_role[role]:
+            by_role[role].append(state_name)
+
+    if not by_role["baseline"] and "baseline" in refs:
+        by_role["baseline"].append("baseline")
+    if "matrix_results" in refs:
+        rows.append(("matrix_results", "matrix_results"))
+    for role, names in by_role.items():
+        if not names and role in refs:
+            names = [role]
+        for index, state_name in enumerate(names):
+            if index == len(names) - 1 and (state_name != role or len(names) > 1):
+                label = f"{role} (latest: {state_name})"
+            elif state_name == role and len(names) > 1:
+                label = f"{role} (initial)"
+            else:
+                label = role if len(names) == 1 else f"{role} ({state_name})"
+            rows.append((label, state_name))
+
+    rows.extend(
+        (("decision (latest)" if name == "decision" else name), name)
+        for name in ("decision", "report", "report_audit") if name in refs
+    )
+    return rows

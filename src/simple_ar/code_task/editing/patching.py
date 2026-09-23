@@ -315,7 +315,9 @@ def propose_patch_edits(
             )
             mode = "llm"
         except LLMError as exc:
-            _emit(message_callback, f"LLM edit proposal failed; writing offline empty proposal. {exc}")
+            # Let the execution boundary record the failure and recovery point.
+            # An unavailable model is not an offline or empty edit proposal.
+            raise LLMError(f"CodeTask edit proposal failed: {exc}") from exc
 
     if proposal is None:
         proposal = _offline_proposal(selected, read_only_context=read_only_context)

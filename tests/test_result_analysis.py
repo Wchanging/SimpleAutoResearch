@@ -32,6 +32,79 @@ class FakeAnalysisClient:
 
 
 class ResultAnalysisTests(unittest.TestCase):
+    def test_malformed_supplement_gets_one_model_correction(self) -> None:
+        import json
+        from unittest.mock import Mock
+
+        context = AnalysisContext(task_id="followup", metrics={"accuracy": 0.8},
+            metadata={"execution_protocol": {"can_extend_seed_condition": True}})
+        client = Mock()
+        client.ask.side_effect = [
+            json.dumps({"recommendation": {"action": "supplement", "supplement": "repeat measurement"}}),
+            json.dumps({"recommendation": {"action": "supplement", "supplement": {"seed": 9, "gap": "seed sensitivity"}}}),
+        ]
+        result = run_result_analysis(context, client=client, use_llm=True)
+        self.assertEqual(result.recommendation.supplement["seed"], 9)
+        self.assertEqual(client.ask.call_count, 2)
+        self.assertIn("explicit integer seed", client.ask.call_args.args[1])
+
+    def test_fixed_command_cannot_turn_a_seed_suggestion_into_execution(self) -> None:
+        from unittest.mock import Mock
+
+        context = AnalysisContext(task_id="fixed", metrics={"accuracy": 0.8},
+            metadata={"execution_protocol": {"can_extend_seed_condition": False}})
+        client = Mock()
+        client.ask.return_value = '{"recommendation":{"action":"supplement","supplement":{"seed":9}}}'
+        with self.assertRaisesRegex(LLMError, "after one correction"):
+            run_result_analysis(context, client=client, use_llm=True)
+        self.assertEqual(client.ask.call_count, 2)
+
+    def test_fixed_command_still_allows_evidence_based_candidate_revision(self) -> None:
+        client = FakeAnalysisClient({
+            "summary": {"method": "Measured", "results": "Candidate comparison available.", "limitations": "One fixed seed."},
+            "claims": [],
+            "analysis_audit": {},
+            "recommendation": {
+                "action": "revise_candidate",
+                "reason": "The measured candidate leaves a documented objective gap.",
+                "evidence_refs": ["attempts/experiment-0010/results.json", "attempts/experiment-0012/results.json"],
+                "revision_intent": "Test one distinct candidate direction against the observed results.",
+                "revision_constraints": ["Keep the accepted command, data and evaluator unchanged."],
+                "revision_base": "candidate",
+                "supplement": {},
+            },
+        })
+        context = AnalysisContext(
+            task_id="fixed-command-revision",
+            title="Choose one further candidate only after reviewing the current comparison.",
+            metrics={"accuracy": 0.824444},
+            metadata={
+                "research_goal": "Measure the initial candidate, then choose one authorized alternative.",
+                "remaining_authorized_rounds": 1,
+                "execution_protocol": {"can_extend_seed_condition": False, "condition_mode": "fixed_command"},
+                "analysis_checkpoint": {
+                    "stage": "post_measurement_decision",
+                    "remaining_authorized_rounds": 1,
+                    "current_candidate": {
+                        "role": "current_candidate",
+                        "artifact_ref": {"path": "attempts/experiment-0012/results.json"},
+                        "implementation_ref": {"path": "attempts/implement-0011/implementation.json"},
+                    },
+                    "measurements": [
+                        {"role": "baseline", "artifact_ref": {"path": "attempts/experiment-0010/results.json"}},
+                        {"role": "current_candidate", "artifact_ref": {"path": "attempts/experiment-0012/results.json"}},
+                    ],
+                },
+            },
+        )
+
+        result = run_result_analysis(context, client=client, use_llm=True)
+
+        self.assertEqual(result.recommendation.action, "revise_candidate")
+        self.assertIn("does not prohibit revise_candidate", client.user)
+        self.assertIn("future candidate or comparison", client.user)
+        self.assertIn("attempts/experiment-0012/results.json", client.user)
+
     def test_prompt_preserves_canonical_comparison_without_condition_tables(self) -> None:
         import json
         from simple_ar.result_analysis.service import build_prompt, build_metric_summary
@@ -49,6 +122,56 @@ class ResultAnalysisTests(unittest.TestCase):
         projected = payload["context"]["project_results"]["execution_result"]
         self.assertEqual(projected["comparisons"], [comparison])
         self.assertNotIn("execution", projected)
+
+    def test_prompt_carries_the_accepted_seed_extension_boundary(self) -> None:
+        import json
+        from simple_ar.result_analysis.service import build_prompt, build_metric_summary
+
+        context = AnalysisContext(
+            task_id="seed-boundary",
+            metrics={"accuracy": 0.8},
+            metadata={"execution_protocol": {
+                "declared_seeds": [0, 1],
+                "seed_flag": "--seed",
+                "can_extend_seed_condition": True,
+                "condition_mode": "paired_seed",
+            }},
+        )
+
+        prompt = build_prompt(context, build_metric_summary(context), run_result_analysis(context))
+        payload = json.loads(prompt.split("\n\n")[-1])
+
+        self.assertTrue(payload["context"]["metadata"]["execution_protocol"]["can_extend_seed_condition"])
+        self.assertIn("Never derive a seed from the iteration", prompt)
+
+    def test_llm_recommendation_is_normalized_and_keeps_analysis_context(self) -> None:
+        context = AnalysisContext(
+            task_id="decision-context",
+            metrics={"accuracy": 0.8},
+            metadata={"research_history": [{"action": "analysis", "status": "completed"}]},
+        )
+        client = FakeAnalysisClient({
+            "summary": {"method": "Measured", "results": "Observed.", "limitations": "Small."},
+            "claims": [],
+            "analysis_audit": {},
+            "recommendation": {
+                "action": "revise",
+                "reason": "The error pattern identifies a bounded candidate change.",
+                "evidence_refs": ["attempts/a/analysis.json"],
+                "revision_intent": "Change the candidate rule for the observed error class.",
+                "revision_constraints": ["Keep the evaluator unchanged."],
+                "revision_base": "candidate",
+                "supplement": {"command": ["do-not-execute"], "seed": 9},
+            },
+        })
+
+        result = run_result_analysis(context, client=client, use_llm=True)
+
+        self.assertEqual(result.recommendation.action, "revise_candidate")
+        self.assertEqual(result.recommendation.supplement, {"seed": 9})
+        self.assertEqual(result.recommendation.revision_base, "candidate")
+        self.assertEqual(result.decision_context, context.metadata)
+        self.assertIn("recommendation", client.user)
 
     def test_prompt_preserves_implementation_lineage_for_paired_results(self) -> None:
         import json

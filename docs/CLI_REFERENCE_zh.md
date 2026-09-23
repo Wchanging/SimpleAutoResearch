@@ -76,6 +76,12 @@ LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求�
 可加 `--session-root PATH` 续接相同目标和 outputs 的会话，补齐缺少的实验配置；
 已有证据、研究设置和预算消费保持不变，详见配置参考的续接说明。
 
+在已暂停或完成的分析检查点，可同时加 `--reanalyze`：复用已有测量重新分析，
+再按结果继续研究决策。历史产物和已消耗预算保留，不增加论文交付要求；
+后续若接受候选修订，仍会消耗原预算执行新实验。不能用它覆盖尚待执行的科研后续计划。
+
+结束时的产物表按 accepted plan 展示最新实现、候选测量和分析；早期修订引用仍单独保留，便于追溯候选 lineage。
+
 可使用 `simple-ar research-session --config examples/research_config/minimal.toml`。
 显式 CLI 覆盖文件值；`--outputs summary report experiments` 按需选择交付。
 预算覆盖项为 `--total-tokens`、`--llm-requests`、`--max-output-tokens`、

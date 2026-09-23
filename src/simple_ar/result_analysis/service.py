@@ -13,6 +13,7 @@ from .schema import (
     AnalysisAudit,
     AnalysisClaim,
     AnalysisContext,
+    AnalysisRecommendation,
     AnalysisResult,
     AnalysisStatus,
 )
@@ -72,6 +73,18 @@ def run_result_analysis(
             label=label,
             output_dir=output_dir,
         )
+        error = _recommendation_error(raw_response, ctx)
+        if error:
+            raw_response = request_json_with_diagnostics(
+                client, SYSTEM_PROMPT,
+                build_prompt(ctx, metric_summary, result)
+                + "\n\nCorrect the rejected recommendation, preserving the measured evidence. "
+                + error + "\nPrevious response: " + json.dumps(raw_response, ensure_ascii=False),
+                label=label + "-recommendation-repair", output_dir=output_dir,
+            )
+            error = _recommendation_error(raw_response, ctx)
+            if error:
+                raise LLMError("Invalid research recommendation after one correction: " + error)
         result = normalize_llm_result(raw_response, ctx, metric_summary, fallback=result)
 
     result.raw_llm_response = raw_response
@@ -80,6 +93,19 @@ def run_result_analysis(
     if output_dir is not None:
         write_analysis_artifacts(output_dir, ctx, result)
     return result
+
+
+def _recommendation_error(response: Mapping[str, Any], context: AnalysisContext) -> str:
+    recommendation = response.get("recommendation")
+    if not isinstance(recommendation, Mapping) or recommendation.get("action") != "supplement":
+        return ""
+    protocol = context.metadata.get("execution_protocol", {})
+    if protocol.get("can_extend_seed_condition") is False:
+        return "This fixed-command task cannot extend seeds. Choose a supported revision, stop, or request_input; do not invent a seed flag."
+    supplement = recommendation.get("supplement")
+    if not isinstance(supplement, Mapping) or type(supplement.get("seed")) is not int:
+        return "supplement must be a JSON object with an explicit integer seed and evidence gap, not prose or an empty object."
+    return ""
 
 
 def request_json_with_diagnostics(
@@ -123,6 +149,23 @@ def deterministic_result(context: AnalysisContext, metric_summary: dict[str, Any
         metric_summary=metric_summary,
         rubric_coverage=rubric_coverage,
         audit=audit,
+        recommendation=deterministic_recommendation(context),
+        decision_context=dict(context.metadata),
+    )
+
+
+def deterministic_recommendation(context: AnalysisContext) -> AnalysisRecommendation:
+    """Keep offline analysis conservative until a scientific proposal exists."""
+
+    refs = context.metadata.get("evidence_refs", [])
+    evidence_refs = normalize_string_list(refs)[:12]
+    return AnalysisRecommendation(
+        action="stop",
+        reason=(
+            "Deterministic result analysis does not choose a scientific follow-up; "
+            "a model or explicit user decision must propose the next bounded action."
+        ),
+        evidence_refs=evidence_refs,
     )
 
 
@@ -463,17 +506,49 @@ def build_prompt(
         "- summary: object with method, results, limitations, reproduction_notes. Values must be short plain strings, not Markdown.\n"
         "- rubric_coverage: list of objects with category, verdict, evidence, limitations. Use categories from rubric_categories.\n"
         "- claims: list of claim objects. Each needs claim_id, claim, verdict, evidence, metric_refs, limitations, confidence.\n"
-        "- analysis_audit: object with missing_required_metrics, weak_metric_signals, unsupported_claims, limitations, notes.\n\n"
+        "- analysis_audit: object with missing_required_metrics, weak_metric_signals, unsupported_claims, limitations, notes.\n"
+        "- recommendation: object with action, reason, evidence_refs, revision_intent, revision_constraints, revision_base, supplement.\n\n"
         "Rules:\n"
         "- Use only provided metrics and artifacts.\n"
         "- Canonical execution comparisons remain evidence even when result_tables are empty; "
         "preserve their source references and comparability limitations. Missing protocol metadata "
         "does not mean the measured baseline is absent.\n"
+        "- The task_contract is a proposed scientific claim, not an inventory of executed candidates. "
+        "The analysis_checkpoint measurement refs are the authority for what was actually run. "
+        "A design that mentions several controls does not establish that those controls already exist. "
+        "Keep such claims partially supported or not evaluated, but separately decide how to obtain "
+        "the remaining evidence through authorized actions. In particular, the first measured candidate "
+        "is the initial candidate; a future alternative is a possible next action, not a prerequisite "
+        "for assessing that first result.\n"
         "- Do not claim judge success unless judge evidence appears in context.\n"
         "- supported/partially_supported claims must include metric_refs or evidence.\n"
         "- Use metric_refs from result_tables evidence_id values, not raw JSON objects.\n"
         "- Use unsupported when the measured evidence refutes a hypothesis; do not use not_evaluated for refuted hypotheses.\n"
         "- If metrics are weak, missing, all zero, or only resource signals, say so clearly.\n\n"
+        "- recommendation.action must be one of supplement, revise_candidate, stop, request_input.\n"
+        "- supplement must be a JSON object, e.g. {\"seed\": 9, \"gap\": \"seed sensitivity\"}; "
+        "the example is a shape, not a seed choice. Use {} for other actions.\n"
+        "- Missing protocol documentation is not a measurement failure: repeating an unchanged command "
+        "does not resolve missing metadata. Request the missing facts or stop with limitations.\n"
+        "- A supplement must name the evidence gap and a concrete bounded condition in supplement; "
+        "do not invent commands, files, datasets, permissions, or seed mechanisms. Use the accepted "
+        "context.metadata.execution_protocol as the authority: provide one explicit integer seed only "
+        "when can_extend_seed_condition is true. If it is false, seed-based supplement is unavailable; "
+        "this does not prohibit revise_candidate within an accepted CodeTask boundary. Never derive a "
+        "seed from the iteration.\n"
+        "- The research_goal states the final objective. Use context.metadata.analysis_checkpoint and "
+        "its artifact refs to distinguish what is already measured from what remains to be done. A future "
+        "candidate or comparison requested by the goal is not missing input merely because it has not "
+        "been run yet. At a post-measurement checkpoint, assess the evidence and remaining authorized "
+        "rounds, then recommend one justified bounded action or stop. Request input only for an actual "
+        "missing external condition, permission, or user decision; do not request a future result that an "
+        "already-authorized action can produce. Do not force a revision when evidence does not justify one.\n"
+        "- revise_candidate must state the intended change and constraints; it is a proposal for the "
+        "existing CodeTask boundary, not an assertion that a patch was applied. Set revision_base to "
+        "candidate when continuing the current candidate; set it to baseline only when the evidence "
+        "requires a fresh direction from the original baseline.\n"
+        "- stop is appropriate when the goal is met, evidence is insufficient, no justified change remains, "
+        "or the configured round/budget boundary is exhausted.\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2, default=str)}"
     )
 
@@ -534,6 +609,9 @@ def normalize_llm_result(
         limitations=normalize_string_list(audit_data.get("limitations")),
         notes=normalize_string_list(audit_data.get("notes")),
     )
+    recommendation = parse_recommendation(
+        response.get("recommendation"), fallback=fallback.recommendation,
+    )
     readme = render_analyzed_markdown(response.get("summary"), context, metric_summary, claims, rubric_coverage, audit)
     return AnalysisResult(
         readme_markdown=readme.strip() + "\n",
@@ -542,6 +620,48 @@ def normalize_llm_result(
         metric_summary=metric_summary,
         rubric_coverage=rubric_coverage,
         audit=audit,
+        recommendation=recommendation,
+        decision_context=dict(context.metadata),
+    )
+
+
+def parse_recommendation(
+    value: Any, *, fallback: AnalysisRecommendation,
+) -> AnalysisRecommendation:
+    """Normalize the small model proposal without granting execution authority."""
+
+    if not isinstance(value, Mapping):
+        return fallback
+    action = str(value.get("action") or "").strip().lower().replace("-", "_")
+    aliases = {"revise": "revise_candidate", "revision": "revise_candidate"}
+    action = aliases.get(action, action)
+    if action not in {"supplement", "revise_candidate", "stop", "request_input"}:
+        return AnalysisRecommendation(
+            action="stop",
+            reason=f"The analysis recommendation used unsupported action {action!r}; no follow-up was accepted.",
+            evidence_refs=fallback.evidence_refs,
+        )
+    evidence_refs = normalize_string_list(value.get("evidence_refs"))[:12]
+    supplement = value.get("supplement")
+    supplement = dict(supplement) if isinstance(supplement, Mapping) else {}
+    # Commands and paths are application facts, not model-controlled fields.
+    supplement = {
+        key: supplement[key]
+        for key in ("seed", "gap", "conditions", "metric", "reason")
+        if key in supplement
+    }
+    return AnalysisRecommendation(
+        action=action,
+        reason=str(value.get("reason") or "").strip(),
+        evidence_refs=evidence_refs,
+        revision_intent=str(value.get("revision_intent") or "").strip(),
+        revision_constraints=normalize_string_list(value.get("revision_constraints"))[:12],
+        revision_base=(
+            str(value.get("revision_base") or "candidate").strip().lower()
+            if str(value.get("revision_base") or "candidate").strip().lower() in {"candidate", "baseline"}
+            else "candidate"
+        ),
+        supplement=supplement,
     )
 
 

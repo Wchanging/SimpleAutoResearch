@@ -20,7 +20,10 @@ from simple_ar.code_task import initialize_code_task
 from simple_ar.code_task.runtime.state import code_task_paths
 from simple_ar.integrations.llm import LLMClient, LLMSettings
 from simple_ar.research.task_plan import (
+    TaskPlanResult,
+    TaskPlanStep,
     TaskPlanRequest,
+    append_research_followup,
     build_task_plan,
     default_task_steps,
 )
@@ -191,6 +194,8 @@ class TaskPlanTests(unittest.TestCase):
             goal="Compare a supplied classifier.",
             request_text="Compare a supplied classifier.",
             requested_outputs=("experiments",),
+            hard_constraints=("Use only the supplied benchmark.",),
+            preferences=("Keep the plan short.",),
             config={
                 "research_materials_only": True,
                 "research_local_documents": ["notes.md"],
@@ -215,6 +220,7 @@ class TaskPlanTests(unittest.TestCase):
 
         self.assertEqual(result.mode, "deterministic_fallback")
         self.assertIn("rejected", result.diagnostics[0])
+        self.assertIn("Use only the supplied benchmark.", result.assumptions)
         actions = [step.action for step in result.steps]
         self.assertLess(actions.index("synthesize"), actions.index("assess_ideas"))
         self.assertLess(actions.index("assess_ideas"), actions.index("research_design"))
@@ -337,6 +343,28 @@ class TaskPlanTests(unittest.TestCase):
                 if row["action"] == "assess_ideas"
             )
             self.assertEqual(assessment_step["status"], "completed")
+
+    def test_revision_followup_waits_for_implementation_state_before_measurement(self) -> None:
+        plan = TaskPlanResult(
+            status="accepted",
+            mode="deterministic",
+            task_kind="research",
+            goal="Continue the bounded experiment.",
+            steps=(
+                TaskPlanStep(
+                    step_id="design", action="research_design", capability="research_design",
+                    state_name="design", problem_solved="", observation="",
+                ),
+            ),
+        )
+
+        extended = append_research_followup(plan, 1, action="revise_candidate", pair_count=1)
+        rows = {step.action: step for step in extended.steps}
+
+        self.assertEqual(
+            rows["research_candidate:1_0"].condition,
+            "after_success:implementation_r1",
+        )
 
 
 if __name__ == "__main__":

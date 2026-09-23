@@ -87,6 +87,9 @@ def comparison_compatibility(baseline: Mapping, candidate: Mapping) -> tuple[str
         return "unknown", "Comparison protocol is incomplete."
     if a != b:
         return "mismatched", "Results use different declared protocols; deltas are descriptive only."
+    placeholder_reason = _unverified_protocol_reason(baseline, candidate)
+    if placeholder_reason:
+        return "unknown", placeholder_reason
     if first.get("source_kind") != "measured" or second.get("source_kind") != "measured":
         return "unknown", "At least one result is not executor-observed measurement."
     if first.get("measurement_id") == second.get("measurement_id"):
@@ -102,3 +105,25 @@ def comparison_compatibility(baseline: Mapping, candidate: Mapping) -> tuple[str
         if x["status"] == y["status"] == "observed_unchanged":
             return "declared_match", "Declared protocols and explicitly checked file contents match at the observed boundaries."
     return "declared_match", "Declared protocols match; independent asset integrity is not yet verified."
+
+
+def _unverified_protocol_reason(
+    baseline: Mapping[str, Any], candidate: Mapping[str, Any],
+) -> str | None:
+    """Reject framework placeholders as proof that two measurements are comparable.
+
+    Prepared execution can supply a command boundary without declaring the
+    dataset or split used by that command.  The resulting fingerprint is
+    useful for lineage, but it cannot establish a scientific comparison.
+    Explicit contracts with concrete split/dataset facts remain eligible even
+    when no protected file was named.
+    """
+
+    for result in (baseline, candidate):
+        contract = result.get("experiment_contract")
+        if not isinstance(contract, Mapping):
+            continue
+        split = contract.get("split_spec")
+        if isinstance(split, Mapping) and str(split.get("status") or "").strip().lower() == "not_declared_by_framework":
+            return "Comparison protocol contains an execution-boundary placeholder split; comparability is unverified."
+    return None

@@ -5,6 +5,7 @@ from .schema import (
     AnalysisClaim,
     AnalysisContext,
     AnalysisMetric,
+    AnalysisRecommendation,
     AnalysisResult,
     AnalysisStatus,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "AnalysisClaim",
     "AnalysisContext",
     "AnalysisMetric",
+    "AnalysisRecommendation",
     "AnalysisResult",
     "AnalysisStatus",
     "run_result_analysis",

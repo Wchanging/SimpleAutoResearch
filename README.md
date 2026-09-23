@@ -221,6 +221,14 @@ and preparation lineage before binding it. A cwd match or narrative contract
 match alone is not sufficient. These compact settings do not grant shell,
 installer, or arbitrary model-execution authority; in LLM mode, design proposals
 must remain within an inspected entrypoint boundary and explicit configuration wins.
+Use `--max-research-iterations N` to authorize at most `N` evidence-driven
+supplement or candidate-revision rounds after the first analysis. A supplement
+requires an explicit new seed and a reconstructable baseline; for a prepared
+CodeTask, the supplement prepares an isolated original baseline workspace and
+measures the current candidate workspace under the same condition. A revision
+explicitly chooses whether to continue from the current candidate workspace or
+start from the recorded original baseline; changed candidate workspaces are
+never silently treated as old baselines.
 
 The commands below are segmented or compatibility surfaces, not a second V2.8
 full workflow. Use them for debugging, persisted handoff continuation, legacy

@@ -223,7 +223,7 @@ class ResearchDesignTests(unittest.TestCase):
         self.assertEqual(restored.contract, result.contract)
         self.assertEqual(restored.novelty_check.idea_id, "idea-002")
 
-    def test_prepared_execution_boundary_replaces_literature_setup_fields(self) -> None:
+    def test_prepared_execution_boundary_does_not_invent_protocol_facts(self) -> None:
         result = build_research_design(
             ResearchDesignRequest(
                 synthesis=self._synthesis(),
@@ -240,21 +240,12 @@ class ResearchDesignTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "ready")
-        self.assertEqual(
-            result.contract.baseline,
-            "prepared project baseline (see execution boundary)",
-        )
-        self.assertEqual(
-            result.contract.dataset,
-            "prepared project dataset (see execution boundary)",
-        )
+        self.assertEqual(result.contract.baseline, "calibration-baseline")
+        self.assertEqual(result.contract.dataset, "unknown")
         self.assertEqual(result.contract.metrics, ["accuracy", "macro_f1"])
-        self.assertEqual(result.contract.dataset_refs[0]["asset_id"], "prepared_execution")
-        self.assertEqual(result.contract.split_spec["status"], "not_declared_by_framework")
-        self.assertEqual(
-            result.contract.comparison_conditions["mode"],
-            "same_declared_evaluator",
-        )
+        self.assertEqual(result.contract.dataset_refs, [])
+        self.assertEqual(result.contract.split_spec, {})
+        self.assertEqual(result.contract.comparison_conditions, {})
         self.assertEqual(
             [item["name"] for item in result.contract.metric_specs],
             ["accuracy", "macro_f1"],

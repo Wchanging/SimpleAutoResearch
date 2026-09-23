@@ -4,6 +4,22 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-09-23
+
+- 增加 `research-session --session-root PATH --reanalyze`，复用实测结果重新分析，不重跑原实验或隐式请求论文；保留历史产物和已消耗预算，新接受的后续动作仍走原科研执行路径。
+- 分离原始准备记录与当前候选工作区，避免修订后误重跑准备步骤；准备成功依据已完成的 attempt，不再要求配置产物具有实验状态字段。
+- 编辑纠正次数仅在新提案生成后消耗；连接失败后仍可正常续接纠正，不再误用旧的失败提案。
+- 分析使用已接受的执行条件；不可执行的补实验建议最多回传模型纠正一次，不再将文字建议静默转为空请求。协议资料缺失不等于需要重复训练。
+- 明确分析提示与检查点投影：固定命令只禁用 seed 补实验，不禁用已授权的 CodeTask 候选修订；既有测量 refs 会标明 baseline、当前候选及其实现来源。目标中尚未执行的后续交付本身不算缺失输入。
+- CodeTask 在精确补丁校验记录失败与当前源码上下文后，允许既有执行路径重新生成一次失效提案；第二次校验失败仍在原边界停止。
+- 同一会话中 command、协议和 preparation lineage 均匹配的已通过 baseline，即使没有 protected-asset 快照也可复用，但完整性仍标为未核验；跨会话/外部复用继续要求快照。
+
+## 2026-09-22
+
+- CodeTask 模型编辑失败交由执行边界记录，不再伪装成离线空提案；显式离线模式保持不变。
+- 将已接受执行协议的 seed 扩展事实传给结果分析；后续建议不得臆造 seed 机制，
+  也不得从科研轮次推导 seed。
+
 ## 2026-09-21
 
 - 将 V2.8 以准备好项目后的端到端主链走通作为阶段基线收口，并在 README
@@ -61,6 +77,16 @@
 - 复用既有 Preparation/CodeTask、experiment、预算和恢复边界，未新增第二套调度器、记忆库、
   重试平台或任意 action registry。
 - 开放网络 survey 的限流证据与冻结端到端验收仍明确未解决；本地 B 验证不替代这些门槛。
+
+### V2.9 阶段 C（有限循环基础）
+
+- 分析结果现在通过当前 candidate/execution 引用和实测 protocol identity 绑定下一次 decision；不再仅因存在旧 decision artifact 就复用旧建议。
+- 在显式 seed 协议、可重建 baseline 且剩余进程预算足够时，沿同一 accepted plan 执行一次 `supplement_baseline → supplement_candidate → reanalysis`，并按有限轮次停止；技术失败仍保留为诊断证据。
+- prepared CodeTask 补测现在从记录的原始 source lineage 准备隔离 baseline workspace，同时在当前 candidate workspace 执行相同条件；候选修订显式选择从当前 candidate 或原始 baseline 开始，并在复用 baseline 前核对受保护资产。显式 `skip`/`reuse` 仍有效。此有限循环行为不代表 live LLM CodeTask 或 V2.9 发布验收完成。
+- 后续步骤现在绑定已持久化的 implementation state；科研历史和 seed 防重复逻辑统一解析
+  session-root attempt 输出，使一个尚未配对的 supplement baseline 可以与其 candidate 配对，
+  同时拒绝已完成 seed 的再次执行。
+- CLI 结束产物表现在按 accepted plan 指向最新实现、候选测量与分析，同时保留早期引用供 lineage 追溯。
 
 ## 2026-09-17
 

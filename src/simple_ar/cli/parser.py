@@ -62,6 +62,7 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
     )
     session_parser.add_argument("--config", type=Path, help="Research TOML; explicit CLI options override file values.")
     session_parser.add_argument("--session-root", type=Path, help="Continue this session with the same goal; attach execution only if missing. Existing budgets stay unchanged.")
+    session_parser.add_argument("--reanalyze", action="store_true", help="With --session-root, reconsider existing measurements and resume the research decision; do not request a report or rerun experiments.")
     session_parser.add_argument("--topic", required=not bool(research_defaults and research_defaults.get("topic")))
     session_parser.add_argument(
         "--task-kind", choices=("auto", "survey", "bug_fix"), default="auto",
@@ -117,6 +118,10 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
     session_parser.add_argument("--max-results", type=int, default=10)
     session_parser.add_argument("--max-chunks", type=int, default=300)
     session_parser.add_argument("--idea-limit", type=int, default=3)
+    session_parser.add_argument(
+        "--max-research-iterations", type=int, default=1,
+        help="Maximum evidence-driven research rounds after the first analysis; zero stops after the first analysis.",
+    )
     session_parser.add_argument("--cwd", default=".")
     session_parser.add_argument(
         "--timeout-sec",
