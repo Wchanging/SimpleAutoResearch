@@ -10,6 +10,8 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 ## 加载规则
 
+研究入口的 `report.template` 默认 `auto`：仅调研沿用综述；实验任务依据分析中的目标判断选择实验论文、复现报告或简短实验分析报告。执行 `passed` 不等于科研目标达成；目标不明、未达成或因轮次限制停止时，默认不写成成功论文。显式 `experiment`、`reproduction`、`analysis_report` 或自定义模板优先，但不能覆盖测量事实。旧会话保存的显式模板不会被新默认值更换；需要时通过现有报告配置续接改为 `auto`。结构自动选择不代表论文语义质量已验收。
+
 新研究会话不设置 `budget.total_tokens`、`budget.llm_requests` 时，框架不限制 API 总 token 和请求次数；
 需要限制时设置正整数。无限额仍记录用量，不等于免费调用或无限重试。
 进程资源、科研轮次、attempt/no-progress 和供应商单次输出限制独立保留。

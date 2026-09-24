@@ -15,6 +15,34 @@ from simple_ar.report.schema import (
 
 
 class ResearchReportApplicationTests(unittest.TestCase):
+    def test_delivery_uses_goal_not_process_success_and_preserves_explicit_template(self):
+        from simple_ar.report.templates import resolve_experiment_delivery, load_report_template_bundle
+        from simple_ar.report.schema import ReportRuntimeConfig
+        config = ReportRuntimeConfig()
+        for task_type, status, execution_status, disposition, expected in (
+            ("improvement", "not_met", "passed", "deliver_observed_result", "analysis_report"),
+            ("improvement", "inconclusive", "passed", "deliver_observed_result", "analysis_report"),
+            ("improvement", "met", "passed", "deliver_observed_result", "experiment"),
+            ("improvement", "met", "failed", "deliver_observed_result", "analysis_report"),
+            ("improvement", "met", "passed", "deliver_with_limits", "analysis_report"),
+            ("reproduction", "not_met", "metric_below_target", "deliver_with_limits", "reproduction"),
+        ):
+            with self.subTest(task_type=task_type, status=status, execution=execution_status):
+                analysis = {"status": execution_status, "goal_assessment": {
+                    "task_type": task_type, "status": status, "evidence_refs": ["accuracy"]}}
+                selected, delivery = resolve_experiment_delivery(config, analysis, {"disposition": disposition})
+                self.assertEqual(selected.template, expected)
+                self.assertEqual(delivery["goal_assessment"], analysis["goal_assessment"])
+                self.assertEqual(load_report_template_bundle(report_mode="experiment", config=selected).name, expected)
+        self.assertEqual(config.template, "auto")
+        selected, _ = resolve_experiment_delivery(ReportRuntimeConfig(template="experiment"), {}, {})
+        self.assertEqual(selected.template, "experiment")
+        selected, _ = resolve_experiment_delivery(config, {"status": "passed"}, {})
+        self.assertEqual(selected.template, "analysis_report")
+        selected, _ = resolve_experiment_delivery(config, {"goal_assessment": {
+            "status": "not_met", "requested_delivery": "paper"}}, {})
+        self.assertEqual(selected.template, "experiment")
+
     def test_paired_metrics_preserve_measurement_and_comparison_origins(self):
         from simple_ar.report.projection import attach_paired_report_measurements
         from simple_ar.core.capabilities import ArtifactRef

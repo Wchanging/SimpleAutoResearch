@@ -4,6 +4,14 @@
 
 ## Research configuration
 
+`report.template` defaults to `auto`: literature tasks use a survey; experimental
+tasks select a paper, reproduction report or concise analysis report using the
+analysis goal judgment. Execution `passed` is not scientific success. Unmet or
+uncertain goals default to an analysis report; explicit templates still win and
+cannot override measured facts. Saved session templates are preserved on resume.
+Use the existing report configuration revision to opt an old session into `auto`.
+Automatic structure selection does not certify the scientific judgment or prose.
+
 Run `simple-ar research-session --config examples/research_config/minimal.toml`.
 The [minimal](../examples/research_config/minimal.toml) and
 [advanced](../examples/research_config/advanced.toml) examples share one format and defaults.

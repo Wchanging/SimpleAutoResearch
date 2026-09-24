@@ -32,6 +32,24 @@ class FakeAnalysisClient:
 
 
 class ResultAnalysisTests(unittest.TestCase):
+    def test_goal_judgment_is_separate_and_requires_resolvable_evidence(self):
+        from simple_ar.result_analysis.service import parse_goal_assessment
+        context = AnalysisContext(metrics={"accuracy": 0.7})
+        tables = {"result_tables": {"all_metric_rows": [{"evidence_id": "accuracy:test:candidate"}]}}
+        for refs, expected in ((["accuracy"], "met"), (["accuracy:test:candidate"], "met"),
+                               (["invented"], "inconclusive"), ([], "inconclusive")):
+            with self.subTest(refs=refs):
+                result = parse_goal_assessment({"task_type": "reproduction", "status": "met",
+                    "reason": "Matches the stated reproduction tolerance.", "evidence_refs": refs}, context, tables)
+                self.assertEqual(result.status, expected)
+                self.assertEqual(result.task_type, "reproduction")
+        self.assertEqual(parse_goal_assessment(None, context, tables).status, "inconclusive")
+        client = FakeAnalysisClient({"goal_assessment": {"task_type": "improvement", "status": "not_met",
+            "reason": "The desired improvement is absent.", "evidence_refs": ["accuracy"]}})
+        result = run_result_analysis(context, client=client, use_llm=True)
+        self.assertEqual(result.goal_assessment.status, "not_met")
+        self.assertIn("Reproduction does not require beating a baseline", client.user)
+
     def test_malformed_supplement_gets_one_model_correction(self) -> None:
         import json
         from unittest.mock import Mock

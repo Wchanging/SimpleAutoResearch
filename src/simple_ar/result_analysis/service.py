@@ -16,6 +16,7 @@ from .schema import (
     AnalysisRecommendation,
     AnalysisResult,
     AnalysisStatus,
+    GoalAssessment,
 )
 
 
@@ -508,6 +509,14 @@ def build_prompt(
         "- claims: list of claim objects. Each needs claim_id, claim, verdict, evidence, metric_refs, limitations, confidence.\n"
         "- analysis_audit: object with missing_required_metrics, weak_metric_signals, unsupported_claims, limitations, notes.\n"
         "- recommendation: object with action, reason, evidence_refs, revision_intent, revision_constraints, revision_base, supplement.\n\n"
+        "- goal_assessment: object with task_type (improvement/reproduction/evaluation/unknown), "
+        "status (met/not_met/inconclusive), reason, evidence_refs, requested_delivery (auto/paper/analysis_report). "
+        "Only set requested_delivery=paper when the user explicitly asks for a paper even with negative results; "
+        "a generic report request or conditional paper request means auto. Assess the user's original goal, "
+        "not merely whether execution passed. Cite evidence_id values from result_tables, "
+        "provided metric names or artifact paths. Reproduction does not require beating a baseline. "
+        "For improvement, check the primary objective and constraints, not any favorable metric. "
+        "Use inconclusive when the success criteria or necessary evidence are missing.\n\n"
         "Rules:\n"
         "- Use only provided metrics and artifacts.\n"
         "- Canonical execution comparisons remain evidence even when result_tables are empty; "
@@ -621,8 +630,38 @@ def normalize_llm_result(
         rubric_coverage=rubric_coverage,
         audit=audit,
         recommendation=recommendation,
+        goal_assessment=parse_goal_assessment(response.get("goal_assessment"), context, metric_summary),
         decision_context=dict(context.metadata),
     )
+
+
+def parse_goal_assessment(
+    value: Any, context: AnalysisContext, metric_summary: Mapping[str, Any],
+) -> GoalAssessment:
+    """Keep missing/ungrounded goal judgments uncertain, not silently successful."""
+    if not isinstance(value, Mapping):
+        return GoalAssessment()
+    known = set(context.metrics) | set(context.artifacts.values())
+    known.update(
+        str(row["evidence_id"]) for row in (metric_summary.get("result_tables") or {}).get("all_metric_rows", [])
+        if isinstance(row, Mapping) and row.get("evidence_id")
+    )
+    refs = normalize_string_list(value.get("evidence_refs"))
+    status = str(value.get("status") or "inconclusive")
+    task_type = str(value.get("task_type") or "unknown")
+    reason = str(value.get("reason") or "").strip()
+    if status not in {"met", "not_met", "inconclusive"}:
+        status = "inconclusive"
+    if task_type not in {"improvement", "reproduction", "evaluation", "unknown"}:
+        task_type = "unknown"
+    if not reason or not refs or any(ref not in known for ref in refs):
+        status = "inconclusive"
+        reason = (reason + " " if reason else "") + "Goal judgment lacks resolvable evidence references."
+    delivery = str(value.get("requested_delivery") or "auto")
+    if delivery not in {"auto", "paper", "analysis_report"}:
+        delivery = "auto"
+    return GoalAssessment(task_type=task_type, requested_delivery=delivery, status=status, reason=reason,
+                          evidence_refs=[ref for ref in refs if ref in known])
 
 
 def parse_recommendation(

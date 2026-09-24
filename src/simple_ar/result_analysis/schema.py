@@ -75,6 +75,16 @@ class AnalysisContext(_Model):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class GoalAssessment(_Model):
+    """Scientific goal judgment, separate from execution/measurement status."""
+
+    task_type: Literal["improvement", "reproduction", "evaluation", "unknown"] = "unknown"
+    requested_delivery: Literal["auto", "paper", "analysis_report"] = "auto"
+    status: Literal["met", "not_met", "inconclusive"] = "inconclusive"
+    reason: str = "The research goal has not been assessed."
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
 class AnalysisResult(_Model):
     readme_markdown: str
     status: AnalysisStatus = "incomplete"
@@ -85,5 +95,6 @@ class AnalysisResult(_Model):
     rubric_coverage: list[dict[str, Any]] = Field(default_factory=list)
     audit: AnalysisAudit = Field(default_factory=AnalysisAudit)
     recommendation: AnalysisRecommendation = Field(default_factory=AnalysisRecommendation)
+    goal_assessment: GoalAssessment = Field(default_factory=GoalAssessment)
     decision_context: dict[str, Any] = Field(default_factory=dict)
     raw_llm_response: dict[str, Any] | None = None

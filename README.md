@@ -20,15 +20,18 @@ data, and an execution protocol. Real runs cover search, research and design,
 scoped code changes, experiments, analysis, and Markdown reports. Those runs
 included framework fixes and recovery; they are not evidence of a single
 frozen-version acceptance run or fully validated paper quality. Remaining
-report factual-correction validation, an explicit attempt-limit extension
-entrypoint, and frozen-version acceptance move to V2.9 recovery, delivery, and
-release work. The V2.9 development branch has exercised supplied-material analysis
-and a small code repair through short task plans. Current continuation work keeps
-accepted-plan lineage, reuses unaffected evidence and measurements, and rebuilds
-reports from retained analysis; local D recovery/invalidation corrections are
-awaiting review, and Stage E is not complete. Live
-open-web acceptance still has a provider rate-limit blocker. Protocol-driven
-experiments and a complete research-informed loop remain under development.
+report factual-correction validation and frozen-version acceptance move to V2.9
+delivery and release work. The V2.9 development branch has exercised supplied-material
+analysis and a small code repair through short task plans. Explicit continuation
+allowances and selective recovery are implemented and locally tested: they preserve
+history, reuse unaffected evidence, and rebuild reports from retained analysis.
+New research sessions default to uncapped API usage, with optional explicit caps.
+Research input requests pause before further execution; Rich shows decision reasons
+and scientific rounds. A real research-loop diagnostic exists, but frozen acceptance,
+three interaction policies and Stage E remain incomplete. Outcome-aware report
+structure selection is implemented; its live scientific and writing quality still
+requires acceptance.
+Open-web quality also needs revalidation after earlier provider rate limiting.
 The target input is a natural-language task, available assets and necessary resource
 and permission settings, not a user-authored stage sequence. Module upgrades accompany
 the core stages; see [development targets and handoffs](docs/DEVELOPMENT.md#v29-development-target-decision-context-and-handoffs).

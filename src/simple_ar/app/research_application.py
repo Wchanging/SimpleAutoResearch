@@ -1408,9 +1408,17 @@ class ResearchApplication:
         if action == "report_write":
             from simple_ar.report.writing import ReportWritingRequest
             from simple_ar.report.schema import ReportRuntimeConfig
-            from simple_ar.report.templates import load_report_template_bundle
+            from simple_ar.report.templates import load_report_template_bundle, resolve_experiment_delivery
             report_context, memory = self.report_inputs()
             config = ReportRuntimeConfig.model_validate(self._effective_config().get("report", {}))
+            analysis_ref = self._latest_analysis_ref()
+            if analysis_ref is not None:
+                analysis = self.controller.store.read_json(analysis_ref).get("analysis", {})
+                decision = self._state_payload("decision") if "decision" in self.controller.manifest.state_refs else {}
+                config, delivery = resolve_experiment_delivery(config, analysis, decision)
+                memory.template = config.template
+                report_context.results["delivery"] = delivery
+                memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
             sources = tuple(ref for key, ref in self.controller.manifest.state_refs.items() if key not in {"work_plan", "work_plan_markdown", "readiness"})
             resume_ref = None
             for attempt in reversed(self.controller.list_attempts()):

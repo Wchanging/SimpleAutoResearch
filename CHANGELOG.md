@@ -6,6 +6,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-24
 
+- Separate analysis goal judgments from execution status. Automatic experimental
+  delivery uses a concise analysis report for unmet/uncertain goals and a
+  reproduction structure for reproduction tasks; explicit templates remain valid.
+  Writing, review, assembly and recovery reuse the same report pipeline.
 - Pause at a research input request before dispatching remaining work, including
   report writing; reload preserves the boundary until the task inputs are revised.
   Rich output shows the research decision, reason and remaining scientific rounds.
@@ -34,8 +38,8 @@ This file records user-visible project changes in reverse chronological order. P
   without duplicating allowance or erasing recorded resource use.
 - Reconcile resumed attempts and preparation refs against accepted-plan order and
   current execution conditions instead of selecting the latest capability artifact.
-  D continuation changes await review; Stage E and frozen live acceptance remain
-  outstanding.
+  Continuation and report-recovery corrections have passed targeted local review;
+  Stage E and frozen live acceptance remain outstanding.
 
 ## 2026-09-23
 

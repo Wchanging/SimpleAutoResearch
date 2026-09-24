@@ -10,7 +10,29 @@ class ReportTemplateError(RuntimeError):
     """Raised when a report template or criteria file cannot be loaded."""
 
 
-BUILTIN_TEMPLATE_NAMES = {"survey", "survey_long", "experiment", "reproduction"}
+BUILTIN_TEMPLATE_NAMES = {"survey", "survey_long", "experiment", "reproduction", "analysis_report"}
+
+
+def resolve_experiment_delivery(config, analysis, decision):
+    """Select a delivery structure; never equate process success with science."""
+    goal = dict(analysis.get("goal_assessment") or {})
+    if config.template not in {"", "auto"}:
+        template, reason = config.template, "Use the explicitly requested template without changing evidence."
+    elif goal.get("requested_delivery") in {"paper", "analysis_report"}:
+        template = "experiment" if goal["requested_delivery"] == "paper" else "analysis_report"
+        reason = "Honor the explicit delivery requirement identified in the task; preserve negative and uncertain findings."
+    elif goal.get("task_type") == "reproduction":
+        template, reason = "reproduction", "Explain reproduction conditions and differences; improvement is not required."
+    elif (goal.get("status") == "met" and goal.get("task_type") != "unknown"
+          and goal.get("evidence_refs") and analysis.get("status") == "passed"
+          and decision.get("disposition") != "deliver_with_limits"):
+        template, reason = "experiment", "The analysis judges the stated goal met with referenced evidence."
+    else:
+        template, reason = "analysis_report", "The goal is unmet or uncertain; deliver observations, limitations and continuation options."
+    delivery = {"template": template, "reason": reason, "goal_assessment": goal,
+                "stop_reason": decision.get("decision_reason", ""),
+                "continuation_options": decision.get("continuation_options", [])}
+    return config.model_copy(update={"template": template}), delivery
 
 
 def load_report_template_bundle(

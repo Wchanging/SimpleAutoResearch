@@ -21,6 +21,45 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_uncertain_goal_uses_analysis_report_and_writer_recovery_keeps_measurement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Classifier\nAccuracy measures correct predictions.", encoding="utf-8")
+            app = create_session(ResearchBrief(request_text="Evaluate this classifier.",
+                requested_outputs=("experiments",),
+                asset_requests=({"locator": str(paper), "role": "paper"},)), root=root / "session",
+                services=ResearchApplicationServices(config={"research_materials_only": True, "execution": {
+                    "command": [sys.executable, "-c", "print('accuracy: 0.7')"],
+                    "cwd": str(root), "timeout_sec": 5,
+                }}, budget_limits={"process_invocations": 1, "process_wall_seconds": 10}))
+            self.assertEqual(app.advance(max_actions=20).status, "completed")
+            measurement = app.latest_experiment_ref()
+            app.request_report()
+            client = LLMClient(LLMSettings(api_key="test", api_mode="chat"))
+            app.services = replace(app.services, llm_client=client)
+            with patch("simple_ar.report.writing.run_report_agent", return_value=None) as writer:
+                app.advance()
+                self.assertEqual(writer.call_args.kwargs["template"].name, "analysis_report")
+                self.assertEqual(writer.call_args.kwargs["memory"].template, "analysis_report")
+                self.assertEqual(writer.call_args.kwargs["context"].results["delivery"]["goal_assessment"]["status"], "inconclusive")
+            app = load_session(root / "session", services=ResearchApplicationServices(llm_client=client))
+            app.continue_session()
+            from simple_ar.report.schema import AgentReportResult, ReportSectionDraft
+            def deliver(**kwargs):
+                paper_id = kwargs["context"].papers[0]["id"]
+                return AgentReportResult(report_body="", memory=kwargs["memory"], used_agent=True,
+                    sections=[ReportSectionDraft(section_id="limitations", heading="Interpretation And Limits",
+                        draft_markdown=f"Accuracy measures correct predictions [@{paper_id}]. The local research goal remains unassessed.",
+                        used_sources=[paper_id])])
+            with patch("simple_ar.report.writing.run_report_agent", side_effect=deliver) as writer:
+                completed = app.advance(max_actions=3)
+                self.assertEqual(writer.call_args.kwargs["template"].name, "analysis_report")
+            self.assertEqual(completed.status, "completed", completed.status_reason)
+            self.assertIn("report_audit", completed.state_refs)
+            self.assertEqual(app.latest_experiment_ref(), measurement)
+            self.assertEqual(sum(a["capability"] == "experiment" for a in app.view().attempts), 1)
+
     def test_input_request_stops_before_report_and_survives_reload(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -6,6 +6,7 @@
 
 ## 2026-09-24
 
+- 分离科研目标判断与执行状态；实验交付默认按目标判断选结构，未达或不确定目标使用简短分析报告，复现采用复现结构，显式模板仍有效。写作、审阅、组装和恢复复用同一报告链。
 - 科研决策要求用户输入时，在后续动作（包括写报告）前暂停；重载保留该边界，需修订任务条件后继续。Rich 展示科研决策、理由和剩余科研轮次。
 - 新研究会话默认不限制 API 请求数和总 token 用量，可通过 CLI/TOML 显式设置上限。保留用量记录与续跑时已存额度；进程、科研轮次及 attempt 限制仍独立生效。
 - 可在现有 accepted plan 中显式修订目标、outputs、材料或执行配置；保留 attempt 历史，仅在命令、schema、协议、准备 lineage 和保护资产仍匹配时复用测量。
@@ -13,7 +14,7 @@
 - `research-report --refresh` 从保留的 analysis 重新生成 Writer/Reviewer 结果与 audit，不再重跑 analysis 或测量。
 - 报告续接遵守持久化 attempt/no-progress 上限；额度耗尽时指向现有显式授权入口，不绕过上限。恢复时保留已存报告设置，只将显式报告改动用于报告产物；无法在现有 session 安全修订的研究设置会明确拒绝。
 - 修正 TOML `research.max_iterations` 到实际消费该值的 CLI 参数映射；manifest 先保存而资源 ledger 写入中断时，同 ID 重放可补完，不重复扩额或抹去历史用量。
-- 恢复中的 attempt 与 preparation 引用按 accepted-plan 顺序和当前执行条件核对，不再只挑最新 capability 产物。D 续接改动仍待审查；E 阶段与冻结 live acceptance 尚未完成。
+- 恢复中的 attempt 与 preparation 引用按 accepted-plan 顺序和当前执行条件核对，不再只挑最新 capability 产物。续接与报告恢复修正已通过本地定向审查；E 阶段与冻结 live acceptance 尚未完成。
 
 ## 2026-09-23
 

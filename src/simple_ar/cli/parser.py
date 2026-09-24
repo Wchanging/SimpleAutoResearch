@@ -164,8 +164,8 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
     )
     session_parser.add_argument(
         "--report-template",
-        default="experiment",
-        help="Report template used with --with-report; defaults to experiment.",
+        default="auto",
+        help="Report template; auto selects a structure from the research evidence and goal judgment.",
     )
     session_parser.add_argument(
         "--report-reviewer",
