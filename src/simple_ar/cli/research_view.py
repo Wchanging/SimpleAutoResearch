@@ -1,6 +1,8 @@
 """Rich presentation of the canonical research loop; no execution state of its own."""
 
 from contextlib import contextmanager
+import os
+import shlex
 from time import monotonic
 
 from rich.panel import Panel
@@ -35,13 +37,16 @@ class ResearchConsole:
     def __init__(self, console=None):
         self.console = console or make_console()
         self._last_decision = None
+        self._last_interaction = None
 
     def start(self, view, *, model: str, topic: str):
         table = Table.grid(padding=(0, 2))
         table.add_column(style="cyan", no_wrap=True)
         table.add_column(overflow="fold")
+        interaction = getattr(view, "work_plan", {}).get("interaction", {})
+        mode = interaction.get("mode", "legacy") if isinstance(interaction, dict) else "legacy"
         for label, value in (("Task", topic), ("Session", view.session_root), ("Model", model),
-                             ("Status", view.status), ("Next", view.next_action or "none")):
+                             ("Interaction", mode), ("Status", view.status), ("Next", view.next_action or "none")):
             table.add_row(label, Text(str(value)))
         self.console.print(Panel(table, title="SimpleAutoResearch", border_style="cyan"))
         self.console.print("Elapsed time is shown while an action runs; completion percentages are not estimated.", style="dim")
@@ -71,6 +76,44 @@ class ResearchConsole:
 
     def state(self, view):
         work_plan = getattr(view, "work_plan", {})
+        interaction_view = work_plan.get("interaction", {}) if isinstance(work_plan, dict) else {}
+        mode = interaction_view.get("mode", "legacy") if isinstance(interaction_view, dict) else "legacy"
+        pending = interaction_view.get("decision") if isinstance(interaction_view, dict) else None
+        if isinstance(pending, dict):
+            key = (pending.get("id"), pending.get("status"))
+            if key != self._last_interaction:
+                self._last_interaction = key
+                rows = [
+                    f"Interaction: {mode}",
+                    f"Decision: {pending.get('id', 'unknown')} ({pending.get('stage', 'unknown')}; {pending.get('status', 'unknown')})",
+                    str(pending.get("question") or "A research decision needs your attention."),
+                    str(pending.get("reason") or "No additional rationale recorded."),
+                ]
+                options = [item for item in pending.get("options", []) if isinstance(item, dict)]
+                if options:
+                    rows.append("Options: " + "; ".join(
+                        f"{item.get('id', 'choice')}: {item.get('label', '')}" for item in options
+                    ))
+                self.console.print(Panel(Text("\n".join(rows)), title="Research decision", border_style="yellow"))
+                topic = str(work_plan.get("task", {}).get("goal", ""))
+                if pending.get("status") == "pending":
+                    for option in pending.get("options", []):
+                        response = option.get("id") if isinstance(option, dict) else None
+                        if response not in {"accept", "reject", "revise"}:
+                            continue
+                        parts = ["simple-ar", "research-session", "--session-root", str(view.session_root),
+                                 "--topic", topic, "--decision-id", str(pending.get("id", "")),
+                                 "--decision-response", response]
+                        if response == "revise":
+                            if pending.get("stage") == "delivery":
+                                parts.extend(("--report-template", "analysis_report"))
+                            else:
+                                parts.extend(("--decision-guidance", "REPLACE_WITH_YOUR_GUIDANCE"))
+                        command = _shell_join(parts)
+                        self.console.print(Text(f"{response}: {command}"))
+        elif self._last_interaction is not None:
+            self._last_interaction = None
+            self.console.print(Text(f"Interaction: {mode}", style="dim"))
         decision = work_plan.get("research_decision", {})
         if decision and decision != self._last_decision:
             self._last_decision = dict(decision)
@@ -138,3 +181,9 @@ def _artifact_rows(view):
         for name in ("decision", "report", "report_audit") if name in refs
     )
     return rows
+
+
+def _shell_join(parts):
+    if os.name == "nt":
+        return "& " + " ".join("'" + str(part).replace("'", "''") + "'" for part in parts)
+    return shlex.join(str(part) for part in parts)

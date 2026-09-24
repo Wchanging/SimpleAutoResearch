@@ -24,6 +24,157 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_rich_displays_pending_decision_commands_without_mutating_state(self):
+        from types import SimpleNamespace
+        from simple_ar.cli.research_view import ResearchConsole
+
+        view = SimpleNamespace(
+            work_plan={"interaction": {"mode": "checkpoints", "decision": {
+                "id": "0123456789abcdef", "stage": "execution_protocol", "status": "pending",
+                "question": "Confirm the protocol.", "reason": "It sets the comparison.",
+                "options": [{"id": "accept", "label": "Run the protocol"},
+                            {"id": "revise", "label": "Change the protocol"},
+                            {"id": "reject", "label": "Stop"}],
+            }}, "task": {"goal": "A task with spaces"}},
+            session_root=Path("C:/runs/a session"), status="paused", next_action=None,
+            status_reason="Waiting for a decision.", attempts=(), state_refs={},
+        )
+        stream = io.StringIO()
+        console = Console(file=stream, width=160)
+        ResearchConsole(console).state(view)
+        output = stream.getvalue()
+        self.assertIn("Interaction: checkpoints", output)
+        self.assertIn("0123456789abcdef", output)
+        self.assertIn("simple-ar", output)
+        self.assertIn("& 'simple-ar'", output)
+        self.assertIn("--decision-response", output)
+        self.assertIn("REPLACE_WITH_YOUR_GUIDANCE", output)
+        self.assertIn("Options: accept: Run the protocol", output)
+
+        view.work_plan["interaction"]["decision"].update({
+            "id": "deliverydecision01", "stage": "delivery", "status": "pending",
+            "question": "Choose a report form.", "reason": "The result is inconclusive.",
+            "options": [{"id": "revise", "label": "Choose a template"}],
+        })
+        ResearchConsole(console).state(view)
+        delivery_output = stream.getvalue()
+        self.assertIn("--report-template", delivery_output)
+        self.assertIn("'analysis_report'", delivery_output)
+
+    def test_delivery_revision_uses_the_pending_reply_not_request_report(self):
+        from dataclasses import replace
+        from simple_ar.app.research_application import (
+            ResearchApplicationError, ResearchApplicationServices, create_session, load_session,
+        )
+        from simple_ar.research.workflow_contracts import ResearchBrief
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Scope\nA supplied source for report delivery.", encoding="utf-8")
+            session = root / "session"
+            app = create_session(ResearchBrief(
+                request_text="Summarize the supplied source.", objective="Summarize the supplied source.",
+                requested_outputs=("report",),
+                asset_requests=({"locator": str(paper), "role": "paper"},),
+            ), root=session, services=ResearchApplicationServices(config={
+                "interaction": "checkpoints", "research_materials_only": True,
+                "report": {"mode": "research_only", "template": "auto"},
+            }))
+            for _ in range(16):
+                if app.view().next_action == "report_write":
+                    break
+                app.advance()
+            self.assertEqual(app.view().next_action, "report_write")
+            decision_id = "abcdef0123456789"
+            decision = {
+                "action": "continue",
+                "interaction": {
+                    "id": decision_id, "stage": "delivery", "status": "pending",
+                    "question": "Choose a report form.", "reason": "The requested delivery is unresolved.",
+                    "options": [{"id": "accept"}, {"id": "revise"}, {"id": "reject"}],
+                    "identity": app._interaction_identity(
+                        "delivery", "report_write", delivery={"template": "analysis_report"},
+                    ),
+                },
+            }
+            proposal_ref = app.controller.store.write_json(
+                f"outputs/research-decision-{decision_id}.json", decision,
+                kind="research_decision", schema="research_decision.v1", producer="test",
+            )
+            app.controller.manifest.state_refs["decision"] = proposal_ref
+            app.controller.save()
+            app.controller.pause("Choose a report form.")
+            base = ["research-session", "--session-root", str(session), "--topic", app.brief.objective]
+            prompt = io.StringIO()
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=None),
+                patch("simple_ar.app.research_application.load_session", return_value=app),
+                contextlib.redirect_stdout(prompt),
+            ):
+                with self.assertRaisesRegex(SystemExit, "status 'paused'"):
+                    main(base)
+            self.assertIn(decision_id, prompt.getvalue())
+            self.assertIn("--report-template", prompt.getvalue())
+            self.assertIn("'analysis_report'", prompt.getvalue())
+            # Other resume branches must not silently discard a requested mode.
+            for extra in (["--reanalyze"], ["--report-template", "analysis_report"]):
+                with (
+                    patch("simple_ar.cli.main._optional_research_llm_client", return_value=None),
+                    patch("simple_ar.app.research_application.load_session", return_value=app),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    with self.assertRaisesRegex(SystemExit, "interaction mode change in a separate resume"):
+                        main(base + ["--interaction", "autonomous"] + extra)
+                self.assertEqual(app.services.config["interaction"], "checkpoints")
+            argv = base + ["--interaction", "autonomous",
+                           "--decision-id", decision_id, "--decision-response", "revise",
+                           "--report-template", "analysis_report"]
+
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=None),
+                patch("simple_ar.app.research_application.load_session", return_value=app),
+                patch.object(app.controller, "continue_with_revision", side_effect=RuntimeError("interrupted after reply")),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(SystemExit, "interrupted after reply"):
+                    main(argv)
+
+            response = app.controller.store.read_json(
+                f"outputs/research-decision-{decision_id}-response.json",
+            )
+            self.assertEqual(response["interaction"]["response"]["revision"], {
+                "report": {"template": "analysis_report"},
+            })
+            self.assertEqual(app.services.config["report"]["template"], "auto")
+            app = load_session(session)
+            with self.assertRaisesRegex(ResearchApplicationError, "different revision inputs"):
+                app.continue_session(
+                    decision_id=decision_id, decision_response="revise",
+                    revised_report_config={"template": "survey"},
+                )
+
+            def stop_before_writer(**_kwargs):
+                return replace(app.view(), status="paused", next_action=None,
+                               status_reason="Test stops before report writing.")
+
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=None),
+                patch("simple_ar.app.research_application.load_session", return_value=app),
+                patch.object(app, "advance", side_effect=stop_before_writer),
+                patch.object(app, "request_report", wraps=app.request_report) as request_report,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(SystemExit, "status 'paused'"):
+                    main(argv)
+            request_report.assert_not_called()
+            self.assertEqual(response["prior_decision_ref"], proposal_ref.to_dict())
+            self.assertEqual(app.services.config["report"]["template"], "analysis_report")
+            self.assertEqual(app.services.config["interaction"], "autonomous")
+            restored = load_session(session)
+            self.assertEqual(restored.services.config["report"]["template"], "analysis_report")
+            self.assertEqual(restored.services.config["interaction"], "autonomous")
+
     def test_research_report_does_not_rewrite_or_execute_a_historical_session(self):
         from tests.legacy_session_fixture import historical_session
         with tempfile.TemporaryDirectory() as tmp:

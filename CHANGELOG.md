@@ -4,6 +4,13 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-25
+
+- Persist decision reply revision inputs with the existing response artifact. An interrupted
+  resume can recover the exact brief/execution/report change; reusing the decision id with
+  different revision terms is rejected. Report and reanalysis entry points cannot bypass a
+  pending required-input or interaction decision.
+
 ## 2026-09-24
 
 - Separate analysis goal judgments from execution status. Automatic experimental
@@ -13,6 +20,12 @@ This file records user-visible project changes in reverse chronological order. P
 - Pause at a research input request before dispatching remaining work, including
   report writing; reload preserves the boundary until the task inputs are revised.
   Rich output shows the research decision, reason and remaining scientific rounds.
+- Add `assisted`, `checkpoints`, and `autonomous` interaction policies to new research
+  sessions (default `checkpoints`). The canonical CLI/TOML accepts, rejects, or revises
+  persisted decisions, while Rich prints continuation commands. Proposal and reply are
+  separate decision artifacts; exact replay does not repeat completed work. Critical
+  facts and permissions remain hard blockers. Only focused local control-flow tests have
+  run; representative live tasks and frozen acceptance remain outstanding.
 - New research sessions default to uncapped API request and total-token usage;
   optional CLI/TOML caps still apply. Usage accounting and saved limits on resume
   are preserved; process, iteration, and attempt limits remain separate.

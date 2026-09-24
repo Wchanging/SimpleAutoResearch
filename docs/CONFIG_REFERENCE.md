@@ -29,7 +29,9 @@ unlimited API usage does not mean unlimited retries or free service.
 Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens),
 `budget` (total_tokens, llm_requests, process_invocations, process_wall_seconds),
 `research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir,
-use_fulltext, allow_pdf_download, keep_raw_pdf, materials_only, max_iterations),
+use_fulltext, allow_pdf_download, keep_raw_pdf, materials_only, max_iterations, interaction),
+`continuation` (authorization fields and optional decision_id, decision_response,
+decision_guidance),
 `assets` (papers), `execution` (command, cwd, timeout_sec, code_task_config,
 primary_metric, metrics, metric_directions, pairs, seeds, seed_flag, seed_count,
 baseline_policy, baseline_ref, protocol), and `report` (template, reviewer,
@@ -48,6 +50,9 @@ Budget limits initialize new sessions; resuming uses the persisted ledger, not a
 Unknown fields are rejected; stage-specific research models are not supported yet.
 `research.max_iterations` maps to the actual follow-up-round limit; `0` stops after
 the first analysis. On `--session-root` resume, saved research settings are retained.
+`research.interaction` selects `assisted`, `checkpoints`, or `autonomous`; new CLI
+sessions default to `checkpoints`, while older sessions without this field keep their
+legacy behavior. Critical facts and permissions remain blockers in every mode.
 Changed search/ingestion settings are rejected when they differ from the saved values;
 `cache_dir` cannot be verified because it is not persisted and is therefore not accepted
 as a resume change. Start a new session to apply those settings. Explicit report settings
@@ -116,6 +121,23 @@ revise the existing session. The accepted plan is rebuilt, while attempt history
 measurements are reused only when their command, result schema, protocol, preparation lineage,
 and protected assets still match. Literature additions do not by themselves repeat valid
 experiments. Changing task kind still requires a new session.
+
+Resolve a pending decision through this same command, without an interactive stdin prompt:
+
+```bash
+simple-ar research-session --session-root runs/research-session/<session> --topic "Original research goal" \
+  --decision-id ID_FROM_RICH --decision-response accept
+
+simple-ar research-session --session-root runs/research-session/<session> --topic "Original research goal" \
+  --decision-id ID_FROM_RICH --decision-response revise \
+  --decision-guidance "Add facts or provide a revised direction"
+```
+
+The response may be `accept`, `reject`, or `revise`. Revising a delivery selection also
+requires an explicit report setting, such as `--report-template analysis_report`. TOML may
+place `decision_id`, `decision_response`, and `decision_guidance` under `[continuation]`.
+The proposal and reply remain separate decision artifacts; exact replay does not repeat
+completed work, and changed task/protocol inputs invalidate an old decision.
 
 ### Explicit continuation allowances
 

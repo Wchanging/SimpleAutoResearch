@@ -459,6 +459,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         "research_max_iterations": args.max_research_iterations,
         "report": report_config,
     }
+    if resume_root is None:
+        config["interaction"] = getattr(args, "interaction", None) or "checkpoints"
     if task_kind != "auto":
         config["research_task_kind"] = task_kind
     selected_idea_id = str(getattr(args, "selected_idea_id", "") or "").strip()
@@ -533,6 +535,9 @@ def _print_research_session(args: argparse.Namespace) -> None:
         asset_requests=assets,
     )
     continuation = _continuation_parameters(args)
+    decision_fields = (args.decision_id, args.decision_response, args.decision_guidance)
+    if resume_root is None and any(decision_fields):
+        raise SystemExit("A decision reply requires --session-root.")
     if resume_root is None and (
         continuation["authorization_id"] or continuation["authorization_reason"]
         or continuation["authorize_remaining"] or continuation["additional_attempts"]
@@ -546,6 +551,13 @@ def _print_research_session(args: argparse.Namespace) -> None:
             from simple_ar.app.research_application import load_session
             from dataclasses import replace
             app = load_session(session_root, services=replace(services, config={}))
+            explicit = getattr(args, "_explicit_resume_destinations", set())
+            interaction_update = (
+                args.interaction
+                if "interaction" in explicit and args.interaction != app.services.config.get("interaction")
+                else None
+            )
+            decision_requested = any(decision_fields)
             changed_research_settings = _changed_resume_research_settings(args, app)
             if changed_research_settings:
                 names = ", ".join(changed_research_settings)
@@ -554,6 +566,27 @@ def _print_research_session(args: argparse.Namespace) -> None:
                     f"{names}. They were not applied; start a new research-session to change search/ingestion settings."
                 )
             report_overrides = _report_config_overrides(args, app)
+            work_interaction = app.view().work_plan.get("interaction", {})
+            pending_decision = (
+                work_interaction.get("decision")
+                if isinstance(work_interaction, dict) else None
+            )
+            has_pending_decision = (
+                isinstance(pending_decision, dict) and pending_decision.get("status") == "pending"
+            )
+            delivery_revision = bool(
+                isinstance(pending_decision, dict)
+                and pending_decision.get("status") in {"pending", "revised"}
+                and pending_decision.get("id") == args.decision_id
+                and pending_decision.get("stage") == "delivery"
+                and args.decision_response == "revise"
+            )
+            if interaction_update is not None and (
+                getattr(args, "reanalyze", False) or (report_overrides and not delivery_revision)
+            ):
+                raise ResearchApplicationError(
+                    "Apply the interaction mode change in a separate resume before reanalysis or report refresh."
+                )
             if task_kind != "auto" and task_kind != app._task_kind():
                 raise ResearchApplicationError("Changing task kind requires a new session; revise the goal/assets/outputs within the existing task kind.")
             revised_brief = _merge_resume_brief(
@@ -576,10 +609,19 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 continuation["authorize_remaining"], continuation["additional_attempts"],
                 continuation["additional_no_progress"],
             ))
-            if report_overrides and (brief_changed or revised_execution is not None or continuation_requested or getattr(args, "reanalyze", False)):
+            if report_overrides and has_pending_decision and not delivery_revision:
+                raise ResearchApplicationError(
+                    "Answer the pending research decision first; only a revise reply to a delivery decision can change report settings here."
+                )
+            if report_overrides and not delivery_revision and (
+                brief_changed or revised_execution is not None or continuation_requested
+                or getattr(args, "reanalyze", False) or decision_requested
+            ):
                 raise ResearchApplicationError(
                     "Apply report configuration in a separate research-session resume, without input revisions, reanalysis or continuation allowances."
                 )
+            if decision_requested and getattr(args, "reanalyze", False):
+                raise ResearchApplicationError("A decision reply cannot be combined with --reanalyze.")
             if getattr(args, "reanalyze", False) and (brief_changed or revised_execution is not None or any((
                 continuation["authorization_id"], continuation["authorization_reason"],
                 continuation["authorize_remaining"], continuation["additional_attempts"],
@@ -588,21 +630,29 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 raise ResearchApplicationError("--reanalyze cannot be combined with input revisions or continuation allowances.")
             if getattr(args, "reanalyze", False):
                 app.request_reanalysis()
-            elif report_overrides:
+            elif report_overrides and not delivery_revision:
                 app.request_report(
                     refresh=True,
                     report_config=report_overrides,
                     reason="Apply explicit report configuration and rebuild only report deliverables from existing evidence.",
                 )
-            elif brief_changed or revised_execution is not None or any((
+            elif (brief_changed or revised_execution is not None or interaction_update is not None
+                  or decision_requested or any((
                 continuation["authorization_id"], continuation["authorization_reason"],
                 continuation["authorize_remaining"], continuation["additional_attempts"],
                 continuation["additional_no_progress"],
-            )) or app.view().status != "completed":
+            )) or (app.view().status != "completed" and not (
+                has_pending_decision
+            ))):
                 app.continue_session(
                     reason="Resume from research-session with explicit input/budget revision.",
                     revised_brief=revised_brief if brief_changed else None,
                     revised_execution=revised_execution,
+                    interaction=interaction_update,
+                    decision_id=args.decision_id,
+                    decision_response=args.decision_response,
+                    decision_guidance=args.decision_guidance,
+                    revised_report_config=report_overrides if delivery_revision else None,
                     **continuation,
                 )
         view = app.view()

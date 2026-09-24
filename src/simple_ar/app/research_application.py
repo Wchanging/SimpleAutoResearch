@@ -17,6 +17,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from uuid import uuid4
 
 from simple_ar.app.research_intake import normalize_assets, validate_brief, write_intake_artifacts
 from simple_ar.app.research_execution import (
@@ -55,6 +56,14 @@ from simple_ar.research.task_plan import (
     TaskPlanRequest,
     TaskPlanResult,
     append_research_followup,
+)
+from simple_ar.app.research_interaction import (
+    INTERACTION_MODES,
+    apply_decision_response,
+    requires_confirmation,
+    response_artifact_path,
+    response_matches,
+    response_terms_match,
 )
 from simple_ar.research.registry import register_research_capabilities
 from simple_ar.research.sources import (
@@ -338,6 +347,8 @@ class ResearchApplication:
                 action = self._next_action()
                 if action is None:
                     break
+                if self._ensure_interaction_checkpoint(action):
+                    break
                 if not self._run_action(action):
                     break
             self._finish_available_work()
@@ -349,12 +360,157 @@ class ResearchApplication:
         reason: str = "Continue the research application.",
         revised_brief: ResearchBrief | None = None,
         revised_execution: Mapping[str, object] | None = None,
+        interaction: str | None = None,
+        decision_id: str | None = None,
+        decision_response: str | None = None,
+        decision_guidance: str | None = None,
+        revised_report_config: Mapping[str, object] | None = None,
         authorization_id: str | None = None,
         authorization_reason: str | None = None,
         authorize_remaining: Mapping[str, int | float] | None = None,
         additional_attempts: int = 0,
         additional_no_progress: int = 0,
     ) -> ResearchApplicationView:
+        if interaction is not None and interaction not in INTERACTION_MODES:
+            raise ResearchApplicationError(
+                f"interaction must be one of {', '.join(INTERACTION_MODES)}."
+            )
+        has_decision_fields = bool(decision_id or decision_response or decision_guidance)
+        if has_decision_fields and not (decision_id and decision_response):
+            raise ResearchApplicationError("A decision reply requires both decision_id and decision_response.")
+        if decision_response is not None and decision_response not in {"accept", "reject", "revise"}:
+            raise ResearchApplicationError("decision_response must be accept, reject or revise.")
+        if decision_guidance and decision_response != "revise":
+            raise ResearchApplicationError("decision_guidance is valid only with decision_response=revise.")
+
+        gate_ref, current_decision, gate = self._current_interaction()
+        replaying_answer = False
+        revision_args_supplied = any((
+            revised_brief is not None, revised_execution is not None,
+            revised_report_config is not None,
+        ))
+        saved_response = self._read_decision_response(decision_id) if decision_id else None
+        if decision_id:
+            if saved_response is not None and not response_terms_match(
+                saved_response, decision_response, decision_guidance,
+            ):
+                raise ResearchApplicationError("This decision id was already answered with different terms.")
+            if not isinstance(gate, Mapping) or gate.get("id") != decision_id:
+                if saved_response is not None:
+                    saved_revision = saved_response.get("revision")
+                    if not revision_args_supplied:
+                        if "revision" not in saved_response or (
+                            isinstance(saved_revision, Mapping)
+                            and self._decision_revision_is_applied(saved_revision)
+                        ):
+                            return self.view()
+                    else:
+                        requested_brief = self._decision_guidance_brief(
+                            revised_brief, decision_id, decision_response,
+                            str(saved_response.get("stage") or ""), decision_guidance,
+                        )
+                        requested_revision = self._interaction_revision_payload(
+                            requested_brief, revised_execution, revised_report_config,
+                        )
+                        if response_matches(
+                            saved_response, decision_response, decision_guidance, requested_revision,
+                        ):
+                            return self.view()
+                    raise ResearchApplicationError("This decision id was already answered with different terms.")
+                raise ResearchApplicationError("The decision id is not the current pending research decision.")
+            if saved_response is None:
+                embedded = gate.get("response") if isinstance(gate.get("response"), Mapping) else None
+                saved_response = ({**embedded, "stage": gate.get("stage")}
+                                  if isinstance(embedded, Mapping) else None)
+            saved_revision = saved_response.get("revision") if isinstance(saved_response, Mapping) else None
+            revision_already_applied = False
+            if isinstance(saved_revision, Mapping) and not revision_args_supplied:
+                if self._decision_revision_is_applied(saved_revision):
+                    revision_already_applied = True
+                else:
+                    revised_brief = (
+                        ResearchBrief.from_dict(saved_revision["brief"])
+                        if isinstance(saved_revision.get("brief"), Mapping) else revised_brief
+                    )
+                    revised_execution = (
+                        dict(saved_revision["execution"])
+                        if isinstance(saved_revision.get("execution"), Mapping) else revised_execution
+                    )
+                    revised_report_config = (
+                        dict(saved_revision["report"])
+                        if isinstance(saved_revision.get("report"), Mapping) else revised_report_config
+                    )
+            if gate.get("status") != "pending":
+                if saved_response and response_terms_match(saved_response, decision_response, decision_guidance):
+                    replaying_answer = True
+                else:
+                    raise ResearchApplicationError("This decision has already been resolved.")
+            if not replaying_answer and not self._interaction_identity_is_current(gate):
+                raise ResearchApplicationError("The pending decision no longer matches current task inputs; review the updated plan.")
+            if not replaying_answer and decision_response == "accept" and gate.get("stage") == "required_input":
+                raise ResearchApplicationError("A required fact or permission cannot be accepted without supplying it; revise or reject the decision.")
+            if not replaying_answer and decision_response == "revise":
+                if gate.get("stage") == "delivery":
+                    if not revised_report_config:
+                        raise ResearchApplicationError("Revising a delivery choice requires an explicit report configuration.")
+                elif not (decision_guidance or revised_brief is not None or revised_execution is not None):
+                    raise ResearchApplicationError("Revising this decision requires guidance, revised task inputs, or an execution protocol.")
+            elif not replaying_answer and (
+                revised_brief is not None or revised_execution is not None or revised_report_config is not None
+            ):
+                raise ResearchApplicationError("Changed task/report inputs must use decision_response=revise.")
+            elif replaying_answer and decision_response != "revise" and (
+                revised_brief is not None or revised_execution is not None or revised_report_config is not None
+            ):
+                raise ResearchApplicationError("Changed task/report inputs must use decision_response=revise.")
+        else:
+            revision_already_applied = False
+            if revised_report_config is not None:
+                raise ResearchApplicationError("A report choice can be revised only as the answer to its pending decision.")
+
+        previous_interaction = self._interaction_mode()
+        original_config = dict(self.services.config)
+        interaction_changed = interaction is not None and interaction != previous_interaction
+        requested_mode = interaction if interaction is not None else previous_interaction
+        answer = decision_response
+        answer_source = "user"
+        if (answer is None and interaction_changed and isinstance(gate, Mapping)
+                and gate.get("status") == "pending"
+                and self._interaction_identity_is_current(gate)):
+            if not requires_confirmation(
+                requested_mode, str(gate.get("stage") or ""), str(gate.get("proposed_action") or ""),
+            ):
+                answer = "accept"
+                answer_source = "interaction_mode_change"
+                decision_id = str(gate.get("id") or "")
+        if answer == "revise" and isinstance(gate, Mapping):
+            revised_brief = self._decision_guidance_brief(
+                revised_brief, decision_id, answer, str(gate.get("stage") or ""), decision_guidance,
+            )
+
+        revision_payload = self._interaction_revision_payload(
+            revised_brief, revised_execution, revised_report_config,
+        )
+        if saved_response is not None and decision_id == (gate.get("id") if isinstance(gate, Mapping) else None):
+            if "revision" not in saved_response:
+                if revision_args_supplied:
+                    raise ResearchApplicationError(
+                        "This older decision reply did not record its revision inputs; start a new decision to change them."
+                    )
+            elif not revision_already_applied and not response_matches(
+                saved_response, decision_response, decision_guidance, revision_payload,
+            ):
+                raise ResearchApplicationError("This decision id was already answered with different revision inputs.")
+            elif isinstance(saved_response.get("revision"), Mapping) and self._decision_revision_is_applied(
+                saved_response["revision"],
+            ):
+                revision_already_applied = True
+            if revision_already_applied:
+                revised_brief = revised_execution = revised_report_config = None
+                revision_payload = {}
+        if revised_brief == self.brief:
+            revised_brief = None
+
         requested_execution = dict(revised_execution) if revised_execution is not None else None
         previous_execution = self.services.config.get("execution")
         execution_changed = requested_execution is not None and requested_execution != previous_execution
@@ -368,6 +524,26 @@ class ResearchApplication:
                 )
             except (TypeError, ValueError) as exc:
                 raise ResearchApplicationError(f"Invalid revised execution configuration: {exc}") from exc
+        updated_config = dict(self.services.config)
+        if interaction_changed and interaction is not None:
+            updated_config["interaction"] = interaction
+        if execution_changed and requested_execution is not None:
+            updated_config["execution"] = requested_execution
+        report_config_changed = False
+        if revised_report_config is not None:
+            from simple_ar.report.schema import ReportRuntimeConfig
+            old_report = updated_config.get("report", {})
+            old_report = dict(old_report) if isinstance(old_report, Mapping) else {}
+            merged_report = {**old_report, **dict(revised_report_config)}
+            try:
+                ReportRuntimeConfig.model_validate(merged_report)
+            except (TypeError, ValueError) as exc:
+                raise ResearchApplicationError(f"Invalid revised report configuration: {exc}") from exc
+            report_config_changed = merged_report != old_report
+            updated_config["report"] = merged_report
+        if (answer == "revise" and isinstance(gate, Mapping) and gate.get("stage") == "delivery"
+                and not report_config_changed and not replaying_answer):
+            raise ResearchApplicationError("The revised report configuration must change the selected delivery.")
         resource_allowances = dict(authorize_remaining or {})
         has_additional_budget = bool(resource_allowances or additional_attempts or additional_no_progress)
         has_auth_fields = bool(authorization_id or authorization_reason)
@@ -382,10 +558,33 @@ class ResearchApplication:
             or not authorization_reason.strip()
         ):
             raise ResearchApplicationError("Continuation authorization id and reason cannot be blank.")
+        pending_after_mode_change = (
+            interaction_changed and answer is None and isinstance(gate, Mapping)
+            and gate.get("status") == "pending"
+            and self._interaction_identity_is_current(gate)
+            and requires_confirmation(
+                requested_mode, str(gate.get("stage") or ""), str(gate.get("proposed_action") or ""),
+            )
+        )
+        settled_answer_replay = (
+            replaying_answer and self.controller.manifest.status == "completed"
+            and prepared is None and not report_config_changed
+        )
         # Authorization alone does not reopen completed work. Use the same
         # persisted authorization path for new terms and idempotent replay.
-        authorization_only = self.controller.manifest.status == "completed" and prepared is None
-        if not authorization_only and prepared is None and self._next_action() is None:
+        settings_only = (
+            self.controller.manifest.status == "completed" and prepared is None
+            and (answer is None or settled_answer_replay)
+            and (interaction_changed or report_config_changed)
+        ) or (
+            pending_after_mode_change and prepared is None and answer is None
+        )
+        authorization_only = (
+            self.controller.manifest.status == "completed" and prepared is None
+            and (answer is None or settled_answer_replay)
+            and not interaction_changed and not report_config_changed
+        )
+        if not authorization_only and not settings_only and prepared is None and answer is None and self._next_action() is None:
             raise ResearchApplicationError("This session has no enabled next action to continue.")
         with self.controller.mutation_scope():
             if self.controller.manifest.status in {"created", "running"} or any(
@@ -421,6 +620,18 @@ class ResearchApplication:
                     raise ResearchApplicationError(f"Could not apply continuation authorization: {exc}") from exc
             if authorization_only:
                 return self.view()
+            if settings_only:
+                if updated_config != dict(self.services.config):
+                    self.services = replace(self.services, config=updated_config)
+                    self._persist_inputs(validate_brief(self.brief, self.assets))
+                return self.view()
+            if (answer is not None and not replaying_answer
+                    and isinstance(gate, Mapping) and gate_ref is not None):
+                self._persist_interaction_response(
+                    gate_ref, current_decision, gate, answer,
+                    guidance=decision_guidance or "", source=answer_source,
+                    revision=revision_payload,
+                )
             # Explicit continuation retries a failed call with no domain result.
             # Completed results and measured failures remain available to recovery.
             current = next((item for item in self.controller.list_attempts()
@@ -433,15 +644,12 @@ class ResearchApplication:
             self.controller.continue_with_revision(
                 reason,
             )
+            if updated_config != dict(self.services.config):
+                self.services = replace(self.services, config=updated_config)
             if prepared is not None:
                 old_brief, old_assets = self.brief, self.assets
                 old_execution = dict(previous_execution) if isinstance(previous_execution, Mapping) else None
                 self.brief, self.assets, diagnostics = prepared
-                if execution_changed and requested_execution is not None:
-                    self.services = replace(
-                        self.services,
-                        config={**self.services.config, "execution": requested_execution},
-                    )
                 self.controller.manifest.current_attempt = None
                 self._invalidate_revised_inputs(old_brief, old_assets, old_execution)
                 self._persist_inputs(diagnostics)
@@ -453,8 +661,116 @@ class ResearchApplication:
                     if assessment.get("generation_mode") == "deterministic_fallback":
                         self.controller.manifest.state_refs.pop("assessment")
                         self.controller.manifest.current_attempt = None
-                self._persist_application_views()
+                if updated_config != original_config:
+                    self._persist_inputs(validate_brief(self.brief, self.assets))
+                else:
+                    self._persist_application_views()
             return self.view()
+
+    def _current_interaction(self):
+        ref = self.controller.manifest.state_refs.get("decision")
+        decision = self.controller.store.read_json(ref) if ref is not None else {}
+        decision = decision if isinstance(decision, Mapping) else {}
+        interaction = decision.get("interaction")
+        return ref, decision, interaction if isinstance(interaction, Mapping) else None
+
+    def _assert_no_pending_interaction(self, operation: str) -> None:
+        decision = self._state_payload("decision") if "decision" in self.controller.manifest.state_refs else {}
+        interaction = decision.get("interaction") if isinstance(decision, Mapping) else None
+        if isinstance(interaction, Mapping) and interaction.get("status") == "pending":
+            stage = str(interaction.get("stage") or "research")
+            raise ResearchApplicationError(
+                f"Resolve the pending {stage} decision through research-session before requesting {operation}."
+            )
+        if (isinstance(decision, Mapping) and decision.get("action") == "request_input"
+                and not isinstance(interaction, Mapping)):
+            raise ResearchApplicationError(
+                f"Resolve the pending required_input through research-session before requesting {operation}."
+            )
+
+    def _read_decision_response(self, decision_id: str) -> Mapping[str, Any] | None:
+        if len(decision_id) != 16 or any(char not in "0123456789abcdef" for char in decision_id.lower()):
+            raise ResearchApplicationError("decision_id must be the 16-character id shown in the pending decision.")
+        try:
+            payload = self.controller.store.read_json(response_artifact_path(decision_id))
+        except (OSError, ValueError):
+            return None
+        interaction = payload.get("interaction") if isinstance(payload, Mapping) else None
+        response = interaction.get("response") if isinstance(interaction, Mapping) else None
+        return ({**response, "stage": interaction.get("stage")}
+                if isinstance(response, Mapping) and isinstance(interaction, Mapping) else None)
+
+    def _decision_guidance_brief(
+        self, brief: ResearchBrief | None, decision_id: str, action: str | None,
+        stage: str, guidance: str | None,
+    ) -> ResearchBrief | None:
+        if action != "revise" or stage == "delivery" or not guidance:
+            return brief
+        base = brief or self.brief
+        clarification = f"\n\n## User decision response ({decision_id})\n\n{guidance.strip()}"
+        # A stored reply can be replayed after its clarification is already in
+        # the canonical brief; return that brief so exact revision terms match.
+        return base if clarification in base.request_text else replace(
+            base, request_text=base.request_text + clarification,
+        )
+
+    @staticmethod
+    def _interaction_revision_payload(
+        brief: ResearchBrief | None, execution: Mapping[str, object] | None,
+        report: Mapping[str, object] | None,
+    ) -> dict[str, Any]:
+        revision: dict[str, Any] = {}
+        if brief is not None:
+            revision["brief"] = brief.to_dict()
+        if execution is not None:
+            revision["execution"] = dict(execution)
+        if report is not None:
+            revision["report"] = dict(report)
+        return revision
+
+    def _decision_revision_is_applied(self, revision: Mapping[str, Any]) -> bool:
+        brief = revision.get("brief")
+        if isinstance(brief, Mapping) and self.brief.to_dict() != dict(brief):
+            return False
+        execution = revision.get("execution")
+        if isinstance(execution, Mapping) and self.services.config.get("execution") != dict(execution):
+            return False
+        report = revision.get("report")
+        if isinstance(report, Mapping):
+            current = self.services.config.get("report", {})
+            if not isinstance(current, Mapping) or any(current.get(name) != value for name, value in report.items()):
+                return False
+        return bool(revision)
+
+    def _persist_interaction_response(
+        self, previous_ref: ArtifactRef, previous: Mapping[str, Any],
+        interaction: Mapping[str, Any], response: str, *, guidance: str, source: str,
+        revision: Mapping[str, Any] | None = None,
+    ) -> None:
+        try:
+            decision, updated = apply_decision_response(
+                previous, interaction, response, guidance, source=source, revision=revision,
+            )
+        except ValueError as exc:
+            raise ResearchApplicationError(str(exc)) from exc
+        stage = str(updated.get("stage") or "")
+        if stage == "research_choice" and response == "accept":
+            proposed = str(updated.get("proposed_action") or "")
+            iteration = int(decision.get("research_iteration", 0)) + 1
+            extension_ref = self._append_research_followup(proposed, iteration)
+            prior_cycle = decision.get("bounded_cycle")
+            cycle = dict(prior_cycle) if isinstance(prior_cycle, Mapping) else {}
+            cycle["plan_extension_ref"] = extension_ref.to_dict() if extension_ref else None
+            decision["bounded_cycle"] = cycle
+        decision["prior_decision_ref"] = previous_ref.to_dict()
+        decision_id = str(updated.get("id") or "")
+        ref = self.controller.store.write_json(
+            response_artifact_path(decision_id), decision,
+            kind="research_decision", schema="research_decision.v1",
+            producer="research_application",
+        )
+        self.controller.manifest.state_refs["decision"] = ref
+        self.controller.save()
 
     def supply_execution(self, execution: Mapping[str, object], *, task_text: str = "") -> ResearchApplicationView:
         """Attach missing execution inputs; retain research evidence and resource limits."""
@@ -478,6 +794,7 @@ class ResearchApplication:
 
     def request_reanalysis(self) -> ResearchApplicationView:
         """Reconsider a settled measurement without retraining or requesting a report."""
+        self._assert_no_pending_interaction("reanalysis")
         if self.controller.manifest.status not in {"paused", "completed"}:
             raise ResearchApplicationError("Stop at an analysis checkpoint before requesting reanalysis.")
         analysis_ref = self._latest_analysis_ref()
@@ -514,6 +831,7 @@ class ResearchApplication:
         and are reused by the report actions.
         """
 
+        self._assert_no_pending_interaction("report changes")
         requested = {item.strip().lower() for item in self.brief.requested_outputs}
         previous_report_config = self.services.config.get("report", {})
         if not isinstance(previous_report_config, Mapping):
@@ -1407,18 +1725,7 @@ class ResearchApplication:
             )
         if action == "report_write":
             from simple_ar.report.writing import ReportWritingRequest
-            from simple_ar.report.schema import ReportRuntimeConfig
-            from simple_ar.report.templates import load_report_template_bundle, resolve_experiment_delivery
-            report_context, memory = self.report_inputs()
-            config = ReportRuntimeConfig.model_validate(self._effective_config().get("report", {}))
-            analysis_ref = self._latest_analysis_ref()
-            if analysis_ref is not None:
-                analysis = self.controller.store.read_json(analysis_ref).get("analysis", {})
-                decision = self._state_payload("decision") if "decision" in self.controller.manifest.state_refs else {}
-                config, delivery = resolve_experiment_delivery(config, analysis, decision)
-                memory.template = config.template
-                report_context.results["delivery"] = delivery
-                memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
+            report_context, memory, config, template, _ = self._report_writing_parts()
             sources = tuple(ref for key, ref in self.controller.manifest.state_refs.items() if key not in {"work_plan", "work_plan_markdown", "readiness"})
             resume_ref = None
             for attempt in reversed(self.controller.list_attempts()):
@@ -1429,8 +1736,7 @@ class ResearchApplication:
                         break
             return self._execute(
                 "report_write", "writer",
-                ReportWritingRequest(report_context, memory, config,
-                                     load_report_template_bundle(report_mode=report_context.report_mode, config=config), self.services.llm_client, resume_ref,
+                ReportWritingRequest(report_context, memory, config, template, self.services.llm_client, resume_ref,
                                      self.services.message_callback),
                 sources + ((resume_ref,) if resume_ref else ()),
             )
@@ -1834,6 +2140,7 @@ class ResearchApplication:
         followup_iteration = current_round + 1
         options: list[dict[str, Any]] = []
         validation_reason = ""
+        interaction: dict[str, Any] | None = None
 
         if execution_status in {"failed", "timed_out"} or analysis_status in {"failed", "blocked"}:
             accepted_action = "stop"
@@ -1908,22 +2215,52 @@ class ResearchApplication:
                 reason = reason or "The analysis proposed a bounded revision of the current candidate."
                 options = [{"action": "stop", "reason": "Stop after the revised candidate and its re-analysis."}]
 
+        proposed_action = accepted_action
+        interaction_mode = self._interaction_mode()
+        if accepted_action == "request_input":
+            interaction = {
+                "id": uuid4().hex[:16],
+                "stage": "required_input",
+                "status": "pending",
+                "question": reason or "The analysis requires a missing fact or explicit user condition.",
+                "reason": reason,
+                "options": [
+                    {"id": "revise", "label": "Provide the missing fact or revised condition"},
+                    {"id": "reject", "label": "Stop and preserve the current evidence"},
+                ],
+                "evidence_refs": list(evidence_refs),
+                "identity": {"research_identity": identity},
+                "proposed_action": "request_input",
+            }
+        elif automatic_follow_up and requires_confirmation(
+            interaction_mode, "research_choice", accepted_action,
+        ):
+            interaction = {
+                "id": uuid4().hex[:16],
+                "stage": "research_choice",
+                "status": "pending",
+                "question": f"Accept the analysis recommendation to {accepted_action}?",
+                "reason": reason,
+                "options": [
+                    {"id": "accept", "label": f"Continue with {accepted_action}"},
+                    {"id": "reject", "label": "Keep the measured result and stop this follow-up"},
+                    {"id": "revise", "label": "Give revised research direction or constraints"},
+                ],
+                "evidence_refs": list(evidence_refs),
+                "identity": {"research_identity": identity},
+                "proposed_action": proposed_action,
+            }
+            accepted_action = "request_input"
+            automatic_follow_up = False
+            disposition = "await_input"
+            options = [
+                {"action": "accept", "reason": f"Continue with {proposed_action}."},
+                {"action": "reject", "reason": "Stop the scientific follow-up and retain the current evidence."},
+                {"action": "revise", "reason": "Provide a revised research direction or constraints."},
+            ]
+
         if automatic_follow_up:
-            plan = self._load_task_plan()
-            pair_count = 0
-            if accepted_action == "revise_candidate":
-                execution = self._execution_config().get("execution")
-                pair_count = len(execution_pairs(execution, task_text=self.brief.request_text)) if isinstance(execution, Mapping) else 0
-            extended = append_research_followup(
-                plan, followup_iteration, action=accepted_action, pair_count=pair_count,
-            )
-            if extended != plan:
-                extension_ref = self.controller.store.write_json(
-                    f"planning/task_plan-extension-r{followup_iteration}.json",
-                    extended.to_handoff_dict(), kind="task_plan",
-                    schema="research_task_plan.v1", producer="research_application",
-                )
-                refs["task_plan"] = extension_ref
+            extension_ref = self._append_research_followup(accepted_action, followup_iteration)
 
         analysis_summary = {
             "status_reasons": [str(item) for item in analysis.get("status_reasons", [])[:4]]
@@ -1963,6 +2300,7 @@ class ResearchApplication:
                 str(item.get("path")): item for item in identity_evidence if item.get("path")
             }.values()),
             "continuation_options": options,
+            **({"interaction": interaction} if interaction is not None else {}),
             "bounded_cycle": {
                 "measured": bool(comparison_payloads),
                 "automatic_follow_up": automatic_follow_up,
@@ -1982,7 +2320,9 @@ class ResearchApplication:
         if existing is not None and self.controller.store.exists(existing):
             decision["prior_decision_ref"] = existing.to_dict()
         path = "outputs/research_decision.json"
-        if existing is not None and self.controller.store.exists(existing):
+        if interaction is not None:
+            path = f"outputs/research-decision-{interaction['id']}.json"
+        elif existing is not None and self.controller.store.exists(existing):
             path = f"outputs/research_decision-{_attempt_id_from_ref(analysis_ref)}.json"
         decision_ref = self.controller.store.write_json(
             path, decision, kind="research_decision", schema="research_decision.v1",
@@ -1990,6 +2330,26 @@ class ResearchApplication:
         )
         refs["decision"] = decision_ref
         return decision_ref
+
+    def _append_research_followup(self, action: str, iteration: int) -> ArtifactRef | None:
+        plan = self._load_task_plan()
+        pair_count = 0
+        if action == "revise_candidate":
+            execution = self._execution_config().get("execution")
+            if isinstance(execution, Mapping):
+                pair_count = len(execution_pairs(execution, task_text=self.brief.request_text))
+        extended = append_research_followup(
+            plan, iteration, action=action, pair_count=pair_count,
+        )
+        if extended == plan:
+            return None
+        ref = self.controller.store.write_json(
+            f"planning/task_plan-extension-r{iteration}.json",
+            extended.to_handoff_dict(), kind="task_plan",
+            schema="research_task_plan.v1", producer="research_application",
+        )
+        self.controller.manifest.state_refs["task_plan"] = ref
+        return ref
 
     def _latest_analysis_ref(self) -> ArtifactRef | None:
         refs = self.controller.manifest.state_refs
@@ -2750,6 +3110,14 @@ class ResearchApplication:
             status = "partial" if has_available_work else "blocked"
         else:
             status = "ready" if next_action else "partial"
+        current_decision = (
+            self._state_payload("decision")
+            if "decision" in self.controller.manifest.state_refs else {}
+        )
+        interaction_decision = (
+            current_decision.get("interaction")
+            if isinstance(current_decision, Mapping) else None
+        )
         return {
             "schema_version": "research_work_plan.v1",
             "revision": self.brief.revision,
@@ -2770,9 +3138,15 @@ class ResearchApplication:
             "pending_user_decision": self.controller.manifest.status_reason if self.controller.manifest.status == "paused" else "",
             "research_decision": {
                 key: value for key, value in (
-                    self._state_payload("decision").items()
-                    if "decision" in self.controller.manifest.state_refs else ()
+                    current_decision.items()
                 ) if key in {"action", "decision_reason", "research_iteration", "remaining_authorized_rounds"}
+            },
+            "interaction": {
+                "mode": self._interaction_mode() or "legacy",
+                "decision": {
+                    key: value for key, value in interaction_decision.items()
+                    if key in {"id", "stage", "status", "question", "reason", "options", "evidence_refs"}
+                } if isinstance(interaction_decision, Mapping) else None,
             },
             "decision_ref": self.controller.manifest.state_refs.get("decision").to_dict()
             if self.controller.manifest.state_refs.get("decision") is not None else None,
@@ -3128,10 +3502,236 @@ class ResearchApplication:
             self._record_attempt_outputs(attempt.capability, state_name, attempt.attempt_id, result)
             self.controller.save()
 
+    def _interaction_mode(self) -> str | None:
+        value = self.services.config.get("interaction")
+        if value is None:
+            return None
+        mode = str(value).strip().lower()
+        if mode not in INTERACTION_MODES:
+            raise ResearchApplicationError(f"Unsupported research interaction mode: {value!r}")
+        return mode
+
+    def _report_writing_parts(self):
+        from simple_ar.report.schema import ReportRuntimeConfig
+        from simple_ar.report.templates import load_report_template_bundle, resolve_experiment_delivery
+
+        report_context, memory = self.report_inputs()
+        config = ReportRuntimeConfig.model_validate(self._effective_config().get("report", {}))
+        delivery: dict[str, Any] = {"template": report_context.report_mode}
+        analysis_ref = self._latest_analysis_ref()
+        if analysis_ref is not None:
+            analysis = self.controller.store.read_json(analysis_ref).get("analysis", {})
+            decision = self._state_payload("decision") if "decision" in self.controller.manifest.state_refs else {}
+            config, delivery = resolve_experiment_delivery(config, analysis, decision)
+            memory.template = config.template
+            report_context.results["delivery"] = delivery
+            memory.key_decisions.append(json.dumps(delivery, ensure_ascii=False))
+        template = load_report_template_bundle(report_mode=report_context.report_mode, config=config)
+        return report_context, memory, config, template, delivery
+
+    def _first_execution_step(self, action: str):
+        if (self._task_kind() == "bug_fix" or not self._requires_execution_output()
+                or "task_plan" not in self.controller.manifest.state_refs):
+            return None
+        execution_capabilities = {"prepare_execution", "implement", "experiment"}
+        steps = self._load_task_plan().steps
+        for index, step in enumerate(steps):
+            if step.capability not in execution_capabilities:
+                continue
+            if step.action == action and not any(
+                self._step_completed(previous)
+                for previous in steps[:index]
+                if previous.capability in execution_capabilities
+            ):
+                return step
+            if step.action == action:
+                return None
+        return None
+
+    def _interaction_identity(self, stage: str, action: str, *, delivery: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        refs = self.controller.manifest.state_refs
+        identity: dict[str, Any] = {
+            "stage": stage,
+            "action": action,
+            "brief_ref": refs["brief"].to_dict(),
+            "task_plan_ref": refs["task_plan"].to_dict(),
+        }
+        if stage == "execution_protocol":
+            if refs.get("design") is not None:
+                identity["design_ref"] = refs["design"].to_dict()
+            identity["runtime_config_ref"] = refs["runtime_config"].to_dict()
+            identity["execution_protocol"] = self._execution_protocol_projection()
+        elif stage == "delivery":
+            analysis_ref = self._latest_analysis_ref()
+            identity["analysis_ref"] = analysis_ref.to_dict() if analysis_ref is not None else None
+            report = self._effective_config().get("report", {})
+            identity["requested_template"] = report.get("template", "auto") if isinstance(report, Mapping) else "auto"
+            identity["selected_template"] = str((delivery or {}).get("template") or "")
+        return identity
+
+    def _interaction_identity_is_current(self, interaction: Mapping[str, Any]) -> bool:
+        identity = interaction.get("identity")
+        if not isinstance(identity, Mapping):
+            return False
+        refs = self.controller.manifest.state_refs
+        for name in ("brief", "task_plan", "design"):
+            expected = identity.get(f"{name}_ref")
+            if expected is not None and (refs.get(name) is None or refs[name].to_dict() != expected):
+                return False
+        stage = str(interaction.get("stage") or "")
+        if stage == "execution_protocol":
+            runtime_ref = self._artifact_ref(identity.get("runtime_config_ref"))
+            if runtime_ref is None or refs.get("runtime_config") is None:
+                return False
+            try:
+                saved = self.controller.store.read_json(runtime_ref)
+            except (KeyError, OSError, TypeError, ValueError):
+                return False
+            saved_config = saved.get("config") if isinstance(saved, Mapping) else None
+            current = self._effective_config()
+            if not isinstance(saved_config, Mapping) or saved_config.get("execution") != current.get("execution"):
+                return False
+            if identity.get("execution_protocol") != self._execution_protocol_projection():
+                return False
+        elif stage == "research_choice":
+            analysis_ref = self._latest_analysis_ref()
+            handoff = self.controller.store.read_json(analysis_ref) if analysis_ref is not None else {}
+            if analysis_ref is None or not isinstance(handoff, Mapping):
+                return False
+            comparison, _ = self._current_analysis_evidence(analysis_ref)
+            execution_ref = self._artifact_ref(handoff.get("execution_ref"))
+            candidates = self._comparison_candidate_refs(comparison, execution_ref)
+            if identity.get("research_identity") != self._decision_identity(analysis_ref, execution_ref, candidates):
+                return False
+        elif stage == "delivery":
+            analysis_ref = self._latest_analysis_ref()
+            current_ref = analysis_ref.to_dict() if analysis_ref is not None else None
+            if identity.get("analysis_ref") != current_ref:
+                return False
+            report = self._effective_config().get("report", {})
+            requested = report.get("template", "auto") if isinstance(report, Mapping) else "auto"
+            if identity.get("requested_template") != requested:
+                return False
+        return True
+
+    def _store_interaction_checkpoint(
+        self, *, stage: str, action: str, question: str, reason: str,
+        options: Sequence[Mapping[str, str]], evidence_refs: Sequence[Mapping[str, Any]],
+        identity: Mapping[str, Any],
+    ) -> bool:
+        previous_ref = self.controller.manifest.state_refs.get("decision")
+        previous = self.controller.store.read_json(previous_ref) if previous_ref is not None else {}
+        previous = dict(previous) if isinstance(previous, Mapping) else {}
+        old_interaction = previous.get("interaction")
+        if (isinstance(old_interaction, Mapping)
+                and old_interaction.get("stage") == stage
+                and old_interaction.get("identity") == dict(identity)):
+            if old_interaction.get("status") == "accepted":
+                return False
+            if old_interaction.get("status") in {"pending", "rejected"}:
+                self.controller.pause(reason)
+                self._persist_application_views()
+                return True
+
+        decision_id = uuid4().hex[:16]
+        interaction = {
+            "id": decision_id,
+            "stage": stage,
+            "status": "pending",
+            "question": question,
+            "reason": reason,
+            "options": [dict(item) for item in options],
+            "evidence_refs": [dict(item) for item in evidence_refs],
+            "identity": dict(identity),
+        }
+        decision = previous or {"schema_version": "research_decision.v1", "action": "continue"}
+        decision["interaction"] = interaction
+        if not previous_ref or not previous:
+            decision["action"] = "request_input"
+            decision["decision_reason"] = reason
+        if previous_ref is not None:
+            decision["prior_decision_ref"] = previous_ref.to_dict()
+        ref = self.controller.store.write_json(
+            f"outputs/research-decision-{decision_id}.json", decision,
+            kind="research_decision", schema="research_decision.v1",
+            producer="research_application",
+        )
+        self.controller.manifest.state_refs["decision"] = ref
+        self.controller.save()
+        self.controller.pause(reason)
+        self._persist_application_views()
+        return True
+
+    def _ensure_interaction_checkpoint(self, action: str) -> bool:
+        mode = self._interaction_mode()
+        if mode is None:
+            return False
+        step = self._first_execution_step(action)
+        if step is not None and requires_confirmation(mode, "execution_protocol", action):
+            protocol = self._execution_protocol_projection() or {}
+            baseline = self._execution_decision_projection()
+            design_ref = self.controller.manifest.state_refs.get("design")
+            refs = [self.controller.manifest.state_refs[name].to_dict()
+                    for name in ("brief", "design", "task_plan", "runtime_config")
+                    if name in self.controller.manifest.state_refs]
+            if baseline:
+                refs.extend(baseline.get("baseline", {}).get("refs", []))
+            reason = str((self._state_payload("design").get("design_reason")
+                          if design_ref is not None else "") or "The accepted design and execution protocol are ready.")
+            question = (
+                f"Confirm the first experiment protocol before {action}: "
+                f"baseline={baseline.get('baseline', {}).get('mode', 'unknown') if baseline else 'unknown'}, "
+                f"seeds={protocol.get('seeds', protocol.get('seed_count', 'unspecified'))}."
+            )
+            return self._store_interaction_checkpoint(
+                stage="execution_protocol", action=action, question=question, reason=reason,
+                options=(
+                    {"id": "accept", "label": "Run the accepted protocol"},
+                    {"id": "revise", "label": "Revise the task constraints or execution protocol"},
+                    {"id": "reject", "label": "Stop before execution and preserve current evidence"},
+                ), evidence_refs=refs,
+                identity=self._interaction_identity("execution_protocol", action),
+            )
+
+        if action == "report_write" and requires_confirmation(mode, "delivery", action):
+            _, _, config, template, delivery = self._report_writing_parts()
+            requested_template = self._effective_config().get("report", {})
+            requested_template = requested_template.get("template", "auto") if isinstance(requested_template, Mapping) else "auto"
+            goal = delivery.get("goal_assessment") if isinstance(delivery, Mapping) else None
+            if requested_template != "auto" or template.name != "analysis_report" or not isinstance(goal, Mapping):
+                return False
+            reason = str(goal.get("reason") or "The requested goal is not yet established by the measured evidence.")
+            analysis_ref = self._latest_analysis_ref()
+            refs = [self.controller.manifest.state_refs[name].to_dict()
+                    for name in ("brief", "task_plan") if name in self.controller.manifest.state_refs]
+            if analysis_ref is not None:
+                refs.append(analysis_ref.to_dict())
+            question = (
+                "The goal assessment does not support a success-style paper; automatic delivery selected "
+                "an analysis report. Accept this evidence-limited deliverable, revise the report choice, "
+                "or stop before writing?"
+            )
+            return self._store_interaction_checkpoint(
+                stage="delivery", action=action, question=question, reason=reason,
+                options=(
+                    {"id": "accept", "label": "Write the analysis report"},
+                    {"id": "revise", "label": "Choose a report template/configuration"},
+                    {"id": "reject", "label": "Stop before writing and preserve current evidence"},
+                ), evidence_refs=refs,
+                identity=self._interaction_identity("delivery", action, delivery={**delivery, "template": template.name}),
+            )
+        return False
+
     def _next_action(self) -> str | None:
-        # A research input request is a boundary before dispatch, not merely a
-        # final status after the remaining report actions have already run.
-        if "decision" in self.controller.manifest.state_refs and self._state_payload("decision").get("action") == "request_input":
+        # A persisted interaction decision is a boundary before dispatch.
+        decision = self._state_payload("decision") if "decision" in self.controller.manifest.state_refs else {}
+        interaction = decision.get("interaction") if isinstance(decision, Mapping) else None
+        if isinstance(interaction, Mapping):
+            status, stage = interaction.get("status"), interaction.get("stage")
+            if status == "pending" or (status == "rejected" and stage != "research_choice"):
+                return None
+        # Historical request_input decisions predate the formal reply entry.
+        if isinstance(decision, Mapping) and decision.get("action") == "request_input" and not isinstance(interaction, Mapping):
             return None
         if "task_plan" not in self.controller.manifest.state_refs:
             return "plan"

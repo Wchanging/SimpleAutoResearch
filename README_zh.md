@@ -17,7 +17,8 @@ V2.9 开发分支已验证短任务计划下的提供材料分析和小型代码
 选择性续接及报告恢复已实现并通过本地定向验证，保留历史、复用有效证据与测量。
 新研究会话 API 默认不限额，可显式设置上限。科研输入请求会在后续执行前暂停，
 Rich 展示决策理由和科研轮次。已有真实研究循环诊断证据；按目标判断选择交付结构已实现，
-但真实判断与文稿质量、冻结验收、三种参与策略及 E 阶段尚未完成；开放检索质量也需重新验证。
+三种参与策略与 CLI/TOML 持久化答复现已接通并通过本地定向控制流测试。真实模型科研判断与文稿质量、
+冻结会话验收及 E 阶段仍未完成；开放检索质量也需重新验证。
 不能把当前切片当成整版完成。目标是以自然语言任务、已有资产和必要的资源/权限配置
 作为输入，而非要求用户填写全部阶段。模块升级与 A—E 核心阶段同步推进，见
 [开发目标与模块衔接](docs/DEVELOPMENT_zh.md#v29-开发目标决策上下文与模块衔接)。
@@ -46,6 +47,10 @@ Rich 展示决策理由和科研轮次。已有真实研究循环诊断证据；
   `research-session-continue` 和 `research-report` 是同一 session 的恢复/报告子命令。
   `research-brief` 保留为分段、开发和诊断接口，
   旧 `research-experiment`、`research-code-task` 和 `simple-ar run/resume` 执行命令已退出；历史产物仍可读取。
+- **参与策略**：新 CLI 会话默认 `checkpoints`；可选择 `assisted`、`checkpoints` 或 `autonomous`。
+  关键事实/权限缺失在所有模式下都会暂停。待处理决定可通过 `research-session` 的
+  `--decision-id` 与 `--decision-response` 接受、拒绝或修订，Rich 会显示续接命令；旧会话缺少策略字段时
+  保持旧行为。真实任务质量和冻结版本验收仍待验证。
 - **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
 - **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
 - **研究到代码实验**：canonical session 可以显式把一个准备好的项目和一份 Code-Task TOML

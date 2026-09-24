@@ -103,6 +103,47 @@ session are rejected before execution; start a new session to apply them.
 `[research].max_iterations` controls bounded follow-up rounds; `0` stops after
 the first analysis.
 
+#### Interaction policies and pending decisions
+
+New CLI sessions default to `checkpoints`. Select `assisted`, `checkpoints`, or
+`autonomous` with `--interaction`; TOML uses `[research] interaction = "checkpoints"`.
+Sessions without a saved interaction field keep their legacy behavior. No mode supplies
+missing facts, assets, or permissions; those remain hard blockers and cannot be accepted
+without providing the required input.
+
+Apply a mode change separately from `--reanalyze` or a report-only refresh; these
+combinations are rejected rather than silently ignoring the mode. A delivery
+decision reply can include both its report settings and a mode change.
+
+- `assisted` confirms the first execution protocol and key delivery choices, and asks
+  about research choices such as a supplement or candidate revision.
+- `checkpoints` confirms the first protocol, material research-direction changes, and
+  automatic delivery tradeoffs; bounded same-protocol supplements remain authorized.
+- `autonomous` chooses among valid options within the saved round limit, but pauses
+  when evidence or prerequisites do not support a safe next action.
+
+Rich shows the decision id, question, rationale, options, and continuation commands.
+Reply through the same `research-session` entry:
+
+```bash
+simple-ar research-session --session-root runs/research-session/<session> --topic "Original research goal" \
+  --decision-id ID_FROM_RICH --decision-response accept
+
+simple-ar research-session --session-root runs/research-session/<session> --topic "Original research goal" \
+  --decision-id ID_FROM_RICH --decision-response revise \
+  --decision-guidance "Add facts or give the revised research direction"
+```
+
+`--decision-response` accepts `accept`, `reject`, or `revise`. Revising a delivery
+choice also requires a report setting, such as `--report-template analysis_report`.
+TOML can provide `decision_id`, `decision_response`, and `decision_guidance` under
+`[continuation]`. The proposal and its answer are separate research-decision artifacts;
+the answer records its brief, execution, or report revision. If a reply is saved before those
+inputs and the process stops, replaying the same decision restores the saved revision; different
+revision terms are rejected. An exact replay after persistence does not repeat completed work,
+and changed inputs make an old decision stale.
+Rich is read-only and never waits for terminal stdin.
+
 Continuation allowances use the same command and may be supplied as CLI options or a
 `[continuation]` TOML table. `--authorize-remaining DIMENSION=AMOUNT` (repeatable) defines a
 new remaining allowance for calls after this authorization; it does not estimate or resolve

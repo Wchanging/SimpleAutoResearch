@@ -82,6 +82,37 @@ LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求�
 且不能安全修订的搜索/摄取设置会在执行前拒绝；要应用这些设置请新建 session。
 `[research].max_iterations` 限制有界后续轮次；`0` 表示首轮分析后停止。
 
+#### 参与策略与待处理决定
+
+新 CLI 会话默认使用 `checkpoints`；用 `--interaction assisted|checkpoints|autonomous`
+选择策略，也可在 TOML 的 `[research] interaction = "checkpoints"` 设置。
+旧会话没有该字段时继续保持旧行为。三种模式都不会代替缺失的事实、资产或权限；这类条件仍须补充，
+不能用 `accept` 绕过。
+
+模式变更与 `--reanalyze` 或单独刷新报告须分次续接，不能组合后静默忽略模式。
+交付决定的正式答复可以同时包含报告设置和模式变更。
+
+- `assisted`：在首次执行协议、自动选择的分析报告等关键节点确认；也会询问补测或候选修订等科研选择。
+- `checkpoints`：确认首次实验协议、实质方向修订和自动交付取舍；同协议内的有界补测仍按既有授权执行。
+- `autonomous`：在有效选项与剩余轮次内自动继续；没有充分依据或前置条件时暂停并保留证据。
+
+暂停时 Rich 展示决定 ID、问题、依据、选项和续接命令。正式答复仍走同一 `research-session`：
+
+```bash
+simple-ar research-session --session-root runs/research-session/<session> --topic "原研究目标" \
+  --decision-id ID_FROM_RICH --decision-response accept
+
+simple-ar research-session --session-root runs/research-session/<session> --topic "原研究目标" \
+  --decision-id ID_FROM_RICH --decision-response revise \
+  --decision-guidance "补充事实或修订后的研究方向"
+```
+
+`--decision-response` 可取 `accept`、`reject` 或 `revise`。修改交付选择时，`revise` 必须同时提供报告配置，
+例如 `--report-template analysis_report`。TOML 可在 `[continuation]` 提供同名的 `decision_id`、
+`decision_response`、`decision_guidance`。答复产物记录 brief、执行或报告修订值；若答复已落盘但输入尚未保存时
+进程中断，使用相同决定和修订重放会恢复原修订，不同修订值会被拒绝。输入持久化后的精确重放不会重复已完成的工作，
+相关输入改变后旧决定不再适用。Rich 只读显示，不会等待终端 stdin。
+
 额度续接仍使用 `research-session`。可通过 `[continuation]` TOML 或 CLI 提供新额度：
 `--authorize-remaining DIMENSION=AMOUNT` 可重复，表示授权后后续调用的新剩余额度，不会估算或
 消除未知历史用量；`--additional-attempts` 与 `--additional-no-progress` 只增加持久化上限，不清零

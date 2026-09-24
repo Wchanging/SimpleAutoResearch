@@ -27,10 +27,11 @@ allowances and selective recovery are implemented and locally tested: they prese
 history, reuse unaffected evidence, and rebuild reports from retained analysis.
 New research sessions default to uncapped API usage, with optional explicit caps.
 Research input requests pause before further execution; Rich shows decision reasons
-and scientific rounds. A real research-loop diagnostic exists, but frozen acceptance,
-three interaction policies and Stage E remain incomplete. Outcome-aware report
-structure selection is implemented; its live scientific and writing quality still
-requires acceptance.
+and scientific rounds. A real research-loop diagnostic exists. The three interaction
+policies and persisted CLI/TOML decision replies are now connected and covered by
+focused local control-flow tests. Live research judgments, report prose, frozen
+acceptance, and Stage E remain incomplete. Outcome-aware report structure selection
+is implemented; its live scientific and writing quality still requires acceptance.
 Open-web quality also needs revalidation after earlier provider rate limiting.
 The target input is a natural-language task, available assets and necessary resource
 and permission settings, not a user-authored stage sequence. Module upgrades accompany
@@ -62,6 +63,12 @@ the core stages; see [development targets and handoffs](docs/DEVELOPMENT.md#v29-
   `research-report` continue the same session; `research-brief` is a segmented development or diagnostic interface.
   The old `research-experiment`, `research-code-task` and `simple-ar run/resume` execution commands are
   retired; historical artifacts remain readable through `status` and artifact tools.
+- **Interaction policies**: new CLI sessions default to `checkpoints`; choose
+  `assisted`, `checkpoints`, or `autonomous`. Missing critical facts/permissions
+  pause in every mode. Resolve a saved decision through `research-session` with
+  `--decision-id` and `--decision-response`; Rich prints continuation commands.
+  Sessions without a saved interaction mode retain their legacy behavior. Live
+  task quality and frozen-version acceptance remain outstanding.
 - **Research sources**: the canonical session can search
   OpenAlex/Semantic Scholar/arXiv/local files through the provider-neutral
   connector boundary, with bounded document extraction and evidence cards.

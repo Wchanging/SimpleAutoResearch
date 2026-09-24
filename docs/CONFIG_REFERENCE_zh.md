@@ -28,7 +28,9 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 - `[budget]`：`total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds`。
   总 token 与单次输出上限不是同一个限制。配置预算用于新会话；恢复继续使用已有账本。
 - `[research]`：`providers`、`queries`、`max_results`、`max_chunks`、`idea_limit`、`cache_dir`、
-  `max_iterations`。`max_iterations = 0` 表示首轮分析后停止。
+  `max_iterations`、`interaction`。`max_iterations = 0` 表示首轮分析后停止。
+  `interaction` 可为 `assisted`、`checkpoints` 或 `autonomous`；新 CLI 会话默认 `checkpoints`，
+  旧 session 缺少该字段时保留旧行为。硬事实/权限缺口在所有模式下都会暂停。
   可用布尔项 `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf` 启用已有全文摄取；
   高级模板显式开启。下载或解析失败仍须保留摘要级/不可用状态，不能称为全文阅读。
 - `[assets].papers`：本地文献路径列表。
@@ -72,6 +74,8 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 - code-task execute --config PATH 读取执行、模型与预算配置。
 - research-session --code-task-config PATH 使用同一个 CodeTask 解析器。
 - 显式 CLI 参数覆盖对应 TOML 选项。
+- `[continuation]` 除额度授权外，还接受 `decision_id`、`decision_response` 和 `decision_guidance`，
+  用于通过正式续接入口答复 Rich 显示的待处理决定。
 - 安装与命令说明：[使用手册](USAGE_zh.md)、[CLI参考](CLI_REFERENCE_zh.md)。
 
 ## CodeTask 字段参考
@@ -85,6 +89,31 @@ simple-ar research-session --config research.toml --session-root runs/research-s
 省略的目标和 outputs 沿用原值；显式提供的新目标、outputs、本地文献或执行配置会修订现有
 session。accepted plan 重新生成，attempt 历史保留；只有命令、结果 schema、协议、准备 lineage
 和保护资产匹配的测量才复用。仅增加文献不会重跑有效实验；改变 task kind 仍需新建 session。
+
+待处理的科研决定通过同一 CLI 入口答复；无需交互式 stdin：
+
+```bash
+simple-ar research-session --session-root runs/research-session/<session> --topic "原研究目标" \
+  --decision-id ID_FROM_RICH --decision-response accept
+
+simple-ar research-session --session-root runs/research-session/<session> --topic "原研究目标" \
+  --decision-id ID_FROM_RICH --decision-response revise \
+  --decision-guidance "补充事实或修订后的方向"
+```
+
+`decision_response` 为 `accept`、`reject` 或 `revise`。修订自动交付选择时，还要显式提供报告设置，
+例如 `--report-template analysis_report`。TOML 答复写法：
+
+```toml
+[continuation]
+decision_id = "ID_FROM_RICH"
+decision_response = "revise"
+decision_guidance = "补充事实或修订后的方向"
+```
+
+精确重放同一答复不会重复已完成工作；提案和答复作为分开的决策产物保留。改变目标或协议后，
+旧决定不会沿用。`assisted` 会询问科研后续选择，`checkpoints` 只暂停在首次协议、实质方向/交付节点，
+`autonomous` 在有依据且仍有授权轮次时自动选择；它们都不能越过缺失事实或权限。
 
 ### 显式续接额度
 

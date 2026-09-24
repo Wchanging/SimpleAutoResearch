@@ -29,13 +29,27 @@ class ResearchApplicationTests(unittest.TestCase):
             app = create_session(ResearchBrief(request_text="Evaluate this classifier.",
                 requested_outputs=("experiments",),
                 asset_requests=({"locator": str(paper), "role": "paper"},)), root=root / "session",
-                services=ResearchApplicationServices(config={"research_materials_only": True, "execution": {
+                services=ResearchApplicationServices(config={"research_materials_only": True,
+                    "interaction": "checkpoints", "execution": {
                     "command": [sys.executable, "-c", "print('accuracy: 0.7')"],
                     "cwd": str(root), "timeout_sec": 5,
                 }}, budget_limits={"process_invocations": 1, "process_wall_seconds": 10}))
-            self.assertEqual(app.advance(max_actions=20).status, "completed")
+            initial = app.advance(max_actions=20)
+            first_gate = initial.work_plan["interaction"]["decision"]
+            if isinstance(first_gate, dict) and first_gate.get("stage") == "execution_protocol":
+                app.continue_session(
+                    decision_id=first_gate["id"], decision_response="accept",
+                )
+                initial = app.advance(max_actions=20)
+            self.assertEqual(initial.status, "completed", initial.status_reason)
             measurement = app.latest_experiment_ref()
             app.request_report()
+            delivery_pause = app.advance()
+            delivery_gate = delivery_pause.work_plan["interaction"]["decision"]
+            self.assertEqual((delivery_pause.status, delivery_gate["stage"]), ("paused", "delivery"))
+            app.continue_session(
+                decision_id=delivery_gate["id"], decision_response="accept",
+            )
             client = LLMClient(LLMSettings(api_key="test", api_mode="chat"))
             app.services = replace(app.services, llm_client=client)
             with patch("simple_ar.report.writing.run_report_agent", return_value=None) as writer:
@@ -95,6 +109,10 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(paused.attempts, before.attempts)
             self.assertNotIn("writer", paused.state_refs)
             app = load_session(root / "session")
+            with self.assertRaisesRegex(ResearchApplicationError, "pending required_input"):
+                app.request_report()
+            with self.assertRaisesRegex(ResearchApplicationError, "pending required_input"):
+                app.request_reanalysis()
             self.assertEqual(app.advance().attempts, before.attempts)
             with self.assertRaisesRegex(ResearchApplicationError, "no enabled next action"):
                 app.continue_session()
@@ -105,6 +123,162 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIsNotNone(app.view().next_action)
             self.assertEqual(app.view().state_refs["read"], before.state_refs["read"])
             self.assertTrue(app.controller.store.exists(decision))
+
+            decision_id = "fedcba9876543210"
+            proposal = {
+                "action": "request_input",
+                "interaction": {
+                    "id": decision_id, "stage": "required_input", "status": "pending",
+                    "reason": "The comparison condition is missing.",
+                    "identity": {"fixture": "pending-input"},
+                },
+            }
+            ref = app.controller.store.write_json(
+                f"outputs/research-decision-{decision_id}.json", proposal,
+                kind="research_decision", schema="research_decision.v1", producer="test",
+            )
+            app.controller.manifest.state_refs["decision"] = ref
+            app.controller.save()
+            app.controller.pause("The comparison condition is missing.")
+            attempts = len(app.controller.list_attempts())
+            rejected = app.continue_session(
+                decision_id=decision_id, decision_response="reject",
+            )
+            saved = app.controller.store.read_json(rejected.state_refs["decision"])
+            self.assertEqual(saved["action"], "stop")
+            self.assertEqual(saved["interaction"]["status"], "rejected")
+            self.assertIsNone(rejected.next_action)
+            self.assertEqual(len(rejected.attempts), attempts)
+
+    def test_interaction_reply_replay_finishes_revision_without_overwriting_proposal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Replay\nA local source for a narrow report.", encoding="utf-8")
+            session = root / "session"
+            app = create_session(ResearchBrief(
+                request_text="Summarize the supplied source.", requested_outputs=("report",),
+                asset_requests=({"locator": str(paper), "role": "paper"},),
+            ), root=session, services=ResearchApplicationServices(
+                config={"research_materials_only": True},
+            ))
+            self.advance_to(app, "report_write")
+            decision_id = "0123456789abcdef"
+            proposal_payload = {
+                "action": "request_input", "decision_reason": "Clarify the report scope.",
+                "interaction": {
+                    "id": decision_id, "stage": "required_input", "status": "pending",
+                    "question": "Which audience should the report address?",
+                    "reason": "The audience changes the requested scope.",
+                    "options": [{"id": "revise", "label": "Clarify"},
+                                {"id": "reject", "label": "Stop"}],
+                    "identity": {"research_identity": "fixture"},
+                },
+            }
+            proposal_ref = app.controller.store.write_json(
+                f"outputs/research-decision-{decision_id}.json", proposal_payload,
+                kind="research_decision", schema="research_decision.v1", producer="test",
+            )
+            app.controller.manifest.state_refs["decision"] = proposal_ref
+            app.controller.save()
+            app.controller.pause("Clarify the report scope.")
+            attempts_before = app.view().attempts
+            reply = {
+                "decision_id": decision_id, "decision_response": "revise",
+                "decision_guidance": "Write for an engineering team.",
+                "revised_brief": replace(
+                    app.brief, accepted_assumptions=("Address the engineering team.",),
+                ),
+            }
+            with patch.object(app.controller, "continue_with_revision", side_effect=RuntimeError("interrupted after reply")):
+                with self.assertRaisesRegex(RuntimeError, "interrupted after reply"):
+                    app.continue_session(**reply)
+
+            response_path = f"outputs/research-decision-{decision_id}-response.json"
+            response_payload = app.controller.store.read_json(response_path)
+            self.assertEqual(response_payload["prior_decision_ref"], proposal_ref.to_dict())
+            self.assertEqual(
+                response_payload["interaction"]["response"]["revision"]["brief"]["accepted_assumptions"],
+                ["Address the engineering team."],
+            )
+            self.assertEqual(app.controller.store.read_json(proposal_ref)["interaction"]["status"], "pending")
+            self.assertNotEqual(app.controller.manifest.state_refs["decision"].path, proposal_ref.path)
+
+            resumed = load_session(session)
+            changed_reply = dict(reply)
+            changed_reply["revised_brief"] = replace(
+                reply["revised_brief"], accepted_assumptions=("A different audience.",),
+            )
+            with self.assertRaisesRegex(ResearchApplicationError, "different revision inputs"):
+                resumed.continue_session(**changed_reply)
+            recovery_reply = {key: value for key, value in reply.items() if key != "revised_brief"}
+            completed_revision = resumed.continue_session(**recovery_reply)
+            self.assertIn("Write for an engineering team.", resumed.brief.request_text)
+            self.assertEqual(resumed.brief.accepted_assumptions, ("Address the engineering team.",))
+            self.assertEqual(completed_revision.attempts, attempts_before)
+            revision = completed_revision.revision
+            replayed = load_session(session).continue_session(**reply)
+            self.assertEqual(replayed.revision, revision)
+            self.assertEqual(replayed.attempts, attempts_before)
+
+    def test_assisted_confirms_protocol_once_then_runs_pair_after_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Paired test\nMeasure accuracy on the supplied fixed examples.", encoding="utf-8")
+            calls = root / "calls.txt"
+            def command(role, value):
+                code = (
+                    "from pathlib import Path; "
+                    f"Path({str(calls)!r}).open('a').write({(role + chr(10))!r}); "
+                    f"print('accuracy: {value}')"
+                )
+                return [sys.executable, "-c", code]
+
+            app = create_session(ResearchBrief(
+                request_text="Compare the supplied classifier with its baseline.",
+                objective="Compare the supplied classifier with its baseline.",
+                requested_outputs=("experiments",),
+                asset_requests=({"locator": str(paper), "role": "paper"},),
+            ), root=root / "session", services=ResearchApplicationServices(
+                config={"interaction": "assisted", "research_materials_only": True, "execution": {
+                    "command": command("candidate", 0.5),
+                    "baseline": {"command": command("baseline", 0.6)},
+                    "cwd": str(root), "timeout_sec": 5,
+                    "result_schema": {"primary_metric": "accuracy", "required_metrics": ["accuracy"]},
+                }},
+                budget_limits={"process_invocations": 2, "process_wall_seconds": 10},
+            ))
+            pending = app.advance(max_actions=30)
+            self.assertEqual(pending.status, "paused", pending.status_reason)
+            gate = pending.work_plan["interaction"]["decision"]
+            self.assertIsInstance(gate, dict, pending.status_reason + repr(pending.work_plan.get("steps")))
+            self.assertEqual(gate["stage"], "execution_protocol")
+            self.assertFalse(calls.exists())
+
+            app = load_session(root / "session")
+            refs = app.controller.manifest.state_refs
+            stored_gate = app.controller.store.read_json(refs["decision"])["interaction"]
+            self.assertTrue(app._interaction_identity_is_current(stored_gate))
+            saved_services = app.services
+            changed_execution = dict(saved_services.config["execution"])
+            changed_execution["timeout_sec"] = 6
+            app.services = replace(saved_services, config={
+                **saved_services.config, "execution": changed_execution,
+            })
+            with self.assertRaisesRegex(ResearchApplicationError, "no longer matches"):
+                app.continue_session(decision_id=gate["id"], decision_response="accept")
+            app.services = saved_services
+            app.continue_session(decision_id=gate["id"], decision_response="accept")
+            completed = app.advance(max_actions=30)
+            self.assertEqual(completed.status, "completed", completed.status_reason)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["baseline", "candidate"])
+            measured_attempts = completed.attempts
+
+            restored = load_session(root / "session")
+            replay = restored.continue_session(decision_id=gate["id"], decision_response="accept")
+            self.assertEqual(replay.attempts, measured_attempts)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["baseline", "candidate"])
 
     def advance_to(self, app, action):
         for _ in range(app.services.max_attempts):
@@ -900,6 +1074,7 @@ class ResearchApplicationTests(unittest.TestCase):
                     max_results=1, max_chunks=10, max_attempts=40,
                     config={
                         "research_materials_only": True,
+                        "interaction": "assisted",
                         "research_max_iterations": 1,
                         "execution": execution,
                     },
@@ -939,6 +1114,20 @@ class ResearchApplicationTests(unittest.TestCase):
             # recommendation is a test double for the model boundary, not live
             # model acceptance evidence.
             with patch("simple_ar.research.analysis.analyze_results", side_effect=analysis_with_bounded_proposal):
+                pending = app.advance(max_actions=40)
+                self.assertEqual(pending.status, "paused", pending.status_reason)
+                gate = pending.work_plan["interaction"]["decision"]
+                self.assertEqual(gate["stage"], "execution_protocol")
+                app = load_session(root / "session")
+                app.continue_session(decision_id=gate["id"], decision_response="accept")
+                pending = app.advance(max_actions=40)
+                self.assertEqual(pending.status, "paused", pending.status_reason)
+                gate = pending.work_plan["interaction"]["decision"]
+                self.assertEqual(gate["stage"], "research_choice")
+                persisted_gate = app.controller.store.read_json(pending.state_refs["decision"])["interaction"]
+                self.assertEqual(persisted_gate["proposed_action"], "supplement")
+                app = load_session(root / "session")
+                app.continue_session(decision_id=gate["id"], decision_response="accept")
                 final = app.advance(max_actions=40)
             self.assertEqual(final.status, "completed", final.status_reason)
             self.assertIn("analysis_r1", final.state_refs)

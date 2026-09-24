@@ -68,6 +68,13 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
     session_parser.add_argument("--authorize-remaining", action="append", default=None, metavar="DIMENSION=AMOUNT", help="Authorize a new remaining resource allowance; repeat for multiple dimensions.")
     session_parser.add_argument("--additional-attempts", type=int, default=0, help="Increase the total attempt cap by this amount; prior attempts are retained.")
     session_parser.add_argument("--additional-no-progress", type=int, default=0, help="Increase the consecutive no-progress cap by this amount.")
+    session_parser.add_argument(
+        "--interaction", choices=("assisted", "checkpoints", "autonomous"), default=None,
+        help="New sessions default to checkpoints; an explicit resume changes only future, unexecuted decisions.",
+    )
+    session_parser.add_argument("--decision-id", default=None, help="Id of the pending decision shown by research-session.")
+    session_parser.add_argument("--decision-response", choices=("accept", "reject", "revise"), default=None)
+    session_parser.add_argument("--decision-guidance", default=None, help="User-provided facts or revised direction; valid with --decision-response revise.")
     session_parser.add_argument("--topic", required=not bool(research_defaults and research_defaults.get("topic")))
     session_parser.add_argument(
         "--task-kind", choices=("auto", "survey", "bug_fix"), default="auto",

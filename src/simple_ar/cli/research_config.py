@@ -14,6 +14,9 @@ FIELDS = {
                      "reason": ("authorization_reason", str),
                      "additional_attempts": ("additional_attempts", int),
                      "additional_no_progress": ("additional_no_progress", int),
+                     "decision_id": ("decision_id", str),
+                     "decision_response": ("decision_response", str),
+                     "decision_guidance": ("decision_guidance", str),
                      "remaining": ("authorize_remaining", dict)},
     "research": {"providers": ("providers", list), "queries": ("queries", list),
                  "max_results": ("max_results", int), "max_chunks": ("max_chunks", int),
@@ -22,7 +25,8 @@ FIELDS = {
                  "materials_only": ("research_materials_only", bool),
                  "allow_pdf_download": ("research_allow_pdf_download", bool),
                   "max_iterations": ("max_research_iterations", int),
-                 "keep_raw_pdf": ("research_keep_raw_pdf", bool)},
+                 "keep_raw_pdf": ("research_keep_raw_pdf", bool),
+                 "interaction": ("interaction", str)},
     "assets": {"papers": ("local_document", list)},
     "execution": {"command": ("command_argv", list), "cwd": ("cwd", str),
                   "timeout_sec": ("timeout_sec", int), "code_task_config": ("code_task_config", str),
@@ -93,6 +97,10 @@ def research_defaults(
                 raise ValueError(f"Invalid type for {section}.{name}: expected {expected.__name__}")
             if expected is int and dest not in {"additional_attempts", "additional_no_progress"} and value < (0 if dest in {"max_review_iterations", "max_section_tokens", "max_research_iterations", "process_invocations", "process_wall_seconds"} else 1):
                 raise ValueError(f"Invalid value for {section}.{name}: {value}")
+            if dest == "interaction" and value not in {"assisted", "checkpoints", "autonomous"}:
+                raise ValueError("research.interaction must be assisted, checkpoints or autonomous")
+            if dest == "decision_response" and value not in {"accept", "reject", "revise"}:
+                raise ValueError("continuation.decision_response must be accept, reject or revise")
             if dest in PATHS:
                 def resolve(item):
                     target = Path(item).expanduser()

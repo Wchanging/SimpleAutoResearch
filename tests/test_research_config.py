@@ -12,6 +12,30 @@ from simple_ar.cli.research_config import research_defaults
 
 
 class ResearchConfigTests(unittest.TestCase):
+    def test_toml_interaction_and_decision_reply_reach_the_canonical_parser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text(
+                '[task]\ngoal="Review a bounded result"\n'
+                '[research]\ninteraction="assisted"\n'
+                '[continuation]\ndecision_id="0123456789abcdef"\n'
+                'decision_response="revise"\ndecision_guidance="Keep the comparison local"\n',
+                encoding="utf-8",
+            )
+            explicit = set()
+            defaults = research_defaults(
+                ["research-session", "--config", str(path)],
+                explicit_destinations=explicit,
+            )
+            args = build_parser(research_defaults=defaults).parse_args(
+                ["research-session", "--config", str(path)],
+            )
+            self.assertEqual(args.interaction, "assisted")
+            self.assertEqual(args.decision_id, "0123456789abcdef")
+            self.assertEqual(args.decision_response, "revise")
+            self.assertEqual(args.decision_guidance, "Keep the comparison local")
+            self.assertTrue({"interaction", "decision_id", "decision_response", "decision_guidance"} <= explicit)
+
     def test_config_accepts_compact_seed_protocol_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "research.toml"
@@ -40,7 +64,7 @@ class ResearchConfigTests(unittest.TestCase):
             from simple_ar.cli.main import main
             from simple_ar.app.research_application import load_session
             with redirect_stdout(io.StringIO()):
-                main(["research-session", "--config", str(path)])
+                main(["research-session", "--config", str(path), "--interaction", "autonomous"])
             session = next((Path(directory) / "out").iterdir())
             self.assertEqual(load_session(session).view().status, "completed")
             self.assertEqual((Path(directory) / "calls.txt").read_text(encoding="utf-8").splitlines(), ["0", "1"])
@@ -70,9 +94,17 @@ class ResearchConfigTests(unittest.TestCase):
             path = root / "research.toml"
             path.write_text(source, encoding="utf-8")
             argv = ["research-session", "--config", str(path)]
-            with redirect_stdout(io.StringIO()):
+            with redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "paused"):
                 main(argv)
             session = next((root / "out").iterdir())
+            pending = load_session(session).view()
+            self.assertEqual(pending.work_plan["interaction"]["mode"], "checkpoints")
+            gate = pending.work_plan["interaction"]["decision"]
+            self.assertEqual(gate["stage"], "execution_protocol")
+            self.assertFalse((root / "calls.txt").exists())
+            with redirect_stdout(io.StringIO()):
+                main(argv + ["--session-root", str(session), "--decision-id", gate["id"],
+                             "--decision-response", "accept"])
             app = load_session(session)
             self.assertEqual(app.view().status, "completed")
             calls = (root / "calls.txt").read_text().splitlines()
@@ -109,8 +141,13 @@ class ResearchConfigTests(unittest.TestCase):
             path.write_text(path.read_text(encoding="utf-8").replace("123456", "999999") +
                             '\n[execution]\ncommand=[' + json.dumps(sys.executable) + ', "measure.py"]\ncwd="."\ntimeout_sec=20\nprimary_metric="accuracy"\n', encoding="utf-8")
             argv = ["research-session", "--config", str(path), "--session-root", str(session)]
-            with redirect_stdout(io.StringIO()):
+            with redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, "paused"):
                 main(argv)
+            gate = load_session(session).view().work_plan["interaction"]["decision"]
+            self.assertEqual(gate["stage"], "execution_protocol")
+            self.assertFalse((root / "calls.txt").exists())
+            with redirect_stdout(io.StringIO()):
+                main(argv + ["--decision-id", gate["id"], "--decision-response", "accept"])
             app = load_session(session)
             after = app.view()
             self.assertEqual(after.status, "completed")
