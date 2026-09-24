@@ -7,6 +7,22 @@ from simple_ar.cli.research_view import ResearchConsole
 
 
 class ResearchConsoleTests(unittest.TestCase):
+    def test_decision_is_visible_once_and_updates_without_control_codes(self):
+        stream = io.StringIO()
+        display = ResearchConsole(Console(file=stream, force_terminal=False, width=120))
+        decision = {"action": "supplement", "research_iteration": 0,
+                    "remaining_authorized_rounds": 1, "decision_reason": "Check [accuracy] uncertainty."}
+        view = SimpleNamespace(status="running", next_action="supplement_baseline:1",
+                               status_reason="", work_plan={"research_decision": decision})
+        display.state(view)
+        display.state(view)
+        self.assertEqual(stream.getvalue().count("Check [accuracy] uncertainty."), 1)
+        decision.update(action="request_input", decision_reason="Confirm the comparison.")
+        display.state(view)
+        self.assertIn("Action: request_input", stream.getvalue())
+        self.assertIn("remaining authorized rounds: 1", stream.getvalue())
+        self.assertNotIn("\x1b", stream.getvalue())
+
     def test_real_process_streams_without_changing_captured_output(self):
         import sys
         import tempfile

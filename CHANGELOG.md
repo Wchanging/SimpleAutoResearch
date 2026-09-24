@@ -6,6 +6,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-24
 
+- Pause at a research input request before dispatching remaining work, including
+  report writing; reload preserves the boundary until the task inputs are revised.
+  Rich output shows the research decision, reason and remaining scientific rounds.
 - New research sessions default to uncapped API request and total-token usage;
   optional CLI/TOML caps still apply. Usage accounting and saved limits on resume
   are preserved; process, iteration, and attempt limits remain separate.

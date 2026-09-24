@@ -2481,6 +2481,11 @@ class ResearchApplication:
         if self._next_action() is not None or self.controller.manifest.status in {"paused", "blocked", "completed"}:
             return
         decision_ref = self._ensure_research_decision()
+        decision = self._state_payload("decision") if "decision" in self.controller.manifest.state_refs else {}
+        if decision.get("action") == "request_input":
+            self.controller.pause(str(decision.get("decision_reason") or "The next research action needs explicit user input."))
+            self._persist_application_views()
+            return
         if self._task_kind() == "bug_fix" and "implementation" in self.controller.manifest.state_refs:
             implementation = self._state_payload("implementation")
             if implementation.get("status") != "validated":
@@ -2505,9 +2510,7 @@ class ResearchApplication:
             self.controller.pause(reason)
         else:
             decision = self.controller.store.read_json(decision_ref) if decision_ref is not None else None
-            if isinstance(decision, Mapping) and decision.get("action") == "request_input":
-                self.controller.pause(str(decision.get("decision_reason") or "The next research action needs explicit user input."))
-            elif isinstance(decision, Mapping) and decision.get("action") == "stop":
+            if isinstance(decision, Mapping) and decision.get("action") == "stop":
                 self.controller.complete(str(decision.get("decision_reason") or "Measured analysis completed; no automatic research follow-up was authorized."))
             else:
                 self.controller.complete("Requested research artifacts are ready.")
@@ -2757,6 +2760,12 @@ class ResearchApplication:
             "status": status,
             "stop_reason": self.controller.manifest.status_reason if self.controller.manifest.status in {"paused", "blocked"} else "",
             "pending_user_decision": self.controller.manifest.status_reason if self.controller.manifest.status == "paused" else "",
+            "research_decision": {
+                key: value for key, value in (
+                    self._state_payload("decision").items()
+                    if "decision" in self.controller.manifest.state_refs else ()
+                ) if key in {"action", "decision_reason", "research_iteration", "remaining_authorized_rounds"}
+            },
             "decision_ref": self.controller.manifest.state_refs.get("decision").to_dict()
             if self.controller.manifest.state_refs.get("decision") is not None else None,
             "input_fingerprint": _input_fingerprint(self.brief, self.assets),
@@ -3112,6 +3121,10 @@ class ResearchApplication:
             self.controller.save()
 
     def _next_action(self) -> str | None:
+        # A research input request is a boundary before dispatch, not merely a
+        # final status after the remaining report actions have already run.
+        if "decision" in self.controller.manifest.state_refs and self._state_payload("decision").get("action") == "request_input":
+            return None
         if "task_plan" not in self.controller.manifest.state_refs:
             return "plan"
         plan = self._load_task_plan()

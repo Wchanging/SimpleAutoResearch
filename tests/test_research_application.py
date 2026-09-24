@@ -21,6 +21,52 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_input_request_stops_before_report_and_survives_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Replay\nMemory retains previous examples.", encoding="utf-8")
+            app = create_session(
+                ResearchBrief(request_text="Summarize replay", requested_outputs=("report",),
+                    asset_requests=({"locator": str(paper), "role": "paper"},)),
+                root=root / "session",
+                services=ResearchApplicationServices(config={"research_materials_only": True}),
+            )
+            self.advance_to(app, "report_write")
+            before = app.view()
+            # Exercise the application boundary with a persisted decision,
+            # without a model call or any experimental subprocess.
+            decision = app.controller.store.write_json(
+                "outputs/research_decision.json",
+                {"action": "request_input", "decision_reason": "Clarify the requested comparison."},
+                kind="research_decision", schema="research_decision.v1", producer="test",
+            )
+            app.controller.manifest.state_refs["decision"] = decision
+            app.controller.save()
+            app = load_session(root / "session")
+            with patch.object(app, "_run_action") as run_action:
+                paused = app.advance(max_actions=20)
+                run_action.assert_not_called()
+            self.assertEqual(paused.status, "paused")
+            self.assertIsNone(paused.next_action)
+            self.assertEqual(paused.status_reason, "Clarify the requested comparison.")
+            self.assertEqual(paused.work_plan["research_decision"], {
+                "action": "request_input", "decision_reason": "Clarify the requested comparison.",
+            })
+            self.assertEqual(paused.attempts, before.attempts)
+            self.assertNotIn("writer", paused.state_refs)
+            app = load_session(root / "session")
+            self.assertEqual(app.advance().attempts, before.attempts)
+            with self.assertRaisesRegex(ResearchApplicationError, "no enabled next action"):
+                app.continue_session()
+            app.continue_session(revised_brief=replace(
+                app.brief, accepted_assumptions=("Compare only the supplied sources.",),
+            ))
+            self.assertNotIn("decision", app.view().state_refs)
+            self.assertIsNotNone(app.view().next_action)
+            self.assertEqual(app.view().state_refs["read"], before.state_refs["read"])
+            self.assertTrue(app.controller.store.exists(decision))
+
     def advance_to(self, app, action):
         for _ in range(app.services.max_attempts):
             view = app.view()

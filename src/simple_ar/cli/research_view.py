@@ -34,6 +34,7 @@ DESCRIPTIONS = {
 class ResearchConsole:
     def __init__(self, console=None):
         self.console = console or make_console()
+        self._last_decision = None
 
     def start(self, view, *, model: str, topic: str):
         table = Table.grid(padding=(0, 2))
@@ -69,6 +70,17 @@ class ResearchConsole:
             self.console.print(Text(f"Action returned in {monotonic() - started:.1f}s", style="dim"))
 
     def state(self, view):
+        work_plan = getattr(view, "work_plan", {})
+        decision = work_plan.get("research_decision", {})
+        if decision and decision != self._last_decision:
+            self._last_decision = dict(decision)
+            rows = [f"Action: {decision.get('action', 'unknown')}"]
+            if decision.get("research_iteration") is not None:
+                rows.append(f"Research round: {decision['research_iteration']}; remaining authorized rounds: {decision.get('remaining_authorized_rounds', 'unknown')}")
+            rows.append(str(decision.get("decision_reason") or "No decision reason recorded."))
+            self.console.print(Panel(Text("\n".join(rows)), title="Research decision", border_style="cyan"))
+        elif not decision:
+            self._last_decision = None
         style = "green" if view.status == "completed" else "yellow" if view.status in {"paused", "blocked"} else "red" if view.status == "failed" else "cyan"
         self.console.print(Text(f"Status: {view.status}; next: {view.next_action or 'none'}", style=style))
         if view.status_reason:
