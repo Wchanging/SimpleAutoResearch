@@ -14,6 +14,38 @@ from simple_ar.core.budget import (
 
 
 class BudgetLedgerTests(unittest.TestCase):
+    def test_one_explicit_authorization_extends_multiple_dimensions_once(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "budget.json"
+            ledger = BudgetLedger({"total_tokens": 100, "llm_requests": 3}, storage_path=path)
+            with self.assertRaisesRegex(BudgetError, "positive"):
+                ledger.validate_remaining(
+                    {"total_tokens": 0}, authorization_id="invalid", reason="Reject zero allowance.",
+                )
+            ledger.reserve("uncertain", {"total_tokens": 35, "llm_requests": 1})
+            ledger.mark_unknown("uncertain", reason="provider response lost")
+            ledger.authorize_remaining(
+                {"total_tokens": 50, "llm_requests": 2},
+                authorization_id="continuation-1", reason="Permit one bounded continuation.",
+            )
+            ledger.reserve("after-auth", {"total_tokens": 20, "llm_requests": 1})
+            ledger.settle("after-auth", {"total_tokens": 18, "llm_requests": 1})
+
+            loaded = BudgetLedger.load(path)
+            loaded.authorize_remaining(
+                {"total_tokens": 50, "llm_requests": 2},
+                authorization_id="continuation-1", reason="Replay the same authorization.",
+            )
+            self.assertEqual(loaded.limits["total_tokens"], 50)
+            self.assertEqual(loaded.remaining("total_tokens"), 32)
+            self.assertEqual(loaded.remaining("llm_requests"), 1)
+            self.assertEqual(loaded.unknown_dimensions(), ("llm_requests", "total_tokens"))
+            with self.assertRaises(BudgetConflictError):
+                loaded.authorize_remaining(
+                    {"total_tokens": 60, "llm_requests": 2},
+                    authorization_id="continuation-1", reason="Changed token allowance.",
+                )
+
     def test_explicit_allowance_preserves_unknown_history_and_does_not_reset_on_reload(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "budget.json"

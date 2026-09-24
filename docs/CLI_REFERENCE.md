@@ -89,12 +89,44 @@ the minimal and advanced templates, which share the same parser and defaults.
 Explicit CLI options override the file. `--outputs` selects `summary`, `report`,
 and/or `experiments`; `--total-tokens`, `--llm-requests`, `--max-output-tokens`,
 `--process-invocations`, and `--process-wall-seconds` expose the corresponding limits.
-Add `--session-root PATH` to resume the same goal/outputs or supply missing execution
-settings; existing evidence, research settings, and budget consumption are retained.
-This does not revise the goal, outputs, execution assets, or protocol; start a new session
-when those inputs change.
+Add `--session-root PATH` to continue the saved accepted plan. Omitted goal/outputs remain
+unchanged; a supplied new goal, output set, local document, or execution configuration is an
+explicit revision. The application keeps attempt history and reuses only measurements whose
+command, result schema, protocol, preparation lineage, and protected assets still match; other
+dependent steps are replanned. Changing task kind still requires a new session.
+On resume, saved report settings remain in force unless a report option is
+explicitly supplied; on a session that already requests a report, an explicit
+report change rebuilds only report outputs. Use `research-report` to add the
+report deliverable to a prefix that did not request one.
+Changed search/ingestion settings that cannot be revised against the saved
+session are rejected before execution; start a new session to apply them.
+`[research].max_iterations` controls bounded follow-up rounds; `0` stops after
+the first analysis.
 
-At a paused or completed analysis checkpoint, add `--reanalyze` to reconsider
+Continuation allowances use the same command and may be supplied as CLI options or a
+`[continuation]` TOML table. `--authorize-remaining DIMENSION=AMOUNT` (repeatable) defines a
+new remaining allowance for calls after this authorization; it does not estimate or resolve
+unknown historical usage. `--additional-attempts` and `--additional-no-progress` raise the
+persisted caps without resetting prior counters. Every allowance requires a stable
+`--authorization-id` and `--authorization-reason`; replaying the same id and terms is
+idempotent, while changed terms require a new id. Never edit the ledger or manifest directly.
+
+On a completed session, authorization without input revisions keeps the session completed
+and executes no research or report actions. Authorize capacity first, then run
+`research-report --refresh` or repeat the original report-configuration command.
+A full report refresh normally needs three attempts (writer, assembly, audit); failed retries
+cost additional attempts. Report-only recovery does not require increasing process budgets.
+
+```bash
+simple-ar research-session --config research.toml --session-root runs/research-session/<session> \
+  --local-document new-paper.md \
+  --authorization-id review-20260924-1 --authorization-reason "Bounded continuation after review" \
+  --additional-attempts 2 --additional-no-progress 1 \
+  --authorize-remaining total_tokens=50000 --authorize-remaining llm_requests=8
+```
+
+At a paused or completed analysis checkpoint, use `--reanalyze` separately from input
+revisions or continuation authorizations to reconsider
 existing measurements and resume research decisions without requesting a report.
 Historical artifacts and consumed budgets remain intact; an accepted follow-up
 may run new experiments within the existing budget. Pending research follow-ups
@@ -273,6 +305,10 @@ the retained analysis and creates new report/audit attempts while retaining old
 reports; it does not rerun measurements or analysis. Model-backed
 sessions use the model to interpret hypotheses; numeric and execution-status
 checks remain deterministic. Refresh uses the remaining session budget.
+Omitted template/reviewer/limit flags keep saved settings. Explicit options
+update report configuration and rebuild only report outputs. If the persisted
+attempt/no-progress cap is exhausted, use `research-session` with an explicit
+continuation authorization; report generation has no cap bypass.
 Use `--reviewer disabled`
 only when an explicit writer-only comparison is wanted; the final audit still
 runs. Legacy sessions remain readable but cannot be resumed by a second report

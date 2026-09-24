@@ -61,8 +61,13 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
         help="Run a bounded literature-only or literature-to-experiment research session.",
     )
     session_parser.add_argument("--config", type=Path, help="Research TOML; explicit CLI options override file values.")
-    session_parser.add_argument("--session-root", type=Path, help="Continue this session with the same goal; attach execution only if missing. Existing budgets stay unchanged.")
+    session_parser.add_argument("--session-root", type=Path, help="Continue this session; unchanged evidence and measurements are reused, while explicitly revised inputs invalidate only dependent results.")
     session_parser.add_argument("--reanalyze", action="store_true", help="With --session-root, reconsider existing measurements and resume the research decision; do not request a report or rerun experiments.")
+    session_parser.add_argument("--authorization-id", default=None, help="Stable idempotency key required for explicit continuation allowances.")
+    session_parser.add_argument("--authorization-reason", default=None, help="Human-readable reason recorded with a continuation allowance.")
+    session_parser.add_argument("--authorize-remaining", action="append", default=None, metavar="DIMENSION=AMOUNT", help="Authorize a new remaining resource allowance; repeat for multiple dimensions.")
+    session_parser.add_argument("--additional-attempts", type=int, default=0, help="Increase the total attempt cap by this amount; prior attempts are retained.")
+    session_parser.add_argument("--additional-no-progress", type=int, default=0, help="Increase the consecutive no-progress cap by this amount.")
     session_parser.add_argument("--topic", required=not bool(research_defaults and research_defaults.get("topic")))
     session_parser.add_argument(
         "--task-kind", choices=("auto", "survey", "bug_fix"), default="auto",

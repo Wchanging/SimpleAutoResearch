@@ -75,11 +75,24 @@ def main(argv: Sequence[str] | None = None) -> None:
             "legacy stage options are not silently translated or executed."
         )
     from simple_ar.cli.research_config import research_defaults
+    explicit_config_destinations: set[str] = set()
     try:
-        parser = build_parser(research_defaults=research_defaults(arguments))
+        parser = build_parser(
+            research_defaults=research_defaults(
+                arguments, explicit_destinations=explicit_config_destinations,
+            )
+        )
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Invalid research configuration: {exc}") from exc
     args = parser.parse_args(arguments)
+    if args.command == "research-session":
+        args._explicit_resume_destinations = _explicit_session_option_destinations(
+            parser, arguments, explicit_config_destinations,
+        )
+    elif args.command == "research-report":
+        args._explicit_resume_destinations = _explicit_session_option_destinations(
+            parser, arguments, set(), command="research-report",
+        )
 
 
     if args.command == "research-brief":
@@ -519,6 +532,13 @@ def _print_research_session(args: argparse.Namespace) -> None:
         requested_outputs=requested_outputs,
         asset_requests=assets,
     )
+    continuation = _continuation_parameters(args)
+    if resume_root is None and (
+        continuation["authorization_id"] or continuation["authorization_reason"]
+        or continuation["authorize_remaining"] or continuation["additional_attempts"]
+        or continuation["additional_no_progress"]
+    ):
+        raise SystemExit("Continuation allowances require --session-root.")
     try:
         if resume_root is None:
             app = create_session(brief, root=session_root, services=services)
@@ -526,24 +546,72 @@ def _print_research_session(args: argparse.Namespace) -> None:
             from simple_ar.app.research_application import load_session
             from dataclasses import replace
             app = load_session(session_root, services=replace(services, config={}))
-            if app.brief.objective != brief.objective or app.brief.requested_outputs != brief.requested_outputs:
-                raise ResearchApplicationError("Resume requires the same goal and outputs; it does not revise the research brief.")
+            changed_research_settings = _changed_resume_research_settings(args, app)
+            if changed_research_settings:
+                names = ", ".join(changed_research_settings)
+                raise ResearchApplicationError(
+                    "These explicit research settings differ from or cannot be verified against the saved session: "
+                    f"{names}. They were not applied; start a new research-session to change search/ingestion settings."
+                )
+            report_overrides = _report_config_overrides(args, app)
+            if task_kind != "auto" and task_kind != app._task_kind():
+                raise ResearchApplicationError("Changing task kind requires a new session; revise the goal/assets/outputs within the existing task kind.")
+            revised_brief = _merge_resume_brief(
+                app.brief, brief, task_text=task_text, outputs=outputs,
+                with_report=args.with_report, no_report=args.no_report,
+            )
             existing = app.services.config.get("execution")
-            if execution is not None and existing is None:
-                app.supply_execution(execution, task_text=task_text)
-            elif execution is not None and execution != existing:
-                raise ResearchApplicationError("Cannot replace an existing experiment configuration while resuming.")
-            elif getattr(args, "reanalyze", False):
+            revised_execution = execution if execution is not None and execution != existing else None
+            brief_changed = revised_brief != app.brief
+            report_requested_in_session = bool(
+                {"report", "paper", "full_paper"}
+                & {item.strip().lower() for item in revised_brief.requested_outputs}
+            )
+            if report_overrides and not report_requested_in_session:
+                raise ResearchApplicationError(
+                    "Report settings do not request a report deliverable. Add the report output first or use research-report."
+                )
+            continuation_requested = any((
+                continuation["authorization_id"], continuation["authorization_reason"],
+                continuation["authorize_remaining"], continuation["additional_attempts"],
+                continuation["additional_no_progress"],
+            ))
+            if report_overrides and (brief_changed or revised_execution is not None or continuation_requested or getattr(args, "reanalyze", False)):
+                raise ResearchApplicationError(
+                    "Apply report configuration in a separate research-session resume, without input revisions, reanalysis or continuation allowances."
+                )
+            if getattr(args, "reanalyze", False) and (brief_changed or revised_execution is not None or any((
+                continuation["authorization_id"], continuation["authorization_reason"],
+                continuation["authorize_remaining"], continuation["additional_attempts"],
+                continuation["additional_no_progress"],
+            ))):
+                raise ResearchApplicationError("--reanalyze cannot be combined with input revisions or continuation allowances.")
+            if getattr(args, "reanalyze", False):
                 app.request_reanalysis()
-            elif app.view().status != "completed":
-                app.continue_session(reason="Resume from research-session; reuse persisted evidence and budgets.")
+            elif report_overrides:
+                app.request_report(
+                    refresh=True,
+                    report_config=report_overrides,
+                    reason="Apply explicit report configuration and rebuild only report deliverables from existing evidence.",
+                )
+            elif brief_changed or revised_execution is not None or any((
+                continuation["authorization_id"], continuation["authorization_reason"],
+                continuation["authorize_remaining"], continuation["additional_attempts"],
+                continuation["additional_no_progress"],
+            )) or app.view().status != "completed":
+                app.continue_session(
+                    reason="Resume from research-session with explicit input/budget revision.",
+                    revised_brief=revised_brief if brief_changed else None,
+                    revised_execution=revised_execution,
+                    **continuation,
+                )
         view = app.view()
         display.start(
             view,
             model=getattr(llm_client, "model", "configured") if llm_client is not None else "deterministic",
             topic=app.brief.objective,
         )
-        for _ in range(services.max_attempts + 8):
+        for _ in range(app.controller.manifest.budget.max_attempts + 8):
             if view.next_action is None:
                 view = app.advance(max_actions=1)
                 break
@@ -589,6 +657,107 @@ def _split_cli_command(value: str) -> list[str]:
             for item in parts
         ]
     return parts
+
+
+def _continuation_parameters(args: argparse.Namespace) -> dict[str, object]:
+    raw = getattr(args, "authorize_remaining", None)
+    allowances: dict[str, int | float] = {}
+    if isinstance(raw, dict):
+        rows = raw.items()
+    elif isinstance(raw, (list, tuple)):
+        parsed: list[tuple[str, str]] = []
+        for item in raw:
+            name, separator, amount = str(item).partition("=")
+            if not separator or not name.strip() or not amount.strip():
+                raise SystemExit("--authorize-remaining must use DIMENSION=AMOUNT.")
+            parsed.append((name.strip(), amount.strip()))
+        rows = parsed
+    elif raw is None:
+        rows = ()
+    else:
+        raise SystemExit("continuation.remaining must be a table or repeated --authorize-remaining values.")
+    for name, raw_amount in rows:
+        try:
+            amount = float(raw_amount)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise SystemExit(f"Invalid continuation allowance for {name!r}.") from exc
+        normalized_name = str(name).strip()
+        if not normalized_name:
+            raise SystemExit("Continuation resource dimensions cannot be blank.")
+        if normalized_name in allowances:
+            raise SystemExit(f"Duplicate continuation resource dimension: {name}")
+        allowances[normalized_name] = int(amount) if amount.is_integer() else amount
+    return {
+        "authorization_id": getattr(args, "authorization_id", None),
+        "authorization_reason": getattr(args, "authorization_reason", None),
+        "authorize_remaining": allowances,
+        "additional_attempts": getattr(args, "additional_attempts", 0),
+        "additional_no_progress": getattr(args, "additional_no_progress", 0),
+    }
+
+
+def _merge_resume_brief(
+    existing: Any,
+    proposed: Any,
+    *,
+    task_text: str,
+    outputs: Sequence[str] | None,
+    with_report: bool,
+    no_report: bool,
+) -> Any:
+    """Apply only supplied CLI/TOML inputs; omitted resume fields stay unchanged."""
+
+    from dataclasses import replace
+
+    objective = proposed.objective.strip()
+    if task_text.strip() or objective != existing.objective:
+        request_text = proposed.request_text
+        if objective != existing.objective and not task_text.strip():
+            old_goal = existing.objective.strip()
+            suffix = existing.request_text[len(old_goal):] if old_goal and existing.request_text.startswith(old_goal) else ""
+            request_text = objective + suffix
+    else:
+        request_text = existing.request_text
+
+    requested_outputs = existing.requested_outputs
+    if outputs is not None:
+        requested_outputs = tuple(outputs)
+    elif with_report:
+        requested_outputs = tuple(dict.fromkeys((*requested_outputs, "report")))
+    elif no_report:
+        requested_outputs = tuple(item for item in requested_outputs if item not in {"report", "paper", "full_paper"})
+
+    asset_requests = list(existing.asset_requests)
+    positions: dict[tuple[str, ...], int] = {}
+
+    def asset_key(item: dict[str, Any]) -> tuple[str, ...]:
+        asset_id = str(item.get("asset_id") or "").strip()
+        if asset_id:
+            return ("id", asset_id)
+        locator = str(item.get("locator") or item.get("path") or "").strip()
+        if "://" not in locator:
+            locator = str(Path(locator).expanduser().resolve())
+        return ("locator", locator, str(item.get("role") or "input"))
+
+    for index, item in enumerate(asset_requests):
+        positions[asset_key(dict(item))] = index
+    for item in proposed.asset_requests:
+        row = dict(item)
+        key = asset_key(row)
+        if key in positions:
+            asset_requests[positions[key]] = row
+        else:
+            positions[key] = len(asset_requests)
+            asset_requests.append(row)
+
+    return replace(
+        existing,
+        request_text=request_text,
+        objective=objective,
+        requested_outputs=requested_outputs,
+        asset_ids=(),
+        asset_requests=tuple(asset_requests),
+    )
 
 
 def _merge_result_schemas(
@@ -701,6 +870,98 @@ def _optional_research_llm_client(
         raise SystemExit(f"Cannot enable LLM-backed {purpose}: {exc}") from exc
 
 
+def _explicit_session_option_destinations(
+    parser: argparse.ArgumentParser,
+    arguments: Sequence[str],
+    configured: set[str],
+    *,
+    command: str = "research-session",
+) -> set[str]:
+    """Track only config fields supplied by this CLI/TOML invocation."""
+
+    from argparse import _SubParsersAction
+
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, _SubParsersAction)
+    )
+    selected = subparsers.choices[command]
+    options = arguments[:arguments.index("--command")] if "--command" in arguments else arguments
+    provided = {item.partition("=")[0] for item in options if item.startswith("-")}
+    destinations = set(configured)
+    for action in selected._actions:
+        if provided.intersection(action.option_strings):
+            destinations.add(action.dest)
+    return destinations
+
+
+def _report_config_overrides(args: argparse.Namespace, app: Any) -> dict[str, object]:
+    explicit = getattr(args, "_explicit_resume_destinations", set())
+    if args.command == "research-report":
+        fields = {
+            "template": "template",
+            "reviewer": "reviewer",
+            "max_review_iterations": "max_review_iterations",
+            "max_section_tokens": "max_section_tokens",
+        }
+    else:
+        fields = {
+            "report_template": "template",
+            "report_reviewer": "reviewer",
+            "max_review_iterations": "max_review_iterations",
+            "max_section_tokens": "max_section_tokens",
+            "report_figures": "figures",
+        }
+    supplied: dict[str, object] = {}
+    for destination, key in fields.items():
+        if destination not in explicit:
+            continue
+        value = getattr(args, destination, None)
+        if key == "template" and args.command == "research-session":
+            if value == "experiment" and not app.services.config.get("execution"):
+                value = "survey"
+        if value is not None:
+            supplied[key] = value
+    saved = app.services.config.get("report", {})
+    saved = saved if isinstance(saved, dict) else {}
+    return {key: value for key, value in supplied.items() if saved.get(key) != value}
+
+
+def _changed_resume_research_settings(
+    args: argparse.Namespace, app: Any,
+) -> list[str]:
+    explicit = getattr(args, "_explicit_resume_destinations", set())
+    saved = app.services.config
+    checks: dict[str, tuple[object, object]] = {
+        "providers": (list(args.providers), list(saved.get("research_sources", []))),
+        "queries": (list(args.queries), list(saved.get("research_queries", []))),
+        "max_results": (args.max_results, app.services.max_results),
+        "max_chunks": (args.max_chunks, app.services.max_chunks),
+        "idea_limit": (args.idea_limit, app.services.idea_limit),
+        "max_research_iterations": (
+            args.max_research_iterations, saved.get("research_max_iterations", 1),
+        ),
+        "research_use_fulltext": (
+            getattr(args, "research_use_fulltext", None), saved.get("research_use_fulltext"),
+        ),
+        "research_materials_only": (
+            getattr(args, "research_materials_only", None), saved.get("research_materials_only"),
+        ),
+        "research_allow_pdf_download": (
+            getattr(args, "research_allow_pdf_download", None), saved.get("research_allow_pdf_download"),
+        ),
+        "research_keep_raw_pdf": (
+            getattr(args, "research_keep_raw_pdf", None), saved.get("research_keep_raw_pdf"),
+        ),
+    }
+    changed = [
+        name for name, (requested, previous) in checks.items()
+        if name in explicit and requested != previous
+    ]
+    if "cache_dir" in explicit:
+        changed.append("cache_dir (not persisted for safe resume comparison)")
+    return changed
+
+
 def _print_research_report(args: argparse.Namespace) -> None:
     """Generate a report from an existing research-session handoff."""
 
@@ -720,21 +981,12 @@ def _print_research_report(args: argparse.Namespace) -> None:
         load_session,
     )
 
-    report_config = {
-        "mode": "experiment",
-        "template": args.template,
-        "reviewer": args.reviewer,
-        "max_review_iterations": args.max_review_iterations,
-    }
-    if args.max_section_tokens is not None:
-        report_config["max_section_tokens"] = args.max_section_tokens
-
+    app = None
     try:
         app = load_session(
             session_root,
             services=ResearchApplicationServices(
                 llm_client=client,
-                config={"report": report_config},
             ),
         )
     except ResearchApplicationError as exc:
@@ -744,18 +996,27 @@ def _print_research_report(args: argparse.Namespace) -> None:
         ) from exc
     try:
         view = app.view()
+        report_overrides = _report_config_overrides(args, app)
         if args.refresh:
-            view = app.request_report(refresh=True, reason="Explicitly regenerate the report from existing research evidence.")
+            view = app.request_report(
+                refresh=True,
+                report_config=report_overrides,
+                reason="Explicitly regenerate the report from existing research evidence.",
+            )
+        elif report_overrides:
+            view = app.request_report(
+                report_config=report_overrides,
+                reason="Apply explicit report settings and rebuild only report deliverables from existing evidence.",
+            )
         elif not ({"report", "paper", "full_paper"} & {
             item.strip().lower() for item in app.brief.requested_outputs
         }):
             view = app.request_report()
         elif view.status in {"paused", "blocked"} and view.next_action is not None:
             view = app.continue_session(
-                reason="Resume the canonical report lifecycle after an explicit report recovery.",
-                allow_no_progress_exhausted=True,
+                reason="Resume the canonical report lifecycle within the persisted session budget.",
             )
-        for _ in range(app.services.max_attempts + 8):
+        for _ in range(app.controller.manifest.budget.max_attempts + 8):
             if view.next_action is None:
                 break
             print_line(f"Action: {view.next_action}")
@@ -768,18 +1029,82 @@ def _print_research_report(args: argparse.Namespace) -> None:
                 break
         app.export_session()
     except (ResearchApplicationError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        guidance = _report_budget_authorization_guidance(app) if app is not None else None
+        if guidance is not None:
+            raise SystemExit(f"{exc}\n{guidance}") from exc
         raise SystemExit(str(exc)) from exc
     print_line(f"Research report session: {view.session_root}")
     print_line(f"Status: {view.status}")
     for name in ("report", "report_audit"):
         if name in view.state_refs:
             print_line(f"{name}: {view.session_root / view.state_refs[name].path}")
+    if view.status in {"paused", "blocked"}:
+        guidance = _report_budget_authorization_guidance(app)
+        if guidance is not None:
+            print_line(guidance)
     _ensure_research_cli_success(
         view.status,
         operation="Research report",
         root=view.session_root,
     )
     return
+
+
+def _report_budget_authorization_guidance(app: Any) -> str | None:
+    """Show the official bounded continuation when the persisted cap is spent."""
+
+    budget = app.controller.manifest.budget
+    # A refresh needs writer, assembly and audit, not just one attempt. For
+    # paused reports count only unfinished delivery actions in the saved view.
+    view = app.view()
+    report_states = ("writer", "report", "report_audit")
+    needed_attempts = 3 if view.status == "completed" else sum(
+        name not in view.state_refs for name in report_states
+    )
+    extra_attempts = max(0, needed_attempts - (budget.max_attempts - budget.attempts))
+    extra_no_progress = int(budget.no_progress >= budget.max_no_progress)
+    exhausted_resources = [
+        name for name in ("llm_requests", "total_tokens")
+        if app.budget_ledger.remaining(name) == 0
+    ]
+    if not (extra_attempts or extra_no_progress or exhausted_resources):
+        return None
+    session_root = Path(app.controller.store.root)
+    objective = str(app.brief.objective)
+    session_id = str(app.controller.manifest.session_id)
+    revision = int(app.controller.manifest.revision)
+    authorization_id = f"report-recovery-{session_id}-r{revision}"
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'" if os.name == "nt" else shlex.quote(value)
+
+    command = [
+        "simple-ar research-session",
+        "--session-root", quote(str(session_root)),
+        "--topic", quote(objective),
+        "--authorization-id", quote(authorization_id),
+        "--authorization-reason", quote("Authorize one bounded report recovery after the persisted session budget was exhausted."),
+    ]
+    client = getattr(getattr(app, "services", None), "llm_client", None)
+    model = getattr(client, "model", None)
+    if isinstance(model, str) and model and model != "env":
+        command.extend(("--model", quote(model)))
+    if extra_attempts:
+        command.extend(("--additional-attempts", str(extra_attempts)))
+    if extra_no_progress:
+        command.extend(("--additional-no-progress", str(extra_no_progress)))
+    for name in sorted(exhausted_resources):
+        command.extend(("--authorize-remaining", quote(f"{name}=<finite-amount>")))
+    guidance = "To continue through the supported bounded entrypoint, review and run: " + " ".join(command)
+    guidance += " The attempt allowance covers remaining report stages, not additional failed retries."
+    if view.status == "completed":
+        guidance += " This only authorizes capacity and keeps the session completed; then repeat your original research-report --refresh or report-configuration command."
+    if exhausted_resources:
+        guidance += (
+            " Resource allowance is also exhausted for " + ", ".join(sorted(exhausted_resources))
+            + "; replace each <finite-amount> with an explicitly chosen positive finite amount before running."
+        )
+    return guidance
 
 
 

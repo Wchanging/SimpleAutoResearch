@@ -26,6 +26,32 @@ class SessionTransitionTests(unittest.TestCase):
         self.assertEqual(budget.no_progress, 0)
         self.assertEqual(budget.recorded_attempts, ["attempt-001"])
 
+    def test_continuation_authorization_increases_caps_without_resetting_use(self) -> None:
+        budget = BudgetState(max_attempts=2, max_no_progress=1)
+        budget.record(False, attempt_id="attempt-001")
+
+        self.assertTrue(budget.authorize_additional(
+            "review-1", attempts=2, no_progress=1,
+            resource_allowances={"total_tokens": 50}, reason="One bounded recovery.",
+        ))
+        self.assertFalse(budget.authorize_additional(
+            "review-1", attempts=2, no_progress=1,
+            resource_allowances={"total_tokens": 50}, reason="One bounded recovery.",
+        ))
+        restored = BudgetState.from_dict(budget.to_dict())
+        self.assertEqual((restored.max_attempts, restored.max_no_progress), (4, 2))
+        self.assertEqual((restored.attempts, restored.no_progress), (1, 1))
+        with self.assertRaisesRegex(ValueError, "different terms"):
+            restored.authorize_additional(
+                "review-1", attempts=3, no_progress=1,
+                resource_allowances={"total_tokens": 50}, reason="Changed allowance.",
+            )
+        with self.assertRaisesRegex(ValueError, "different terms"):
+            restored.authorize_additional(
+                "review-1", attempts=2, no_progress=1,
+                resource_allowances={"total_tokens": 60}, reason="One bounded recovery.",
+            )
+
 
 
 

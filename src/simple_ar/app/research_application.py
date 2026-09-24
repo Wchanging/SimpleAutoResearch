@@ -348,14 +348,79 @@ class ResearchApplication:
         *,
         reason: str = "Continue the research application.",
         revised_brief: ResearchBrief | None = None,
-        allow_no_progress_exhausted: bool = False,
+        revised_execution: Mapping[str, object] | None = None,
+        authorization_id: str | None = None,
+        authorization_reason: str | None = None,
+        authorize_remaining: Mapping[str, int | float] | None = None,
+        additional_attempts: int = 0,
+        additional_no_progress: int = 0,
     ) -> ResearchApplicationView:
-        prepared = self._prepare_revision(revised_brief) if revised_brief else None
-        if self.controller.manifest.status == "completed" and prepared is None:
-            raise ResearchApplicationError("A completed session requires a revised brief.")
-        if self.controller.manifest.status == "paused" and prepared is None and self._next_action() is None:
-            raise ResearchApplicationError("This paused session has no enabled next action.")
+        requested_execution = dict(revised_execution) if revised_execution is not None else None
+        previous_execution = self.services.config.get("execution")
+        execution_changed = requested_execution is not None and requested_execution != previous_execution
+        prepared = self._prepare_revision(revised_brief or self.brief) if (
+            revised_brief is not None or execution_changed
+        ) else None
+        if execution_changed:
+            try:
+                execution_request(
+                    requested_execution, task_text=(prepared[0].request_text if prepared else self.brief.request_text),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ResearchApplicationError(f"Invalid revised execution configuration: {exc}") from exc
+        resource_allowances = dict(authorize_remaining or {})
+        has_additional_budget = bool(resource_allowances or additional_attempts or additional_no_progress)
+        has_auth_fields = bool(authorization_id or authorization_reason)
+        if (has_additional_budget and not (authorization_id and authorization_reason)) or (
+            has_auth_fields and not has_additional_budget
+        ):
+            raise ResearchApplicationError(
+                "Continuation allowances require both an authorization id and reason; an id/reason without allowances is invalid."
+            )
+        if authorization_id and (
+            not authorization_id.strip() or not isinstance(authorization_reason, str)
+            or not authorization_reason.strip()
+        ):
+            raise ResearchApplicationError("Continuation authorization id and reason cannot be blank.")
+        # Authorization alone does not reopen completed work. Use the same
+        # persisted authorization path for new terms and idempotent replay.
+        authorization_only = self.controller.manifest.status == "completed" and prepared is None
+        if not authorization_only and prepared is None and self._next_action() is None:
+            raise ResearchApplicationError("This session has no enabled next action to continue.")
         with self.controller.mutation_scope():
+            if self.controller.manifest.status in {"created", "running"} or any(
+                attempt.status == "running" for attempt in self.controller.list_attempts()
+            ):
+                raise ResearchApplicationError("Resolve the current running/empty session state before authorizing continuation.")
+            budget = self.controller.manifest.budget
+            if has_additional_budget:
+                if resource_allowances:
+                    try:
+                        self.budget_ledger.validate_remaining(
+                            resource_allowances,
+                            authorization_id=str(authorization_id),
+                            reason=str(authorization_reason),
+                        )
+                    except BudgetError as exc:
+                        raise ResearchApplicationError(f"Could not apply resource authorization: {exc}") from exc
+                try:
+                    budget.authorize_additional(
+                        str(authorization_id), attempts=additional_attempts,
+                        no_progress=additional_no_progress,
+                        resource_allowances=resource_allowances,
+                        reason=str(authorization_reason),
+                    )
+                    self.controller.save()
+                    if resource_allowances:
+                        self.budget_ledger.authorize_remaining(
+                            resource_allowances,
+                            authorization_id=str(authorization_id),
+                            reason=str(authorization_reason),
+                        )
+                except (BudgetError, ValueError) as exc:
+                    raise ResearchApplicationError(f"Could not apply continuation authorization: {exc}") from exc
+            if authorization_only:
+                return self.view()
             # Explicit continuation retries a failed call with no domain result.
             # Completed results and measured failures remain available to recovery.
             current = next((item for item in self.controller.list_attempts()
@@ -367,13 +432,18 @@ class ResearchApplication:
                     self.controller.manifest.current_attempt = None
             self.controller.continue_with_revision(
                 reason,
-                allow_no_progress_exhausted=allow_no_progress_exhausted,
             )
             if prepared is not None:
-                previous_brief, previous_assets = self.brief, self.assets
+                old_brief, old_assets = self.brief, self.assets
+                old_execution = dict(previous_execution) if isinstance(previous_execution, Mapping) else None
                 self.brief, self.assets, diagnostics = prepared
+                if execution_changed and requested_execution is not None:
+                    self.services = replace(
+                        self.services,
+                        config={**self.services.config, "execution": requested_execution},
+                    )
                 self.controller.manifest.current_attempt = None
-                self._invalidate_revised_inputs(previous_brief, previous_assets)
+                self._invalidate_revised_inputs(old_brief, old_assets, old_execution)
                 self._persist_inputs(diagnostics)
             else:
                 # An invalid comparison is not a user decision to reject every
@@ -394,24 +464,17 @@ class ResearchApplication:
             raise ResearchApplicationError("Execution is already configured; use an explicit experiment revision instead.")
         if self.controller.manifest.status != "paused":
             raise ResearchApplicationError("Supply execution to a paused session before continuing it.")
-        execution_request(execution, task_text=task_text)  # Validate argv and location without launching a process.
-        with self.controller.mutation_scope():
-            self.controller.continue_with_revision("User supplied the missing experiment configuration; budgets unchanged.")
-            self.services = replace(self.services, config={**self.services.config, "execution": dict(execution)})
-            if task_text.strip():
-                self.brief = replace(self.brief, request_text=self.brief.request_text + "\n\n## Implementation task\n\n" + task_text.strip(),
-                                     revision=self.brief.revision + 1, parent_revision=self.brief.revision)
-            self.controller.manifest.current_attempt = None
-            self._remove_plan_capability_refs({
-                "research_design", "prepare_execution", "implement", "experiment", "analysis",
-                "report_write", "report", "report_audit",
-            })
-            for name in ("task_plan", "design", "comparison", "decision", "writer", "report", "report_audit", "diagnostics"):
-                self.controller.manifest.state_refs.pop(name, None)
-            self._persist_inputs(validate_brief(self.brief, self.assets))
-            if self._next_action() == "plan":
-                self._run_action("plan")
-            return self.view()
+        revised = self.brief
+        if task_text.strip() and task_text.strip() not in revised.request_text:
+            revised = replace(
+                revised,
+                request_text=revised.request_text + "\n\n## Implementation task\n\n" + task_text.strip(),
+            )
+        return self.continue_session(
+            reason="User supplied the missing experiment configuration.",
+            revised_brief=revised,
+            revised_execution=execution,
+        )
 
     def request_reanalysis(self) -> ResearchApplicationView:
         """Reconsider a settled measurement without retraining or requesting a report."""
@@ -439,18 +502,32 @@ class ResearchApplication:
         self,
         *,
         refresh: bool = False,
+        report_config: Mapping[str, object] | None = None,
         reason: str = "Request the report deliverable from the completed research evidence.",
     ) -> ResearchApplicationView:
         """Add the report deliverable without rerunning settled research work.
 
         This is the explicit continuation used by ``research-report`` for a
         canonical session created with ``--no-report``. It changes the
-        requested deliverable only; existing evidence and measurements remain
-        immutable and are reused by the report actions.
+        requested deliverable and, when supplied, only the report runtime
+        configuration; existing evidence and measurements remain immutable
+        and are reused by the report actions.
         """
 
         requested = {item.strip().lower() for item in self.brief.requested_outputs}
-        if requested & {"report", "paper", "full_paper"} and not refresh:
+        previous_report_config = self.services.config.get("report", {})
+        if not isinstance(previous_report_config, Mapping):
+            previous_report_config = {}
+        updated_report_config = {**previous_report_config, **dict(report_config or {})}
+        report_config_changed = updated_report_config != dict(previous_report_config)
+        if report_config is not None:
+            from simple_ar.report.schema import ReportRuntimeConfig
+
+            try:
+                ReportRuntimeConfig.model_validate(updated_report_config)
+            except (TypeError, ValueError) as exc:
+                raise ResearchApplicationError(f"Invalid report configuration: {exc}") from exc
+        if requested & {"report", "paper", "full_paper"} and not refresh and not report_config_changed:
             return self.view()
         if self.controller.manifest.status == "running":
             raise ResearchApplicationError(
@@ -458,7 +535,11 @@ class ResearchApplication:
             )
         with self.controller.mutation_scope():
             self.controller.continue_with_revision(reason)
-            if refresh:
+            if report_config_changed:
+                config = dict(self.services.config)
+                config["report"] = updated_report_config
+                self.services = replace(self.services, config=config)
+            if refresh or report_config_changed:
                 # Retire only delivery pointers; prior attempts and all research
                 # measurements remain immutable and available for inspection.
                 for name in ("writer", "report", "report_audit"):
@@ -1344,7 +1425,6 @@ class ResearchApplication:
                                      load_report_template_bundle(report_mode=report_context.report_mode, config=config), self.services.llm_client, resume_ref,
                                      self.services.message_callback),
                 sources + ((resume_ref,) if resume_ref else ()),
-                allow_no_progress_exhausted=True,
             )
         if action in {"report", "report_audit"}:
             from simple_ar.report.schema import ReportContext, ReportMemory
@@ -1612,7 +1692,7 @@ class ResearchApplication:
         if require_all and len(refs) != expected:
             return [], "Candidate revision requires a passed baseline for every accepted comparison condition."
         for index, ref in enumerate(refs):
-            if not self._baseline_ref_matches(ref, execution, pair_index=index if pairs else None):
+            if not self._measurement_ref_matches(ref, execution, pair_index=index if pairs else None):
                 return [], "The original baseline no longer matches the current protected assets or protocol."
             payload = self.controller.store.read_json(ref)
             if str(payload.get("status") or "").lower() != "passed":
@@ -1632,21 +1712,16 @@ class ResearchApplication:
         self, capability: str, state_name: str,
         request: Any, inputs: tuple[ArtifactRef, ...], *, allow_partial: bool = False,
         parent_attempt_id: str | None = None,
-        allow_no_progress_exhausted: bool = False,
         **kwargs: Any,
     ) -> bool:
         _, artifact_kind, _ = _CAPABILITY_OUTPUTS[capability]
-        attempt_id = self.controller.allocate_attempt_id(
-            capability,
-            allow_no_progress_exhausted=allow_no_progress_exhausted,
-        )
+        attempt_id = self.controller.allocate_attempt_id(capability)
         request = self._request_for_attempt(request, attempt_id)
         if request is not None:
             kwargs["request"] = request
         result = self.controller.execute_attempt(
             capability, attempt_id=attempt_id, inputs=inputs, parent_attempt_id=parent_attempt_id,
             trigger=f"application:{state_name}",
-            allow_no_progress_exhausted=allow_no_progress_exhausted,
             **kwargs,
         )
         accepted = {"completed", "partial"} if allow_partial else {"completed"}
@@ -2721,7 +2796,7 @@ class ResearchApplication:
             mode, reason = "reuse", "Reuse the supplied or persisted passed canonical result when conditions match."
         elif refs:
             compatible = (not pairs or len(refs) == len(pairs)) and all(
-                self._baseline_ref_matches(ref, execution, pair_index=index if pairs else None)
+                self._measurement_ref_matches(ref, execution, pair_index=index if pairs else None)
                 for index, ref in enumerate(refs)
             )
             mode = "reuse" if compatible else "run"
@@ -2752,28 +2827,13 @@ class ResearchApplication:
         assets = _normalize_assets(candidate, self.services)
         diagnostics = validate_brief(candidate, assets)
         _raise_on_errors(diagnostics)
-        previous = {asset.asset_id: _asset_revision_facts(asset) for asset in self.assets}
-        revised = {asset.asset_id: _asset_revision_facts(asset) for asset in assets}
-        changed_ids = {
-            asset_id for asset_id in previous.keys() | revised.keys()
-            if previous.get(asset_id) != revised.get(asset_id)
-        }
-        execution_roles = {"code", "project", "repository", "dataset", "data", "benchmark", "evaluator", "baseline", "execution"}
-        changed_execution_assets = [
-            asset.asset_id for asset in (*self.assets, *assets)
-            if asset.asset_id in changed_ids
-            and (asset.role.strip().lower() in execution_roles or asset.kind.strip().lower() in execution_roles)
-        ]
-        if changed_execution_assets:
-            raise ResearchApplicationError(
-                "Execution-bound assets changed in the revised brief ("
-                + ", ".join(dict.fromkeys(changed_execution_assets))
-                + "); revise the execution configuration through a new session rather than reusing old measurements."
-            )
         return candidate, assets, diagnostics
 
     def _invalidate_revised_inputs(
-        self, previous_brief: ResearchBrief, previous_assets: tuple[ResearchAsset, ...],
+        self,
+        previous_brief: ResearchBrief,
+        previous_assets: tuple[ResearchAsset, ...],
+        previous_execution: Mapping[str, object] | None,
     ) -> None:
         """Retire only current pointers whose accepted-plan inputs changed."""
 
@@ -2793,13 +2853,43 @@ class ResearchApplication:
         outputs_changed = previous_brief.requested_outputs != self.brief.requested_outputs
         previous_assets_by_id = {asset.asset_id: _asset_revision_facts(asset) for asset in previous_assets}
         current_assets_by_id = {asset.asset_id: _asset_revision_facts(asset) for asset in self.assets}
-        materials_changed = (
-            previous_assets_by_id != current_assets_by_id
-            or previous_brief.asset_ids != self.brief.asset_ids
+        changed_asset_ids = {
+            asset_id for asset_id in previous_assets_by_id.keys() | current_assets_by_id.keys()
+            if previous_assets_by_id.get(asset_id) != current_assets_by_id.get(asset_id)
+        }
+        touched_assets = [
+            asset for asset in (*previous_assets, *self.assets)
+            if asset.asset_id in changed_asset_ids
+        ]
+        execution_roles = {"code", "project", "repository", "dataset", "data", "benchmark", "evaluator", "baseline", "execution"}
+        execution_assets_changed = any(
+            asset.role.strip().lower() in execution_roles
+            or asset.kind.strip().lower() in execution_roles
+            for asset in touched_assets
         )
+        research_assets_changed = any(
+            asset.role.strip().lower() in {"paper", "document", "reference"}
+            for asset in touched_assets
+        ) or (previous_brief.asset_ids != self.brief.asset_ids and not execution_assets_changed)
+        materials_changed = research_assets_changed
+        current_execution = self.services.config.get("execution")
+        current_execution = dict(current_execution) if isinstance(current_execution, Mapping) else None
+        execution_changed = previous_execution != current_execution
+        old_code_task = previous_execution.get("code_task") if isinstance(previous_execution, Mapping) else None
+        new_code_task = current_execution.get("code_task") if isinstance(current_execution, Mapping) else None
+        code_task_changed = old_code_task != new_code_task
+        old_code_root = old_code_task.get("code_root") if isinstance(old_code_task, Mapping) else None
+        new_code_root = new_code_task.get("code_root") if isinstance(new_code_task, Mapping) else None
+        code_project_changed = any(
+            asset.role.strip().lower() in {"code", "project", "repository"}
+            or asset.kind.strip().lower() in {"code", "project", "repository"}
+            for asset in touched_assets
+        ) or old_code_root != new_code_root
+        execution_context_changed = execution_changed or execution_assets_changed
 
         if preferences_changed and not any((
             question_changed, constraints_changed, outputs_changed, materials_changed,
+            execution_changed, execution_assets_changed,
         )):
             # Refresh only declared deliverables affected by this revision.
             # Preferences are not classified by natural-language keywords;
@@ -2846,16 +2936,80 @@ class ResearchApplication:
                 "report_write", "report", "report_audit",
             })
 
-        execution = self._execution_config().get("execution")
-        is_code_task = isinstance(execution, Mapping) and isinstance(execution.get("code_task"), Mapping)
-        if is_code_task and implementation_context_changed:
+        is_code_task = isinstance(old_code_task, Mapping) or isinstance(new_code_task, Mapping)
+        if execution_changed or execution_assets_changed:
+            stale_capabilities.update({
+                "research_design", "analysis", "report_write", "report", "report_audit",
+            })
+        if code_project_changed:
+            stale_capabilities.update({"prepare_execution", "implement"})
+        old_dataset = previous_execution.get("dataset") if isinstance(previous_execution, Mapping) else None
+        dataset_changed = old_dataset != current_execution.get("dataset") if isinstance(current_execution, Mapping) else old_dataset is not None
+        dataset_preparation = isinstance(current_execution, Mapping) and "dataset" in current_execution
+        has_preparation = self._active_preparation_ref() is not None
+        preparation_changed = code_project_changed or dataset_changed or (
+            execution_assets_changed and (dataset_preparation or has_preparation)
+        )
+        if preparation_changed:
+            stale_capabilities.add("prepare_execution")
+        if is_code_task and (implementation_context_changed or code_task_changed or code_project_changed):
             stale_capabilities.add("implement")
+        if preparation_changed:
+            refs.pop("preparation", None)
 
+        # Do not resolve a changed preparation through the still-persisted old
+        # prepared artifact. For unchanged preparation, overlaying its concrete
+        # workspace remains necessary to compare the same execution condition.
+        resolved_execution = (
+            current_execution if preparation_changed
+            else self._effective_config().get("execution")
+        )
+        reusable_measurements: set[str] = set()
+        protocol_is_explicit = isinstance(current_execution, Mapping) and "protocol" in current_execution
+        protocol = current_execution.get("protocol") if isinstance(current_execution, Mapping) else None
+        contract_override = (
+            dict(protocol) if isinstance(protocol, Mapping)
+            else {} if protocol_is_explicit else None
+        )
+        if execution_context_changed and isinstance(resolved_execution, Mapping):
+            policy = str(resolved_execution.get("baseline_policy") or "skip").strip().lower()
+            for name, ref in tuple(refs.items()):
+                if name != "baseline" and not name.startswith("matrix_baseline_"):
+                    continue
+                pair_index = int(name.rsplit("_", 1)[1]) if name.startswith("matrix_baseline_") else None
+                if policy != "skip" and not execution_assets_changed and not preparation_changed and self._measurement_ref_matches(
+                    ref, resolved_execution, condition="baseline", pair_index=pair_index,
+                    contract_override=contract_override,
+                ):
+                    reusable_measurements.add(name)
+                else:
+                    refs.pop(name, None)
+
+        measurements_stale = False
         if "task_plan" in refs:
             plan = self._load_task_plan()
             for step in plan.steps:
                 stale = step.capability in stale_capabilities
-                if is_code_task and implementation_context_changed:
+                if execution_context_changed and step.capability == "experiment":
+                    is_baseline = step.action == "baseline" or step.action.startswith("matrix_baseline_")
+                    if is_baseline:
+                        stale = step.state_name not in reusable_measurements
+                    else:
+                        pair_index = (
+                            int(step.action.rsplit("_", 1)[1])
+                            if step.action.startswith("matrix_candidate_") else None
+                        )
+                        condition = "baseline" if is_baseline else "candidate"
+                        stale = (
+                            execution_assets_changed or preparation_changed
+                            or not self._measurement_ref_matches(
+                                refs[step.state_name], resolved_execution,
+                                condition=condition, pair_index=pair_index,
+                                contract_override=contract_override,
+                            )
+                        ) if step.state_name in refs and isinstance(resolved_execution, Mapping) else True
+                    measurements_stale = measurements_stale or stale
+                if is_code_task and (implementation_context_changed or code_task_changed or code_project_changed):
                     if step.capability == "prepare_execution" and step.action.startswith("prepare_candidate:"):
                         stale = True
                     if step.capability == "experiment" and step.action not in {"baseline"} and not step.action.startswith(("matrix_baseline_", "supplement_baseline:")):
@@ -2870,7 +3024,7 @@ class ResearchApplication:
         if "analysis" in stale_capabilities or (is_code_task and implementation_context_changed):
             refs.pop("comparison", None)
             refs.pop("decision", None)
-        if "experiment" in stale_capabilities or (is_code_task and implementation_context_changed):
+        if measurements_stale or execution_context_changed or (is_code_task and implementation_context_changed):
             refs.pop("matrix_results", None)
 
     def _remove_plan_capability_refs(self, capabilities: set[str]) -> None:
@@ -3017,12 +3171,22 @@ class ResearchApplication:
         if ref is None:
             return False
         attempt = self._attempt_for_ref(ref)
-        return bool(
+        completed = bool(
             attempt is not None
             and attempt.status in {"completed", "failed"}
             and attempt.trigger == f"application:{state_name}"
             and attempt.capability == step.capability
         )
+        if not completed or step.capability != "experiment" or attempt is None or attempt.status != "completed":
+            return completed
+        try:
+            result = self.controller.store.read_json(ref)
+        except (OSError, ValueError):
+            return False
+        # Completion is a persisted attempt/result fact. Compatibility with a
+        # revised execution contract is decided when that revision is accepted,
+        # never while projecting an unchanged session.
+        return isinstance(result, Mapping)
 
     def _condition_applies(self, condition: str) -> bool:
         if not condition:
@@ -3258,7 +3422,7 @@ class ResearchApplication:
                 return False
             for index, value in enumerate(configured_refs):
                 ref = self._coerce_reuse_ref(value)
-                if ref is None or not self._baseline_ref_matches(ref, execution, pair_index=index):
+                if ref is None or not self._measurement_ref_matches(ref, execution, pair_index=index):
                     self.controller.pause(
                         f"Baseline reuse condition does not match the accepted protocol for seed index {index}."
                     )
@@ -3269,7 +3433,7 @@ class ResearchApplication:
 
         value = configured or self.controller.manifest.state_refs.get("baseline")
         ref = self._coerce_reuse_ref(value)
-        if ref is None or not self._baseline_ref_matches(ref, execution):
+        if ref is None or not self._measurement_ref_matches(ref, execution):
             self.controller.pause(
                 "Baseline reuse requested, but no passed same-condition canonical result was supplied."
             )
@@ -3298,21 +3462,27 @@ class ResearchApplication:
         except (KeyError, TypeError, ValueError, OSError):
             return None
 
-    def _baseline_ref_matches(
-        self, ref: ArtifactRef, execution: Mapping[str, object], *, pair_index: int | None = None,
+    def _measurement_ref_matches(
+        self,
+        ref: ArtifactRef,
+        execution: Mapping[str, object],
+        *,
+        condition: str = "baseline",
+        pair_index: int | None = None,
+        contract_override: Mapping[str, Any] | None = None,
     ) -> bool:
         try:
             payload = self.controller.store.read_json(ref)
             if not isinstance(payload, Mapping) or str(payload.get("status") or "").lower() != "passed":
                 return False
-            contract = self._execution_contract()
+            contract = contract_override if contract_override is not None else self._execution_contract()
             if contract is None and isinstance(execution.get("protocol"), Mapping):
                 # A brief revision can invalidate the old design artifact
                 # before the next design step runs.  An explicitly supplied
                 # execution protocol is still a valid reuse boundary.
                 contract = dict(execution["protocol"])
             expected = execution_request(
-                execution, condition="baseline", pair_index=pair_index,
+                execution, condition=condition, pair_index=pair_index,
                 task_text=self.brief.request_text, contract=contract,
             )
         except (KeyError, TypeError, ValueError, OSError):
@@ -3329,15 +3499,17 @@ class ResearchApplication:
             return False
 
         baseline_attempt = self._attempt_for_ref(ref)
+        trigger = baseline_attempt.trigger.removeprefix("application:") if baseline_attempt else ""
+        baseline_actions = {"baseline"} if condition == "baseline" else set()
+        baseline_prefixes = ("matrix_baseline_", "baseline_supplement:") if condition == "baseline" else ()
         same_session_baseline = (
             baseline_attempt is not None
             and baseline_attempt.capability == "experiment"
             and baseline_attempt.status == "completed"
             and (
-                baseline_attempt.trigger.removeprefix("application:") == "baseline"
-                or baseline_attempt.trigger.removeprefix("application:").startswith(
-                    ("matrix_baseline_", "baseline_supplement:")
-                )
+                trigger in baseline_actions or trigger.startswith(baseline_prefixes)
+                if condition == "baseline"
+                else trigger not in {"baseline"} and not trigger.startswith(("matrix_baseline_", "baseline_supplement:"))
             )
         )
 
@@ -3474,7 +3646,30 @@ class ResearchApplication:
         config = dict(self.services.config)
         preparation = self._active_preparation_ref()
         if preparation is not None:
-            config["execution"] = dict(self.controller.store.read_json(preparation)["execution"])
+            prepared_execution = dict(self.controller.store.read_json(preparation)["execution"])
+            configured = config.get("execution")
+            if isinstance(configured, Mapping):
+                requested = dict(configured)
+                prepared_task = prepared_execution.get("code_task")
+                requested_task = requested.get("code_task")
+                if isinstance(prepared_task, Mapping) and isinstance(requested_task, Mapping):
+                    task = dict(requested_task)
+                    for key in ("run_dir",):
+                        if key in prepared_task:
+                            task[key] = prepared_task[key]
+                    task.pop("code_root", None)
+                    task.pop("workspace_mode", None)
+                    requested["code_task"] = task
+                    requested.pop("cwd", None)
+                    prepared_baseline = prepared_execution.get("baseline")
+                    requested_baseline = requested.get("baseline")
+                    if isinstance(prepared_baseline, Mapping) and isinstance(requested_baseline, Mapping):
+                        baseline = {**prepared_baseline, **requested_baseline}
+                        baseline["cwd"] = prepared_baseline.get("cwd", baseline.get("cwd"))
+                        requested["baseline"] = baseline
+                config["execution"] = {**prepared_execution, **requested}
+            else:
+                config["execution"] = prepared_execution
         return config
 
     def _active_preparation_ref(self) -> ArtifactRef | None:

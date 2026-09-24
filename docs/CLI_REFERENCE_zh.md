@@ -73,11 +73,34 @@ LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求�
 
 ### `simple-ar research-session`（任务驱动的 canonical 入口）
 
-可加 `--session-root PATH` 续接相同目标和 outputs 的会话，或补齐缺少的执行配置；
-已有证据、研究设置和预算消费保持不变。该选项不用于修改目标、outputs、执行资产或协议；
-这些输入变化时请新建 session。详见配置参考的续接说明。
+可加 `--session-root PATH` 继续已保存的 accepted plan。未提供的新目标/outputs 保持不变；
+显式提供新目标、outputs、本地文献或执行配置会修订当前 session。attempt 历史保留；只有
+命令、结果 schema、协议、准备 lineage 和保护资产仍匹配的测量才复用，其余依赖步骤重新规划。
+新增文献本身不会重跑有效实验；task kind 改变仍须新建 session。详见配置参考的续接说明。
+恢复时未显式提供的报告选项沿用已存设置；对已请求报告的 session，显式报告改动只重建报告产物。
+尚未请求报告的前缀请使用 `research-report` 添加交付物。与已存 session 不匹配、
+且不能安全修订的搜索/摄取设置会在执行前拒绝；要应用这些设置请新建 session。
+`[research].max_iterations` 限制有界后续轮次；`0` 表示首轮分析后停止。
 
-在已暂停或完成的分析检查点，可同时加 `--reanalyze`：复用已有测量重新分析，
+额度续接仍使用 `research-session`。可通过 `[continuation]` TOML 或 CLI 提供新额度：
+`--authorize-remaining DIMENSION=AMOUNT` 可重复，表示授权后后续调用的新剩余额度，不会估算或
+消除未知历史用量；`--additional-attempts` 与 `--additional-no-progress` 只增加持久化上限，不清零
+计数。所有授权都需要稳定的 `--authorization-id` 和 `--authorization-reason`；相同 ID/条款重放
+幂等，条款变化须使用新 ID。不得直接编辑账本或 manifest。
+
+已完成会话若只追加额度而不修改输入，将保持 `completed`，不执行任何研究或报告动作。
+刷新报告时可先用上述入口授权，再运行 `research-report --refresh` 或原报告配置修订命令。
+完整报告刷新通常需要 writer、组装、审计三个 attempt，失败重试另计；纯报告不要求增加进程预算。
+
+```bash
+simple-ar research-session --config research.toml --session-root runs/research-session/<session> \
+  --local-document new-paper.md \
+  --authorization-id review-20260924-1 --authorization-reason "审查后有界续接" \
+  --additional-attempts 2 --additional-no-progress 1 \
+  --authorize-remaining total_tokens=50000 --authorize-remaining llm_requests=8
+```
+
+在已暂停或完成的分析检查点，可单独使用 `--reanalyze`（不与额度授权或输入修订合并）：复用已有测量重新分析，
 再按结果继续研究决策。历史产物和已消耗预算保留，不增加论文交付要求；
 后续若接受候选修订，仍会消耗原预算执行新实验。不能用它覆盖尚待执行的科研后续计划。
 
@@ -223,6 +246,8 @@ uv run simple-ar research-report \
 刷新仍使用会话剩余预算。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit
 仍会运行。历史 session 可读取，但不再由第二套报告执行器续写；损坏的正式 session 会明确失败，
 不会回退到另一条流程。
+未提供的 template/reviewer/limit 选项沿用 session 已存设置；显式选项只更新报告配置并重建报告产物。
+持久化 attempt/no-progress 上限耗尽时，请通过 `research-session` 做显式授权续接；报告路径不绕过上限。
 
 ### 已退出的分段 CodeTask 命令
 

@@ -292,32 +292,68 @@ class BudgetLedger:
             self._persist_unlocked()
             return entry
 
-    def authorize_remaining(self, dimension: str, amount: BudgetNumber, *, authorization_id: str, reason: str) -> None:
+    def authorize_remaining(
+        self,
+        dimension: str | Mapping[str, BudgetNumber],
+        amount: BudgetNumber | None = None,
+        *,
+        authorization_id: str,
+        reason: str,
+    ) -> None:
         """Start an explicitly authorized allowance; preserve all earlier usage.
 
         The allowance covers subsequent calls, not unknown historical charges.
+        A mapping authorizes several dimensions under one id atomically.
         Replaying the same authorization never replenishes spent capacity.
         """
-        dimension = _required_text(dimension, "dimension")
-        amount = _number(amount, field="allowance")
-        authorization_id = _required_text(authorization_id, "authorization_id")
-        reason = _required_text(reason, "reason")
+        allowances, authorization_id, reason = _remaining_authorization(
+            dimension, amount, authorization_id, reason,
+        )
         with self._lock:
-            existing = self._entries.get(authorization_id)
+            existing = self._check_remaining_authorization(allowances, authorization_id)
             if existing is not None:
-                if existing.actual_source != "user_authorization" or existing.reserved != {dimension: amount}:
-                    raise BudgetConflictError("Authorization ID already exists with different terms")
                 return
-            if any(e.status == "reserved" and dimension in e.reserved for e in self._entries.values()):
-                raise BudgetConflictError("Cannot replace an allowance while calls remain in flight")
             now = _utc_now()
             self._entries[authorization_id] = BudgetEntry(
-                authorization_id, {dimension: amount}, {}, "released",
+                authorization_id, allowances, {}, "released",
                 actual_source="user_authorization", reason=reason,
                 created_at=now, updated_at=now,
             )
-            self.limits[dimension] = amount
+            self.limits.update(allowances)
             self._persist_unlocked()
+
+    def validate_remaining(
+        self,
+        allowances: Mapping[str, BudgetNumber],
+        *,
+        authorization_id: str,
+        reason: str,
+    ) -> None:
+        """Validate an authorization before its companion session-budget record is saved."""
+
+        normalized, authorization_id, _ = _remaining_authorization(
+            allowances, None, authorization_id, reason,
+        )
+        with self._lock:
+            self._check_remaining_authorization(normalized, authorization_id)
+
+    def _check_remaining_authorization(
+        self, allowances: dict[str, BudgetNumber], authorization_id: str,
+    ) -> BudgetEntry | None:
+        unknown = set(allowances) - set(self.limits)
+        if unknown:
+            raise BudgetError("Cannot authorize unconfigured resource dimensions: " + ", ".join(sorted(unknown)))
+        existing = self._entries.get(authorization_id)
+        if existing is not None:
+            if existing.actual_source != "user_authorization" or existing.reserved != allowances:
+                raise BudgetConflictError("Authorization ID already exists with different terms")
+            return existing
+        if any(
+            e.status == "reserved" and set(allowances).intersection(e.reserved)
+            for e in self._entries.values()
+        ):
+            raise BudgetConflictError("Cannot replace an allowance while calls remain in flight")
+        return None
 
     def _allowance_entries(self, dimension: str) -> tuple[BudgetEntry, ...]:
         entries = tuple(self._entries.values())
@@ -469,6 +505,28 @@ def _normalize_limits(
             limit = _number(limit, field=f"limit for {dimension!r}")
         normalized[dimension] = limit
     return normalized
+
+
+def _remaining_authorization(
+    dimension: str | Mapping[str, BudgetNumber],
+    amount: BudgetNumber | None,
+    authorization_id: str,
+    reason: str,
+) -> tuple[dict[str, BudgetNumber], str, str]:
+    if isinstance(dimension, Mapping):
+        if amount is not None:
+            raise BudgetError("A multi-dimension allowance must not include a separate amount")
+        allowances = _normalize_amounts(dimension, field="allowance")
+        if not allowances:
+            raise BudgetError("An allowance must include at least one dimension")
+    else:
+        dimension = _required_text(dimension, "dimension")
+        if amount is None:
+            raise BudgetError("An allowance amount is required")
+        allowances = {dimension: _number(amount, field="allowance")}
+    if any(value <= 0 for value in allowances.values()):
+        raise BudgetError("Resource allowance amounts must be positive")
+    return allowances, _required_text(authorization_id, "authorization_id"), _required_text(reason, "reason")
 
 
 def _normalize_amounts(value: object, *, field: str) -> dict[str, BudgetNumber]:

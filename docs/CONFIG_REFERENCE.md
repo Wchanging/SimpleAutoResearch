@@ -13,7 +13,7 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens),
 `budget` (total_tokens, llm_requests, process_invocations, process_wall_seconds),
 `research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir,
-use_fulltext, allow_pdf_download, keep_raw_pdf),
+use_fulltext, allow_pdf_download, keep_raw_pdf, materials_only, max_iterations),
 `assets` (papers), `execution` (command, cwd, timeout_sec, code_task_config,
 primary_metric, metrics, metric_directions, pairs, seeds, seed_flag, seed_count,
 baseline_policy, baseline_ref, protocol), and `report` (template, reviewer,
@@ -30,6 +30,14 @@ with --with-report/--no-report. Missing execution settings preserve the experime
 and pause at that boundary; automatic repository preparation is not yet implemented.
 Budget limits initialize new sessions; resuming uses the persisted ledger, not a refreshed allowance.
 Unknown fields are rejected; stage-specific research models are not supported yet.
+`research.max_iterations` maps to the actual follow-up-round limit; `0` stops after
+the first analysis. On `--session-root` resume, saved research settings are retained.
+Changed search/ingestion settings are rejected when they differ from the saved values;
+`cache_dir` cannot be verified because it is not persisted and is therefore not accepted
+as a resume change. Start a new session to apply those settings. Explicit report settings
+may be changed on a session that already requests a report; only writer/report/audit outputs
+are invalidated, not research evidence or measurements. Use `research-report` to add a report
+deliverable to an existing prefix.
 `task.kind` may be `auto`, `survey`, or `bug_fix`. Bug repair uses the existing
 `execution.code_task_config`, edit scope and short validation command, with explicit
 finite process budgets and no baseline. Its output is `bug_fix`; auto does not imply
@@ -87,11 +95,42 @@ Historical configuration snapshots remain readable files, not executable workflo
 ### Continue a research session after preparing execution
 
 Run `simple-ar research-session --config research.toml --session-root runs/research-session/<session>`.
-Keep the original goal/outputs and add the missing execution command or CodeTask configuration.
-Existing evidence is reused, implementation task-file instructions are retained, and completed
-sessions do not train again. Existing execution settings cannot be silently replaced.
-Saved research/report settings and budget limits remain authoritative; editing TOML does not
-replenish the ledger. Declare intended process limits when creating a session that will later run experiments.
+Omitted goal/outputs stay unchanged; supplied goal, outputs, local papers, or execution settings
+revise the existing session. The accepted plan is rebuilt, while attempt history remains and
+measurements are reused only when their command, result schema, protocol, preparation lineage,
+and protected assets still match. Literature additions do not by themselves repeat valid
+experiments. Changing task kind still requires a new session.
+
+### Explicit continuation allowances
+
+Continuation uses the existing `research-session` command. A `[continuation]` table is optional
+and only applies with `--session-root`:
+
+```toml
+[continuation]
+authorization_id = "review-20260924-1"
+reason = "Bounded continuation after review"
+additional_attempts = 2
+additional_no_progress = 1
+remaining = { total_tokens = 50000, llm_requests = 8 }
+```
+
+`remaining` starts a new allowance for subsequent calls on already configured resource
+dimensions. It does not estimate or resolve unknown historical usage; earlier ledger entries and
+attempt counters remain intact. `additional_attempts` and `additional_no_progress` increase their
+persisted caps and do not reset use. CLI equivalents are `--authorization-id`,
+`--authorization-reason`, repeatable `--authorize-remaining DIMENSION=AMOUNT`,
+`--additional-attempts`, and `--additional-no-progress`. Use the same ID only to replay exactly
+the same terms; a new allowance requires a new ID. Do not edit the ledger or manifest by hand.
+Authorization alone on a completed session keeps its status, attempts and artifacts unchanged.
+Resources and attempt capacity may be replenished separately; execution still checks all required
+limits. Replaying identical terms does not replenish spent capacity and can finish an interrupted
+resource-ledger write. For report refresh, authorize first and then run `research-report --refresh`;
+report-only work does not require expanding process permissions.
+
+Saved research/report settings remain authoritative unless explicitly revised through the
+session entrypoint. Declare intended process limits when creating a session that will later run
+experiments; continuation can only extend dimensions already present in that session's ledger.
 Automatic repository discovery/download/setup is not implemented.
 
 Research preparation honors CodeTask auto/copy/git_worktree and protected paths. Auto preserves

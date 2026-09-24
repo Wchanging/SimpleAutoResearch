@@ -20,7 +20,8 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
   API key/base URL 继续来自环境，禁止在模板写密钥。
 - `[budget]`：`total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds`。
   总 token 与单次输出上限不是同一个限制。配置预算用于新会话；恢复继续使用已有账本。
-- `[research]`：`providers`、`queries`、`max_results`、`max_chunks`、`idea_limit`、`cache_dir`。
+- `[research]`：`providers`、`queries`、`max_results`、`max_chunks`、`idea_limit`、`cache_dir`、
+  `max_iterations`。`max_iterations = 0` 表示首轮分析后停止。
   可用布尔项 `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf` 启用已有全文摄取；
   高级模板显式开启。下载或解析失败仍须保留摘要级/不可用状态，不能称为全文阅读。
 - `[assets].papers`：本地文献路径列表。
@@ -54,6 +55,11 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 - 未实现字段和拼写错误显式报错。暂不接受研究阶段模型或多模型协作配置。
 - 生效预算、研究参数和输入保存在会话 runtime_config/brief 产物中；认证配置不写入。
   模型连接仍来自当前运行环境，不应将这些产物视为完整的连接配置快照。
+- 使用 `--session-root` 恢复时，未改动的研究参数沿用已存值。若显式研究配置与存档值不同，
+  搜索/摄取类变更会在执行前拒绝；`cache_dir` 没有持久化，无法安全比较，因此也不能作为续接改动。
+  请新建 session 应用这些研究设置。已请求报告的 session 可显式修改 `[report]`；它只失效 writer/report/audit
+  交付引用，保留文献、分析与测量产物，不重新运行研究或实验。
+  尚未请求报告的前缀可使用 `research-report` 补齐交付物。
 
 - code-task init --config PATH 读取初始化配置。
 - code-task execute --config PATH 读取执行、模型与预算配置。
@@ -69,14 +75,36 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 simple-ar research-session --config research.toml --session-root runs/research-session/<session>
 ```
 
-保持原目标和 outputs，在 TOML 中补充 `[execution]` 的 command/cwd/timeout_sec，
-或引用已有 CodeTask 配置即可继续缺少实验条件的暂停会话。已有研究产物复用，
-CodeTask task_file 中的补充实现要求会保留；不会重新检索或覆盖已有实验协议。
-完整会话重复运行不会再次训练。若要修改已有实验条件，使用显式实验修订入口。
+省略的目标和 outputs 沿用原值；显式提供的新目标、outputs、本地文献或执行配置会修订现有
+session。accepted plan 重新生成，attempt 历史保留；只有命令、结果 schema、协议、准备 lineage
+和保护资产匹配的测量才复用。仅增加文献不会重跑有效实验；改变 task kind 仍需新建 session。
 
-续接沿用已保存的研究/报告设置和预算，只有模型连接来自本次环境。
-修改配置中的预算不会增加原会话额度；计划稍后实验时，应在首次启动就填写允许的
-process_invocations/process_wall_seconds。自动寻找、下载并配置仓库仍不是已实现能力。
+### 显式续接额度
+
+在同一 `research-session --session-root` 命令中可用 TOML 授权：
+
+```toml
+[continuation]
+authorization_id = "review-20260924-1"
+reason = "审查后的有界续接"
+additional_attempts = 2
+additional_no_progress = 1
+remaining = { total_tokens = 50000, llm_requests = 8 }
+```
+
+`remaining` 对原账本已有的资源维度开启一份后续调用的新剩余额度；它不会估算或消除未知历史用量，
+旧 ledger entries 和 attempt 计数仍保留。`additional_attempts`、`additional_no_progress` 增加持久化
+上限，不清零已用量。CLI 等价选项是 `--authorization-id`、`--authorization-reason`、可重复的
+`--authorize-remaining DIMENSION=AMOUNT`、`--additional-attempts`、`--additional-no-progress`。
+相同 ID 只可重放完全相同的条款；需要新授权时使用新 ID，不要手改 ledger/manifest。
+已完成会话仅追加额度时保持完成状态，不新增 attempt 或修改产物；授权不等于执行。
+可先补资源额度，再补 attempt 额度；执行仍检查所有实际需要的上限。
+重放相同条款不会补回已消耗额度；若上次续接在账本写入中断，会幂等补完该账本项。
+报告刷新先完成授权，再调用 `research-report --refresh`；纯报告无需扩大进程权限。
+
+保存的研究/报告设置继续以 session runtime_config 为准，除非通过入口显式修订当前支持的输入。
+首次启动时仍应声明允许的 `process_invocations`/`process_wall_seconds`；续接只接受此会话账本已配置的
+资源维度。自动寻找、下载和配置仓库仍未实现。
 
 研究准备复用 CodeTask 的 auto/copy/git_worktree 选项及自定义保护路径。
 auto 对干净仓库使用 worktree；有未提交源码或无法创建 worktree 时使用 copy 并记录原因。

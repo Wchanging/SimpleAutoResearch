@@ -943,17 +943,18 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["baseline"])
             original_evaluator = script.read_text(encoding="utf-8")
             script.write_text(original_evaluator + "\n# protected evaluator changed\n", encoding="utf-8")
-            self.assertFalse(app._baseline_ref_matches(baseline_ref, execution))
+            self.assertFalse(app._measurement_ref_matches(baseline_ref, execution))
             script.write_text(original_evaluator, encoding="utf-8")
-            self.assertTrue(app._baseline_ref_matches(baseline_ref, execution))
-            app.services = replace(app.services, config={
-                **app.services.config,
-                "execution": {**execution, "baseline_policy": "reuse", "baseline_ref": baseline_ref.path},
-            })
+            self.assertTrue(app._measurement_ref_matches(baseline_ref, execution))
+            reuse_execution = {
+                **execution, "baseline_policy": "reuse", "baseline_ref": baseline_ref.path,
+            }
             revised = replace(app.brief, request_text="Measure the fixture again without repeating a valid baseline.")
-            with app.controller.mutation_scope():
-                app.controller.pause("Pause before the explicit protocol revision.")
-            app.continue_session(reason="Reuse the passed same-condition baseline.", revised_brief=revised)
+            app.controller.pause("Stop at the baseline before accepting a plan revision.")
+            app.continue_session(
+                reason="Reuse the passed same-condition baseline.", revised_brief=revised,
+                revised_execution=reuse_execution,
+            )
             finished = app.advance(max_actions=20)
             self.assertEqual(finished.status, "completed", finished.status_reason)
             self.assertEqual(finished.work_plan["execution_decision"]["baseline"]["mode"], "reuse")
@@ -962,6 +963,13 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertTrue(app._step_completed(candidate_step))
             script.write_text(original_evaluator + "\n# protected evaluator changed after measurement\n", encoding="utf-8")
             self.assertTrue(app._step_completed(candidate_step))
+            completed_services = app.services
+            app.services = replace(app.services, config={
+                **app.services.config,
+                "execution": {**reuse_execution, "command": [sys.executable, str(script), "candidate-v2"]},
+            })
+            self.assertTrue(app._step_completed(candidate_step))
+            app.services = completed_services
             script.write_text(original_evaluator, encoding="utf-8")
             self.assertTrue(app._step_completed(candidate_step))
 
@@ -969,19 +977,17 @@ class ResearchApplicationTests(unittest.TestCase):
                 **execution["protocol"],
                 "dataset_refs": [{"asset_id": "different", "revision": "v2"}],
             }
-            app.services = replace(app.services, config={
-                **app.services.config,
-                "execution": {
-                    **execution,
-                    "baseline_policy": "reuse",
-                    "baseline_ref": baseline_ref.path,
-                    "protocol": mismatched_protocol,
-                },
-            })
+            mismatched_execution = {
+                **reuse_execution,
+                "protocol": mismatched_protocol,
+            }
             app.continue_session(
                 reason="Check that a changed protocol cannot reuse the old baseline.",
                 revised_brief=replace(app.brief, request_text="Measure the fixture under a changed dataset reference."),
+                revised_execution=mismatched_execution,
             )
+            self.assertNotIn("baseline", app.controller.manifest.state_refs)
+            self.assertNotIn("experiment", app.controller.manifest.state_refs)
             rejected = app.advance(max_actions=20)
             self.assertEqual(rejected.status, "paused")
             self.assertIn("Baseline reuse requested", rejected.status_reason)
@@ -1028,7 +1034,168 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(app.view().next_action, "baseline")
             after_baseline = app.advance(max_actions=1)
             baseline_ref = after_baseline.state_refs["baseline"]
-            self.assertTrue(app._baseline_ref_matches(baseline_ref, execution))
+            self.assertTrue(app._measurement_ref_matches(baseline_ref, execution))
+
+    def test_revised_code_root_drops_old_preparation_before_execution_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_project = root / "old-project"
+            new_project = root / "new-project"
+            old_data = root / "old-data.csv"
+            new_data = root / "new-data.csv"
+            old_project.mkdir()
+            new_project.mkdir()
+            old_data.write_text("x,label\n1,a\n", encoding="utf-8")
+            new_data.write_text("x,label\n2,b\n", encoding="utf-8")
+            old_execution = {
+                "command": [sys.executable, "-c", "print('accuracy: 0.5')"],
+                "cwd": str(old_project), "timeout_sec": 5,
+                "result_schema": {"primary_metric": "accuracy"},
+                "code_task": {"code_root": str(old_project), "allowed_patterns": ["*.py"]},
+            }
+            app = create_session(
+                ResearchBrief(
+                    request_text="Inspect this bounded project.", requested_outputs=("experiments",),
+                    asset_requests=({"locator": str(old_data), "kind": "dataset", "role": "dataset"},),
+                ),
+                root=root / "session",
+                services=ResearchApplicationServices(config={"execution": old_execution}),
+            )
+            app.controller.pause("Seed an existing prepared workspace for revision coverage.")
+            preparation = app.controller.store.write_json(
+                "inputs/prepared_execution.json",
+                {"execution": old_execution, "source_project": str(old_project), "workspace": str(old_project)},
+                kind="prepared_execution", schema="prepared_execution.v1", producer="test",
+            )
+            app.controller.manifest.state_refs["preparation"] = preparation
+            app.controller.save()
+
+            app.continue_session(
+                reason="Use the explicitly revised data asset.",
+                revised_brief=replace(
+                    app.brief,
+                    asset_requests=({"locator": str(new_data), "kind": "dataset", "role": "dataset"},),
+                ),
+            )
+            self.assertNotIn("preparation", app.controller.manifest.state_refs)
+            self.assertEqual(app.brief.asset_requests[0]["locator"], str(new_data))
+            self.assertTrue(app.controller.store.exists(preparation))
+
+            app.controller.pause("Stop before accepting the project-root revision.")
+            preparation = app.controller.store.write_json(
+                "inputs/prepared_execution_revision.json",
+                {"execution": old_execution, "source_project": str(old_project), "workspace": str(old_project)},
+                kind="prepared_execution", schema="prepared_execution.v1", producer="test",
+            )
+            app.controller.manifest.state_refs["preparation"] = preparation
+            app.controller.save()
+            new_execution = {
+                **old_execution,
+                "cwd": str(new_project),
+                "code_task": {**old_execution["code_task"], "code_root": str(new_project)},
+            }
+            app.continue_session(
+                reason="Use the explicitly revised project root.", revised_execution=new_execution,
+            )
+
+            self.assertNotIn("preparation", app.controller.manifest.state_refs)
+            resolved = app._effective_config()["execution"]
+            self.assertEqual(Path(resolved["code_task"]["code_root"]).resolve(), new_project.resolve())
+            self.assertEqual(Path(resolved["cwd"]).resolve(), new_project.resolve())
+            self.assertTrue(app.controller.store.exists(preparation))
+
+    def test_execution_revision_reuses_matching_baseline_and_remeasures_changed_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Fixed comparison\nA small fixture has an explicit held-out condition.\n", encoding="utf-8")
+            data = root / "data.csv"
+            data.write_text("x,label\n1,a\n", encoding="utf-8")
+            script = root / "measure.py"
+            script.write_text(
+                "import sys\nfrom pathlib import Path\n"
+                "with Path('calls.txt').open('a') as f: f.write(sys.argv[1] + '\\n')\n"
+                "print('accuracy: 0.6' if sys.argv[1] == 'baseline' else 'accuracy: 0.7')\n",
+                encoding="utf-8",
+            )
+            protocol = {
+                "contract_id": "resume-condition-v1",
+                "dataset_refs": [{"asset_id": "fixture", "revision": "v1"}],
+                "split_spec": {"name": "heldout"},
+                "metric_specs": [{"name": "accuracy", "unit": "fraction"}],
+                "comparison_conditions": {"method": "fixed"},
+                "protected_assets": [
+                    {"asset_id": "data", "path": str(data)},
+                    {"asset_id": "evaluator", "path": str(script)},
+                ],
+            }
+            execution = {
+                "command": [sys.executable, str(script), "candidate-v1"],
+                "baseline": {"command": [sys.executable, str(script), "baseline"]},
+                "baseline_policy": "run", "cwd": str(root), "timeout_sec": 5,
+                "result_schema": {"primary_metric": "accuracy", "direction": "higher"},
+                "protocol": protocol,
+            }
+            app = create_session(
+                ResearchBrief(
+                    request_text="Compare the fixed CPU fixture under its held-out condition.",
+                    requested_outputs=("experiments",),
+                    asset_requests=(
+                        {"locator": str(paper), "role": "paper"},
+                        {"asset_id": "fixture", "locator": str(data), "kind": "dataset", "role": "dataset"},
+                    ),
+                ),
+                root=root / "session",
+                services=ResearchApplicationServices(
+                    max_results=1, max_chunks=10, max_attempts=32,
+                    config={"research_materials_only": True, "execution": execution},
+                    budget_limits={"process_invocations": 8, "process_wall_seconds": 80},
+                ),
+            )
+            first = app.advance(max_actions=32)
+            self.assertEqual(first.status, "completed", first.status_reason)
+            original_baseline = first.state_refs["baseline"]
+            original_candidate = first.state_refs["experiment"]
+            original_attempt_count = len(first.attempts)
+            calls = root / "calls.txt"
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["baseline", "candidate-v1"])
+
+            revised_execution = {
+                **execution,
+                "command": [sys.executable, str(script), "candidate-v2"],
+            }
+            app.continue_session(
+                reason="Revise only the candidate invocation; retain the matching control.",
+                revised_execution=revised_execution,
+            )
+            second = app.advance(max_actions=32)
+            self.assertEqual(second.status, "completed", second.status_reason)
+            self.assertEqual(second.state_refs["baseline"], original_baseline)
+            self.assertNotEqual(second.state_refs["experiment"], original_candidate)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), [
+                "baseline", "candidate-v1", "candidate-v2",
+            ])
+
+            data.write_text("x,label\n2,b\n", encoding="utf-8")
+            app.continue_session(
+                reason="The protected data changed; retain history but refresh its comparison.",
+                revised_brief=replace(app.brief),
+            )
+            third = app.advance(max_actions=32)
+            self.assertEqual(third.status, "completed", third.status_reason)
+            self.assertNotEqual(third.state_refs["baseline"], second.state_refs["baseline"])
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), [
+                "baseline", "candidate-v1", "candidate-v2", "baseline", "candidate-v2",
+            ])
+            self.assertGreater(len(third.attempts), original_attempt_count)
+            self.assertTrue(app.controller.store.exists(original_baseline))
+            attempts = third.attempts
+            resumed = load_session(root / "session")
+            final = resumed.advance(max_actions=32)
+            self.assertEqual(final.attempts, attempts)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), [
+                "baseline", "candidate-v1", "candidate-v2", "baseline", "candidate-v2",
+            ])
 
     def test_literature_report_does_not_require_or_launch_experiments(self):
         from dataclasses import replace
@@ -1168,12 +1335,19 @@ class ResearchApplicationTests(unittest.TestCase):
             completed = refreshed
             attempt_count = len(completed.attempts)
 
-            reopened = app.request_report(refresh=True)
+            reopened = app.request_report(
+                refresh=True,
+                report_config={"template": "experiment", "reviewer": "disabled"},
+            )
 
             self.assertEqual(reopened.status, "running")
             self.assertEqual(reopened.next_action, "report_write")
             self.assertEqual(reopened.state_refs["analysis"], analysis_ref)
             self.assertEqual(len(reopened.attempts), attempt_count)
+            self.assertEqual(sum(item["capability"] == "experiment" for item in reopened.attempts), 1)
+            runtime = app.controller.store.read_json(reopened.state_refs["runtime_config"])
+            self.assertEqual(runtime["config"]["report"]["reviewer"], "disabled")
+            self.assertEqual(runtime["config"]["report"]["template"], "experiment")
             self.assertEqual(app.controller.manifest.revision, 2)
             self.assertEqual(app.brief.revision, 2)
             self.assertIn("report", app.brief.requested_outputs)

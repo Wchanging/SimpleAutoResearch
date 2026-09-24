@@ -6,16 +6,30 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-24
 
-- Keep continuation tied to the accepted plan: revising a brief retires only
-  dependent current refs, while unaffected source evidence and valid measurements
-  remain reusable. Changing execution-bound assets or protocol still requires a
-  new session.
+- Continue an accepted plan with explicit goal/output/material or execution
+  revisions. Preserve attempt history and reuse measurements only when their
+  command, schema, protocol, preparation lineage, and protected assets still match.
+- Add idempotent continuation authorizations through the existing CLI/TOML:
+  resource allowances begin after authorization, while attempt/no-progress caps
+  increase without resetting observed use or resolving unknown historical usage.
+  Authorization alone keeps a completed session closed, ready for a separate
+  explicit report refresh. Replaying identical terms does not replenish an
+  existing allowance; an interrupted ledger write can be completed idempotently.
 - Make `research-report --refresh` rebuild Writer/Reviewer output and audit from
   retained analysis; it no longer re-runs analysis or measurements.
+- Keep report recovery inside persisted attempt/no-progress limits; exhausted
+  sessions point to the existing explicit continuation authorization instead
+  of bypassing the cap. Report guidance covers the remaining delivery stages
+  without asking to enable process budgets. Resume preserves saved report settings, applies only
+  explicit report changes to report outputs, and rejects changed research
+  settings that the existing session cannot safely revise.
+- Bind TOML `research.max_iterations` to the consumed CLI setting and make
+  continuation replay complete an interrupted manifest-first ledger write
+  without duplicating allowance or erasing recorded resource use.
 - Reconcile resumed attempts and preparation refs against accepted-plan order and
   current execution conditions instead of selecting the latest capability artifact.
-  D recovery/invalidation corrections await review; Stage E and frozen live acceptance
-  remain outstanding.
+  D continuation changes await review; Stage E and frozen live acceptance remain
+  outstanding.
 
 ## 2026-09-23
 

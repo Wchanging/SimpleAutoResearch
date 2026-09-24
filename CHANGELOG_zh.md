@@ -6,9 +6,12 @@
 
 ## 2026-09-24
 
-- 续接继续绑定 accepted plan：修改 brief 时仅使依赖变化输入的当前引用失效，保留未受影响的来源证据和有效测量供复用。执行资产或协议变化仍须新建 session。
+- 可在现有 accepted plan 中显式修订目标、outputs、材料或执行配置；保留 attempt 历史，仅在命令、schema、协议、准备 lineage 和保护资产仍匹配时复用测量。
+- 通过现有 CLI/TOML 增加幂等续接授权：资源新额度从授权后开始；attempt/no-progress 上限递增，不清零用量或抹去未知历史用量。已完成会话仅追加额度时保持完成状态，随后可显式刷新报告；相同条款不重复扩额，账本写入中断时可幂等补完。报告恢复提示覆盖剩余交付步骤，不要求扩大无关进程权限。
 - `research-report --refresh` 从保留的 analysis 重新生成 Writer/Reviewer 结果与 audit，不再重跑 analysis 或测量。
-- 恢复中的 attempt 与 preparation 引用按 accepted-plan 顺序和当前执行条件核对，不再只挑最新 capability 产物。D 恢复/失效修正仍待审查；E 阶段与冻结 live acceptance 尚未完成。
+- 报告续接遵守持久化 attempt/no-progress 上限；额度耗尽时指向现有显式授权入口，不绕过上限。恢复时保留已存报告设置，只将显式报告改动用于报告产物；无法在现有 session 安全修订的研究设置会明确拒绝。
+- 修正 TOML `research.max_iterations` 到实际消费该值的 CLI 参数映射；manifest 先保存而资源 ledger 写入中断时，同 ID 重放可补完，不重复扩额或抹去历史用量。
+- 恢复中的 attempt 与 preparation 引用按 accepted-plan 顺序和当前执行条件核对，不再只挑最新 capability 产物。D 续接改动仍待审查；E 阶段与冻结 live acceptance 尚未完成。
 
 ## 2026-09-23
 

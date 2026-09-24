@@ -10,13 +10,18 @@ FIELDS = {
     "model": {"name": ("model", str), "max_output_tokens": ("max_output_tokens", int)},
     "budget": {"total_tokens": ("total_tokens", int), "llm_requests": ("llm_requests", int),
                "process_invocations": ("process_invocations", int), "process_wall_seconds": ("process_wall_seconds", int)},
+    "continuation": {"authorization_id": ("authorization_id", str),
+                     "reason": ("authorization_reason", str),
+                     "additional_attempts": ("additional_attempts", int),
+                     "additional_no_progress": ("additional_no_progress", int),
+                     "remaining": ("authorize_remaining", dict)},
     "research": {"providers": ("providers", list), "queries": ("queries", list),
                  "max_results": ("max_results", int), "max_chunks": ("max_chunks", int),
                  "idea_limit": ("idea_limit", int), "cache_dir": ("cache_dir", str),
                  "use_fulltext": ("research_use_fulltext", bool),
                  "materials_only": ("research_materials_only", bool),
                  "allow_pdf_download": ("research_allow_pdf_download", bool),
-                  "max_iterations": ("research_max_iterations", int),
+                  "max_iterations": ("max_research_iterations", int),
                  "keep_raw_pdf": ("research_keep_raw_pdf", bool)},
     "assets": {"papers": ("local_document", list)},
     "execution": {"command": ("command_argv", list), "cwd": ("cwd", str),
@@ -33,7 +38,9 @@ LIST_FLAGS = {"providers": "--provider", "queries": "--query", "local_document":
               "metric": "--metric", "metric_direction": "--metric-direction"}
 
 
-def research_defaults(arguments: list[str]) -> dict:
+def research_defaults(
+    arguments: list[str], *, explicit_destinations: set[str] | None = None,
+) -> dict:
     if not arguments or arguments[0] != "research-session":
         return {}
     # Everything after --command belongs to the external process.
@@ -80,9 +87,11 @@ def research_defaults(arguments: list[str]) -> dict:
             if name not in FIELDS[section]:
                 raise ValueError(f"Unknown research configuration field: {section}.{name}")
             dest, expected = FIELDS[section][name]
+            if explicit_destinations is not None:
+                explicit_destinations.add(dest)
             if type(value) is not expected or (expected is list and any(type(item) is not str for item in value)):
                 raise ValueError(f"Invalid type for {section}.{name}: expected {expected.__name__}")
-            if expected is int and value < (0 if dest in {"max_review_iterations", "max_section_tokens", "process_invocations", "process_wall_seconds"} else 1):
+            if expected is int and dest not in {"additional_attempts", "additional_no_progress"} and value < (0 if dest in {"max_review_iterations", "max_section_tokens", "max_research_iterations", "process_invocations", "process_wall_seconds"} else 1):
                 raise ValueError(f"Invalid value for {section}.{name}: {value}")
             if dest in PATHS:
                 def resolve(item):
@@ -90,6 +99,14 @@ def research_defaults(arguments: list[str]) -> dict:
                     return str(target if target.is_absolute() else (path.parent / target).resolve())
                 value = [resolve(item) for item in value] if expected is list else resolve(value)
             defaults[dest] = value
+    allowances = defaults.get("authorize_remaining")
+    if allowances is not None:
+        if not allowances or any(
+            not isinstance(key, str) or not key.strip()
+            or type(value) not in {int, float}
+            for key, value in allowances.items()
+        ):
+            raise ValueError("continuation.remaining must map resource names to numeric amounts")
     if "outputs" in defaults and (not defaults["outputs"] or set(defaults["outputs"]) - {"summary", "report", "experiments", "bug_fix"}):
         raise ValueError("task.outputs must contain summary, report, experiments and/or bug_fix")
     if defaults.get("task_kind", "auto") not in {"auto", "survey", "bug_fix"}:

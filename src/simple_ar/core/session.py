@@ -71,6 +71,7 @@ class BudgetState:
     attempts: int = 0
     no_progress: int = 0
     recorded_attempts: list[str] = field(default_factory=list)
+    continuation_authorizations: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1 or self.max_no_progress < 1:
@@ -81,6 +82,20 @@ class BudgetState:
             raise ValueError("Recorded attempt ids cannot be blank.")
         if len(set(self.recorded_attempts)) != len(self.recorded_attempts):
             raise ValueError("Recorded attempt ids must be unique.")
+        if not isinstance(self.continuation_authorizations, dict):
+            raise ValueError("Continuation authorizations must be an object.")
+        for authorization_id, terms in self.continuation_authorizations.items():
+            if not authorization_id.strip() or not isinstance(terms, dict):
+                raise ValueError("Continuation authorization entries must be named objects.")
+            if type(terms.get("additional_attempts")) is not int or type(terms.get("additional_no_progress")) is not int:
+                raise ValueError("Continuation authorization amounts must be integers.")
+            if min(terms["additional_attempts"], terms["additional_no_progress"]) < 0:
+                raise ValueError("Continuation authorization amounts cannot be negative.")
+            if not isinstance(terms.get("reason"), str) or not terms["reason"].strip():
+                raise ValueError("Continuation authorization requires a reason.")
+            resources = terms.get("resource_allowances", {})
+            if not isinstance(resources, dict):
+                raise ValueError("Continuation resource authorization terms must be an object.")
 
     def record(self, progressed: bool, *, attempt_id: str | None = None) -> bool:
         normalized_attempt_id = attempt_id.strip() if attempt_id is not None else None
@@ -97,6 +112,46 @@ class BudgetState:
     def exhausted(self) -> bool:
         return self.attempts >= self.max_attempts or self.no_progress >= self.max_no_progress
 
+    def authorize_additional(
+        self,
+        authorization_id: str,
+        *,
+        attempts: int = 0,
+        no_progress: int = 0,
+        resource_allowances: dict[str, int | float] | None = None,
+        reason: str,
+    ) -> bool:
+        """Record explicit caps without executing work or resetting observed use.
+
+        Execution checks capacity separately: a user may replenish resources
+        before adding attempts, or replay an authorization after spending it.
+        """
+
+        authorization_id = authorization_id.strip()
+        reason = reason.strip()
+        if not authorization_id or not reason:
+            raise ValueError("Continuation authorization requires an id and reason.")
+        if type(attempts) is not int or type(no_progress) is not int or min(attempts, no_progress) < 0:
+            raise ValueError("Additional attempt allowances must be non-negative integers.")
+        resources = dict(resource_allowances or {})
+        if attempts == 0 and no_progress == 0 and not resources:
+            raise ValueError("At least one additional attempt allowance must be positive.")
+        terms = {
+            "additional_attempts": attempts,
+            "additional_no_progress": no_progress,
+            "resource_allowances": resources,
+            "reason": reason,
+        }
+        existing = self.continuation_authorizations.get(authorization_id)
+        if existing is not None:
+            if existing != terms:
+                raise ValueError("Continuation authorization id already exists with different terms.")
+            return False
+        self.max_attempts += attempts
+        self.max_no_progress += no_progress
+        self.continuation_authorizations[authorization_id] = terms
+        return True
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "max_attempts": self.max_attempts,
@@ -104,6 +159,9 @@ class BudgetState:
             "attempts": self.attempts,
             "no_progress": self.no_progress,
             "recorded_attempts": list(self.recorded_attempts),
+            "continuation_authorizations": {
+                key: dict(value) for key, value in self.continuation_authorizations.items()
+            },
         }
 
     @classmethod
@@ -111,6 +169,11 @@ class BudgetState:
         raw_recorded_attempts = data.get("recorded_attempts", [])
         if not isinstance(raw_recorded_attempts, (list, tuple)):
             raise ValueError("BudgetState.recorded_attempts must be an array.")
+        raw_authorizations = data.get("continuation_authorizations", {})
+        if not isinstance(raw_authorizations, dict):
+            raise ValueError("BudgetState.continuation_authorizations must be an object.")
+        if any(not isinstance(key, str) or not isinstance(value, dict) for key, value in raw_authorizations.items()):
+            raise ValueError("BudgetState.continuation_authorizations entries must be named objects.")
         return cls(
             max_attempts=int(data.get("max_attempts", 3)),
             max_no_progress=int(data.get("max_no_progress", 2)),
@@ -121,6 +184,10 @@ class BudgetState:
                 for item in raw_recorded_attempts
                 if str(item).strip()
             ],
+            continuation_authorizations={
+                str(key): dict(value)
+                for key, value in raw_authorizations.items()
+            },
         )
 
 

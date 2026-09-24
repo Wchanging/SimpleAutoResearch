@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 from rich.console import Console
 
@@ -513,7 +513,10 @@ class CliTests(unittest.TestCase):
             )
             app = MagicMock()
             app.brief = SimpleNamespace(requested_outputs=("experiments",))
-            app.services = SimpleNamespace(max_attempts=4)
+            app.services = SimpleNamespace(max_attempts=4, config={})
+            app.controller = SimpleNamespace(
+                manifest=SimpleNamespace(budget=SimpleNamespace(max_attempts=4)),
+            )
             app.view.return_value = SimpleNamespace(
                 session_root=session_root,
                 status="completed",
@@ -547,17 +550,186 @@ class CliTests(unittest.TestCase):
                         str(session_root),
                         "--model",
                         "gpt-5.4",
+                        "--template",
+                        "survey",
                     ]
                 )
 
             loader.assert_called_once()
-            app.request_report.assert_called_once()
+            app.request_report.assert_called_once_with(
+                report_config={"template": "survey"},
+                reason="Apply explicit report settings and rebuild only report deliverables from existing evidence.",
+            )
             app.advance.assert_called_once_with(max_actions=1)
             self.assertIn("Status: completed", stdout.getvalue())
             self.assertIn(
                 str(session_root / "attempts" / "report-001" / "report.md"),
                 stdout.getvalue(),
             )
+
+    def test_report_resume_uses_real_interface_and_persisted_attempt_limit(self):
+        from simple_ar.app.research_application import ResearchApplication
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "session"
+            app = create_autospec(ResearchApplication, instance=True)
+            app.brief = SimpleNamespace(objective="A bounded report", requested_outputs=("report",))
+            app.services = SimpleNamespace(
+                max_attempts=1, llm_client=SimpleNamespace(model="scripted"), config={},
+            )
+            app.controller = SimpleNamespace(
+                manifest=SimpleNamespace(budget=SimpleNamespace(max_attempts=3)),
+            )
+            paused = SimpleNamespace(
+                session_root=root, status="paused", status_reason="retry report",
+                next_action="report_write", state_refs={},
+            )
+            running = SimpleNamespace(
+                session_root=root, status="running", status_reason="",
+                next_action="report_write", state_refs={},
+            )
+            completed = SimpleNamespace(
+                session_root=root, status="completed", status_reason="",
+                next_action=None,
+                state_refs={"report": SimpleNamespace(path="attempts/report-001/report.md")},
+            )
+            app.view.return_value = paused
+            app.continue_session.return_value = running
+            app.advance.side_effect = [running] * 9 + [completed]
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch("simple_ar.app.research_application.load_session", return_value=app),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main(["research-report", "--session-root", str(root), "--model", "scripted"])
+            app.continue_session.assert_called_once_with(
+                reason="Resume the canonical report lifecycle within the persisted session budget.",
+            )
+            self.assertEqual(app.advance.call_count, 10)
+
+    def test_exhausted_report_resume_shows_bounded_authorization_entrypoint(self):
+        from simple_ar.app.research_application import ResearchApplication
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "session"
+            app = create_autospec(ResearchApplication, instance=True)
+            app.brief = SimpleNamespace(objective="A bounded report", requested_outputs=("report",))
+            app.services = SimpleNamespace(config={}, llm_client=SimpleNamespace(model="scripted"))
+            app.controller = SimpleNamespace(
+                manifest=SimpleNamespace(
+                    budget=SimpleNamespace(
+                        attempts=5, max_attempts=5, no_progress=3, max_no_progress=3,
+                    ),
+                    session_id="session-123", revision=7,
+                ),
+                store=SimpleNamespace(root=root),
+            )
+            app.budget_ledger = SimpleNamespace(limits={}, remaining=lambda _name: None)
+            app.view.return_value = SimpleNamespace(
+                session_root=root, status="paused", next_action="report_write", state_refs={},
+            )
+            app.continue_session.side_effect = RuntimeError("Session budget is exhausted.")
+            output = io.StringIO()
+            with (
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch("simple_ar.app.research_application.load_session", return_value=app),
+                contextlib.redirect_stdout(output),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit, "--additional-attempts 3 --additional-no-progress 1",
+                ) as raised:
+                    main(["research-report", "--session-root", str(root), "--model", "scripted"])
+            self.assertIn("simple-ar research-session", str(raised.exception))
+            self.assertIn("--topic 'A bounded report'", str(raised.exception))
+            self.assertNotIn("allow_no_progress_exhausted", str(raised.exception))
+
+    def test_completed_report_authorization_refresh_and_recovery_without_processes(self):
+        from dataclasses import replace
+        from simple_ar.app.research_application import create_session, load_session, ResearchApplicationServices
+        from simple_ar.research.workflow_contracts import ResearchBrief
+        from simple_ar.report.schema import AgentReportResult, ReportSectionDraft
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Calibration\nCalibration evidence is limited.\n", encoding="utf-8")
+            session = root / "session"
+            app = create_session(ResearchBrief(
+                request_text="Review calibration.", objective="Review calibration.",
+                requested_outputs=("report",),
+                asset_requests=({"locator": str(paper), "role": "paper"},),
+            ), root=session, services=ResearchApplicationServices(
+                max_results=1, max_attempts=9,
+                budget_limits={"llm_requests": 10, "total_tokens": 100,
+                               "process_invocations": 0, "process_wall_seconds": 0},
+            ))
+            self.assertEqual(app.advance(max_actions=6).next_action, "report_write")
+            app.services = replace(app.services, llm_client=object())
+
+            def writer(**kwargs):
+                paper_id = kwargs["context"].papers[0]["id"]
+                return AgentReportResult(report_body="", memory=kwargs["memory"], used_agent=True,
+                    sections=[ReportSectionDraft(section_id="review", heading="Evidence",
+                        draft_markdown=f"Calibration evidence is limited [@{paper_id}].",
+                        used_sources=[paper_id])])
+
+            with patch("simple_ar.report.writing.run_report_agent", side_effect=writer):
+                initial = app.advance(max_actions=3)
+            self.assertEqual(initial.status, "completed")
+            self.assertEqual(initial.budget["attempts"], 9)
+            old_report = session / initial.state_refs["report"].path
+            old_body = old_report.read_bytes()
+            resume = ["research-session", "--session-root", str(session), "--topic", "Review calibration."]
+            authorize = resume + ["--authorization-id", "report-refresh-1",
+                "--authorization-reason", "One report refresh and one failed attempt.", "--additional-attempts", "4"]
+            report = ["research-report", "--session-root", str(session), "--model", "scripted"]
+            with patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    main(report + ["--refresh"])
+                self.assertIn("--additional-attempts 3", str(raised.exception))
+                self.assertNotIn("process_invocations=", str(raised.exception))
+                self.assertNotIn("process_wall_seconds=", str(raised.exception))
+                self.assertIn("then repeat", str(raised.exception))
+                self.assertEqual(load_session(session).view().state_refs, initial.state_refs)
+
+                resources = resume + ["--authorization-id", "report-resources-1",
+                    "--authorization-reason", "Replenish tokens before authorizing attempts.",
+                    "--authorize-remaining", "total_tokens=200"]
+                main(resources)  # Authorization need not enable execution immediately.
+                main(resources)
+                still_completed = load_session(session)
+                self.assertEqual(still_completed.view().attempts, initial.attempts)
+                self.assertTrue(still_completed.controller.manifest.budget.exhausted())
+                self.assertEqual(still_completed.budget_ledger.limits["total_tokens"], 200)
+
+                for _ in range(2):
+                    main(authorize)
+                    view = load_session(session).view()
+                    self.assertEqual((view.status, view.revision, view.attempts, view.state_refs),
+                                     (initial.status, initial.revision, initial.attempts, initial.state_refs))
+                    self.assertEqual(view.budget["max_attempts"], 13)
+                with self.assertRaisesRegex(SystemExit, "different terms"):
+                    main(authorize[:-1] + ["5"])
+
+                with patch("simple_ar.report.writing.run_report_agent", side_effect=RuntimeError("fixture interruption")):
+                    with self.assertRaises(SystemExit):
+                        main(report + ["--refresh"])
+                self.assertEqual(load_session(session).view().status, "paused")
+                with patch("simple_ar.report.writing.run_report_agent", side_effect=writer):
+                    main(report)
+                completed = load_session(session).view()
+                self.assertEqual(completed.status, "completed")
+                self.assertEqual(completed.budget["attempts"], 13)
+                self.assertNotEqual(completed.state_refs["report"], initial.state_refs["report"])
+                main(authorize)  # Replay remains safe even after all four attempts were spent.
+                main(report)
+            restored = load_session(session)
+            self.assertEqual(restored.view().attempts, completed.attempts)
+            self.assertEqual(restored.view().state_refs["read"], initial.state_refs["read"])
+            self.assertEqual(old_report.read_bytes(), old_body)
+            self.assertEqual(restored.budget_ledger.limits["process_invocations"], 0)
+            self.assertEqual(restored.budget_ledger.limits["process_wall_seconds"], 0)
+            self.assertFalse(any(row["capability"] == "experiment" for row in completed.attempts))
 
     def test_research_session_cli_can_append_report_in_one_explicit_flow(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
