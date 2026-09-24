@@ -4,6 +4,19 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-24
+
+- Keep continuation tied to the accepted plan: revising a brief retires only
+  dependent current refs, while unaffected source evidence and valid measurements
+  remain reusable. Changing execution-bound assets or protocol still requires a
+  new session.
+- Make `research-report --refresh` rebuild Writer/Reviewer output and audit from
+  retained analysis; it no longer re-runs analysis or measurements.
+- Reconcile resumed attempts and preparation refs against accepted-plan order and
+  current execution conditions instead of selecting the latest capability artifact.
+  D recovery/invalidation corrections await review; Stage E and frozen live acceptance
+  remain outstanding.
+
 ## 2026-09-23
 
 - Add `research-session --session-root PATH --reanalyze` to reconsider existing

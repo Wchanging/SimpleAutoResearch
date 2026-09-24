@@ -20,7 +20,7 @@ session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使
 
 | 命令 | 用途 |
 | --- | --- |
-| `simple-ar research-session` | **V2.8 正式主入口**：在同一个 session 中运行 literature-only 或完整的有界 research-to-report 流程。 |
+| `simple-ar research-session` | 有界任务驱动 session 的正式入口；accepted plan 选择适用的研究与执行步骤。 |
 | `simple-ar research-session-continue` | 重试 canonical 显式实验中的技术失败。 |
 | `simple-ar research-session-migrate` | 从只读的 `session_manifest.v1` 创建 canonical 后继 session。 |
 | `simple-ar research-report` | 从已完成的 research session 生成并审查报告。 |
@@ -71,10 +71,11 @@ LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求�
 独立 design→experiment→analysis 创建器已删除；研究任务使用 `research-session`。
 旧 `--synthesis-file` 参数不作隐式兼容。领域能力仍可在库级组合，历史产物保持可读。
 
-### `simple-ar research-session`（V2.8 正式唯一主入口）
+### `simple-ar research-session`（任务驱动的 canonical 入口）
 
-可加 `--session-root PATH` 续接相同目标和 outputs 的会话，补齐缺少的实验配置；
-已有证据、研究设置和预算消费保持不变，详见配置参考的续接说明。
+可加 `--session-root PATH` 续接相同目标和 outputs 的会话，或补齐缺少的执行配置；
+已有证据、研究设置和预算消费保持不变。该选项不用于修改目标、outputs、执行资产或协议；
+这些输入变化时请新建 session。详见配置参考的续接说明。
 
 在已暂停或完成的分析检查点，可同时加 `--reanalyze`：复用已有测量重新分析，
 再按结果继续研究决策。历史产物和已消耗预算保留，不增加论文交付要求；
@@ -87,11 +88,9 @@ LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求�
 预算覆盖项为 `--total-tokens`、`--llm-requests`、`--max-output-tokens`、
 `--process-invocations`、`--process-wall-seconds`。见[配置参考](CONFIG_REFERENCE_zh.md)。
 
-**一句话说明**：在同一个 session 中运行 V2.8 正式主线。提供实验命令或
-`--code-task-config` 时，运行有界的 research-to-experiment 流程：
-`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`。
-两者都省略时，运行 literature-only 流程并在有证据支持的 summary 处结束；如果提供模型，
-还会继续生成 research-only 报告。该模式不会创建实验请求或启动进程。
+**一句话说明**：运行一个有界 session，由 accepted plan 选择适合任务与已有资产的步骤。
+提供实验命令或 `--code-task-config` 时，计划可包含准备、实现、测量和分析；两者都省略时，
+session 保持 literature-only，不会创建执行请求或启动进程。
 
 模型可用时，同一个 application 会继续进入 `report -> report_audit`；`--no-report` 仅用于调试
 或只检查前缀 handoff。之后调用 `research-report` 可以只补齐报告交付物，不重新检索、分析或
@@ -219,8 +218,8 @@ uv run simple-ar research-report \
 表示不添加该单次调用上限，这也是报告运行时配置的默认值。会话级 token 预算仍然有效。
 
 报告和审查会作为新的 attempt 写入原 session。canonical session 已有报告时再次调用是幂等读取，
-不会重新运行 Writer。显式添加 `--refresh` 会基于已有测量重新分析并创建新的报告/审查 attempts，
-保留历史稿件，不重复检索、改码或训练；模型会话使用模型解释假设，数值和执行状态仍由确定性分析负责。
+不会重新运行 Writer。显式添加 `--refresh` 会复用已保留的 analysis，仅创建新的报告/审查 attempts，
+保留历史稿件，不重复测量或分析；模型会话使用模型解释假设，数值和执行状态仍由确定性分析负责。
 刷新仍使用会话剩余预算。只有需要明确做 writer-only 对照时才使用 `--reviewer disabled`；最终 audit
 仍会运行。历史 session 可读取，但不再由第二套报告执行器续写；损坏的正式 session 会明确失败，
 不会回退到另一条流程。

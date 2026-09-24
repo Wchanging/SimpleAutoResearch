@@ -4,6 +4,12 @@
 
 本文按倒序记录用户可见的项目变化。规划笔记和设计理由主要放在 `docs/` 和 `MDfiles/`；这里尽量保持为普通 changelog，而不是长期计划文档。
 
+## 2026-09-24
+
+- 续接继续绑定 accepted plan：修改 brief 时仅使依赖变化输入的当前引用失效，保留未受影响的来源证据和有效测量供复用。执行资产或协议变化仍须新建 session。
+- `research-report --refresh` 从保留的 analysis 重新生成 Writer/Reviewer 结果与 audit，不再重跑 analysis 或测量。
+- 恢复中的 attempt 与 preparation 引用按 accepted-plan 顺序和当前执行条件核对，不再只挑最新 capability 产物。D 恢复/失效修正仍待审查；E 阶段与冻结 live acceptance 尚未完成。
+
 ## 2026-09-23
 
 - 增加 `research-session --session-root PATH --reanalyze`，复用实测结果重新分析，不重跑原实验或隐式请求论文；保留历史产物和已消耗预算，新接受的后续动作仍走原科研执行路径。

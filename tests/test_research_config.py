@@ -110,7 +110,7 @@ class ResearchConfigTests(unittest.TestCase):
             after = app.view()
             self.assertEqual(after.status, "completed")
             for key, ref in before.state_refs.items():
-                if key not in {"runtime_config", "diagnostics", "task_plan"}:
+                if key not in {"runtime_config", "diagnostics", "task_plan", "design", "research_design"}:
                     self.assertEqual(after.state_refs[key], ref)
             self.assertNotEqual(after.state_refs["task_plan"], before.state_refs["task_plan"])
             self.assertEqual(app.budget_ledger.limits["total_tokens"], 123456)

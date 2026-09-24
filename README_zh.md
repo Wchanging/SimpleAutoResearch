@@ -14,8 +14,9 @@ V2.8 以“准备好代码、数据和执行协议后的端到端主链走通”
 已有运行包含框架修复与恢复，不代表冻结版本一次完整验收或论文质量全部通过。
 已知限制包括报告中尚未复验的事实修订、耗尽 attempt 额度后的追加入口，以及
 严格冻结版本新会话验收；这些转入 V2.9 的恢复、交付和发布验收工作。
-V2.9 开发分支已验证短任务计划下的提供材料分析和小型代码修复；开放网络调研验收
-仍有服务限流问题。协议驱动实验、研究记忆参与的有限科研循环和完整续接仍在推进，
+V2.9 开发分支已验证短任务计划下的提供材料分析和小型代码修复。当前续接工作保留
+accepted-plan lineage，复用未受影响的证据与测量，并基于已有分析重新生成报告；本地 D 阶段恢复/选择性失效修正
+仍待审查，E 阶段尚未完成。开放网络调研验收仍有服务限流问题。协议驱动实验和完整的研究驱动循环仍在推进，
 不能把当前切片当成整版完成。目标是以自然语言任务、已有资产和必要的资源/权限配置
 作为输入，而非要求用户填写全部阶段。模块升级与 A—E 核心阶段同步推进，见
 [开发目标与模块衔接](docs/DEVELOPMENT_zh.md#v29-开发目标决策上下文与模块衔接)。
@@ -30,9 +31,10 @@ V2.9 开发分支已验证短任务计划下的提供材料分析和小型代码
 
 ## 当前可用能力
 
-- **V2.8 canonical research-session**：运行有界的
+- **V2.8 canonical research-session**：同一 application 按有界 accepted task plan 执行；
+  并非每个任务都会运行历史流程
   `plan -> search -> document_ingest -> read -> synthesize -> research_design
-  -> experiment -> analysis -> report -> report_audit` 主流程。主线明确约束
+  -> experiment -> analysis -> report -> report_audit` 的全部能力。主线明确约束
   provider、artifact、指标、超时和 continuation；模型模式的 CLI 默认请求报告。
   该路径已在 AutoDL 的准备项目上完成一次 60 条 raw、10 篇 selected/document 的真实
   网络/LLM/CodeTask/实验/报告闭环；这证明的是有界基础流程，不是任意任务上的完整自主研究。
@@ -123,8 +125,8 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 配置文件入口：`simple-ar research-session --config examples/research_config/minimal.toml`。
 轻量模板和完整参考共用一套格式，说明见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
 
-当前主线是 `research-session`：从计划、网络/本地检索、文档证据，到一个准备好的实验、
-结果分析、报告和审计，沿一条有界 handoff 完成。先运行适合笔记本的完整 fixture：
+当前主线是 `research-session`：同一有界 application 执行任务实际需要且输入允许的 accepted plan；
+文献、实验、分析和报告不是每个任务都必须经过的固定阶段。先运行适合笔记本的完整 fixture：
 
 ```bash
 uv run python examples/research_session_smoke.py
@@ -132,7 +134,7 @@ uv run python examples/research_session_smoke.py
 
 真实网络 + LLM 的低预算命令见 `examples/README.md`。它要求可用的 OpenAI 兼容模型/网关，
 provider 失败时不会用 fixture 结果冒充成功；如果提供 `--code-task-config`，可以接入一个
-准备好的项目，但 V2.8 每次只执行一个研究方向。
+准备好的项目；其执行范围由已接受的任务计划与提供的协议约束。
 
 如果只想做文献研究，可以同时省略 `--command` 和 `--code-task-config`。不提供 `--model` 时，
 session 会在有证据支持的 summary 处结束；提供模型时，可以继续生成 research-only Markdown 报告。

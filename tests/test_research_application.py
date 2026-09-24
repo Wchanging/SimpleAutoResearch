@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import tempfile
 import sys
 import unittest
@@ -135,6 +136,9 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(fixed_protocol["condition_mode"], "fixed_command")
 
     def test_revision_preparation_preserves_original_step_reference(self):
+        from types import SimpleNamespace
+        from simple_ar.research.task_plan import TaskPlanResult, TaskPlanStep
+
         with tempfile.TemporaryDirectory() as tmp:
             app = create_session(ResearchBrief(request_text="Compare candidates."), root=Path(tmp))
             original = app.controller.store.write_json("original.json", {"execution": {"cwd": "original"}},
@@ -145,8 +149,19 @@ class ResearchApplicationTests(unittest.TestCase):
             with patch.object(app.controller, "attempt_output_ref", return_value=revised):
                 app._record_attempt_outputs("prepare_execution", "preparation_r1", "prepare-2", None)
             self.assertEqual(app.controller.manifest.state_refs["preparation"], original)
-            self.assertEqual(app._effective_config()["execution"]["cwd"], "revised")
-            from types import SimpleNamespace
+            plan = TaskPlanResult(
+                task_kind="research", goal="Compare candidates.", mode="test",
+                steps=(
+                    TaskPlanStep("initial", "prepare_execution", "prepare_execution", "preparation", "Prepare", "Inspect."),
+                    TaskPlanStep("revision-1", "prepare_candidate:1", "prepare_execution", "preparation_r1", "Revise", "Inspect."),
+                ),
+            )
+            app.controller.manifest.state_refs["task_plan"] = app.controller.store.write_json(
+                "planning/task_plan.json", plan.to_handoff_dict(), kind="task_plan",
+                schema="research_task_plan.v1", producer="test",
+            )
+            with patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="completed")):
+                self.assertEqual(app._effective_config()["execution"]["cwd"], "revised")
             with patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="completed")):
                 self.assertTrue(app._state_succeeded("preparation_r1"))
             with patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="failed")):
@@ -156,6 +171,22 @@ class ResearchApplicationTests(unittest.TestCase):
         """Keep the old real bridge check, but exercise the formal lifecycle."""
         class FakeClient:
             model = "fake-research-and-code-model"
+
+            def __init__(self):
+                self.edit_count = 0
+                self.analysis_count = 0
+
+            def ask(self, _system, _user, *, label=""):
+                if label not in {"result-analysis", "experiment-analysis"}:
+                    raise AssertionError(f"Unexpected text LLM label: {label}")
+                self.analysis_count += 1
+                revise = self.analysis_count == 1
+                return json.dumps({"recommendation": {
+                    "action": "revise_candidate" if revise else "stop",
+                    "reason": "Test a distinct candidate once." if revise else "The bounded comparison is complete.",
+                    "revision_intent": "Add lottery keyword support." if revise else "Report the measured comparison.",
+                    "revision_constraints": ["Preserve the evaluator and existing API."],
+                }})
 
             def ask_json(
                 self,
@@ -218,21 +249,38 @@ class ResearchApplicationTests(unittest.TestCase):
                         "requires_approval_before_patch": True,
                     }
                 if label == "code-task-propose-edits":
+                    self.edit_count += 1
+                    if self.edit_count == 1:
+                        old = (
+                            "def predict(text):\n"
+                            "    return 'spam' if 'win' in text.lower() else 'ham'\n"
+                        )
+                        new = (
+                            "def predict(text):\n"
+                            "    lowered = text.lower()\n"
+                            "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize')) else 'ham'\n"
+                        )
+                        summary = "Add prize keyword support."
+                    else:
+                        old = (
+                            "def predict(text):\n"
+                            "    lowered = text.lower()\n"
+                            "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize')) else 'ham'\n"
+                        )
+                        new = (
+                            "def predict(text):\n"
+                            "    lowered = text.lower()\n"
+                            "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize', 'lottery')) else 'ham'\n"
+                        )
+                        summary = "Add lottery keyword support."
                     return {
-                        "summary": "Add prize keyword support.",
+                        "summary": summary,
                         "edits": [
                             {
                                 "path": "spam_model.py",
-                                "old": (
-                                    "def predict(text):\n"
-                                    "    return 'spam' if 'win' in text.lower() else 'ham'\n"
-                                ),
-                                "new": (
-                                    "def predict(text):\n"
-                                    "    lowered = text.lower()\n"
-                                    "    return 'spam' if any(keyword in lowered for keyword in ('win', 'prize')) else 'ham'\n"
-                                ),
-                                "reason": "Classify prize messages as spam.",
+                                "old": old,
+                                "new": new,
+                                "reason": summary,
                             }
                         ],
                         "validation": ["python -m unittest discover -s tests"],
@@ -258,7 +306,7 @@ class ResearchApplicationTests(unittest.TestCase):
             )
             (project / "benchmark.py").write_text(
                 "from spam_model import predict\n\n"
-                "rows = [('win now', 'spam'), ('prize only', 'spam')]\n"
+                "rows = [('win now', 'spam'), ('prize only', 'spam'), ('lottery only', 'spam')]\n"
                 "correct = sum(predict(text) == label for text, label in rows)\n"
                 "print(f'accuracy: {correct / len(rows):.6f}')\n",
                 encoding="utf-8",
@@ -285,17 +333,24 @@ class ResearchApplicationTests(unittest.TestCase):
                 requested_outputs=("experiments",),
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=ResearchApplicationServices(
-                max_results=1, config={"research_queries": ["reliable agents"]},
-                budget_limits={"process_invocations": 2, "process_wall_seconds": 40},
+                max_results=1, max_attempts=32,
+                config={"research_queries": ["reliable agents"], "research_max_iterations": 1},
+                budget_limits={"process_invocations": 3, "process_wall_seconds": 60},
             ))
             paused = app.advance(max_actions=10)
             self.assertEqual(paused.status, "paused")
+            research_refs = {
+                name: paused.state_refs[name]
+                for name in ("documents", "read", "synthesis")
+                if name in paused.state_refs
+            }
             app.supply_execution(execution, task_text="Keep the existing prediction API unchanged.")
             app = load_session(root / "session")
             self.assertIn("Keep the existing prediction API", app.brief.request_text)
-            self.assertEqual(app.view().state_refs["design"], paused.state_refs["design"])
-            app.advance(max_actions=2)
-            self.assertEqual(app.view().next_action, "implement", app.view().status_reason)
+            self.assertNotEqual(app.view().state_refs.get("design"), paused.state_refs.get("design"))
+            for name, ref in research_refs.items():
+                self.assertEqual(app.view().state_refs[name], ref)
+            self.advance_to(app, "implement")
             client = FakeClient()
             app.services = replace(app.services, llm_client=client)
             with patch.object(LLMClient, "for_task", return_value=client):
@@ -319,34 +374,59 @@ class ResearchApplicationTests(unittest.TestCase):
                 Path(revision_config["code_task"]["code_root"]).resolve(),
                 candidate_workspace.resolve(),
             )
-            app.services = replace(app.services, llm_client=None)
-            final = app.advance(max_actions=5)
+            first_round = app.advance(max_actions=3)
+            if first_round.next_action == "prepare_candidate:1":
+                first_round = app.advance(max_actions=1)
+            self.assertEqual(first_round.next_action, "revise_candidate:1", first_round.status_reason)
+            self.assertIn("preparation_r1", first_round.state_refs)
+            baseline_ref = first_round.state_refs["baseline"]
+            first_candidate_ref = first_round.state_refs["experiment"]
+            baseline = app.controller.store.read_json(baseline_ref)
+            first_candidate = app.controller.store.read_json(first_candidate_ref)
+            self.assertAlmostEqual(baseline["metrics"]["accuracy"], 1 / 3, places=5)
+            self.assertAlmostEqual(first_candidate["metrics"]["accuracy"], 2 / 3, places=5)
+
+            app = load_session(root / "session")
+            self.assertEqual(app.view().next_action, "revise_candidate:1")
+            self.assertEqual(app.controller.manifest.state_refs["baseline"], baseline_ref)
+            self.assertEqual(app.controller.manifest.state_refs["experiment"], first_candidate_ref)
+            app.services = replace(app.services, llm_client=client)
+            with patch.object(LLMClient, "for_task", return_value=client):
+                implemented_revision = app.advance(max_actions=1)
+            self.assertEqual(implemented_revision.next_action, "research_candidate:1", implemented_revision.status_reason)
+            revised_measurement = app.advance(max_actions=1)
+            self.assertEqual(revised_measurement.next_action, "reanalysis:1", revised_measurement.status_reason)
+            revision_ref = revised_measurement.state_refs["experiment_revision_1"]
+            revision_step = next(step for step in app._load_task_plan().steps if step.state_name == "experiment_revision_1")
+            self.assertTrue(app._step_completed(revision_step), app.controller.store.read_json(revision_ref))
+            self.assertEqual(app.latest_experiment_ref(), revision_ref)
+            final = app.advance(max_actions=1)
             self.assertEqual(final.status, "completed", final.status_reason)
             baseline = app.controller.store.read_json(final.state_refs["baseline"])
-            candidate = app.controller.store.read_json(final.state_refs["experiment"])
-            self.assertEqual(baseline["metrics"]["accuracy"], 0.5)
-            self.assertEqual(candidate["metrics"]["accuracy"], 1.0)
+            first_candidate = app.controller.store.read_json(final.state_refs["experiment"])
+            candidate = app.controller.store.read_json(final.state_refs["experiment_revision_1"])
+            self.assertAlmostEqual(candidate["metrics"]["accuracy"], 1.0)
             self.assertEqual(app.budget_ledger.remaining("process_invocations"), 0)
             self.assertNotIn("'prize'", (project / "spam_model.py").read_text())
-            analysis = app.controller.store.read_json(final.state_refs["analysis"])["analysis"]
+            analysis = app.controller.store.read_json(final.state_refs["analysis_r1"])["analysis"]
             decision_context = analysis["decision_context"]
             self.assertIn("prize", decision_context["research_goal"])
             checkpoint = decision_context["analysis_checkpoint"]
             current_candidate = checkpoint["current_candidate"]
-            self.assertEqual(current_candidate["artifact_ref"]["path"], final.state_refs["experiment"].path)
-            self.assertEqual(current_candidate["implementation_ref"]["path"], implementation_ref.path)
+            self.assertEqual(current_candidate["artifact_ref"]["path"], final.state_refs["experiment_revision_1"].path)
+            self.assertEqual(current_candidate["implementation_ref"]["path"], final.state_refs["implementation_r1"].path)
             roles = {row["role"]: row for row in checkpoint["measurements"]}
             self.assertEqual(roles["baseline"]["artifact_ref"]["path"], final.state_refs["baseline"].path)
-            self.assertEqual(roles["current_candidate"]["artifact_ref"]["path"], final.state_refs["experiment"].path)
+            self.assertEqual(roles["current_candidate"]["artifact_ref"]["path"], final.state_refs["experiment_revision_1"].path)
             self.assertEqual(checkpoint["stage"], "post_measurement_decision")
             history = decision_context["research_history"]
-            implementation = next(row for row in history if row["capability"] == "implement")
+            implementation = next(row for row in reversed(history) if row["capability"] == "implement")
             implementation_output = next(
                 output for output in implementation["outputs"]
                 if output["kind"] == "implementation_result"
             )
             self.assertTrue(implementation_output["patch_available"])
-            self.assertIn("prize", implementation_output["patch_excerpt"])
+            self.assertIn("lottery", implementation_output["patch_excerpt"])
             self.assertFalse(implementation_output["patch_truncated"])
             self.assertEqual(implementation_output["validation_report"]["status"], "passed")
             history_refs = {
@@ -355,19 +435,31 @@ class ResearchApplicationTests(unittest.TestCase):
             }
             self.assertIn(final.state_refs["baseline"].path, history_refs)
             self.assertIn(final.state_refs["experiment"].path, history_refs)
+            self.assertIn(final.state_refs["experiment_revision_1"].path, history_refs)
             measurements = [
                 output["metrics"]
                 for row in history if row["capability"] == "experiment"
                 for output in row.get("outputs", []) if output["kind"] == "experiment_result"
             ]
-            self.assertEqual([row["accuracy"] for row in measurements], [0.5, 1.0])
+            self.assertEqual([row["accuracy"] for row in measurements], [baseline["metrics"]["accuracy"], first_candidate["metrics"]["accuracy"], candidate["metrics"]["accuracy"]])
             context, _ = app.report_inputs()
             self.assertIn("implementation", context.results)
-            self.assertIn("prize", str(context.results["implementation"]))
+            self.assertIn("lottery", str(context.results["implementation"]))
             before = final.state_refs
+            attempts_before_preference = len(final.attempts)
             reloaded = load_session(root / "session")
             restored = reloaded.advance(max_actions=5)
             self.assertEqual(restored.state_refs, before)
+            self.assertEqual(len(restored.attempts), attempts_before_preference)
+            self.assertEqual(reloaded.budget_ledger.remaining("process_invocations"), 0)
+
+            reloaded.continue_session(
+                revised_brief=replace(reloaded.brief, preferences=("Keep the report concise.",)),
+            )
+            preference_resume = reloaded.advance(max_actions=5)
+            self.assertEqual(len(preference_resume.attempts), attempts_before_preference)
+            self.assertEqual(preference_resume.state_refs["implementation_r1"], before["implementation_r1"])
+            self.assertEqual(preference_resume.state_refs["experiment_revision_1"], before["experiment_revision_1"])
             self.assertEqual(reloaded.budget_ledger.remaining("process_invocations"), 0)
 
     def test_code_task_supplement_uses_original_baseline_and_current_candidate(self):
@@ -866,6 +958,12 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(finished.status, "completed", finished.status_reason)
             self.assertEqual(finished.work_plan["execution_decision"]["baseline"]["mode"], "reuse")
             self.assertEqual((root / "calls.txt").read_text(encoding="utf-8").splitlines(), ["baseline", "candidate"])
+            candidate_step = next(step for step in app._load_task_plan().steps if step.action == "experiment")
+            self.assertTrue(app._step_completed(candidate_step))
+            script.write_text(original_evaluator + "\n# protected evaluator changed after measurement\n", encoding="utf-8")
+            self.assertTrue(app._step_completed(candidate_step))
+            script.write_text(original_evaluator, encoding="utf-8")
+            self.assertTrue(app._step_completed(candidate_step))
 
             mismatched_protocol = {
                 **execution["protocol"],
@@ -1005,9 +1103,17 @@ class ResearchApplicationTests(unittest.TestCase):
             old_report = view.state_refs["report"]
             old_body = app.controller.store.read_text(old_report)
             old_read = view.state_refs["read"]
-            refreshed = app.request_report(refresh=True)
+            attempts_before_revision = len(view.attempts)
+            refreshed = app.continue_session(
+                revised_brief=replace(
+                    app.brief,
+                    preferences=("Keep the report concise.",),
+                ),
+            )
             self.assertEqual(refreshed.next_action, "report_write")
             self.assertEqual(refreshed.state_refs["read"], old_read)
+            self.assertNotIn("report", refreshed.state_refs)
+            self.assertEqual(len(refreshed.attempts), attempts_before_revision)
             with patch("simple_ar.report.writing.run_report_agent", side_effect=writer):
                 view = app.advance(max_actions=3)
             self.assertNotEqual(view.state_refs["report"], old_report)
@@ -1062,7 +1168,7 @@ class ResearchApplicationTests(unittest.TestCase):
             completed = refreshed
             attempt_count = len(completed.attempts)
 
-            reopened = app.request_report()
+            reopened = app.request_report(refresh=True)
 
             self.assertEqual(reopened.status, "running")
             self.assertEqual(reopened.next_action, "report_write")
@@ -1071,6 +1177,42 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(app.controller.manifest.revision, 2)
             self.assertEqual(app.brief.revision, 2)
             self.assertIn("report", app.brief.requested_outputs)
+
+    def test_brief_revision_reuses_unaffected_source_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Replay\n\nA small memory retains earlier examples.\n", encoding="utf-8")
+            app = create_session(
+                ResearchBrief(
+                    request_text="Study replay methods.",
+                    requested_outputs=("summary",),
+                    asset_requests=({"locator": str(paper), "role": "paper"},),
+                ),
+                root=root / "session",
+                services=ResearchApplicationServices(
+                    max_results=1, max_chunks=10, max_attempts=16,
+                    config={"research_materials_only": True},
+                ),
+            )
+            original = app.advance(max_actions=12)
+            self.assertEqual(original.status, "completed", original.status_reason)
+            retained = {name: original.state_refs[name] for name in ("documents", "read")}
+            app.continue_session(
+                revised_brief=replace(app.brief, preferences=("Keep the summary concise.",)),
+            )
+            self.assertNotIn("synthesis", app.controller.manifest.state_refs)
+            self.assertNotIn("summary", app.controller.manifest.state_refs)
+            for name, ref in retained.items():
+                self.assertEqual(app.controller.manifest.state_refs[name], ref)
+                self.assertTrue(app.controller.store.exists(ref))
+
+            revised = app.advance(max_actions=12)
+            self.assertEqual(revised.status, "completed", revised.status_reason)
+            for name, ref in retained.items():
+                self.assertEqual(revised.state_refs[name], ref)
+            self.assertEqual(sum(item["capability"] == "document_ingest" for item in revised.attempts), 1)
+            self.assertEqual(sum(item["capability"] == "read" for item in revised.attempts), 1)
 
     def test_csv_baseline_preparation_trains_and_scores_real_labels(self):
         for swapped in (False, True):

@@ -24,7 +24,7 @@ not silently translated to the canonical application.
 
 | Command | Purpose |
 | --- | --- |
-| `simple-ar research-session` | **V2.8 formal mainline**: run the bounded literature-only or research-to-report flow in one session. |
+| `simple-ar research-session` | Canonical entry for a bounded task-driven session; the accepted plan selects applicable research and execution steps. |
 | `simple-ar research-session-continue` | Retry one failed canonical explicit experiment. |
 | `simple-ar research-session-migrate` | Create a canonical successor from a read-only `session_manifest.v1`. |
 | `simple-ar research-report` | Generate and audit a report from a completed research session. |
@@ -81,7 +81,7 @@ The separate design→experiment→analysis creator is retired. Use `research-se
 for research tasks. The old `--synthesis-file` argument is not silently translated.
 Domain capabilities remain composable at library level; historical artifacts remain readable.
 
-### `simple-ar research-session` (V2.8 formal mainline)
+### `simple-ar research-session` (canonical task-driven entry)
 
 Use `simple-ar research-session --config examples/research_config/minimal.toml`
 for a file-based start. The [configuration reference](CONFIG_REFERENCE.md) describes
@@ -89,8 +89,10 @@ the minimal and advanced templates, which share the same parser and defaults.
 Explicit CLI options override the file. `--outputs` selects `summary`, `report`,
 and/or `experiments`; `--total-tokens`, `--llm-requests`, `--max-output-tokens`,
 `--process-invocations`, and `--process-wall-seconds` expose the corresponding limits.
-Add `--session-root PATH` to resume the same goal/outputs or supply missing execution settings;
-existing evidence, research settings, and budget consumption are retained.
+Add `--session-root PATH` to resume the same goal/outputs or supply missing execution
+settings; existing evidence, research settings, and budget consumption are retained.
+This does not revise the goal, outputs, execution assets, or protocol; start a new session
+when those inputs change.
 
 At a paused or completed analysis checkpoint, add `--reanalyze` to reconsider
 existing measurements and resume research decisions without requesting a report.
@@ -102,13 +104,11 @@ The completion table resolves the latest implementation, candidate measurement,
 and analysis from the accepted plan. Earlier revision refs remain separately
 listed so the candidate lineage is still navigable.
 
-**Purpose**: run the V2.8 formal composition in one session. If an execution
-command or `--code-task-config` is supplied, it continues through the bounded
-research-to-experiment path
-`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment -> analysis`.
-If neither is supplied, it is a literature-only session that ends at an
-evidence-backed summary, or continues to a research-only report when a model
-is supplied. The latter never creates an execution request or process.
+**Purpose**: run one bounded session whose accepted plan selects the steps
+applicable to the task and supplied assets. With an execution command or
+`--code-task-config`, the plan may include preparation, implementation,
+measurement, and analysis. Without either, the session remains literature-only
+and never creates an execution request or process.
 
 When a model is available, the same application continues through `report` and
 `report_audit`; `--no-report` is for debugging or prefix-only inspection. A
@@ -268,9 +268,9 @@ runtime configuration; the session budget still applies.
 
 The report and audit are appended as new attempts under the same session. A
 second invocation with an existing canonical report is idempotent: it reads
-the completed state and does not rerun the Writer. Explicit `--refresh` reanalyzes
-existing measurements and creates new report/audit attempts while retaining old
-reports, without rerunning search, implementation or training. Model-backed
+the completed state and does not rerun the Writer. Explicit `--refresh` reuses
+the retained analysis and creates new report/audit attempts while retaining old
+reports; it does not rerun measurements or analysis. Model-backed
 sessions use the model to interpret hypotheses; numeric and execution-status
 checks remain deterministic. Refresh uses the remaining session budget.
 Use `--reviewer disabled`

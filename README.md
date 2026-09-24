@@ -23,9 +23,12 @@ frozen-version acceptance run or fully validated paper quality. Remaining
 report factual-correction validation, an explicit attempt-limit extension
 entrypoint, and frozen-version acceptance move to V2.9 recovery, delivery, and
 release work. The V2.9 development branch has exercised supplied-material analysis
-and a small code repair through short task plans; live open-web acceptance still
-has a provider rate-limit blocker. Protocol-driven experiments, research-informed
-iteration and full continuation remain in development, not completed features.
+and a small code repair through short task plans. Current continuation work keeps
+accepted-plan lineage, reuses unaffected evidence and measurements, and rebuilds
+reports from retained analysis; local D recovery/invalidation corrections are
+awaiting review, and Stage E is not complete. Live
+open-web acceptance still has a provider rate-limit blocker. Protocol-driven
+experiments and a complete research-informed loop remain under development.
 The target input is a natural-language task, available assets and necessary resource
 and permission settings, not a user-authored stage sequence. Module upgrades accompany
 the core stages; see [development targets and handoffs](docs/DEVELOPMENT.md#v29-development-target-decision-context-and-handoffs).
@@ -42,9 +45,10 @@ the core stages; see [development targets and handoffs](docs/DEVELOPMENT.md#v29-
 
 ## What Works Today
 
-- **V2.8 canonical research session**: run the bounded
+- **V2.8 canonical research session**: the shared application follows a bounded
+  accepted task plan; not every task runs every capability in the historical
   `plan -> search -> document_ingest -> read -> synthesize -> research_design
-  -> experiment -> analysis -> report -> report_audit` path. The mainline uses
+  -> experiment -> analysis -> report -> report_audit` sequence. The mainline uses
   explicit provider, artifact, metric, timeout, and continuation boundaries;
   the model-backed CLI requests the report by default. The path has completed
   one real AutoDL prepared-project run with 60 raw and 10 selected/documents
@@ -181,9 +185,10 @@ settings, not a hard-coded provider integration.
 For file-based use, start with `simple-ar research-session --config examples/research_config/minimal.toml`.
 See the [configuration reference](docs/CONFIG_REFERENCE.md) for the shared minimal/advanced format.
 
-The mainline is `research-session`: it keeps one bounded handoff from
-planning and network/local search through document evidence, one prepared
-experiment, result analysis, report writing, and audit. Start with the
+The mainline is `research-session`: one bounded application follows the accepted
+plan for the task and available assets. Search, document evidence, execution,
+analysis, and reporting are included only when that plan and supplied protocol
+call for them. Start with the
 laptop-safe complete fixture:
 
 ```bash

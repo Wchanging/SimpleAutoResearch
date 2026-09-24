@@ -593,7 +593,7 @@ def _state_name(action: str) -> str:
         return f"implementation_r{action.split(':', 1)[1]}"
     if action.startswith("research_candidate:"):
         suffix = action.split(":", 1)[1]
-        return f"experiment_revision_{suffix.replace('_', '_')}"
+        return f"experiment_revision_{suffix}"
     if action.startswith("reanalysis:"):
         return f"analysis_r{action.split(':', 1)[1]}"
     return action

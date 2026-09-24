@@ -169,11 +169,6 @@ _CAPABILITY_OUTPUTS = {
 }
 
 
-_DERIVED_KEYS = {
-    "plan", "task_plan", "search", "documents", "read", "synthesis",
-    "assessment", "idea_comparison", "summary", "summary_snapshot",
-    "work_plan", "work_plan_markdown", "readiness", "design", "preparation", "baseline", "implementation", "experiment", "analysis", "comparison", "decision", "writer", "report", "report_audit"
-}
 _EXECUTION_OUTPUTS = {
     "experiment", "experiments", "code", "code_task"
 }
@@ -375,15 +370,10 @@ class ResearchApplication:
                 allow_no_progress_exhausted=allow_no_progress_exhausted,
             )
             if prepared is not None:
+                previous_brief, previous_assets = self.brief, self.assets
                 self.brief, self.assets, diagnostics = prepared
                 self.controller.manifest.current_attempt = None
-                dynamic = {key for key in self.controller.manifest.state_refs if key.startswith((
-                    "repair_", "experiment_repair_", "matrix_", "preparation_r",
-                    "implementation_r", "experiment_revision_", "analysis_r",
-                    "baseline_supplement_", "experiment_supplement_",
-                ))}
-                for key in _DERIVED_KEYS | {"diagnostics"} | dynamic:
-                    self.controller.manifest.state_refs.pop(key, None)
+                self._invalidate_revised_inputs(previous_brief, previous_assets)
                 self._persist_inputs(diagnostics)
             else:
                 # An invalid comparison is not a user decision to reject every
@@ -412,13 +402,12 @@ class ResearchApplication:
                 self.brief = replace(self.brief, request_text=self.brief.request_text + "\n\n## Implementation task\n\n" + task_text.strip(),
                                      revision=self.brief.revision + 1, parent_revision=self.brief.revision)
             self.controller.manifest.current_attempt = None
-            dynamic = {key for key in self.controller.manifest.state_refs if key.startswith((
-                "repair_", "experiment_repair_", "matrix_", "preparation_r",
-                "implementation_r", "experiment_revision_", "analysis_r",
-                "baseline_supplement_", "experiment_supplement_",
-            ))}
-            for key in {"task_plan", "preparation", "baseline", "implementation", "experiment", "analysis", "comparison", "decision", "writer", "report", "report_audit", "diagnostics"} | dynamic:
-                self.controller.manifest.state_refs.pop(key, None)
+            self._remove_plan_capability_refs({
+                "research_design", "prepare_execution", "implement", "experiment", "analysis",
+                "report_write", "report", "report_audit",
+            })
+            for name in ("task_plan", "design", "comparison", "decision", "writer", "report", "report_audit", "diagnostics"):
+                self.controller.manifest.state_refs.pop(name, None)
             self._persist_inputs(validate_brief(self.brief, self.assets))
             if self._next_action() == "plan":
                 self._run_action("plan")
@@ -472,7 +461,7 @@ class ResearchApplication:
             if refresh:
                 # Retire only delivery pointers; prior attempts and all research
                 # measurements remain immutable and available for inspection.
-                for name in ("analysis", "comparison", "writer", "report", "report_audit"):
+                for name in ("writer", "report", "report_audit"):
                     self.controller.manifest.state_refs.pop(name, None)
                 self.controller.manifest.current_attempt = None
             self.brief = replace(
@@ -735,7 +724,7 @@ class ResearchApplication:
         context.source_handles, memory.source_handles = handles, handles
         implementation_ref = next(
             (refs[str(row["state_name"])] for row in reversed(self._accepted_plan_steps())
-             if (str(row["action"]) == "implement" or str(row["action"]).startswith("repair:"))
+             if str(row.get("capability") or "") == "implement"
              and str(row["state_name"]) in refs),
             None,
         )
@@ -2564,14 +2553,12 @@ class ResearchApplication:
         """Read the last completed experiment named by the accepted plan."""
         refs = self.controller.manifest.state_refs
         if "task_plan" in refs:
-            for row in reversed(self._accepted_plan_steps()):
-                if _capability_for_action(str(row["action"])) != "experiment":
+            for step in reversed(self._load_task_plan().steps):
+                if step.capability != "experiment":
                     continue
-                state = str(row["state_name"])
-                if state in refs and self._step_completed(
-                    next(step for step in self._load_task_plan().steps if step.state_name == state)
-                ):
-                    return refs[state]
+                ref = refs.get(step.state_name)
+                if ref is not None and self._step_completed(step):
+                    return ref
         return None
 
     def _build_work_plan(self) -> dict[str, Any]:
@@ -2765,7 +2752,134 @@ class ResearchApplication:
         assets = _normalize_assets(candidate, self.services)
         diagnostics = validate_brief(candidate, assets)
         _raise_on_errors(diagnostics)
+        previous = {asset.asset_id: _asset_revision_facts(asset) for asset in self.assets}
+        revised = {asset.asset_id: _asset_revision_facts(asset) for asset in assets}
+        changed_ids = {
+            asset_id for asset_id in previous.keys() | revised.keys()
+            if previous.get(asset_id) != revised.get(asset_id)
+        }
+        execution_roles = {"code", "project", "repository", "dataset", "data", "benchmark", "evaluator", "baseline", "execution"}
+        changed_execution_assets = [
+            asset.asset_id for asset in (*self.assets, *assets)
+            if asset.asset_id in changed_ids
+            and (asset.role.strip().lower() in execution_roles or asset.kind.strip().lower() in execution_roles)
+        ]
+        if changed_execution_assets:
+            raise ResearchApplicationError(
+                "Execution-bound assets changed in the revised brief ("
+                + ", ".join(dict.fromkeys(changed_execution_assets))
+                + "); revise the execution configuration through a new session rather than reusing old measurements."
+            )
         return candidate, assets, diagnostics
+
+    def _invalidate_revised_inputs(
+        self, previous_brief: ResearchBrief, previous_assets: tuple[ResearchAsset, ...],
+    ) -> None:
+        """Retire only current pointers whose accepted-plan inputs changed."""
+
+        refs = self.controller.manifest.state_refs
+        question_changed = any((
+            previous_brief.request_text != self.brief.request_text,
+            previous_brief.objective != self.brief.objective,
+            previous_brief.intents != self.brief.intents,
+            previous_brief.user_hypotheses != self.brief.user_hypotheses,
+        ))
+        constraints_changed = any((
+            previous_brief.hard_constraints != self.brief.hard_constraints,
+            previous_brief.open_questions != self.brief.open_questions,
+            previous_brief.accepted_assumptions != self.brief.accepted_assumptions,
+        ))
+        preferences_changed = previous_brief.preferences != self.brief.preferences
+        outputs_changed = previous_brief.requested_outputs != self.brief.requested_outputs
+        previous_assets_by_id = {asset.asset_id: _asset_revision_facts(asset) for asset in previous_assets}
+        current_assets_by_id = {asset.asset_id: _asset_revision_facts(asset) for asset in self.assets}
+        materials_changed = (
+            previous_assets_by_id != current_assets_by_id
+            or previous_brief.asset_ids != self.brief.asset_ids
+        )
+
+        if preferences_changed and not any((
+            question_changed, constraints_changed, outputs_changed, materials_changed,
+        )):
+            # Refresh only declared deliverables affected by this revision.
+            # Preferences are not classified by natural-language keywords;
+            # research/output changes that alter the task belong in its goal,
+            # hard constraints, or a new execution session.
+            requested = {_output_state_name(output) for output in _requested_outputs(self.brief)}
+            stale_capabilities: set[str] = set()
+            if "summary" in requested:
+                stale_capabilities.update({"synthesize", "summary"})
+            if "report" in requested:
+                stale_capabilities.update({"report_write", "report", "report_audit"})
+            self._remove_plan_capability_refs(stale_capabilities)
+            if "synthesize" in stale_capabilities:
+                refs.pop("synthesis", None)
+            if "summary" in stale_capabilities:
+                refs.pop("summary_snapshot", None)
+            if "report_write" in stale_capabilities:
+                refs.pop("writer", None)
+            if "report" in stale_capabilities:
+                refs.pop("report", None)
+            if "report_audit" in stale_capabilities:
+                refs.pop("report_audit", None)
+            return
+
+        decision_context_changed = question_changed or constraints_changed or preferences_changed
+        implementation_context_changed = question_changed or constraints_changed
+
+        stale_capabilities: set[str] = set()
+        if question_changed:
+            stale_capabilities.update({
+                "search", "document_ingest", "read", "synthesize", "summary",
+                "assess_ideas", "research_design", "analysis", "report_write", "report", "report_audit",
+            })
+            refs.pop("plan", None)
+        elif materials_changed:
+            stale_capabilities.update({
+                "document_ingest", "read", "synthesize", "summary", "assess_ideas",
+                "research_design", "analysis", "report_write", "report", "report_audit",
+            })
+            refs.pop("plan", None)
+        elif decision_context_changed:
+            stale_capabilities.update({
+                "synthesize", "summary", "assess_ideas", "research_design", "analysis",
+                "report_write", "report", "report_audit",
+            })
+
+        execution = self._execution_config().get("execution")
+        is_code_task = isinstance(execution, Mapping) and isinstance(execution.get("code_task"), Mapping)
+        if is_code_task and implementation_context_changed:
+            stale_capabilities.add("implement")
+
+        if "task_plan" in refs:
+            plan = self._load_task_plan()
+            for step in plan.steps:
+                stale = step.capability in stale_capabilities
+                if is_code_task and implementation_context_changed:
+                    if step.capability == "prepare_execution" and step.action.startswith("prepare_candidate:"):
+                        stale = True
+                    if step.capability == "experiment" and step.action not in {"baseline"} and not step.action.startswith(("matrix_baseline_", "supplement_baseline:")):
+                        stale = True
+                if stale:
+                    refs.pop(step.state_name, None)
+        refs.pop("task_plan", None)
+        if "assess_ideas" in stale_capabilities:
+            refs.pop("idea_comparison", None)
+        if "summary" in stale_capabilities:
+            refs.pop("summary_snapshot", None)
+        if "analysis" in stale_capabilities or (is_code_task and implementation_context_changed):
+            refs.pop("comparison", None)
+            refs.pop("decision", None)
+        if "experiment" in stale_capabilities or (is_code_task and implementation_context_changed):
+            refs.pop("matrix_results", None)
+
+    def _remove_plan_capability_refs(self, capabilities: set[str]) -> None:
+        refs = self.controller.manifest.state_refs
+        if "task_plan" not in refs:
+            return
+        for step in self._load_task_plan().steps:
+            if step.capability in capabilities:
+                refs.pop(step.state_name, None)
 
     def _reconcile_running_attempt(self) -> None:
         attempts = self.controller.list_attempts()
@@ -2773,7 +2887,6 @@ class ResearchApplication:
         if not running:
             # A process can stop after finalizing the attempt but before the
             # application saves its state ref. Reuse that result on reload.
-            next_action = self._next_action() or ""
             current_attempt = self.controller.manifest.current_attempt
             current_manifest = next(
                 (item for item in attempts if item.attempt_id == current_attempt),
@@ -2789,19 +2902,39 @@ class ResearchApplication:
             # explicit pointer with an older completed attempt during reload.
             if current_state and current_state in self.controller.manifest.state_refs:
                 return
-            capability = _capability_for_action(next_action)
-            running = [item for item in attempts
-                       if item.attempt_id == self.controller.manifest.current_attempt
-                       and item.capability == capability
-                       and (item.status == "completed" or (
-                           item.status == "failed" and item.capability in {"experiment", "analysis"}
-                       ))
-                       and self.controller.manifest.status == "running"]
+            planner_attempt = (
+                current_manifest is not None
+                and current_manifest.capability == "plan"
+                and current_state == "plan"
+                and "task_plan" not in self.controller.manifest.state_refs
+            )
+            current_step = next((
+                step for step in self._load_task_plan().steps
+                if step.state_name == current_state and step.capability == current_manifest.capability
+            ), None) if current_manifest is not None and "task_plan" in self.controller.manifest.state_refs else None
+            recoverable = current_manifest is not None and current_manifest.status in {"completed", "failed"} and (
+                current_manifest.status == "completed"
+                or current_manifest.capability in {"experiment", "analysis"}
+            )
+            running = [current_manifest] if (
+                (current_step is not None or planner_attempt)
+                and recoverable and self.controller.manifest.status == "running"
+            ) else []
             if not running:
                 return
         if len(running) != 1:
             raise ResearchApplicationError("Session has multiple interrupted attempts to inspect.")
         attempt = running[0]
+        if "task_plan" in self.controller.manifest.state_refs:
+            state_name = attempt.trigger.removeprefix("application:") if attempt.trigger.startswith("application:") else ""
+            planner_attempt = attempt.capability == "plan" and state_name == "plan" and "task_plan" not in self.controller.manifest.state_refs
+            if not planner_attempt and not any(
+                step.state_name == state_name and step.capability == attempt.capability
+                for step in self._load_task_plan().steps
+            ):
+                raise ResearchApplicationError(
+                    f"Attempt {attempt.attempt_id} is not bound to a step in the accepted task plan."
+                )
         result_path = self.controller.store.root / "attempts" / attempt.attempt_id / "capability_result.json"
         if not result_path.is_file():
             raise ResearchApplicationError(
@@ -3218,6 +3351,13 @@ class ResearchApplication:
                 return False
             try:
                 actual_source_ref = ArtifactRef.from_dict(dict(source_ref))
+                if same_session_baseline:
+                    bound_preparation = next(
+                        (item for item in baseline_attempt.inputs if item.kind == "prepared_execution"),
+                        None,
+                    )
+                    if bound_preparation is None or bound_preparation.path != actual_source_ref.path:
+                        return False
                 actual_source = self.controller.store.read_json(actual_source_ref)
                 current_source = self.controller.store.read_json(current_preparation)
                 actual_project_value = actual_source.get("source_project")
@@ -3338,12 +3478,17 @@ class ResearchApplication:
         return config
 
     def _active_preparation_ref(self) -> ArtifactRef | None:
-        """Select the active workspace without overwriting completed plan-step refs."""
+        """Select the latest usable preparation in accepted-plan order."""
         refs = self.controller.manifest.state_refs
-        revisions = [(int(name.removeprefix("preparation_r")), ref)
-                     for name, ref in refs.items()
-                     if name.startswith("preparation_r") and name.removeprefix("preparation_r").isdigit()]
-        return max(revisions, key=lambda item: item[0])[1] if revisions else refs.get("preparation")
+        if "task_plan" in refs:
+            for step in reversed(self._load_task_plan().steps):
+                if step.capability != "prepare_execution":
+                    continue
+                ref = refs.get(step.state_name)
+                attempt = self._attempt_for_ref(ref) if ref is not None else None
+                if attempt is not None and attempt.status == "completed":
+                    return ref
+        return refs.get("preparation")
 
     def _needs_preparation(self) -> bool:
         execution = self.services.config.get("execution")
@@ -3633,25 +3778,13 @@ def _matrix_candidate_key(revision: int, index: int) -> str:
     return f"matrix_candidate_r{revision}_{index}" if revision else f"matrix_candidate_{index}"
 
 
-def _capability_for_action(action: str) -> str:
-    if action == "summarize":
-        return "summary"
-    if action == "matrix_analysis" or action.startswith("reanalysis:"):
-        return "analysis"
-    if action.startswith(("repair:", "matrix_repair_")):
-        return "implement"
-    if action.startswith("prepare_candidate:"):
-        return "prepare_execution"
-    if action.startswith("revise_candidate:"):
-        return "implement"
-    if action.startswith((
-        "retest:", "matrix_baseline_", "matrix_candidate_",
-        "supplement_baseline:", "supplement_candidate:",
-    )) or action == "baseline":
-        return "experiment"
-    if action.startswith("research_candidate:"):
-        return "experiment"
-    return action
+def _asset_revision_facts(asset: ResearchAsset) -> tuple[Any, ...]:
+    return (
+        asset.kind, asset.role, asset.locator,
+        json.dumps(asset.identity, sort_keys=True, ensure_ascii=False, default=str),
+        asset.availability, asset.understanding, asset.mutability,
+        asset.allowed_uses, asset.provenance,
+    )
 
 
 def _action_iteration(action: str) -> int:
