@@ -102,6 +102,10 @@ class ResearchConfigTests(unittest.TestCase):
                 main(["research-session", "--config", str(path)])
             session = next((root / "out").iterdir())
             before = load_session(session).view()
+            original_inputs = {
+                key: (session / before.state_refs[key].path).read_bytes()
+                for key in ("brief", "brief_markdown", "assets")
+            }
             path.write_text(path.read_text(encoding="utf-8").replace("123456", "999999") +
                             '\n[execution]\ncommand=[' + json.dumps(sys.executable) + ', "measure.py"]\ncwd="."\ntimeout_sec=20\nprimary_metric="accuracy"\n', encoding="utf-8")
             argv = ["research-session", "--config", str(path), "--session-root", str(session)]
@@ -111,8 +115,19 @@ class ResearchConfigTests(unittest.TestCase):
             after = app.view()
             self.assertEqual(after.status, "completed")
             for key, ref in before.state_refs.items():
-                if key not in {"runtime_config", "diagnostics", "task_plan", "design", "research_design"}:
+                if key not in {"brief", "assets", "brief_markdown", "runtime_config", "diagnostics", "task_plan", "design", "research_design"}:
                     self.assertEqual(after.state_refs[key], ref)
+            for key, content in original_inputs.items():
+                self.assertEqual((session / before.state_refs[key].path).read_bytes(), content)
+                self.assertNotEqual(after.state_refs[key], before.state_refs[key])
+            old_brief = json.loads(original_inputs["brief"])
+            new_brief = json.loads((session / after.state_refs["brief"].path).read_text(encoding="utf-8"))
+            self.assertEqual(new_brief["revision"], old_brief["revision"] + 1)
+            self.assertEqual(new_brief["parent_revision"], old_brief["revision"])
+            self.assertEqual(
+                {key: value for key, value in new_brief.items() if key not in {"revision", "parent_revision"}},
+                {key: value for key, value in old_brief.items() if key not in {"revision", "parent_revision"}},
+            )
             self.assertNotEqual(after.state_refs["task_plan"], before.state_refs["task_plan"])
             self.assertEqual(app.budget_ledger.limits["total_tokens"], 123456)
             self.assertEqual((root / "calls.txt").read_text(), "x")
@@ -380,12 +395,21 @@ class ResearchConfigTests(unittest.TestCase):
                                            "python", "train.py", "--config", "missing.toml"]), {})
 
     def test_templates_parse_with_same_defaults(self):
+        from simple_ar.app.research_application import ResearchApplicationServices
+
+        defaults = build_parser().parse_args(["research-session", "--topic", "A research goal"])
+        self.assertIsNone(defaults.total_tokens)
+        self.assertIsNone(defaults.llm_requests)
+        self.assertEqual(ResearchApplicationServices().budget_limits,
+                         {"total_tokens": None, "llm_requests": None})
         root = Path(__file__).resolve().parents[1]
         for name in ("minimal", "advanced"):
             argv = ["research-session", "--config", str(root / "examples/research_config" / f"{name}.toml")]
             args = build_parser(research_defaults=research_defaults(argv)).parse_args(argv)
             self.assertTrue(args.topic)
             self.assertEqual(args.max_output_tokens, 8192)
+            self.assertIsNone(args.total_tokens)
+            self.assertIsNone(args.llm_requests)
             if name == "advanced":
                 self.assertTrue(args.research_use_fulltext)
                 self.assertTrue(args.research_allow_pdf_download)

@@ -504,8 +504,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         input_base_dir=Path.cwd(),
         config=config,
         budget_limits={
-            "llm_requests": getattr(args, "llm_requests", 40),
-            "total_tokens": getattr(args, "total_tokens", 160_000),
+            "llm_requests": args.llm_requests,
+            "total_tokens": args.total_tokens,
             "process_invocations": args.process_invocations if getattr(args, "process_invocations", None) is not None else (1 if task_kind == "bug_fix" else 8 if execution is not None else 0),
             "process_wall_seconds": args.process_wall_seconds if getattr(args, "process_wall_seconds", None) is not None else (max(30, timeout_sec) if task_kind == "bug_fix" else max(60, timeout_sec * 8) if execution is not None else 0),
         },

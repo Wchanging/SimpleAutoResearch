@@ -14,6 +14,25 @@ from simple_ar.core.budget import (
 
 
 class BudgetLedgerTests(unittest.TestCase):
+    def test_unlimited_api_usage_survives_reload_with_unknown_calls(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "budget.json"
+            ledger = BudgetLedger(
+                {"total_tokens": None, "llm_requests": None, "process_invocations": 0},
+                storage_path=path,
+            )
+            ledger.reserve("completed", {"total_tokens": 3000000, "llm_requests": 100})
+            ledger.settle("completed", {"total_tokens": 2000000, "llm_requests": 100})
+            ledger.reserve("interrupted", {"total_tokens": 1000, "llm_requests": 1})
+            ledger.mark_unknown("interrupted", reason="connection lost")
+            loaded = BudgetLedger.load(path)
+            self.assertEqual(loaded.entries[0].actual["total_tokens"], 2000000)
+            self.assertEqual(loaded.entries[1].status, "unknown")
+            self.assertIsNone(loaded.remaining("total_tokens"))
+            loaded.reserve("continued", {"total_tokens": 3000000, "llm_requests": 1})
+            with self.assertRaises(BudgetExceededError):
+                loaded.reserve("process", {"process_invocations": 1})
+
     def test_one_explicit_authorization_extends_multiple_dimensions_once(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "budget.json"

@@ -6,6 +6,7 @@
 
 ## 2026-09-24
 
+- 新研究会话默认不限制 API 请求数和总 token 用量，可通过 CLI/TOML 显式设置上限。保留用量记录与续跑时已存额度；进程、科研轮次及 attempt 限制仍独立生效。
 - 可在现有 accepted plan 中显式修订目标、outputs、材料或执行配置；保留 attempt 历史，仅在命令、schema、协议、准备 lineage 和保护资产仍匹配时复用测量。
 - 通过现有 CLI/TOML 增加幂等续接授权：资源新额度从授权后开始；attempt/no-progress 上限递增，不清零用量或抹去未知历史用量。已完成会话仅追加额度时保持完成状态，随后可显式刷新报告；相同条款不重复扩额，账本写入中断时可幂等补完。报告恢复提示覆盖剩余交付步骤，不要求扩大无关进程权限。
 - `research-report --refresh` 从保留的 analysis 重新生成 Writer/Reviewer 结果与 audit，不再重跑 analysis 或测量。

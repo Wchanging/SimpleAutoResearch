@@ -74,8 +74,8 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
         help="Task-driven path: survey reuses evidence/report; bug_fix reuses isolated CodeTask patching and short validation.",
     )
     session_parser.add_argument("--outputs", nargs="+", choices=("summary", "report", "experiments", "bug_fix"))
-    session_parser.add_argument("--total-tokens", type=int, default=160000)
-    session_parser.add_argument("--llm-requests", type=int, default=40)
+    session_parser.add_argument("--total-tokens", type=int, default=None, help="Optional session API token budget; omitted means unlimited.")
+    session_parser.add_argument("--llm-requests", type=int, default=None, help="Optional session API request budget; omitted means unlimited.")
     session_parser.add_argument("--max-output-tokens", type=int, default=None)
     session_parser.add_argument(
         "--max-section-tokens",

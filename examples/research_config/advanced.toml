@@ -9,8 +9,9 @@ name = "env"
 max_output_tokens = 8192
 
 [budget]
-total_tokens = 2000000
-llm_requests = 120
+# Optional API caps; omitted means unlimited, not zero.
+# total_tokens = 2000000
+# llm_requests = 120
 process_invocations = 0 # No execution requested by this survey example.
 process_wall_seconds = 0
 

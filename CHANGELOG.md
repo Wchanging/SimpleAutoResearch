@@ -6,6 +6,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-24
 
+- New research sessions default to uncapped API request and total-token usage;
+  optional CLI/TOML caps still apply. Usage accounting and saved limits on resume
+  are preserved; process, iteration, and attempt limits remain separate.
 - Continue an accepted plan with explicit goal/output/material or execution
   revisions. Preserve attempt history and reuse measurements only when their
   command, schema, protocol, preparation lineage, and protected assets still match.

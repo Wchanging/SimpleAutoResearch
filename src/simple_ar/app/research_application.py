@@ -91,7 +91,7 @@ class ResearchApplicationServices:
     input_base_dir: Path | None = None
     config: Mapping[str, object] = field(default_factory=dict)
     budget_limits: Mapping[str, int | float | None] = field(
-        default_factory=lambda: {"llm_requests": 20, "total_tokens": 80_000}
+        default_factory=lambda: {"llm_requests": None, "total_tokens": None}
     )
     max_attempts: int = 16
     max_no_progress: int = 3

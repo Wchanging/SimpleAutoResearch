@@ -10,6 +10,11 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 ## 加载规则
 
+新研究会话不设置 `budget.total_tokens`、`budget.llm_requests` 时，框架不限制 API 总 token 和请求次数；
+需要限制时设置正整数。无限额仍记录用量，不等于免费调用或无限重试。
+进程资源、科研轮次、attempt/no-progress 和供应商单次输出限制独立保留。
+恢复旧会话仍沿用其持久化额度；省略配置不会清除旧限额或清零用量。服务商报错时保留产物并暂停受影响工作，以便恢复。
+
 - 优先级：内置默认 → 研究 TOML → 显式 CLI 覆盖。CLI 列表覆盖整份文件列表。
 - 研究文件中的相对路径以 TOML 所在目录为基准；命令 argv 原样传给实验进程。
 - `[task]`：`goal`、`kind`（auto/survey/bug_fix）、`outputs`（summary/report/experiments/bug_fix）、`output_root`。

@@ -10,6 +10,14 @@ The [minimal](../examples/research_config/minimal.toml) and
 Precedence is built-in defaults, TOML, then explicit CLI options. CLI lists replace file lists.
 File-relative paths resolve from the TOML directory; command argv remains literal.
 
+For new research sessions, omitted `budget.total_tokens` and `budget.llm_requests`
+mean no framework API usage cap. Set positive integers to enforce optional caps;
+usage is still recorded when unlimited. Process limits, scientific iteration limits,
+attempt/no-progress limits and provider per-response limits remain separate.
+Resuming an existing session preserves its saved limits; omission does not remove
+an old cap or reset usage. Provider errors pause affected work for recovery;
+unlimited API usage does not mean unlimited retries or free service.
+
 Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens),
 `budget` (total_tokens, llm_requests, process_invocations, process_wall_seconds),
 `research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir,
