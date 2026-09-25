@@ -1,0 +1,38 @@
+# Server acceptance candidate; complete split/environment/throughput preflight before launching.
+[task]
+goal = "Improve forgetting under a small replay memory in the supplied Mammoth/CIFAR-100 project without hiding losses in classification accuracy. Inspect the project and relevant literature, choose one feasible change, establish a comparable baseline when needed, implement and validate the change, and use measured evidence to decide whether to revise, supplement, or stop. Explain resource and protocol choices. Deliver a research draft only if the evidence supports the requested improvement; otherwise deliver an honest experiment analysis and continuation options."
+kind = "auto"
+outputs = ["experiments", "report"]
+output_root = "../../runs/continual-learning"
+
+[model]
+name = "env"
+max_output_tokens = 8192
+
+[budget]
+process_invocations = 8
+process_wall_seconds = 7200
+
+[research]
+providers = ["openalex", "semantic_scholar", "arxiv"]
+max_results = 12
+max_chunks = 64
+idea_limit = 2
+use_fulltext = false
+allow_pdf_download = false
+materials_only = false
+max_iterations = 2
+interaction = "autonomous"
+
+[execution]
+code_task_config = "code_task.toml"
+timeout_sec = 1800
+seed_flag = "--seed"
+
+[report]
+template = "auto"
+reviewer = "llm"
+max_review_iterations = 1
+
+[report.figures]
+enabled = true

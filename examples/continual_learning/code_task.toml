@@ -1,0 +1,45 @@
+# Template: replace every /path/to value before running. No environment-variable interpolation is assumed.
+[code_task]
+kind = "existing_project"
+code_root = "/path/to/mammoth-tpami2023"
+task_file = "/path/to/SimpleAutoResearch/examples/continual_learning/task.md"
+name = "continual-research-acceptance"
+
+[workspace]
+mode = "copy"
+reuse_source_venv = false
+
+[environment]
+mode = "current"
+python_executable = "/path/to/mammoth-env/bin/python"
+
+[edit_scope]
+allowed_patterns = ["models/**", "utils/**"]
+protected_patterns = ["datasets/**", "utils/training.py", "utils/loggers.py", "utils/metrics.py"]
+
+[benchmark]
+command = "/path/to/mammoth-env/bin/python /path/to/SimpleAutoResearch/examples/continual_learning/run_mammoth.py --data-root /path/to/datasets --model er --dataset seq-cifar100 --lr 0.03 --buffer_size 200 --minibatch_size 32 --batch_size 32 --n_epochs 1 --seed 0 --validation 1 --nowand 1 --disable_log 0"
+primary_metric = "accuracy"
+
+[benchmark.metric_directions]
+accuracy = "higher"
+average_incremental_accuracy = "higher"
+forgetting = "lower"
+backward_transfer = "higher"
+
+[execute]
+to_step = "run"
+use_llm = true
+timeout_sec = 1800
+repair_rounds = 1
+max_files = 6
+max_source_chars_per_file = 10000
+baseline_policy = "auto"
+allow_planning_fallback = false
+llm_retry_attempts = 2
+
+[resource]
+max_runtime_sec = 1800
+max_memory_mb = 20000
+allow_gpu = true
+max_files = 6

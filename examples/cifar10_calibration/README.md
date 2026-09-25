@@ -16,7 +16,7 @@ and optimization, **not** validation accuracy, a full epoch, Linux or GPU throug
 - `method.py`: research-editable training transforms and loss.
 - `train.py`, `protocol.py`: protected training schedule, partition and evaluator.
 - `prepare.py`: explicit shared-data preparation, never part of candidate training.
-- Shared data stays outside the copied code project, for example under `runs/assets`.
+- Shared data stays outside the copied code project, for example under `.local/assets`.
   Protect the generated `low-data-v1.json` in the application's execution protocol too.
 
 The baseline calls [torchvision ResNet-18](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.resnet18.html)
@@ -42,15 +42,15 @@ For an isolated CPU validation environment, the currently selected pair is
 Do not install CUDA packages into the framework environment for this check:
 
 ```bash
-uv venv runs/cifar-cpu-env --python 3.12
-uv pip install --python runs/cifar-cpu-env/bin/python \
+uv venv .local/envs/cifar-cpu --python 3.12
+uv pip install --python .local/envs/cifar-cpu/bin/python \
   -r examples/cifar10_calibration/requirements-cpu.txt
 uv run --no-sync python examples/cifar10_calibration/preflight.py \
-  --python runs/cifar-cpu-env/bin/python --data-root runs/assets/cifar10 \
+  --python .local/envs/cifar-cpu/bin/python --data-root .local/assets/cifar10 \
   --output runs/cifar-cpu-preflight --download
 ```
 
-On Windows use `runs/cifar-cpu-env/Scripts/python.exe`. The preflight uses the
+On Windows use `.local/envs/cifar-cpu/Scripts/python.exe`. The preflight uses the
 existing process executor with a persisted ledger: one asset-preparation process
 (180s), then one two-step CPU probe (60s). Logs and exit/timeout evidence remain
 under the output directory; failures are not retried. Remove `--download` when
@@ -60,19 +60,19 @@ From the repository root, in that prepared environment:
 
 ```bash
 # Explicit download permission; omit --download to use already prepared data.
-python examples/cifar10_calibration/prepare.py --data-root runs/assets/cifar10 --download
+python examples/cifar10_calibration/prepare.py --data-root .local/assets/cifar10 --download
 
 # Short CPU code/environment check, not a scientific measurement.
-python examples/cifar10_calibration/train.py --data-root runs/assets/cifar10 \
+python examples/cifar10_calibration/train.py --data-root .local/assets/cifar10 \
   --output runs/cifar-cpu-probe --seed 0 --device cpu --batch-size 2 --probe-steps 2
 
 # Only after GPU approval: estimate throughput/memory before freezing epochs.
-python examples/cifar10_calibration/train.py --data-root runs/assets/cifar10 \
+python examples/cifar10_calibration/train.py --data-root .local/assets/cifar10 \
   --output runs/cifar-gpu-probe --seed 0 --device cuda --probe-steps 100
 
 # Example single condition; real runs must be launched through the framework's
 # execution boundary so its process timeout and shared budget apply.
-python examples/cifar10_calibration/train.py --data-root runs/assets/cifar10 \
+python examples/cifar10_calibration/train.py --data-root .local/assets/cifar10 \
   --output runs/cifar-baseline-seed0 --seed 0 --device cuda --epochs 30
 ```
 
@@ -96,7 +96,7 @@ Its CLI only prints config; it does not create a session, download, call a model
 
 ```bash
 uv run --no-sync python examples/cifar10_calibration/application.py \
-  --python runs/cifar-cpu-env/bin/python --data-root runs/assets/cifar10 --epochs 1
+  --python .local/envs/cifar-cpu/bin/python --data-root .local/assets/cifar10 --epochs 1
 ```
 
 Use the Windows interpreter path shown above on Windows. `--epochs 1` is a config
@@ -112,8 +112,8 @@ start one bounded action at a time so the persisted session remains inspectable:
 
 ```bash
 uv run --no-sync python examples/research_application_live.py --cifar10 \
-  --session runs/cifar10-live --python runs/cifar-cuda-env/bin/python \
-  --data-root runs/assets/cifar10 --epochs 1 --device cuda --max-actions 1
+  --session runs/cifar10-live --python .local/envs/cifar-cuda/bin/python \
+  --data-root .local/assets/cifar10 --epochs 1 --device cuda --max-actions 1
 ```
 
 Continue the same session with `--resume --session runs/cifar10-live`; the saved

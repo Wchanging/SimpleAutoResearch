@@ -1,10 +1,43 @@
-# Continual-learning acceptance candidate
+# Continual-learning research case
 
-This example is under development, not a completed V2.8 acceptance result.
+This is a prepared-project research example, not a claim of completed acceptance.
 It uses the official Mammoth `tpami2023` commit
 `ad4d39068a07cc339fdfd3b8bad30067c591d046` with CIFAR-100 class-incremental
 learning (ten tasks of ten classes). Repository selection and this adapter are
 engineering-provided inputs; do not describe them as autonomous discovery.
+
+## Case inputs and normal entrypoint
+
+- `research.toml`: natural-language goal, delivery and research/process limits.
+- `code_task.toml`: project/interpreter paths, edit scope and measurement command.
+- `task.md`: implementation and comparison requirements.
+- `run_mammoth.py`: measurement adapter, not a separate research orchestrator.
+
+Copy the two TOML files to an ignored machine-local configuration directory
+(for example `.local/cases/continual_learning/`). Replace every `/path/to` value
+in `code_task.toml` with an existing absolute path. Set `research.toml`'s
+`output_root` to an absolute `runs/continual-learning` directory in your checkout;
+its checked-in relative default is only correct when used from this example
+directory. Keep `code_task_config = "code_task.toml"` beside the copied config.
+Use the checked-in `task.md` via an absolute path, or a local copy for your task.
+No template substitution or automatic dependency installation is performed.
+
+After preparing the data, fixed split, Python environment and GPU budget:
+
+```bash
+uv run --no-sync simple-ar research-session --config .local/cases/continual_learning/research.toml
+```
+
+The template uses autonomous interaction and no cumulative API request/token cap.
+It bounds research follow-ups to two and processes to eight invocations, 7200
+seconds total and 1800 seconds each. These are ceilings, not runtime estimates.
+Its one epoch per task is a low-cost engineering acceptance condition. The ten
+tasks are ten sequential groups of CIFAR-100 classes, not ten framework stages.
+Baseline policy is `auto`; no three-seed matrix or mandatory revision is preset.
+The literature input is abstract-level; this is not full-text writing validation.
+API credentials belong in the environment. Outputs belong in `runs`, not here.
+
+## Measurement and comparison
 
 `run_mammoth.py` runs from an isolated Mammoth project working directory. It
 uses the official model, training loop, task splitting, transforms and evaluator.
@@ -28,11 +61,11 @@ Example experiment argv, executed with the isolated project as cwd:
 TORCH_PYTHON /path/to/SimpleAutoResearch/examples/continual_learning/run_mammoth.py \
   --data-root /path/to/shared/datasets --model er --dataset seq-cifar100 \
   --lr 0.03 --buffer_size 200 --minibatch_size 32 --batch_size 32 \
-  --n_epochs 5 --seed 0 --validation 1 --nowand 1 --disable_log 0
+  --n_epochs 1 --seed 0 --validation 1 --nowand 1 --disable_log 0
 ```
 
-Five epochs are an initial reduced-training candidate protocol, not the paper's
-original 50-epoch setting and not yet a frozen scientific comparison. Measure
+One epoch is a reduced-training protocol, not the paper's
+original 50-epoch setting or evidence of scientific effectiveness. Measure
 real-data throughput before setting the final matrix. Keep seeds and evaluation
 conditions identical for baseline/candidate. Never tune on the held-out test set.
 Random-input GPU probes and `--debug_mode 1` runs are diagnostics only.
@@ -41,9 +74,9 @@ Before preparing isolated baseline/candidate workspaces, freeze the upstream
 `datasets/val_permutations/seq-cifar100.pt` split as an explicit project asset.
 The upstream validation loader otherwise generates it on first use, consuming
 the current random state; independently generated splits are not a controlled
-comparison. Record its hash and include it among the existing protocol's
-protected assets. Keep the same split across seeds; only training randomness
-should vary. This preparation has not yet been validated on the server.
+comparison. Verify that it is a complete permutation of the training indices
+and include it among the protocol's protected assets. Keep the same split
+across seeds; only training randomness should vary. Do not place it in Git.
 
 The framework preserves the JSON under its existing `experiment_outputs`
 artifact. Each measured cell also emits a standard metric named
@@ -59,8 +92,7 @@ different claims. This adapter does not provide intra-training checkpointing:
 failed training is an incomplete run, while completed experiments can be reused
 by the existing research session. Do not invent task results after interruption.
 
-Local tests verify measurement conversion and report-tool provenance. Server
-diagnostics on a single RTX 3090 completed the ten-task sequence: 26.83 seconds
-in debug mode, then 89.02 seconds for one full epoch per task. These establish
-runtime compatibility, not method effectiveness or original-paper reproduction.
-Frozen-version research-to-paper acceptance remains pending.
+Local tests verify measurement conversion and report-tool provenance. Keep
+dated runtime measurements and acceptance outcomes in run records, not this
+reusable case definition. A completed process is not by itself evidence of
+method effectiveness, report quality or original-paper reproduction.

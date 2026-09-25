@@ -25,6 +25,7 @@ wheels/
 .simple_ar_cache/
 
 # Runtime outputs
+.local/
 runs/
 artifacts/
 .researchclaw_cache/
