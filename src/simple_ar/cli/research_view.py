@@ -7,11 +7,12 @@ from time import monotonic
 
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from rich.table import Table
+from rich.table import Column, Table
 from rich.text import Text
 
 from simple_ar.core.console import make_console
 from simple_ar.core.reporting import style_progress_message
+from simple_ar.core.process_output import ProcessMessage
 
 
 DESCRIPTIONS = {
@@ -38,6 +39,8 @@ class ResearchConsole:
         self.console = console or make_console()
         self._last_decision = None
         self._last_interaction = None
+        self._progress = None
+        self._process_tasks = {}
 
     def start(self, view, *, model: str, topic: str):
         table = Table.grid(padding=(0, 2))
@@ -52,6 +55,22 @@ class ResearchConsole:
         self.console.print("Elapsed time is shown while an action runs; completion percentages are not estimated.", style="dim")
 
     def message(self, message: str):
+        if isinstance(message, ProcessMessage):
+            progress = self._progress
+            if message.transient:
+                if progress is not None and self.console.is_terminal:
+                    task = self._process_tasks.get(message.stream)
+                    description = Text.from_ansi(str(message))
+                    description.no_wrap = True
+                    description.overflow = "ellipsis"
+                    if task is None:
+                        self._process_tasks[message.stream] = progress.add_task(description, total=None)
+                    else:
+                        progress.update(task, description=description)
+                return
+            task = self._process_tasks.pop(message.stream, None)
+            if task is not None and progress is not None:
+                progress.remove_task(task)
         self.console.print(Text("  - " + message, style=style_progress_message(message)))
 
     @contextmanager
@@ -61,11 +80,13 @@ class ResearchConsole:
         self.console.print(Text(description))
         started = monotonic()
         # Redirected logs retain plain milestones without animation or ANSI frames.
-        progress = Progress(SpinnerColumn(), TextColumn("{task.description}"), TimeElapsedColumn(),
+        progress = Progress(SpinnerColumn(), TextColumn("{task.description}", markup=False,
+                            table_column=Column(no_wrap=True, overflow="ellipsis")), TimeElapsedColumn(),
                             console=self.console, transient=True, refresh_per_second=2,
                             disable=not self.console.is_terminal)
         try:
             with progress:
+                self._progress = progress
                 progress.add_task("Running — waiting for action result", total=None)
                 yield
         except BaseException:
@@ -73,6 +94,9 @@ class ResearchConsole:
             raise
         else:
             self.console.print(Text(f"Action returned in {monotonic() - started:.1f}s", style="dim"))
+        finally:
+            self._progress = None
+            self._process_tasks.clear()
 
     def state(self, view):
         work_plan = getattr(view, "work_plan", {})

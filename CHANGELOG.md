@@ -6,6 +6,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-25
 
+- Preserve carriage-return experiment progress as transient Rich updates instead of
+  printing every frame. Buffer partial lines per stream, retain ordinary log lines,
+  and leave raw process logs unchanged; redirected output omits transient frames.
 - Derive internal task-plan routing from model-selected actions. Invalid plans get one
   correction attempt instead of a silent deterministic fallback; proposals and validation
   errors are saved in attempt-local `task_plan_proposals.json`. Persisted accepted plans
