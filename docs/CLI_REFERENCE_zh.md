@@ -73,6 +73,9 @@ LLM 模式仍使用正常的 `.env` provider 配置。缺少 key、模型请求�
 
 ### `simple-ar research-session`（任务驱动的 canonical 入口）
 
+LLM 任务计划校验失败时最多自动纠正一次，不静默改用固定计划。
+返回提案与校验错误保存在该次 `attempts/plan-*/task_plan_proposals.json`；仍无有效计划时暂停，不执行后续动作。
+
 可加 `--session-root PATH` 继续已保存的 accepted plan。未提供的新目标/outputs 保持不变；
 显式提供新目标、outputs、本地文献或执行配置会修订当前 session。attempt 历史保留；只有
 命令、结果 schema、协议、准备 lineage 和保护资产仍匹配的测量才复用，其余依赖步骤重新规划。

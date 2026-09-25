@@ -6,6 +6,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-25
 
+- Derive internal task-plan routing from model-selected actions. Invalid plans get one
+  correction attempt instead of a silent deterministic fallback; proposals and validation
+  errors are saved in attempt-local `task_plan_proposals.json`. Persisted accepted plans
+  remain strictly validated. Rich shows task-neutral planning text and diagnostics when no deliverable exists.
 - Normalize the unambiguous `summary` capability spelling to the `summarize` plan action.
   Use prepared CodeTask execution settings without leaking workspace-creation or edit-scope
   parameters into the implementation interface; unknown actions and boundary mismatches remain errors.

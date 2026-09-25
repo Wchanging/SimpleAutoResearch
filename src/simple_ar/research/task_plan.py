@@ -176,56 +176,58 @@ class TaskPlanResult:
         )
 
 
-def build_task_plan(request: TaskPlanRequest) -> TaskPlanResult:
+def build_task_plan(request: TaskPlanRequest, *, trace: list[dict[str, Any]] | None = None) -> TaskPlanResult:
     """Build, validate, and return the plan that the application will consume."""
 
     defaults = default_task_steps(request)
     mode = "deterministic"
     model = ""
-    rows: list[Mapping[str, Any]] = defaults
+    diagnostics: list[str] = []
+    steps = _normalize_steps(defaults)
     if request.use_llm:
         client = request.llm_client
         if client is None:
             raise LLMError("Task planning was requested but no client was provided.")
         prompt = _llm_prompt(request, defaults)
-        response = client.ask_json(
-            """You are the task planner for a bounded research application.
+        for attempt in range(2):
+            response = client.ask_json(
+                """You are the task planner for a bounded research application.
 Return JSON only. Propose a short sequential plan from the supplied
 task, assets, constraints, and boundary preset. Do not invent
 capabilities, processes, datasets, files, or parallel branches.
 The application will validate and execute the plan.""",
-            prompt,
-            label="task-plan",
-            max_output_tokens=_planning_output_tokens(request.config),
-        )
-        raw = response.get("steps") if isinstance(response, Mapping) else None
-        if not isinstance(raw, list) or not raw:
-            raise LLMError("Task-plan response did not contain a non-empty steps list.")
-        rows = raw
+                prompt,
+                label="task-plan",
+                max_output_tokens=_planning_output_tokens(request.config),
+            )
+            record = {"response": response, "validation_error": ""}
+            if trace is not None:
+                trace.append(record)
+            try:
+                raw = response.get("steps") if isinstance(response, Mapping) else None
+                if not isinstance(raw, list) or not raw:
+                    raise ValueError("Task-plan response must contain a non-empty steps list.")
+                # Routing and storage names belong to the executor, not the model.
+                rows = [
+                    {key: value for key, value in row.items() if key not in {"capability", "state_name"}}
+                    if isinstance(row, Mapping) else row for row in raw
+                ]
+                steps = _normalize_steps(rows)
+                _validate_sequence(request, steps)
+            except ValueError as exc:
+                record["validation_error"] = str(exc)
+                diagnostics.append(str(exc))
+                if attempt:
+                    raise ValueError(f"Task plan invalid after one correction: {exc}") from exc
+                prompt = (_llm_prompt(request, defaults) + "\n\nCorrect this rejected proposal within the same permissions. "
+                          "Return the complete steps array.\n" + json.dumps(record, ensure_ascii=False))
+            else:
+                break
         mode = "llm"
         model = str(getattr(client, "model", ""))
 
-    steps = _normalize_steps(rows)
-    try:
-        _validate_sequence(request, steps)
-    except ValueError as exc:
-        if not request.use_llm:
-            raise
-        # A model may omit a required evidence handoff even when every
-        # proposed action is otherwise valid.  Keep the authorization checks
-        # strict, then use the small deterministic plan as the recovery path
-        # instead of pausing a user session for a repairable omission.
-        _validate_authorized_boundaries(request, steps)
-        fallback_rows = default_task_steps(request)
-        fallback_steps = _normalize_steps(fallback_rows)
-        _validate_sequence(request, fallback_steps)
-        steps = fallback_steps
-        mode = "deterministic_fallback"
-        diagnostics = (
-            f"LLM task plan rejected ({exc}); used the validated deterministic plan.",
-        )
     else:
-        diagnostics = ()
+        _validate_sequence(request, steps)
     return TaskPlanResult(
         task_kind=request.task_kind,
         goal=request.goal.strip(),
@@ -233,7 +235,7 @@ The application will validate and execute the plan.""",
         mode=mode,
         model=model,
         assumptions=tuple(str(item).strip() for item in request.hard_constraints if str(item).strip()),
-        diagnostics=diagnostics,
+        diagnostics=tuple(diagnostics),
     )
 
 
@@ -661,14 +663,19 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
                 if str(asset.get("role") or "").strip().lower() in {"paper", "document", "reference"}
             ),
         },
-        "default_steps": defaults,
+        "default_steps": [
+            {key: value for key, value in row.items() if key not in {"capability", "state_name"}}
+            for row in defaults
+        ],
     }
     return (
         "Interpret this task into one short sequential accepted plan. The returned JSON must have "
         "a `steps` array. The defaults are a seed: choose the necessary sequential stages for "
         "the task, assets, and constraints. Use only actions present in the seed or its explicit "
-        "bounded execution boundary; preserve each chosen action's capability and state_name. "
-        "For a summary, use action `summarize` with capability/state_name `summary`. "
+        "bounded execution boundary. Return action, step_id, problem_solved, observation, and "
+        "the supplied condition if any. Do not generate capability or state_name: the executor derives them. "
+        "For bug_fix, use only prepare_execution (when required) and implement; implementation "
+        "already includes validation and the repair explanation, so do not append summary or report steps. "
         "Do not invent dynamic indices, repair rounds, capabilities, processes, or parallel work. "
         "For provided_materials_only, begin with document_ingest over the supplied assets and do "
         "not add search. With supplied local documents you may omit search when the task calls "

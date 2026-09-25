@@ -239,7 +239,15 @@ def run_research_plan_capability(
         task_request = request.task_plan_request
         if task_request.use_llm and task_request.llm_client is None:
             task_request = replace(task_request, llm_client=request.llm_client)
-        task_plan = build_task_plan(task_request)
+        trace = []
+        try:
+            task_plan = build_task_plan(task_request, trace=trace)
+        finally:
+            if trace:
+                artifacts.append(context.store.write_json(
+                    "task_plan_proposals.json", {"proposals": trace},
+                    kind="task_plan_proposals", producer="research.task_planning",
+                ))
         artifacts.append(context.store.write_json(
             "task_plan.json",
             task_plan.to_handoff_dict(),

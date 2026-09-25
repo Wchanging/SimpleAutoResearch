@@ -83,6 +83,10 @@ Domain capabilities remain composable at library level; historical artifacts rem
 
 ### `simple-ar research-session` (canonical task-driven entry)
 
+Invalid LLM task plans get at most one correction attempt, never a silent fixed-plan fallback.
+Returned proposals and validation errors are saved in `attempts/plan-*/task_plan_proposals.json`;
+if no valid plan is produced, the session pauses without executing downstream actions.
+
 Use `simple-ar research-session --config examples/research_config/minimal.toml`
 for a file-based start. The [configuration reference](CONFIG_REFERENCE.md) describes
 the minimal and advanced templates, which share the same parser and defaults.

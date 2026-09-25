@@ -15,7 +15,7 @@ from simple_ar.core.reporting import style_progress_message
 
 
 DESCRIPTIONS = {
-    "plan": "Plan research questions and search queries",
+    "plan": "Plan the next steps from the task, assets and constraints",
     "search": "Search literature providers and select sources",
     "document_ingest": "Fetch and extract available documents",
     "read": "Read documents and collect traceable evidence",
@@ -134,7 +134,10 @@ class ResearchConsole:
         table = Table("Artifact", "Location", header_style="bold cyan")
         for name, ref_name in _artifact_rows(view):
             table.add_row(name, Text(str(view.session_root / view.state_refs[ref_name].path)))
-        self.console.print(table)
+        if table.row_count:
+            self.console.print(table)
+        else:
+            self.console.print(Text(f"No deliverable yet. Attempt diagnostics: {view.session_root / 'attempts'}", style="dim"))
         self.console.print(Text(f"Artifacts: {len(view.state_refs)}; attempts: {len(view.attempts)}"))
         self.console.print("Completion describes delivered artifacts, not scientific success or paper quality.", style="dim")
 

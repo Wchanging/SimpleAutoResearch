@@ -24,6 +24,21 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_rich_failed_plan_shows_diagnostics_instead_of_empty_table(self):
+        from simple_ar.cli.research_view import ResearchConsole
+        stream = io.StringIO()
+        renderer = ResearchConsole(Console(file=stream, width=160))
+        view = SimpleNamespace(work_plan={}, session_root=Path("runs/failed-plan"),
+                               status="paused", next_action="plan", status_reason="Invalid task plan",
+                               attempts=(), state_refs={})
+        with renderer.action("plan"):
+            pass
+        renderer.finish(view)
+        output = stream.getvalue()
+        self.assertIn("task, assets and constraints", output)
+        self.assertIn("Attempt diagnostics:", output)
+        self.assertNotIn("Location", output)
+
     def test_rich_displays_pending_decision_commands_without_mutating_state(self):
         from types import SimpleNamespace
         from simple_ar.cli.research_view import ResearchConsole

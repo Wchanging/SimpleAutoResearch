@@ -39,11 +39,17 @@ class TaskPlanTests(unittest.TestCase):
                 for row in rows:
                     if row["action"] == "summarize":
                         row["action"] = "summary"
+                        row["capability"] = "invented_route"
+                        row["state_name"] = "invented_state"
                 return {"steps": rows}
         result = build_task_plan(replace(request, use_llm=True, llm_client=Client()))
         step = next(step for step in result.steps if step.action == "summarize")
         self.assertEqual((step.capability, step.state_name), ("summary", "summary"))
         self.assertEqual(TaskPlanResult.from_handoff_dict(result.to_handoff_dict()), result)
+        corrupt = result.to_handoff_dict()
+        corrupt["steps"][0]["capability"] = "invented_route"
+        with self.assertRaisesRegex(ValueError, "boundary mismatch"):
+            TaskPlanResult.from_handoff_dict(corrupt)
         rows = result.to_handoff_dict()
         rows["steps"][0]["action"] = "invented_action"
         with self.assertRaisesRegex(ValueError, "Unsupported task plan action"):
@@ -206,7 +212,7 @@ class TaskPlanTests(unittest.TestCase):
         build_task_plan(replace(request, config={"research_task_planning_max_output_tokens": 2048}))
         self.assertEqual(client.tokens, 2048)
 
-    def test_invalid_llm_sequence_uses_deterministic_plan_without_relaxing_boundaries(self) -> None:
+    def test_invalid_llm_sequence_is_corrected_without_silent_fallback(self) -> None:
         request = TaskPlanRequest(
             task_kind="research",
             goal="Compare a supplied classifier.",
@@ -223,8 +229,12 @@ class TaskPlanTests(unittest.TestCase):
 
         class Client:
             model = "fixture-invalid-planner"
+            calls = 0
 
             def ask_json(self, *args, **kwargs):
+                self.calls += 1
+                if self.calls == 2:
+                    return {"steps": default_task_steps(request)}
                 return {
                     "steps": [
                         {"action": "document_ingest"},
@@ -236,12 +246,45 @@ class TaskPlanTests(unittest.TestCase):
 
         result = build_task_plan(replace(request, use_llm=True, llm_client=Client()))
 
-        self.assertEqual(result.mode, "deterministic_fallback")
-        self.assertIn("rejected", result.diagnostics[0])
+        self.assertEqual(result.mode, "llm")
+        self.assertTrue(result.diagnostics)
         self.assertIn("Use only the supplied benchmark.", result.assumptions)
         actions = [step.action for step in result.steps]
         self.assertLess(actions.index("synthesize"), actions.index("assess_ideas"))
         self.assertLess(actions.index("assess_ideas"), actions.index("research_design"))
+
+    def test_bug_plan_correction_is_bounded_and_records_rejected_proposals(self) -> None:
+        request = TaskPlanRequest(task_kind="bug_fix", goal="Fix totals", request_text="Fix totals")
+        class Client:
+            calls = 0
+            def ask_json(self, system, prompt, **kwargs):
+                self.calls += 1
+                if self.calls == 2:
+                    assert "Bug-fix plans" in prompt
+                return {"steps": [{"action": "summarize", "capability": "wrong"}]}
+        client = Client()
+        trace = []
+        with self.assertRaisesRegex(ValueError, "after one correction"):
+            build_task_plan(replace(request, use_llm=True, llm_client=client), trace=trace)
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(len(trace), 2)
+        self.assertTrue(all(row["validation_error"] for row in trace))
+        self.assertEqual(trace[0]["response"]["steps"][0]["capability"], "wrong")
+        from types import SimpleNamespace
+        from simple_ar.core import ArtifactStore
+        from simple_ar.research.planning.capability import ResearchPlanRequest, run_research_plan_capability
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "after one correction"):
+                run_research_plan_capability(
+                    context=SimpleNamespace(store=ArtifactStore(Path(tmp))),
+                    request=ResearchPlanRequest(
+                        topic="Fix totals", task_plan_only=True,
+                        task_plan_request=replace(request, use_llm=True, llm_client=Client()),
+                    ),
+                )
+            saved = json.loads((Path(tmp) / "task_plan_proposals.json").read_text())
+            self.assertEqual(len(saved["proposals"]), 2)
+            self.assertFalse((Path(tmp) / "task_plan.json").exists())
 
     def test_bug_application_uses_code_task_without_literature_or_experiment(self) -> None:
         from tests.test_code_task import _FakeCodeTaskClient
