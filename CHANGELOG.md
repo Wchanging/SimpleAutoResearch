@@ -6,6 +6,9 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-25
 
+- Normalize the unambiguous `summary` capability spelling to the `summarize` plan action.
+  Use prepared CodeTask execution settings without leaking workspace-creation or edit-scope
+  parameters into the implementation interface; unknown actions and boundary mismatches remain errors.
 - Persist decision reply revision inputs with the existing response artifact. An interrupted
   resume can recover the exact brief/execution/report change; reusing the decision id with
   different revision terms is rejected. Report and reanalysis entry points cannot bypass a

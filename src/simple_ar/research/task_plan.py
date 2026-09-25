@@ -431,6 +431,10 @@ def _normalize_steps(rows: list[Any]) -> tuple[TaskPlanStep, ...]:
         if not isinstance(raw, Mapping):
             raise ValueError(f"Task plan step {index + 1} must be an object.")
         action = str(raw.get("action") or "").strip()
+        # The summary capability and its action have different public names.
+        # Canonicalize that unambiguous spelling before validating the boundary.
+        if action == "summary":
+            action = "summarize"
         if action in {"plan", "task_plan"} or not (_is_known_action(action)):
             raise ValueError(f"Unsupported task plan action: {action!r}")
         step_id = str(raw.get("step_id") or action).strip()
@@ -664,6 +668,7 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "a `steps` array. The defaults are a seed: choose the necessary sequential stages for "
         "the task, assets, and constraints. Use only actions present in the seed or its explicit "
         "bounded execution boundary; preserve each chosen action's capability and state_name. "
+        "For a summary, use action `summarize` with capability/state_name `summary`. "
         "Do not invent dynamic indices, repair rounds, capabilities, processes, or parallel work. "
         "For provided_materials_only, begin with document_ingest over the supplied assets and do "
         "not add search. With supplied local documents you may omit search when the task calls "

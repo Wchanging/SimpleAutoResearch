@@ -4274,12 +4274,12 @@ class ResearchApplication:
                 prepared_task = prepared_execution.get("code_task")
                 requested_task = requested.get("code_task")
                 if isinstance(prepared_task, Mapping) and isinstance(requested_task, Mapping):
-                    task = dict(requested_task)
-                    for key in ("run_dir",):
-                        if key in prepared_task:
-                            task[key] = prepared_task[key]
-                    task.pop("code_root", None)
-                    task.pop("workspace_mode", None)
+                    # Preparation owns workspace identity and edit scope. Its
+                    # output is the executor contract, not the declarative spec.
+                    task = dict(prepared_task)
+                    for key in ("approval_note", "max_repairs", "budget_profile", "allow_large_edits"):
+                        if key in requested_task:
+                            task[key] = requested_task[key]
                     requested["code_task"] = task
                     requested.pop("cwd", None)
                     prepared_baseline = prepared_execution.get("baseline")

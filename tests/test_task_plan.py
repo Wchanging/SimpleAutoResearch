@@ -31,6 +31,24 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_summary_capability_spelling_is_normalized_without_relaxing_boundaries(self) -> None:
+        request = TaskPlanRequest(task_kind="survey", goal="Read papers", request_text="Read papers")
+        class Client:
+            def ask_json(self, *args, **kwargs):
+                rows = default_task_steps(request)
+                for row in rows:
+                    if row["action"] == "summarize":
+                        row["action"] = "summary"
+                return {"steps": rows}
+        result = build_task_plan(replace(request, use_llm=True, llm_client=Client()))
+        step = next(step for step in result.steps if step.action == "summarize")
+        self.assertEqual((step.capability, step.state_name), ("summary", "summary"))
+        self.assertEqual(TaskPlanResult.from_handoff_dict(result.to_handoff_dict()), result)
+        rows = result.to_handoff_dict()
+        rows["steps"][0]["action"] = "invented_action"
+        with self.assertRaisesRegex(ValueError, "Unsupported task plan action"):
+            TaskPlanResult.from_handoff_dict(rows)
+
     def test_compact_seed_protocol_is_explicit_and_budget_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -244,22 +262,15 @@ class TaskPlanTests(unittest.TestCase):
                 "print(f'accuracy: {correct / len(rows):.6f}')\n",
                 encoding="utf-8",
             )
-            task = root / "task.md"
-            task.write_text("Fix prize classification.", encoding="utf-8")
-            run_dir = root / "code-task"
-            initialize_code_task(
-                run_dir=run_dir,
-                code_root=project,
-                task_file=task,
-                benchmark_command="python benchmark.py",
-            )
-            workspace = code_task_paths(run_dir).workspace_dir
             execution = {
                 "command": [sys.executable, "benchmark.py"],
-                "cwd": str(workspace),
+                "cwd": str(project),
                 "timeout_sec": 10,
                 "code_task": {
-                    "run_dir": str(run_dir),
+                    "code_root": str(project),
+                    "workspace_mode": "copy",
+                    "allowed_patterns": ["spam_model.py"],
+                    "protected_patterns": ["benchmark.py"],
                     "approval_note": "Authorize this isolated bug patch.",
                 },
             }
@@ -283,7 +294,12 @@ class TaskPlanTests(unittest.TestCase):
             )
 
             planned = app.advance()
+            self.assertEqual(planned.next_action, "prepare_execution")
+            planned = app.advance(max_actions=1)
             self.assertEqual(planned.next_action, "implement")
+            resolved = app._effective_config()["execution"]
+            self.assertEqual(set(resolved["code_task"]), {"run_dir", "approval_note"})
+            self.assertNotEqual(Path(resolved["cwd"]), project)
             self.assertIn("task_plan", planned.state_refs)
             self.assertNotIn("plan", planned.state_refs)
             fake = _FakeCodeTaskClient()
@@ -310,7 +326,11 @@ class TaskPlanTests(unittest.TestCase):
             self.assertNotIn("experiment", finished.state_refs)
             self.assertEqual(
                 {attempt["capability"] for attempt in finished.attempts},
-                {"plan", "implement"},
+                {"plan", "prepare_execution", "implement"},
+            )
+            self.assertEqual(
+                (Path(resolved["cwd"]) / "benchmark.py").read_text(),
+                (project / "benchmark.py").read_text(),
             )
 
     def test_application_executes_an_optional_step_declared_by_the_accepted_plan(self) -> None:
