@@ -32,6 +32,7 @@ from simple_ar.code_task.analysis.context import (
     load_latest_code_task_context_pack,
 )
 from simple_ar.code_task.analysis.index import build_codebase_index
+from simple_ar.code_task.analysis.source_context import requested_source_context as _requested_source_context
 from simple_ar.code_task.editing.planning import select_relevant_files
 from simple_ar.code_task.analysis.repo_map import build_repo_map
 from simple_ar.code_task.memory import task_memory_context
@@ -1078,46 +1079,6 @@ def _implementation_feedback(value: Any) -> dict[str, Any] | None:
     reason = _string(value.get("reason"))
     questions = _string_list(value.get("questions"))
     return {"kind": "design_gap", "reason": reason, "questions": questions} if reason and questions else None
-
-
-def _requested_source_context(workspace: Path, index: dict[str, Any], request: dict[str, Any],
-                              *, supplied: list[dict[str, str]], max_files: int, max_chars: int,
-                              max_total_chars: int | None = None) -> list[dict[str, Any]]:
-    """Resolve a bounded read request, including a window beyond a clipped prefix.
-
-    Replacement reference context has the same file/character allowance as the
-    initial reference pack; editable snippets and edit authorization stay fixed.
-    """
-    query = " ".join([request["query"], *request["symbols"]]).strip()
-    candidates = list(request["files"])
-    if query:
-        candidates.extend(select_relevant_files(index, query, max_files=max_files))
-    previous = {item["path"]: item["text"] for item in supplied}
-    terms = [symbol.rsplit(".", 1)[-1] for symbol in request["symbols"]] or query.split()
-    result = []
-    remaining = max_total_chars if max_total_chars is not None else max_files * max_chars
-    for relative in dict.fromkeys(candidates):
-        if remaining <= 0:
-            break
-        path = _workspace_file(workspace.resolve(), relative)
-        if path is None or not path.is_file() or path.name.startswith(".env"):
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        start = 0
-        if len(text) > max_chars:
-            matches = [text.find(term) for term in terms if term and text.find(term) >= 0]
-            if matches:
-                start = max(0, matches[0] - max_chars // 4)
-            elif relative in previous:
-                start = max(0, min(len(previous[relative]), len(text) - max_chars))
-        excerpt = text[start:start + min(max_chars, remaining)]
-        if excerpt and excerpt not in previous.get(relative, ""):
-            result.append({"path": relative, "access_role": "read_only", "text": excerpt,
-                           "source_offset": start, "truncated": start > 0 or start + len(excerpt) < len(text)})
-            remaining -= len(excerpt)
-        if len(result) >= max_files:
-            break
-    return result
 
 
 def _normalize_context_request(value: dict[str, Any], known_paths: set[str]) -> dict[str, Any]:

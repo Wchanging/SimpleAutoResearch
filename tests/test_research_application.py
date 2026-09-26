@@ -470,6 +470,11 @@ class ResearchApplicationTests(unittest.TestCase):
                     if self.refinement_calls == 1:
                         from simple_ar.integrations.llm import LLMError
                         raise LLMError("simulated transport interruption")
+                    if self.refinement_calls == 2:
+                        return {"status": "inspect_source", "context_request": {
+                            "files": ["spam_model.py"], "symbols": ["predict"], "query": ""}}
+                    assert '"source_excerpts": [{"path": "spam_model.py"' in _user
+                    assert '"research_materials": {"schema_version": "synthesis_result.v1"' in _user
                     return {"status": "ready", "implementation_spec": "Engineering choice: add prize to the keyword set; retain predict(text) and existing win handling.",
                             "unresolved_questions": []}
                 if label.startswith("code-task-review-"):
@@ -684,9 +689,21 @@ class ResearchApplicationTests(unittest.TestCase):
                 self.assertEqual(interrupted.status, "paused")
                 self.assertEqual(interrupted.next_action, "refine_implementation:1")
                 app = load_session(root / "session", services=ResearchApplicationServices(llm_client=client))
-                app.continue_session()
+                app.continue_session(interaction="checkpoints")
                 clarified = app.advance()
                 self.assertEqual(clarified.next_action, "prepare_implementation:1", clarified.status_reason)
+                self.assertEqual(client.refinement_calls, 3)
+                # Every downstream consumer must use the clarified design.
+                refined_ref = app._implementation_design_ref()
+                refined = app.controller.store.read_json(refined_ref)
+                self.assertIn("Engineering choice", refined["implementation_spec"])
+                self.assertEqual(app._execution_contract(), refined["contract"])
+                self.assertEqual(app._interaction_identity("execution_protocol", "prepare_implementation:1")["design_ref"], refined_ref.to_dict())
+                gate_view = app.advance()
+                self.assertEqual(gate_view.status, "paused")
+                gate = gate_view.work_plan["interaction"]["decision"]
+                self.assertEqual(gate["stage"], "execution_protocol")
+                app.continue_session(decision_id=gate["id"], decision_response="accept", interaction="autonomous")
                 app = load_session(root / "session", services=ResearchApplicationServices(llm_client=client))
                 with patch.object(LLMClient, "for_task", return_value=client):
                     implemented = app.advance(max_actions=2)
@@ -741,6 +758,9 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(app.latest_experiment_ref(), revision_ref)
             final = app.advance(max_actions=1)
             self.assertEqual(final.status, "completed", final.status_reason)
+            if refine:
+                report_context, _ = app.report_inputs()
+                self.assertTrue(any(handle.artifact == refined_ref.path for handle in report_context.source_handles))
             baseline = app.controller.store.read_json(final.state_refs["baseline"])
             first_candidate = app.controller.store.read_json(final.state_refs["experiment"])
             candidate = app.controller.store.read_json(final.state_refs["experiment_revision_1"])

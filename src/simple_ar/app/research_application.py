@@ -1056,6 +1056,8 @@ class ResearchApplication:
             return attach_report_read_evidence(context, memory, documents=self._load_documents(),
                                                read=self._load_read(), read_ref=refs["read"])
         analysis_ref = self._latest_analysis_ref() or refs["analysis"]
+        design_ref = self._implementation_design_ref()
+        design = ResearchDesignResult.from_handoff_dict(self.controller.store.read_json(design_ref))
         analysis = AnalysisHandoff.from_handoff_dict(self.controller.store.read_json(analysis_ref))
         if "matrix_results" in refs and analysis.execution_ref == refs["matrix_results"]:
             from simple_ar.report.projection import attach_paired_report_measurements
@@ -1072,7 +1074,7 @@ class ResearchApplication:
                 search=self._load_search(), documents=self._load_documents(),
                 execution={"status": evidence["status"], "metrics": {}}, analysis=analysis.analysis,
                 brief_ref=refs["synthesis"], execution_ref=refs["matrix_results"], analysis_ref=analysis_ref,
-                design=ResearchDesignResult.from_handoff_dict(self._state_payload("design")), design_ref=refs["design"])
+                design=design, design_ref=design_ref)
             context.results = evidence
             memory.limitations.append(f"Metrics describe candidate revision {evidence.get('candidate_revision', 0)}; "
                 f"{len(evidence.get('superseded_candidates', []))} superseded candidate measurements are retained separately, not pooled.")
@@ -1110,8 +1112,7 @@ class ResearchApplication:
             topic=self._experiment_report_topic(), brief=self._load_synthesis(),
             search=self._load_search(), documents=self._load_documents(), execution=execution,
             analysis=analysis.analysis, brief_ref=refs["synthesis"], execution_ref=analysis.execution_ref,
-            analysis_ref=analysis_ref, design=ResearchDesignResult.from_handoff_dict(self._state_payload("design")),
-            design_ref=refs["design"],
+            analysis_ref=analysis_ref, design=design, design_ref=design_ref,
         )
         # The legacy context embedded baseline/comparison in one execution file.
         # New application measurements are independent immutable artifacts.
@@ -2072,7 +2073,8 @@ class ResearchApplication:
 
     def _implementation_design_ref(self) -> ArtifactRef:
         refs = self.controller.manifest.state_refs
-        for step in reversed(self._load_task_plan().steps):
+        steps = self._load_task_plan().steps if "task_plan" in refs else ()
+        for step in reversed(steps):
             if step.capability == "research_design" and self._step_completed(step):
                 return refs[step.state_name]
         return refs["design"]
@@ -2128,12 +2130,24 @@ class ResearchApplication:
                     ref = self.controller.store.ref(Path(feedback_ref.path).parent / ref.path, kind=ref.kind)
                     text = self.controller.store.read_text(ref)
                     evidence[name] = text[:24000] + ("\n[Evidence excerpt truncated; do not assume omitted code is absent.]" if len(text) > 24000 else "")
+            for name in ("read", "documents"):
+                ref = self.controller.manifest.state_refs.get(name)
+                if ref is not None:
+                    text = self.controller.store.read_text(ref)
+                    evidence[name] = text[:24000] + ("\n[Evidence excerpt truncated.]" if len(text) > 24000 else "")
+            preparation = self._active_preparation_ref()
+            prepared = self.controller.store.read_json(preparation) if preparation is not None else {}
+            workspace = Path(prepared["workspace"]) if prepared.get("workspace") else None
+            index_path = Path(payload["code_task_run_dir"]) / "code_task" / "meta" / "codebase_index.json"
+            source_index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.is_file() else {}
             return self._execute(
                 "research_design", action,
-                ResearchDesignRequest(synthesis={}, previous_design=self.controller.store.read_json(design_ref),
+                ResearchDesignRequest(synthesis=self._load_synthesis(), previous_design=self.controller.store.read_json(design_ref),
+                    idea_id=self._effective_config().get("research_selected_idea_id"),
+                    source_workspace=workspace, source_index=source_index,
                     implementation_feedback={"gap": payload["implementation_feedback"], "evidence": evidence},
                     execution_context=self._problem_markdown(), use_llm=True, llm_client=self.services.llm_client),
-                (design_ref, feedback_ref, *self._input_refs("brief", "runtime_config")),
+                (design_ref, feedback_ref, *self._input_refs("brief", "runtime_config", "synthesis", "read", "documents", "preparation")),
             )
         config, reason = self._revision_execution_config()
         source = self._prepared_source_project()
@@ -3667,7 +3681,7 @@ class ResearchApplication:
         }
         if stage == "execution_protocol":
             if refs.get("design") is not None:
-                identity["design_ref"] = refs["design"].to_dict()
+                identity["design_ref"] = self._implementation_design_ref().to_dict()
             identity["runtime_config_ref"] = refs["runtime_config"].to_dict()
             identity["execution_protocol"] = self._execution_protocol_projection()
         elif stage == "delivery":
@@ -3685,7 +3699,8 @@ class ResearchApplication:
         refs = self.controller.manifest.state_refs
         for name in ("brief", "task_plan", "design"):
             expected = identity.get(f"{name}_ref")
-            if expected is not None and (refs.get(name) is None or refs[name].to_dict() != expected):
+            actual = self._implementation_design_ref() if name == "design" and name in refs else refs.get(name)
+            if expected is not None and (actual is None or actual.to_dict() != expected):
                 return False
         stage = str(interaction.get("stage") or "")
         if stage == "execution_protocol":
@@ -3776,16 +3791,20 @@ class ResearchApplication:
         if mode is None:
             return False
         step = self._first_execution_step(action)
+        if action.startswith("prepare_implementation:"):
+            step = next((row for row in self._load_task_plan().steps if row.action == action), None)
         if step is not None and requires_confirmation(mode, "execution_protocol", action):
             protocol = self._execution_protocol_projection() or {}
             baseline = self._execution_decision_projection()
-            design_ref = self.controller.manifest.state_refs.get("design")
+            design_ref = self._implementation_design_ref() if "design" in self.controller.manifest.state_refs else None
             refs = [self.controller.manifest.state_refs[name].to_dict()
-                    for name in ("brief", "design", "task_plan", "runtime_config")
+                    for name in ("brief", "task_plan", "runtime_config")
                     if name in self.controller.manifest.state_refs]
+            if design_ref is not None:
+                refs.append(design_ref.to_dict())
             if baseline:
                 refs.extend(baseline.get("baseline", {}).get("refs", []))
-            reason = str((self._state_payload("design").get("design_reason")
+            reason = str((self.controller.store.read_json(design_ref).get("selection_rationale")
                           if design_ref is not None else "") or "The accepted design and execution protocol are ready.")
             question = (
                 f"Confirm the first experiment protocol before {action}: "
@@ -4104,17 +4123,17 @@ class ResearchApplication:
         return config
 
     def _design_execution_protocol(self) -> Mapping[str, Any] | None:
-        ref = self.controller.manifest.state_refs.get("design")
-        if ref is None:
+        if "design" not in self.controller.manifest.state_refs:
             return None
+        ref = self._implementation_design_ref()
         payload = self.controller.store.read_json(ref)
         protocol = payload.get("execution_protocol") if isinstance(payload, Mapping) else None
         return dict(protocol) if isinstance(protocol, Mapping) else None
 
     def _execution_contract(self) -> Mapping[str, Any] | None:
-        ref = self.controller.manifest.state_refs.get("design")
-        if ref is None:
+        if "design" not in self.controller.manifest.state_refs:
             return None
+        ref = self._implementation_design_ref()
         payload = self.controller.store.read_json(ref)
         contract = payload.get("contract") if isinstance(payload, Mapping) else None
         return dict(contract) if isinstance(contract, Mapping) else None
@@ -4467,7 +4486,7 @@ class ResearchApplication:
                 schema = dict(configured)
 
         contract: dict[str, Any] = {}
-        design_ref = self.controller.manifest.state_refs.get("design")
+        design_ref = self._implementation_design_ref() if "design" in self.controller.manifest.state_refs else None
         design: Mapping[str, Any] = {}
         if design_ref is not None:
             payload = self.controller.store.read_json(design_ref)
@@ -4686,7 +4705,7 @@ class ResearchApplication:
 
     def _experiment_report_topic(self) -> str:
         """Use the selected idea as the paper title when it has one."""
-        design_ref = self.controller.manifest.state_refs.get("design")
+        design_ref = self._implementation_design_ref() if "design" in self.controller.manifest.state_refs else None
         if design_ref is not None:
             design = self.controller.store.read_json(design_ref)
             selected = design.get("selected_idea") if isinstance(design, Mapping) else None

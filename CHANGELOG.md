@@ -6,6 +6,12 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-26
 
+- Design clarification can inspect indexed workspace source through the same bounded
+  read-only lookup as CodeTask, with an attempt-local trace retained on provider failure.
+  It receives existing reading/synthesis evidence, distinguishes experimental choices
+  from reproduction facts, and can reselect a supplied candidate without changing the
+  comparison protocol or a fixed candidate. Analysis, reports and confirmation gates
+  now reference the latest completed design, not the original design unconditionally.
 - Explicit continuation retries a settled blocked step instead of replaying its old
   result indefinitely. Historical artifacts, measurements and budget accounting are
   retained; interrupted result recovery remains separate from an explicit retry.

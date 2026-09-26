@@ -24,6 +24,61 @@ from simple_ar.research.synthesis import SynthesisResult
 
 
 class ResearchDesignTests(unittest.TestCase):
+    def test_refinement_reads_real_source_and_persists_trace_on_provider_failure(self):
+        from unittest.mock import Mock
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            source = "# padding\n" * 900 + "def end_task(model):\n    return model.copy()\n"
+            (workspace / "lifecycle.py").write_text(source, encoding="utf-8")
+            original = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+            client = Mock()
+            inspect = {"status": "inspect_source", "context_request": {
+                "files": ["lifecycle.py"], "symbols": ["end_task"], "query": ""}}
+            client.ask_json.side_effect = [inspect, LLMError("provider unavailable")]
+            request = ResearchDesignRequest(synthesis=self._synthesis(), previous_design=original.to_handoff_dict(),
+                source_workspace=workspace, source_index={"files": [{"path": "lifecycle.py"}]},
+                use_llm=True, llm_client=client)
+            context = CapabilityContext(store=ArtifactStore(root / "attempt"),
+                attempt=AttemptManifest(attempt_id="design-1", capability="research_design"))
+            with self.assertRaisesRegex(LLMError, "provider unavailable"):
+                run_research_design_capability(context=context, request=request)
+            trace = json.loads((root / "attempt" / "design_refinement_trace.json").read_text())
+            excerpt = trace["turns"][0]["source_excerpts"][0]
+            self.assertIn("def end_task", excerpt["text"])
+            self.assertTrue(excerpt["truncated"])
+            self.assertIn("def end_task", client.ask_json.call_args.args[1])
+            self.assertEqual((workspace / "lifecycle.py").read_text(), source)
+            # A repeated request terminates rather than looping on unchanged evidence.
+            client.ask_json.side_effect = [inspect, inspect]
+            self.assertEqual(build_research_design(request).status, "blocked")
+
+    def test_refinement_reselects_only_available_candidates_with_same_protocol(self):
+        from unittest.mock import Mock
+        synthesis = self._synthesis()
+        original = build_research_design(ResearchDesignRequest(synthesis=synthesis))
+        alternate = replace(original.selected_idea, idea_id="alternate", title="Simpler candidate",
+            hypothesis="An alternative may help", proposed_change="Use a simpler objective")
+        synthesis = replace(synthesis, ideas=(*synthesis.ideas, alternate))
+        client = Mock()
+        client.ask_json.return_value = {"status": "ready", "implementation_spec": "Implement the simpler objective; coefficient 0.1 is our trial choice.",
+            "unresolved_questions": [], "selected_idea_id": "alternate", "selection_rationale": "Original candidate is not implementable."}
+        request = ResearchDesignRequest(synthesis=synthesis, previous_design=original.to_handoff_dict(), use_llm=True, llm_client=client)
+        result = build_research_design(request)
+        self.assertEqual(result.selected_idea, alternate)
+        self.assertEqual(result.contract.hypothesis, alternate.hypothesis)
+        self.assertEqual(result.execution_protocol, original.execution_protocol)
+        self.assertEqual(result.contract.dataset, original.contract.dataset)
+        self.assertEqual(result.contract.implementation_scope, original.contract.implementation_scope)
+        self.assertIsNone(result.novelty_check)
+        with self.assertRaises(LLMError):
+            build_research_design(replace(request, idea_id=original.selected_idea.idea_id))
+        different_data = replace(alternate, required_datasets=["other"])
+        self.assertEqual(build_research_design(replace(request,
+            synthesis=replace(synthesis, ideas=(different_data,)))).status, "blocked")
+
     def test_implementation_refinement_preserves_contract_and_surfaces_missing_evidence(self):
         from unittest.mock import Mock
         original = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
