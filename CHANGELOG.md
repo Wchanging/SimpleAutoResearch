@@ -4,6 +4,12 @@
 
 This file records user-visible project changes in reverse chronological order. Planning notes and design rationale live in `docs/` and `MDfiles/`; this file should stay close to a normal changelog.
 
+## 2026-09-26
+
+- Explicit continuation retries a settled blocked step instead of replaying its old
+  result indefinitely. Historical artifacts, measurements and budget accounting are
+  retained; interrupted result recovery remains separate from an explicit retry.
+
 ## 2026-09-25
 
 - Explicit implementation design gaps can return to bounded design clarification,

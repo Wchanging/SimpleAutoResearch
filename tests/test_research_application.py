@@ -633,10 +633,44 @@ class ResearchApplicationTests(unittest.TestCase):
                 # projections must be refreshed for that revised request.
                 self.assertNotEqual(app.view().state_refs.get(name), ref)
             self.advance_to(app, "implement")
+            if not refine:
+                # A no-model proposal is a real persisted blocker with no
+                # structured design feedback, as in older server sessions.
+                blocked = app.advance()
+                self.assertEqual(blocked.status, "paused", blocked.status_reason)
+                self.assertEqual(blocked.next_action, "implement")
+                baseline_ref = blocked.state_refs["baseline"]
+                blocked_attempt = app.controller.manifest.current_attempt
+                old_result = root / "session" / "attempts" / blocked_attempt / "capability_result.json"
+                old_bytes = old_result.read_bytes()
+                app = load_session(root / "session")
+                self.assertEqual(app.advance().status, "paused")
+                self.assertEqual(len(app.view().attempts), len(blocked.attempts))
+                app.continue_session(reason="Retry the blocked implementation with a model.")
+                # The retry intent must survive another reload before execution.
+                app = load_session(root / "session")
+                self.assertIsNone(app.controller.manifest.current_attempt)
+                self.assertEqual(app.view().budget["attempts"], blocked.budget["attempts"])
             client = FakeClient()
             app.services = replace(app.services, llm_client=client)
             with patch.object(LLMClient, "for_task", return_value=client):
-                implemented = app.advance()
+                if refine:
+                    # Crash after persisting a blocked result, before routing
+                    # its feedback: reload must recover, not rerun the editor.
+                    with patch.object(app, "_schedule_implementation_refinement", side_effect=RuntimeError("interrupted routing")):
+                        with self.assertRaisesRegex(RuntimeError, "interrupted routing"):
+                            app.advance()
+                    app = load_session(root / "session", services=ResearchApplicationServices(llm_client=client))
+                    attempt_count = len(app.view().attempts)
+                    with patch.object(app, "_run_action", return_value=False):
+                        implemented = app.advance()
+                    self.assertEqual(len(implemented.attempts), attempt_count)
+                else:
+                    implemented = app.advance()
+            if not refine:
+                self.assertEqual(len(implemented.attempts), len(blocked.attempts) + 1)
+                self.assertEqual(implemented.state_refs["baseline"], baseline_ref)
+                self.assertEqual(old_result.read_bytes(), old_bytes)
             if refine:
                 self.assertEqual(implemented.next_action, "refine_implementation:1", implemented.status_reason)
                 baseline_ref = implemented.state_refs["baseline"]

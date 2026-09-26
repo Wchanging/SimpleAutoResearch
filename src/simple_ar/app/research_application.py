@@ -633,11 +633,17 @@ class ResearchApplication:
                     guidance=decision_guidance or "", source=answer_source,
                     revision=revision_payload,
                 )
-            # Explicit continuation retries a failed call with no domain result.
-            # Completed results and measured failures remain available to recovery.
+            # A settled blocked attempt has already handed control back to the
+            # caller. Explicit continuation must retry the pending step, not
+            # replay that blocker. Reconcile accounting before releasing only
+            # the recovery pointer; retain its artifacts and history.
+            # Completed results and measured failures still need recovery.
             current = next((item for item in self.controller.list_attempts()
                             if item.attempt_id == self.controller.manifest.current_attempt), None)
-            if current is not None and current.status == "failed":
+            if current is not None and current.status == "blocked" and self.controller.manifest.status in {"paused", "blocked"}:
+                self.controller.reconcile_attempt(current.attempt_id)
+                self.controller.manifest.current_attempt = None
+            elif current is not None and current.status == "failed":
                 result = self.controller.reconcile_attempt(current.attempt_id)
                 output = _CAPABILITY_OUTPUTS.get(current.capability)
                 if output is not None and not any(ref.kind == output[1] for ref in result.artifacts):
