@@ -6,6 +6,15 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-25
 
+- Explicit implementation design gaps can return to bounded design clarification,
+  then continue in a fresh CodeTask workspace without overwriting frozen inputs or
+  rerunning valid baselines. Clarifications share the research iteration allowance;
+  unresolved evidence and repeated gaps remain visible stops. Recovery preserves
+  accepted clarification steps. Baselines without a separate cwd inherit the prepared workspace.
+- An empty CodeTask edit proposal can request one bounded read-only source expansion
+  before retrying. Edit permissions remain unchanged; unresolved blockers are shown
+  instead of suggesting that an already-enabled LLM be enabled. Research implementation
+  attempts retain the proposal and supplemental context for diagnosis and continuation.
 - Preserve carriage-return experiment progress as transient Rich updates instead of
   printing every frame. Buffer partial lines per stream, retain ordinary log lines,
   and leave raw process logs unchanged; redirected output omits transient frames.

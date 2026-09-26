@@ -24,6 +24,27 @@ from simple_ar.research.synthesis import SynthesisResult
 
 
 class ResearchDesignTests(unittest.TestCase):
+    def test_implementation_refinement_preserves_contract_and_surfaces_missing_evidence(self):
+        from unittest.mock import Mock
+        original = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))
+        client = Mock()
+        request = ResearchDesignRequest(synthesis={}, previous_design=original.to_handoff_dict(),
+            implementation_feedback={"questions": ["When is the checkpoint updated?"]},
+            use_llm=True, llm_client=client)
+        client.ask_json.return_value = {"status": "ready", "implementation_spec": "Chosen engineering detail: snapshot after end_task.",
+                                      "unresolved_questions": [], "execution_protocol": {"command": ["unapproved"]}}
+        refined = build_research_design(request)
+        self.assertEqual(refined.contract, original.contract)
+        self.assertEqual(refined.execution_protocol, original.execution_protocol)
+        self.assertIn("end_task", ResearchDesignResult.from_handoff_dict(refined.to_handoff_dict()).implementation_spec)
+        client.ask_json.return_value = {"status": "blocked", "implementation_spec": "", "unresolved_questions": ["Need the actual method definition."]}
+        blocked = build_research_design(request)
+        self.assertEqual(blocked.status, "blocked")
+        self.assertEqual(blocked.diagnostics, ("Need the actual method definition.",))
+        client.ask_json.return_value = {"status": "ready", "implementation_spec": "Guess", "unresolved_questions": ["Unknown shape"]}
+        with self.assertRaises(LLMError):
+            build_research_design(request)
+
     def test_literature_baseline_does_not_request_a_control_run(self) -> None:
         result = build_research_design(ResearchDesignRequest(
             synthesis=self._synthesis(),

@@ -43,6 +43,8 @@ class ResearchDesignRequest:
     use_llm: bool = False
     llm_client: Any | None = None
     selection_rationale: str = ""
+    previous_design: Mapping[str, Any] | None = None
+    implementation_feedback: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.use_llm and self.llm_client is None:
@@ -78,6 +80,7 @@ class ResearchDesignResult:
     selection_rationale: str = ""
     execution_protocol: dict[str, Any] = field(default_factory=dict)
     diagnostics: tuple[str, ...] = ()
+    implementation_spec: str = ""
 
     def to_handoff_dict(self) -> dict[str, Any]:
         """Return the stable, compact design handoff."""
@@ -98,6 +101,7 @@ class ResearchDesignResult:
             "contract": self.contract.to_row() if self.contract is not None else None,
             "evidence_refs": list(self.evidence_refs),
             "diagnostics": list(self.diagnostics),
+            **({"implementation_spec": self.implementation_spec} if self.implementation_spec else {}),
         }
 
     @classmethod
@@ -141,16 +145,19 @@ class ResearchDesignResult:
                 str(item) for item in data.get("evidence_refs", [])
             ),
             diagnostics=tuple(str(item) for item in data.get("diagnostics", [])),
+            implementation_spec=str(data.get("implementation_spec") or ""),
         )
 
 
 def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResult:
     """Select one grounded idea and check the existing research contract.
 
-    Missing information is surfaced as ``needs_review``.  The function never
-    invents a command, baseline result, metric value, or implementation plan.
+    Missing information is surfaced explicitly. A refinement may clarify
+    implementation details, but never replaces commands or measured results.
     """
 
+    if request.previous_design is not None:
+        return _refine_implementation_design(request)
     synthesis = request.normalized_synthesis()
     selected_for_validation = synthesis.status == "needs_review" and request.idea_id is not None
     if synthesis.status != "ready" and not selected_for_validation:
@@ -243,6 +250,42 @@ def build_research_design(request: ResearchDesignRequest) -> ResearchDesignResul
         execution_protocol=execution_protocol,
         diagnostics=tuple(diagnostics),
     )
+
+
+def _refine_implementation_design(request: ResearchDesignRequest) -> ResearchDesignResult:
+    """Clarify implementation without granting a new method or protocol."""
+    previous = ResearchDesignResult.from_handoff_dict(request.previous_design)
+    if previous.contract is None or not request.use_llm or request.llm_client is None:
+        raise ValueError("Design refinement requires an accepted contract and a model.")
+    response = request.llm_client.ask_json(
+        RESEARCH_DESIGN_SYSTEM,
+        "Resolve the implementation questions using the accepted design and supplied evidence. "
+        "Keep the hypothesis, method identity, evaluation, data, commands, budget and edit scope unchanged. "
+        "You may choose unspecified engineering details delegated by the task; label those choices, "
+        "never attribute them to a paper. Explain interfaces/shapes, state lifecycle, objective or "
+        "pseudocode, and verification as relevant. Do not fabricate missing source evidence. "
+        "If a different method, new permission or unavailable evidence is needed, return status=blocked "
+        "and the exact unresolved questions. Return JSON {status: ready|blocked, "
+        "implementation_spec: string, unresolved_questions: [string]}. A ready answer must resolve "
+        "all supplied questions. This is design only, not permission to execute commands.\n\n"
+        + json.dumps({"design": request.previous_design,
+                      "feedback": request.implementation_feedback,
+                      "task": request.execution_context}, ensure_ascii=False, default=str),
+        label="research-design-refinement",
+    )
+    if not isinstance(response, Mapping) or response.get("status") not in {"ready", "blocked"}:
+        raise LLMError("Design refinement must return ready or blocked.")
+    spec = response.get("implementation_spec", "")
+    questions = response.get("unresolved_questions", [])
+    if not isinstance(spec, str) or not isinstance(questions, list) or any(not isinstance(q, str) for q in questions):
+        raise LLMError("Invalid implementation specification or unresolved questions.")
+    if response["status"] == "ready" and (not spec.strip() or questions):
+        raise LLMError("A ready design refinement needs a specification and no unresolved questions.")
+    diagnostics = tuple(questions)
+    if response["status"] == "blocked" and not diagnostics:
+        diagnostics = ("Design evidence remains insufficient.",)
+    return replace(previous, status=response["status"], implementation_spec=spec.strip(),
+                   generation_mode="llm", diagnostics=diagnostics)
 
 
 def _apply_execution_boundary(

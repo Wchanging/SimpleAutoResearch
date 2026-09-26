@@ -284,6 +284,7 @@ def propose_patch_edits(
 
     mode = "offline"
     proposal: dict[str, Any] | None = None
+    context_followup = None
     if use_llm:
         try:
             _emit(message_callback, "Calling LLM for controlled edit proposal.")
@@ -313,6 +314,44 @@ def propose_patch_edits(
                 batch_work_item=batch_constraints.get("work_item", {}),
                 memory_context=memory_context,
             )
+            # A request for missing source is a read operation, not permission
+            # to edit those files. Keep the accepted targets and patch budget.
+            request = proposal.get("context_request")
+            if not proposal.get("edits") and isinstance(request, dict):
+                request = _normalize_context_request(request, _known_paths(index))
+                total_chars = 2 * max_files * max_source_chars_per_file
+                if loaded_context is not None:
+                    total_chars = int(loaded_context.context_pack.get("budget", {}).get("max_total_chars", total_chars))
+                extra = _requested_source_context(workspace_dir, index, request,
+                    supplied=[*snippets, *reference_snippets], max_files=max_files,
+                    max_chars=max_source_chars_per_file,
+                    max_total_chars=max(0, total_chars - sum(len(item["text"]) for item in snippets)))
+                if extra:
+                    context_followup = {"request": request, "snippets": extra,
+                                        "initial_summary": proposal.get("summary", ""),
+                                        "initial_validation": proposal.get("validation", [])}
+                    # Persist the request before the second call, including if
+                    # the provider fails. At most one source expansion per call.
+                    write_json(meta_dir / "edit_context_followup.json", context_followup)
+                    if extra:
+                        _emit(message_callback, "Reading requested source context before one edit-proposal retry.")
+                        proposal = client.ask_json(
+                            CODE_TASK_EDIT_SYSTEM,
+                            _edit_user_prompt(
+                                task_text=task_text, patch_plan=patch_plan, index=index,
+                                snippets=snippets, reference_snippets=extra,
+                                read_only_context=list(dict.fromkeys([*read_only_context, *(item["path"] for item in extra)])),
+                                allowed_patterns=allowed_patterns, protected_patterns=protected_patterns,
+                                budget=budget, allowed_edit_files=proposal_allowed_files,
+                                batch_work_item=batch_constraints.get("work_item", {}),
+                                memory_context=memory_context,
+                            ) + "\nRequested source has been supplied as read-only evidence. "
+                            "Resolve implementation details delegated by the accepted design. "
+                            "If algorithmic requirements remain undefined, return no edits and "
+                            "return implementation_feedback with kind=design_gap, reason and questions; do not invent "
+                            "a different method or request unchanged context repeatedly.",
+                            label="code-task-propose-edits-context",
+                        )
             mode = "llm"
         except LLMError as exc:
             # Let the execution boundary record the failure and recovery point.
@@ -336,6 +375,8 @@ def propose_patch_edits(
     normalized["selected_files"] = selected
     normalized["read_only_context"] = read_only_context
     normalized["context_pack"] = context_pack_ref
+    if context_followup is not None:
+        normalized["context_followup"] = "code_task/meta/edit_context_followup.json"
     normalized["batch"] = _batch_ref(root, batch)
     normalized["editor"] = editor_metadata(
         backend=CONTROLLED_PATCH_BACKEND,
@@ -554,6 +595,8 @@ def _should_retry_empty_context_request(
     snippets: list[dict[str, str]],
     allowed_edit_files: list[str],
 ) -> bool:
+    if response.get("implementation_feedback"):
+        return False
     edits = response.get("edits")
     if isinstance(edits, list) and edits:
         return False
@@ -564,12 +607,14 @@ def _should_retry_empty_context_request(
     context_request = response.get("context_request")
     if not isinstance(context_request, dict):
         return True
+    if context_request.get("symbols") or context_request.get("query"):
+        return False
     requested_files = {
         str(path).strip()
         for path in context_request.get("files", [])
         if str(path).strip()
     }
-    return not requested_files or requested_files.issubset(snippet_paths)
+    return not requested_files
 
 
 def _edit_user_prompt(
@@ -627,7 +672,10 @@ def _edit_user_prompt(
     return (
         "Return JSON with fields: `summary` string, `edits` list, "
         "`validation` list of strings, `risks` list of strings, and optional "
-        "`context_request` object when more files/symbols are needed.\n\n"
+        "`context_request` object when more files/symbols are needed. If the method itself lacks "
+        "required design decisions, return empty edits and implementation_feedback: "
+        "{kind: design_gap, reason: string, questions: [specific unresolved questions]}. "
+        "Do not use design_gap for missing source or an ordinary coding failure.\n\n"
         "Each item in `edits` must contain exactly these string fields: "
         "`path`, `old`, `new`, and `reason`.\n\n"
         "Hard rules:\n"
@@ -791,6 +839,7 @@ def _normalize_edit_proposal(
         "warnings": warnings,
         "rejected_edits": rejected_edits,
         "context_request": _normalize_context_request(context_request, known_paths),
+        "implementation_feedback": _implementation_feedback(proposal.get("implementation_feedback")) if not proposal.get("edits") else None,
         "budget": budget_result["budget"],
     }
 
@@ -1021,6 +1070,54 @@ def _whole_file_rewrite_suspicions(workspace_dir: Path, edits: list[dict[str, st
         if old_ratio > 0.85 or new_ratio > 0.95:
             suspicious.append(edit["path"])
     return suspicious
+
+
+def _implementation_feedback(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("kind") != "design_gap":
+        return None
+    reason = _string(value.get("reason"))
+    questions = _string_list(value.get("questions"))
+    return {"kind": "design_gap", "reason": reason, "questions": questions} if reason and questions else None
+
+
+def _requested_source_context(workspace: Path, index: dict[str, Any], request: dict[str, Any],
+                              *, supplied: list[dict[str, str]], max_files: int, max_chars: int,
+                              max_total_chars: int | None = None) -> list[dict[str, Any]]:
+    """Resolve a bounded read request, including a window beyond a clipped prefix.
+
+    Replacement reference context has the same file/character allowance as the
+    initial reference pack; editable snippets and edit authorization stay fixed.
+    """
+    query = " ".join([request["query"], *request["symbols"]]).strip()
+    candidates = list(request["files"])
+    if query:
+        candidates.extend(select_relevant_files(index, query, max_files=max_files))
+    previous = {item["path"]: item["text"] for item in supplied}
+    terms = [symbol.rsplit(".", 1)[-1] for symbol in request["symbols"]] or query.split()
+    result = []
+    remaining = max_total_chars if max_total_chars is not None else max_files * max_chars
+    for relative in dict.fromkeys(candidates):
+        if remaining <= 0:
+            break
+        path = _workspace_file(workspace.resolve(), relative)
+        if path is None or not path.is_file() or path.name.startswith(".env"):
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        start = 0
+        if len(text) > max_chars:
+            matches = [text.find(term) for term in terms if term and text.find(term) >= 0]
+            if matches:
+                start = max(0, matches[0] - max_chars // 4)
+            elif relative in previous:
+                start = max(0, min(len(previous[relative]), len(text) - max_chars))
+        excerpt = text[start:start + min(max_chars, remaining)]
+        if excerpt and excerpt not in previous.get(relative, ""):
+            result.append({"path": relative, "access_role": "read_only", "text": excerpt,
+                           "source_offset": start, "truncated": start > 0 or start + len(excerpt) < len(text)})
+            remaining -= len(excerpt)
+        if len(result) >= max_files:
+            break
+    return result
 
 
 def _normalize_context_request(value: dict[str, Any], known_paths: set[str]) -> dict[str, Any]:

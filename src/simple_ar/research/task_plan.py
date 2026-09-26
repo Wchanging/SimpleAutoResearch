@@ -58,12 +58,14 @@ _STEP_TEXT = {
     "prepare_candidate": ("Create a fresh isolated workspace from the recorded original project for a candidate revision.", "Revision workspace lineage and copy report."),
     "revise_candidate": ("Apply and validate the analysis-directed candidate revision in the isolated workspace.", "Candidate revision patch, validation, and lineage."),
     "research_candidate": ("Measure the analysis-directed candidate revision under the accepted comparison condition.", "Candidate revision measurement and diagnostics."),
+    "refine_implementation": ("Resolve explicit implementation design questions without changing the protocol.", "Clarified design or unresolved evidence needs."),
+    "prepare_implementation": ("Prepare a fresh workspace for the clarified implementation.", "New workspace with preserved original lineage."),
 }
 _ACTION_RE = re.compile(
     r"^(?:repair:\d+|retest:\d+|matrix_repair_\d+|matrix_baseline_\d+|"
     r"matrix_candidate(?:_r\d+)?_\d+|supplement_baseline:\d+|"
     r"supplement_candidate:\d+|reanalysis:\d+|prepare_candidate:\d+|"
-    r"revise_candidate:\d+|research_candidate:\d+(?:_\d+)?)$"
+    r"revise_candidate:\d+|research_candidate:\d+(?:_\d+)?|refine_implementation:\d+|prepare_implementation:\d+)$"
 )
 
 
@@ -412,8 +414,17 @@ def _execution_steps(execution: Mapping[str, object]) -> list[dict[str, Any]]:
     return steps
 
 
+def insert_implementation_refinement(plan: TaskPlanResult, state_name: str, iteration: int) -> TaskPlanResult:
+    """Insert recovery before the unfinished implementation, leaving measurements alone."""
+    rows = [step.to_dict() for step in plan.steps]
+    position = next(i for i, step in enumerate(plan.steps) if step.state_name == state_name)
+    additions = [_row(f"refine_implementation:{iteration}"), _row(f"prepare_implementation:{iteration}")]
+    rows[position:position] = additions
+    return replace(plan, steps=tuple(_normalize_steps(rows)))
+
+
 def _row(action: str, *, condition: str = "") -> dict[str, Any]:
-    problem, observation = _STEP_TEXT.get(action, ("Advance the accepted task plan.", "Inspect the declared capability result."))
+    problem, observation = _STEP_TEXT.get(action.split(":", 1)[0], ("Advance the accepted task plan.", "Inspect the declared capability result."))
     return {
         "step_id": action,
         "action": action,
@@ -471,6 +482,8 @@ def _normalize_steps(rows: list[Any]) -> tuple[TaskPlanStep, ...]:
 
 def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]) -> None:
     actions = [step.action for step in steps]
+    if any(action.startswith(("refine_implementation:", "prepare_implementation:")) for action in actions):
+        raise ValueError("Implementation refinement requires recorded executor feedback; it cannot be preplanned.")
     _validate_authorized_boundaries(request, steps)
     if request.task_kind == "bug_fix":
         if any(step.capability not in {"prepare_execution", "implement"} for step in steps) or "implement" not in actions:
@@ -562,6 +575,10 @@ def _capability(action: str) -> str:
         return "experiment"
     if action.startswith("prepare_candidate:"):
         return "prepare_execution"
+    if action.startswith("prepare_implementation:"):
+        return "prepare_execution"
+    if action.startswith("refine_implementation:"):
+        return "research_design"
     if action.startswith("revise_candidate:"):
         return "implement"
     if action.startswith("research_candidate:"):

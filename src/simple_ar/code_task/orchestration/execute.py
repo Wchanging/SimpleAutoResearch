@@ -650,11 +650,18 @@ def execute_code_task(
                 metadata={"selected_files": list(result.selected_files)},
             )
             if result.edit_count == 0:
+                proposal = read_json(result.proposal_path)
+                reasons = [str(item) for item in proposal.get("validation", []) if str(item).strip()]
+                detail = str(proposal.get("summary") or "No edits were proposed.")
+                if reasons:
+                    detail += " " + "; ".join(reasons)
                 return _result(
                     paths,
                     steps,
                     "no_edits_proposed",
-                    "Review code_task/meta/proposed_edits.json or rerun with LLM enabled.",
+                    detail + " See code_task/meta/proposed_edits.json. "
+                    + ("Resolve the reported implementation/design blocker before retrying."
+                       if result.mode == "llm" else "Provide edits or enable the LLM editor."),
                 )
             if not (approval_note.strip() and apply_proposed_edits):
                 return _result(

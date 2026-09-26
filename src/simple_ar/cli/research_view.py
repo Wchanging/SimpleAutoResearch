@@ -24,6 +24,8 @@ DESCRIPTIONS = {
     "summarize": "Save the research summary",
     "assess_ideas": "Assess candidate evidence and feasibility",
     "research_design": "Design the selected experiment",
+    "refine_implementation": "Clarify unresolved implementation decisions within the accepted design",
+    "prepare_implementation": "Prepare a fresh workspace without repeating valid measurements",
     "prepare_execution": "Prepare the isolated project workspace",
     "implement": "Locate code, propose edits, review and validate",
     "analysis": "Compare measured results with the hypothesis",
@@ -75,7 +77,7 @@ class ResearchConsole:
 
     @contextmanager
     def action(self, action: str):
-        description = DESCRIPTIONS.get(action, action.replace("_", " "))
+        description = DESCRIPTIONS.get(action.split(":", 1)[0], action.replace("_", " "))
         self.console.rule(Text(action, style="bold cyan"))
         self.console.print(Text(description))
         started = monotonic()

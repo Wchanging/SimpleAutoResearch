@@ -427,6 +427,12 @@ class ResearchApplicationTests(unittest.TestCase):
                 self.assertFalse(app._state_succeeded("preparation_r1"))
 
     def test_real_code_task_modification_is_measured_by_application_once(self):
+        self._exercise_code_task_lifecycle()
+
+    def test_design_gap_refines_in_fresh_workspace_and_preserves_baseline(self):
+        self._exercise_code_task_lifecycle(refine=True)
+
+    def _exercise_code_task_lifecycle(self, *, refine=False):
         """Keep the old real bridge check, but exercise the formal lifecycle."""
         class FakeClient:
             model = "fake-research-and-code-model"
@@ -434,6 +440,8 @@ class ResearchApplicationTests(unittest.TestCase):
             def __init__(self):
                 self.edit_count = 0
                 self.analysis_count = 0
+                self.gap_returned = False
+                self.refinement_calls = 0
 
             def ask(self, _system, _user, *, label=""):
                 if label not in {"result-analysis", "experiment-analysis"}:
@@ -456,6 +464,14 @@ class ResearchApplicationTests(unittest.TestCase):
                 **kwargs: object,
             ) -> dict[str, object]:
                 del kwargs
+                if label == "research-design-refinement":
+                    assert "def predict" in _user, "Design refinement must receive the inspected source, not just the model's complaint."
+                    self.refinement_calls += 1
+                    if self.refinement_calls == 1:
+                        from simple_ar.integrations.llm import LLMError
+                        raise LLMError("simulated transport interruption")
+                    return {"status": "ready", "implementation_spec": "Engineering choice: add prize to the keyword set; retain predict(text) and existing win handling.",
+                            "unresolved_questions": []}
                 if label.startswith("code-task-review-"):
                     return {"findings": []}
                 if label == "code-task-work-plan":
@@ -508,6 +524,11 @@ class ResearchApplicationTests(unittest.TestCase):
                         "requires_approval_before_patch": True,
                     }
                 if label == "code-task-propose-edits":
+                    if refine and not self.gap_returned:
+                        self.gap_returned = True
+                        return {"summary": "Clarify the allowed keyword behavior.", "edits": [],
+                                "implementation_feedback": {"kind": "design_gap", "reason": "Keyword behavior needs clarification.",
+                                                            "questions": ["Should prize retain win handling?"]}}
                     self.edit_count += 1
                     if self.edit_count == 1:
                         old = (
@@ -593,7 +614,7 @@ class ResearchApplicationTests(unittest.TestCase):
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=ResearchApplicationServices(
                 max_results=1, max_attempts=32,
-                config={"research_queries": ["reliable agents"], "research_max_iterations": 1},
+                config={"research_queries": ["reliable agents"], "research_max_iterations": 2 if refine else 1},
                 budget_limits={"process_invocations": 3, "process_wall_seconds": 60},
             ))
             paused = app.advance(max_actions=10)
@@ -608,12 +629,37 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIn("Keep the existing prediction API", app.brief.request_text)
             self.assertNotEqual(app.view().state_refs.get("design"), paused.state_refs.get("design"))
             for name, ref in research_refs.items():
-                self.assertEqual(app.view().state_refs[name], ref)
+                # supply_execution also changes the task text here; evidence
+                # projections must be refreshed for that revised request.
+                self.assertNotEqual(app.view().state_refs.get(name), ref)
             self.advance_to(app, "implement")
             client = FakeClient()
             app.services = replace(app.services, llm_client=client)
             with patch.object(LLMClient, "for_task", return_value=client):
                 implemented = app.advance()
+            if refine:
+                self.assertEqual(implemented.next_action, "refine_implementation:1", implemented.status_reason)
+                baseline_ref = implemented.state_refs["baseline"]
+                old_preparation = app.controller.store.read_json(implemented.state_refs["preparation"])
+                # Inspect the actual frozen handoff from the failed attempt instead of guessing its layout.
+                feedback = app._state_payload("feedback:1")
+                old_handoff = Path(feedback["code_task_run_dir"]) / "code_task" / "research_handoff.json"
+                old_bytes = old_handoff.read_bytes()
+                app = load_session(root / "session", services=ResearchApplicationServices(llm_client=client))
+                interrupted = app.advance()
+                self.assertEqual(interrupted.status, "paused")
+                self.assertEqual(interrupted.next_action, "refine_implementation:1")
+                app = load_session(root / "session", services=ResearchApplicationServices(llm_client=client))
+                app.continue_session()
+                clarified = app.advance()
+                self.assertEqual(clarified.next_action, "prepare_implementation:1", clarified.status_reason)
+                app = load_session(root / "session", services=ResearchApplicationServices(llm_client=client))
+                with patch.object(LLMClient, "for_task", return_value=client):
+                    implemented = app.advance(max_actions=2)
+                self.assertEqual(implemented.state_refs["baseline"], baseline_ref)
+                self.assertEqual(old_handoff.read_bytes(), old_bytes)
+                self.assertNotEqual(app.controller.store.read_json(app._active_preparation_ref())["workspace"], old_preparation["workspace"])
+                self.assertEqual(sum(a["capability"] == "experiment" for a in implemented.attempts), 1)
             self.assertEqual(implemented.next_action, "experiment", implemented.status_reason)
             implementation_ref = implemented.state_refs["implementation"]
             task_input_ref = app.controller.store.ref(
@@ -624,7 +670,7 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertIn("## User research objective", implementation_task)
             self.assertIn("Study reliable agents; add prize keyword support without changing tests.", implementation_task)
             self.assertIn("selecting a concrete option within the accepted design and CodeTask scope", implementation_task)
-            prepared = app.controller.store.read_json(implemented.state_refs["preparation"])
+            prepared = app.controller.store.read_json(app._active_preparation_ref())
             candidate_workspace = Path(prepared["workspace"])
             self.assertIn("prize", (candidate_workspace / "spam_model.py").read_text(encoding="utf-8"))
             revision_config, revision_reason = app._revision_execution_config()

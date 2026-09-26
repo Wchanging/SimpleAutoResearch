@@ -3070,6 +3070,78 @@ protected_patterns = ["pyproject.toml"]
                 recovered = propose_patch_edits(run_dir, use_llm=True)
             self.assertEqual(recovered.mode, "llm")
 
+    def test_requested_symbol_context_replaces_clipped_prefix_with_bounded_window(self) -> None:
+        from simple_ar.code_task.editing.patching import _requested_source_context
+        from simple_ar.code_task.analysis.index import build_codebase_index
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            body = "# padding\n" * 100 + "def end_task():\n    return 'checkpoint'\n"
+            write_text(root / "lifecycle.py", body)
+            index = build_codebase_index(root)
+            request = {"files": [], "symbols": ["end_task"], "query": "lifecycle"}
+            result = _requested_source_context(root, index, request,
+                supplied=[{"path": "lifecycle.py", "text": body[:200]}], max_files=1, max_chars=200)
+            self.assertEqual(len(result), 1)
+            self.assertIn("def end_task", result[0]["text"])
+            self.assertLessEqual(len(result[0]["text"]), 200)
+            self.assertEqual(result[0]["access_role"], "read_only")
+            self.assertGreater(result[0]["source_offset"], 0)
+
+    def test_missing_context_is_read_once_without_expanding_edit_scope(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "project"
+            _write_toy_project(code_root)
+            write_text(code_root / "tests/lifecycle.py", "def end_task():\n    pass\n")
+            write_text(root / "task.md", "Improve spam prediction.")
+            run_dir = root / "run"
+            initialize_code_task(run_dir=run_dir, code_root=code_root,
+                                 task_file=root / "task.md", benchmark_command="python -m unittest")
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            initial = {"edits": [], "summary": "Need lifecycle context",
+                       "context_request": {"files": ["tests/lifecycle.py", "../../.env"]}}
+            client = Mock()
+            client.ask_json.return_value = {
+                "edits": [{"path": "tests/lifecycle.py", "old": "pass", "new": "return 1"}],
+                "validation": ["Algorithm still unspecified"],
+            }
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task", return_value=client), patch(
+                "simple_ar.code_task.editing.patching._ask_llm_for_edits", return_value=initial,
+            ):
+                result = propose_patch_edits(run_dir, use_llm=True, max_files=1)
+            client.ask_json.assert_called_once()
+            prompt = client.ask_json.call_args.args[1]
+            self.assertIn("def end_task()", prompt)
+            self.assertEqual(result.edit_count, 0)
+            evidence = read_json(run_dir / "code_task/meta/edit_context_followup.json")
+            self.assertEqual(evidence["request"]["files"], ["tests/lifecycle.py"])
+            self.assertEqual(read_text(run_dir / "code_task/workspace/tests/lifecycle.py"),
+                             "def end_task():\n    pass\n")
+            # A valid edit can follow the same read-only request; no source is
+            # changed until the separate apply boundary runs.
+            client.reset_mock()
+            client.ask_json.return_value = {
+                "edits": [{"path": "spam_model.py", "old": "'win'", "new": "'prize'"}],
+            }
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task", return_value=client), patch(
+                "simple_ar.code_task.editing.patching._ask_llm_for_edits", return_value=initial,
+            ):
+                result = propose_patch_edits(run_dir, use_llm=True, max_files=1, force=True)
+            self.assertEqual(result.edit_count, 1)
+            client.ask_json.assert_called_once()
+            # Another context request is retained as a blocker, not recursively
+            # executed until API budget is exhausted.
+            client.reset_mock()
+            client.ask_json.return_value = initial
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task", return_value=client), patch(
+                "simple_ar.code_task.editing.patching._ask_llm_for_edits", return_value=initial,
+            ):
+                result = propose_patch_edits(run_dir, use_llm=True, max_files=1, force=True)
+            self.assertEqual(result.edit_count, 0)
+            client.ask_json.assert_called_once()
+
     def test_propose_edits_restricts_llm_to_current_batch_targets(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

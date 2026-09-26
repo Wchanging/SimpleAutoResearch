@@ -17,6 +17,7 @@ from simple_ar.code_task.orchestration.verification import validate_repair_patch
 from simple_ar.code_task.execution.runner import run_code_task_benchmark
 from simple_ar.code_task.execution.repair import RepairEvidence, propose_repair_edits
 from simple_ar.code_task.editing.patching import apply_patch_edits
+from simple_ar.code_task.analysis.context import load_latest_code_task_context_pack
 from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest, save_code_task_manifest
 from simple_ar.code_task.editing.scope import protected_patterns_from_manifest
 from simple_ar.experiment.execution.measurement import snapshot_protocol_assets, reconcile_protocol_assets
@@ -137,6 +138,7 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     # absolute paths in an independently managed CodeTask run. Do not copy data,
     # environments, checkpoints or the whole workspace into every attempt.
     evidence = {}
+    source_context = load_latest_code_task_context_pack(request.run_dir)
     for name, path in {
         "patch": paths.task_dir / "patch.diff",
         "validation": paths.meta_dir / "validation_report.json",
@@ -144,6 +146,9 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
         "work_plan": paths.task_dir / "work_plan.json",
         "patch_plan": paths.task_dir / "patch_plan.md",
         "research_handoff": paths.task_dir / "research_handoff.json",
+        "edit_proposal": paths.meta_dir / "proposed_edits.json",
+        "context_followup": paths.meta_dir / "edit_context_followup.json",
+        **({"source_context": source_context.prompt_context_path} if source_context is not None else {}),
         **repair_paths,
     }.items():
         if path.is_file():
@@ -169,6 +174,9 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
         "timed_out": validation.timed_out,
         "metrics": dict(validation.metrics),
     }
+    proposal_path = paths.meta_dir / "proposed_edits.json"
+    proposal = read_json(proposal_path) if proposal_path.is_file() else {}
+    feedback = proposal.get("implementation_feedback") if stop_reason == "no_edits_proposed" else None
     artifact = context.store.write_json(
         "implementation.json", {
             "schema_version": "research_implementation.v1",
@@ -176,6 +184,7 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
             "code_task_run_dir": str(request.run_dir), "workspace_dir": str(paths.workspace_dir),
             "stop_reason": stop_reason, "next_action": next_action,
             "steps": steps,
+            "implementation_feedback": feedback,
             "failure_ref": request.failure_ref.to_dict() if request.failure_ref else None,
             "asset_integrity": integrity,
             "validation": validation_row,
@@ -254,6 +263,8 @@ def _prepare_research_task(
                 ),
             )
         )
+        if design.implementation_spec:
+            task += "\n## Clarified implementation specification\n\n" + design.implementation_spec + "\n"
         brief = consumed.get("brief")
         if isinstance(brief, Mapping):
             objective = str(brief.get("objective") or brief.get("request_text") or "").strip()

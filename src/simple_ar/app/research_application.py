@@ -56,6 +56,7 @@ from simple_ar.research.task_plan import (
     TaskPlanRequest,
     TaskPlanResult,
     append_research_followup,
+    insert_implementation_refinement,
 )
 from simple_ar.app.research_interaction import (
     INTERACTION_MODES,
@@ -1319,6 +1320,8 @@ class ResearchApplication:
                     llm_client=self.services.llm_client,
                 ), self._input_refs("synthesis", "read", "brief", "runtime_config"), allow_partial=True,
             )
+        if action.startswith(("refine_implementation:", "prepare_implementation:")):
+            return self._run_implementation_refinement(action)
         if action == "research_design":
             execution_config = self._execution_config()
             execution = execution_config.get("execution")
@@ -2029,6 +2032,12 @@ class ResearchApplication:
         **kwargs: Any,
     ) -> bool:
         _, artifact_kind, _ = _CAPABILITY_OUTPUTS[capability]
+        if capability == "implement" and any(ref.kind == "research_design" for ref in inputs):
+            design_ref = self._implementation_design_ref()
+            inputs = tuple(design_ref if ref.kind == "research_design" else ref for ref in inputs)
+            preparation = self._active_preparation_ref()
+            if preparation is not None and preparation not in inputs:
+                inputs += (preparation,)
         attempt_id = self.controller.allocate_attempt_id(capability)
         request = self._request_for_attempt(request, attempt_id)
         if request is not None:
@@ -2045,12 +2054,97 @@ class ResearchApplication:
             ref.kind == artifact_kind for ref in result.artifacts
         )
         if result.status not in accepted and not measured_failure:
+            if capability == "implement" and self._schedule_implementation_refinement(state_name, attempt_id, result):
+                self._persist_application_views()
+                return True
             detail = "; ".join(str(item) for item in result.diagnostics if str(item).strip())
             self.controller.pause(f"{capability} returned {result.status!r}" + (f": {detail}" if detail else "."))
             return False
         self._record_attempt_outputs(capability, state_name, attempt_id, result)
         self._persist_application_views()
         return True
+
+    def _implementation_design_ref(self) -> ArtifactRef:
+        refs = self.controller.manifest.state_refs
+        for step in reversed(self._load_task_plan().steps):
+            if step.capability == "research_design" and self._step_completed(step):
+                return refs[step.state_name]
+        return refs["design"]
+
+    def _schedule_implementation_refinement(self, state_name: str, attempt_id: str, result: Any) -> bool:
+        """Route explicit design gaps; never infer research intent from error prose."""
+        if result.status != "blocked" or self.services.llm_client is None or self._task_kind() == "bug_fix":
+            return False
+        output = next((ref for ref in result.artifacts if ref.kind == "implementation_result"), None)
+        if output is None:
+            return False
+        output = self.controller.attempt_output_ref(attempt_id, kind="implementation_result", schema="research_implementation.v1")
+        if output in self.controller.manifest.state_refs.values():
+            return True  # Scheduling was already persisted before interruption.
+        payload = self.controller.store.read_json(output)
+        feedback = payload.get("implementation_feedback")
+        if (payload.get("stop_reason") != "no_edits_proposed" or not isinstance(feedback, Mapping)
+                or feedback.get("kind") != "design_gap" or not str(feedback.get("reason") or "").strip()
+                or not isinstance(feedback.get("questions"), list) or not feedback["questions"]):
+            return False
+        plan = self._load_task_plan()
+        existing = [step for step in plan.steps if step.action.startswith("refine_implementation:")]
+        latest = self._latest_analysis_ref()
+        rounds = self._research_analysis_round(latest) if latest else 0
+        if rounds >= self._research_iteration_limit():
+            return False
+        for step in existing:
+            old = self._state_payload(f"feedback:{step.action.split(':')[1]}")
+            if old.get("implementation_feedback") == feedback:
+                return False
+        iteration = len(existing) + 1
+        extended = insert_implementation_refinement(plan, state_name, iteration)
+        refs = self.controller.manifest.state_refs
+        refs[f"feedback:{iteration}"] = output
+        refs["task_plan"] = self.controller.store.write_json(
+            f"planning/task_plan-design-refinement-{iteration}.json", extended.to_handoff_dict(),
+            kind="task_plan", schema="research_task_plan.v1", producer="research_application",
+        )
+        if self.services.message_callback:
+            self.services.message_callback("Implementation needs design clarification; preserving measurements and scheduling bounded refinement.")
+        return True
+
+    def _run_implementation_refinement(self, action: str) -> bool:
+        iteration = action.split(":")[1]
+        feedback_ref = self.controller.manifest.state_refs[f"feedback:{iteration}"]
+        design_ref = self._implementation_design_ref()
+        if action.startswith("refine_implementation:"):
+            payload = self.controller.store.read_json(feedback_ref)
+            evidence = {}
+            for name in ("edit_proposal", "context_followup", "source_context", "patch_plan"):
+                ref = self._artifact_ref(payload.get("artifact_refs", {}).get(name))
+                if ref is not None:
+                    ref = self.controller.store.ref(Path(feedback_ref.path).parent / ref.path, kind=ref.kind)
+                    text = self.controller.store.read_text(ref)
+                    evidence[name] = text[:24000] + ("\n[Evidence excerpt truncated; do not assume omitted code is absent.]" if len(text) > 24000 else "")
+            return self._execute(
+                "research_design", action,
+                ResearchDesignRequest(synthesis={}, previous_design=self.controller.store.read_json(design_ref),
+                    implementation_feedback={"gap": payload["implementation_feedback"], "evidence": evidence},
+                    execution_context=self._problem_markdown(), use_llm=True, llm_client=self.services.llm_client),
+                (design_ref, feedback_ref, *self._input_refs("brief", "runtime_config")),
+            )
+        config, reason = self._revision_execution_config()
+        source = self._prepared_source_project()
+        if config is None or source is None:
+            self.controller.pause(reason or "Design refinement has no original project lineage.")
+            return False
+        # Copy the current candidate, preserving prior accepted revisions.
+        # A clarified design must never overwrite a frozen CodeTask handoff.
+        prepared = self.controller.store.read_json(self._active_preparation_ref())
+        config["code_task"]["code_root"] = prepared["workspace"]
+        config["cwd"] = prepared["workspace"]
+        run = execution_request(config, task_text=self.brief.request_text, contract=self._execution_contract()).run
+        return self._execute("prepare_execution", action,
+            PreparationRequest(config, self._problem_markdown(), run,
+                run_dir=Path(f"project_run_design_{iteration}"), source_project=source),
+            (design_ref, feedback_ref, *self._input_refs("brief", "runtime_config")),
+        )
 
     def _record_attempt_outputs(self, capability: str, state_name: str, attempt_id: str, result: Any) -> None:
         """Bind the same declared outputs after normal execution or recovery."""
@@ -2452,7 +2546,10 @@ class ResearchApplication:
 
     def _research_iteration_limit(self) -> int:
         value = self._effective_config().get("research_max_iterations", 1)
-        return value if type(value) is int and value >= 0 else 1
+        maximum = value if type(value) is int and value >= 0 else 1
+        refinements = sum(step.action.startswith("refine_implementation:")
+                          for step in self._load_task_plan().steps) if "task_plan" in self.controller.manifest.state_refs else 0
+        return max(0, maximum - refinements)
 
     def _recommendation_payload(self, analysis: Mapping[str, Any]) -> dict[str, Any]:
         value = analysis.get("recommendation")
@@ -3457,9 +3554,10 @@ class ResearchApplication:
                 step for step in self._load_task_plan().steps
                 if step.state_name == current_state and step.capability == current_manifest.capability
             ), None) if current_manifest is not None and "task_plan" in self.controller.manifest.state_refs else None
-            recoverable = current_manifest is not None and current_manifest.status in {"completed", "failed"} and (
+            recoverable = current_manifest is not None and current_manifest.status in {"completed", "failed", "blocked"} and (
                 current_manifest.status == "completed"
                 or current_manifest.capability in {"experiment", "analysis"}
+                or (current_manifest.capability == "implement" and current_manifest.status == "blocked")
             )
             running = [current_manifest] if (
                 (current_step is not None or planner_attempt)
@@ -3491,6 +3589,11 @@ class ResearchApplication:
             for ref in result.artifacts
         )
         if result.status not in {"completed", "partial"} and not measured_failure:
+            if attempt.capability == "implement":
+                state_name = attempt.trigger.removeprefix("application:")
+                if self._schedule_implementation_refinement(state_name, attempt.attempt_id, result):
+                    self._persist_application_views()
+                    return
             self.controller.pause(f"Recovered {attempt.capability} as {result.status!r}: {'; '.join(result.diagnostics)}")
             return
         state = _CAPABILITY_OUTPUTS.get(attempt.capability or "")
@@ -4286,7 +4389,7 @@ class ResearchApplication:
                     requested_baseline = requested.get("baseline")
                     if isinstance(prepared_baseline, Mapping) and isinstance(requested_baseline, Mapping):
                         baseline = {**prepared_baseline, **requested_baseline}
-                        baseline["cwd"] = prepared_baseline.get("cwd", baseline.get("cwd"))
+                        baseline["cwd"] = prepared_baseline.get("cwd") or prepared_execution["cwd"]
                         requested["baseline"] = baseline
                 config["execution"] = {**prepared_execution, **requested}
             else:
