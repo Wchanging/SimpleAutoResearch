@@ -67,6 +67,15 @@ _ACTION_RE = re.compile(
     r"supplement_candidate:\d+|reanalysis:\d+|prepare_candidate:\d+|"
     r"revise_candidate:\d+|research_candidate:\d+(?:_\d+)?|refine_implementation:\d+|prepare_implementation:\d+)$"
 )
+_PROCESS_CAPABILITIES = {"prepare_execution", "implement", "experiment"}
+_PROCESS_RESPONSIBILITIES = {
+    "prepare_execution": "Create the isolated workspace and record the copy/entry facts.",
+    "implement": "Locate, scope, patch, and validate the authorized code change; it does not choose the research protocol.",
+    "experiment": "Run one configured baseline or candidate measurement under the accepted protocol.",
+    "analysis": "Interpret completed measurements and report limitations; it does not launch an unplanned process.",
+    "summary": "Persist the requested evidence-backed source summary without creating measurements.",
+    "report": "Assemble the requested report from accepted evidence and measurements without creating new evidence.",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,12 +254,7 @@ def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
     """Return explicit offline defaults; these are a planning seed, not dispatch."""
 
     if request.task_kind == "bug_fix":
-        execution = request.execution or {}
-        steps: list[dict[str, Any]] = []
-        if not execution or _needs_preparation(execution):
-            steps.append(_row("prepare_execution"))
-        steps.append(_row("implement"))
-        return steps
+        return _bug_fix_steps(request.execution or {})
 
     if _provided_materials_only(request):
         # Supplied papers are an input boundary, not the output of a fake
@@ -294,6 +298,14 @@ def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:
         _row("report", condition=report_condition),
         _row("report_audit", condition=report_condition),
     ])
+    return steps
+
+
+def _bug_fix_steps(execution: Mapping[str, object]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    if not execution or _needs_preparation(execution):
+        steps.append(_row("prepare_execution"))
+    steps.append(_row("implement"))
     return steps
 
 
@@ -414,6 +426,59 @@ def _execution_steps(execution: Mapping[str, object]) -> list[dict[str, Any]]:
     return steps
 
 
+def _planning_boundary(request: TaskPlanRequest) -> dict[str, Any]:
+    """Describe the current process boundary for both prompting and validation.
+
+    The execution rows are derived from the existing protocol materializer.  A
+    pre-design research plan may see those rows as deferred, but it cannot
+    dispatch them until the design capability has accepted the protocol.
+    """
+
+    execution = request.execution if isinstance(request.execution, Mapping) else None
+    configured = bool(execution)
+    allowed_rows: list[dict[str, Any]] = []
+    deferred_rows: list[dict[str, Any]] = []
+    if request.task_kind == "bug_fix":
+        allowed_rows = _bug_fix_steps(execution or {})
+        checkpoint = "implementation"
+        unauthorized_reason = "Bug-fix routing authorizes only its preparation and implementation actions."
+    elif request.task_kind == "survey":
+        checkpoint = "evidence"
+        unauthorized_reason = "Survey routing does not authorize process actions."
+    elif not configured:
+        checkpoint = "evidence"
+        unauthorized_reason = "No execution boundary was supplied for this research task."
+    elif request.execution_protocol_accepted:
+        allowed_rows = _execution_steps(execution or {})
+        checkpoint = "execution"
+        unauthorized_reason = "The action is not part of the accepted execution protocol."
+    else:
+        deferred_rows = _execution_steps(execution or {})
+        checkpoint = "research_design"
+        unauthorized_reason = "The action is not part of the supplied execution boundary."
+
+    def process_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "action": row["action"],
+                "condition": row.get("condition", ""),
+                "capability": row["capability"],
+            }
+            for row in rows
+            if row.get("capability") in _PROCESS_CAPABILITIES
+        ]
+
+    return {
+        "protocol_accepted": bool(request.execution_protocol_accepted),
+        "execution_configured": configured,
+        "checkpoint": checkpoint,
+        "allowed_process_steps": process_rows(allowed_rows),
+        "deferred_process_steps": process_rows(deferred_rows),
+        "unauthorized_process_reason": unauthorized_reason,
+        "process_responsibilities": dict(_PROCESS_RESPONSIBILITIES),
+    }
+
+
 def insert_implementation_refinement(plan: TaskPlanResult, state_name: str, iteration: int) -> TaskPlanResult:
     """Insert recovery before the unfinished implementation, leaving measurements alone."""
     rows = [step.to_dict() for step in plan.steps]
@@ -484,27 +549,33 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
     actions = [step.action for step in steps]
     if any(action.startswith(("refine_implementation:", "prepare_implementation:")) for action in actions):
         raise ValueError("Implementation refinement requires recorded executor feedback; it cannot be preplanned.")
-    _validate_authorized_boundaries(request, steps)
+    errors = _validate_authorized_boundaries(request, steps)
     if request.task_kind == "bug_fix":
         if any(step.capability not in {"prepare_execution", "implement"} for step in steps) or "implement" not in actions:
-            raise ValueError("Bug-fix plans may contain only preparation and implementation.")
+            errors.append("Bug-fix plans may contain only preparation and implementation.")
         if any(action not in {"prepare_execution", "implement"} for action in actions):
-            raise ValueError("Bug-fix plans may use only the preparation and implementation actions.")
-        if "prepare_execution" in actions and actions.index("implement") < actions.index("prepare_execution"):
-            raise ValueError("Bug-fix implementation must follow preparation.")
+            errors.append("Bug-fix plans may use only the preparation and implementation actions.")
+        if (
+            "prepare_execution" in actions
+            and "implement" in actions
+            and actions.index("implement") < actions.index("prepare_execution")
+        ):
+            errors.append("Bug-fix implementation must follow preparation.")
+        if errors:
+            raise ValueError("\n".join(errors))
         return
     provided_only = "search" not in actions
     if provided_only and not request.config.get("research_local_documents"):
-        raise ValueError("Omitting search requires supplied local documents.")
+        errors.append("Omitting search requires supplied local documents.")
     required = {"document_ingest", "read", "synthesize"} if provided_only else {
         "search", "document_ingest", "read", "synthesize"
     }
     if not required <= set(actions):
         boundary = "provided-materials" if provided_only else "search-to-evidence"
-        raise ValueError(f"Research plans must preserve the {boundary} boundary.")
+        errors.append(f"Research plans must preserve the {boundary} boundary.")
     requested = {str(item).strip().lower() for item in request.requested_outputs}
     if (not requested or requested & {"summarize", "summary", "research_summary"}) and "summarize" not in actions:
-        raise ValueError("The requested research summary is missing from the accepted plan.")
+        errors.append("The requested research summary is missing from the accepted plan.")
     dependencies = {
         "document_ingest": () if provided_only else ("search",),
         "read": ("document_ingest",), "synthesize": ("read",),
@@ -516,7 +587,9 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
     for index, step in enumerate(steps):
         for dependency in dependencies.get(step.action, ()):
             if not any(_action_matches(item.action, dependency) for item in steps[:index]):
-                raise ValueError(f"Task plan action {step.action!r} is missing prerequisite {dependency!r}.")
+                errors.append(f"Task plan action {step.action!r} is missing prerequisite {dependency!r}.")
+    if errors:
+        raise ValueError("\n".join(errors))
     if requested & {"experiment", "experiments"} and not request.execution_protocol_accepted and "research_design" in actions:
         return
     if requested & {"experiment", "experiments"} and not ("experiment" in actions or any(action.startswith("matrix_candidate") for action in actions)):
@@ -535,25 +608,50 @@ def _provided_materials_only(request: TaskPlanRequest) -> bool:
 
 def _validate_authorized_boundaries(
     request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...],
-) -> None:
-    """Bind process actions to the configured protocol, not model discretion."""
-    process_capabilities = {"prepare_execution", "implement", "experiment"}
-    if request.task_kind == "survey" and any(step.capability in process_capabilities for step in steps):
-        raise ValueError("Process action exceeds the authorized protocol for a survey.")
+) -> list[str]:
+    """Return all boundary errors from one proposal; defaults are not authority."""
+    boundary = _planning_boundary(request)
     permitted = {
         row["action"]: row.get("condition", "")
-        for row in default_task_steps(request)
-        if row["capability"] in process_capabilities
+        for row in boundary["allowed_process_steps"]
     }
+    deferred = {
+        row["action"]: row.get("condition", "")
+        for row in boundary["deferred_process_steps"]
+    }
+    errors: list[str] = []
     for step in steps:
-        if step.capability in process_capabilities:
-            if step.action not in permitted or step.condition != permitted[step.action]:
-                raise ValueError(f"Process action exceeds the authorized protocol: {step.action}")
+        if step.capability in _PROCESS_CAPABILITIES:
+            if step.action not in permitted:
+                if step.action in deferred:
+                    category = "not_ready"
+                    reason = "The supplied execution boundary authorizes this process only after the research design protocol is accepted."
+                    expected = f"deferred condition={deferred[step.action] or 'none'}"
+                    unlock = "research_design must produce the accepted execution protocol"
+                else:
+                    category = "unauthorized"
+                    reason = boundary["unauthorized_process_reason"]
+                    expected = "an action from the current execution boundary"
+                    unlock = "provide an explicit supported execution boundary or use the task's existing non-process route"
+                errors.append(
+                    "Task-plan boundary error (authorized protocol): "
+                    f"action={step.action!r}; category={category}; reason={reason}; "
+                    f"expected={expected}; unlock={unlock}."
+                )
+            elif step.condition != permitted[step.action]:
+                errors.append(
+                    "Task-plan boundary error (authorized protocol): "
+                    f"action={step.action!r}; category=condition_mismatch; "
+                    "reason=the model cannot change the executor's protocol condition; "
+                    f"expected condition={permitted[step.action] or 'none'}; "
+                    f"received condition={step.condition or 'none'}."
+                )
         if _provided_materials_only(request) and step.action == "search":
-            raise ValueError("Provided-materials plans cannot authorize search.")
-        if step.capability not in process_capabilities and step.condition:
+            errors.append("Provided-materials plans cannot authorize search.")
+        if step.capability not in _PROCESS_CAPABILITIES and step.condition:
             if step.action not in {"report_write", "report", "report_audit"} or step.condition != "on_request:report":
-                raise ValueError(f"Unsupported delivery condition for {step.action}.")
+                errors.append(f"Unsupported delivery condition for {step.action}.")
+    return errors
 
 
 def _action_matches(action: str, expected: str) -> bool:
@@ -654,6 +752,7 @@ def _planning_output_tokens(config: Mapping[str, object]) -> int | None:
 
 
 def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str:
+    planning_boundary = _planning_boundary(request)
     boundary = {
         "task_kind": request.task_kind,
         "goal": request.goal,
@@ -672,6 +771,7 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
             "has_dataset": "dataset" in (request.execution or {}),
             "repair_limit": _repair_limit(request.execution or {}),
         },
+        "planning_boundary": planning_boundary,
         "material_boundary": {
             "provided_materials_only": _provided_materials_only(request),
             "search_allowed": not _provided_materials_only(request),
@@ -680,17 +780,23 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
                 if str(asset.get("role") or "").strip().lower() in {"paper", "document", "reference"}
             ),
         },
-        "default_steps": [
+        "suggested_steps": [
             {key: value for key, value in row.items() if key not in {"capability", "state_name"}}
             for row in defaults
         ],
     }
     return (
         "Interpret this task into one short sequential accepted plan. The returned JSON must have "
-        "a `steps` array. The defaults are a seed: choose the necessary sequential stages for "
-        "the task, assets, and constraints. Use only actions present in the seed or its explicit "
-        "bounded execution boundary. Return action, step_id, problem_solved, observation, and "
+        "a `steps` array. The suggested steps are context only, not authorization: choose the "
+        "necessary sequential stages for the task, assets, and constraints, and use only process "
+        "actions listed as allowed in `planning_boundary`. Deferred actions are not executable in "
+        "this proposal; stop at the named checkpoint and let the application resume after its "
+        "unlocking artifact exists. Return action, step_id, problem_solved, observation, and "
         "the supplied condition if any. Do not generate capability or state_name: the executor derives them. "
+        "The boundary is authoritative even when a suggested step or task wording seems to imply more. "
+        "`prepare_execution` creates an isolated workspace, `implement` only locates/patches/validates "
+        "authorized code, `experiment` measures a configured condition, `analysis` interprets completed "
+        "measurements, and none of these actions is a substitute for research design or report writing. "
         "For bug_fix, use only prepare_execution (when required) and implement; implementation "
         "already includes validation and the repair explanation, so do not append summary or report steps. "
         "Do not invent dynamic indices, repair rounds, capabilities, processes, or parallel work. "

@@ -243,6 +243,11 @@ canonical application 会继续执行 report_write → report → report_audit�
 之后执行有界的 `assess_ideas` capability；其 JSON/Markdown 产物记录证据引用是否可解析、相似工作风险、
 未知项和面向准备度的建议，不宣称新颖性，也不授予执行权限。
 
+初始 LLM task plan 接收一份与校验器共用的 planning boundary。默认步骤只帮助描述任务，不授予进程权限。
+在 `research_design` 接受执行协议之前，已配置的准备、改码、baseline、candidate 和 repair 动作会明确标为 deferred；
+survey 或没有执行配置的 research 路径则标为 unauthorized。设计完成后，只有现有执行步骤物化器及其条件能产生可执行
+进程动作。这样保留明确的设计检查点，不增加第二套生命周期或权限存储。
+
 应用只维护一份能力产物契约，供注册、正常执行与恢复复用。引用登记先解析全部声明产物再
 更新状态；baseline/candidate/repair 具体角色沿用 attempt trigger，不再维护第二套产物映射。
 

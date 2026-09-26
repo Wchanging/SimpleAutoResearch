@@ -6,6 +6,14 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-26
 
+- Task-plan validation now shares one planning-boundary view with the LLM
+  prompt. Suggested defaults are no longer treated as process authorization:
+  configured actions before an accepted research design are deferred, while
+  survey and unconfigured research process actions are rejected as
+  unauthorized. After design, the existing protocol step materializer remains
+  the source of executable actions and conditions, and one correction reports
+  all boundary errors from the proposal.
+
 - Research request construction now reuses the existing bare-Python argv policy
   without probing or launching an external interpreter. Environment version
   detection remains in explicit CodeTask initialization/probe boundaries; absolute

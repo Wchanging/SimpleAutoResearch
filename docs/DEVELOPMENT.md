@@ -304,6 +304,16 @@ synthesis. Its JSON and Markdown artifacts record evidence resolution,
 similarity risk, unknowns, and a readiness-oriented recommendation; they do
 not claim novelty or authorize execution.
 
+The initial LLM task plan receives a shared planning-boundary view. Suggested
+default rows help describe the task but do not grant process authority. Before
+`research_design` accepts an execution protocol, configured preparation,
+implementation, baseline, candidate, and repair actions are reported as
+deferred; survey and unconfigured research routes report them as unauthorized.
+After design, the accepted protocol's existing execution-step materializer is
+the sole source for executable process actions and their conditions. This
+keeps the design checkpoint explicit without adding a second lifecycle or
+permission store.
+
 The application maintains one capability-output contract table for registration,
 normal execution and recovery. A shared binding step resolves all declared
 references before updating state. Attempt triggers retain the exact baseline,

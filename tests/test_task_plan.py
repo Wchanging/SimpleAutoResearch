@@ -337,6 +337,76 @@ class TaskPlanTests(unittest.TestCase):
         self.assertLess(actions.index("synthesize"), actions.index("assess_ideas"))
         self.assertLess(actions.index("assess_ideas"), actions.index("research_design"))
 
+    def test_pre_design_process_proposals_report_all_deferred_boundary_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            execution = {
+                "pairs": [{
+                    "seed": 0,
+                    "baseline_command": [sys.executable, "-c", "print('baseline')"],
+                    "candidate_command": [sys.executable, "-c", "print('candidate')"],
+                }],
+                "cwd": tmp,
+                "timeout_sec": 5,
+                "code_task": {"code_root": tmp},
+            }
+            request = TaskPlanRequest(
+                task_kind="research",
+                goal="Compare the supplied fixture.",
+                request_text="Compare the supplied fixture.",
+                requested_outputs=("experiments",),
+                config={
+                    "research_materials_only": True,
+                    "research_local_documents": ["fixture.md"],
+                },
+                execution=execution,
+            )
+
+            class Client:
+                model = "fixture-boundary-planner"
+
+                def __init__(self):
+                    self.calls = 0
+                    self.prompts = []
+
+                def ask_json(self, _system, prompt, **_kwargs):
+                    self.calls += 1
+                    self.prompts.append(prompt)
+                    if self.calls == 1:
+                        return {"steps": [
+                            {"action": "document_ingest"},
+                            {"action": "read"},
+                            {"action": "synthesize"},
+                            {"action": "assess_ideas"},
+                            {"action": "research_design"},
+                            {"action": "prepare_execution"},
+                            {"action": "implement"},
+                            {"action": "summarize"},
+                        ]}
+                    return {"steps": [
+                        {"action": "document_ingest"},
+                        {"action": "read"},
+                        {"action": "synthesize"},
+                        {"action": "assess_ideas"},
+                        {"action": "research_design"},
+                    ]}
+
+            client = Client()
+            trace = []
+            result = build_task_plan(
+                replace(request, use_llm=True, llm_client=client), trace=trace,
+            )
+
+            self.assertEqual(client.calls, 2)
+            self.assertEqual([step.action for step in result.steps][-1], "research_design")
+            self.assertIn("category=not_ready", trace[0]["validation_error"])
+            self.assertIn("action='prepare_execution'", trace[0]["validation_error"])
+            self.assertIn("action='implement'", trace[0]["validation_error"])
+            self.assertIn("research_design must produce the accepted execution protocol", trace[0]["validation_error"])
+            self.assertIn('"protocol_accepted": false', client.prompts[0])
+            self.assertIn('"deferred_process_steps"', client.prompts[0])
+            self.assertIn('"suggested_steps"', client.prompts[0])
+            self.assertNotIn('"default_steps"', client.prompts[0])
+
     def test_bug_plan_correction_is_bounded_and_records_rejected_proposals(self) -> None:
         request = TaskPlanRequest(task_kind="bug_fix", goal="Fix totals", request_text="Fix totals")
         class Client:
@@ -369,6 +439,27 @@ class TaskPlanTests(unittest.TestCase):
             saved = json.loads((Path(tmp) / "task_plan_proposals.json").read_text())
             self.assertEqual(len(saved["proposals"]), 2)
             self.assertFalse((Path(tmp) / "task_plan.json").exists())
+
+    def test_bug_plan_missing_implementation_keeps_complete_correction_feedback(self) -> None:
+        request = TaskPlanRequest(task_kind="bug_fix", goal="Fix totals", request_text="Fix totals")
+
+        class Client:
+            calls = 0
+
+            def ask_json(self, *_args, **_kwargs):
+                self.calls += 1
+                return {"steps": [{"action": "prepare_execution"}]}
+
+        client = Client()
+        trace = []
+        with self.assertRaisesRegex(ValueError, "after one correction") as raised:
+            build_task_plan(
+                replace(request, use_llm=True, llm_client=client), trace=trace,
+            )
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(len(trace), 2)
+        self.assertIn("Bug-fix plans may contain only preparation and implementation", trace[0]["validation_error"])
+        self.assertNotIn("not in list", str(raised.exception))
 
     def test_bug_application_uses_code_task_without_literature_or_experiment(self) -> None:
         from tests.test_code_task import _FakeCodeTaskClient

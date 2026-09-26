@@ -112,6 +112,11 @@ class CodeTaskTests(unittest.TestCase):
     def test_application_prepares_source_project_and_resumes_without_reinitializing(self):
         self._exercise_application_code_change(repair_failure=False, prepare_source=True)
 
+    def test_application_accepts_code_task_protocol_before_preparation_and_reload(self):
+        self._exercise_application_code_change(
+            repair_failure=False, prepare_source=True, protocol_gate=True,
+        )
+
     def test_application_implements_once_after_all_paired_baselines(self):
         self._exercise_application_code_change(repair_failure=False, prepare_source=True, paired=True)
 
@@ -127,7 +132,7 @@ class CodeTaskTests(unittest.TestCase):
     def test_paired_repair_limit_keeps_failure_and_missing_seed(self):
         self._exercise_application_code_change(repair_failure=True, repair_succeeds=False, prepare_source=True, paired=True)
 
-    def _exercise_application_code_change(self, *, repair_failure, repair_succeeds=True, prepare_source=False, paired=False, baseline_failure=False, late_failure=False):
+    def _exercise_application_code_change(self, *, repair_failure, repair_succeeds=True, prepare_source=False, paired=False, baseline_failure=False, late_failure=False, protocol_gate=False):
         from dataclasses import replace
         from simple_ar.app.research_application import ResearchApplicationServices, create_session, load_session
         from simple_ar.research.workflow_contracts import ResearchBrief
@@ -154,6 +159,7 @@ class CodeTaskTests(unittest.TestCase):
                 request_text="Compare a keyword classifier improvement.", requested_outputs=("experiments",),
                 asset_requests=({"locator": str(paper), "role": "paper"},),
             ), root=root / "session", services=ResearchApplicationServices(max_results=1, max_attempts=24 if paired else 16, config={
+                **({"interaction": "assisted"} if protocol_gate else {}),
                 "execution": {"command": command, "baseline": {"command": command},
                               **({"pairs": [{"seed": seed, "baseline_command": command + [str(seed)],
                                                "candidate_command": command + [str(seed)]} for seed in (0, 1)]} if paired else {}),
@@ -171,7 +177,15 @@ class CodeTaskTests(unittest.TestCase):
                               "process_invocations": (5 + int(late_failure) if repair_failure else 4) if paired else 3 if repair_failure else 2,
                               "process_wall_seconds": 30 if paired else 15}))
             if prepare_source:
-                app.advance(max_actions=8)
+                app.advance(max_actions=20 if protocol_gate else 8)
+                if protocol_gate:
+                    pending = app.view()
+                    self.assertEqual(pending.status, "paused", pending.status_reason)
+                    gate = pending.work_plan["interaction"]["decision"]
+                    self.assertEqual(gate["stage"], "execution_protocol")
+                    self.assertFalse((project / "evaluation_count.txt").exists())
+                    app.continue_session(decision_id=gate["id"], decision_response="accept")
+                    app = load_session(root / "session")
                 self.assertEqual(app.view().next_action, "prepare_execution")
                 with patch.object(app, "_persist_application_views", side_effect=RuntimeError("interrupted preparation")):
                     with self.assertRaisesRegex(RuntimeError, "interrupted preparation"):
