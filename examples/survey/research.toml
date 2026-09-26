@@ -2,7 +2,7 @@
 [task]
 goal = "Survey small-memory continual learning for image classification, compare feasible methods and explain open questions with evidence."
 outputs = ["report"]
-output_root = "../../runs/research-session"
+output_root = "../../runs/survey"
 
 [model]
 name = "env" # Use SIMPLE_AR_MODEL from .env; or supply a model name.
@@ -12,3 +12,18 @@ max_output_tokens = 8192
 # Optional API caps; omitted means unlimited, not zero.
 # total_tokens = 2000000
 # llm_requests = 120
+process_invocations = 0
+process_wall_seconds = 0
+
+[research]
+providers = ["openalex", "semantic_scholar", "arxiv"]
+max_results = 12
+max_chunks = 64
+use_fulltext = false
+allow_pdf_download = false
+interaction = "autonomous"
+
+[report]
+template = "survey"
+reviewer = "llm"
+max_review_iterations = 1

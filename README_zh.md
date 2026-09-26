@@ -1,4 +1,4 @@
-# SimpleAutoResearch
+﻿# SimpleAutoResearch
 
 [English version](README.md)
 
@@ -62,7 +62,7 @@ Rich 展示决策理由和科研轮次。已有真实研究循环诊断证据；
 - **面向贡献者的能力边界**：新的模块可以使用轻量的
   `ArtifactStore`、`CapabilityResult` 和有界 attempt API，内部保持模块化，但正式研究流程
   统一由 `research-session` 编排。旧八阶段和 code-task 入口只在迁移完成前作为兼容/开发面
-  存在。离线参考实现位于 `examples/capability_package_minimal/`。
+  存在。离线参考实现位于 `tests/fixtures/capability_package_minimal/`。
 - **成熟库基础设施**：pipeline/code-task TOML 配置通过 Pydantic 校验，LLM 调用默认使用 OpenAI Python SDK，并保留 LiteLLM 兼容层；OpenAlex 访问通过 pyalex，终端进度输出开始走 Rich，为后续更清晰的 human-in-the-loop 审核打基础。
 
 ## 安装与配置
@@ -128,14 +128,14 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 
 ### 1. V2.8 canonical research-session 主线
 
-配置文件入口：`simple-ar research-session --config examples/research_config/minimal.toml`。
+配置文件入口：`simple-ar research-session --config examples/survey/research.toml`。
 轻量模板和完整参考共用一套格式，说明见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
 
 当前主线是 `research-session`：同一有界 application 执行任务实际需要且输入允许的 accepted plan；
 文献、实验、分析和报告不是每个任务都必须经过的固定阶段。先运行适合笔记本的完整 fixture：
 
 ```bash
-uv run python examples/research_session_smoke.py
+uv run python scripts/research_session_smoke.py
 ```
 
 真实网络 + LLM 的低预算命令见 `examples/README.md`。它要求可用的 OpenAI 兼容模型/网关，

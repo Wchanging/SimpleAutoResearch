@@ -43,7 +43,7 @@ turning the existing pipeline into an unrestricted task graph.
 
 This boundary is additive: it does not migrate the eight stages automatically
 or change the artifact paths expected by existing commands and adapters. The
-offline reference package in `examples/capability_package_minimal/` shows the
+offline reference package in `tests/fixtures/capability_package_minimal/` shows the
 smallest supported handoff; domain-specific schemas belong to the capability,
 not to the shared core.
 
@@ -114,7 +114,7 @@ For a reproducible local run, provide one or more Markdown/text documents:
 
 ```bash
 uv run simple-ar research-brief --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --local-document tests/fixtures/research/reliable_agents.md \
   --output-root runs/research-brief
 ```
 
@@ -166,7 +166,7 @@ design without rebuilding them:
 ```bash
 uv run simple-ar research-session-continue \
   --session-root runs/research-session/<session> \
-  --cwd examples/research_brief/fixtures \
+  --cwd tests/fixtures/research \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
   --command python -c "print('accuracy: 0.90')"
@@ -377,7 +377,7 @@ Key boundaries:
 
 Bundled examples:
 
-- `examples/research_session_smoke.py`: canonical research workflow smoke;
+- `scripts/research_session_smoke.py`: canonical research workflow smoke;
   literature-only reports use the same application, not an old pipeline config.
 - `examples/code_task_medium_review/`: standalone code-task workflow over a
   multi-module review classifier with a `main.py` entrypoint, JSON config,
@@ -412,7 +412,7 @@ plan -> search -> document ingest -> read -> synthesize -> design
   evidence. Mechanical audit success is not proof of publication quality or
   semantic correctness.
 - Resuming report work must not rerun experiments that have completed. See the
-  session commands above and `examples/research_session_smoke.py` for the entry
+  session commands above and `scripts/research_session_smoke.py` for the entry
   point; the offline smoke is a fixture, not real scientific validation.
 
 ## Historical Eight-Stage Artifacts

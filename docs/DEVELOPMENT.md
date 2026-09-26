@@ -589,7 +589,7 @@ is not an implicit scheduler. Callers still provide capability inputs and may
 choose a permitted backtrack explicitly.
 
 The smallest end-to-end reference is
-`examples/capability_package_minimal/`. Run `uv run simple-ar-checks core` to
+`tests/fixtures/capability_package_minimal/`. Run `uv run simple-ar-checks core` to
 verify the boundary offline. New capability work should begin from this
 contract and keep domain-specific request/result schemas outside the core.
 

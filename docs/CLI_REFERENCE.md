@@ -49,7 +49,7 @@ Markdown/text documents.
 ```bash
 uv run simple-ar research-brief \
   --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --local-document tests/fixtures/research/reliable_agents.md \
   --output-root runs/research-brief
 ```
 
@@ -67,7 +67,7 @@ explicitly:
 ```bash
 uv run simple-ar research-brief \
   --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --local-document tests/fixtures/research/reliable_agents.md \
   --model "$SIMPLE_AR_MODEL"
 ```
 
@@ -87,7 +87,7 @@ Invalid LLM task plans get at most one correction attempt, never a silent fixed-
 Returned proposals and validation errors are saved in `attempts/plan-*/task_plan_proposals.json`;
 if no valid plan is produced, the session pauses without executing downstream actions.
 
-Use `simple-ar research-session --config examples/research_config/minimal.toml`
+Use `simple-ar research-session --config examples/survey/research.toml`
 for a file-based start. The [configuration reference](CONFIG_REFERENCE.md) describes
 the minimal and advanced templates, which share the same parser and defaults.
 Explicit CLI options override the file. `--outputs` selects `summary`, `report`,
@@ -198,8 +198,8 @@ prefix without rerunning its research evidence or experiment. Use
 ```bash
 uv run simple-ar research-session \
   --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
-  --cwd examples/research_brief/fixtures \
+  --local-document tests/fixtures/research/reliable_agents.md \
+  --cwd tests/fixtures/research \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
   --command python -c "print('accuracy: 0.75')"
@@ -211,7 +211,7 @@ omit `--command` and provide a Code-Task TOML plus a model:
 ```bash
 uv run simple-ar research-session \
   --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --local-document tests/fixtures/research/reliable_agents.md \
   --code-task-config examples/code_task_medium_review/configs/code_task.toml \
   --model "$SIMPLE_AR_MODEL" \
   --output-root runs/research-session
@@ -289,7 +289,7 @@ not an executable continuation of the old stage plan.
 ```bash
 uv run simple-ar research-session-continue \
   --session-root runs/research-session/<session> \
-  --cwd examples/research_brief/fixtures \
+  --cwd tests/fixtures/research \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
   --command python -c "print('accuracy: 0.90')"

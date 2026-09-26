@@ -99,7 +99,7 @@ the core stages; see [development targets and handoffs](docs/DEVELOPMENT.md#v29-
   research flow stays orchestrated by `research-session`. The old eight-stage
   and segmented code-task surfaces remain only for compatibility or development
   until migration is complete. The offline reference is in
-  `examples/capability_package_minimal/`.
+  `tests/fixtures/capability_package_minimal/`.
 - **Mature library foundation**: pipeline/code-task TOML configs are validated
   through Pydantic, LLM calls use the OpenAI Python SDK by default with a
   LiteLLM compatibility option, OpenAlex access goes through pyalex, and
@@ -192,8 +192,8 @@ settings, not a hard-coded provider integration.
 
 ### 1. V2.8 canonical research session
 
-For file-based use, start with `simple-ar research-session --config examples/research_config/minimal.toml`.
-See the [configuration reference](docs/CONFIG_REFERENCE.md) for the shared minimal/advanced format.
+For file-based use, start with `simple-ar research-session --config examples/survey/research.toml`.
+See the [configuration reference](docs/CONFIG_REFERENCE.md) for additional options.
 
 The mainline is `research-session`: one bounded application follows the accepted
 plan for the task and available assets. Search, document evidence, execution,
@@ -202,7 +202,7 @@ call for them. Start with the
 laptop-safe complete fixture:
 
 ```bash
-uv run python examples/research_session_smoke.py
+uv run python scripts/research_session_smoke.py
 ```
 
 For the real network + LLM path, use the bounded command in

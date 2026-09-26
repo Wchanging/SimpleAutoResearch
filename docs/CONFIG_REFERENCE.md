@@ -12,9 +12,9 @@ cannot override measured facts. Saved session templates are preserved on resume.
 Use the existing report configuration revision to opt an old session into `auto`.
 Automatic structure selection does not certify the scientific judgment or prose.
 
-Run `simple-ar research-session --config examples/research_config/minimal.toml`.
-The [minimal](../examples/research_config/minimal.toml) and
-[advanced](../examples/research_config/advanced.toml) examples share one format and defaults.
+Run `simple-ar research-session --config examples/survey/research.toml`.
+The [survey case](../examples/survey/README.md) is a complete literature task.
+Additional configuration options are documented below, not separate user workflows.
 Precedence is built-in defaults, TOML, then explicit CLI options. CLI lists replace file lists.
 File-relative paths resolve from the TOML directory; command argv remains literal.
 

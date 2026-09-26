@@ -47,7 +47,7 @@ def main() -> int:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
-    fixture = repo_root / "examples" / "research_brief" / "fixtures" / "reliable_agents.md"
+    fixture = repo_root / "tests" / "fixtures" / "research" / "reliable_agents.md"
     topic = "reliable agents"
     execution = {
         "command": [sys.executable, "-c", "print('accuracy: 0.75')"],

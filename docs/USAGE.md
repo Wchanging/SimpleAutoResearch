@@ -133,7 +133,7 @@ budget is created in this form.
 For a laptop-safe offline complete smoke:
 
 ```bash
-uv run python examples/research_session_smoke.py
+uv run python scripts/research_session_smoke.py
 ```
 
 See `examples/README.md` for the bounded network, LLM, and prepared-project path. On failure,
@@ -221,9 +221,8 @@ uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
 uv run simple-ar tools serve-mcp runs/<run-id>
 ```
 
-The canonical Codex/MCP integration example lives in
-`examples/tool_mcp_codex_agent/`. It uses `[implementation].provider = "codex"`
-and leaves `[implementation].agent_model = ""` by default so Codex CLI can use
+For a Codex/MCP integration, configure `[implementation].provider = "codex"`
+and leave `[implementation].agent_model = ""` by default so Codex CLI can use
 the model configured for your account. Set `agent_model` only when you have
 confirmed the model name is supported by that CLI/account.
 
@@ -283,21 +282,6 @@ In this mode, `execute` uses the shared code-task memory, reviewer,
 validation, runner, and repair artifacts, but the implementation step generates
 `code_task/workspace/generated_project/` instead of applying a patch to copied
 source files.
-
-For a larger server-oriented acceptance task, use the standalone greenfield ML
-suite:
-
-```bash
-uv run simple-ar code-task init --config examples/code_task_greenfield_ml_suite/configs/code_task.toml
-uv run simple-ar code-task execute runs/code-task-greenfield-ml-suite/<run-id> --config examples/code_task_greenfield_ml_suite/configs/code_task.toml --yes
-```
-
-This example is intentionally heavier than the laptop smoke tests. It asks for
-a modular ML workbench with packaged/local open datasets when available,
-synthetic fallback only when necessary, multiple model families, ablations,
-resource-aware execution, and parseable metrics. Edit `[implementation]` in the
-config when you want to test a Codex/Claude/OpenCode handoff instead of the
-local LLM path.
 
 Before planning the greenfield implementation, execute writes
 `code_task/meta/dependency_advice.json` and `.md`. It scans the active Python

@@ -1,10 +1,9 @@
-# 配置参考
+﻿# 配置参考
 
 [English version](CONFIG_REFERENCE.md)
 
-研究任务使用 `simple-ar research-session --config PATH`。先复制
-[轻量模板](../examples/research_config/minimal.toml)，需要更多控制时参考
-[完整示例](../examples/research_config/advanced.toml)。两者是同一格式、同一默认值，不是两套运行模式。
+研究任务使用 `simple-ar research-session --config PATH`。可直接从
+[综述案例](../examples/survey/README.md)开始；更多配置项在下文说明，不再作为额外案例混放。
 CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 旧八阶段外层配置解析器及别名转换已经退出，历史快照仍可读取，但不是可执行工作流。
 

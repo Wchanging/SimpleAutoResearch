@@ -1,7 +1,7 @@
 # Bounded local project generation, not a full research/report workflow.
 [code_task]
 kind = "greenfield"
-task_file = "examples/greenfield_lightweight_training/task.md"
+task_file = "tests/fixtures/greenfield_lightweight_training/task.md"
 output_root = "runs"
 name = "greenfield-lightweight-training"
 

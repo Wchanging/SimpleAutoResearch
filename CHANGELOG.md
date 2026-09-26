@@ -6,6 +6,10 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-26
 
+- Reduce public examples to four self-contained cases: survey, continual learning,
+  digits coding and multi-file review coding. Move required regression assets to
+  tests/fixtures and the offline session smoke to scripts; remove unused historical
+  GPU/greenfield/MCP demos and update current documentation and test references.
 - Design clarification can inspect indexed workspace source through the same bounded
   read-only lookup as CodeTask, with an attempt-local trace retained on provider failure.
   It receives existing reading/synthesis evidence, distinguishes experimental choices

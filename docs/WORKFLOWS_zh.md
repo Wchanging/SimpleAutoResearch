@@ -34,7 +34,7 @@ simple-ar status RUN_DIR -> 只读展示存档
 任务图。
 
 这层边界是增量式的：它不会自动迁移八个阶段，也不会改变现有命令和 adapter 依赖
-的产物路径。`examples/capability_package_minimal/` 提供最小离线 handoff 示例；
+的产物路径。`tests/fixtures/capability_package_minimal/` 提供最小离线 handoff 示例；
 具体领域的 schema 应属于对应 capability，不应继续堆进共享 core。
 
 session 还可以选择一个可选的 lifecycle profile，限制本次 session 可以执行的
@@ -93,7 +93,7 @@ uv run simple-ar research-brief --topic "reliable agents"
 
 ```bash
 uv run simple-ar research-brief --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --local-document tests/fixtures/research/reliable_agents.md \
   --output-root runs/research-brief
 ```
 
@@ -134,7 +134,7 @@ research-only 报告路径。这是明确支持的无实验形态，不会隐式
 ```bash
 uv run simple-ar research-session-continue \
   --session-root runs/research-session/<session> \
-  --cwd examples/research_brief/fixtures \
+  --cwd tests/fixtures/research \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
   --command python -c "print('accuracy: 0.90')"
@@ -284,7 +284,7 @@ init workspace -> index code -> map repo -> probe environment
 
 内置示例：
 
-- `examples/research_session_smoke.py`：正式研究应用 smoke；纯文献报告也使用同一应用，不再提供旧 pipeline 配置。
+- `scripts/research_session_smoke.py`：正式研究应用 smoke；纯文献报告也使用同一应用，不再提供旧 pipeline 配置。
 - `examples/code_task_medium_review/`：standalone code-task 流程，目标是一个多模块 review classifier，入口是 `main.py`，使用 JSON config，运行时有进度输出，任务自然涉及 feature extraction、model scoring 和配置文件之间的联动。
 - `examples/code_task_digits_mlp/`：独立 CodeTask 的轻量 NumPy MLP benchmark，适合无 GPU 的真实 CPU 测量。
 
@@ -305,7 +305,7 @@ plan -> search -> document ingest -> read -> synthesize -> design
 - 实现产出冻结的 patch、validation、review 和计划证据；通过这些检查不等于科学上有提升。
 - 实验结果和对照保留执行来源。失败进程不构成有效测量，合法负结果也不意味着应无限修复。
 - 报告使用已记录的文献、实现和实验证据。机械审计通过不等于论文达到发表质量或语义已经正确。
-- 恢复报告不能重跑已完成实验。入口参见上方会话命令与 `examples/research_session_smoke.py`；
+- 恢复报告不能重跑已完成实验。入口参见上方会话命令与 `scripts/research_session_smoke.py`；
   离线 smoke 使用 fixture，不是真实科研验收。
 
 ## 历史八阶段产物

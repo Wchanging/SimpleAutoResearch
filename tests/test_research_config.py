@@ -440,8 +440,10 @@ class ResearchConfigTests(unittest.TestCase):
         self.assertEqual(ResearchApplicationServices().budget_limits,
                          {"total_tokens": None, "llm_requests": None})
         root = Path(__file__).resolve().parents[1]
-        for name in ("minimal", "advanced"):
-            argv = ["research-session", "--config", str(root / "examples/research_config" / f"{name}.toml")]
+        for name, path in (("survey", "examples/survey/research.toml"),
+                           ("advanced", "tests/fixtures/research_config/advanced.toml"),
+                           ("continual", "examples/continual_learning/research.toml")):
+            argv = ["research-session", "--config", str(root / path)]
             args = build_parser(research_defaults=research_defaults(argv)).parse_args(argv)
             self.assertTrue(args.topic)
             self.assertEqual(args.max_output_tokens, 8192)

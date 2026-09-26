@@ -410,7 +410,7 @@ attempt 可以继承 session 的 profile，也可以省略 profile；但不能�
 内置 profile 的有序 `capabilities` 元组只作为范围和文档参考，不是隐式执行计划。
 调用方仍需提供 capability 输入，并在需要时选择白名单内的回退路径。
 
-最小的端到端参考实现位于 `examples/capability_package_minimal/`。可以运行
+最小的端到端参考实现位于 `tests/fixtures/capability_package_minimal/`。可以运行
 `uv run simple-ar-checks core` 做离线验收。新的能力开发应先遵循这组边界，
 具体的 request/result schema 放在对应领域模块中，不要继续膨胀 core。
 

@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("cifar_protocol", Path(__file__).resolve().parents[1]
-    / "examples/cifar10_calibration/protocol.py")
+    / "tests/fixtures/cifar10_calibration/protocol.py")
 protocol = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(protocol)
 

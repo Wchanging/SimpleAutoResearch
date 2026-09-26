@@ -1,4 +1,4 @@
-# 使用与配置
+﻿# 使用与配置
 
 [English version](USAGE.md)
 
@@ -101,7 +101,7 @@ V2.8 的正式用户入口是 `research-session`。它在同一个 session 中�
 适合笔记本的离线完整 smoke：
 
 ```bash
-uv run python examples/research_session_smoke.py
+uv run python scripts/research_session_smoke.py
 ```
 
 真实网络、LLM 和准备好的代码项目的低资源示例见 `examples/README.md`。遇到失败时，保留
@@ -180,7 +180,7 @@ uv run simple-ar tools call runs/<run-id> list_experiment_artifacts
 uv run simple-ar tools serve-mcp runs/<run-id>
 ```
 
-标准的 Codex/MCP 集成示例位于 `examples/tool_mcp_codex_agent/`。它使用
+配置 Codex/MCP 集成时，使用
 `[implementation].provider = "codex"`，并默认保持 `[implementation].agent_model = ""`，
 让 Codex CLI 使用当前账号配置的默认模型。只有确认 CLI/账号支持某个模型名时，
 再显式填写 `agent_model`。
@@ -222,15 +222,6 @@ uv run simple-ar code-task execute runs/<run-id> --to-step run
 ```
 
 这种模式会复用 code-task 的 memory、reviewer、validation、runner 和 repair 产物，只是实现步骤不再应用 patch，而是在隔离 workspace 内生成 `generated_project/`。
-
-如果要做更大的服务器端验收任务，可以使用 standalone greenfield ML suite：
-
-```bash
-uv run simple-ar code-task init --config examples/code_task_greenfield_ml_suite/configs/code_task.toml
-uv run simple-ar code-task execute runs/code-task-greenfield-ml-suite/<run-id> --config examples/code_task_greenfield_ml_suite/configs/code_task.toml --yes
-```
-
-这个示例比本地 smoke test 更重，目标是生成一个模块化 ML workbench：优先使用本地可用的开源/打包数据集，必要时才退回 deterministic synthetic fallback，并包含多种模型/基线、ablation、资源自适应执行和可解析指标。如果要测试 Codex / Claude / OpenCode handoff，修改配置中的 `[implementation]` 即可。
 
 在规划 greenfield 实现前，`execute` 会写出 `code_task/meta/dependency_advice.json`
 和 `.md`。它会扫描当前 Python 环境，把完整 installed-package snapshot 写入 JSON，

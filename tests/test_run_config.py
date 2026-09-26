@@ -58,7 +58,8 @@ class RunConfigTests(unittest.TestCase):
             ("greenfield_lightweight_training", "empty", "none"),
         ):
             with self.subTest(example=name):
-                config = repo / "examples" / name / "configs" / "code_task.toml"
+                base = "examples" if name == "code_task_digits_mlp" else "tests/fixtures"
+                config = repo / base / name / "configs" / "code_task.toml"
                 init = load_code_task_init_options(config_path=str(config))
                 execute = load_code_task_execute_options(config_path=str(config))
                 self.assertEqual(init.workspace_mode, mode)
@@ -138,7 +139,7 @@ agent_timeout_sec = 123
                 r"""
 [code_task]
 kind = "greenfield"
-task_file = 'examples\code_task_greenfield_ml_suite\task.md'
+task_file = 'tests\fixtures\greenfield_lightweight_training\task.md'
 output_root = 'runs\code-task-greenfield-ml-suite'
 
 [environment]
@@ -149,7 +150,7 @@ python = '.venv\bin\python'
 
             options = load_code_task_init_options(config_path=str(config))
 
-            self.assertEqual(options.task_file, "examples/code_task_greenfield_ml_suite/task.md")
+            self.assertEqual(options.task_file, "tests/fixtures/greenfield_lightweight_training/task.md")
             self.assertEqual(options.output_root, "runs/code-task-greenfield-ml-suite")
             self.assertEqual(options.python_executable, ".venv/bin/python")
 

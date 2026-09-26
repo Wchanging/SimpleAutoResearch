@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from examples.capability_package_minimal import register
+from tests.fixtures.capability_package_minimal import register
 from simple_ar.core import ArtifactStore, CapabilityRegistry, SessionController
 
 

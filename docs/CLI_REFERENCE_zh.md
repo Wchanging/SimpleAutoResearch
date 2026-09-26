@@ -1,4 +1,4 @@
-# CLI 参考
+﻿# CLI 参考
 
 [English version](CLI_REFERENCE.md)
 
@@ -44,7 +44,7 @@ session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使
 ```bash
 uv run simple-ar research-brief \
   --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --local-document tests/fixtures/research/reliable_agents.md \
   --output-root runs/research-brief
 ```
 
@@ -59,7 +59,7 @@ uv run simple-ar research-brief \
 ```bash
 uv run simple-ar research-brief \
   --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --local-document tests/fixtures/research/reliable_agents.md \
   --model "$SIMPLE_AR_MODEL"
 ```
 
@@ -140,7 +140,7 @@ simple-ar research-session --config research.toml --session-root runs/research-s
 
 结束时的产物表按 accepted plan 展示最新实现、候选测量和分析；早期修订引用仍单独保留，便于追溯候选 lineage。
 
-可使用 `simple-ar research-session --config examples/research_config/minimal.toml`。
+可使用 `simple-ar research-session --config examples/survey/research.toml`。
 显式 CLI 覆盖文件值；`--outputs summary report experiments` 按需选择交付。
 预算覆盖项为 `--total-tokens`、`--llm-requests`、`--max-output-tokens`、
 `--process-invocations`、`--process-wall-seconds`。见[配置参考](CONFIG_REFERENCE_zh.md)。
@@ -158,8 +158,8 @@ session 保持 literature-only，不会创建执行请求或启动进程。
 ```bash
 uv run simple-ar research-session \
   --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
-  --cwd examples/research_brief/fixtures \
+  --local-document tests/fixtures/research/reliable_agents.md \
+  --cwd tests/fixtures/research \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
   --command python -c "print('accuracy: 0.75')"
@@ -171,7 +171,7 @@ uv run simple-ar research-session \
 ```bash
 uv run simple-ar research-session \
   --topic "reliable agents" \
-  --local-document examples/research_brief/fixtures/reliable_agents.md \
+  --local-document tests/fixtures/research/reliable_agents.md \
   --code-task-config examples/code_task_medium_review/configs/code_task.toml \
   --model "$SIMPLE_AR_MODEL" \
   --output-root runs/research-session
@@ -232,7 +232,7 @@ status 行为。
 ```bash
 uv run simple-ar research-session-continue \
   --session-root runs/research-session/<session> \
-  --cwd examples/research_brief/fixtures \
+  --cwd tests/fixtures/research \
   --primary-metric accuracy \
   --metric-direction accuracy=higher \
   --command python -c "print('accuracy: 0.90')"
