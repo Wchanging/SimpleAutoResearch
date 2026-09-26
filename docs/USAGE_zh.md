@@ -82,17 +82,140 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 默认是每次 provider 尝试 180 秒；慢速服务商可以设置更大的正数，只有明确设为 `0` / `off` / `none` / `unlimited` 才不向 provider 传客户端超时。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传输出上限。只有你确实想限制模型输出长度时才设置正数。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时、5xx 响应和 Cloudflare 524 origin timeout。
-- 在线 pipeline 阶段在这些重试耗尽后默认失败，并保留可恢复状态。只有明确设置
-  `[llm].allow_fallback = true` 才会写入 deterministic fallback；`--no-llm` 仍然是清晰的离线路径。
+- 在线研究调用在有界 provider 重试耗尽后停止并保留失败 attempt。研究 TOML 没有
+  `[llm].allow_fallback` 开关；要离线运行请设置 `[model].name = ""`，不能把确定性输出描述成
+  模型生成的分析。`--no-llm` 只属于 CodeTask 原语命令，不是 research-session 参数。
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `off` 表示只靠 prompt 和本地解析，兼容性最好；`auto` 会尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；`json_object` 表示强制发送。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
 
-## V2.8 Research Session：从主题到报告
+## 选择任务与最小输入
 
-V2.8 的正式用户入口是 `research-session`。它在同一个 session 中按固定顺序执行
-`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment
--> analysis`，在模型可用且未关闭报告时继续完成 `report -> report_audit`。实验命令、baseline、
-数据集、代码范围和资源限制仍由用户或配置明确提供；它是有界闭环，不是无限自主研究循环。
+`research-session` 接收目标、已有材料和明确的执行条件，再由 accepted plan
+选择适用能力；用户不需要填写内部阶段顺序。当前支持的任务形态如下：
+
+| 需求 | 最小配置与命令 | 不会假定什么 |
+| --- | --- | --- |
+| 在线综述 | `[task] outputs=["report"]`、`[research] providers=[...]`；`research-session --config survey.toml` | 不启动实验进程或代码项目 |
+| 分析已有论文/笔记 | 增加 `[research] materials_only=true` 与 `[assets].papers=[...]` | 不执行网络检索或伪造检索结果 |
+| 修复已有项目 | `[task] kind="bug_fix"` 加 `[execution] code_task_config="code_task.toml"`；运行研究配置 | 不自动引入文献或 baseline |
+| 复现/测量已有脚本 | `[execution] command=["python","measure.py"]`、`cwd`、指标与有限进程预算 | 不自动发现仓库或扩展种子 |
+| 改进已有研究项目 | `[task] kind="auto"` 配 `execution.code_task_config`、保护资产、benchmark 和 protocol；参见[持续学习案例](../examples/continual_learning/README.md) | 不安装依赖、下载数据或宣称科研成功 |
+| 独立代码任务 | `simple-ar code-task init --config code_task.toml`，再执行 `code-task execute` | 不进入研究报告生命周期 |
+
+下面是四个彼此独立、可以直接保存的完整研究 TOML 文件；不要把它们的分区拼接到同一个文件。
+相对路径均以该 TOML 文件所在目录为基准。
+
+### 1. 仅分析供材（不检索）
+
+```toml
+[task]
+goal = "Compare the claims and limitations in the supplied papers."
+outputs = ["report"]
+
+[model]
+name = "env"
+
+[research]
+materials_only = true
+max_chunks = 32
+
+[assets]
+papers = ["notes/method-a.md", "notes/method-b.md"]
+
+[report]
+template = "survey"
+```
+
+在放置 `research.toml` 的目录执行 `simple-ar research-session --config research.toml`。
+两个只读文件必须真实存在；不会执行 search，也不会启动实验进程。
+
+### 2. 在线文献综述
+
+```toml
+[task]
+goal = "Survey small-memory continual learning for image classification."
+outputs = ["report"]
+
+[model]
+name = "env"
+
+[research]
+providers = ["openalex", "semantic_scholar", "arxiv"]
+max_results = 8
+max_chunks = 32
+interaction = "checkpoints"
+
+[budget]
+process_invocations = 0
+process_wall_seconds = 0
+
+[report]
+template = "survey"
+```
+
+在包含该文件的目录执行；它使用配置的 provider 和当前环境中的 LLM 设置，不发现代码项目，
+也不启动实验。
+
+### 3. 已有项目 bug 修复
+
+```toml
+[task]
+goal = "Fix the phrase-aware classification bug described by the task file."
+kind = "bug_fix"
+outputs = ["bug_fix"]
+
+[model]
+name = "env"
+
+[budget]
+process_invocations = 1
+process_wall_seconds = 120
+
+[execution]
+code_task_config = "examples/code_task_medium_review/configs/code_task.toml"
+```
+
+将此文件保存到仓库根目录后执行 `simple-ar research-session --config bugfix.toml`。
+引用的 CodeTask TOML、其 `task.md`、项目源码、benchmark 和声明的修改范围必须存在；
+实现会在隔离 workspace 中进行，bug-fix 路径不跑 baseline，也不改原始 fixture。
+
+### 4. 直接 CPU 测量
+
+```toml
+[task]
+goal = "Measure the checked-in digits benchmark without changing its source."
+outputs = ["experiments"]
+
+[model]
+name = ""
+
+[execution]
+command = ["python", "benchmark.py"]
+cwd = "examples/code_task_digits_mlp/project"
+timeout_sec = 60
+primary_metric = "accuracy"
+
+[budget]
+process_invocations = 1
+process_wall_seconds = 60
+```
+
+将此文件保存到仓库根目录后执行
+`simple-ar research-session --config measurement.toml`。显式 `outputs` 已排除报告，
+不要再同时传入 `--no-report`。直接 argv 使用进程
+`PATH`，不应用 CodeTask 解释器策略；若 `python` 不是目标环境，请在 `command` 中写绝对解释器。
+该 benchmark 是小型 CPU fixture，不是科研改进证据。
+
+四种文件都可用 `simple-ar status RUN_DIR` 查看输出路径；暂停后用
+`simple-ar research-session --session-root RUN_DIR`，按文档的 decision/continuation 参数恢复。
+一次执行边界只能使用直接 `execution.command` 或 `execution.code_task_config` 之一，不能同时写两套。
+
+## Research session：从任务到证据
+
+正式用户入口是 `research-session`。它接收任务和材料，生成短 accepted plan，
+只执行计划真正需要的能力。文献摄取、CodeTask 准备/实现、实验测量、分析、报告写作和审计
+各自拥有边界，应用通过显式 artifact 引用连接它们。实验命令、baseline 策略、数据集、代码范围
+和资源限制仍由用户或配置提供；这是有界工作，不是无限自主循环。
 
 如果只需要文献研究，可以同时省略实验命令和 `--code-task-config`。不提供模型时，session
 会在有证据支持的 summary 处完成；提供模型时，可以继续进入 research-only 报告路径。这种
@@ -121,7 +244,7 @@ uv run simple-ar search-artifacts runs/<run-id> "accuracy"
 
 ## Tool 和外部 Agent Handoff 预览
 
-V2.6 新增内部 common tool 与 agent-handoff 层。它是未来 Codex、Claude Code、
+内部 common tool 与 agent-handoff 层是未来 Codex、Claude Code、
 OpenCode、OpenAI tool calling 或 MCP adapter 的受控扩展点，不是新的默认运行路径。
 
 当前行为：
@@ -150,7 +273,7 @@ runs/<run-id>/agent_handoff/<name>/
 experiment 和 code-task workflow 不需要 Codex、Claude Code、OpenCode 或 MCP server
 也能继续运行。
 
-V2.6 也在这个边界后面接入了可运行 backend：
+这个边界后面也提供可运行 backend：
 
 - `fake`：deterministic dry-run backend，用于集成测试；
 - `local_llm`：用当前 LLM 生成有边界的 review 产物；
@@ -241,7 +364,7 @@ benchmark 最好输出稳定的数值指标行。当前支持 `name: value` 和 
 自定义指标推荐在 TOML 中声明解释方向。显式 CLI 参数仍然支持，适合临时实验和快速测试，
 但公开使用路径建议优先用 TOML。完整参数表见
 [CLI 参考](CLI_REFERENCE_zh.md#simple-ar-code-task-init)，配置 schema 见
-[配置参考](CONFIG_REFERENCE_zh.md#standalone-code-task-config)。
+[配置参考](CONFIG_REFERENCE_zh.md#独立-code-task-config)。
 
 已有项目任务可以用 `[execute].baseline_policy` 控制是否先跑未修改 baseline。
 默认 `auto` 会在需要比较证据时运行 baseline；baseline 很贵、或任务只是验收式目标时，

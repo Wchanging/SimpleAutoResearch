@@ -9,27 +9,30 @@ engineering-provided inputs; do not describe them as autonomous discovery.
 ## Case inputs and normal entrypoint
 
 - `research.toml`: natural-language goal, delivery and research/process limits.
-- `code_task.toml`: edit scope and measurement command, with three machine paths read from the environment.
+- `code_task.toml`: edit scope, measurement command, and the case-declared project/data paths.
 - `task.md`: implementation and comparison requirements.
 - `run_mammoth.py`: measurement adapter, not a separate research orchestrator.
 
-Run the checked-in `research.toml` directly; do not copy or edit either TOML
-just to set server paths. Add these three absolute paths to the repository's
-ignored `.env` (or export them in the shell):
+Run the checked-in `research.toml` directly. Its paired `code_task.toml` declares
+the expected project, dataset and frozen split under `runs/assets` relative to
+the case file; those paths must exist before the session starts. The CLI checks
+required paths before creating a session or calling the model. `research.toml`
+resolves its `code_task_config` and output directory from its own location, and
+`code_task.toml` resolves case files through `{config_dir}`.
 
-```dotenv
-SIMPLE_AR_MAMMOTH_ROOT=/absolute/path/to/mammoth-tpami2023
-SIMPLE_AR_MAMMOTH_PYTHON=/absolute/path/to/training-env/bin/python
-SIMPLE_AR_DATA_ROOT=/absolute/path/to/shared/datasets
+The default `[environment] mode = "current"` uses the Python running
+SimpleAutoResearch. If the project requires another installed environment,
+edit the case TOML explicitly (without putting the path in `.env`):
+
+```toml
+[environment]
+mode = "external"
+python_executable = "{config_dir}/../../runs/envs/mammoth-probe/bin/python"
 ```
 
-The configured project root, Python interpreter, CIFAR-100 data directory and
-frozen validation permutation must exist before the session starts. The CLI
-reports missing environment variables or paths before creating a session or
-calling the model. `research.toml` resolves its `code_task_config` and output
-directory from its own location; `code_task.toml` resolves `task.md` and
-`run_mammoth.py` through `{config_dir}`. Neither file is machine-specific.
-No dependency installation or data download is automatic.
+The benchmark begins with `python`; the existing environment policy resolves it
+to the selected interpreter. No dependency installation or data download is
+automatic, and the TOML is not a substitute for verifying the assets.
 
 After preparing the data, fixed split, Python environment and GPU budget:
 
@@ -55,8 +58,8 @@ for a single run; it does not request additional seeds. These are declared
 conditions, not proof that data files or an old run were independently verified.
 Updating this configuration does not retroactively repair historical results.
 
-The CodeTask environment uses `mode = "external"` and the configured training
-Python. Static dependency checks use that interpreter, without importing the
+When configured with `mode = "external"`, CodeTask uses the selected training
+Python; otherwise it uses the current framework Python. Static dependency checks use the selected interpreter, without importing the
 training project or installing packages. A passed static check is not a runtime
 test or evidence of scientific effectiveness.
 
@@ -76,14 +79,14 @@ Use the existing framework executor with a finite timeout and an explicitly
 authorized GPU budget. It sets `SIMPLE_AR_OUTPUT_DIR` per invocation; standalone
 diagnostics must instead pass a unique `--output` directory.
 
-The literal experiment argv lives in `code_task.toml`; the configured Python,
-adapter and data-root paths are expanded before it is parsed into process
-arguments. Keep quoted path references in that command when paths may contain
-spaces. For your own project, put its research and CodeTask TOMLs beside its
-task description, use `{config_dir}` for case-owned files and `${NAME}` for
-machine paths, and declare required input paths under
-`[environment].required_paths`. Existing CodeTask TOMLs without these opt-in
-references retain their current working-directory-relative behavior.
+The literal experiment argv lives in `code_task.toml`; `{config_dir}` paths are
+expanded before it is parsed into process arguments. Keep quoted path references
+in that command when paths may contain spaces. For your own project, put its
+research and CodeTask TOMLs beside the task description, use `{config_dir}` for
+case-owned files or explicit absolute paths for machine assets, and declare
+required input paths under `[environment].required_paths`. Existing CodeTask
+TOMLs without `{config_dir}` retain their current working-directory-relative
+behavior; task resource paths are not read from `.env`.
 
 One epoch is a reduced-training protocol, not the paper's
 original 50-epoch setting or evidence of scientific effectiveness. Measure

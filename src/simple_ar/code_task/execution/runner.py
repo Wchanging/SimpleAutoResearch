@@ -20,7 +20,11 @@ from simple_ar.code_task.editing.attempts import (
     update_code_task_batch_state,
 )
 from simple_ar.code_task.execution.comparison import CodeTaskComparisonResult, compare_code_task_runs
-from simple_ar.code_task.execution.environment import ensure_code_task_environment_policy
+from simple_ar.code_task.execution.environment import (
+    apply_code_task_environment_policy,
+    ensure_code_task_environment_policy,
+    policy_python_executable,
+)
 from simple_ar.code_task.execution.artifact_contract import (
     compact_artifact_scan,
     expected_artifact_row,
@@ -880,22 +884,13 @@ def _split_command(command_text: str, *, environment_policy: dict[str, Any]) -> 
         # shell text: keeping them makes Python -c execute a string literal.
         args = [token[1:-1] if len(token) >= 2 and token[0] in {"'", '"'}
                 and token[-1] == token[0] else token for token in args]
-    if args[0] in {"python", "python3"}:
-        args[0] = _policy_python_executable(environment_policy)
-    return args
-
-
-def _policy_python_executable(environment_policy: dict[str, Any]) -> str:
-    executable = environment_policy.get("python_executable")
-    if isinstance(executable, str) and executable:
-        return executable
-    return sys.executable
+    return apply_code_task_environment_policy(args, environment_policy)
 
 
 def _execution_environment_record(environment_policy: dict[str, Any]) -> dict[str, Any]:
     return {
         "mode": environment_policy.get("mode", "current"),
-        "python_executable": _policy_python_executable(environment_policy),
+        "python_executable": policy_python_executable(environment_policy),
         "python_version": environment_policy.get("python_version"),
         "allow_dependency_install": bool(
             environment_policy.get("allow_dependency_install", False)

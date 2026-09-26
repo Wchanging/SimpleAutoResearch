@@ -10,6 +10,7 @@ from simple_ar.research.experiment import ExperimentRequest
 from simple_ar.research.contracts import ResearchExperimentContract
 from simple_ar.research.implementation import ImplementationRequest
 from simple_ar.code_task.editing.budget import VALID_BUDGET_PROFILES
+from simple_ar.code_task.execution.environment import resolve_code_task_command
 
 
 def normalize_execution_config(
@@ -311,7 +312,8 @@ def execution_request(
     config = normalize_execution_config(config, task_text=task_text)
     pairs = tuple(config.get("pairs", ()))
     config.pop("pairs", None)
-    config.pop("code_task", None)  # Consumed by the separate implementation action.
+    code_task = config.pop("code_task", None)  # Consumed by the separate implementation action.
+    environment = code_task if isinstance(code_task, Mapping) else None
     config.pop("baseline_policy", None)
     config.pop("baseline_ref", None)
     config.pop("protocol_seed_reason", None)
@@ -349,6 +351,12 @@ def execution_request(
         not isinstance(arg, str) or not arg for arg in command
     ):
         raise ValueError("execution.command must be a non-empty argv list, not shell text.")
+    if environment is not None:
+        command = resolve_code_task_command(
+            command,
+            env_mode=str(environment.get("env_mode") or "current"),
+            python_executable=environment.get("python_executable"),
+        )
     cwd = Path(str(config.get("cwd", "")))
     if not cwd.is_absolute() or not cwd.is_dir():
         raise ValueError("execution.cwd must be an existing absolute directory.")
@@ -395,11 +403,12 @@ def implementation_request(
 ) -> ImplementationRequest:
     task = config.get("code_task")
     if not isinstance(task, Mapping) or set(task) - {
-        "run_dir", "approval_note", "max_repairs", "budget_profile", "allow_large_edits"
+        "run_dir", "approval_note", "max_repairs", "budget_profile", "allow_large_edits",
+        "env_mode", "python_executable",
     }:
         raise ValueError(
             "execution.code_task accepts run_dir, approval_note, max_repairs, "
-            "budget_profile and allow_large_edits."
+            "budget_profile, allow_large_edits, env_mode and python_executable."
         )
     repair_limit(config)
     run_dir = Path(str(task.get("run_dir", "")))

@@ -6,6 +6,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,44 @@ def build_code_task_environment_policy(
             "It does not create environments or install dependencies.",
         ],
     }
+
+
+def policy_python_executable(environment_policy: Mapping[str, Any]) -> str:
+    """Return the interpreter selected by a persisted CodeTask policy."""
+    executable = environment_policy.get("python_executable")
+    if isinstance(executable, str) and executable:
+        return executable
+    return sys.executable
+
+
+def apply_code_task_environment_policy(
+    command: Sequence[str], environment_policy: Mapping[str, Any]
+) -> list[str]:
+    """Resolve only the supported bare Python command in an argv list."""
+    args = list(command)
+    if args and args[0] in {"python", "python3"}:
+        args[0] = policy_python_executable(environment_policy)
+    return args
+
+
+def resolve_code_task_command(
+    command: Sequence[str], *, env_mode: str = "current",
+    python_executable: str | Path | None = None,
+) -> list[str]:
+    """Resolve a research command without probing or launching an interpreter.
+
+    Full environment policies include a version probe and therefore belong to
+    initialization/probe boundaries.  Request construction only needs the
+    already-supported argv rewrite for a bare Python command.
+    """
+    args = list(command)
+    if not args or args[0] not in {"python", "python3"}:
+        return args
+    mode = _normalize_env_mode(env_mode)
+    executable = _resolve_policy_python(mode, python_executable)
+    return apply_code_task_environment_policy(
+        args, {"python_executable": executable}
+    )
 
 
 def _probe_code_task_environment(

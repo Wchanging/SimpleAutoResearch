@@ -6,10 +6,19 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-26
 
+- Research request construction now reuses the existing bare-Python argv policy
+  without probing or launching an external interpreter. Environment version
+  detection remains in explicit CodeTask initialization/probe boundaries; absolute
+  and non-Python commands are unchanged. Research configuration and workflow docs
+  now expose the real section fields, continuation ownership, independent task
+  examples, and capability-driven recovery instead of removed template/fixed-stage
+  descriptions.
+
 - Run the continual-learning case from its checked-in configs: CodeTask TOML
-  now supports opt-in `{config_dir}` case paths, `${NAME}` machine paths from the
-  environment or local `.env`, and declared required-path checks before work starts.
-  Existing cwd-relative configs keep their original meaning.
+  now supports opt-in `{config_dir}` case paths and declared required-path checks
+  before work starts. Task assets and interpreters are declared in the task TOML;
+  `.env` remains for global credentials/model/transport settings, and existing
+  cwd-relative configs keep their original meaning.
 
 - Separate research/candidate identity from comparison conditions. Baseline reuse
   and measured-result comparison now share one protocol projection; changing a

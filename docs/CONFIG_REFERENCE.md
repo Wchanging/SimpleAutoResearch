@@ -2,7 +2,14 @@
 
 [中文版本](CONFIG_REFERENCE_zh.md)
 
-## Research configuration
+## Global `.env`
+
+`.env` is loaded by the LLM integration for credentials, endpoint, model and
+transport settings. It is ignored by Git and must not contain task assets,
+source roots, datasets, or interpreter paths. Task-specific paths and execution
+conditions belong to the research TOML or its referenced CodeTask TOML.
+
+## Research TOML: sections and defaults
 
 `report.template` defaults to `auto`: literature tasks use a survey; experimental
 tasks select a paper, reproduction report or concise analysis report using the
@@ -18,58 +25,38 @@ Additional configuration options are documented below, not separate user workflo
 Precedence is built-in defaults, TOML, then explicit CLI options. CLI lists replace file lists.
 File-relative paths resolve from the TOML directory; command argv remains literal.
 
-For new research sessions, omitted `budget.total_tokens` and `budget.llm_requests`
-mean no framework API usage cap. Set positive integers to enforce optional caps;
-usage is still recorded when unlimited. Process limits, scientific iteration limits,
-attempt/no-progress limits and provider per-response limits remain separate.
-Resuming an existing session preserves its saved limits; omission does not remove
-an old cap or reset usage. Provider errors pause affected work for recovery;
-unlimited API usage does not mean unlimited retries or free service.
+### Task, model and budget
 
-Sections: `task` (goal, outputs, output_root), `model` (name, max_output_tokens),
-`budget` (total_tokens, llm_requests, process_invocations, process_wall_seconds),
-`research` (providers, queries, max_results, max_chunks, idea_limit, cache_dir,
-use_fulltext, allow_pdf_download, keep_raw_pdf, materials_only, max_iterations, interaction),
-`continuation` (authorization fields and optional decision_id, decision_response,
-decision_guidance),
-`assets` (papers), `execution` (command, cwd, timeout_sec, code_task_config,
-primary_metric, metrics, metric_directions, pairs, seeds, seed_flag, seed_count,
-baseline_policy, baseline_ref, protocol), and `report` (template, reviewer,
-max_review_iterations, max_section_tokens, figures). A report section token value of `0` omits the
-per-call provider output cap; use a positive value only as an explicit expert limit.
-Supported deterministic figures are enabled by default for user-facing reports;
-set `[report.figures] enabled = false` or `mode = "off"` for text-only output.
-For paired experiments, `max_figures = 0` selects up to four representative
-metrics; set a positive value only when a different figure count is intended.
-Use model name `env` for SIMPLE_AR_MODEL; credentials remain in the environment.
-This is the file-based default; explicit `name = ""` selects deterministic processing without LLM calls.
-Outputs may be summary, report, and/or experiments. Explicit outputs cannot be combined
-with --with-report/--no-report. Missing execution settings preserve the experiment goal
-and pause at that boundary; automatic repository preparation is not yet implemented.
-Budget limits initialize new sessions; resuming uses the persisted ledger, not a refreshed allowance.
-Unknown fields are rejected; stage-specific research models are not supported yet.
-`research.max_iterations` maps to the actual follow-up-round limit; `0` stops after
-the first analysis. On `--session-root` resume, saved research settings are retained.
-`research.interaction` selects `assisted`, `checkpoints`, or `autonomous`; new CLI
-sessions default to `checkpoints`, while older sessions without this field keep their
-legacy behavior. Critical facts and permissions remain blockers in every mode.
-Changed search/ingestion settings are rejected when they differ from the saved values;
-`cache_dir` cannot be verified because it is not persisted and is therefore not accepted
-as a resume change. Start a new session to apply those settings. Explicit report settings
-may be changed on a session that already requests a report; only writer/report/audit outputs
-are invalidated, not research evidence or measurements. Use `research-report` to add a report
-deliverable to an existing prefix.
-`task.kind` may be `auto`, `survey`, or `bug_fix`. Bug repair uses the existing
-`execution.code_task_config`, edit scope and short validation command, with explicit
-finite process budgets and no baseline. Its output is `bug_fix`; auto does not imply
-arbitrary project preparation.
-Set `[research] materials_only = true` with `[assets].papers` to analyse supplied
-documents without search. LLM reading is still allowed. Without that restriction,
-the model may also omit search when local materials satisfy the task. Stage A uses
-short sequential plans with unique actions and adapter-bound inputs, not arbitrary
-repeated actions, input rebinding, or model-expanded experiment protocols.
-The three full-text options are explicit booleans. The advanced template enables
-them; retrieval failures must still be reported as abstract-only or unavailable.
+| Section | Fields | Default / requirement / condition |
+| --- | --- | --- |
+| `[task]` | `goal`, `kind`, `outputs`, `output_root`, `selected_idea_id` | `goal` is required for a new session. `kind` defaults to `auto` and accepts `auto`, `survey`, `bug_fix`. `outputs` is optional and is derived from the requested task/report/execution shape; if written, use `summary`, `report`, `experiments`, and/or `bug_fix`. `output_root` defaults to `runs/research-session`; `selected_idea_id` is optional and must select an existing grounded candidate. |
+| `[model]` | `name`, `max_output_tokens` | A file config defaults `name` to `env`, which reads `SIMPLE_AR_MODEL`; `name = ""` selects deterministic processing. `max_output_tokens` is optional. Credentials stay in the environment. |
+| `[budget]` | `total_tokens`, `llm_requests`, `process_invocations`, `process_wall_seconds` | Token/request caps are optional for a new session (omitted means no cap for that dimension). Process values default from the task shape; set them explicitly when execution is requested. Resume keeps the saved ledger and does not reset usage. |
+
+### Research inputs and behavior
+
+| Section | Fields | Default / requirement / condition |
+| --- | --- | --- |
+| `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
+| `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `materials_only` | All default false. `materials_only = true` requires/uses `[assets].papers` and disables search; it does not disable model reading. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
+| `[research]` | `max_iterations`, `interaction` | `max_iterations` defaults to `1`; `0` stops after the first analysis. `interaction` defaults to `checkpoints` for a new CLI session and accepts `assisted`, `checkpoints`, or `autonomous`. Critical facts and permissions block every mode. |
+| `[assets]` | `papers` | Optional list of local Markdown/text/PDF paths. Paths resolve from the TOML directory and are read-only inputs. |
+
+### Execution and report
+
+| Section | Fields | Default / requirement / condition |
+| --- | --- | --- |
+| `[execution]` | `command`, `cwd`, `timeout_sec`, `code_task_config` | Choose one execution boundary: literal argv `command` plus an existing absolute `cwd`, or a CodeTask TOML reference. Omit both for literature-only work. `timeout_sec` is optional and defaults at the CLI/application boundary. |
+| `[execution]` | `primary_metric`, `metrics`, `metric_directions` | Optional measurement schema; directions use `higher`, `lower`, `resource`, or `ignore`. |
+| `[execution]` | `pairs`, `seeds`, `seed_flag`, `seed_count` | Optional explicit comparison inputs. `pairs` contains unique integer `seed` plus literal `baseline_command` and `candidate_command`; compact seed expansion requires a literal command and explicit seed flag/count. Natural-language seed requests are not parsed. |
+| `[execution]` | `baseline_policy`, `baseline_ref`, `protocol` | Policy is `run`, `skip`, or `reuse`; `reuse` requires a passed current-session artifact whose command, schema, protocol conditions, protected assets and preparation lineage match. `protocol` uses the existing experiment contract and does not certify data contents. |
+| `[report]` | `template`, `reviewer`, `max_review_iterations`, `max_section_tokens`, `figures` | `template` defaults to `auto`; `reviewer` defaults to `llm`; review iterations default to `1`. `max_section_tokens = 0` omits a per-call output cap. Figures are deterministic by default; set `[report.figures].enabled = false` or `mode = "off"` for text-only output. |
+
+Explicit `outputs` cannot be combined with `--with-report`/`--no-report`. Report structure
+selection never overrides measured facts or certifies scientific success. Changed
+search/ingestion settings are rejected on resume when they differ from saved values;
+explicit report settings can invalidate only writer/report/audit outputs, not research
+evidence or measurements. Use `research-report` to add a report to an existing prefix.
 
 Advanced experiments may either use `[[execution.pairs]]` rows with a unique integer
 `seed`, `baseline_command` and `candidate_command` (literal argv arrays), or declare
@@ -105,20 +92,23 @@ split_spec, metric_specs, comparison_conditions and protected_assets, optionally
 contract_id/hypothesis. Protected file paths are relative to the experiment cwd,
 not the TOML directory; shared data may use absolute paths. No seed interpolation
 or extra scheduler is introduced. Grant process budgets for every matrix run.
+Use either literal `execution.command` plus `cwd`, or `execution.code_task_config`
+for one prepared code boundary; the two descriptions are mutually exclusive.
+Direct command argv uses the process `PATH`. A referenced CodeTask config applies
+its `current`/`external` interpreter policy to a leading bare `python`/`python3`.
 
 The sections below cover the existing CodeTask TOML for `code-task` and
 `research-session --code-task-config`. Research TOML can reference this file through
 `execution.code_task_config`; it does not duplicate CodeTask's implementation settings.
 
-CodeTask TOML preserves its legacy cwd-relative paths. Opt in to portable case
-paths with `{config_dir}` (the absolute directory containing that TOML) in path
-fields and `[benchmark].command`. Use `${NAME}` for machine-specific paths; the
-loader checks the process environment and the nearest `.env` found from the
-current directory, without overwriting exported values. Missing names are
-reported together before a research session starts. Quote interpolated command
-arguments when a path may contain spaces. `[environment].required_paths` lists
-additional files/directories that must exist before running; it checks presence,
-not dataset correctness. See the [continual-learning case](../examples/continual_learning/README.md).
+CodeTask TOML preserves its legacy cwd-relative paths. Use `{config_dir}` (the
+absolute directory containing that TOML) in path fields and
+`[benchmark].command` when a case should be relocatable. Otherwise declare an
+explicit absolute path for a machine-owned project, dataset, split, or
+interpreter. Quote command arguments when a path may contain spaces.
+`[environment].required_paths` lists additional files/directories that must
+exist before running; it checks presence, not dataset correctness. See the
+[continual-learning case](../examples/continual_learning/README.md).
 
 The old eight-stage outer-pipeline parser and its alias mapping are retired.
 Historical configuration snapshots remain readable files, not executable workflows.
@@ -131,7 +121,7 @@ Historical configuration snapshots remain readable files, not executable workflo
 - Explicit CLI flags override corresponding TOML values.
 - Setup and command details: [Usage](USAGE.md), [CLI Reference](CLI_REFERENCE.md).
 
-## CodeTask Field Reference
+## Research continuation and decisions
 
 ### Continue a research session after preparing execution
 
@@ -196,6 +186,8 @@ uncommitted source by falling back to copy with a recorded reason; explicit git_
 committed HEAD. Preparation records workspace/Git provenance, not an automatic commit per candidate.
 Sparse/empty workspace options remain limited to standalone CodeTask.
 
+## CodeTask Field Reference
+
 ### Code-Task Fields
 
 | Field | Meaning |
@@ -207,6 +199,7 @@ Sparse/empty workspace options remain limited to standalone CodeTask.
 | `[benchmark].primary_metric` | Main metric used for the objective verdict. Unknown metrics are still recorded, but need directions to decide improvement. |
 | `[benchmark.metric_directions]` | Direction map for metrics: `higher`, `lower`, `resource`, or `ignore`. |
 | `[environment].mode` | `current` uses the active SimpleAutoResearch Python; `external` uses `[environment].python` or `[environment].python_executable`. No dependencies are installed automatically. |
+| `[environment].python_executable` | Required when `mode = "external"`; the selected executable resolves a leading bare `python`/`python3` in the benchmark argv. Absolute commands and non-Python commands are retained. |
 | `[environment].required_paths` | Optional path list checked when this CodeTask config is loaded; useful for data files and fixed splits that the command needs. |
 | `[workspace].mode` | Workspace strategy: `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty` for greenfield code-task runs. Existing projects default to `auto`, which tries git worktree first and falls back to guarded copy when needed. |
 | `[workspace].reuse_source_venv` | If a source `.venv` or `venv` is detected, record and use that Python as the execution interpreter. |

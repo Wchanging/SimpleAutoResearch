@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import os
 import sqlite3
 import sys
 import tempfile
@@ -1102,15 +1101,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(execution["code_task"]["env_mode"], "external")
             self.assertEqual(Path(execution["code_task"]["python_executable"]), Path(sys.executable))
 
-    def test_research_case_uses_checked_in_configs_and_machine_paths(self) -> None:
+    def test_research_case_uses_checked_in_configs_and_case_local_paths(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             root = Path(tmp)
             case = root / "case with spaces"
-            project = root / "source project"
-            data = root / "shared data"
-            for directory in (case, project, data):
-                directory.mkdir()
+            case.mkdir()
+            project = case / "source project"
+            data = case / "shared data"
+            project.mkdir()
+            data.mkdir()
             (case / "task.md").write_text("Improve this project.", encoding="utf-8")
             (case / "run.py").write_text("", encoding="utf-8")
             (case / "research.toml").write_text(
@@ -1120,13 +1120,13 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (case / "code_task.toml").write_text(
-                '[code_task]\ncode_root = "${SIMPLE_AR_CLI_TEST_PROJECT}"\n'
+                '[code_task]\ncode_root = "{config_dir}/source project"\n'
                 'task_file = "{config_dir}/task.md"\n'
                 '[environment]\nmode = "external"\n'
-                'python_executable = "${SIMPLE_AR_CLI_TEST_PYTHON}"\n'
-                'required_paths = ["${SIMPLE_AR_CLI_TEST_DATA}"]\n'
+                f'python_executable = "{Path(sys.executable).as_posix()}"\n'
+                'required_paths = ["{config_dir}/shared data"]\n'
                 '[benchmark]\n'
-                "command = '\"${SIMPLE_AR_CLI_TEST_PYTHON}\" \"{config_dir}/run.py\" --data-root \"${SIMPLE_AR_CLI_TEST_DATA}\"'\n"
+                "command = 'python \"{config_dir}/run.py\" --data-root \"{config_dir}/shared data\"'\n"
                 'primary_metric = "accuracy"\n'
                 '[execute]\nuse_llm = true\nbaseline_policy = "skip"\n',
                 encoding="utf-8",
@@ -1139,11 +1139,6 @@ class CliTests(unittest.TestCase):
             )
             app.advance.return_value = app.view.return_value
             with (
-                patch.dict(os.environ, {
-                    "SIMPLE_AR_CLI_TEST_PROJECT": str(project),
-                    "SIMPLE_AR_CLI_TEST_PYTHON": sys.executable,
-                    "SIMPLE_AR_CLI_TEST_DATA": str(data),
-                }),
                 patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
                 patch("simple_ar.app.research_application.create_session", return_value=app) as creator,
                 contextlib.redirect_stdout(io.StringIO()),
@@ -1152,6 +1147,7 @@ class CliTests(unittest.TestCase):
 
             execution = creator.call_args.kwargs["services"].config["execution"]
             self.assertEqual(Path(execution["cwd"]), project)
+            self.assertEqual(execution["command"][0], "python")
             self.assertEqual(Path(execution["command"][1]), case / "run.py")
             self.assertEqual(Path(execution["command"][3]), data)
 

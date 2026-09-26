@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import os
-import sys
 import tempfile
+import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from simple_ar.code_task.runtime.config import (
     CodeTaskConfigError,
@@ -24,84 +22,53 @@ class RunConfigTests(unittest.TestCase):
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             case = Path(tmp) / "case with spaces"
-            project = Path(tmp) / "project with spaces"
-            data = Path(tmp) / "data with spaces"
             case.mkdir()
+            project = case / "project with spaces"
+            data = case / "data with spaces"
             project.mkdir()
             data.mkdir()
             (case / "task.md").write_text("Task", encoding="utf-8")
             (case / "run.py").write_text("", encoding="utf-8")
             config = case / "code_task.toml"
             config.write_text(
-                '[code_task]\ncode_root = "${SIMPLE_AR_CONFIG_TEST_ROOT}"\n'
+                '[code_task]\ncode_root = "{config_dir}/project with spaces"\n'
                 'task_file = "{config_dir}/task.md"\n'
                 '[environment]\nmode = "external"\n'
-                'python_executable = "${SIMPLE_AR_CONFIG_TEST_PYTHON}"\n'
-                'required_paths = ["${SIMPLE_AR_CONFIG_TEST_DATA}"]\n'
+                f'python_executable = "{Path(sys.executable).as_posix()}"\n'
+                'required_paths = ["{config_dir}/data with spaces"]\n'
                 '[benchmark]\n'
-                "command = '\"${SIMPLE_AR_CONFIG_TEST_PYTHON}\" \"{config_dir}/run.py\" --data-root \"${SIMPLE_AR_CONFIG_TEST_DATA}\"'\n",
+                "command = 'python \"{config_dir}/run.py\" --data-root \"{config_dir}/data with spaces\"'\n",
                 encoding="utf-8",
             )
-            with patch.dict(os.environ, {
-                "SIMPLE_AR_CONFIG_TEST_ROOT": str(project),
-                "SIMPLE_AR_CONFIG_TEST_PYTHON": sys.executable,
-                "SIMPLE_AR_CONFIG_TEST_DATA": str(data),
-            }):
-                options = load_code_task_init_options(config_path=str(config))
+            options = load_code_task_init_options(config_path=str(config))
 
             self.assertEqual(Path(options.code_root), project)
             self.assertEqual(Path(options.task_file), case / "task.md")
             self.assertEqual(Path(options.python_executable), Path(sys.executable))
             argv = _split_cli_command(options.benchmark_command)
-            self.assertEqual(Path(argv[0]), Path(sys.executable))
+            self.assertEqual(argv[0], "python")
             self.assertEqual(Path(argv[1]), case / "run.py")
             self.assertEqual(argv[2], "--data-root")
             self.assertEqual(Path(argv[3]), data)
 
-    def test_machine_paths_load_from_local_dotenv(self) -> None:
+    def test_task_resource_environment_references_are_rejected(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             root = Path(tmp)
             project = root / "project"
             project.mkdir()
-            (root / ".env").write_text(
-                f"SIMPLE_AR_CONFIG_TEST_DOTENV={project.as_posix()}\n", encoding="utf-8"
-            )
             config = root / "code_task.toml"
             config.write_text(
-                '[code_task]\ncode_root = "${SIMPLE_AR_CONFIG_TEST_DOTENV}"\n',
+                '[code_task]\ncode_root = "${SIMPLE_AR_CONFIG_TEST_ROOT}"\n',
                 encoding="utf-8",
             )
-            previous_cwd = Path.cwd()
-            try:
-                os.chdir(root)
-                with patch.dict(os.environ, clear=False):
-                    os.environ.pop("SIMPLE_AR_CONFIG_TEST_DOTENV", None)
-                    options = load_code_task_init_options(
-                        config_path=str(config), require_task_file=False
-                    )
-            finally:
-                os.chdir(previous_cwd)
-            self.assertEqual(Path(options.code_root), project)
+            with self.assertRaisesRegex(CodeTaskConfigError, "Task resource paths"):
+                load_code_task_init_options(config_path=str(config), require_task_file=False)
 
-    def test_missing_machine_values_and_required_paths_fail_before_session(self) -> None:
+    def test_missing_required_paths_fail_before_session(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
             config = Path(tmp) / "code_task.toml"
-            config.write_text(
-                '[code_task]\ncode_root = "${SIMPLE_AR_CONFIG_TEST_MISSING_ROOT}"\n'
-                '[environment]\nrequired_paths = ["${SIMPLE_AR_CONFIG_TEST_MISSING_DATA}"]\n',
-                encoding="utf-8",
-            )
-            with patch.dict(os.environ, {
-                "SIMPLE_AR_CONFIG_TEST_MISSING_ROOT": "",
-                "SIMPLE_AR_CONFIG_TEST_MISSING_DATA": "",
-            }):
-                with self.assertRaises(CodeTaskConfigError) as raised:
-                    load_code_task_init_options(config_path=str(config))
-            self.assertIn("SIMPLE_AR_CONFIG_TEST_MISSING_ROOT", str(raised.exception))
-            self.assertIn("SIMPLE_AR_CONFIG_TEST_MISSING_DATA", str(raised.exception))
-
             config.write_text(
                 '[environment]\nrequired_paths = ["{config_dir}/missing-data"]\n',
                 encoding="utf-8",

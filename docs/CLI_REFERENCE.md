@@ -5,8 +5,8 @@
 This page is a command lookup for SimpleAutoResearch. It intentionally focuses
 on command syntax, options, outputs, and short operational notes.
 
-For ordinary V2.8 use, `simple-ar research-session` is the only formal user
-entrypoint for the bounded research-to-report flow. `research-report` can
+For ordinary use, `simple-ar research-session` is the formal task-driven
+entrypoint for bounded research, code repair, and explicit experiments. `research-report` can
 continue a canonical session created with `--no-report`; the current
 `research-session-continue` uses the canonical retry boundary for v2 sessions
 only. Legacy v1 sessions remain read-only; use `research-session-migrate` to
@@ -36,7 +36,7 @@ not silently translated to the canonical application.
 | `simple-ar clean` | Preview and remove rebuildable run caches. |
 | `simple-ar code-task ...` | Work with an existing codebase or a greenfield code task in an isolated editable workspace. |
 
-## Research Pipeline
+## Research Commands
 
 
 ### `simple-ar research-brief` (segmented/development interface)
@@ -88,8 +88,10 @@ Returned proposals and validation errors are saved in `attempts/plan-*/task_plan
 if no valid plan is produced, the session pauses without executing downstream actions.
 
 Use `simple-ar research-session --config examples/survey/research.toml`
-for a file-based start. The [configuration reference](CONFIG_REFERENCE.md) describes
-the minimal and advanced templates, which share the same parser and defaults.
+for a file-based start. The [survey example](../examples/survey/README.md) is a complete
+literature-only file; the [configuration reference](CONFIG_REFERENCE.md) documents the
+shared parser fields and defaults. For task shapes with different boundaries, use the
+independent files in [Usage And Configuration](USAGE.md#choose-a-task-and-its-smallest-input).
 Explicit CLI options override the file. `--outputs` selects `summary`, `report`,
 and/or `experiments`; `--total-tokens`, `--llm-requests`, `--max-output-tokens`,
 `--process-invocations`, and `--process-wall-seconds` expose the corresponding limits.
@@ -707,7 +709,7 @@ to continue. In non-interactive shells it stops cleanly at the gate unless
 auto-continue those primitive prompts. Use `--yes` in normal execute mode only
 when automated approval is intentional, and `--no-review-inline` when you want
 the older stop-and-rerun behavior. Full workflow walkthroughs live in
-[Usage And Configuration](USAGE.md#recommended-path-toml--execute).
+[Usage And Configuration](USAGE.md#recommended-path-toml-execute).
 
 When LLM work planning or patch planning returns malformed JSON, execute stops
 with `llm_planning_failed` and does not write an offline fallback plan. Rerun

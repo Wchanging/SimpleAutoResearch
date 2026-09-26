@@ -6,10 +6,10 @@ This document is for contributors who want to extend SimpleAutoResearch. For com
 
 ## Project Shape
 
-SimpleAutoResearch is now file-first plus state-backed:
+SimpleAutoResearch is file-first with persisted session state:
 
-- stages read and write concrete files;
-- workflow state is visible in `state.json` and stage contracts;
+- capabilities read and write concrete artifacts;
+- session state is visible in `session_manifest.json`, attempts, and `ArtifactRef` handoffs;
 - tests verify contracts/artifacts instead of hidden in-memory state;
 - risky code changes happen in isolated editable workspaces, usually a guarded
   copy, optionally a detached git worktree, and experimentally a sparse copy.
@@ -55,20 +55,21 @@ Every review should answer at least:
 
 Locks, budgets, migration, and recovery in the implementation blueprint should be the smallest reliable versions required by the current path. The blueprint is not a checklist saying that every piece of infrastructure and protection must be complete before any user feature can ship. Its example limits are adjustable engineering starting points, not reasons to avoid real tasks. The full architecture and construction order live in the project's local `MDfiles/` planning notes; that directory is intentionally excluded from GitHub, so this document is the public contributor standard.
 
-### V2.9 Development Target: Decision Context And Handoffs
+### Current research-session extension boundaries
 
-These are development contracts, not claims that autonomous research iteration is complete.
-The current slice has exercised supplied-material analysis and a small code repair through short
-plans; open-web research and subsequent experimental loops need their own acceptance evidence.
+These are current development contracts, not claims that every provider, project, or
+scientific loop has passed live acceptance.
 
-Stage B keeps the same entrypoint and binds a declared execution protocol to the existing
-Preparation/CodeTask and experiment capabilities. A literal command plus explicit seed settings
-may produce pairs; in LLM mode, research design may propose an argv extension only after the
-entrypoint has been inspected and only within that authorized process boundary. Baseline behavior
-is recorded as run, skip, or same-condition reuse. The accepted plan and work-plan view retain the
-protocol reason and artifact references, while model output still cannot grant itself a cwd,
-installer, repair index, or process permission. This is local B behavior, not evidence that
-open-web retrieval or frozen end-to-end acceptance has passed.
+`research-session` interprets task/assets/constraints into an accepted bounded plan and connects
+it to typed capabilities. Design and execution reuse the supplied entrypoint, protocol, CodeTask
+edit scope and process budget. Model output may propose conditions only inside inspected and
+authorized boundaries; it cannot grant itself a cwd, installer, repair limit, or process permission.
+Baseline behavior is `run`, `skip`, or same-condition `reuse`. A saved measurement is reused only
+when its command, schema, protocol, preparation lineage and protected assets still match.
+Analysis, implementation, experiment, report writing and audit own different facts. A plan is not
+execution, a zero exit code is not scientific success, and report prose does not create a measured
+result. Recovery follows saved attempt/state references and does not silently repeat a completed
+side effect; provider failures, failed processes and negative scientific findings remain distinct.
 
 - Keep one execution chain: task/assets → near-term plan → typed capability request →
   SessionController → actual artifacts → reconsider only when needed.
@@ -84,13 +85,10 @@ open-web retrieval or frozen end-to-end acceptance has passed.
 - Continue an accepted plan while its premises hold; reconsider when evidence changes the decision.
   Basic recovery is required from the first working path.
 
-Module upgrades accompany delivery: A covers task interpretation, supplied materials and bug repair;
-B covers design, project inspection, scoped implementation and executable protocols; C covers
-analysis, relevant failure experience, supplemental experiments and direction changes; D covers
-continuation and removal of superseded orchestration; E verifies normal-scale quality, reports and
-user delivery. Quality is not deferred until E. Multi-agent discussion, complex PDF processing,
-template export and external Harness integration remain optional enhancements, not prerequisites
-or claims about released functionality.
+Do not document a future capability as accepted merely because its schema or fixture exists.
+Live provider, project, GPU, retrieval, and report-quality evidence must be named separately from
+offline parser or behavior coverage. New work should extend the current application/capability
+path and remain bounded until a real consumer justifies a larger interface.
 
 ### Compatibility Audit
 
@@ -108,7 +106,7 @@ simple-ar status / inspect / search-artifacts
   -> historical artifact readers (no old workflow execution)
 ```
 
-`research-session` is the only formal V2.8 user entrypoint and owns the bounded
+`research-session` is the formal user entrypoint and owns the bounded
 research sequence. With an explicit command or CodeTask it continues through
 experiment, analysis, report, and audit; without either it provides the
 literature-only summary/report path and creates no execution request. The
@@ -116,45 +114,30 @@ segmented commands remain useful for
 development, diagnostics, and persisted handoff continuation, but are not a
 parallel product workflow. `simple-ar run/resume` is retired; its flags are not
 silently translated. New capability work belongs under `research/`, `experiment/`,
-or `report/`. The old stage layer has been deleted; remaining experiment and
-report consumers still require cleanup. Lifecycle unification is not complete.
+or `report/`. The old stage layer is deleted; historical consumers are read-only
+and current experiment/report behavior is owned by the modules described below.
 
-The September 2026 cleanup removed confirmed speculative or duplicate layers:
-the unused session-plan abstraction, multi-candidate CodeTask scheduler,
-standalone research iteration policy, and research Tool/MCP design-contract
-artifacts. Read cards and `evidence_pack_from_read()` provide the shared
-Read-to-Synthesis handoff; the obsolete debug output and full-pack builder have
-been removed, and derivation tests use that same handoff. CodeTask's external CLI support is
-also kept as a disabled/explicit backend because the current experiment path
-uses its provider factory; it is not a V2.8 workflow controller.
+The current tree uses read cards and `evidence_pack_from_read()` for the shared
+Read-to-Synthesis handoff and does not add a second planning or lifecycle store.
+CodeTask's external CLI support is also kept as a disabled/explicit backend because the current experiment path
+uses its provider factory; it is not a research-session workflow controller.
 
-This is a temporary V2.8 keep decision, not a promise that every old path is
-permanent. Migrate SurveyBench, ARC-Bench, historical readers, old configs, and
-tests; before deleting another compatibility module, search imports, CLI
+Historical readers and compatibility facades are retained only where their
+consumers or old formats still exist. Before deleting one, search imports, CLI
 dispatch, docs, fixtures, and historical readers, then preserve the old-format
 regression while migrating its real consumer. Delete a facade or projection
 once its consumers are gone instead of keeping a complete legacy entrypoint
 for hypothetical future use.
 
-### V2.8 Closure Order
+### Delivery review checklist
 
-The canonical business path is connected, but the engineering release gate still
-requires compatibility exit, real Linux/CUDA validation, and a clean release
-baseline:
+Before calling a change ready, review the actual user path and its evidence:
 
-1. Put new behavior only in the canonical research, experiment, report, and
-   Code-Task modules.
-2. Point the README, default examples, and normal-user documentation only to
-   `research-session`.
-3. Migrate real `run/resume` consumers to typed handoffs or an explicit
-   read-only legacy importer.
-4. Remove dead handlers, registry branches, projections, temporary outputs, and
-   duplicate tests after focused and historical-format regressions pass.
-5. Run the fixture, full suite, CLI checks, and bounded AutoDL smoke before
-   freezing V2.8.
-6. Start V2.9 only after that gate, with report engineering, module upgrades,
-   broader research-direction iteration, and Overleaf-ready output; external
-   Harness adapters come later.
+1. Trace the input from the public command to the owning capability and artifact.
+2. Check ordinary, failed, resumed, and no-execution paths with focused tests.
+3. Compare generated claims with original measurements, protocol, sources and figures.
+4. State provider, environment, data and live-project limitations instead of weakening gates.
+5. Remove replaced branches and duplicate ownership; do not add a new lifecycle to preserve an old one.
 
 The public “one entrypoint” rule does not remove internal modularity. Capabilities
 remain independently testable and composable for developers, recovery, and
@@ -288,7 +271,7 @@ comparison or recovery view. It reads attempt manifests only, does not merge
 artifacts, choose a best result, or schedule work; missing parents and cycles
 are reported explicitly.
 
-The V2.8 application layer owns the ordered capability sequence and calls
+The application layer owns the ordered capability sequence and calls
 `SessionController.execute_attempt()` explicitly. The new
 `simple_ar.app.research_application.ResearchApplication` is the first formal
 entry: it persists a `ResearchBrief` and normalized assets, then advances the
@@ -924,7 +907,7 @@ searches for an implicit “latest” artifact.
 
 ## Adding A Canonical Capability
 
-New V2.8 work belongs to the capability/session path, not to the frozen
+New research work belongs to the capability/session path, not to the historical
 eight-stage implementation. Add a capability in this order:
 
 1. Define a typed request/result and its stable handoff schema in the owning
@@ -998,8 +981,8 @@ Writer/document-plan and report/audit boundaries instead of restoring that secon
 pipeline. Historical `survey_contract` context remains readable; the builder-only
 runtime toggle and longform `planning_artifacts` option no longer exist.
 
-The report system is the V2.4 outlet for research-only surveys, experiment
-reports, and embedded code-task results. Keep it template-driven and
+The report system is the outlet for research-only surveys, experiment reports,
+and embedded code-task results. Keep it template-driven and
 evidence-aware rather than turning it back into a single prompt or a single
 large service file.
 
@@ -1034,14 +1017,15 @@ When adding report behavior:
 - keep Writer execution in `writing.py` and assembly in `capability.py`.
 
 `app/research_report.py` now only reads historical evidence; it no longer runs a
-Writer or appends fixed report/audit attempts. `app/research_application.py` and `cli/main.py` still need
-responsibility review. Remove redundant state and execution ownership rather
-than distributing the same complexity across more files.
+Writer or appends fixed report/audit attempts. `app/research_application.py`
+owns session decisions and `cli/main.py` owns user-facing dispatch. Keep those
+responsibilities distinct and remove redundant state or execution ownership
+rather than distributing the same complexity across more files.
 
 ## Extending Tools And External Agent Backends
 
-V2.6 introduces a common tool and handoff layer without replacing the existing
-domain implementations:
+The common tool and handoff layer provides an opt-in boundary without replacing
+the existing domain implementations:
 
 ```text
 src/simple_ar/tools/

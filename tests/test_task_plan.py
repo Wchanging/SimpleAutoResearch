@@ -31,6 +31,55 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_research_execution_resolves_bare_python_with_code_task_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"cwd": tmp, "timeout_sec": 5}
+            cases = (
+                ("bare-current", ["python", "-c", "print('ok')"], "current", None,
+                 sys.executable),
+                ("bare-external", ["python3", "-c", "print('ok')"], "external",
+                 sys.executable, sys.executable),
+                ("explicit-current", [sys.executable, "-V"], "current", None,
+                 sys.executable),
+                ("explicit-external", [sys.executable, "-V"], "external", sys.executable,
+                 sys.executable),
+                ("non-python", ["benchmark-tool", "--version"], "external",
+                 sys.executable, "benchmark-tool"),
+            )
+            with patch("simple_ar.code_task.execution.environment.subprocess.run") as probe:
+                for name, command, mode, executable, expected in cases:
+                    with self.subTest(name=name):
+                        config = {
+                            **base,
+                            "command": command,
+                            "code_task": {
+                                "env_mode": mode,
+                                "python_executable": executable,
+                            },
+                        }
+                        request = execution_request(config)
+                        self.assertEqual(Path(request.run.command[0]), Path(expected))
+                        self.assertEqual(request.run.command[1:], command[1:])
+
+                pair_config = {
+                    **base,
+                    "pairs": [{
+                        "seed": 0,
+                        "candidate_command": ["python", "-c", "print('candidate')"],
+                        "baseline_command": ["python3", "-c", "print('baseline')"],
+                    }],
+                    "code_task": {
+                        "env_mode": "external",
+                        "python_executable": sys.executable,
+                    },
+                }
+                for condition, marker in (("candidate", "candidate"), ("baseline", "baseline")):
+                    with self.subTest(condition=condition):
+                        request = execution_request(pair_config, condition=condition)
+                        self.assertEqual(Path(request.run.command[0]), Path(sys.executable))
+                        self.assertIn(marker, request.run.command[-1])
+                probe.assert_not_called()
+
     def test_fixed_command_seed_is_preserved_without_inventing_pairs(self):
         from simple_ar.experiment.execution.backend import RunResult
         from simple_ar.experiment.execution.results import build_canonical_results
@@ -378,7 +427,10 @@ class TaskPlanTests(unittest.TestCase):
             planned = app.advance(max_actions=1)
             self.assertEqual(planned.next_action, "implement")
             resolved = app._effective_config()["execution"]
-            self.assertEqual(set(resolved["code_task"]), {"run_dir", "approval_note"})
+            self.assertEqual(
+                set(resolved["code_task"]),
+                {"run_dir", "approval_note", "env_mode", "python_executable"},
+            )
             from simple_ar.code_task.runtime.state import load_code_task_manifest
             manifest = load_code_task_manifest(Path(resolved["code_task"]["run_dir"]))
             self.assertEqual(manifest["environment"]["policy"]["mode"], "external")

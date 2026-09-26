@@ -105,8 +105,8 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     allowed = task.pop("allowed_patterns", None)
     protected = task.pop("protected_patterns", ())
     workspace_mode = task.pop("workspace_mode", "auto")
-    env_mode = task.pop("env_mode", "current")
-    python_executable = task.pop("python_executable", None)
+    env_mode = task.get("env_mode", "current")
+    python_executable = task.get("python_executable")
     if workspace_mode not in {"auto", "copy", "git_worktree"}:
         raise ValueError("Research project preparation supports auto, copy or git_worktree; sparse/empty workspaces require standalone CodeTask.")
     for name, patterns in (("allowed_patterns", () if allowed is None else allowed), ("protected_patterns", protected)):

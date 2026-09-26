@@ -107,22 +107,157 @@ Notes:
   exponential backoff for transient provider errors such as connection resets,
   rate limits, timeouts, 5xx responses, and gateway errors such as Cloudflare
   524 origin timeouts.
-- Online pipeline stages fail after those retries by default. Set
-  `[llm].allow_fallback = true` only when you explicitly want deterministic
-  fallback artifacts; `--no-llm` remains the clear offline path.
+- Online research calls stop after the configured bounded provider retries and
+  preserve the failed attempt. Research TOML has no `[llm].allow_fallback`
+  switch; set `[model].name = ""` for deterministic offline processing, and do
+  not label its output as model-generated analysis. `--no-llm` is a CodeTask
+  primitive option, not a research-session flag.
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` controls provider-native JSON mode for
   structured calls. The default `off` uses prompt-only parsing for broad
   provider compatibility. `auto` tries `response_format={"type":"json_object"}`
   and falls back if the provider rejects it; `json_object` always sends it.
 - Price fields are optional and only affect cost estimates in usage summaries.
 
-## V2.8 Research Session (Topic To Report)
+## Choose a task and its smallest input
 
-The formal V2.8 user entrypoint is `research-session`. It runs
-`plan -> search -> document_ingest -> read -> synthesize -> research_design -> experiment
--> analysis` in one session, then continues through `report -> report_audit` when a model is
-available and reporting is not disabled. The experiment command, baseline, dataset, code scope,
-and resource limits remain explicit user/configuration inputs; this is a bounded workflow, not an
+`research-session` accepts a goal, available materials, and explicit execution
+conditions. The accepted plan selects the applicable capabilities; users do not
+need to write an internal stage list. Use these supported shapes:
+
+| Need | Minimum configuration and command | What it does not assume |
+| --- | --- | --- |
+| Online survey | `[task] outputs=["report"]`, `[research] providers=[...]`; `research-session --config survey.toml` | No experiment process or code project |
+| Analyse supplied papers/notes | Add `[research] materials_only=true` and `[assets].papers=[...]` | No web search or fabricated search result |
+| Repair an existing project | `[task] kind="bug_fix"` plus `[execution] code_task_config="code_task.toml"`; run the research config | No literature or baseline unless the task explicitly supplies it |
+| Reproduce or measure an existing script | `[execution] command=["python","measure.py"], cwd="/abs/project", primary_metric="accuracy"` and a finite process budget | No automatic repository discovery or seed expansion |
+| Improve an existing research project | Use `[task] kind="auto"` with `execution.code_task_config`, protected assets, benchmark and protocol; the [continual-learning case](../examples/continual_learning/README.md) is the prepared example | No dependency install, dataset download, or scientific success claim |
+| Independent code work | `simple-ar code-task init --config code_task.toml` then `simple-ar code-task execute ...` | No research report lifecycle |
+
+The following are four independent complete research TOML files. Save each as a
+file before running it; do not concatenate the sections. Relative paths resolve
+from that file's directory.
+
+### 1. Supplied-material analysis (no search)
+
+```toml
+[task]
+goal = "Compare the claims and limitations in the supplied papers."
+outputs = ["report"]
+
+[model]
+name = "env"
+
+[research]
+materials_only = true
+max_chunks = 32
+
+[assets]
+papers = ["notes/method-a.md", "notes/method-b.md"]
+
+[report]
+template = "survey"
+```
+
+Run from the directory containing `research.toml` with
+`simple-ar research-session --config research.toml`. Both read-only files must
+exist; no search or experiment process is created.
+
+### 2. Online literature survey
+
+```toml
+[task]
+goal = "Survey small-memory continual learning for image classification."
+outputs = ["report"]
+
+[model]
+name = "env"
+
+[research]
+providers = ["openalex", "semantic_scholar", "arxiv"]
+max_results = 8
+max_chunks = 32
+interaction = "checkpoints"
+
+[budget]
+process_invocations = 0
+process_wall_seconds = 0
+
+[report]
+template = "survey"
+```
+
+Run it from the repository root or another directory containing the file. This
+uses configured providers and the current environment's LLM settings; it does
+not discover a code project or start an experiment.
+
+### 3. Existing-project bug repair
+
+```toml
+[task]
+goal = "Fix the phrase-aware classification bug described by the task file."
+kind = "bug_fix"
+outputs = ["bug_fix"]
+
+[model]
+name = "env"
+
+[budget]
+process_invocations = 1
+process_wall_seconds = 120
+
+[execution]
+code_task_config = "examples/code_task_medium_review/configs/code_task.toml"
+```
+
+Save this file at the repository root and run
+`simple-ar research-session --config bugfix.toml`. The referenced CodeTask file,
+its `task.md`, project files, benchmark and declared edit scope must exist. The
+implementation runs in an isolated workspace and the bug-fix path does not run
+a baseline or write the original fixture.
+
+### 4. Direct CPU measurement
+
+```toml
+[task]
+goal = "Measure the checked-in digits benchmark without changing its source."
+outputs = ["experiments"]
+
+[model]
+name = ""
+
+[execution]
+command = ["python", "benchmark.py"]
+cwd = "examples/code_task_digits_mlp/project"
+timeout_sec = 60
+primary_metric = "accuracy"
+
+[budget]
+process_invocations = 1
+process_wall_seconds = 60
+```
+
+Save at the repository root and run
+`simple-ar research-session --config measurement.toml`. The explicit `outputs`
+already excludes a report; do not combine it with `--no-report`. Direct argv
+uses the process `PATH` and has no CodeTask interpreter policy; use an absolute
+interpreter in `command` if `python` is not the intended environment. The
+benchmark is a small CPU fixture, not evidence of a scientific improvement.
+
+For all four files, inspect the printed session path with
+`simple-ar status RUN_DIR`. Resume or inspect a paused decision using
+`simple-ar research-session --session-root RUN_DIR` and the documented decision
+or continuation options. A direct `execution.command` and
+`execution.code_task_config` are mutually exclusive; do not combine them.
+
+## Research session: task to evidence
+
+The formal user entrypoint is `research-session`. It accepts the task and assets,
+creates a short accepted plan, and invokes only the capabilities justified by
+that plan. Literature ingestion, CodeTask preparation/implementation, experiment
+measurement, analysis, report writing and audit are separate owned boundaries;
+the application reconnects them through declared artifact references. The
+execution command, baseline policy, dataset, code scope and resource limits
+remain explicit user/configuration inputs. This is bounded work, not an
 unlimited autonomous loop.
 
 For a literature-only session, omit both the execution command and
@@ -154,7 +289,7 @@ See [CLI Reference](CLI_REFERENCE.md#artifact-tools) for option details.
 
 ## Tool And External Agent Handoff Preview
 
-V2.6 adds an internal common tool and agent-handoff layer. This is a controlled
+An internal common tool and agent-handoff layer is available as a controlled
 extension point for future Codex, Claude Code, OpenCode, OpenAI tool-calling, or
 MCP adapters; it is not a new default runtime path.
 
@@ -187,7 +322,7 @@ External tools remain optional strong-path adapters. Local research, report,
 greenfield experiment, and code-task workflows continue to work without Codex,
 Claude Code, OpenCode, or an MCP server.
 
-V2.6 also adds runnable backend wrappers behind this boundary:
+Runnable backend wrappers are available behind this boundary:
 
 - `fake`: deterministic dry-run backend used for integration tests;
 - `local_llm`: uses the configured LLM to produce bounded review artifacts;

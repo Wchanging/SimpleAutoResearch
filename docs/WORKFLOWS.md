@@ -2,47 +2,53 @@
 
 [中文版本](WORKFLOWS_zh.md)
 
-This document explains what SimpleAutoResearch is doing internally: workflow
-presets, pipeline stages, artifact ownership, and module boundaries. It avoids
+This document explains what SimpleAutoResearch is doing internally: task-driven
+capabilities, artifact ownership, recovery boundaries, and module boundaries. It avoids
 duplicating the full artifact manual; for concrete commands and file trees, see
 [Usage And Configuration](USAGE.md). For command flags, see
 [CLI Reference](CLI_REFERENCE.md); for TOML fields, see
 [Configuration Reference](CONFIG_REFERENCE.md).
 
-## Workflow Presets
+## Task-Driven Execution And Recovery
 
 The formal research entrypoint is `research-session`. It owns attempts, artifacts,
-reports and audits in one session, selecting literature or experiment work from
-the request. The old eight-stage executor is retired, not a compatibility workflow.
-
-The project remains module-first internally. Capabilities can be reused by tests,
-recovery, developer APIs, and future workflows, but ordinary users should not
-have to assemble the complete flow across multiple public entrypoints.
+reports and audits in one session, while `ResearchApplication` selects only the
+capabilities justified by the task, supplied assets and accepted execution
+constraints. There is no user-facing fixed stage sequence.
 
 ```text
-formal user entrypoint
-research-session
-  -> plan -> search -> document_ingest -> read -> synthesize
-  -> research_design -> experiment -> analysis -> report -> report_audit
+task + assets + constraints
+  -> short accepted plan
+  -> capability execution and observed artifact
+  -> application decision: next action, revision, delivery, or stop
+  -> explicit recovery/reload from persisted refs without repeating valid work
+```
 
-segmented/development interfaces
-research-brief
+The application owns plan acceptance, capability order, comparison decisions and
+delivery choices. Each capability owns its input contract and attempt output;
+`SessionController` owns attempt, budget, lineage and artifact persistence. A
+resume reads those facts and reconstructs the next accepted action; it does not
+replay completed side effects or let the core invent a domain-specific stage.
 
-historical read interface
-simple-ar status RUN_DIR -> read-only archive display
+Public entrypoints remain intentionally small:
+
+```text
+simple-ar research-session       # canonical task-driven entry and recovery
+simple-ar research-brief         # compatibility request/result adapter
+simple-ar status RUN_DIR         # read-only archive display
 ```
 
 ## Capability Runs
 
-Alongside the workflow presets, `simple_ar.core` provides an opt-in boundary
+Alongside the task-driven entrypoint, `simple_ar.core` provides an opt-in boundary
 for new replaceable capabilities. A capability receives declared input
 references through `CapabilityContext`, writes outputs through an
 attempt-scoped `ArtifactStore`, and returns a `CapabilityResult`. The
 `SessionController` can persist a bounded attempt and its decision without
-turning the existing pipeline into an unrestricted task graph.
+turning the application into an unrestricted task graph.
 
-This boundary is additive: it does not migrate the eight stages automatically
-or change the artifact paths expected by existing commands and adapters. The
+This boundary is compositional: it does not schedule arbitrary actions or
+change the artifact paths expected by existing commands and adapters. The
 offline reference package in `tests/fixtures/capability_package_minimal/` shows the
 smallest supported handoff; domain-specific schemas belong to the capability,
 not to the shared core.
@@ -304,7 +310,7 @@ reference to the separate audit capability.
 ### 1. Research Report (Literature-First, Segmented/Advanced)
 
 Use this when you want a literature review, survey, or DeepResearch-like report without emphasizing experiments.
-For the ordinary complete V2.8 flow, use `research-session`; this section describes a reusable
+For an ordinary complete research task, use `research-session`; this section describes a reusable
 capability boundary.
 
 Conceptual flow:
@@ -455,7 +461,7 @@ See the capability entrypoints above for typed inputs and outputs.
 
 ## Code Task Artifact Boundaries
 
-Standalone code tasks and research-application implementations use the same conceptual
+Standalone code tasks and research-session implementations use the same conceptual
 layout. The important boundary is what each group is responsible for:
 
 - `workspace/`: isolated editable project copy, worktree, or sparse subset.
@@ -511,7 +517,7 @@ the formal entrypoint simple.
 - If the user wants a survey, code stages should be skipped.
 - If the user wants to optimize existing code, literature stages should be optional.
 - `research-session` can include a prepared code experiment while keeping a
-  fixed lifecycle boundary.
+  bounded lifecycle boundary.
 - Tests, recovery, developers, and future workflows can compose modules without
   making ordinary users understand the internal assembly.
 - Each module can be upgraded independently, but there must not be a second

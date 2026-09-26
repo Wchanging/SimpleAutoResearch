@@ -6,10 +6,10 @@
 
 ## 项目形态
 
-SimpleAutoResearch 现在采用 file-first + state-backed 的形态：
+SimpleAutoResearch 现在以文件产物和持久化 session state 为中心：
 
-- stage 读取和写入具体文件；
-- workflow state 通过 `state.json` 和阶段 contract 可见；
+- capability 读取和写入具体 artifact；
+- session state 通过 `session_manifest.json`、attempt 和 `ArtifactRef` handoff 可见；
 - 测试验证 contract/artifact，而不是依赖隐藏内存状态；
 - 高风险代码修改发生在隔离 editable workspace 中，通常是受保护 copy，也可以是 detached git worktree，或实验性 sparse copy。
 
@@ -54,16 +54,17 @@ SimpleAutoResearch 同时要避免两种失控：不断增加暂时没有消费�
 
 实施蓝图中的锁、预算、迁移和恢复，只实现当前路径需要的最小可靠版本；蓝图不是“先把所有基础设施和防护做齐，才允许交付功能”的清单。示例中的时间、请求和资源限制是可调整的工程起点，不能成为回避真实任务的理由。完整架构与施工顺序保存在项目本地的 `MDfiles/` 规划笔记中；该目录按项目约定不提交 GitHub，公开贡献者规则以本文为准。
 
-### V2.9 开发目标：决策上下文与模块衔接
+### 当前 research-session 扩展边界
 
-以下是开发中的目标契约，不表示完整自主科研循环已经实现。当前开发切片已验证
-短计划下的提供材料分析和小型代码修复；开放网络调研与后续实验循环仍需独立验收。
+以下是当前开发契约，不是所有 provider、项目或科研循环都已经通过 live acceptance 的声明。
 
-阶段 B 在同一入口内将已声明的执行协议绑定到现有 Preparation/CodeTask 和 experiment 能力：
-单个 literal command 配合显式 seed 设置可以生成 pair；LLM 模式下，research design 只有在检查过
-入口后，才能在既有进程边界内提出 argv 扩展。baseline 记录为运行、跳过或同条件复用。accepted plan
-与 work-plan 会保存协议理由和产物引用；模型不能自行授予 cwd、安装器、修复索引或进程权限。
-这些是本地 B 的实现证据，不表示开放检索或冻结端到端验收已经通过。
+`research-session` 把任务/资产/约束解释成有界 accepted plan，再接到 typed capability。Design 和 execution
+复用 supplied entrypoint、protocol、CodeTask 修改范围和 process budget。模型只能在检查过且已授权的边界内
+提出条件，不能自授予 cwd、installer、repair limit 或 process permission。baseline 只有 `run`、`skip` 或
+同条件 `reuse`；只有命令、schema、protocol、准备 lineage 和保护资产都匹配时才复用保存的测量。
+Analysis、实现、实验、报告写作和审计各自拥有不同事实。plan 不是 execution，零退出码不是科研成功，
+报告正文也不能创造测量结果。恢复沿用保存的 attempt/state 引用，不静默重复已完成副作用；provider 错误、
+进程失败和科研负结果保持区分。
 
 - 一条执行链：任务/资产 → 近期计划 → 类型化能力请求 → SessionController → 实际产物 → 必要时重新判断。
 - 基础研究记忆从任务、计划、相关经历和产物引用组装，不是第二份事实库。
@@ -74,10 +75,9 @@ SimpleAutoResearch 同时要避免两种失控：不断增加暂时没有消费�
   计划不等于执行，返回码成功不等于目标达成，报告不产生测量事实。
 - 已接受计划前提未变时继续；出现影响判断的新证据才重规划。基本恢复从第一条路径就要成立。
 
-模块升级融入阶段交付：A 任务理解、材料阅读和代码修复；B 设计、项目探查、受限改码和协议执行；
-C 结果解释、相关失败经验、补实验与方向修订；D 变更续接和旧调度退出；E 正常规模质量、报告和用户交付验收。
-E 不是前面阶段可以忽略质量的理由。多 Agent 讨论、复杂 PDF、模板导出与外部 Harness 是按需增强，
-不预建平台，也不把它们包装成已发布功能。
+不要因为 schema 或 fixture 存在就把未来能力写成已验收。provider、项目、GPU、检索和报告质量的 live 证据
+必须与离线 parser/behavior coverage 分开记录。新工作应扩展当前 application/capability 路径，并在真实消费者
+出现前保持有界。
 
 ### 兼容性审计
 
@@ -94,40 +94,34 @@ simple-ar status / inspect / search-artifacts
   -> 历史产物读取（不启动旧流程）
 ```
 
-`research-session` 是 V2.8 唯一正式用户入口，负责有界的 research 流程。提供明确命令或
+`research-session` 是正式用户入口，负责有界的 research 流程。提供明确命令或
 CodeTask 时继续完成 `research_design -> experiment -> analysis -> report -> report_audit`；
 两者都省略时提供 literature-only 的 summary/report 路径，且不创建 execution 请求。
 `research-brief`
 仍保留，但只用于分段调试、已有 handoff 接续和库级组合，不与完整主线
 并列作为产品入口。`simple-ar run/resume` 已退出，不静默转换旧参数。新的 capability 应
-放在 `research/`、`experiment/` 或 `report/` 中。旧阶段层已删除；剩余实验和报告消费者
-仍需收束，不能宣称生命周期已经全部统一。
+放在 `research/`、`experiment/` 或 `report/` 中。旧阶段层已删除；历史消费者只读，当前
+实验和报告行为由下文模块负责。
 
-2026 年 9 月的清洗已经删除确认没有生产消费者的超前/重复层：无用的 session-plan
-抽象、多候选 CodeTask 调度器、独立 research iteration policy，以及 research
-Tool/MCP 设计契约产物。Read cards 和 `evidence_pack_from_read()` 统一承担阅读到综合的
-证据交接；旧 debug 输出及完整 pack 构建器已退出，推导测试也使用正式交接。CodeTask 的 external CLI 支持保留为显式、默认
-禁用的 backend，因为当前实验路径仍使用它的 provider factory；它不是 V2.8 的
+当前树通过 read cards 和 `evidence_pack_from_read()` 统一承担阅读到综合的证据交接，不增加第二份
+planning 或 lifecycle store。CodeTask 的 external CLI 支持保留为显式、默认
+禁用的 backend，因为当前实验路径仍使用它的 provider factory；它不是 research-session 的
 workflow controller。
 
-这是当前 V2.8 收口期间的临时保留决定，并不意味着所有旧路径永久不能清理。下一步是
-逐项迁移 SurveyBench、ARC-Bench、历史 reader、旧配置和测试；删除下一个兼容模块前，
-要重新搜索 import、CLI 分发、文档、fixture 和历史 reader，并保留旧格式回归。若真实
-消费者已经退出，旧 facade、registry 分支和 projection 应直接删除，不继续保留“以后可能有用”
+历史 reader 和兼容 facade 只在仍有消费者或旧格式时保留。删除前必须搜索 import、CLI 分发、
+文档、fixture 和历史 reader，迁移真实消费者并保留旧格式回归。若真实消费者已经退出，旧
+facade、registry 分支和 projection 应直接删除，不继续保留“以后可能有用”
 的整套入口。
 
-### V2.8 收口顺序
+### 交付审查清单
 
-V2.8 的 canonical 业务闭环已经接通，但工程发布还差兼容退出、真实 Linux/CUDA 验证和干净的发布基线。
-贡献者按下面顺序推进：
+准备交付前检查真实用户路径及证据：
 
-1. 只把新研究行为放入 canonical `research/`、`experiment/`、`report/` 和 `code_task/`；
-2. 让 README、默认 example 和普通用户文档只指向 `research-session`；
-3. 把仍使用 `run/resume` 的真实消费者迁移到 typed handoff 或明确的只读导入边界；
-4. 删除已无消费者的旧 handler、registry、projection、临时输出和重复测试；
-5. 通过聚焦回归、fixture、CLI/历史格式回归、全量测试和低资源 smoke 后，才冻结 V2.8；
-6. V2.9 再处理报告工程、模块质量升级、更广的研究方向迭代和 Overleaf-ready 输出，
-   外部 Claude Code/Codex/OpenCode Harness 更晚接入。
+1. 从公开命令追踪到负责 capability 和 artifact 的输入链；
+2. 用定向测试覆盖正常、失败、恢复和无实验路径；
+3. 将生成声明与原始测量、protocol、来源和图表对照；
+4. 直接列出 provider、环境、数据和 live 项目限制，不削弱 gate；
+5. 删除被替代分支和重复职责，不为保留旧路径再造一套 lifecycle。
 
 这里的“一个入口”指用户正式入口只有 `research-session`；内部 capability 仍然保持模块化，
 供测试、恢复、开发者和未来其他 workflow 组合使用。
@@ -227,7 +221,7 @@ capability result。两者都不会自动重试、覆盖已有的 result envelop
 `attempt_lineage()`。它只读取 attempt manifest，不合并产物、不选择最佳结果，也不调度新
 工作；父节点缺失或链路成环时会显式报错。
 
-V2.8 application 层负责给出有序 capability 序列，并显式调用
+application 层负责给出有序 capability 序列，并显式调用
 `SessionController.execute_attempt()`。当前的正式 P04 入口是
 `simple_ar.app.research_application.ResearchApplication`：它保存 `ResearchBrief` 和归一化
 资产，再按 `plan -> search -> document_ingest -> read -> synthesize -> summarize` 每次推进
@@ -662,7 +656,7 @@ draft 的调用方提供下游报告边界。该适配器复用 `assemble_report
 
 ## 添加 Canonical Capability
 
-新的 V2.8 能力应进入 capability/session 主线，而不是继续写入已经冻结的八阶段实现。
+新的 research 能力应进入 capability/session 主线，而不是继续写入历史八阶段实现。
 建议按以下顺序添加：
 
 1. 在所属领域包中定义 typed request/result 和稳定的 handoff schema。
@@ -720,8 +714,8 @@ Metric comparison 应保持保守。未知数值指标可以记录 delta，但�
 report/audit 边界，不恢复第二套流水线。历史 `survey_contract` 上下文仍可读，但旧构建器专属的
 runtime 开关和 longform `planning_artifacts` 配置已删除。
 
-Report system 是 V2.4 用来承接 research-only survey、experiment report 和
-embedded code-task result 的出口。它应该保持 template-driven 和 evidence-aware，
+Report system 是承接 research-only survey、experiment report 和 embedded
+code-task result 的出口。它应该保持 template-driven 和 evidence-aware，
 不要退回到单个大 prompt 或单个大 service 文件。
 
 ```text
@@ -753,12 +747,12 @@ src/simple_ar/report/
 - Writer 执行放在 `writing.py`，报告组装放在 `capability.py`。
 
 `app/research_report.py` 现仅投影历史证据，不再执行 Writer 或固定 report/audit attempt。
-`app/research_application.py` 和 `cli/main.py` 仍需职责审查。
+`app/research_application.py` 负责 session 决策，`cli/main.py` 负责用户入口分发；二者职责应保持分开。
 优先删除重复状态和执行 owner，而不是把复杂度分散到更多文件。
 
 ## 扩展 Tools 和外部 Agent Backend
 
-V2.6 新增 common tool 与 handoff 层，但不替换已有领域实现：
+common tool 与 handoff 层提供可选边界，但不替换已有领域实现：
 
 ```text
 src/simple_ar/tools/

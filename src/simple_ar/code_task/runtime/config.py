@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import os
-import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from simple_ar.code_task.execution.baseline_policy import normalize_baseline_policy
@@ -638,11 +635,8 @@ def _load_toml_config(path: str | None) -> CodeTaskConfig:
     return config
 
 
-_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
-
 def _resolve_local_references(config: CodeTaskConfig, config_path: Path) -> None:
-    """Expand opt-in machine and case paths without changing legacy relative paths."""
+    """Expand case-local paths without changing legacy relative paths."""
 
     fields = (
         (config.code_task, "code_root"),
@@ -653,38 +647,22 @@ def _resolve_local_references(config: CodeTaskConfig, config_path: Path) -> None
         (config.benchmark, "command"),
         (config.execute, "baseline_metrics_file"),
     )
-    values = [getattr(section, name) for section, name in fields]
-    values.extend(config.environment.required_paths)
-    if any(isinstance(value, str) and _ENV_REFERENCE.search(value) for value in values):
-        dotenv_path = find_dotenv(usecwd=True)
-        if dotenv_path:
-            load_dotenv(dotenv_path, override=False)
-
-    missing_vars: set[str] = set()
     case_dir = config_path.resolve().parent.as_posix()
 
     def expand(value: str) -> str:
-        def environment(match: re.Match[str]) -> str:
-            name = match.group(1)
-            resolved = os.environ.get(name)
-            if not resolved:
-                missing_vars.add(name)
-                return match.group(0)
-            return resolved
-
-        return _ENV_REFERENCE.sub(environment, value.replace("{config_dir}", case_dir))
+        resolved = value.replace("{config_dir}", case_dir)
+        if "${" in resolved:
+            raise CodeTaskConfigError(
+                f"Task resource paths must be declared in {config_path}; "
+                "use {config_dir} or an explicit path, not .env variables."
+            )
+        return resolved
 
     for section, name in fields:
         value = getattr(section, name)
         if value is not None:
             setattr(section, name, expand(value))
     config.environment.required_paths = [expand(value) for value in config.environment.required_paths]
-    if missing_vars:
-        raise CodeTaskConfigError(
-            f"Missing environment variable(s) for {config_path}: "
-            + ", ".join(sorted(missing_vars))
-            + ". Set them in the environment or a .env file found from the current directory."
-        )
     missing_paths = [
         str(Path(value).expanduser().resolve())
         for value in config.environment.required_paths

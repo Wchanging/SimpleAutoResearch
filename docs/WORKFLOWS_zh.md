@@ -2,38 +2,43 @@
 
 [English version](WORKFLOWS.md)
 
-本文说明 SimpleAutoResearch 内部在做什么：工作流预设、pipeline 阶段、artifact 归属和模块边界。它不重复完整文件手册；具体命令和文件树见 [使用与配置](USAGE_zh.md)，命令参数见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML 字段见 [配置参考](CONFIG_REFERENCE_zh.md)。
+本文说明 SimpleAutoResearch 内部在做什么：任务驱动能力、artifact 归属、恢复边界和模块职责。它不重复完整文件手册；具体命令和文件树见 [使用与配置](USAGE_zh.md)，命令参数见 [CLI 参考](CLI_REFERENCE_zh.md)，TOML 字段见 [配置参考](CONFIG_REFERENCE_zh.md)。
 
-## 工作流预设
+## 任务驱动的执行与恢复
 
 正式研究入口是 `research-session`，在同一会话中维护 attempt、产物、报告与审计，
-按请求选择文献或实验任务。旧八阶段执行器已退出，不再作为兼容工作流运行。
-SimpleAutoResearch 仍保持 module-first，但模块化发生在内部 capability 和应用层；它让
-测试、恢复、开发者接口以及后续 workflow 可以复用能力，不意味着普通用户需要在多条入口
-之间自行拼接完整流程。
+由 `ResearchApplication` 根据任务、已有材料和已接受的执行约束选择需要的能力；对用户没有
+固定阶段序列。
 
 ```text
-正式用户入口
-research-session
-  -> plan -> search -> document_ingest -> read -> synthesize
-  -> research_design -> experiment -> analysis -> report -> report_audit
+任务 + 材料 + 约束
+  -> 短 accepted plan
+  -> 能力执行并记录观察产物
+  -> 应用层决定下一动作、修订、交付或停止
+  -> 从持久化引用显式恢复，已完成的有效副作用不重复
+```
 
-内部可复用/分段接口
-research-brief
+应用层负责计划接受、能力顺序、可比性决定和交付选择；每个能力负责自己的输入合同与
+attempt 输出；`SessionController` 负责 attempt、预算、lineage 和产物持久化。恢复时读取
+这些事实并重建下一项已接受动作，不重放已完成副作用，也不让 core 自行发明领域阶段。
 
-历史读取入口
-simple-ar status RUN_DIR -> 只读展示存档
+公开入口保持精简：
+
+```text
+simple-ar research-session       # 正式任务驱动入口与恢复
+simple-ar research-brief         # 兼容请求/结果适配器
+simple-ar status RUN_DIR         # 只读展示存档
 ```
 
 ## Capability 运行
 
-在这些 workflow preset 之外，`simple_ar.core` 为新的可替换能力提供了一层可选
+在这个任务驱动入口之外，`simple_ar.core` 为新的可替换能力提供了一层可选
 边界。能力通过 `CapabilityContext` 接收已经声明的输入引用，通过 attempt-local
 的 `ArtifactStore` 写出结果，并返回 `CapabilityResult`。`SessionController` 可以
-持久化一个有界 attempt 和对应 decision，但不会把现有 pipeline 变成不受限制的
+持久化一个有界 attempt 和对应 decision，但不会把应用变成不受限制的
 任务图。
 
-这层边界是增量式的：它不会自动迁移八个阶段，也不会改变现有命令和 adapter 依赖
+这层边界是组合式的：它不会调度任意动作，也不会改变现有命令和 adapter 依赖
 的产物路径。`tests/fixtures/capability_package_minimal/` 提供最小离线 handoff 示例；
 具体领域的 schema 应属于对应 capability，不应继续堆进共享 core。
 
@@ -73,7 +78,7 @@ controller 不会自行推断分支，也不会替调用方选择结果。需要
 暴露聚合的 `research_brief` capability：session 分别持久化 `read` 与 `synthesize`。
 历史 `research_brief.v1` handoff 仍可读取，但不会再成为第二条可执行 lifecycle。
 
-下面的 `research-brief` 是分段/开发入口，不是 V2.8 完整主线。面向普通用户的完整流程应
+下面的 `research-brief` 是分段/开发入口，不是普通用户的完整任务入口。面向普通用户的流程应
 优先使用 `simple-ar research-session`；需要只构建研究 handoff、调试阅读或从已有 handoff
 开始时，才使用这些较小的组合入口。`research-brief` 现在只是参数/返回值适配器，
 请求同一个 `ResearchApplication` 生成文献摘要，采用其生命周期及默认请求/token 预算，
@@ -240,7 +245,7 @@ retry 或阶段转移；持久化的独立分析还会写出 `analysis_status.js
 ### 1. Research Report：文献优先（分段/高级用例）
 
 适合想要 literature review、survey 或 DeepResearch-like report，而不强调实验执行的场景。
-普通用户的完整 V2.8 主线仍应使用 `research-session`；这里描述的是可复用的分段能力边界。
+普通用户的完整研究任务仍应使用 `research-session`；这里描述的是可复用的分段能力边界。
 
 概念流程：
 
@@ -336,7 +341,7 @@ LLM idea 与本地新颖性检查只是研究建议，不是原创性证明；�
 
 ## Code Task Artifact 边界
 
-Standalone code task 和嵌入 8 阶段 pipeline 的 code task 使用相同的概念布局。重点不是记住每个文件名，而是理解每组 artifact 的职责：
+Standalone code task 和 research-session 中的 CodeTask 使用相同的概念布局。重点不是记住每个文件名，而是理解每组 artifact 的职责：
 
 - `workspace/`：隔离后的可编辑项目副本、worktree 或 sparse subset。
 - `meta/`：环境报告、repo map、locate results、edit proposals、validation reports、applied-edit summaries 和 LLM usage。
@@ -373,7 +378,7 @@ tests、benchmarks、环境文件、secrets 和用户配置的 protected paths �
 
 - 用户只想写 survey 时，不应强制运行代码阶段。
 - 用户只想优化已有代码时，文献阶段应可选。
-- `research-session` 可以按任务配置选择是否接入准备好的代码实验，但流程边界仍然固定。
+- `research-session` 可以按任务配置选择是否接入准备好的代码实验，但生命周期仍保持有界。
 - 测试、恢复、开发者和未来 workflow 可以组合模块；普通用户不需要理解内部组合细节。
 - 每个模块可以独立升级，但不得形成第二套 session 状态、artifact 或报告核心。
 

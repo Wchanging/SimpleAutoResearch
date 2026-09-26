@@ -4406,7 +4406,10 @@ class ResearchApplication:
                     # Preparation owns workspace identity and edit scope. Its
                     # output is the executor contract, not the declarative spec.
                     task = dict(prepared_task)
-                    for key in ("approval_note", "max_repairs", "budget_profile", "allow_large_edits"):
+                    for key in (
+                        "approval_note", "max_repairs", "budget_profile", "allow_large_edits",
+                        "env_mode", "python_executable",
+                    ):
                         if key in requested_task:
                             task[key] = requested_task[key]
                     requested["code_task"] = task

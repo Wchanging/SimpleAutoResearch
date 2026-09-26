@@ -7,7 +7,13 @@
 CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 旧八阶段外层配置解析器及别名转换已经退出，历史快照仍可读取，但不是可执行工作流。
 
-## 加载规则
+## 全局 `.env`
+
+`.env` 由 LLM 集成读取，用于凭据、endpoint、模型和传输设置；它被 Git
+忽略，不应放任务资源、源码根目录、数据集或解释器路径。任务专属路径和执行条件
+必须写在研究 TOML 或其引用的 CodeTask TOML 中。
+
+## 研究 TOML：分区与默认值
 
 研究入口的 `report.template` 默认 `auto`：仅调研沿用综述；实验任务依据分析中的目标判断选择实验论文、复现报告或简短实验分析报告。执行 `passed` 不等于科研目标达成；目标不明、未达成或因轮次限制停止时，默认不写成成功论文。显式 `experiment`、`reproduction`、`analysis_report` 或自定义模板优先，但不能覆盖测量事实。旧会话保存的显式模板不会被新默认值更换；需要时通过现有报告配置续接改为 `auto`。结构自动选择不代表论文语义质量已验收。
 
@@ -18,62 +24,42 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 - 优先级：内置默认 → 研究 TOML → 显式 CLI 覆盖。CLI 列表覆盖整份文件列表。
 - 研究文件中的相对路径以 TOML 所在目录为基准；命令 argv 原样传给实验进程。
-- `[task]`：`goal`、`kind`（auto/survey/bug_fix）、`outputs`（summary/report/experiments/bug_fix）、`output_root`。
-  bug_fix 复用 CodeTask 配置的修改范围与短验证命令，不执行 baseline；需显式提供
-  `execution.code_task_config` 和有限进程预算。auto 尚不代表任意任务自主准备。
-- `[model]`：`name`（`env` 使用 `.env` 的 SIMPLE_AR_MODEL）、`max_output_tokens`。
-  配置文件省略模型时默认使用环境模型；显式 `name = ""` 用于不调用模型的确定性摘要。
-  API key/base URL 继续来自环境，禁止在模板写密钥。
-- `[budget]`：`total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds`。
-  总 token 与单次输出上限不是同一个限制。配置预算用于新会话；恢复继续使用已有账本。
-- `[research]`：`providers`、`queries`、`max_results`、`max_chunks`、`idea_limit`、`cache_dir`、
-  `max_iterations`、`interaction`。`max_iterations = 0` 表示首轮分析后停止。
-  `interaction` 可为 `assisted`、`checkpoints` 或 `autonomous`；新 CLI 会话默认 `checkpoints`，
-  旧 session 缺少该字段时保留旧行为。硬事实/权限缺口在所有模式下都会暂停。
-  可用布尔项 `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf` 启用已有全文摄取；
-  高级模板显式开启。下载或解析失败仍须保留摘要级/不可用状态，不能称为全文阅读。
-- `[assets].papers`：本地文献路径列表。
-  设置 `[research] materials_only = true` 可明确只分析这些材料，不执行 search。
-  仍可调用 LLM 阅读和综合；并非离线模型模式。未强制此限制时，LLM 计划也可根据任务
-  选择省略搜索，但必须已有本地材料。来源不足按实际限制交付，不伪造检索结果。
-  阶段 A 的已接受计划是短顺序计划；每个动作只出现一次，输入由现有能力适配函数绑定，
-  不支持任意重复动作、任意输入重绑定或自主扩大实验协议。
-- `[execution]`：`command`（字符串数组）、`cwd`、`timeout_sec`，或 `code_task_config`；
-  可附 `primary_metric`、`metrics`、`metric_directions`（如 `["accuracy=higher"]），以及
-  `seeds`/`seed_count`、`seed_flag`、`baseline_policy`、`baseline_ref`。
-- 高级实验可用 `[[execution.pairs]]`：每行包含唯一整数 `seed` 与显式 argv 数组
-  `baseline_command`、`candidate_command`，不与 compact seed 设置混用。也可以只提供一个
-  literal `command`、`seed_flag` 和显式的 `seed_count`，由正式入口生成有界 pair；不会解析
-  自然语言 seed 请求或 shell，也不会把模型建议变成命令权限。未声明重复条件则保留一次执行并
-  记录默认理由。LLM 模式下，research design 只能在检查过的入口边界内提出条件或 argv 扩展，
-  显式配置优先。`baseline_policy` 只能为 `run`、`skip` 或 `reuse`；reuse 只接受当前 artifact store
-  中通过且实际命令、结果 schema、数据/划分/指标/条件及准备 lineage 相符的框架产物；仅 cwd 或
-  叙述性契约相同不足以复用。引用 CodeTask 时，改码范围仍由 CodeTask 配置负责。
-  `[execution.protocol]` 直接使用已有实验契约的 dataset_refs、split_spec、metric_specs、
-  comparison_conditions、protected_assets，可附 contract_id/hypothesis。
-  保护文件相对路径以实验 cwd 为基准，共享数据可用绝对路径；不是以 TOML 目录为基准。
-  不提供种子插值或新调度器；进程预算须覆盖整个矩阵。
-  单次固定命令也可用 `seed_flag` 记录 literal 整数种子（`--seed 0` 或 `--seed=0`），
-  不生成 pair 或授权追加种子。明确扩展种子时替换已有参数而非重复追加；命令种子与
-  `protocol.comparison_conditions.seed` 冲突时报错。声明协议贯通设计、测量与报告，
-  但不代表数据内容已获验证，也不会追改历史测量。
-  可比性依据协议版本、数据引用、划分、指标定义、比较条件、保护资产和结果 schema，
-  不依据候选 ID 或假设文本。历史完整合同使用同一规则只读比较，不用新计划补齐旧证据。
-- `[report]`：`template`、`reviewer`、`max_review_iterations`、`max_section_tokens`、`figures`。
-  `max_section_tokens = 0` 表示不添加报告单次调用的 provider 输出上限；只有确实需要专家级
-  限制时才填写正数。支持的确定性图表默认启用；如需纯文本输出，可设置
-  `[report.figures] enabled = false` 或 `mode = "off"`。配对实验中
-  `max_figures = 0` 默认选择最多四个代表性指标；只有确实需要不同数量时才填写正数。
-- 显式 outputs 与 --with-report/--no-report 二选一。只调研不会因配置了材料而训练。
-  请求 experiments 但没有执行配置时保留该目标，并在实验处报告准备缺口；自动仓库准备尚未实现。
-- 未实现字段和拼写错误显式报错。暂不接受研究阶段模型或多模型协作配置。
-- 生效预算、研究参数和输入保存在会话 runtime_config/brief 产物中；认证配置不写入。
-  模型连接仍来自当前运行环境，不应将这些产物视为完整的连接配置快照。
-- 使用 `--session-root` 恢复时，未改动的研究参数沿用已存值。若显式研究配置与存档值不同，
-  搜索/摄取类变更会在执行前拒绝；`cache_dir` 没有持久化，无法安全比较，因此也不能作为续接改动。
-  请新建 session 应用这些研究设置。已请求报告的 session 可显式修改 `[report]`；它只失效 writer/report/audit
-  交付引用，保留文献、分析与测量产物，不重新运行研究或实验。
-  尚未请求报告的前缀可使用 `research-report` 补齐交付物。
+
+### 任务、模型与预算
+
+| 分区 | 字段 | 默认值 / 必填与条件约束 |
+| --- | --- | --- |
+| `[task]` | `goal`、`kind`、`outputs`、`output_root`、`selected_idea_id` | 新 session 必须有 `goal`。`kind` 默认 `auto`，可为 `auto`、`survey`、`bug_fix`。`outputs` 可省略，由任务/报告/执行形态推导；显式值只能使用 `summary`、`report`、`experiments`、`bug_fix`。`output_root` 默认 `runs/research-session`；`selected_idea_id` 可选，必须指向已有且有依据的候选。 |
+| `[model]` | `name`、`max_output_tokens` | 文件配置默认 `name = "env"`，读取 `.env` 的 `SIMPLE_AR_MODEL`；`name = ""` 选择不调用 LLM 的确定性处理。`max_output_tokens` 可省略；凭据始终留在环境中。 |
+| `[budget]` | `total_tokens`、`llm_requests`、`process_invocations`、`process_wall_seconds` | 新 session 的 token/request 上限可省略（该维度不设框架上限）；进程值按任务形态在入口推导，要求执行时应显式设置。恢复沿用已存账本，不清零用量。 |
+
+### 研究输入与行为
+
+| 分区 | 字段 | 默认值 / 必填与条件约束 |
+| --- | --- | --- |
+| `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
+| `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`materials_only` | 默认均为 false。`materials_only = true` 要求/使用 `[assets].papers` 并禁用 search，但仍允许模型阅读；全文获取失败时保留 abstract-only/unavailable 状态。 |
+| `[research]` | `max_iterations`、`interaction` | `max_iterations` 默认 `1`，`0` 表示首轮分析后停止。`interaction` 新 CLI 默认 `checkpoints`，可选 `assisted`、`checkpoints`、`autonomous`；硬事实和权限缺口在任何模式下都是阻塞。 |
+| `[assets]` | `papers` | 可选的本地 Markdown/text/PDF 路径列表；相对路径以 TOML 所在目录解析，作为只读输入。 |
+
+未知分区/字段和类型错误会显式拒绝。accepted plan 是短顺序计划，动作唯一且输入由
+能力适配函数绑定，不是任意模型调度器。只调研不会创建实验进程；`bug_fix` 必须提供
+`execution.code_task_config`，产出 `bug_fix` 且不运行 baseline；`auto` 不意味着自动发现
+仓库或安装依赖。
+
+### 执行与报告
+
+| 分区 | 字段 | 默认值 / 必填与条件约束 |
+| --- | --- | --- |
+| `[execution]` | `command`、`cwd`、`timeout_sec`、`code_task_config` | 选择一个执行边界：literal argv `command` 加已存在的绝对 `cwd`，或 CodeTask TOML 引用。只调研时两者都省略；`timeout_sec` 在 CLI/应用边界提供默认值。 |
+| `[execution]` | `primary_metric`、`metrics`、`metric_directions` | 可选测量 schema；方向为 `higher`、`lower`、`resource` 或 `ignore`。 |
+| `[execution]` | `pairs`、`seeds`、`seed_flag`、`seed_count` | 可选的显式比较输入。`pairs` 每行包含唯一整数 `seed` 与 literal `baseline_command`/`candidate_command`；compact seed 必须有 literal command 和显式 seed flag/count，不解析自然语言 seed。 |
+| `[execution]` | `baseline_policy`、`baseline_ref`、`protocol` | policy 为 `run`、`skip` 或 `reuse`；`reuse` 要求当前 session 中通过且命令、schema、协议条件、保护资产和准备 lineage 都匹配的产物。`protocol` 复用已有实验合同，但不证明数据内容。 |
+| `[report]` | `template`、`reviewer`、`max_review_iterations`、`max_section_tokens`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，review iteration 默认 `1`。`max_section_tokens = 0` 取消单次输出上限；图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
+
+显式 `outputs` 不能与 `--with-report`/`--no-report` 同时使用。报告结构选择不能覆盖
+测量事实或证明科研成功；恢复时变更搜索/摄取设置若与存档不符会被拒绝，显式报告变更只
+失效 writer/report/audit 产物，不重跑研究或测量。已有前缀可用 `research-report` 补齐报告。
 
 - code-task init --config PATH 读取初始化配置。
 - code-task execute --config PATH 读取执行、模型与预算配置。
@@ -82,8 +68,6 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 - `[continuation]` 除额度授权外，还接受 `decision_id`、`decision_response` 和 `decision_guidance`，
   用于通过正式续接入口答复 Rich 显示的待处理决定。
 - 安装与命令说明：[使用手册](USAGE_zh.md)、[CLI参考](CLI_REFERENCE_zh.md)。
-
-## CodeTask 字段参考
 
 ### 研究会话补齐条件与续接
 
@@ -152,12 +136,11 @@ auto 对干净仓库使用 worktree；有未提交源码或无法创建 worktree
 显式 git_worktree 使用已提交 HEAD，不包含未提交修改。准备产物记录 Git 版本和隔离位置；
 这不是每轮候选自动提交 Git。sparse_copy/empty 仍限独立 CodeTask 使用。
 
-### Code-Task 字段
+## CodeTask TOML 字段参考
 
 CodeTask TOML 旧有的相对路径仍以运行时 cwd 为基准，不会被静默改写。若要让案例随仓库
 直接运行，可在路径字段和 `[benchmark].command` 中用 `{config_dir}` 引用该 TOML
-所在目录，用 `${NAME}` 引用本机路径。变量从进程环境或当前目录向上查找的 `.env`
-读取；已导出的环境变量优先。缺少的变量会在会话开始前一起报出。命令参数中的路径
+所在目录；机器拥有的项目、数据集、划分或解释器则写显式绝对路径。命令参数中的路径
 可能含空格时须加引号。可用 `[environment].required_paths` 在配置加载时检查额外
 数据/划分文件是否存在；这不验证数据内容。完整用法见[持续学习案例](../examples/continual_learning/README.md)。
 
@@ -170,6 +153,7 @@ CodeTask TOML 旧有的相对路径仍以运行时 cwd 为基准，不会被静�
 | `[benchmark].primary_metric` | objective verdict 使用的主指标。未知指标仍会记录，但最好声明方向。 |
 | `[benchmark.metric_directions]` | 指标方向表：`higher`、`lower`、`resource` 或 `ignore`。 |
 | `[environment].mode` | `current` 使用当前 SimpleAutoResearch Python；`external` 使用 `[environment].python` 或 `[environment].python_executable`。不会自动安装依赖。 |
+| `[environment].python_executable` | `mode = "external"` 时必填；会把 benchmark argv 开头的裸 `python`/`python3` 解析为该解释器。已经是绝对路径的命令和非 Python 命令保持不变。 |
 | `[environment].required_paths` | 可选的文件/目录列表；加载 CodeTask 配置时检查是否存在，可用于数据和固定划分。存在性不等于数据内容已验证。 |
 | `[workspace].mode` | workspace 策略：`auto`、`copy`、`git_worktree` 或 `sparse_copy`。已有项目默认 `auto`，会优先尝试 git worktree，失败时降级为 copy 并记录原因。 |
 | `[workspace].reuse_source_venv` | 检测到 source `.venv` 或 `venv` 时，是否记录并使用其中 Python。 |

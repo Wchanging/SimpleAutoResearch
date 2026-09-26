@@ -1,8 +1,7 @@
-# Set SIMPLE_AR_MAMMOTH_ROOT, SIMPLE_AR_MAMMOTH_PYTHON and SIMPLE_AR_DATA_ROOT once in .env.
-# {config_dir} points to this file's directory; no local copy of this case is needed.
+# Case assets are declared here; {config_dir} is this file's directory.
 [code_task]
 kind = "existing_project"
-code_root = "${SIMPLE_AR_MAMMOTH_ROOT}"
+code_root = "{config_dir}/../../runs/assets/mammoth-tpami2023"
 task_file = "{config_dir}/task.md"
 name = "continual-research-acceptance"
 
@@ -11,11 +10,10 @@ mode = "copy"
 reuse_source_venv = false
 
 [environment]
-mode = "external"
-python_executable = "${SIMPLE_AR_MAMMOTH_PYTHON}"
+mode = "current"
 required_paths = [
-  "${SIMPLE_AR_DATA_ROOT}/CIFAR100/cifar-100-python",
-  "${SIMPLE_AR_MAMMOTH_ROOT}/datasets/val_permutations/seq-cifar100.pt",
+  "{config_dir}/../../runs/assets/datasets/CIFAR100/cifar-100-python",
+  "{config_dir}/../../runs/assets/mammoth-tpami2023/datasets/val_permutations/seq-cifar100.pt",
 ]
 
 [edit_scope]
@@ -23,7 +21,7 @@ allowed_patterns = ["models/**", "utils/**"]
 protected_patterns = ["datasets/**", "utils/training.py", "utils/loggers.py", "utils/metrics.py"]
 
 [benchmark]
-command = '"${SIMPLE_AR_MAMMOTH_PYTHON}" "{config_dir}/run_mammoth.py" --data-root "${SIMPLE_AR_DATA_ROOT}" --model er --dataset seq-cifar100 --lr 0.03 --buffer_size 200 --minibatch_size 32 --batch_size 32 --n_epochs 1 --seed 0 --validation 1 --nowand 1 --disable_log 0'
+command = 'python "{config_dir}/run_mammoth.py" --data-root "{config_dir}/../../runs/assets/datasets" --model er --dataset seq-cifar100 --lr 0.03 --buffer_size 200 --minibatch_size 32 --batch_size 32 --n_epochs 1 --seed 0 --validation 1 --nowand 1 --disable_log 0'
 primary_metric = "accuracy"
 
 [benchmark.metric_directions]

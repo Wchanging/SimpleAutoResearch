@@ -4,8 +4,8 @@
 
 本文是 SimpleAutoResearch 的命令速查手册，只关注命令语法、参数、产物和少量边界说明。
 
-V2.8 的正式用户入口只有 `simple-ar research-session`，它负责从研究问题到
-`report/report_audit` 的完整有界流程。`research-report` 可以为 `--no-report` 创建的 canonical
+普通使用的正式任务入口是 `simple-ar research-session`，它负责有界的综述、改码和显式实验。
+`research-report` 可以为 `--no-report` 创建的 canonical
 session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使用 canonical 的显式重试边界，
 不再回退执行旧 v1 session。旧会话保持只读，可通过 `research-session-migrate` 将证据导入新会话。
 `research-brief`
@@ -32,7 +32,7 @@ session 补齐报告；`research-session-continue` 对 `session_manifest.v2` 使
 | `simple-ar clean` | 预览并清理某次 run 的可重建缓存。 |
 | `simple-ar code-task ...` | 在隔离可编辑 workspace 中处理已有代码项目。 |
 
-## Research Pipeline
+## Research 命令
 
 
 ### `simple-ar research-brief`（分段/开发接口）
@@ -529,7 +529,7 @@ uv run simple-ar code-task init --kind greenfield --task-file task.md --benchmar
 
 **注意**：
 
-可复用设置建议写入 TOML，见 [配置参考](CONFIG_REFERENCE_zh.md#standalone-code-task-config)。
+可复用设置建议写入 TOML，见 [配置参考](CONFIG_REFERENCE_zh.md#独立-code-task-config)。
 
 #### `simple-ar code-task execute`
 
@@ -596,7 +596,7 @@ uv run simple-ar code-task execute runs/<run-id> --apply-proposed-edits --timeou
 并可搭配 `--yes` 自动继续这些 primitive prompts。普通 execute 模式下的 `--yes`
 会自动批准审核门，只应在你明确想自动审批 plan/proposal 时使用。使用
 `--no-review-inline` 可恢复“停住、下次再跑”的旧行为。完整运行流程见
-[使用与配置](USAGE_zh.md#推荐路径toml--execute)。
+[使用与配置](USAGE_zh.md#推荐路径toml-execute)。
 
 如果 LLM work-plan 或 patch-plan 返回了无法解析的 JSON，`execute` 会停在
 `llm_planning_failed`，并且不会写入 offline fallback plan。此时直接重跑同一条
