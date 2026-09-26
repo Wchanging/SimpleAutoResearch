@@ -123,8 +123,9 @@ The last two use standalone `code-task`, not the complete research loop.
 For the classical-ML example, install `uv sync --extra examples` and retain that
 extra when running with `uv run --extra examples ...`.
 
-The continual-learning config is a **template**, not a ready-to-run environment:
-follow its guide to set machine paths and prepare data before starting it.
+The continual-learning case runs from its checked-in config after you set three
+machine paths in `.env` and prepare the project, data and fixed split. No TOML
+copy is required; see its [run guide](examples/continual_learning/README.md).
 The [example index](examples/README.md) explains the shared directory conventions.
 
 ## Bring your own task
@@ -147,10 +148,11 @@ For example:
 > Compare against a suitable baseline, explain the measured tradeoffs, and
 > deliver an analysis if the evidence does not support an improvement.
 
-Natural language expresses the goal; configuration still supplies concrete
-paths, execution permissions, and resource constraints. The system does not
-automatically provision a training environment. When copying configs to
-`.local/cases/`, check relative paths and follow the case's path instructions.
+Natural language expresses the goal; configuration still supplies execution
+permissions and resource constraints. The system does not automatically
+provision a training environment. For your own project, keep the research and
+CodeTask TOMLs beside the task files, use `{config_dir}` for those files and
+`${NAME}` for machine paths in `.env`; run the research TOML directly.
 
 ### Decide how involved to be
 

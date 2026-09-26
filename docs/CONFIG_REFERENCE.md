@@ -110,6 +110,16 @@ The sections below cover the existing CodeTask TOML for `code-task` and
 `research-session --code-task-config`. Research TOML can reference this file through
 `execution.code_task_config`; it does not duplicate CodeTask's implementation settings.
 
+CodeTask TOML preserves its legacy cwd-relative paths. Opt in to portable case
+paths with `{config_dir}` (the absolute directory containing that TOML) in path
+fields and `[benchmark].command`. Use `${NAME}` for machine-specific paths; the
+loader checks the process environment and the nearest `.env` found from the
+current directory, without overwriting exported values. Missing names are
+reported together before a research session starts. Quote interpolated command
+arguments when a path may contain spaces. `[environment].required_paths` lists
+additional files/directories that must exist before running; it checks presence,
+not dataset correctness. See the [continual-learning case](../examples/continual_learning/README.md).
+
 The old eight-stage outer-pipeline parser and its alias mapping are retired.
 Historical configuration snapshots remain readable files, not executable workflows.
 
@@ -196,7 +206,8 @@ Sparse/empty workspace options remain limited to standalone CodeTask.
 | `[benchmark].command` | Command executed inside `code_task/workspace` before and after edits. It should print parseable metrics such as `accuracy: 0.82`. |
 | `[benchmark].primary_metric` | Main metric used for the objective verdict. Unknown metrics are still recorded, but need directions to decide improvement. |
 | `[benchmark.metric_directions]` | Direction map for metrics: `higher`, `lower`, `resource`, or `ignore`. |
-| `[environment].mode` | `current` uses the active SimpleAutoResearch Python; `external` uses `[environment].python`. No dependencies are installed automatically. |
+| `[environment].mode` | `current` uses the active SimpleAutoResearch Python; `external` uses `[environment].python` or `[environment].python_executable`. No dependencies are installed automatically. |
+| `[environment].required_paths` | Optional path list checked when this CodeTask config is loaded; useful for data files and fixed splits that the command needs. |
 | `[workspace].mode` | Workspace strategy: `auto`, `copy`, `git_worktree`, `sparse_copy`, or `empty` for greenfield code-task runs. Existing projects default to `auto`, which tries git worktree first and falls back to guarded copy when needed. |
 | `[workspace].reuse_source_venv` | If a source `.venv` or `venv` is detected, record and use that Python as the execution interpreter. |
 | `[implementation].provider` | Code-task implementation backend. `local` keeps the in-process SimpleAutoResearch path; `fake` is deterministic for tests; `local_llm` uses the configured LLM; `codex`, `claude_code`, `opencode`, and `external_cli` use the external-agent handoff boundary when explicitly enabled. |

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import sqlite3
 import sys
 import tempfile
@@ -1100,6 +1101,59 @@ class CliTests(unittest.TestCase):
             self.assertEqual(execution["code_task"]["max_repairs"], 0)
             self.assertEqual(execution["code_task"]["env_mode"], "external")
             self.assertEqual(Path(execution["code_task"]["python_executable"]), Path(sys.executable))
+
+    def test_research_case_uses_checked_in_configs_and_machine_paths(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            case = root / "case with spaces"
+            project = root / "source project"
+            data = root / "shared data"
+            for directory in (case, project, data):
+                directory.mkdir()
+            (case / "task.md").write_text("Improve this project.", encoding="utf-8")
+            (case / "run.py").write_text("", encoding="utf-8")
+            (case / "research.toml").write_text(
+                '[task]\ngoal = "Improve this project"\noutputs = ["experiments"]\n'
+                '[model]\nname = "fixture-model"\n'
+                '[execution]\ncode_task_config = "code_task.toml"\n',
+                encoding="utf-8",
+            )
+            (case / "code_task.toml").write_text(
+                '[code_task]\ncode_root = "${SIMPLE_AR_CLI_TEST_PROJECT}"\n'
+                'task_file = "{config_dir}/task.md"\n'
+                '[environment]\nmode = "external"\n'
+                'python_executable = "${SIMPLE_AR_CLI_TEST_PYTHON}"\n'
+                'required_paths = ["${SIMPLE_AR_CLI_TEST_DATA}"]\n'
+                '[benchmark]\n'
+                "command = '\"${SIMPLE_AR_CLI_TEST_PYTHON}\" \"{config_dir}/run.py\" --data-root \"${SIMPLE_AR_CLI_TEST_DATA}\"'\n"
+                'primary_metric = "accuracy"\n'
+                '[execute]\nuse_llm = true\nbaseline_policy = "skip"\n',
+                encoding="utf-8",
+            )
+            app = MagicMock()
+            app.services = SimpleNamespace(max_attempts=5)
+            app.view.return_value = SimpleNamespace(
+                session_root=root / "session", status="completed", status_reason="",
+                next_action=None, state_refs={}, attempts=(),
+            )
+            app.advance.return_value = app.view.return_value
+            with (
+                patch.dict(os.environ, {
+                    "SIMPLE_AR_CLI_TEST_PROJECT": str(project),
+                    "SIMPLE_AR_CLI_TEST_PYTHON": sys.executable,
+                    "SIMPLE_AR_CLI_TEST_DATA": str(data),
+                }),
+                patch("simple_ar.cli.main._optional_research_llm_client", return_value=object()),
+                patch("simple_ar.app.research_application.create_session", return_value=app) as creator,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                main(["research-session", "--config", str(case / "research.toml")])
+
+            execution = creator.call_args.kwargs["services"].config["execution"]
+            self.assertEqual(Path(execution["cwd"]), project)
+            self.assertEqual(Path(execution["command"][1]), case / "run.py")
+            self.assertEqual(Path(execution["command"][3]), data)
 
 
 

@@ -6,6 +6,11 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-26
 
+- Run the continual-learning case from its checked-in configs: CodeTask TOML
+  now supports opt-in `{config_dir}` case paths, `${NAME}` machine paths from the
+  environment or local `.env`, and declared required-path checks before work starts.
+  Existing cwd-relative configs keep their original meaning.
+
 - Separate research/candidate identity from comparison conditions. Baseline reuse
   and measured-result comparison now share one protocol projection; changing a
   hypothesis does not invalidate an otherwise matching control. Old complete

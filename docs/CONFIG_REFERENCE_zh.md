@@ -154,6 +154,13 @@ auto 对干净仓库使用 worktree；有未提交源码或无法创建 worktree
 
 ### Code-Task 字段
 
+CodeTask TOML 旧有的相对路径仍以运行时 cwd 为基准，不会被静默改写。若要让案例随仓库
+直接运行，可在路径字段和 `[benchmark].command` 中用 `{config_dir}` 引用该 TOML
+所在目录，用 `${NAME}` 引用本机路径。变量从进程环境或当前目录向上查找的 `.env`
+读取；已导出的环境变量优先。缺少的变量会在会话开始前一起报出。命令参数中的路径
+可能含空格时须加引号。可用 `[environment].required_paths` 在配置加载时检查额外
+数据/划分文件是否存在；这不验证数据内容。完整用法见[持续学习案例](../examples/continual_learning/README.md)。
+
 | 字段 | 含义 |
 | --- | --- |
 | `[code_task].kind` | `existing_project` 表示已有源码项目 patch；`greenfield` 从 empty workspace 开始，并在 `code_task/workspace/generated_project` 下生成项目。 |
@@ -162,7 +169,8 @@ auto 对干净仓库使用 worktree；有未提交源码或无法创建 worktree
 | `[benchmark].command` | 在 `code_task/workspace` 中 patch 前后运行的命令。建议输出 `accuracy: 0.82` 这类可解析指标。 |
 | `[benchmark].primary_metric` | objective verdict 使用的主指标。未知指标仍会记录，但最好声明方向。 |
 | `[benchmark.metric_directions]` | 指标方向表：`higher`、`lower`、`resource` 或 `ignore`。 |
-| `[environment].mode` | `current` 使用当前 SimpleAutoResearch Python；`external` 使用 `[environment].python`。不会自动安装依赖。 |
+| `[environment].mode` | `current` 使用当前 SimpleAutoResearch Python；`external` 使用 `[environment].python` 或 `[environment].python_executable`。不会自动安装依赖。 |
+| `[environment].required_paths` | 可选的文件/目录列表；加载 CodeTask 配置时检查是否存在，可用于数据和固定划分。存在性不等于数据内容已验证。 |
 | `[workspace].mode` | workspace 策略：`auto`、`copy`、`git_worktree` 或 `sparse_copy`。已有项目默认 `auto`，会优先尝试 git worktree，失败时降级为 copy 并记录原因。 |
 | `[workspace].reuse_source_venv` | 检测到 source `.venv` 或 `venv` 时，是否记录并使用其中 Python。 |
 | `[implementation].provider` | code-task 实现 backend。`local` 使用 SimpleAutoResearch 进程内路径；`fake` 用于确定性测试；`local_llm` 使用当前 LLM；`codex`、`claude_code`、`opencode` 和 `external_cli` 会在显式启用时走外部 agent handoff 边界。 |

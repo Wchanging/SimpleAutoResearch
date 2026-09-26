@@ -9,23 +9,32 @@ engineering-provided inputs; do not describe them as autonomous discovery.
 ## Case inputs and normal entrypoint
 
 - `research.toml`: natural-language goal, delivery and research/process limits.
-- `code_task.toml`: project/interpreter paths, edit scope and measurement command.
+- `code_task.toml`: edit scope and measurement command, with three machine paths read from the environment.
 - `task.md`: implementation and comparison requirements.
 - `run_mammoth.py`: measurement adapter, not a separate research orchestrator.
 
-Copy the two TOML files to an ignored machine-local configuration directory
-(for example `.local/cases/continual_learning/`). Replace every `/path/to` value
-in `code_task.toml` with an existing absolute path. Set `research.toml`'s
-`output_root` to an absolute `runs/continual-learning` directory in your checkout;
-its checked-in relative default is only correct when used from this example
-directory. Keep `code_task_config = "code_task.toml"` beside the copied config.
-Use the checked-in `task.md` via an absolute path, or a local copy for your task.
-No template substitution or automatic dependency installation is performed.
+Run the checked-in `research.toml` directly; do not copy or edit either TOML
+just to set server paths. Add these three absolute paths to the repository's
+ignored `.env` (or export them in the shell):
+
+```dotenv
+SIMPLE_AR_MAMMOTH_ROOT=/absolute/path/to/mammoth-tpami2023
+SIMPLE_AR_MAMMOTH_PYTHON=/absolute/path/to/training-env/bin/python
+SIMPLE_AR_DATA_ROOT=/absolute/path/to/shared/datasets
+```
+
+The configured project root, Python interpreter, CIFAR-100 data directory and
+frozen validation permutation must exist before the session starts. The CLI
+reports missing environment variables or paths before creating a session or
+calling the model. `research.toml` resolves its `code_task_config` and output
+directory from its own location; `code_task.toml` resolves `task.md` and
+`run_mammoth.py` through `{config_dir}`. Neither file is machine-specific.
+No dependency installation or data download is automatic.
 
 After preparing the data, fixed split, Python environment and GPU budget:
 
 ```bash
-uv run --no-sync simple-ar research-session --config .local/cases/continual_learning/research.toml
+uv run --no-sync simple-ar research-session --config examples/continual_learning/research.toml
 ```
 
 The template uses autonomous interaction and no cumulative API request/token cap.
@@ -67,14 +76,14 @@ Use the existing framework executor with a finite timeout and an explicitly
 authorized GPU budget. It sets `SIMPLE_AR_OUTPUT_DIR` per invocation; standalone
 diagnostics must instead pass a unique `--output` directory.
 
-Example experiment argv, executed with the isolated project as cwd:
-
-```bash
-TORCH_PYTHON /path/to/SimpleAutoResearch/examples/continual_learning/run_mammoth.py \
-  --data-root /path/to/shared/datasets --model er --dataset seq-cifar100 \
-  --lr 0.03 --buffer_size 200 --minibatch_size 32 --batch_size 32 \
-  --n_epochs 1 --seed 0 --validation 1 --nowand 1 --disable_log 0
-```
+The literal experiment argv lives in `code_task.toml`; the configured Python,
+adapter and data-root paths are expanded before it is parsed into process
+arguments. Keep quoted path references in that command when paths may contain
+spaces. For your own project, put its research and CodeTask TOMLs beside its
+task description, use `{config_dir}` for case-owned files and `${NAME}` for
+machine paths, and declare required input paths under
+`[environment].required_paths`. Existing CodeTask TOMLs without these opt-in
+references retain their current working-directory-relative behavior.
 
 One epoch is a reduced-training protocol, not the paper's
 original 50-epoch setting or evidence of scientific effectiveness. Measure

@@ -4,6 +4,7 @@ import argparse
 import os
 import re
 import shlex
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -341,8 +342,19 @@ def _print_research_session(args: argparse.Namespace) -> None:
             )
         except (CodeTaskConfigError, RuntimeError, TypeError, ValueError) as exc:
             raise SystemExit(f"Invalid research Code-Task configuration: {exc}") from exc
-        if not code_task_spec.code_root.exists():
-            raise SystemExit(f"Code-Task project root not found: {code_task_spec.code_root}")
+        missing_inputs = []
+        if not code_task_spec.code_root.is_dir():
+            missing_inputs.append(f"project directory: {code_task_spec.code_root}")
+        if code_task_spec.task_file is not None and not code_task_spec.task_file.is_file():
+            missing_inputs.append(f"task file: {code_task_spec.task_file}")
+        if code_task_spec.env_mode == "external":
+            python = code_task_spec.python_executable
+            if not python:
+                missing_inputs.append("[environment].python_executable (required for external mode)")
+            elif not Path(python).is_file() and shutil.which(python) is None:
+                missing_inputs.append(f"external Python executable: {python}")
+        if missing_inputs:
+            raise SystemExit("Code-Task input(s) not found: " + "; ".join(missing_inputs))
         if execute_options.use_llm is not True:
             raise SystemExit(
                 "--code-task-config requires [execute].use_llm = true because "

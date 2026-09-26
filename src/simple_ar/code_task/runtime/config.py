@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from dotenv import find_dotenv, load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from simple_ar.code_task.execution.baseline_policy import normalize_baseline_policy
@@ -70,6 +73,7 @@ class EnvironmentSection(_ConfigModel):
     mode: str | None = None
     python: str | None = None
     python_executable: str | None = None
+    required_paths: list[str] = Field(default_factory=list)
 
 
 class WorkspaceSection(_ConfigModel):
@@ -627,9 +631,69 @@ def _load_toml_config(path: str | None) -> CodeTaskConfig:
     if not isinstance(data, dict):
         raise CodeTaskConfigError(f"Expected TOML table in config file: {config_path}")
     try:
-        return CodeTaskConfig.model_validate(data)
+        config = CodeTaskConfig.model_validate(data)
     except ValidationError as exc:
         raise CodeTaskConfigError(f"Invalid code-task config {config_path}: {exc}") from exc
+    _resolve_local_references(config, config_path)
+    return config
+
+
+_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _resolve_local_references(config: CodeTaskConfig, config_path: Path) -> None:
+    """Expand opt-in machine and case paths without changing legacy relative paths."""
+
+    fields = (
+        (config.code_task, "code_root"),
+        (config.code_task, "task_file"),
+        (config.code_task, "output_root"),
+        (config.environment, "python"),
+        (config.environment, "python_executable"),
+        (config.benchmark, "command"),
+        (config.execute, "baseline_metrics_file"),
+    )
+    values = [getattr(section, name) for section, name in fields]
+    values.extend(config.environment.required_paths)
+    if any(isinstance(value, str) and _ENV_REFERENCE.search(value) for value in values):
+        dotenv_path = find_dotenv(usecwd=True)
+        if dotenv_path:
+            load_dotenv(dotenv_path, override=False)
+
+    missing_vars: set[str] = set()
+    case_dir = config_path.resolve().parent.as_posix()
+
+    def expand(value: str) -> str:
+        def environment(match: re.Match[str]) -> str:
+            name = match.group(1)
+            resolved = os.environ.get(name)
+            if not resolved:
+                missing_vars.add(name)
+                return match.group(0)
+            return resolved
+
+        return _ENV_REFERENCE.sub(environment, value.replace("{config_dir}", case_dir))
+
+    for section, name in fields:
+        value = getattr(section, name)
+        if value is not None:
+            setattr(section, name, expand(value))
+    config.environment.required_paths = [expand(value) for value in config.environment.required_paths]
+    if missing_vars:
+        raise CodeTaskConfigError(
+            f"Missing environment variable(s) for {config_path}: "
+            + ", ".join(sorted(missing_vars))
+            + ". Set them in the environment or a .env file found from the current directory."
+        )
+    missing_paths = [
+        str(Path(value).expanduser().resolve())
+        for value in config.environment.required_paths
+        if not Path(value).expanduser().exists()
+    ]
+    if missing_paths:
+        raise CodeTaskConfigError(
+            f"Required path(s) not found for {config_path}: " + ", ".join(missing_paths)
+        )
 
 
 def _config_string(value: object) -> str | None:
