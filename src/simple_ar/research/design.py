@@ -225,6 +225,7 @@ def build_research_design(request: ResearchDesignRequest, *, trace: list[dict[st
         execution_schema=request.execution_schema,
         execution_context=request.execution_context,
         prepared_execution=isinstance(request.execution_boundary.get("code_task"), Mapping),
+        configured_protocol=request.execution_boundary.get("protocol"),
     )
 
     execution_protocol = _resolve_execution_protocol(
@@ -356,6 +357,7 @@ def _apply_execution_boundary(
     execution_schema: Mapping[str, Any],
     execution_context: str,
     prepared_execution: bool,
+    configured_protocol: Mapping[str, Any] | None = None,
 ) -> ResearchExperimentContract:
     """Make a prepared project the execution contract's source of truth.
 
@@ -367,7 +369,7 @@ def _apply_execution_boundary(
     synthesis handoff for prompts and audit.
     """
 
-    if not execution_context.strip():
+    if not execution_context.strip() and not configured_protocol:
         return contract
     raw_metrics = execution_schema.get("required_metrics")
     metrics = (
@@ -400,6 +402,13 @@ def _apply_execution_boundary(
         # actually declared by the execution schema; leave other protocol
         # fields empty so measurement identity remains incomplete/unknown.
         boundary_fields = {"dataset": "unknown", "metric_specs": metric_specs}
+    # Explicit task conditions are authoritative, unlike literature-derived
+    # dataset hints. Keep them visible to design as well as the executor.
+    if isinstance(configured_protocol, Mapping):
+        for name in ("dataset", "dataset_refs", "split_spec", "metric_specs",
+                     "comparison_conditions", "protected_assets"):
+            if name in configured_protocol:
+                boundary_fields[name] = configured_protocol[name]
     return replace(
         contract,
         metrics=list(dict.fromkeys(metrics or contract.metrics)),

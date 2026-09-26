@@ -3881,6 +3881,31 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(strict.status, "failed")
             self.assertGreaterEqual(strict.error_count, 1)
 
+    def test_validation_uses_external_dependency_probe_without_importing_project(self):
+        from simple_ar.code_task.execution.validation import _external_import_availability
+        self.assertEqual(_external_import_availability(sys.executable, {"json", "simple_ar_no_such_package"}),
+                         {"json": True, "simple_ar_no_such_package": False})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            write_text(project / "main.py", "import fictional_training_package\n")
+            write_text(root / "task.md", "Inspect code, do not execute it.")
+            run = root / "run"
+            initialize_code_task(run_dir=run, code_root=project, task_file=root / "task.md",
+                                 env_mode="external", python_executable=sys.executable)
+            with patch("simple_ar.code_task.execution.validation._external_import_availability",
+                       return_value={"fictional_training_package": True}) as probe:
+                validate_code_task(run)
+            probe.assert_called_once()
+            report = read_json(run / "code_task/meta/validation_report.json")
+            self.assertFalse(any(row["code"] == "missing_import" for row in report["issues"]))
+            self.assertIn("static", report["validation_scope"])
+            with patch("simple_ar.code_task.execution.validation._external_import_availability", return_value=None):
+                validate_code_task(run)
+            report = read_json(run / "code_task/meta/validation_report.json")
+            self.assertEqual([row["code"] for row in report["issues"]], ["dependency_check_unavailable"])
+
     def test_run_code_task_benchmark_captures_outputs_and_updates_status(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:

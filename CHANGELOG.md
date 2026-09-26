@@ -6,6 +6,27 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## 2026-09-26
 
+- Separate research/candidate identity from comparison conditions. Baseline reuse
+  and measured-result comparison now share one protocol projection; changing a
+  hypothesis does not invalidate an otherwise matching control. Old complete
+  contracts are compared read-only, while missing or changed conditions remain
+  unverified or mismatched.
+  Explicit task revision also refreshes asset observations when its text is
+  unchanged, preserving valid results but invalidating changed data inputs.
+
+- Preserve fixed-command seeds and explicitly configured experiment conditions
+  through design and measurement. Seed expansion replaces an existing seed flag
+  instead of duplicating it. Research CodeTask preparation now retains the
+  external interpreter policy; static dependency checks use that interpreter
+  rather than reporting missing training dependencies from the framework host.
+- Experiment reports use the persisted execution contract and show declared key
+  metrics with links to detailed measurements, rather than duplicating every
+  task-level value in the body. Derived deltas remain distinct from measurements;
+  the complete evidence remains available to report tools and audits.
+
+- Reorganize the English and Chinese READMEs around user tasks, a real survey
+  quick start, examples, outputs and continuation. Remove internal milestone
+  handoff prose from the homepage and clarify costs, preparation and quality limits.
 - Reduce public examples to four self-contained cases: survey, continual learning,
   digits coding and multi-file review coding. Move required regression assets to
   tests/fixtures and the offline session smoke to scripts; remove unused historical

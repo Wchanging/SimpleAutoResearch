@@ -32,7 +32,7 @@ from simple_ar.app.research_execution import (
 from simple_ar.literature.models import Paper
 from simple_ar.research.preparation import PreparationRequest, inspect_execution_entry
 from simple_ar.experiment.execution.backend import LocalExecutionBackend
-from simple_ar.experiment.execution.measurement import snapshot_protocol_assets
+from simple_ar.experiment.execution.measurement import comparable_protocol, snapshot_protocol_assets
 from simple_ar.research.experiment import ExperimentRequest
 from simple_ar.core import (
     ArtifactRef,
@@ -509,8 +509,9 @@ class ResearchApplication:
             if revision_already_applied:
                 revised_brief = revised_execution = revised_report_config = None
                 revision_payload = {}
-        if revised_brief == self.brief:
-            revised_brief = None
+        # An explicit revision also refreshes asset observations. Equal task
+        # text does not imply unchanged data; input invalidation below retains
+        # completed work when both the task and its assets still match.
 
         requested_execution = dict(revised_execution) if revised_execution is not None else None
         previous_execution = self.services.config.get("execution")
@@ -2529,7 +2530,7 @@ class ResearchApplication:
                 protocol_identity.append(f"{ref.path}:{fingerprint}")
             elif isinstance(contract, Mapping):
                 protocol_identity.append(
-                    f"{ref.path}:{json.dumps(_comparable_protocol(contract), sort_keys=True, default=str)}"
+                    f"{ref.path}:{json.dumps(comparable_protocol(contract), sort_keys=True, default=str)}"
                 )
             else:
                 protocol_identity.append(ref.path)
@@ -4244,7 +4245,7 @@ class ResearchApplication:
         actual_contract = payload.get("experiment_contract")
         if not isinstance(expected_contract, Mapping) or not isinstance(actual_contract, Mapping):
             return False
-        if _comparable_protocol(actual_contract) != _comparable_protocol(expected_contract):
+        if comparable_protocol(actual_contract) != comparable_protocol(expected_contract):
             return False
 
         baseline_attempt = self._attempt_for_ref(ref)
@@ -4689,6 +4690,8 @@ class ResearchApplication:
             execution.get("protocol_seed_flag") or execution.get("seed_flag") or ""
         ).strip()
         can_extend = bool(seed_flag and seeds)
+        if not seeds:
+            seeds = execution_protocol(execution)["seeds"]
         return {
             "comparison_required": execution.get("comparison_required"),
             "baseline_policy": str(execution.get("baseline_policy") or ""),
@@ -4894,18 +4897,6 @@ def _input_fingerprint(brief: ResearchBrief, assets: tuple[ResearchAsset, ...]) 
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _comparable_protocol(contract: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep measured-condition identity, not narrative design prose."""
-
-    return {
-        key: contract.get(key)
-        for key in (
-            "protocol_revision", "dataset_refs", "split_spec", "metric_specs",
-            "comparison_conditions", "protected_assets",
-        )
-    }
 
 
 def _render_work_plan(plan: Mapping[str, Any]) -> str:

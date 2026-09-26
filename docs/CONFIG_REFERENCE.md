@@ -83,6 +83,16 @@ entrypoint has been inspected; the proposal remains inside the authorized proces
 boundary and explicit configuration wins. With `code_task_config`, pairs replace its
 benchmark commands for the research matrix. CodeTask still owns edit scope and
 implementation settings.
+For a single fixed command, `seed_flag` alone records its literal integer seed
+(`--seed 0` or `--seed=0`) without creating pairs or permitting seed extensions.
+Explicit seed expansion replaces an existing argument rather than appending a
+duplicate. A command seed conflicting with `protocol.comparison_conditions.seed`
+is rejected. Declared protocol settings flow to design, measurement and reporting;
+they do not certify data contents or retroactively modify historical measurements.
+Comparison identity includes the protocol revision, data references, split, metric
+definitions, comparison conditions, protected assets and result schema—not the
+candidate ID or hypothesis text. Complete historical contracts use the same
+read-only comparison; missing protocol evidence is not filled from a newer plan.
 `baseline_policy` is `run` when a comparison is required, `skip` when it is not, or
 `reuse` when `baseline_ref` points to a passed, same-condition canonical result in the
 current session artifact store. Reuse checks the actual command, result schema and

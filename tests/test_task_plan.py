@@ -31,6 +31,41 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_fixed_command_seed_is_preserved_without_inventing_pairs(self):
+        from simple_ar.experiment.execution.backend import RunResult
+        from simple_ar.experiment.execution.results import build_canonical_results
+        for argv in (["measure.py", "--rng", "0"], ["measure.py", "--rng=0"]):
+            config = {"command": argv, "seed_flag": "--rng",
+                      "cwd": str(Path.cwd()), "timeout_sec": 5}
+            normalized = normalize_execution_config(config)
+            self.assertNotIn("pairs", normalized)
+            self.assertEqual(execution_protocol(normalized)["seeds"], [0])
+            self.assertEqual(normalize_execution_config(normalized), normalized)
+            request = execution_request(normalized)
+            self.assertEqual(request.run.command, argv)
+            self.assertEqual(request.experiment_contract.comparison_conditions["seed"], 0)
+            result = build_canonical_results(
+                RunResult(0, False, "", "", command=argv),
+                experiment_contract=request.experiment_contract.to_row(),
+            )
+            self.assertEqual(result["measurement"]["seed"], 0)
+            self.assertEqual(result["measurement"]["protocol_status"], "incomplete")
+        unbound = execution_request({"command": argv, "cwd": str(Path.cwd()), "timeout_sec": 5})
+        self.assertIsNone(unbound.experiment_contract)
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            execution_request({**config, "protocol": {"comparison_conditions": {"seed": 9}}})
+        with self.assertRaisesRegex(ValueError, "repeated seed"):
+            execution_request({**config, "command": ["measure.py", "--rng=0", "--rng", "1"]})
+
+    def test_seed_expansion_replaces_existing_flag_instead_of_duplicating_it(self):
+        normalized = normalize_execution_config({
+            "command": ["measure.py", "--rng=0"], "seed_flag": "--rng", "seeds": [3],
+            "cwd": str(Path.cwd()), "timeout_sec": 5,
+        })
+        request = execution_request(normalized)
+        self.assertEqual(request.run.command, ["measure.py", "--rng=3"])
+        self.assertEqual(request.experiment_contract.comparison_conditions["seed"], 3)
+
     def test_summary_capability_spelling_is_normalized_without_relaxing_boundaries(self) -> None:
         request = TaskPlanRequest(task_kind="survey", goal="Read papers", request_text="Read papers")
         class Client:
@@ -314,6 +349,8 @@ class TaskPlanTests(unittest.TestCase):
                     "workspace_mode": "copy",
                     "allowed_patterns": ["spam_model.py"],
                     "protected_patterns": ["benchmark.py"],
+                    "env_mode": "external",
+                    "python_executable": sys.executable,
                     "approval_note": "Authorize this isolated bug patch.",
                 },
             }
@@ -342,6 +379,10 @@ class TaskPlanTests(unittest.TestCase):
             self.assertEqual(planned.next_action, "implement")
             resolved = app._effective_config()["execution"]
             self.assertEqual(set(resolved["code_task"]), {"run_dir", "approval_note"})
+            from simple_ar.code_task.runtime.state import load_code_task_manifest
+            manifest = load_code_task_manifest(Path(resolved["code_task"]["run_dir"]))
+            self.assertEqual(manifest["environment"]["policy"]["mode"], "external")
+            self.assertEqual(manifest["environment"]["policy"]["python_executable"], sys.executable)
             self.assertNotEqual(Path(resolved["cwd"]), project)
             self.assertIn("task_plan", planned.state_refs)
             self.assertNotIn("plan", planned.state_refs)

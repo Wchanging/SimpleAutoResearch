@@ -1043,6 +1043,9 @@ class CliTests(unittest.TestCase):
                 "[code_task]\n"
                 f'code_root = "{project.as_posix()}"\n'
                 f'task_file = "{task_file.as_posix()}"\n'
+                "[environment]\n"
+                'mode = "external"\n'
+                f'python_executable = "{Path(sys.executable).as_posix()}"\n'
                 "[benchmark]\n"
                 'command = "python benchmark.py"\n'
                 'primary_metric = "accuracy"\n'
@@ -1095,6 +1098,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(execution["timeout_sec"], 7)
             self.assertEqual(execution["code_task"]["code_root"], str(project.resolve()))
             self.assertEqual(execution["code_task"]["max_repairs"], 0)
+            self.assertEqual(execution["code_task"]["env_mode"], "external")
+            self.assertEqual(Path(execution["code_task"]["python_executable"]), Path(sys.executable))
 
 
 

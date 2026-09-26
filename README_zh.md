@@ -1,233 +1,205 @@
-﻿# SimpleAutoResearch
+# SimpleAutoResearch
 
-[English version](README.md)
+**轻量、可检查、可恢复的自动化研究框架。从任务出发，连接文献、代码、实验与报告。**
 
-SimpleAutoResearch 是一个以学习为优先、轻量化的自动科研项目，参考了
-[AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw) 的阶段式科研思路。它尝试把“研究主题”推进到文献笔记、小型实验、已有代码改进任务、可执行结果和 Markdown 报告，同时让每一步都能被查看、恢复和调试。
+[English](README.md) · [快速开始](#快速开始) · [选择案例](#选择案例) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
 
-这个项目的目标不是复刻一个庞大的 agent 框架，而是构建一个清晰、可检查、适合学习和逐步扩展的版本。
+提供研究目标、已有材料和执行条件，让 SimpleAutoResearch 在一个可保存、可续跑的会话中，
+组织文献调研、限定范围的代码修改、实验执行与报告写作。
+并非每项任务都需要走遍全部环节：调研不必训练，修复代码也不必写论文。
 
-## 版本状态
+我们关注的是 **看得见的决策、真实执行的证据、可以复用的结果**，
+同时让框架保持清晰、易理解、易扩展。
 
-V2.8 以“准备好代码、数据和执行协议后的端到端主链走通”作为阶段基线：
-检索、理解与方案、受限改码、实验、分析及 Markdown 报告均有真实运行证据。
-已有运行包含框架修复与恢复，不代表冻结版本一次完整验收或论文质量全部通过。
-尚未复验的报告事实修订与严格冻结版本新会话验收转入 V2.9 的交付和发布工作。
-V2.9 开发分支已验证短任务计划下的提供材料分析和小型代码修复；显式额度追加、
-选择性续接及报告恢复已实现并通过本地定向验证，保留历史、复用有效证据与测量。
-新研究会话 API 默认不限额，可显式设置上限。科研输入请求会在后续执行前暂停，
-Rich 展示决策理由和科研轮次。已有真实研究循环诊断证据；按目标判断选择交付结构已实现，
-三种参与策略与 CLI/TOML 持久化答复现已接通并通过本地定向控制流测试。真实模型科研判断与文稿质量、
-冻结会话验收及 E 阶段仍未完成；开放检索质量也需重新验证。
-不能把当前切片当成整版完成。目标是以自然语言任务、已有资产和必要的资源/权限配置
-作为输入，而非要求用户填写全部阶段。模块升级与 A—E 核心阶段同步推进，见
-[开发目标与模块衔接](docs/DEVELOPMENT_zh.md#v29-开发目标决策上下文与模块衔接)。
+> **项目仍在积极开发。** 文献与代码任务流程已可使用；已有项目上的完整科研流程仍在持续实测。
+> 运行完成表示交付了产物，不代表研究假设成立，也不代表论文已经达到发表质量。
 
-## 目标
+## 可以用来做什么？
 
-- 让研究流程显式化，并以文件作为主要中间产物。
-- 让每次运行易于检查、恢复和调试。
-- 同时支持文献/报告流程和已有代码改进流程。
-- 优先使用可控、可复现实验，而不是无约束代码生成。
-- 让代码规模保持在学习者和贡献者可以理解的范围内。
+| 你的任务 | 需要提供 | 可以查看的结果 |
+| --- | --- | --- |
+| 探索一个研究方向 | 问题、范围和模型访问配置 | 筛选后的来源、阅读笔记、综合分析与 Markdown 报告 |
+| 改进或修复代码 | 项目、任务说明与验证命令 | 隔离的修改后工作区、修改记录、审阅与验证结果 |
+| 尝试一个研究改进 | 准备好的代码、数据、环境、评价条件与资源限制 | 候选实现、实测指标、分析，以及有证据支撑的报告或初稿 |
 
-## 当前可用能力
+### 为什么选择 SimpleAutoResearch？
 
-- **V2.8 canonical research-session**：同一 application 按有界 accepted task plan 执行；
-  并非每个任务都会运行历史流程
-  `plan -> search -> document_ingest -> read -> synthesize -> research_design
-  -> experiment -> analysis -> report -> report_audit` 的全部能力。主线明确约束
-  provider、artifact、指标、超时和 continuation；模型模式的 CLI 默认请求报告。
-  该路径已在 AutoDL 的准备项目上完成一次 60 条 raw、10 篇 selected/document 的真实
-  网络/LLM/CodeTask/实验/报告闭环；这证明的是有界基础流程，不是任意任务上的完整自主研究。
-- **研究源**：canonical session 可以通过统一连接器访问
-  OpenAlex/Semantic Scholar/arXiv/本地文件，并执行有界文档摄取和证据卡片生成；
-  LLM 规划、有界阅读/筛选、paper notes 和综合需要显式开启。旧八阶段的检索策略不再作为可执行路径支持。
-- **入口层级**：普通用户在 V2.8 只需要记住 `simple-ar research-session`；
-  `research-session-continue` 和 `research-report` 是同一 session 的恢复/报告子命令。
-  `research-brief` 保留为分段、开发和诊断接口，
-  旧 `research-experiment`、`research-code-task` 和 `simple-ar run/resume` 执行命令已退出；历史产物仍可读取。
-- **参与策略**：新 CLI 会话默认 `checkpoints`；可选择 `assisted`、`checkpoints` 或 `autonomous`。
-  关键事实/权限缺失在所有模式下都会暂停。待处理决定可通过 `research-session` 的
-  `--decision-id` 与 `--decision-response` 接受、拒绝或修订，Rich 会显示续接命令；旧会话缺少策略字段时
-  保持旧行为。真实任务质量和冻结版本验收仍待验证。
-- **Code Task**：在隔离可编辑 workspace 中改进已有代码库，或从 `empty` workspace 生成受控 greenfield 项目；支持 LLM 规划、task memory、人工审核点、受控补丁/生成产物、结构化 review、验证、benchmark 运行和指标对比。
-- **Workspace 策略**：`copy` 是最稳妥的隔离副本；`git_worktree` 适合较大的 git 仓库；实验性 `sparse_copy` 适合你明确知道 include 范围的小型子集。
-- **研究到代码实验**：canonical session 可以显式把一个准备好的项目和一份 Code-Task TOML
-  交给隔离的 Code-Task backend，再复用同一套 experiment、analysis、report 和 audit handoff。
-  在显式配置时支持有界的成对测量和技术修复/复测；自主研究方向循环仍不属于 V2.8。
-- **延期的集成边界**：只读 tool schema、MCP 暴露和外部 Agent/Harness 适配器目前只作为边界或
-  兼容面冻结。Claude Code、Codex、OpenCode 等 Harness 属于 V2.8 之后的工作，不是当前验收条件。
-- **可审查产物**：每次运行都把关键决策写入 `runs/` 下的文件，而不是隐藏在进程内存里。
-- **面向贡献者的能力边界**：新的模块可以使用轻量的
-  `ArtifactStore`、`CapabilityResult` 和有界 attempt API，内部保持模块化，但正式研究流程
-  统一由 `research-session` 编排。旧八阶段和 code-task 入口只在迁移完成前作为兼容/开发面
-  存在。离线参考实现位于 `tests/fixtures/capability_package_minimal/`。
-- **成熟库基础设施**：pipeline/code-task TOML 配置通过 Pydantic 校验，LLM 调用默认使用 OpenAI Python SDK，并保留 LiteLLM 兼容层；OpenAlex 访问通过 pyalex，终端进度输出开始走 Rich，为后续更清晰的 human-in-the-loop 审核打基础。
+- **任务驱动，而非所有任务走同一条流水线。** 根据已接受的计划连接所需能力；
+  在配置允许的有限科研轮次内，可以根据证据补充测量或修订候选。
+- **过程可检查。** 计划、来源、代码修改、测量、用量和报告保存为文件，不只留在对话里。
+- **中断不必从头开始。** 保存尝试历史，支持复用未受影响的证据与条件仍适用的测量。
+- **参与程度可选。** 辅助决策、关键节点确认或限定范围内自主执行，按任务需要选择。
+- **框架本身易理解。** 文件化状态、TOML 配置、Rich 终端输出和职责清晰的模块，
+  无需先维护另一套复杂基础设施。
 
-## 安装与配置
+## 快速开始
 
-克隆仓库：
+先运行一个真实文献调研：**无需数据集、训练环境或 GPU**，但需要网络和可用的模型 API。
+
+### 1. 安装
+
+准备 **Python 3.12+**、Git 和 [uv](https://docs.astral.sh/uv/)，然后在终端运行：
 
 ```bash
 git clone https://github.com/Wchanging/SimpleAutoResearch.git
 cd SimpleAutoResearch
-```
-
-使用 `uv` 安装依赖：
-
-```bash
 uv sync
 ```
 
-框架本身不要求 scikit-learn。运行附带的传统机器学习示例及其测试时，使用
-`uv sync --extra examples`，并以 `uv run --extra examples ...` 运行命令；
-使用 pip 时安装 `pip install '.[examples]'`。
+### 2. 配置模型
 
-创建本地环境变量文件：
+如果还没有 `.env`，先复制模板：
 
 ```bash
 cp .env.example .env
 ```
 
-PowerShell：
+PowerShell 使用 `Copy-Item .env.example .env`。在本地文件中填写服务商的密钥、
+API 地址和模型标识：
 
-```powershell
-Copy-Item .env.example .env
-```
-
-编辑 `.env`。如果要运行 LLM 支持的阶段，需要至少配置 API key：
-
-```bash
+```dotenv
 OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://api.openai.com/v1
-SIMPLE_AR_MODEL=gpt-4o-mini
-SIMPLE_AR_LLM_BACKEND=openai
-SIMPLE_AR_LLM_API=responses
-SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
-SIMPLE_AR_LLM_REASONING_EFFORT=
-SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_TIMEOUT_SEC=180
-SIMPLE_AR_MAX_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
-SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
-SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
-SIMPLE_AR_JSON_RESPONSE_FORMAT=off
-SIMPLE_AR_INPUT_PRICE_PER_1M=
-SIMPLE_AR_OUTPUT_PRICE_PER_1M=
+OPENAI_BASE_URL=https://your-provider.example/v1
+SIMPLE_AR_MODEL=your_model_id
+SIMPLE_AR_LLM_API=chat
+SIMPLE_AR_LLM_STREAM=true
 ```
 
-如果使用第三方 OpenAI 兼容接口，把 `OPENAI_BASE_URL` 指向对应服务的 `/v1` 地址即可。价格字段是可选项；不填写时，SimpleAutoResearch 仍会记录 token 数量，但费用估算会显示为 `null`。连接中断、限流、超时和 5xx 这类临时 provider 错误会按上面的 retry 设置做有限指数退避重试。JSON 输出请求默认只靠 prompt 和本地解析，兼容性更好；只有 provider 明确支持原生 JSON response formatting 时，才建议把 `SIMPLE_AR_JSON_RESPONSE_FORMAT` 改成 `auto` 或 `json_object`。`SIMPLE_AR_LLM_BACKEND=openai` 默认使用 OpenAI Python SDK 直连；只有需要旧 LiteLLM 兼容层时才改成 `litellm`。`SIMPLE_AR_LLM_TIMEOUT_SEC` 默认是每次 provider 尝试 180 秒，慢速服务商可以设为更大的正数，只有明确设为 `0` / `off` / `none` / `unlimited` 才禁用客户端超时；`SIMPLE_AR_MAX_OUTPUT_TOKENS` 仍默认不限制，只有确实需要限制模型输出长度时才设置正数。`SIMPLE_AR_LLM_API=responses` 使用 Responses API 风格的 `instructions` 和 `input`，临时错误只会在同一接口内有限重试；如果明确需要兼容性 fallback，可使用已有的 `auto` 模式，在 Responses 重试后再尝试 Chat Completions。`chat` 会始终直接使用 Chat Completions。
-新生成的 usage 记录还会保存实际 provider 调用次数，旧的 usage 记录仍可正常读取。
+请替换占位值。这里使用支持流式的 Chat Completions 兼容接口；如果服务商支持的是
+Responses 接口，则选择 `responses`。不要提交密钥。
+传输方式、重试和超时等进阶选项见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
 
-对于支持推理模式的模型，可以用 `SIMPLE_AR_LLM_REASONING_EFFORT=low` 等
-模型文档规定的值，并按需设置 `SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` 为显式调用上限
-提供推理余量。这是通用能力选项，不是为某个 provider 复制一套客户端。
-
-## 快速开始
-
-### 1. V2.8 canonical research-session 主线
-
-配置文件入口：`simple-ar research-session --config examples/survey/research.toml`。
-轻量模板和完整参考共用一套格式，说明见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
-
-当前主线是 `research-session`：同一有界 application 执行任务实际需要且输入允许的 accepted plan；
-文献、实验、分析和报告不是每个任务都必须经过的固定阶段。先运行适合笔记本的完整 fixture：
+### 3. 启动调研
 
 ```bash
-uv run python scripts/research_session_smoke.py
+uv run simple-ar research-session --config examples/survey/research.toml
 ```
 
-真实网络 + LLM 的低预算命令见 `examples/README.md`。它要求可用的 OpenAI 兼容模型/网关，
-provider 失败时不会用 fixture 结果冒充成功；如果提供 `--code-task-config`，可以接入一个
-准备好的项目；其执行范围由已接受的任务计划与提供的协议约束。
-
-如果只想做文献研究，可以同时省略 `--command` 和 `--code-task-config`。不提供 `--model` 时，
-session 会在有证据支持的 summary 处结束；提供模型时，可以继续生成 research-only Markdown 报告。
-该模式不会创建实验预算，也不会启动实验进程。
-
-对已经准备好的低成本实验，可以在 `[execution]` 中提供一个 literal argv，再声明
-`seed_count`/`seeds` 与 `seed_flag`；正式入口会将其绑定为有界的显式 pair。`baseline_policy`
-可设为 `skip` 表示不需要对照，或设为 `reuse` 复用当前 artifact store 中同条件且已通过的
-框架测量。复用前会核对实际命令、结果 schema、数据/划分/指标/条件以及准备 lineage；仅 cwd
-或叙述性合同相同不足以复用。LLM 设计只能在检查过的入口边界内提出参数，显式配置优先，模型建议不能获得 shell 或任意执行权限。
-
-以下命令是分段或兼容入口，不是第二条 V2.8 完整主线。只有在调试、恢复已有 handoff、
-验证旧配置或运行历史 benchmark 时才需要使用它们。
-
-
-### 2. Code Task：已有代码库修改
-
-当你已经有一个项目，希望模型提出可审核的改进时，先写一个简短任务文件，例如 `tasks/improve_model.md`，说明希望修改什么、用什么 benchmark 判断效果。然后为自己的项目创建一个 TOML 配置：
+内置任务调研小内存持续学习。尝试自己的问题时，修改配置中的 `[task].goal`，例如：
 
 ```toml
-[code_task]
-code_root = "path/to/your/project"
-task_file = "tasks/improve_model.md"
-output_root = "runs"
-name = "my-code-task"
-
-[benchmark]
-command = "python benchmark.py"
-primary_metric = "accuracy"
-
-[benchmark.metric_directions]
-accuracy = "higher"
-latency_ms = "resource"
-
-[workspace]
-mode = "auto"  # auto | copy | git_worktree | sparse_copy
+goal = "比较小内存持续学习中的回放方法，解释各自的权衡、证据局限与尚未解决的问题。"
 ```
 
-接着运行完整的人工审核流程。`init` 会打印一个新的 run 目录，例如
-`runs/20260523-xxxx-my-code-task`；后续命令把 `runs/<run-id>` 替换成这个实际路径即可。
-在真实交互终端里，`code-task execute` 会在审核门询问是否继续，输入 `yes` 后可以继续推进；
-下面的显式命令链是同一流程的 review-first 版本，也适合非交互 shell。
+这个案例会检索文献来源，阅读可获取的摘要和元数据，生成带参考来源的 Markdown 报告及审计结果。
+默认**不下载全文，也不运行训练**。具体输入范围见[调研案例说明](examples/survey/README.md)。
+
+**结果在哪里？** 终端会打印会话目录与交付文件路径。本例保存在 `runs/survey/<session>/`，
+打开输出中列出的 `report` 和 `report_audit` 文件即可。保留会话路径，后续可以继续运行。
+
+> **费用提示：** 这是真实 API 调用，会产生费用。累计 API 请求数与 token 用量默认不设上限，
+> 可以主动设置；它们与进程资源、科研轮次限制分别配置，见[配置参考](docs/CONFIG_REFERENCE_zh.md)。
+> 耗时取决于服务商与任务，不承诺固定几分钟完成。
+
+## 选择案例
+
+每个示例目录对应一个完整案例，包含输入、配置与运行说明。实际运行产物统一放入 `runs/`。
+
+| 案例 | 适合尝试什么 | 准备条件 |
+| --- | --- | --- |
+| [文献调研](examples/survey/README.md) | 无需训练的首次研究会话 | 模型 API 与网络 |
+| [持续学习](examples/continual_learning/README.md) | Mammoth / CIFAR-100 上的研究改进 | 项目、数据、固定划分、训练环境与 GPU 预算 |
+| [Digits MLP](examples/code_task_digits_mlp/README.md) | 小型模型代码改进 | 自带项目；需要 NumPy 与 scikit-learn |
+| [多文件代码 Review](examples/code_task_medium_review/README.md) | 限定范围的改码与验证 | 自带项目；使用 Python 标准库 |
+
+后两个使用独立 `code-task`，不等于完整科研循环。运行传统机器学习案例时，使用
+`uv sync --extra examples` 安装额外依赖，并在运行时保留 `uv run --extra examples ...`。
+
+持续学习配置是**模板，不是已经准备好的运行环境**：先按案例说明配置机器路径、准备数据再启动。
+目录约定与入口汇总见[示例索引](examples/README.md)。
+
+## 换成自己的任务
+
+从最接近的案例开始，描述**希望得到的结果**，而非自己填写内部阶段顺序。
+一份清楚的任务通常包含：
+
+1. **目标与交付：** 综述、验证过的代码修改、实验分析，或证据充分时的研究初稿。
+2. **已有资产：** 论文、项目路径、数据集或已有实验结果。
+3. **执行条件：** 准备好的解释器、验证或测量命令、可比较的评价条件、允许修改的范围。
+4. **限制与参与方式：** 计算资源、科研轮次、可选 API 上限，以及希望人工确认的决策。
+
+例如：
+
+> 改进这个已准备好的持续学习项目在小回放内存下的遗忘问题，保持数据划分与评价方式不变。
+> 与适用的基线比较，解释实测结果中的权衡。如果证据不支持改进，就交付实验分析，不要包装成成功论文。
+
+自然语言负责表达目标；配置仍需提供实际路径、执行权限与资源约束。
+框架不会自动部署训练环境。将配置复制到 `.local/cases/` 时，注意相对路径变化，
+按案例说明设置资产与输出路径。
+
+### 选择参与程度
+
+通过 `--interaction` 或 `[research].interaction` 选择：
+
+| 模式 | 参与方式 |
+| --- | --- |
+| `assisted` | 确认执行协议、科研选择与关键交付决定 |
+| `checkpoints` | 确认关键协议、方向和交付变化；允许同协议内的有限补测 |
+| `autonomous` | 在已配置的范围与限制内，自主选择可执行的下一步 |
+
+新 CLI 会话默认 `checkpoints`，案例配置可以另选模式；调研示例使用 `autonomous`。
+**所有模式都可能因关键事实、资产或权限缺失而暂停**，自动同意并不能补齐这些条件。
+
+## 查看结果与中断续跑
+
+Rich 终端输出展示当前动作、耗时、进度消息与最终产物位置。
+查看报告时，也应检查对应的测量和验证记录，不能用生成文字代替实际执行证据。
+
+解决服务商错误或其他阻塞后，可以续跑同一个调研会话。
+将下面的 `SESSION_PATH` 替换为终端打印的完整会话目录：
 
 ```bash
-uv run simple-ar code-task init --config path/to/your_code_task.toml
-uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
-uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml --to-step propose-edits
-uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml --apply-proposed-edits --timeout 60
-uv run simple-ar status runs/<run-id>
+uv run simple-ar research-session --config examples/survey/research.toml --session-root "SESSION_PATH"
 ```
 
-这套命令会准备隔离 workspace、运行 baseline benchmark、生成 work plan、停在 patch plan 审核点、生成 `code_task/meta/proposed_edits.json`、应用已审核 proposal、执行结构化 post-apply / post-run review、验证并运行 patched benchmark，并写入最终状态。如果结果还需要有限范围的后续修复，可以继续使用 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中的 repair 流程。
+其他案例使用原任务的配置。省略 `--session-root` 会新建会话；续跑保留历史与用量记录，
+不会重置已耗尽的预算。遇到待确认决定时，按终端显示的决定 ID 和答复命令操作。
+显式修订与追加额度的方法见 [CLI 参考](docs/CLI_REFERENCE_zh.md)。
 
-内置 standalone code-task 示例是 `examples/code_task_medium_review/configs/code_task.toml`，放在 [使用与配置](docs/USAGE_zh.md#推荐路径toml--execute) 中作为辅助示例。
+## 框架如何工作
 
+```text
+目标 + 材料 + 约束
+        ↓
+   规划近期工作 ←──────────────┐
+        ↓                     │
+  调研 / 改码 / 实验           │
+        ↓                     │
+  保存证据与结果 ──────── 重新判断
+                              │
+                         交付或暂停
+```
 
-## 当前能力边界
+这些是共享能力，不是为每类任务各造一条完整流水线。
+CodeTask 负责限定范围的实现与验证，实验模块记录测量，报告模块组织已有证据，
+会话负责连接输入输出和有限轮次的后续工作。
+技术修复、科研修订与写作修订有不同目的，不应混为一种重试。
 
-SimpleAutoResearch 已经可以作为学习和原型实验框架使用，但它仍然故意保持保守。
+## 当前边界
 
-- 当前代码编辑是受控 old/new replacement，更可审计，但弱于完整自主 coding agent。
-- 默认 edit scope 会保护 tests、benchmark 文件和 secret-like 路径，避免模型通过修改评测来刷指标。
-- `auto` 会优先为已有 commit 的 Git 项目创建 detached worktree；`code_root` 可以是仓库根目录或仓库内项目子目录。Git 条件不满足时会降级 copy 并记录原因；显式 `git_worktree` 则会失败并给出修复提示。
-- `sparse_copy` 仍是实验性功能，如果 include 范围过窄，可能漏掉运行依赖。
-- 目前不会自动安装项目依赖，也不会自动管理 Docker/Conda/GPU/Slurm 环境。
-- 较大的代码修改 proposal 仍可能触发很长的 LLM completion。当前实验/代码执行已经收束到明确 contract、资源预算、canonical results、guard、受控 greenfield 路径和可选 external-agent handoff；但它仍不适合作为大型无人值守重构工具。
-- 文献检索现在会写入可审计的 source plan 和 document-store metadata，并支持 OpenAlex、Semantic Scholar、arXiv 和本地 Markdown/text 笔记。它可以解析本地/缓存的 Markdown、text、基础 HTML，以及轻量 `pypdf` PDF。当前已预留可选 `unstructured` 和 LanceDB hooks，但还不是完整 section-aware PDF parser 或向量 RAG survey 系统。
-- LLM 报告有引用、指标和边界规则保护；如果草稿不合格，会回退到结构化 deterministic report。
+- **研究质量仍需审阅。** 运行可能得到负面或不确定结果；报告审计不等于科学正确性或发表质量认证。
+- **阅读深度取决于输入。** 仅摘要的调研不是全文综述，复杂 PDF 和不完整来源仍有局限。
+- **代码修改有明确范围。** 受控编辑与隔离工作区不等于通用无人值守重构能力，也不是安全沙箱。
+- **执行环境需要准备。** 项目依赖、数据与 GPU/服务器环境由使用者准备；不要让不熟悉的项目代码接触敏感文件或凭据。
+- **外部服务可能中断。** 网络、限流与模型输出错误可能导致暂停，处理原因后再续跑。
 
 ## 文档
 
-- [使用与配置](docs/USAGE_zh.md)：安装、工作流示例、产物说明和排错流程。
-- [CLI 参考](docs/CLI_REFERENCE_zh.md)：命令组和参数表。
-- [配置参考](docs/CONFIG_REFERENCE_zh.md)：TOML section、完整配置示例和 workspace 模式变体。
-- [工作流与产物](docs/WORKFLOWS_zh.md)：预设工作流、8 阶段流程和产物布局。
-- [开发指南](docs/DEVELOPMENT_zh.md)：如何扩展 capability、template 和 code-task 模块。
-- [Changelog](CHANGELOG_zh.md)：按时间记录的开发进展。
+| 文档 | 适合查阅什么 |
+| --- | --- |
+| [使用指南](docs/USAGE_zh.md) | 使用流程、产物与排错 |
+| [配置参考](docs/CONFIG_REFERENCE_zh.md) | 模型设置、任务输入、预算与执行选项 |
+| [CLI 参考](docs/CLI_REFERENCE_zh.md) | 命令、续跑与决定答复 |
+| [工作流与产物](docs/WORKFLOWS_zh.md) | 执行边界与结果记录 |
+| [开发指南](docs/DEVELOPMENT_zh.md) | 能力扩展与内部接口 |
+| [更新记录](CHANGELOG_zh.md) | 功能变化与迁移提示 |
 
-V2.8 的当前收口计划、版本边界和兼容退出条件维护在本地 `MDfiles/` 规划文档中；该目录
-按项目约定保持 Git 忽略，不作为 GitHub 的公开计划来源。贡献代码时以开发指南、工作流文档
-和 CLI 参考中的正式入口边界为准。
+## 参与贡献与致谢
 
-## 参考项目
+欢迎问题反馈、可复现的 bug 报告、实际案例和聚焦的 PR。
+反馈时请附上命令、相关配置和诊断信息，**先移除 API 密钥、登录凭据与私有数据**。
+报告质量、案例和文档的改进，与代码贡献同样重要。
 
-主要参考项目是 [aiming-lab/AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw)。SimpleAutoResearch 借鉴了阶段式自动科研的思想，但实现保持紧凑、可学习、可逐步扩展。
-
-## 社区
-
-这是一个早期、学习导向的项目。欢迎 issue、建议、实验结果和小而聚焦的 pull request，尤其是 coding-agent workflow、可复现实验执行、报告质量和文档清晰度相关方向。
+项目受到 [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw) 启发，
+同时坚持紧凑、可检查的实现。我们希望做到：
+**轻量高效、鲁棒可用、结构清晰、运行稳定、维护轻松、拓展简单、开源好用。**

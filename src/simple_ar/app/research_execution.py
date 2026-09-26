@@ -22,8 +22,8 @@ def normalize_execution_config(
 ) -> dict[str, Any]:
     """Bind a compact declared protocol to literal execution pairs.
 
-    This is the only expansion point for seed-aware execution.  It appends a
-    declared flag/value to an already validated argv; it never parses shell
+    This is the only expansion point for seed-aware execution. It binds a
+    declared flag/value in an already validated argv; it never parses shell
     text or turns a model suggestion into an executable command.
     """
 
@@ -52,8 +52,8 @@ def normalize_execution_config(
         pairs = tuple(
             {
                 "seed": seed,
-                "baseline_command": [*baseline_command, seed_flag.strip(), str(seed)],
-                "candidate_command": [*command, seed_flag.strip(), str(seed)],
+                "baseline_command": _with_seed(baseline_command, seed_flag.strip(), seed),
+                "candidate_command": _with_seed(command, seed_flag.strip(), seed),
             }
             for seed in seed_values
         )
@@ -68,6 +68,11 @@ def normalize_execution_config(
         )
     else:
         normalized.pop("pairs", None)
+
+    # A fixed command can declare its seed too; retaining the flag does not
+    # authorize extra seed conditions or convert it into a paired experiment.
+    if normalized.get("seed_flag"):
+        normalized["protocol_seed_flag"] = normalized["seed_flag"]
 
     for key in ("seeds", "seed_count", "seed_flag"):
         normalized.pop(key, None)
@@ -96,6 +101,35 @@ def execution_pairs(config: Mapping, *, task_text: str = "") -> tuple[Mapping, .
     """Return the bounded literal pairs consumed by the existing runner."""
 
     return tuple(normalize_execution_config(config, task_text=task_text).get("pairs", ()))
+
+
+def _command_seed(command: list[str], flag: str) -> tuple[int | None, int | None]:
+    """Read only the caller-declared seed flag, without executing or guessing argv."""
+    indices = [i for i, arg in enumerate(command) if arg == flag or arg.startswith(flag + "=")]
+    if not indices:
+        return None, None
+    if len(indices) != 1:
+        raise ValueError(f"Ambiguous repeated seed flag: {flag}")
+    index = indices[0]
+    value = command[index].split("=", 1)[1] if command[index] != flag else (
+        command[index + 1] if index + 1 < len(command) else ""
+    )
+    try:
+        return index, int(value)
+    except ValueError as exc:
+        raise ValueError(f"Seed flag {flag} requires an integer value.") from exc
+
+
+def _with_seed(command: list[str], flag: str, seed: int) -> list[str]:
+    index, _ = _command_seed(command, flag)
+    result = list(command)
+    if index is None:
+        return [*result, flag, str(seed)]
+    if result[index] == flag:
+        result[index + 1] = str(seed)
+    else:
+        result[index] = f"{flag}={seed}"
+    return result
 
 
 def _validated_pairs(rows: object) -> tuple[Mapping, ...]:
@@ -177,6 +211,12 @@ def execution_protocol(config: Mapping, *, task_text: str = "") -> dict[str, Any
     normalized = normalize_execution_config(config, task_text=task_text)
     pairs = tuple(normalized.get("pairs", ()))
     seeds = [int(row["seed"]) for row in pairs]
+    if not seeds:
+        flag = str(normalized.get("protocol_seed_flag") or "").strip()
+        if flag:
+            _, seed = _command_seed(_argv(normalized.get("command"), "execution.command"), flag)
+            if seed is not None:
+                seeds = [seed]
     if not seeds:
         protocol = normalized.get("protocol")
         comparison = protocol.get("comparison_conditions") if isinstance(protocol, Mapping) else None
@@ -275,7 +315,7 @@ def execution_request(
     config.pop("baseline_policy", None)
     config.pop("baseline_ref", None)
     config.pop("protocol_seed_reason", None)
-    config.pop("protocol_seed_flag", None)
+    seed_flag = str(config.pop("protocol_seed_flag", "") or "").strip()
     if "baseline" in config:
         baseline = config.pop("baseline")
         if not isinstance(baseline, Mapping) or "command" not in baseline:
@@ -319,6 +359,14 @@ def execution_request(
     if not isinstance(schema, Mapping):
         raise ValueError("execution.result_schema must be an object.")
     protocol = _merge_protocol_contract(config.get("protocol"), contract)
+    if seed_flag:
+        _, seed = _command_seed(list(command), seed_flag)
+        if seed is not None:
+            protocol = dict(protocol or {})
+            conditions = dict(protocol.get("comparison_conditions") or {})
+            if "seed" in conditions and conditions["seed"] != seed:
+                raise ValueError("Declared protocol seed conflicts with the execution command.")
+            protocol["comparison_conditions"] = {**conditions, "seed": seed}
     if protocol is not None and not isinstance(protocol, Mapping):
         raise ValueError("execution.protocol must be a research experiment contract object.")
     if protocol is not None:

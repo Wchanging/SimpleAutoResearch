@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +106,22 @@ def validate_code_task(
         raise FileNotFoundError(f"Missing code-task workspace: {paths.workspace_dir}")
 
     issues: list[dict[str, Any]] = []
+    policy = manifest_section(manifest, "environment").get("policy", {})
+    external_python = policy.get("python_executable") if policy.get("mode") == "external" else None
+    import_availability = None
+    if external_python:
+        names: set[str] = set()
+        for path in _iter_workspace_files(paths.workspace_dir):
+            if path.suffix == ".py" and (max_file_bytes <= 0 or path.stat().st_size <= max_file_bytes):
+                try:
+                    names.update(name for name, _ in _imports(ast.parse(path.read_text(encoding="utf-8", errors="replace"))))
+                except SyntaxError:
+                    pass  # Reported by the ordinary syntax pass below.
+        import_availability = _external_import_availability(str(external_python), names)
+        if import_availability is None:
+            issues.append(_issue(severity="warning", code="dependency_check_unavailable", path="",
+                message="Could not inspect the configured external interpreter; dependency availability is unknown."))
+            import_availability = {}  # Do not substitute the host environment as evidence.
     scanned_files = 0
     python_files = 0
     for path in _iter_workspace_files(paths.workspace_dir):
@@ -129,6 +147,7 @@ def validate_code_task(
             workspace_dir=paths.workspace_dir,
             strict=strict,
             issues=issues,
+            import_availability=import_availability,
         )
 
     error_count = sum(1 for item in issues if item["severity"] == "error")
@@ -141,6 +160,8 @@ def validate_code_task(
         "strict": strict,
         "max_file_bytes": max_file_bytes,
         "workspace": str(paths.workspace_dir),
+        "dependency_interpreter": str(external_python or sys.executable),
+        "validation_scope": "static syntax and import discovery; not runtime or scientific validation",
         "file_count": scanned_files,
         "python_file_count": python_files,
         "issue_count": len(issues),
@@ -177,6 +198,7 @@ def _validate_python_file(
     workspace_dir: Path,
     strict: bool,
     issues: list[dict[str, Any]],
+    import_availability: dict[str, bool] | None = None,
 ) -> None:
     text = path.read_text(encoding="utf-8", errors="replace")
     try:
@@ -206,14 +228,14 @@ def _validate_python_file(
                     message=f"Import `{name}` can perform external, destructive, or network operations.",
                 )
             )
-        if not _import_available(name, workspace_dir, current_file=path):
+        if not _import_available(name, workspace_dir, current_file=path, import_availability=import_availability):
             issues.append(
                 _issue(
                     severity="warning",
                     code="missing_import",
                     path=rel_path,
                     line=line,
-                    message=f"Import `{name}` was not found in the workspace, stdlib, or current environment.",
+                    message=f"Import `{name}` was not found in the workspace or validation interpreter (see dependency_interpreter).",
                 )
             )
 
@@ -256,13 +278,14 @@ def _call_name(node: ast.AST) -> str:
     return ""
 
 
-def _import_available(name: str, workspace_dir: Path, *, current_file: Path | None = None) -> bool:
+def _import_available(name: str, workspace_dir: Path, *, current_file: Path | None = None,
+                      import_availability: dict[str, bool] | None = None) -> bool:
     if not name:
         return True
-    if name in sys.builtin_module_names:
+    if import_availability is None and name in sys.builtin_module_names:
         return True
     stdlib_names = getattr(sys, "stdlib_module_names", set())
-    if name in stdlib_names:
+    if import_availability is None and name in stdlib_names:
         return True
     roots = [workspace_dir, workspace_dir / "src", workspace_dir / "generated_project"]
     if current_file is not None:
@@ -281,10 +304,30 @@ def _import_available(name: str, workspace_dir: Path, *, current_file: Path | No
             return True
         if (root / name / "__init__.py").is_file():
             return True
+    if import_availability is not None:
+        return import_availability.get(name, True)  # Unknown is reported once, not as missing.
     try:
         return importlib.util.find_spec(name) is not None
     except (ImportError, AttributeError, ValueError):
         return False
+
+
+def _external_import_availability(executable: str, names: set[str]) -> dict[str, bool] | None:
+    """One bounded stdlib-only probe; never import project or training modules."""
+    script = (
+        "import importlib.util,json,sys; "
+        "names=json.load(sys.stdin); "
+        "print(json.dumps({n: importlib.util.find_spec(n) is not None for n in names}))"
+    )
+    try:
+        result = subprocess.run([executable, "-I", "-c", script],
+            input=json.dumps(sorted(names)), capture_output=True, text=True, timeout=10, check=False)
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        return data if isinstance(data, dict) and all(type(v) is bool for v in data.values()) else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
 
 
 def _iter_workspace_files(root: Path) -> list[Path]:

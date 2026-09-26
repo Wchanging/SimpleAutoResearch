@@ -3,6 +3,7 @@
 import unittest
 
 from simple_ar.report.projection import (
+    _append_verified_experiment_evidence,
     _metric_ledger,
     _verified_experiment_evidence,
     attach_implementation_evidence,
@@ -11,10 +12,76 @@ from simple_ar.core import ArtifactStore
 from pathlib import Path
 import tempfile
 from simple_ar.report.audit import build_report_audit
-from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory
+from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory, ReportSectionDraft
 
 
 class ReportMeasurementAuditTests(unittest.TestCase):
+    def test_verified_metrics_keep_declared_rows_and_link_full_execution_evidence(self):
+        metric_names = ["accuracy", "macro_f1", "forgetting", "backward_transfer"] + [
+            f"accuracy_after_task_{index}_on_task_{task}"
+            for index in range(11)
+            for task in range(5)
+        ]
+        comparison_metrics = []
+        sources = []
+        for index, name in enumerate(metric_names):
+            baseline = 0.5 + index / 1000
+            candidate = baseline + 0.01
+            comparison_metrics.append({
+                "name": name, "baseline": baseline, "candidate": candidate,
+                "delta": candidate - baseline, "interpretation": "improved",
+            })
+            for label, value, source_kind in (
+                ("baseline", baseline, "measured"),
+                ("candidate", candidate, "measured"),
+                ("comparison_delta", candidate - baseline, "derived_comparison"),
+            ):
+                sources.append(MetricSource(
+                    metric_id=f"metric:{label}:{name}", name=name, value=value,
+                    artifact="attempts/experiment-001/results.json", label=label,
+                    source_kind=source_kind,
+                ))
+        context = ReportContext(
+            topic="Continual learning", report_mode="experiment",
+            experiment_plan={"metrics": ["accuracy", "macro_f1"]},
+            results={
+                "result_schema": {"primary_metric": "accuracy", "required_metrics": ["accuracy", "macro_f1"]},
+                "comparisons": [{"seed": 4, "metrics": comparison_metrics}],
+            },
+            metric_sources=sources,
+        )
+
+        body = _verified_experiment_evidence(context)
+        appended = _append_verified_experiment_evidence((), context)[0]
+
+        self.assertIn("`accuracy`", body)
+        self.assertIn("`macro_f1`", body)
+        self.assertNotIn("accuracy_after_task_", body)
+        self.assertNotIn("Metric Provenance", body)
+        self.assertIn("Derived delta (candidate − baseline)", body)
+        self.assertIn("../experiment-001/results.json", body)
+        self.assertEqual(len(context.metric_sources), 59 * 3)
+        self.assertEqual(appended.metric_ids, [metric.metric_id for metric in sources])
+
+        audit = build_report_audit(report=body, report_body=body, context=context, memory=ReportMemory())
+        self.assertEqual(audit.metric_audit.status, "warning")
+        self.assertIn("metric:baseline:accuracy_after_task_0_on_task_0", audit.metric_audit.unmatched_metrics)
+
+        explicitly_required = "accuracy_after_task_0_on_task_0"
+        required_context = ReportContext(
+            topic="Continual learning", report_mode="experiment",
+            experiment_plan={"metrics": [explicitly_required]},
+            results={"paired_summary": [{
+                "metric": explicitly_required, "n": 2, "baseline_mean": 0.5,
+                "candidate_mean": 0.6, "delta_mean": 0.1, "delta_sample_std": 0.0,
+            }]},
+            metric_sources=[MetricSource(
+                metric_id="required-task-metric", name=f"{explicitly_required}.candidate_mean",
+                value=0.6, artifact="attempts/experiment-001/results.json", label="paired_summary:0",
+            )],
+        )
+        self.assertIn(explicitly_required, _verified_experiment_evidence(required_context))
+
     def test_paired_report_keeps_detailed_measurements_out_of_paper_body(self):
         summary = {
             "metric": "accuracy",

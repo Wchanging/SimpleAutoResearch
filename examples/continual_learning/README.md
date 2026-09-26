@@ -39,6 +39,18 @@ API credentials belong in the environment. Outputs belong in `runs`, not here.
 
 ## Measurement and comparison
 
+The example declares dataset, split and comparison settings in
+`execution.protocol`. Keep them aligned with the measurement command when
+changing the experiment. `seed_flag` identifies the literal seed argument even
+for a single run; it does not request additional seeds. These are declared
+conditions, not proof that data files or an old run were independently verified.
+Updating this configuration does not retroactively repair historical results.
+
+The CodeTask environment uses `mode = "external"` and the configured training
+Python. Static dependency checks use that interpreter, without importing the
+training project or installing packages. A passed static check is not a runtime
+test or evidence of scientific effectiveness.
+
 `run_mammoth.py` runs from an isolated Mammoth project working directory. It
 uses the official model, training loop, task splitting, transforms and evaluator.
 It only maps the shared dataset location, limits loader workers/torch threads

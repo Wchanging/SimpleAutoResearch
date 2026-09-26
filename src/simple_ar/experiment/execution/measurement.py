@@ -49,20 +49,32 @@ def _file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def comparable_protocol(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Project comparison conditions, excluding candidate identity and research prose."""
+    return {key: contract.get(key) for key in (
+        "protocol_revision", "dataset_refs", "split_spec", "metric_specs",
+        "comparison_conditions", "protected_assets",
+    )}
+
+
+def _protocol_fingerprint(contract: Mapping[str, Any], result_schema: Mapping[str, Any]) -> str | None:
+    protocol = comparable_protocol(contract)
+    if not all(protocol.get(key) for key in (
+        "dataset_refs", "split_spec", "metric_specs", "comparison_conditions",
+    )):
+        return None
+    return hashlib.sha256(json.dumps(
+        {"protocol": protocol, "result_schema": dict(result_schema)},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+
 def measurement_record(
     run: Any, contract: Mapping[str, Any] | None, result_schema: Mapping[str, Any],
 ) -> dict[str, Any]:
     process = getattr(run, "process_record", {})
     protocol = dict(contract or {})
-    # A legacy hypothesis alone does not specify a comparable experiment.
-    complete = all(protocol.get(key) for key in (
-        "dataset_refs", "split_spec", "metric_specs", "comparison_conditions",
-    ))
-    fingerprint = hashlib.sha256(json.dumps(
-        {"protocol": protocol, "result_schema": dict(result_schema)},
-        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")).hexdigest() if complete else None
+    fingerprint = _protocol_fingerprint(protocol, result_schema)
     return {
         "schema_version": "experiment_measurement.v1",
         "measurement_id": process.get("invocation_id"),
@@ -72,6 +84,7 @@ def measurement_record(
         "protocol_revision": protocol.get("protocol_revision"),
         "protocol_fingerprint": fingerprint,
         "protocol_status": "declared" if fingerprint else "incomplete",
+        "seed": protocol.get("comparison_conditions", {}).get("seed"),
         "limitations": ["Protocol identity reflects declared settings, not verified dataset or evaluator contents."],
     }
 
@@ -85,6 +98,16 @@ def comparison_compatibility(baseline: Mapping, candidate: Mapping) -> tuple[str
     a, b = first.get("protocol_fingerprint"), second.get("protocol_fingerprint")
     if not a or not b:
         return "unknown", "Comparison protocol is incomplete."
+    # Re-project persisted contracts so old whole-contract fingerprints and new
+    # condition-only fingerprints can be compared without rewriting history.
+    contracts = (baseline.get("experiment_contract"), candidate.get("experiment_contract"))
+    if any(isinstance(contract, Mapping) for contract in contracts):
+        if not all(isinstance(contract, Mapping) for contract in contracts):
+            return "unknown", "One result lacks its persisted comparison contract."
+        a = _protocol_fingerprint(contracts[0], baseline.get("result_schema") or {})
+        b = _protocol_fingerprint(contracts[1], candidate.get("result_schema") or {})
+        if not a or not b:
+            return "unknown", "Comparison protocol is incomplete."
     if a != b:
         return "mismatched", "Results use different declared protocols; deltas are descriptive only."
     placeholder_reason = _unverified_protocol_reason(baseline, candidate)

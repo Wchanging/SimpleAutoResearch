@@ -11,8 +11,10 @@ entry point.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from posixpath import relpath
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from simple_ar.core import ArtifactRef, ArtifactStore
 from simple_ar.literature.models import Paper
@@ -25,10 +27,22 @@ from simple_ar.report.schema import (
     SourceHandle,
 )
 from simple_ar.research.design import ResearchDesignResult
+from simple_ar.research.contracts import ResearchExperimentContract
 from simple_ar.research.documents.ingest import DocumentBundle
 from simple_ar.research.sources import SearchResult
 from simple_ar.research.synthesis import SynthesisResult
 from simple_ar.result_analysis.schema import AnalysisResult
+
+_RESEARCH_CONTEXT_FIELDS = (
+    "hypothesis",
+    "motivation_refs",
+    "expected_outcome",
+    "proposed_change",
+    "implementation_scope",
+    "validation_hints",
+    "risks",
+    "report_claim_plan",
+)
 
 if TYPE_CHECKING:
     from simple_ar.research.evidence.reader import ReadResult
@@ -134,11 +148,28 @@ def build_research_report_inputs(
 ) -> tuple[ReportContext, ReportMemory]:
     """Build experiment-report inputs from canonical persisted artifacts."""
 
-    contract = (
+    execution = dict(execution)
+    fallback_contract = (
         design.contract
         if design is not None and design.contract is not None
         else brief.experiment_contract
     )
+    execution_contract = execution.get("experiment_contract")
+    if isinstance(execution_contract, ResearchExperimentContract):
+        execution_contract = execution_contract.to_row()
+    if isinstance(execution_contract, Mapping) and execution_contract:
+        # Prefer the protocol attached to the measured result while retaining
+        # descriptive research context omitted by older execution records.
+        # Dataset, metric, seed, and comparison conditions must come from the
+        # measured execution contract, never from a planned fallback.
+        contract_row = dict(execution_contract)
+        fallback_row = fallback_contract.to_row() if fallback_contract is not None else {}
+        for field in _RESEARCH_CONTEXT_FIELDS:
+            if not contract_row.get(field) and fallback_row.get(field):
+                contract_row[field] = fallback_row[field]
+        contract = ResearchExperimentContract.from_row(contract_row)
+    else:
+        contract = fallback_contract
     if contract is None:
         raise ReportProjectionError(
             "Research session has no experiment contract; report input is incomplete."
@@ -149,7 +180,6 @@ def build_research_report_inputs(
             "Research session has no topic in its persisted research plan."
         )
 
-    execution = dict(execution)
     source_handles = _research_source_handles(
         search=search,
         brief_ref=brief_ref,
@@ -529,64 +559,137 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
 
     if not context.metric_sources:
         return ""
-    lines = [
-        "The following values are copied from the persisted experiment evidence "
-        "and are included to keep the quantitative record complete."
-    ]
+    primary_metric, declared_metrics = _declared_report_metrics(context)
+    intro = (
+        "Declared primary and required values below are copied from persisted experiment evidence."
+        if declared_metrics is not None
+        else "The following values are copied from the persisted experiment evidence."
+    )
+    lines = [intro + " Full measurements remain available from their source artifacts."]
     comparisons = context.results.get("comparisons") if isinstance(context.results, Mapping) else None
     summaries = context.results.get("paired_summary") if isinstance(context.results, Mapping) else None
     if isinstance(summaries, list) and summaries:
-        table = _paired_summary_markdown(summaries)
+        table = _paired_summary_markdown(summaries, declared_metrics)
         if table:
             lines.extend(["", "### Aggregate Paired Metrics", "", table])
-        seed_table = _paired_primary_metric_markdown(comparisons)
+            lines.append(
+                "Mean deltas are derived as candidate minus baseline; the reported "
+                "sample deviation describes observed paired deltas and is not a significance test."
+            )
+        seed_table = _paired_primary_metric_markdown(comparisons, primary_metric)
         if seed_table:
             lines.extend(["", "### Seed-Level Primary Metric", "", seed_table])
-        source_labels = _metric_source_labels(context.metric_sources)
-        if source_labels:
-            lines.extend(
-                [
-                    "",
-                    "Measurement provenance labels: " + source_labels + ".",
-                ]
-            )
-        collection_ref = context.results.get("collection_ref")
-        if isinstance(collection_ref, Mapping) and collection_ref.get("path"):
+        detail_reference = _detailed_measurement_reference(context)
+        if detail_reference:
             lines.extend([
                 "",
-                "Detailed per-task and raw per-seed measurements are preserved "
-                f"in the persisted artifact `{collection_ref['path']}` and the "
-                "individual experiment result artifacts; this paper shows the "
-                "compact aggregate view.",
+                "Detailed per-task and per-condition measurements are preserved in "
+                f"{detail_reference}; this section shows the declared compact results.",
             ])
         return "\n".join(lines)
     if isinstance(comparisons, list):
+        rendered = False
         for comparison in comparisons:
             if not isinstance(comparison, Mapping):
                 continue
-            table = _comparison_markdown(comparison)
+            table = _comparison_markdown(comparison, declared_metrics)
             if table:
-                lines.extend(["", "### Baseline and Patched Comparison", "", table])
+                lines.extend(["", "### Baseline and Candidate Comparison", "", table])
+                lines.append(
+                    "Derived delta is candidate minus baseline; it is calculated from "
+                    "the two measured values, not an independent measurement."
+                )
+                rendered = True
                 break
-    ledger = _metric_ledger(context.metric_sources)
+        if not rendered:
+            lines.append(
+                "No persisted comparison rows are available."
+                if not comparisons
+                else "No declared primary or required metric matched a persisted comparison row."
+            )
+
+    if isinstance(comparisons, list) and rendered:
+        visible_metrics = []
+    elif declared_metrics is None:
+        visible_metrics = context.metric_sources
+    else:
+        visible_metrics = [metric for metric in context.metric_sources if metric.name in declared_metrics]
+    ledger = _metric_ledger(visible_metrics)
     if ledger:
         lines.extend(["", "### Metric Provenance", "", ledger])
+        if any(metric.source_kind.startswith("derived_") for metric in visible_metrics):
+            lines.append("Rows with a derived origin are calculated summaries or differences, not direct measurements.")
+    detail_reference = _detailed_measurement_reference(context)
+    if detail_reference and (
+        isinstance(comparisons, list) or len(visible_metrics) < len(context.metric_sources)
+    ):
+        detail_note = (
+            "Detailed per-condition and per-task measurements are preserved in"
+            if isinstance(comparisons, list)
+            else "Other detailed measurements remain in"
+        )
+        lines.extend(["", f"{detail_note} {detail_reference}."])
     return "\n".join(lines)
 
 
-def _paired_summary_markdown(summaries: list[Mapping[str, Any]]) -> str:
-    """Render aggregate paired summaries, excluding task-by-task diagnostics."""
+def _declared_report_metrics(context: ReportContext) -> tuple[str, set[str] | None]:
+    """Return the declared primary metric and report-level required metrics."""
+
+    names: list[str] = []
+    primary = ""
+
+    def add(value: object) -> None:
+        if isinstance(value, str):
+            candidates = [value]
+        elif isinstance(value, (list, tuple)):
+            candidates = value
+        else:
+            return
+        for item in candidates:
+            name = str(item).strip()
+            if name and name not in names:
+                names.append(name)
+
+    sources: list[Mapping[str, Any]] = []
+    if isinstance(context.results, Mapping):
+        sources.append(context.results)
+        for key in ("experiment_contract", "baseline"):
+            value = context.results.get(key)
+            if isinstance(value, Mapping):
+                sources.append(value)
+    if isinstance(context.experiment_plan, Mapping):
+        sources.append(context.experiment_plan)
+
+    for source in sources:
+        schema = source.get("result_schema")
+        if isinstance(schema, Mapping):
+            if not primary:
+                primary = str(schema.get("primary_metric") or "").strip()
+            add(schema.get("required_metrics"))
+        if not primary:
+            primary = str(source.get("primary_metric") or "").strip()
+        add(source.get("metrics"))
+    if primary:
+        add(primary)
+    return primary, set(names) if names else None
+
+
+def _paired_summary_markdown(
+    summaries: list[Mapping[str, Any]],
+    metric_names: set[str] | None = None,
+) -> str:
+    """Render only declared paired summaries when a metric scope is provided."""
     rows = [
         row
         for row in summaries
         if isinstance(row, Mapping)
         and str(row.get("metric") or "").strip()
-        and "_after_task_" not in str(row.get("metric") or "")
+        and (metric_names is None or str(row.get("metric") or "").strip() in metric_names)
     ]
     if not rows:
         return ""
     table = [
-        "| Metric | Seeds | Baseline mean | Candidate mean | Mean delta | Delta std |",
+        "| Metric | Seeds | Baseline mean | Candidate mean | Mean delta (derived) | Delta std |",
         "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
@@ -607,12 +710,12 @@ def _paired_summary_markdown(summaries: list[Mapping[str, Any]]) -> str:
     return "\n".join(table)
 
 
-def _paired_primary_metric_markdown(comparisons: object) -> str:
-    """Render one measured primary-metric row per seed when available."""
-    if not isinstance(comparisons, list):
+def _paired_primary_metric_markdown(comparisons: object, primary_metric: str) -> str:
+    """Render one measured primary-metric row per seed when declared."""
+    if not isinstance(comparisons, list) or not primary_metric:
         return ""
     table = [
-        "| Seed | Baseline | Candidate | Delta |",
+        "| Seed | Baseline | Candidate | Derived delta (candidate − baseline) |",
         "| ---: | ---: | ---: | ---: |",
     ]
     for comparison in comparisons:
@@ -625,7 +728,7 @@ def _paired_primary_metric_markdown(comparisons: object) -> str:
             (
                 row
                 for row in metrics
-                if isinstance(row, Mapping) and str(row.get("name")) == "accuracy"
+                if isinstance(row, Mapping) and str(row.get("name")) == primary_metric
             ),
             None,
         )
@@ -646,19 +749,22 @@ def _paired_primary_metric_markdown(comparisons: object) -> str:
     return "\n".join(table) if len(table) > 2 else ""
 
 
-def _comparison_markdown(comparison: Mapping[str, Any]) -> str:
+def _comparison_markdown(
+    comparison: Mapping[str, Any],
+    metric_names: set[str] | None = None,
+) -> str:
     metric_rows = comparison.get("metrics")
     if not isinstance(metric_rows, list):
         return ""
     table = [
-        "| Metric | Baseline | Patched | Delta | Interpretation |",
+        "| Metric | Baseline | Candidate | Derived delta (candidate − baseline) | Interpretation |",
         "| --- | ---: | ---: | ---: | --- |",
     ]
     for row in metric_rows:
         if not isinstance(row, Mapping):
             continue
         name = str(row.get("name") or "").strip()
-        if not name:
+        if not name or (metric_names is not None and name not in metric_names):
             continue
         table.append(
             "| "
@@ -674,6 +780,30 @@ def _comparison_markdown(comparison: Mapping[str, Any]) -> str:
             + " |"
         )
     return "\n".join(table) if len(table) > 2 else ""
+
+
+def _detailed_measurement_reference(context: ReportContext) -> str:
+    """Link to existing immutable result artifacts without copying their rows."""
+
+    paths: list[str] = []
+    collection = context.results.get("collection_ref") if isinstance(context.results, Mapping) else None
+    if isinstance(collection, Mapping) and isinstance(collection.get("path"), str):
+        paths.append(collection["path"])
+    else:
+        paths.extend(metric.artifact for metric in context.metric_sources)
+
+    references: list[str] = []
+    for path in dict.fromkeys(path for path in paths if path):
+        artifact_path = PurePosixPath(path)
+        if not artifact_path.parts or artifact_path.is_absolute() or any(
+            part in {".", ".."} for part in artifact_path.parts
+        ):
+            continue
+        # Report artifacts live in attempts/<report-attempt>/; result refs are
+        # session-root-relative and therefore need a path relative to that dir.
+        target = relpath(artifact_path.as_posix(), "attempts/__report_attempt__")
+        references.append(f"[`{path}`]({quote(target, safe='/-._~')})")
+    return ", ".join(references)
 
 
 def _metric_ledger(metrics: list[MetricSource]) -> str:
@@ -697,14 +827,6 @@ def _metric_ledger(metrics: list[MetricSource]) -> str:
             + " |"
         )
     return "\n".join(table) if len(table) > 2 else ""
-
-
-def _metric_source_labels(metrics: list[MetricSource]) -> str:
-    """Keep paired evidence labels visible without expanding every measurement."""
-    labels = dict.fromkeys(
-        metric.label.strip() for metric in metrics if metric.label.strip()
-    )
-    return ", ".join(f"`{_markdown_cell(label)}`" for label in labels)
 
 
 def _format_report_metric(value: object) -> str:

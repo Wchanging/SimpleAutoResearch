@@ -96,14 +96,17 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
     if set(task) - {
         "code_root", "approval_note", "max_repairs", "allowed_patterns",
         "budget_profile", "allow_large_edits", "workspace_mode", "protected_patterns",
+        "env_mode", "python_executable",
     }:
         raise ValueError(
             "Preparing code_task accepts code_root, approval_note, max_repairs, "
-            "allowed_patterns, protected_patterns, budget_profile, allow_large_edits and workspace_mode."
+            "allowed_patterns, protected_patterns, budget_profile, allow_large_edits, workspace_mode, env_mode and python_executable."
         )
     allowed = task.pop("allowed_patterns", None)
     protected = task.pop("protected_patterns", ())
     workspace_mode = task.pop("workspace_mode", "auto")
+    env_mode = task.pop("env_mode", "current")
+    python_executable = task.pop("python_executable", None)
     if workspace_mode not in {"auto", "copy", "git_worktree"}:
         raise ValueError("Research project preparation supports auto, copy or git_worktree; sparse/empty workspaces require standalone CodeTask.")
     for name, patterns in (("allowed_patterns", () if allowed is None else allowed), ("protected_patterns", protected)):
@@ -126,6 +129,7 @@ def run_preparation_capability(*, context: CapabilityContext, request: Preparati
         run_dir=context.store.root / (request.run_dir or Path("project_run")), code_root=root,
         task_file=context.store.resolve(task_ref), benchmark_command=command,
         workspace_mode=workspace_mode,
+        env_mode=env_mode, python_executable=python_executable,
         edit_scope_allowed_patterns=tuple(allowed or ()),
         edit_scope_protected_patterns=tuple(protected),
     )

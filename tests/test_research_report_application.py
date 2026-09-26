@@ -160,6 +160,31 @@ class ResearchReportApplicationTests(unittest.TestCase):
             self.assertTrue(any(item.name == "accuracy" for item in context.metric_sources))
             self.assertTrue(any(item.kind == "analysis" for item in memory.source_handles))
 
+    def test_report_projection_prefers_the_measured_execution_contract(self) -> None:
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = historical_session(Path(tmp) / "session")
+            execution_contract = {
+                "contract_id": "measured-protocol",
+                "dataset_refs": [{"asset_id": "dataset-v3", "revision": "3"}],
+                "split_spec": {"evaluation": "held-out-test"},
+                "comparison_conditions": {"seed": 19, "epochs": 2},
+            }
+            session = replace(
+                session,
+                execution={**session.execution, "experiment_contract": execution_contract},
+            )
+
+            context, _ = build_research_session_report_inputs(session)
+
+        self.assertEqual(context.experiment_plan["contract_id"], "measured-protocol")
+        self.assertEqual(context.experiment_plan["dataset_refs"], execution_contract["dataset_refs"])
+        self.assertEqual(context.experiment_plan["comparison_conditions"], {"seed": 19, "epochs": 2})
+        self.assertEqual(context.experiment_plan["metrics"], [])
+        self.assertEqual(context.experiment_plan["dataset"], "unknown")
+        self.assertEqual(context.hypothesis_markdown, "Validation improves reliability.")
+
     def test_report_projection_assigns_model_citation_keys(self) -> None:
         from simple_ar.core.capabilities import ArtifactRef
         from simple_ar.literature.models import Paper

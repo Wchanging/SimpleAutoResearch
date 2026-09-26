@@ -1,369 +1,243 @@
-﻿# SimpleAutoResearch
+# SimpleAutoResearch
 
-[中文版本](README_zh.md)
+**A lightweight research framework. From a task to inspectable evidence, code, experiments, and reports.**
 
-SimpleAutoResearch is a teaching-first, lightweight auto-research project
-inspired by [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw).
-It explores how an automated research assistant can move from a topic to
-literature notes, small experiments, existing-code improvement tasks,
-executable results, and Markdown reports while keeping the process visible and
-hackable.
+[中文](README_zh.md) · [Quick start](#quick-start) · [Examples](#choose-a-case) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
 
-The goal is not to reproduce every feature of a large agent framework. The goal
-is to build a clear, inspectable version that is useful for learning,
-experimentation, and gradual extension.
+Give SimpleAutoResearch a research goal, the materials you already have, and the
+conditions it can work within. It connects literature research, scoped code
+changes, experiment execution, and reporting in a saved, resumable session.
+Not every task needs every step: a survey does not need training, and a code
+repair does not need a paper.
 
-## Version status
+The emphasis is on **visible decisions, real execution, and reusable results**—
+with a codebase that remains understandable and straightforward to extend.
 
-V2.8 is a milestone baseline for an end-to-end workflow with prepared code,
-data, and an execution protocol. Real runs cover search, research and design,
-scoped code changes, experiments, analysis, and Markdown reports. Those runs
-included framework fixes and recovery; they are not evidence of a single
-frozen-version acceptance run or fully validated paper quality. Remaining
-report factual-correction validation and frozen-version acceptance move to V2.9
-delivery and release work. The V2.9 development branch has exercised supplied-material
-analysis and a small code repair through short task plans. Explicit continuation
-allowances and selective recovery are implemented and locally tested: they preserve
-history, reuse unaffected evidence, and rebuild reports from retained analysis.
-New research sessions default to uncapped API usage, with optional explicit caps.
-Research input requests pause before further execution; Rich shows decision reasons
-and scientific rounds. A real research-loop diagnostic exists. The three interaction
-policies and persisted CLI/TOML decision replies are now connected and covered by
-focused local control-flow tests. Live research judgments, report prose, frozen
-acceptance, and Stage E remain incomplete. Outcome-aware report structure selection
-is implemented; its live scientific and writing quality still requires acceptance.
-Open-web quality also needs revalidation after earlier provider rate limiting.
-The target input is a natural-language task, available assets and necessary resource
-and permission settings, not a user-authored stage sequence. Module upgrades accompany
-the core stages; see [development targets and handoffs](docs/DEVELOPMENT.md#v29-development-target-decision-context-and-handoffs).
+> **Actively developed.** Literature and code-task workflows are available;
+> prepared-project research is still being validated end to end. A completed
+> run means artifacts were delivered, not that a hypothesis is correct or a
+> paper is ready for publication.
 
-## Goals
+## What can you do with it?
 
-- Keep research steps explicit and file-based.
-- Make runs easy to inspect, resume, and debug.
-- Support both literature/report workflows and existing-code improvement
-  workflows.
-- Prefer controlled, reproducible experiments over unconstrained code
-  generation.
-- Keep the codebase small enough for learners and contributors to understand.
+| Your task | What you provide | What to inspect afterward |
+| --- | --- | --- |
+| Explore a research direction | A question, scope, and model access | Selected sources, reading notes, synthesis, and a Markdown report |
+| Improve or repair a codebase | A project, task, and validation commands | An isolated edited workspace, change records, reviews, and validation results |
+| Investigate a research improvement | Prepared code, data, environment, evaluation conditions, and resource limits | Candidate changes, actual measurements, analysis, and an evidence-based report or draft |
 
-## What Works Today
+### Why SimpleAutoResearch?
 
-- **V2.8 canonical research session**: the shared application follows a bounded
-  accepted task plan; not every task runs every capability in the historical
-  `plan -> search -> document_ingest -> read -> synthesize -> research_design
-  -> experiment -> analysis -> report -> report_audit` sequence. The mainline uses
-  explicit provider, artifact, metric, timeout, and continuation boundaries;
-  the model-backed CLI requests the report by default. The path has completed
-  one real AutoDL prepared-project run with 60 raw and 10 selected/documents
-  across network/LLM/CodeTask/experiment/report; this proves the bounded
-  foundation, not autonomous research for arbitrary tasks.
-- **Entrypoint hierarchy**: for normal V2.8 use, remember only
-  `simple-ar research-session`. `research-session-continue` and
-  `research-report` continue the same session; `research-brief` is a segmented development or diagnostic interface.
-  The old `research-experiment`, `research-code-task` and `simple-ar run/resume` execution commands are
-  retired; historical artifacts remain readable through `status` and artifact tools.
-- **Interaction policies**: new CLI sessions default to `checkpoints`; choose
-  `assisted`, `checkpoints`, or `autonomous`. Missing critical facts/permissions
-  pause in every mode. Resolve a saved decision through `research-session` with
-  `--decision-id` and `--decision-response`; Rich prints continuation commands.
-  Sessions without a saved interaction mode retain their legacy behavior. Live
-  task quality and frozen-version acceptance remain outstanding.
-- **Research sources**: the canonical session can search
-  OpenAlex/Semantic Scholar/arXiv/local files through the provider-neutral
-  connector boundary, with bounded document extraction and evidence cards.
-  Optional LLM planning, bounded reading/screening, paper notes, and synthesis
-  are explicit. The old eight-stage retrieval strategy is no longer a supported
-  execution route.
-- **Code tasks**: improve an existing codebase or generate a bounded
-  greenfield project inside an isolated editable workspace with LLM planning,
-  task memory, review gates, controlled patch/generation artifacts,
-  validation, benchmark execution, and metric comparison.
-- **Workspace strategies**: use `copy` for the safest isolated copy,
-  `git_worktree` for larger git repositories where full copying is wasteful,
-  or experimental `sparse_copy` for small allowlisted subsets.
-- **Research-to-code runs**: the canonical session can explicitly route one
-  prepared project and one Code-Task TOML through the isolated Code-Task
-  backend, then reuse the normal experiment, analysis, report, and audit
-  handoffs. Bounded paired measurements and technical repair/retest are
-  available when explicitly configured; autonomous research-direction loops
-  remain out of scope for V2.8.
-- **Deferred integrations**: read-only tool schemas, MCP exposure, and external
-  Agent/Harness adapters exist as boundaries or compatibility surfaces, but are
-  frozen for now. Claude Code, Codex, OpenCode, and similar Harness paths are
-  post-V2.8 work, not required for the current acceptance target.
-- **Reviewable artifacts**: each run writes inspectable files under `runs/`
-  instead of hiding decisions inside process memory.
-- **Capability boundary for contributors**: new modules can use the small
-  `ArtifactStore`/`CapabilityResult`/bounded-attempt API while the formal
-  research flow stays orchestrated by `research-session`. The old eight-stage
-  and segmented code-task surfaces remain only for compatibility or development
-  until migration is complete. The offline reference is in
-  `tests/fixtures/capability_package_minimal/`.
-- **Mature library foundation**: pipeline/code-task TOML configs are validated
-  through Pydantic, LLM calls use the OpenAI Python SDK by default with a
-  LiteLLM compatibility option, OpenAlex access goes through pyalex, and
-  terminal progress uses Rich as a first step toward cleaner human-in-the-loop
-  review.
+- **Task-driven, not one mandatory sequence.** An accepted plan connects the
+  capabilities needed for the task. Bounded research follow-ups can supplement
+  measurements or revise a candidate when the evidence calls for it.
+- **Work you can inspect.** Plans, sources, patches, measurements, usage, and
+  reports are saved as files, rather than only appearing in a conversation.
+- **Resume without throwing everything away.** Sessions retain attempt history
+  and can reuse unaffected evidence and compatible measurements.
+- **Choose where to participate.** Use assisted decisions, key checkpoints, or
+  autonomous execution within the supplied scope.
+- **Keep the machinery understandable.** File-based state, TOML configuration,
+  Rich terminal output, and focused modules instead of another infrastructure
+  platform to operate.
 
-## Install And Configure
+## Quick start
 
-Clone the repository:
+Start with a real literature survey: **no dataset, training environment, or GPU
+required**. It does need network access and a working model API.
+
+### 1. Install
+
+Requirements: **Python 3.12+**, Git, and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/Wchanging/SimpleAutoResearch.git
 cd SimpleAutoResearch
-```
-
-Install dependencies with `uv`:
-
-```bash
 uv sync
 ```
 
-The framework does not require scikit-learn. For the bundled classical-ML
-examples and their tests, use `uv sync --extra examples` and run commands with
-`uv run --extra examples ...`. For pip installations, use `pip install '.[examples]'`.
+### 2. Configure model access
 
-Create your local environment file:
+Copy `.env.example` to `.env` if you do not already have one:
 
 ```bash
 cp .env.example .env
 ```
 
-On PowerShell:
+On PowerShell, use `Copy-Item .env.example .env` instead. Edit the local file
+with your provider's credentials, API base URL, and model identifier:
 
-```powershell
-Copy-Item .env.example .env
-```
-
-Edit `.env` for LLM-backed stages:
-
-```bash
+```dotenv
 OPENAI_API_KEY=your_api_key
-OPENAI_BASE_URL=https://api.openai.com/v1
-SIMPLE_AR_MODEL=gpt-4o-mini
-SIMPLE_AR_LLM_BACKEND=openai
-SIMPLE_AR_LLM_API=responses
-SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM=auto
-SIMPLE_AR_LLM_REASONING_EFFORT=
-SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_TIMEOUT_SEC=180
-SIMPLE_AR_MAX_OUTPUT_TOKENS=
-SIMPLE_AR_LLM_RETRY_ATTEMPTS=3
-SIMPLE_AR_LLM_RETRY_BASE_DELAY_SEC=1
-SIMPLE_AR_LLM_RETRY_MAX_DELAY_SEC=12
-SIMPLE_AR_JSON_RESPONSE_FORMAT=off
-SIMPLE_AR_INPUT_PRICE_PER_1M=
-SIMPLE_AR_OUTPUT_PRICE_PER_1M=
+OPENAI_BASE_URL=https://your-provider.example/v1
+SIMPLE_AR_MODEL=your_model_id
+SIMPLE_AR_LLM_API=chat
+SIMPLE_AR_LLM_STREAM=true
 ```
 
-For third-party OpenAI-compatible providers, set `OPENAI_BASE_URL` to that
-provider's `/v1` endpoint. Price fields are optional; when unset,
-SimpleAutoResearch records token counts but leaves estimated cost as `null`.
-Each new usage row also records the provider-call count, while legacy usage
-rows remain readable.
-Transient provider failures such as connection resets, rate limits, timeouts,
-and 5xx responses use bounded exponential backoff controlled by the retry
-settings above. JSON-producing calls use prompt-only parsing by default for
-provider compatibility. Set `SIMPLE_AR_JSON_RESPONSE_FORMAT=auto` or
-`json_object` only when your provider supports native JSON response formatting.
-`SIMPLE_AR_LLM_BACKEND=openai` uses the OpenAI Python SDK directly and is the
-default transport. Set it to `litellm` only when you need the older LiteLLM
-compatibility layer for a non-standard provider.
-`SIMPLE_AR_LLM_TIMEOUT_SEC` defaults to 180 seconds per provider attempt;
-set it to a larger positive value for slow providers, or to `0`/`off`/`none`
-to explicitly disable the client-side timeout. `SIMPLE_AR_MAX_OUTPUT_TOKENS`
-remains uncapped by default; set a positive value only when you intentionally
-want to bound response size.
-`SIMPLE_AR_LLM_API=responses` uses Responses API-style `instructions` and
-`input` and retries transient failures on that same API only. Set it to `chat`
-when your provider should always use Chat Completions directly. Use the
-explicit `auto` mode only when you want a compatibility fallback from
-Responses to Chat after the bounded retries.
-For compatible reasoning models, `SIMPLE_AR_LLM_REASONING_EFFORT` forwards a
-documented effort value such as `low` to the Chat request; leave it empty for
-models that do not document this option. `SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS`
-can expand an explicit per-call cap to leave room for reasoning, but does not
-create a cap when the caller has not set one. These are generic capability
-settings, not a hard-coded provider integration.
+Replace the placeholders. This example uses a Chat Completions-compatible
+endpoint with streaming; choose `responses` instead if that is the API your
+provider supports. Do not commit credentials. Advanced transport, retry, and
+timeout options belong in the [configuration reference](docs/CONFIG_REFERENCE.md).
 
-## Quickstart
-
-### 1. V2.8 canonical research session
-
-For file-based use, start with `simple-ar research-session --config examples/survey/research.toml`.
-See the [configuration reference](docs/CONFIG_REFERENCE.md) for additional options.
-
-The mainline is `research-session`: one bounded application follows the accepted
-plan for the task and available assets. Search, document evidence, execution,
-analysis, and reporting are included only when that plan and supplied protocol
-call for them. Start with the
-laptop-safe complete fixture:
+### 3. Run a survey
 
 ```bash
-uv run python scripts/research_session_smoke.py
+uv run simple-ar research-session --config examples/survey/research.toml
 ```
 
-For the real network + LLM path, use the bounded command in
-`examples/README.md`. It requires a valid OpenAI-compatible model/gateway and
-does not replace provider failures with fixture output. A prepared existing
-project can be added with `--code-task-config`; V2.8 runs one direction at a
-time.
-
-For a literature-only pass, omit both `--command` and
-`--code-task-config`. Without `--model` the session ends with an evidence-backed
-summary; with `--model` it can continue to the research-only Markdown report.
-No experiment process is created in this mode.
-
-For a prepared low-cost experiment, one literal command can serve a bounded
-seed protocol without hand-writing every pair:
+The included task surveys small-memory continual learning. To try your own
+question, change `[task].goal` in the config—for example:
 
 ```toml
-[execution]
-command = ["python", "measure.py"]
-cwd = "."
-timeout_sec = 30
-seed_count = 2
-seed_flag = "--seed"
-baseline_policy = "skip" # run, skip, or reuse a same-condition artifact
+goal = "Compare replay-based approaches to small-memory continual learning. Explain their tradeoffs, evidence limitations, and open questions."
 ```
 
-The accepted plan records the selected conditions and runs only the existing
-execution backend. `reuse` requires a passed framework-produced `baseline_ref`;
-it checks the command, result schema, and the declared data/split/metric/condition
-and preparation lineage before binding it. A cwd match or narrative contract
-match alone is not sufficient. These compact settings do not grant shell,
-installer, or arbitrary model-execution authority; in LLM mode, design proposals
-must remain within an inspected entrypoint boundary and explicit configuration wins.
-Use `--max-research-iterations N` to authorize at most `N` evidence-driven
-supplement or candidate-revision rounds after the first analysis. A supplement
-requires an explicit new seed and a reconstructable baseline; for a prepared
-CodeTask, the supplement prepares an isolated original baseline workspace and
-measures the current candidate workspace under the same condition. A revision
-explicitly chooses whether to continue from the current candidate workspace or
-start from the recorded original baseline; changed candidate workspaces are
-never silently treated as old baselines.
+This case searches literature providers, reads available abstracts and metadata,
+and produces a Markdown report with references and an audit. It **does not
+download full texts or run training**. See the [survey case](examples/survey/README.md)
+for its exact scope.
 
-The commands below are segmented or compatibility surfaces, not a second V2.8
-full workflow. Use them for debugging, persisted handoff continuation, legacy
-configuration, or historical benchmark checks.
+**Where are the results?** The terminal prints the session directory and
+deliverable paths. For this case, look under `runs/survey/<session>/`; open the
+reported `report` and `report_audit` files. Keep the session path for continuation.
 
+> **Cost:** model calls are real and billable. Cumulative API request/token
+> budgets are uncapped unless you set them. Optional caps, process limits, and
+> research-round limits are separate settings; see [configuration](docs/CONFIG_REFERENCE.md).
+> Runtime depends on the provider and task, so there is no fixed completion-time promise.
 
-### 2. Existing-Code Code Task
+## Choose a case
 
-Use this when you already have a project and want the model to propose a
-reviewable improvement. First write a small task file, for example
-`tasks/improve_model.md`, that says what should change and what benchmark should
-improve. Then create a TOML config for your project:
+Each example directory contains one case's inputs, configuration, and run guide.
+Generated outputs stay in `runs/`.
 
-```toml
-[code_task]
-code_root = "path/to/your/project"
-task_file = "tasks/improve_model.md"
-output_root = "runs"
-name = "my-code-task"
+| Case | Best for | Preparation |
+| --- | --- | --- |
+| [Literature survey](examples/survey/README.md) | A first research session without training | Model API and internet access |
+| [Continual learning](examples/continual_learning/README.md) | Research improvement on Mammoth / CIFAR-100 | Project, dataset, fixed split, training environment, and GPU budget |
+| [Digits MLP](examples/code_task_digits_mlp/README.md) | A small model-code improvement task | Included project; NumPy and scikit-learn |
+| [Multi-file code review](examples/code_task_medium_review/README.md) | Trying scoped edits and validation | Included project; Python standard library |
 
-[benchmark]
-command = "python benchmark.py"
-primary_metric = "accuracy"
+The last two use standalone `code-task`, not the complete research loop.
+For the classical-ML example, install `uv sync --extra examples` and retain that
+extra when running with `uv run --extra examples ...`.
 
-[benchmark.metric_directions]
-accuracy = "higher"
-latency_ms = "resource"
+The continual-learning config is a **template**, not a ready-to-run environment:
+follow its guide to set machine paths and prepare data before starting it.
+The [example index](examples/README.md) explains the shared directory conventions.
 
-[workspace]
-mode = "auto"  # auto | copy | git_worktree | sparse_copy
-```
+## Bring your own task
 
-Then run the reviewed flow. `init` prints a run directory such as
-`runs/20260523-xxxx-my-code-task`; use that path in place of `runs/<run-id>`.
-On an interactive terminal, `code-task execute` can continue through review
-gates after you answer `yes`. The explicit commands below are the same flow in
-a review-first form that also works in non-interactive shells.
+Start with the closest case and describe **the outcome you want**, rather than
+writing a sequence of internal stages. A useful task supplies:
+
+1. **Goal and deliverable:** a survey, a verified code change, experiment analysis,
+   or a research draft where evidence supports it.
+2. **Available assets:** papers, project paths, datasets, or prior results.
+3. **Execution conditions:** the prepared interpreter, validation/measurement
+   command, comparable evaluation conditions, and permitted edit scope.
+4. **Limits and participation:** compute limits, research rounds, optional API
+   caps, and the decisions you want to review.
+
+For example:
+
+> Improve forgetting under a small replay-memory budget in this prepared
+> continual-learning project. Keep the dataset split and evaluation unchanged.
+> Compare against a suitable baseline, explain the measured tradeoffs, and
+> deliver an analysis if the evidence does not support an improvement.
+
+Natural language expresses the goal; configuration still supplies concrete
+paths, execution permissions, and resource constraints. The system does not
+automatically provision a training environment. When copying configs to
+`.local/cases/`, check relative paths and follow the case's path instructions.
+
+### Decide how involved to be
+
+Select a policy with `--interaction` or `[research].interaction`:
+
+| Mode | Participation |
+| --- | --- |
+| `assisted` | Review the execution protocol, research choices, and key delivery decisions |
+| `checkpoints` | Review key protocol/direction/delivery decisions; allow bounded same-protocol follow-ups |
+| `autonomous` | Let the system choose valid next actions within the configured scope and limits |
+
+New CLI sessions default to `checkpoints`; an example config may choose a
+different mode. The survey example uses `autonomous`. **All modes can pause for
+missing critical facts, assets, or permissions**—automatic approval cannot supply them.
+
+## Inspect and resume
+
+Rich output shows the current action, elapsed time, progress messages, and final
+artifact paths. Read saved measurements and validation results alongside the
+report: generated prose is not a substitute for execution evidence.
+
+To continue the survey after resolving a provider error or another blocker,
+replace `SESSION_PATH` below with the exact directory printed by your run:
 
 ```bash
-uv run simple-ar code-task init --config path/to/your_code_task.toml
-uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml
-uv run simple-ar code-task decide-plan runs/<run-id> --decision approve --note "reviewed"
-uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml --to-step propose-edits
-uv run simple-ar code-task execute runs/<run-id> --config path/to/your_code_task.toml --apply-proposed-edits --timeout 60
-uv run simple-ar status runs/<run-id>
+uv run simple-ar research-session --config examples/survey/research.toml --session-root "SESSION_PATH"
 ```
 
-That sequence prepares an isolated workspace, runs the baseline benchmark,
-builds a work plan, stops for patch-plan review, generates
-`code_task/meta/proposed_edits.json`, applies the reviewed proposal, validates
-the patched workspace, runs structured post-apply/post-run reviews, runs the
-patched benchmark, and writes the final status.
-If the result needs a bounded follow-up, use the repair path documented in
-[Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
+Use the original task's config for other cases. Omitting `--session-root` starts
+a new session. Continuation preserves history and accounting; it does not reset
+an exhausted budget. For a pending decision, follow the terminal's decision ID
+and reply instructions. See [CLI reference](docs/CLI_REFERENCE.md) for explicit
+revisions and allowance changes.
 
-The bundled standalone code-task example is
-`examples/code_task_medium_review/configs/code_task.toml`; it is documented in
-[Usage And Configuration](docs/USAGE.md#recommended-path-toml--execute).
+## How it fits together
 
+```text
+Task + materials + constraints
+             ↓
+      Plan the next work ←──────────────┐
+             ↓                         │
+  Research / CodeTask / Experiment     │
+             ↓                         │
+     Save evidence and results ── Reassess
+                                       │
+                                Deliver or pause
+```
 
-## Capability Boundaries
+These are shared capabilities, not separate end-to-end pipelines for every
+task. CodeTask handles scoped implementation and validation; experiments
+record measurements; reporting organizes available evidence. The session
+coordinates their handoffs and bounded follow-ups. Technical repair, research
+revision, and writing revision serve different purposes.
 
-SimpleAutoResearch is useful as a learning and prototyping framework, but it is
-still intentionally conservative.
+## Current boundaries
 
-- Code edits use controlled old/new replacements. This keeps patches auditable,
-  but it is weaker than a full autonomous coding agent.
-- The default edit scope protects tests, benchmark files, and secret-like paths
-  from automated patching.
-- `auto` prefers a detached worktree for Git projects with at least one local
-  commit; `code_root` may be either the repository root or a project
-  subdirectory inside it. If Git cannot be used safely, `auto` falls back to
-  copy and records the reason; explicit `git_worktree` fails with a repair
-  checklist instead.
-- `sparse_copy` is experimental and can omit runtime dependencies if the
-  allowlist is too narrow.
-- The tool does not yet install project dependencies or manage
-  Docker/Conda/GPU/Slurm environments.
-- Large code-edit proposals may still produce long LLM completions. Current
-  experiment/code execution uses explicit contracts, resource budgets,
-  canonical results, guards, bounded greenfield generation, and optional
-  external-agent handoff, but it is still not a recommended unattended large
-  refactoring tool.
-- Literature search now has an auditable source plan and document-store
-  metadata, and can use OpenAlex, Semantic Scholar, arXiv, or local
-  Markdown/text notes. It can parse local/cached Markdown, text, basic HTML, and
-  lightweight `pypdf` PDFs. Optional `unstructured` and LanceDB hooks exist, but
-  it is not yet a full section-aware PDF parser or vector-RAG survey system.
-- LLM-written reports are guarded by citation, metric, and boundary checks; when
-  a draft fails these checks, the tool falls back to a structured deterministic
-  report.
+- **Research quality needs review.** A run can finish with negative or inconclusive
+  results. Report audits do not certify scientific correctness or publication quality.
+- **Reading depth depends on the inputs.** Abstract-only runs are not full-paper
+  reviews; complex PDFs and incomplete source material remain limitations.
+- **Code changes are scoped.** Controlled edits and isolated workspaces do not
+  make this a general-purpose unattended refactoring agent or a security sandbox.
+- **Prepare the execution environment.** Project dependencies, datasets, and
+  GPU/server setup remain your responsibility. Do not run unfamiliar project
+  code with access to sensitive files or credentials.
+- **Providers can interrupt work.** Network failures, rate limits, and model
+  output errors can pause a session. Resume after addressing the cause.
 
 ## Documentation
 
-- [Usage And Configuration](docs/USAGE.md): setup, workflow-oriented examples,
-  artifacts, and troubleshooting.
-- [CLI Reference](docs/CLI_REFERENCE.md): command groups and option tables.
-- [Configuration Reference](docs/CONFIG_REFERENCE.md): TOML sections, complete
-  config examples, and workspace-mode variants.
-- [Workflows And Artifacts](docs/WORKFLOWS.md): the formal session workflow,
-  legacy eight-stage projection, and artifact layouts.
-- [Development Guide](docs/DEVELOPMENT.md): how to extend capabilities, templates, and
-  code-task modules.
-- [Changelog](CHANGELOG.md): chronological development progress.
+| Guide | Use it for |
+| --- | --- |
+| [Usage](docs/USAGE.md) | Workflows, outputs, and troubleshooting |
+| [Configuration](docs/CONFIG_REFERENCE.md) | Model settings, task inputs, budgets, and execution options |
+| [CLI reference](docs/CLI_REFERENCE.md) | Commands, continuation, and decision replies |
+| [Workflows and artifacts](docs/WORKFLOWS.md) | Execution boundaries and saved results |
+| [Development](docs/DEVELOPMENT.md) | Extending capabilities and understanding internal interfaces |
+| [Changelog](CHANGELOG.md) | Changes and migration notes |
 
-The current V2.8 closure plan and version boundaries live in local `MDfiles/`
-planning notes. That directory remains ignored by project policy and is not the
-public GitHub roadmap; contributors should follow the formal-entrypoint boundary
-in the development, workflow, and CLI documents above.
+## Contributing and acknowledgements
 
-## Reference
+Issues, reproducible bug reports, case studies, and focused pull requests are
+welcome. Include the command, relevant config, and diagnostics—**remove API
+keys, credentials, and private data first**. Report-quality improvements and
+clearer examples are as valuable as code changes.
 
-The main reference project is
-[aiming-lab/AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw).
-SimpleAutoResearch borrows the staged research idea, but keeps the
-implementation intentionally compact and learning-friendly.
-
-## Community
-
-This is an early learning-oriented project. Issues, suggestions, experiments,
-and small focused pull requests are welcome, especially around coding-agent
-workflows, reproducible experiment execution, report quality, and documentation
-clarity.
+The project is inspired by [AutoResearchClaw](https://github.com/aiming-lab/AutoResearchClaw),
+while pursuing a compact, inspectable implementation. Our priorities are
+lightweight execution, robustness, clear structure, stable operation, and easy
+maintenance and extension.

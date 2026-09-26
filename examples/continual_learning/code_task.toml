@@ -10,7 +10,7 @@ mode = "copy"
 reuse_source_venv = false
 
 [environment]
-mode = "current"
+mode = "external"
 python_executable = "/path/to/mammoth-env/bin/python"
 
 [edit_scope]

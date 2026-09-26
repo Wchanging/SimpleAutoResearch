@@ -70,7 +70,11 @@ class AnalysisCapabilityTests(unittest.TestCase):
                 for role, value in (("baseline", 0.5), ("candidate", 0.5 + delta)):
                     ref = store.write_json(f"{role}-{seed}.json", {
                         "status": "passed", "metrics": {"accuracy": value},
-                        "experiment_contract": {"comparison_conditions": {"seed": seed, "epochs": epochs}},
+                        "experiment_contract": {
+                            "dataset_refs": [{"asset_id": "fixture"}],
+                            "split_spec": {"split": "held-out"},
+                            "metric_specs": [{"name": "accuracy", "unit": "fraction"}],
+                            "comparison_conditions": {"seed": seed, "epochs": epochs}},
                         "measurement": {"measurement_id": f"{role}-{seed}", "source_kind": "measured",
                                         "protocol_fingerprint": f"fixture-{seed}"}}, kind="experiment_result")
                     pair[role] = ref.to_dict()

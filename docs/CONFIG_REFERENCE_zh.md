@@ -53,6 +53,12 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
   comparison_conditions、protected_assets，可附 contract_id/hypothesis。
   保护文件相对路径以实验 cwd 为基准，共享数据可用绝对路径；不是以 TOML 目录为基准。
   不提供种子插值或新调度器；进程预算须覆盖整个矩阵。
+  单次固定命令也可用 `seed_flag` 记录 literal 整数种子（`--seed 0` 或 `--seed=0`），
+  不生成 pair 或授权追加种子。明确扩展种子时替换已有参数而非重复追加；命令种子与
+  `protocol.comparison_conditions.seed` 冲突时报错。声明协议贯通设计、测量与报告，
+  但不代表数据内容已获验证，也不会追改历史测量。
+  可比性依据协议版本、数据引用、划分、指标定义、比较条件、保护资产和结果 schema，
+  不依据候选 ID 或假设文本。历史完整合同使用同一规则只读比较，不用新计划补齐旧证据。
 - `[report]`：`template`、`reviewer`、`max_review_iterations`、`max_section_tokens`、`figures`。
   `max_section_tokens = 0` 表示不添加报告单次调用的 provider 输出上限；只有确实需要专家级
   限制时才填写正数。支持的确定性图表默认启用；如需纯文本输出，可设置

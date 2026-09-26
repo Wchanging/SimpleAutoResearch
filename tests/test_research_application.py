@@ -393,6 +393,10 @@ class ResearchApplicationTests(unittest.TestCase):
             fixed_protocol = app._analysis_execution_protocol(fixed)
             self.assertFalse(fixed_protocol["can_extend_seed_condition"])
             self.assertEqual(fixed_protocol["condition_mode"], "fixed_command")
+            fixed.update(command=[*command, "--seed", "0"], seed_flag="--seed")
+            fixed_protocol = app._analysis_execution_protocol(fixed)
+            self.assertEqual(fixed_protocol["declared_seeds"], [0])
+            self.assertFalse(fixed_protocol["can_extend_seed_condition"])
 
     def test_revision_preparation_preserves_original_step_reference(self):
         from types import SimpleNamespace
@@ -1546,6 +1550,15 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(second.status, "completed", second.status_reason)
             self.assertEqual(second.state_refs["baseline"], original_baseline)
             self.assertNotEqual(second.state_refs["experiment"], original_candidate)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), [
+                "baseline", "candidate-v1", "candidate-v2",
+            ])
+
+            app.continue_session(reason="Recheck unchanged inputs.", revised_brief=replace(app.brief))
+            unchanged = app.advance(max_actions=32)
+            self.assertEqual(unchanged.status, "completed", unchanged.status_reason)
+            self.assertEqual(unchanged.state_refs["baseline"], second.state_refs["baseline"])
+            self.assertEqual(unchanged.state_refs["experiment"], second.state_refs["experiment"])
             self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), [
                 "baseline", "candidate-v1", "candidate-v2",
             ])

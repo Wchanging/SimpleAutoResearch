@@ -23,6 +23,48 @@ from simple_ar.research.synthesis import SynthesisResult
 
 
 class ExperimentCapabilityTests(unittest.TestCase):
+    def test_comparison_separates_candidate_identity_from_measured_conditions(self):
+        import copy
+        from types import SimpleNamespace
+        from simple_ar.experiment.execution.measurement import measurement_record, comparison_compatibility
+
+        contract = {
+            "contract_id": "idea-a", "hypothesis": "Original hypothesis",
+            "dataset_refs": [{"asset_id": "data"}], "split_spec": {"split": "test"},
+            "metric_specs": [{"name": "accuracy", "unit": "fraction"}],
+            "comparison_conditions": {"seed": 0, "epochs": 1}, "protocol_revision": 1,
+        }
+        schema = {"primary_metric": "accuracy", "direction": "higher"}
+        def measured(identifier, conditions, result_schema=schema):
+            return {"experiment_contract": conditions, "result_schema": result_schema,
+                    "measurement": measurement_record(SimpleNamespace(
+                        process_record={"invocation_id": identifier}, label=identifier), conditions, result_schema)}
+
+        baseline = measured("baseline", contract)
+        revised = {**contract, "contract_id": "idea-b", "hypothesis": "Different hypothesis",
+                   "proposed_change": "Different candidate", "report_claim_plan": ["Still unproven"]}
+        candidate = measured("candidate", revised)
+        self.assertEqual(baseline["measurement"]["protocol_fingerprint"], candidate["measurement"]["protocol_fingerprint"])
+        historical = copy.deepcopy(baseline)
+        historical["measurement"]["protocol_fingerprint"] = "old-whole-contract-fingerprint"
+        before = copy.deepcopy(historical)
+        self.assertEqual(comparison_compatibility(historical, candidate)[0], "declared_match")
+        self.assertEqual(historical, before)
+        for key, value in {
+            "dataset_refs": [{"asset_id": "other-data"}], "split_spec": {"split": "validation"},
+            "metric_specs": [{"name": "accuracy", "unit": "percent"}],
+            "comparison_conditions": {"seed": 1, "epochs": 1}, "protocol_revision": 2,
+            "protected_assets": [{"asset_id": "evaluator", "path": "evaluate.py"}],
+        }.items():
+            with self.subTest(field=key):
+                self.assertEqual(comparison_compatibility(historical, measured("candidate", {**revised, key: value}))[0], "mismatched")
+        self.assertEqual(comparison_compatibility(historical, measured("candidate", revised, {**schema, "direction": "lower"}))[0], "mismatched")
+        incomplete = measured("candidate", {"hypothesis": "No declared protocol"})
+        self.assertEqual(comparison_compatibility(historical, incomplete)[0], "unknown")
+        self.assertEqual(comparison_compatibility(baseline, baseline)[0], "unknown")
+        candidate["measurement"]["source_kind"] = "unverified_backend"
+        self.assertEqual(comparison_compatibility(historical, candidate)[0], "unknown")
+
     def test_process_output_directory_is_registered_as_an_experiment_artifact(self):
         from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
         with tempfile.TemporaryDirectory() as tmp:

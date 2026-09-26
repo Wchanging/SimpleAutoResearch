@@ -327,6 +327,20 @@ class ResearchDesignTests(unittest.TestCase):
             ["accuracy", "macro_f1"],
         )
 
+    def test_prepared_design_preserves_explicit_evaluation_facts(self):
+        declared = {"dataset": "user-data", "dataset_refs": [{"asset_id": "user-data"}],
+                    "split_spec": {"split": "fixed-validation"},
+                    "comparison_conditions": {"seed": 0, "epochs": 1}}
+        result = build_research_design(ResearchDesignRequest(
+            synthesis=self._synthesis(), idea_id="idea-002",
+            execution_schema={"required_metrics": ["accuracy"]},
+            execution_boundary={"code_task": {"code_root": "prepared"}, "protocol": declared},
+            execution_context="Prepared user project",
+        ))
+        for name, value in declared.items():
+            self.assertEqual(getattr(result.contract, name), value)
+        self.assertEqual(result.contract.metric_specs, [{"name": "accuracy"}])
+
     def test_default_selection_prefers_a_more_executable_candidate(self) -> None:
         synthesis = SynthesisResult(
             status="ready",

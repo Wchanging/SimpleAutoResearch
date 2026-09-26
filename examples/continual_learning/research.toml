@@ -29,6 +29,28 @@ code_task_config = "code_task.toml"
 timeout_sec = 1800
 seed_flag = "--seed"
 
+# Declared evaluation conditions, not a claim that the framework verified the data.
+# Keep these synchronized with code_task.toml and the prepared project.
+[execution.protocol]
+dataset = "CIFAR-100 / seq-cifar100"
+dataset_refs = [{asset_id = "cifar100", name = "CIFAR-100", role = "class-incremental image classification"}]
+
+[execution.protocol.split_spec]
+validation = true
+permutation = "datasets/val_permutations/seq-cifar100.pt"
+task_count = 10
+classes_per_task = 10
+class_order = "Mammoth seq-cifar100 fixed class order"
+
+[execution.protocol.comparison_conditions]
+seed = 0
+n_epochs = 1
+buffer_size = 200
+batch_size = 32
+minibatch_size = 32
+lr = 0.03
+evaluator = "unchanged run_mammoth.py and protected Mammoth evaluation code"
+
 [report]
 template = "auto"
 reviewer = "llm"

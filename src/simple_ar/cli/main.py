@@ -390,6 +390,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         task = {
             "code_root": str(code_task_spec.code_root.resolve()),
             "workspace_mode": code_task_spec.workspace_mode,
+            "env_mode": code_task_spec.env_mode,
+            "python_executable": code_task_spec.python_executable,
             "approval_note": code_task_spec.approval_note,
             "max_repairs": execute_options.repair_rounds,
             "allowed_patterns": list(code_task_spec.edit_scope_allowed_patterns),
