@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from simple_ar.core.artifacts import read_json, read_text
-from simple_ar.cli.research_view import ResearchConsole
+from simple_ar.cli.research_view import ResearchConsole, report_audit_line
 from simple_ar.cli.code_task_view import (
     confirm_next_step,
     confirm_review_gate,
@@ -1145,6 +1145,9 @@ def _print_research_report(args: argparse.Namespace) -> None:
         raise SystemExit(str(exc)) from exc
     print_line(f"Research report session: {view.session_root}")
     print_line(f"Status: {view.status}")
+    audit_line = report_audit_line(view)
+    if audit_line is not None:
+        print_line(audit_line)
     for name in ("report", "report_audit"):
         if name in view.state_refs:
             print_line(f"{name}: {view.session_root / view.state_refs[name].path}")

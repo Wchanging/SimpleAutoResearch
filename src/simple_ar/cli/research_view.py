@@ -10,6 +10,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Column, Table
 from rich.text import Text
 
+from simple_ar.core.capabilities import ArtifactStore
 from simple_ar.core.console import make_console
 from simple_ar.core.reporting import style_progress_message
 from simple_ar.core.process_output import ProcessMessage
@@ -165,7 +166,27 @@ class ResearchConsole:
         else:
             self.console.print(Text(f"No deliverable yet. Attempt diagnostics: {view.session_root / 'attempts'}", style="dim"))
         self.console.print(Text(f"Artifacts: {len(view.state_refs)}; attempts: {len(view.attempts)}"))
+        audit_line = report_audit_line(view)
+        if audit_line is not None:
+            self.console.print(Text(audit_line))
         self.console.print("Completion describes delivered artifacts, not scientific success or paper quality.", style="dim")
+
+
+def report_audit_line(view) -> str | None:
+    """Show the persisted quality gate separately from session completion."""
+    audit_ref = view.state_refs.get("report_audit")
+    if audit_ref is None:
+        return None
+    try:
+        audit = ArtifactStore(view.session_root).read_json(audit_ref)
+    except (OSError, ValueError):
+        return "Report audit: unavailable (inspect the referenced audit artifact)."
+    if not isinstance(audit, dict) or audit.get("status") not in {"passed", "warning", "failed"}:
+        return "Report audit: unavailable (invalid audit artifact)."
+    status = audit["status"]
+    if audit.get("semantic_review_status") == "semantic_unchecked":
+        return f"Report audit: {status} (semantic support is not certified)."
+    return f"Report audit: {status}."
 
 
 def _artifact_rows(view):

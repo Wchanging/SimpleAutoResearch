@@ -24,6 +24,26 @@ TEST_ROOT = Path(__file__).resolve().parents[1] / ".tmp_tests"
 
 
 class CliTests(unittest.TestCase):
+    def test_rich_completion_distinguishes_session_and_report_audit_status(self):
+        from simple_ar.cli.research_view import ResearchConsole, report_audit_line
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audit_ref = ArtifactStore(root).write_json(
+                "audit.json",
+                {"status": "warning", "semantic_review_status": "semantic_unchecked"},
+            )
+            view = SimpleNamespace(
+                work_plan={}, session_root=root, status="completed", next_action=None,
+                status_reason="", attempts=(), state_refs={"report_audit": audit_ref},
+            )
+            stream = io.StringIO()
+            ResearchConsole(Console(file=stream, width=120)).finish(view)
+            self.assertIn("Report audit: warning", stream.getvalue())
+            self.assertIn("semantic support is not certified", stream.getvalue())
+            self.assertEqual(report_audit_line(view),
+                             "Report audit: warning (semantic support is not certified).")
+
     def test_rich_failed_plan_shows_diagnostics_instead_of_empty_table(self):
         from simple_ar.cli.research_view import ResearchConsole
         stream = io.StringIO()
