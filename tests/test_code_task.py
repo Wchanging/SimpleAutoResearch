@@ -4402,7 +4402,9 @@ protected_patterns = ["pyproject.toml"]
             _write_toy_project(code_root)
             write_text(task_file, "# Task\n\nRun with an explicit interpreter.\n")
             run_dir = root / "runs" / "code-task-run"
-            expected_python = str(Path(sys.executable).resolve())
+            # Preserve the selected venv entrypoint: resolving symlinks would
+            # incorrectly expect its base interpreter instead.
+            expected_python = sys.executable
             initialize_code_task(
                 run_dir=run_dir,
                 code_root=code_root,
