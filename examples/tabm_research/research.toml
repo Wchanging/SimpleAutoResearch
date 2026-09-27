@@ -1,0 +1,58 @@
+# TabM/California is a real-paper research case, not a frozen method proposal.
+[task]
+goal = "Using the supplied ICLR 2025 TabM paper, its official code, and the fixed California Housing split, identify a justified low-cost modification that could improve validation RMSE without concealing a substantial runtime cost. Inspect the paper and project, establish a same-protocol baseline, choose and implement a candidate, compare measured validation results, and decide whether a bounded revision or another seed is worth the remaining budget. Do not tune to or claim success from the held-out test metric. Deliver a research draft only if the evidence supports the claim; otherwise deliver an honest analysis with limitations and continuation options."
+kind = "auto"
+outputs = ["experiments", "report"]
+output_root = "../../runs/tabm-research"
+
+[model]
+name = "env"
+max_output_tokens = 8192
+
+[budget]
+process_invocations = 8
+process_wall_seconds = 3600
+
+[research]
+providers = ["openalex", "semantic_scholar", "arxiv"]
+max_results = 12
+max_chunks = 80
+idea_limit = 2
+use_fulltext = false
+allow_pdf_download = false
+materials_only = false
+max_iterations = 2
+interaction = "autonomous"
+
+[assets]
+papers = ["../../runs/assets/tabm-paper.pdf"]
+
+[execution]
+code_task_config = "code_task.toml"
+timeout_sec = 420
+seed_flag = "--seed"
+
+[execution.protocol]
+dataset = "California Housing / official TabM split"
+dataset_refs = [{asset_id = "tabm-california", name = "California Housing", role = "tabular regression"}]
+
+[execution.protocol.split_spec]
+train_size = 13209
+validation_size = 3303
+test_size = 4128
+split_source = "official TabM data archive"
+
+[execution.protocol.comparison_conditions]
+seed = 0
+source_config = "exp/tabm/california/0-evaluation/0.toml"
+primary_metric = "validation RMSE, lower is better"
+runtime_metric = "train_seconds, resource cost"
+evaluator = "external run_tabm.py scores fixed Y_val.npy against saved validation predictions"
+
+[report]
+template = "auto"
+reviewer = "llm"
+max_review_iterations = 1
+
+[report.figures]
+enabled = true

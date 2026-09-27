@@ -1,0 +1,52 @@
+# Paths are relative to this case file, not the caller's shell directory.
+[code_task]
+kind = "existing_project"
+code_root = "{config_dir}/../../runs/assets/tabm/paper"
+task_file = "{config_dir}/task.md"
+name = "tabm-california-research"
+
+[workspace]
+mode = "copy"
+reuse_source_venv = false
+
+[environment]
+mode = "external"
+python_executable = "{config_dir}/../../runs/assets/tabm-venv/bin/python"
+required_paths = [
+  "{config_dir}/../../runs/assets/tabm/paper/data/california/READY",
+  "{config_dir}/../../runs/assets/tabm/paper/data/california/Y_val.npy",
+  "{config_dir}/../../runs/assets/tabm/paper/exp/tabm/california/0-evaluation/0.toml",
+  "{config_dir}/../../runs/assets/tabm-paper.pdf",
+]
+
+[edit_scope]
+allowed_patterns = ["bin/model.py", "lib/deep.py"]
+protected_patterns = ["data/**", "exp/**", "lib/data.py", "lib/metrics.py", "lib/util.py", "lib/env.py"]
+
+[benchmark]
+command = 'python "{config_dir}/run_tabm.py" --dataset california --seed 0 --timeout 330'
+primary_metric = "rmse"
+
+[benchmark.metric_directions]
+rmse = "lower"
+train_seconds = "resource"
+
+[execute]
+to_step = "run"
+use_llm = true
+timeout_sec = 420
+repair_rounds = 1
+max_files = 4
+max_source_chars_per_file = 18000
+baseline_policy = "auto"
+allow_planning_fallback = false
+llm_retry_attempts = 2
+
+[resource]
+max_runtime_sec = 420
+max_memory_mb = 20000
+allow_gpu = true
+max_files = 4
+
+[safety]
+max_file_bytes = 2500000
