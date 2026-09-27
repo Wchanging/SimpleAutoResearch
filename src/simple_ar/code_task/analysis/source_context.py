@@ -94,8 +94,10 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
         query_positions = positions_for(query_terms)
         positions = symbol_positions + query_positions
         unseen = lambda items: [pos for pos in items if not any(lo <= pos < hi for lo, hi in seen)]
-        starts = [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(symbol_positions)]
-        starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(query_positions)]
+        # The query expresses the requested behavior; named symbols can be
+        # implementation helpers or imports that appear far from that behavior.
+        starts = [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(query_positions)]
+        starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(symbol_positions)]
         if not positions and not symbols and not query_terms:
             starts = [min(max((hi for _, hi in seen), default=0), max(0, len(text) - size))]
         elif positions and not starts:
