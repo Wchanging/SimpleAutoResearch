@@ -37,7 +37,7 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 
 | Section | Fields | Default / requirement / condition |
 | --- | --- | --- |
-| `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
+| `[research]` | `providers`, `queries`, `max_results`, `max_chunks`, `read_max_shortlist`, `idea_limit`, `cache_dir` | Lists are optional; CLI defaults are `max_results = 10`, `max_chunks = 300`, `idea_limit = 3`. `read_max_shortlist` is optional (default: all papers up to 24); explicitly supplied papers are retained within this reading limit, and an over-limit request fails visibly. `cache_dir` is optional and is not a safe resume-change because it is not persisted. |
 | `[research]` | `use_fulltext`, `allow_pdf_download`, `keep_raw_pdf`, `materials_only` | All default false. `materials_only = true` requires/uses `[assets].papers` and disables search; it does not disable model reading. Full-text retrieval remains best-effort and unavailable/abstract-only states are retained honestly. |
 | `[research]` | `max_iterations`, `interaction` | `max_iterations` defaults to `1`; `0` stops after the first analysis. `interaction` defaults to `checkpoints` for a new CLI session and accepts `assisted`, `checkpoints`, or `autonomous`. Critical facts and permissions block every mode. |
 | `[assets]` | `papers` | Optional list of local Markdown/text/PDF paths. Paths resolve from the TOML directory and are read-only inputs. |

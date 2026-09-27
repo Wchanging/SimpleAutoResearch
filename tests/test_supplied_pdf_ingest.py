@@ -14,11 +14,78 @@ from simple_ar.app.research_application import ResearchApplication, load_session
 from simple_ar.literature.models import Paper
 from simple_ar.research.documents.fulltext import build_fulltext_manifest
 from simple_ar.research.documents.ingest import build_document_bundle
+from simple_ar.research.documents.ingest import DocumentBundle
 from simple_ar.research.documents.records import build_document_records
+from simple_ar.research.contracts import DocumentRecord, TextChunk
+from simple_ar.research.evidence.reader import ReadRequest, read_documents
 from simple_ar.research.sources.base import build_source_plan
 
 
 class SuppliedPdfIngestTest(unittest.TestCase):
+    def test_llm_screening_keeps_supplied_paper_within_shortlist_limit(self) -> None:
+        records = [
+            DocumentRecord(
+                document_id=document_id, title=document_id, source=source,
+                source_id=document_id, abstract="Evidence about the method.",
+            )
+            for document_id, source in (
+                ("supplied", "local_files"), ("retrieved-a", "arxiv"),
+                ("retrieved-b", "openalex"),
+            )
+        ]
+        bundle = DocumentBundle(
+            records=records, fulltext_manifest={}, fulltext_extraction={}, sections=[],
+            chunks=[
+                TextChunk(chunk_id=f"{record.document_id}#chunk-001",
+                          document_id=record.document_id, text=record.abstract)
+                for record in records
+            ],
+        )
+        decisions = [
+            {"paper_id": "supplied", "decision": "drop", "reading_priority": 3},
+            {"paper_id": "retrieved-a", "decision": "keep", "reading_priority": 1},
+            {"paper_id": "retrieved-b", "decision": "keep", "reading_priority": 2},
+        ]
+        with patch(
+            "simple_ar.research.evidence.reader.screen_papers_with_llm",
+            return_value=decisions,
+        ), patch(
+            "simple_ar.research.evidence.reader.read_paper_notes_with_llm",
+            return_value=[],
+        ):
+            result = read_documents(ReadRequest(
+                bundle=bundle, required_document_ids=("supplied",),
+                use_llm=True, llm_client=object(),
+                config={"read_screening_max_shortlist": 2},
+            ))
+        self.assertEqual(
+            [record.document_id for record in result.bundle.records],
+            ["supplied", "retrieved-a"],
+        )
+        self.assertEqual(len(result.bundle.chunks), 2)
+        self.assertEqual(len(result.screening_decisions), 3)
+        self.assertEqual(result.screening_decisions[0]["decision"], "keep")
+        self.assertEqual(result.screening_decisions[2]["decision"], "drop")
+
+    def test_supplied_documents_over_shortlist_limit_fail_explicitly(self) -> None:
+        records = [
+            DocumentRecord(document_id=name, title=name, source="local_files", source_id=name)
+            for name in ("a", "b")
+        ]
+        bundle = DocumentBundle(
+            records=records, fulltext_manifest={}, fulltext_extraction={}, sections=[], chunks=[],
+        )
+        with patch(
+            "simple_ar.research.evidence.reader.screen_papers_with_llm",
+            return_value=[{"paper_id": "a", "decision": "keep"}],
+        ):
+            with self.assertRaisesRegex(ValueError, "supplied documents exceed"):
+                read_documents(ReadRequest(
+                    bundle=bundle, required_document_ids=("a", "b"),
+                    use_llm=True, llm_client=object(),
+                    config={"read_screening_max_shortlist": 1},
+                ))
+
     def test_configured_pdf_reaches_normal_session_reading(self) -> None:
         from simple_ar.cli.main import main
 

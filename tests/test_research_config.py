@@ -336,6 +336,21 @@ class ResearchConfigTests(unittest.TestCase):
             self.assertEqual(args.max_research_iterations, 3)
             self.assertIn("max_research_iterations", explicit)
 
+    def test_read_shortlist_limit_is_available_in_task_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text(
+                '[task]\ngoal="Read supplied papers"\n'
+                '[research]\nread_max_shortlist=3\n',
+                encoding="utf-8",
+            )
+            explicit = set()
+            argv = ["research-session", "--config", str(path)]
+            defaults = research_defaults(argv, explicit_destinations=explicit)
+            args = build_parser(research_defaults=defaults).parse_args(argv)
+            self.assertEqual(args.read_max_shortlist, 3)
+            self.assertIn("read_max_shortlist", explicit)
+
     def test_config_can_record_an_explicit_idea_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "research.toml"

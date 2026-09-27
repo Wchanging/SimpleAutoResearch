@@ -1294,6 +1294,11 @@ class ResearchApplication:
                 "read", "read",
                 ReadRequest(
                     bundle=documents, topic=self.controller.manifest.topic,
+                    required_document_ids=tuple(
+                        record.document_id for record in documents.records
+                        if record.source == "local_files"
+                        and record.source_id in plan.source_plan.local_documents
+                    ),
                     problem_markdown=self._problem_markdown(),
                     research_plan_json=json.dumps(plan.to_handoff_dict(), ensure_ascii=False, indent=2),
                     config=self._effective_config(), use_llm=self.services.llm_client is not None,

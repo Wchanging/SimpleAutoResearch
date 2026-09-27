@@ -473,6 +473,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         "research_max_iterations": args.max_research_iterations,
         "report": report_config,
     }
+    if getattr(args, "read_max_shortlist", None) is not None:
+        config["research_read_max_shortlist"] = args.read_max_shortlist
     if resume_root is None:
         config["interaction"] = getattr(args, "interaction", None) or "checkpoints"
     if task_kind != "auto":
@@ -1000,6 +1002,9 @@ def _changed_resume_research_settings(
         "queries": (list(args.queries), list(saved.get("research_queries", []))),
         "max_results": (args.max_results, app.services.max_results),
         "max_chunks": (args.max_chunks, app.services.max_chunks),
+        "read_max_shortlist": (
+            getattr(args, "read_max_shortlist", None), saved.get("research_read_max_shortlist"),
+        ),
         "idea_limit": (args.idea_limit, app.services.idea_limit),
         "max_research_iterations": (
             args.max_research_iterations, saved.get("research_max_iterations", 1),

@@ -28,6 +28,7 @@ from simple_ar.research.evidence.cards import (
     build_method_cards,
 )
 from simple_ar.research.evidence.screening import (
+    _screening_max_shortlist,
     read_paper_notes_with_llm,
     render_paper_notes_markdown,
     screen_papers_with_llm,
@@ -138,6 +139,7 @@ class ReadRequest:
     bundle: DocumentBundle
     document_ids: tuple[str, ...] | None = None
     paper_ids: tuple[str, ...] | None = None
+    required_document_ids: tuple[str, ...] = ()
     topic: str = ""
     problem_markdown: str = ""
     research_plan_json: str = "{}"
@@ -282,6 +284,9 @@ def read_documents(request: ReadRequest) -> ReadResult:
                 emit=request.emit,
                 papers=[record.to_row() for record in bundle.records],
                 config=request.config,
+            )
+            decisions = _preserve_required_screening(
+                bundle, decisions, request.required_document_ids, request.config,
             )
             screening_decisions = tuple(decisions)
             bundle = _bundle_for_screening(bundle, decisions)
@@ -483,6 +488,58 @@ def _bundle_for_screening(
             chunk for chunk in bundle.chunks if chunk.document_id in selected_ids
         ],
     )
+
+
+def _preserve_required_screening(
+    bundle: DocumentBundle,
+    decisions: list[dict[str, Any]],
+    required_document_ids: tuple[str, ...],
+    config: Mapping[str, object],
+) -> list[dict[str, Any]]:
+    """Keep explicitly supplied documents without silently widening the shortlist."""
+
+    required = tuple(dict.fromkeys(required_document_ids))
+    if not required or not decisions:
+        return decisions
+    records = {record.document_id: record for record in bundle.records}
+    missing = set(required) - records.keys()
+    if missing:
+        raise ValueError("Required read document(s) are absent: " + ", ".join(sorted(missing)))
+    limit = _screening_max_shortlist(config, len(bundle.records))
+    if len(required) > limit:
+        raise ValueError(
+            f"{len(required)} supplied documents exceed the read shortlist limit {limit}; "
+            "increase research.read_max_shortlist or narrow the supplied documents."
+        )
+
+    output = [dict(row) for row in decisions]
+    by_id = {str(row.get("paper_id") or ""): row for row in output}
+    for index, document_id in enumerate(required):
+        record = records[document_id]
+        identifiers = (document_id, record.source_id or "", str(record.metadata.get("paper_id") or ""))
+        row = next((by_id[identifier] for identifier in identifiers if identifier in by_id), None)
+        if row is None:
+            row = {"paper_id": document_id}
+            output.append(row)
+        row.update({
+            "decision": "keep",
+            "reading_priority": index - len(required),
+            "reason": "Explicitly supplied document; retained for evidence-grounded reading.",
+        })
+
+    required_set = set(required)
+    selected = [row for row in output if str(row.get("decision") or "keep").lower() == "keep"]
+    selected.sort(key=lambda row: (
+        _optional_int(row.get("reading_priority")) or 9999,
+        str(row.get("paper_id") or ""),
+    ))
+    for row in selected[limit:]:
+        identifier = str(row.get("paper_id") or "")
+        if identifier in required_set:
+            continue
+        row["decision"] = "drop"
+        row["reason"] = "Displaced by explicitly supplied document within read shortlist limit."
+    return output
 
 
 def _optional_int(value: object) -> int | None:

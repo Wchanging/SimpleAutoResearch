@@ -20,6 +20,7 @@ FIELDS = {
                      "remaining": ("authorize_remaining", dict)},
     "research": {"providers": ("providers", list), "queries": ("queries", list),
                  "max_results": ("max_results", int), "max_chunks": ("max_chunks", int),
+                 "read_max_shortlist": ("read_max_shortlist", int),
                  "idea_limit": ("idea_limit", int), "cache_dir": ("cache_dir", str),
                  "use_fulltext": ("research_use_fulltext", bool),
                  "materials_only": ("research_materials_only", bool),
