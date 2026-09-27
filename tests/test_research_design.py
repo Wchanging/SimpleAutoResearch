@@ -146,6 +146,46 @@ class ResearchDesignTests(unittest.TestCase):
                                           required_paths=("experiment.toml", "../outside.toml"))
             self.assertEqual([row["path"] for row in index["files"]], ["model.py", "experiment.toml"])
 
+    def test_source_followup_uses_new_symbol_window_in_requested_file(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text(
+                "def forward():\n    return 1\n" + "# padding\n" * 700
+                + "def forward_again():\n    return 2\n", encoding="utf-8",
+            )
+            (workspace / "report.json").write_text('{"forward": "irrelevant"}', encoding="utf-8")
+            index = source_file_inventory(workspace)
+            request = {"files": ["model.py"], "symbols": ["forward"], "query": "find forward aggregation"}
+            first = requested_source_context(workspace, index, request,
+                supplied=[], max_files=2, max_chars=1000)
+            second = requested_source_context(workspace, index, request,
+                supplied=first, max_files=2, max_chars=1000)
+            self.assertEqual([row["path"] for row in second], ["model.py"])
+            self.assertIn("forward_again", second[0]["text"])
+            self.assertGreater(second[0]["source_offset"], first[0]["source_offset"])
+            self.assertEqual(requested_source_context(workspace, index, request,
+                supplied=first + second, max_files=2, max_chars=1000), [])
+
+    def test_source_followup_uses_query_after_symbol_window_is_exhausted(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text(
+                "def forward():\n    return 1\n" + "# padding\n" * 700
+                + "predictions = scores.mean(1)\n", encoding="utf-8",
+            )
+            index = source_file_inventory(workspace)
+            request = {"files": ["model.py"], "symbols": ["Model.forward"],
+                       "query": "Where are predictions aggregated?"}
+            first = requested_source_context(workspace, index, request,
+                supplied=[], max_files=1, max_chars=1000)
+            second = requested_source_context(workspace, index, request,
+                supplied=first, max_files=1, max_chars=1000)
+            self.assertIn("predictions = scores.mean(1)", second[0]["text"])
+
     def test_refinement_reads_real_source_and_persists_trace_on_provider_failure(self):
         from unittest.mock import Mock
         import json

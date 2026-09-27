@@ -1,6 +1,7 @@
 """Bounded, read-only source lookup shared by editing and research design."""
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -58,11 +59,17 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
                              max_total_chars: int | None = None) -> list[dict[str, Any]]:
     query = " ".join([request.get("query", ""), *request.get("symbols", [])]).strip()
     known = {str(item["path"]) for item in index.get("files", [])}
-    candidates = [path for path in request.get("files", []) if path in known]
-    if query:
+    requested_files = request.get("files", [])
+    candidates = [path for path in requested_files if path in known]
+    if not requested_files and query:
         candidates.extend(select_relevant_files(index, query, max_files=max_files))
-    previous = {item["path"]: item["text"] for item in supplied}
-    terms = [symbol.rsplit(".", 1)[-1] for symbol in request.get("symbols", [])] or query.split()
+    previous: dict[str, list[tuple[int, int]]] = {}
+    for item in supplied:
+        start = int(item.get("source_offset", 0))
+        previous.setdefault(item["path"], []).append((start, start + len(item["text"])))
+    symbols = [symbol.rsplit(".", 1)[-1] for symbol in request.get("symbols", [])]
+    query_terms = [term for term in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", request.get("query", ""))
+                   if len(term) >= 5 and term.lower() not in {"where", "which", "about", "their", "these", "those"}]
     result = []
     remaining = max_total_chars if max_total_chars is not None else max_files * max_chars
     workspace = workspace.resolve()
@@ -75,18 +82,36 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
                 or not path.is_file() or path.name.startswith(".env")):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        start = 0
-        if len(text) > max_chars:
-            matches = [text.find(term) for term in terms if term and text.find(term) >= 0]
-            if matches:
-                start = max(0, matches[0] - max_chars // 4)
-            elif relative in previous:
-                start = max(0, min(len(previous[relative]), len(text) - max_chars))
-        excerpt = text[start:start + min(max_chars, remaining)]
-        if excerpt and excerpt not in previous.get(relative, ""):
+        size = min(max_chars, remaining)
+        seen = previous.get(relative, [])
+        def positions_for(terms: list[str]) -> list[int]:
+            return sorted({match.start() for term in terms if term
+                           for match in re.finditer(re.escape(term), text, flags=re.IGNORECASE)})
+
+        symbol_positions = positions_for(symbols)
+        query_positions = positions_for(query_terms)
+        positions = symbol_positions + query_positions
+        novel_positions = [pos for pos in symbol_positions if not any(lo <= pos < hi for lo, hi in seen)]
+        if not novel_positions:
+            novel_positions = [pos for pos in query_positions if not any(lo <= pos < hi for lo, hi in seen)]
+        starts = [max(0, min(pos - size // 4, len(text) - size)) for pos in novel_positions]
+        if not positions and not symbols and not query_terms:
+            starts = [min(max((hi for _, hi in seen), default=0), max(0, len(text) - size))]
+        elif positions and not starts:
+            # A requested method can start in an already supplied window but
+            # continue beyond its clipped end. Return one adjacent window.
+            starts = [min(hi, max(0, len(text) - size)) for lo, hi in seen
+                      if hi < len(text) and any(lo <= pos < hi and pos >= hi - size // 3 for pos in positions)]
+        for start in starts:
+            excerpt = text[start:start + size]
+            novel = sum(not any(lo <= pos < hi for lo, hi in seen)
+                        for pos in range(start, start + len(excerpt)))
+            if novel < min(256, max(1, len(excerpt) // 4)):
+                continue
             result.append({"path": relative, "access_role": "read_only", "text": excerpt,
                            "source_offset": start, "truncated": start > 0 or start + len(excerpt) < len(text)})
             remaining -= len(excerpt)
+            break
         if len(result) >= max_files:
             break
     return result

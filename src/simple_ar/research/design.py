@@ -321,7 +321,7 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
             {"files": likely_files, "symbols": [], "query": ""},
             supplied=excerpts, max_files=2, max_chars=6000, max_total_chars=12000,
         ))
-        trace.append({"initial_source_excerpts": excerpts})
+        trace.append({"initial_source_excerpts": [dict(row) for row in excerpts]})
     prompt = (
         "Resolve the implementation questions. Separate missing observable source facts, "
         "delegated experimental choices, and unavailable external evidence or permissions. "
