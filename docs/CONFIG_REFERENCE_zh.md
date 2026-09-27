@@ -55,7 +55,7 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 | `[execution]` | `primary_metric`、`metrics`、`metric_directions` | 可选测量 schema；方向为 `higher`、`lower`、`resource` 或 `ignore`。 |
 | `[execution]` | `pairs`、`seeds`、`seed_flag`、`seed_count` | 可选的显式比较输入。`pairs` 每行包含唯一整数 `seed` 与 literal `baseline_command`/`candidate_command`；compact seed 必须有 literal command 和显式 seed flag/count，不解析自然语言 seed。 |
 | `[execution]` | `baseline_policy`、`baseline_ref`、`protocol` | policy 为 `run`、`skip` 或 `reuse`；`reuse` 要求当前 session 中通过且命令、schema、协议条件、保护资产和准备 lineage 都匹配的产物。`protocol` 复用已有实验合同，但不证明数据内容。 |
-| `[report]` | `template`、`reviewer`、`max_review_iterations`、`max_section_tokens`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，review iteration 默认 `1`。`max_section_tokens = 0` 取消单次输出上限；图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
+| `[report]` | `template`、`reviewer`、`max_review_iterations`、`document_review`、`max_section_tokens`、`figures` | `template` 默认 `auto`，`reviewer` 默认 `llm`，review iteration 默认 `1`。可选 `document_review = true` 增加一次有界整稿审查和最多两处定向修订；在真实长文验证前默认关闭。`max_section_tokens = 0` 取消单次输出上限；图表默认使用确定性图表，可设 `[report.figures].enabled = false` 或 `mode = "off"`。 |
 
 显式 `outputs` 不能与 `--with-report`/`--no-report` 同时使用。报告结构选择不能覆盖
 测量事实或证明科研成功；恢复时变更搜索/摄取设置若与存档不符会被拒绝，显式报告变更只

@@ -36,6 +36,7 @@ FIELDS = {
                   "metric_directions": ("metric_direction", list)},
     "report": {"template": ("report_template", str), "reviewer": ("report_reviewer", str),
                "max_review_iterations": ("max_review_iterations", int),
+               "document_review": ("report_document_review", bool),
                "max_section_tokens": ("max_section_tokens", int),
                "figures": ("report_figures", dict)},
 }

@@ -76,6 +76,8 @@ class ReportRuntimeConfig(ReportModel):
     agent: str = "llm"
     reviewer: str = "llm"
     max_review_iterations: int = 2
+    # Optional until cross-document editing is validated on real long-form work.
+    document_review: bool = False
     # Zero means that the report writer/reviewer does not add a per-call
     # provider output cap. The provider or session token budget still bounds
     # the run when configured. A positive value is an explicit expert limit.

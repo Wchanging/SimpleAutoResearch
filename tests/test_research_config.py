@@ -12,6 +12,24 @@ from simple_ar.cli.research_config import research_defaults
 
 
 class ResearchConfigTests(unittest.TestCase):
+    def test_document_review_is_explicit_and_can_be_disabled_on_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text(
+                '[task]\ngoal="Review an evidence report"\n'
+                '[report]\ndocument_review=true\n', encoding="utf-8",
+            )
+            argv = ["research-session", "--config", str(path)]
+            explicit = set()
+            defaults = research_defaults(argv, explicit_destinations=explicit)
+            args = build_parser(research_defaults=defaults).parse_args(argv)
+            self.assertTrue(args.report_document_review)
+            self.assertIn("report_document_review", explicit)
+            disabled = build_parser(research_defaults=defaults).parse_args(
+                [*argv, "--no-report-document-review"],
+            )
+            self.assertFalse(disabled.report_document_review)
+
     def test_resume_without_config_restores_saved_goal_and_keeps_outputs(self):
         from simple_ar.cli.main import main
         from simple_ar.app.research_application import load_session

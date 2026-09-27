@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from simple_ar.integrations.llm import LLMClient, LLMError, LLMResponseError
 from simple_ar.report.assembler import assemble_report_sections
 from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
+from simple_ar.report.editor import review_document
 from simple_ar.report.schema import (
     AgentReportResult,
     ReportContext,
@@ -157,6 +158,7 @@ def run_report_agent(
     iterations: list[ReportIterationRecord] = []
     all_findings: list[ReviewerFinding] = []
     all_tool_results: list[ReportToolResult] = []
+    document_review_done = bool(completed_checkpoint.get("document_review_done")) if completed_checkpoint else False
 
     if completed_checkpoint is not None:
         current = ReportMemory.model_validate(completed_checkpoint["memory"])
@@ -182,7 +184,8 @@ def run_report_agent(
                              "iterations": [row.model_dump(mode="json") for row in iterations],
                              "reviewer_findings": [row.model_dump(mode="json") for row in all_findings],
                              "tool_results": [row.model_dump(mode="json") for row in all_tool_results],
-                             "pending_draft": pending_draft.model_dump(mode="json") if pending_draft else None})
+                             "pending_draft": pending_draft.model_dump(mode="json") if pending_draft else None,
+                             "document_review_done": document_review_done})
 
     try:
         for section_index, section in enumerate(_draft_sequence(current.section_plan), start=1):
@@ -324,23 +327,36 @@ def run_report_agent(
             pending_draft = None
             checkpoint()
 
-        body = assemble_report_sections(title=context.topic, sections=_final_sequence(current.section_plan, sections))
         # Audit the latest reviewed draft, not the union of issues from every
         # superseded draft. Iterations/all_findings retain the complete history.
-        latest: dict[str, list[ReviewerFinding]] = {}
-        for record in iterations:
-            if record.action not in {"review", "review_revision"}:
-                continue
-            if any(finding.type == "review_agent_fallback" for finding in record.findings):
-                latest.setdefault(record.section_id, [
-                    finding for finding in current.reviewer_findings if finding.section_id == record.section_id
-                ]).extend(record.findings)
-            else:
-                latest[record.section_id] = list(record.findings)
-        current.reviewer_findings = _dedupe_findings(
-            [finding for finding in current.reviewer_findings if finding.section_id not in latest]
-            + [finding for findings in latest.values() for finding in findings]
-        )
+        if not document_review_done:
+            # A completed document review already resolved or retained the
+            # section findings in its checkpoint. Replaying older per-section
+            # reviews on resume would erase its unresolved cross-section issues.
+            latest: dict[str, list[ReviewerFinding]] = {}
+            for record in iterations:
+                if record.action not in {"review", "review_revision"}:
+                    continue
+                if any(finding.type == "review_agent_fallback" for finding in record.findings):
+                    latest.setdefault(record.section_id, [
+                        finding for finding in current.reviewer_findings if finding.section_id == record.section_id
+                    ]).extend(record.findings)
+                else:
+                    latest[record.section_id] = list(record.findings)
+            current.reviewer_findings = _dedupe_findings(
+                [finding for finding in current.reviewer_findings if finding.section_id not in latest]
+                + [finding for findings in latest.values() for finding in findings]
+            )
+        if (config.document_review and config.reviewer != "disabled"
+                and len(sections) > 1 and not document_review_done):
+            _edit_whole_document(
+                client=client, context=context, template=template, memory=current,
+                config=config, sections=sections, iterations=iterations,
+                all_findings=all_findings, emit=emit,
+            )
+            document_review_done = True
+            checkpoint()
+        body = assemble_report_sections(title=context.topic, sections=_final_sequence(current.section_plan, sections))
         return AgentReportResult(
             report_body=body,
             memory=current,
@@ -357,6 +373,133 @@ def run_report_agent(
             ) from exc
         _emit(emit, f"Report agent failed validation; using explicit offline fallback. {exc}")
         return None
+
+
+def _edit_whole_document(
+    *, client: LLMClient, context: ReportContext, template: ReportTemplateBundle,
+    memory: ReportMemory, config: ReportRuntimeConfig, sections: list[ReportSectionDraft],
+    iterations: list[ReportIterationRecord], all_findings: list[ReviewerFinding],
+    emit: Callable[[str], None] | None,
+) -> None:
+    """Revise at most two sections against the assembled report, retaining failed reviews."""
+    plans = {plan.section_id: plan for plan in memory.section_plan}
+    by_id = {draft.section_id: index for index, draft in enumerate(sections)}
+    try:
+        _emit(emit, "Reviewer checking whole-document coherence.")
+        reviews = review_document(
+            client=client, template=template, memory=memory,
+            sections=_final_sequence(memory.section_plan, sections), config=config,
+            execution_summary=_compact_execution_results(context.results),
+            metric_summary=_prompt_metrics(memory, detail="summary"),
+        )
+    except (LLMError, ValidationError, ValueError) as exc:
+        finding = ReviewerFinding(
+            finding_id="document-review-unavailable", type="document_review_unavailable",
+            severity="major", message=f"Whole-document review did not complete: {exc}",
+            suggested_action="Inspect cross-section coherence before publication.",
+        )
+        all_findings.append(finding)
+        memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, finding])
+        return
+    adopted_revision = False
+    for review in reviews:
+        plan = plans[review.section_id]
+        index = by_id[review.section_id]
+        original = sections[index]
+        all_findings.extend(review.findings)
+        iterations.append(_iteration(len(iterations) + 1, plan, "document_review",
+            review.verdict, original.used_sources, findings=review.findings))
+        if not _needs_revision(review) or config.max_review_iterations == 0:
+            memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, *review.findings])
+            continue
+        try:
+            # An optional editor must never replace an already reviewed section
+            # with the generic writer/reviewer fallback after a provider error.
+            strict = config.model_copy(update={"allow_llm_fallback": False})
+            _emit(emit, f"Writer revising `{plan.heading}` for document coherence.")
+            revised = _draft_section_with_recovery(
+                client=client, context=context, template=template, memory=memory,
+                section=plan, config=strict, extra_context=[], previous_draft=original,
+                review=review, label=f"report-document-reviser-{plan.section_id}",
+                draft_mode="section_revision", emit=emit,
+            )
+            _emit(emit, f"Reviewer verifying revised `{plan.heading}`.")
+            verification = _review_section_with_recovery(
+                client=client, context=context, template=template, memory=memory,
+                section=plan, draft=revised, config=strict,
+                label=f"report-document-verifier-{plan.section_id}", emit=emit,
+            )
+            all_findings.extend(verification.findings)
+            iterations.append(_iteration(len(iterations) + 1, plan, "document_revise",
+                revised.status, revised.used_sources))
+            iterations.append(_iteration(len(iterations) + 1, plan, "document_verify",
+                verification.verdict, revised.used_sources, findings=verification.findings))
+            if _needs_revision(verification):
+                unresolved = verification.findings or [ReviewerFinding(
+                    finding_id=f"{plan.section_id}-document-verification-failed",
+                    type="document_revision_unresolved", severity="major",
+                    message="The whole-document revision did not pass section verification.",
+                    section_id=plan.section_id,
+                )]
+                memory.reviewer_findings = _dedupe_findings([
+                    *memory.reviewer_findings, *review.findings, *unresolved,
+                ])
+                continue
+            sections[index] = revised
+            adopted_revision = True
+            memory.reviewer_findings = [
+                finding for finding in memory.reviewer_findings if finding.section_id != plan.section_id
+            ]
+            old_claims = {claim.claim_id for claim in original.claims}
+            memory.claims_evidence_matrix = [
+                claim for claim in memory.claims_evidence_matrix if claim.claim_id not in old_claims
+            ]
+            _merge_draft_into_memory(memory, revised, verification.findings)
+        except (LLMError, ValidationError, ValueError) as exc:
+            unresolved = ReviewerFinding(
+                finding_id=f"{plan.section_id}-document-revision-unavailable",
+                type="document_revision_unavailable", severity="major",
+                message=f"Whole-document finding for {plan.heading} was not resolved: {exc}",
+                section_id=plan.section_id,
+                suggested_action="Inspect the original section and the document review finding.",
+            )
+            all_findings.append(unresolved)
+            memory.reviewer_findings = _dedupe_findings([
+                *memory.reviewer_findings, *review.findings, unresolved,
+            ])
+    if adopted_revision:
+        try:
+            _emit(emit, "Reviewer rechecking whole-document coherence after revision.")
+            verification_reviews = review_document(
+                client=client, template=template, memory=memory,
+                sections=_final_sequence(memory.section_plan, sections), config=config,
+                execution_summary=_compact_execution_results(context.results),
+                metric_summary=_prompt_metrics(memory, detail="summary"),
+                label="report-document-verifier",
+            )
+            for review in verification_reviews:
+                plan = plans[review.section_id]
+                unresolved = review.findings or ([ReviewerFinding(
+                    finding_id=f"{plan.section_id}-document-recheck-unresolved",
+                    type="document_revision_unresolved", severity="major",
+                    message="The final whole-document recheck still requested revision.",
+                    section_id=plan.section_id,
+                )] if _needs_revision(review) else [])
+                all_findings.extend(unresolved)
+                iterations.append(_iteration(len(iterations) + 1, plan, "document_recheck",
+                    review.verdict, sections[by_id[review.section_id]].used_sources,
+                    findings=unresolved))
+                memory.reviewer_findings = _dedupe_findings([
+                    *memory.reviewer_findings, *unresolved,
+                ])
+        except (LLMError, ValidationError, ValueError) as exc:
+            unavailable = ReviewerFinding(
+                finding_id="document-recheck-unavailable", type="document_review_unavailable",
+                severity="major", message=f"Whole-document recheck did not complete: {exc}",
+                suggested_action="Inspect the revised report before publication.",
+            )
+            all_findings.append(unavailable)
+            memory.reviewer_findings = _dedupe_findings([*memory.reviewer_findings, unavailable])
 
 
 def _maybe_adapt_survey_outline(

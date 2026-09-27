@@ -480,6 +480,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         "reviewer": args.report_reviewer,
         "max_review_iterations": args.max_review_iterations,
     }
+    if getattr(args, "report_document_review", None) is not None:
+        report_config["document_review"] = args.report_document_review
     if getattr(args, "max_section_tokens", None) is not None:
         if args.max_section_tokens < 0:
             raise SystemExit("--max-section-tokens cannot be negative; use 0 to omit the cap.")
@@ -1001,6 +1003,7 @@ def _report_config_overrides(args: argparse.Namespace, app: Any) -> dict[str, ob
             "template": "template",
             "reviewer": "reviewer",
             "max_review_iterations": "max_review_iterations",
+            "document_review": "document_review",
             "max_section_tokens": "max_section_tokens",
         }
     else:
@@ -1008,6 +1011,7 @@ def _report_config_overrides(args: argparse.Namespace, app: Any) -> dict[str, ob
             "report_template": "template",
             "report_reviewer": "reviewer",
             "max_review_iterations": "max_review_iterations",
+            "report_document_review": "document_review",
             "max_section_tokens": "max_section_tokens",
             "report_figures": "figures",
         }

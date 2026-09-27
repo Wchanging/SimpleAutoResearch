@@ -197,6 +197,10 @@ def build_parser(
         help="Maximum report revision cycles per section with --with-report.",
     )
     session_parser.add_argument(
+        "--report-document-review", action=argparse.BooleanOptionalAction, default=None,
+        help="Opt into one bounded whole-document review and targeted section revision.",
+    )
+    session_parser.add_argument(
         "--code-task-config",
         default=None,
         help=(
@@ -331,6 +335,10 @@ def build_parser(
         type=int,
         default=1,
         help="Maximum Writer revision cycles per section.",
+    )
+    report_parser.add_argument(
+        "--document-review", action=argparse.BooleanOptionalAction, default=None,
+        help="Opt into one bounded whole-document review and targeted section revision.",
     )
     report_parser.add_argument(
         "--max-section-tokens",
