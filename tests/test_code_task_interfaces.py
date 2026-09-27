@@ -370,6 +370,19 @@ class CodeTaskInterfaceTests(unittest.TestCase):
             self.assertEqual(review["status"], "failed")
             self.assertTrue(any(row["category"] == "missing_local_api" for row in review["findings"]))
 
+    def test_star_reexports_and_loaded_submodules_are_not_missing_apis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            write_text(project / "lib" / "__init__.py", "from .util import *\n")
+            write_text(project / "lib" / "util.py", "Thing = int\n")
+            write_text(project / "lib" / "deep.py", "def run():\n    return 1\n")
+            write_text(
+                project / "caller.py",
+                "import lib\nimport lib.deep\nfrom lib import Thing\n"
+                "result = lib.deep.run()\nvalue = lib.Thing(1)\n",
+            )
+            self.assertEqual(find_local_api_mismatches(project), [])
+
     def test_review_warns_when_planned_public_api_is_not_exported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project = Path(tmp)

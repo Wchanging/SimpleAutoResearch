@@ -154,6 +154,7 @@ def find_local_api_mismatches(
 
     modules: dict[str, tuple[Path, set[str]]] = {}
     trees: dict[Path, ast.Module] = {}
+    open_exports: set[str] = set()
     for path in sorted(project_dir.rglob("*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
@@ -164,6 +165,13 @@ def find_local_api_mismatches(
             continue
         trees[path] = tree
         modules[module] = (path, _exported_names(tree))
+        if any(
+            isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names)
+            for node in tree.body
+        ):
+            # A star import can re-export names that this file does not define.
+            # Treat its API as open rather than reporting a definite absence.
+            open_exports.add(module)
 
     findings: list[dict[str, Any]] = []
     seen: set[tuple[str, int, str, str]] = set()
@@ -184,7 +192,7 @@ def find_local_api_mismatches(
                     local_name = alias.asname or alias.name
                     if child_module in modules:
                         aliases[local_name] = child_module
-                    elif base in modules and alias.name not in modules[base][1]:
+                    elif base in modules and base not in open_exports and alias.name not in modules[base][1]:
                         _append_mismatch(
                             findings,
                             seen,
@@ -201,7 +209,11 @@ def find_local_api_mismatches(
             target_module = aliases.get(node.value.id)
             if target_module not in modules:
                 continue
-            if node.attr in modules[target_module][1]:
+            if (
+                node.attr in modules[target_module][1]
+                or target_module in open_exports
+                or f"{target_module}.{node.attr}" in modules
+            ):
                 continue
             _append_mismatch(
                 findings,

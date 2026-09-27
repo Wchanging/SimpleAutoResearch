@@ -31,6 +31,37 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class TaskPlanTests(unittest.TestCase):
+    def test_execution_extension_keeps_model_chosen_provided_materials_route(self) -> None:
+        request = TaskPlanRequest(
+            task_kind="research", goal="Improve the supplied method.",
+            request_text="Improve the supplied method.",
+            requested_outputs=("experiments", "report"),
+            config={"research_local_documents": ["paper.pdf"]},
+            execution={"command": [sys.executable, "-V"],
+                       "cwd": str(Path.cwd()), "timeout_sec": 5},
+        )
+
+        class Client:
+            model = "fixture-planner"
+
+            def ask_json(self, *_args, **_kwargs):
+                return {"steps": [{"action": action} for action in (
+                    "document_ingest", "read", "synthesize", "summarize",
+                    "assess_ideas", "research_design",
+                )]}
+
+        prior = build_task_plan(replace(request, use_llm=True, llm_client=Client()))
+        self.assertNotIn("search", [step.action for step in prior.steps])
+        extended = build_task_plan(replace(
+            request, execution_protocol_accepted=True, prior_plan=prior,
+        ))
+        actions = [step.action for step in extended.steps]
+        self.assertEqual(actions[:len(prior.steps)], [step.action for step in prior.steps])
+        self.assertNotIn("search", actions)
+        self.assertEqual(actions.count("document_ingest"), 1)
+        self.assertEqual(actions[-3:], ["report_write", "report", "report_audit"])
+        self.assertIn("experiment", actions)
+
     def test_research_execution_resolves_bare_python_with_code_task_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = {"cwd": tmp, "timeout_sec": 5}

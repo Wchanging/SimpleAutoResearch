@@ -1,9 +1,38 @@
 """Bounded, read-only source lookup shared by editing and research design."""
 
+import os
 from pathlib import Path
 from typing import Any
 
+from simple_ar.code_task.analysis.index import IGNORED_DIR_NAMES
 from simple_ar.code_task.editing.planning import select_relevant_files
+
+
+def source_file_inventory(workspace: Path, *, max_files: int = 400) -> dict[str, Any]:
+    """List candidate source files for design lookup without hashing dataset assets."""
+    files: list[dict[str, Any]] = []
+    scanned = 0
+    for current, dirnames, filenames in os.walk(workspace):
+        dirnames[:] = sorted(
+            (name for name in dirnames if name not in IGNORED_DIR_NAMES and not name.startswith(".")),
+            key=lambda name: (name.lower() in {"data", "datasets", "outputs", "runs", "results", "artifacts"}, name),
+        )
+        for name in sorted(filenames):
+            scanned += 1
+            if scanned > 10000:
+                break
+            path = Path(current) / name
+            if name.startswith(".env") or path.suffix.lower() not in {
+                ".py", ".toml", ".yaml", ".yml", ".md", ".txt", ".json",
+            }:
+                continue
+            files.append({"path": path.relative_to(workspace).as_posix(),
+                          "kind": "python" if path.suffix.lower() == ".py" else "text",
+                          "role_tags": ["source"] if path.suffix.lower() == ".py" else ["config"]})
+        if scanned > 10000:
+            break
+    files.sort(key=lambda row: (row["kind"] != "python", row["path"]))
+    return {"files": files[:max_files]}
 
 
 def requested_source_context(workspace: Path, index: dict[str, Any], request: dict[str, Any],

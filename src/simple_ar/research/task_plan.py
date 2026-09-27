@@ -136,6 +136,7 @@ class TaskPlanRequest:
     config: Mapping[str, object] = field(default_factory=dict)
     execution: Mapping[str, object] | None = None
     execution_protocol_accepted: bool = False
+    prior_plan: TaskPlanResult | None = field(default=None, repr=False, compare=False)
     use_llm: bool = False
     llm_client: Any | None = field(default=None, repr=False, compare=False)
 
@@ -206,6 +207,8 @@ class TaskPlanResult:
 def build_task_plan(request: TaskPlanRequest, *, trace: list[dict[str, Any]] | None = None) -> TaskPlanResult:
     """Build, validate, and return the plan that the application will consume."""
 
+    if request.execution_protocol_accepted and request.prior_plan is not None:
+        return _extend_accepted_research_plan(request)
     if request.task_kind != "bug_fix" and _provided_materials_only(request) and not request.config.get("research_local_documents"):
         raise ValueError("Provided-materials planning requires supplied local documents before model planning.")
     defaults = default_task_steps(request)
@@ -274,6 +277,28 @@ The application will validate and execute the plan.""",
         assumptions=tuple(str(item).strip() for item in request.hard_constraints if str(item).strip()),
         diagnostics=tuple(diagnostics),
     )
+
+
+def _extend_accepted_research_plan(request: TaskPlanRequest) -> TaskPlanResult:
+    """Append executable work without rewriting the accepted evidence route."""
+    prior = request.prior_plan
+    if prior is None or prior.task_kind != request.task_kind or prior.goal != request.goal.strip():
+        raise ValueError("Execution extension requires the accepted plan for this same task.")
+    if not prior.steps or prior.steps[-1].action != "research_design" or not request.execution:
+        raise ValueError("Execution extension requires a completed design checkpoint and execution boundary.")
+    if any(step.capability in _PROCESS_CAPABILITIES for step in prior.steps):
+        raise ValueError("The accepted plan already contains execution actions.")
+    requested = {str(item).strip().lower() for item in request.requested_outputs}
+    report_condition = "" if requested & {"report", "paper", "full_paper"} else "on_request:report"
+    rows = [step.to_dict() for step in prior.steps]
+    rows.extend(_execution_steps(request.execution))
+    rows.extend(_row(action, condition=report_condition)
+                for action in ("report_write", "report", "report_audit"))
+    steps = _normalize_steps(rows)
+    _validate_sequence(request, steps)
+    return replace(prior, steps=steps, diagnostics=(
+        *prior.diagnostics, "Appended execution and delivery to the accepted evidence route.",
+    ))
 
 
 def default_task_steps(request: TaskPlanRequest) -> list[dict[str, Any]]:

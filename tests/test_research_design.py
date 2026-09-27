@@ -24,6 +24,34 @@ from simple_ar.research.synthesis import SynthesisResult
 
 
 class ResearchDesignTests(unittest.TestCase):
+    def test_initial_research_design_clarifies_method_before_code_task(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text("def forward(x):\n    return x\n", encoding="utf-8")
+            (workspace / "data.npy").write_bytes(b"not source")
+            index = source_file_inventory(workspace)
+            self.assertEqual([row["path"] for row in index["files"]], ["model.py"])
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Test a bounded mechanism.",
+                 "execution_protocol": {}},
+                {"status": "ready", "implementation_spec":
+                    "Observe a changed forward output on a small input; keep the accepted evaluator.",
+                 "unresolved_questions": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace)}},
+                source_workspace=workspace, source_index=index,
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertIn("changed forward output", result.implementation_spec)
+            self.assertIn("def forward", client.ask_json.call_args.args[1])
+
     def test_refinement_reads_real_source_and_persists_trace_on_provider_failure(self):
         from unittest.mock import Mock
         import json

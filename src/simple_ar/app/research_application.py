@@ -1228,6 +1228,7 @@ class ResearchApplication:
                 if isinstance(plan_config.get("execution"), Mapping)
                 else None,
                 execution_protocol_accepted=protocol_accepted,
+                prior_plan=self._load_task_plan() if protocol_accepted and "task_plan" in self.controller.manifest.state_refs else None,
                 use_llm=use_llm,
                 llm_client=self.services.llm_client,
             )
@@ -1449,6 +1450,12 @@ class ResearchApplication:
                 if has_execution:
                     try:
                         entry_facts = inspect_execution_entry(execution_boundary if execution_boundary else execution)
+                        code_task = execution.get("code_task")
+                        code_root = code_task.get("code_root") if isinstance(code_task, Mapping) else None
+                        if isinstance(code_root, str) and Path(code_root).is_dir():
+                            from simple_ar.code_task.analysis.source_context import source_file_inventory
+                            source_workspace = Path(code_root)
+                            source_index = source_file_inventory(source_workspace)
                     except (OSError, TypeError, ValueError) as exc:
                         self.controller.pause(f"Could not inspect the supplied execution entry: {exc}")
                         self._persist_application_views()
@@ -1459,6 +1466,7 @@ class ResearchApplication:
                 ResearchDesignRequest(
                     synthesis=self._load_synthesis(), topic=self.brief.objective or self.brief.request_text,
                     idea_id=str(selected) if selected else None, selection_rationale=reason,
+                    idea_id_is_fixed=bool(self._effective_config().get("research_selected_idea_id")),
                     execution_context=self._problem_markdown() if has_execution or self.services.config.get("research_execution_context") else "",
                     execution_schema=execution.get("result_schema", {}) if has_execution else {},
                     execution_boundary=execution_boundary if execution_boundary else {},
