@@ -477,14 +477,24 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(request.source_index["files"][0]["path"], "learner.py")
             self.assertIn(implementation, execute.call_args.args[3])
             self.assertIn(revised, execute.call_args.args[3])
-            measured = app.controller.store.write_json("revision-result.json", {"status": "passed"},
+            baseline_measured = app.controller.store.write_json("revision-baseline-result.json", {"status": "passed"},
+                kind="experiment_result", schema="experiment_result.v1", producer="test")
+            measured = app.controller.store.write_json("revision-result.json", {
+                "status": "passed", "implementation_ref": implementation.to_dict(),
+            },
                 kind="experiment_result", schema="experiment_result.v1", producer="test")
             app.controller.manifest.state_refs["experiment_revision_1"] = measured
             with patch.object(app, "_step_completed", return_value=True):
-                collection_ref = app._write_supplement_collection(2, {"seed": 5}, [(measured, measured)])
+                collection_ref = app._write_supplement_collection(2, {"seed": 5}, [(baseline_measured, measured)])
             collection = app.controller.store.read_json(collection_ref)
             self.assertEqual(collection["candidate_revision"], 1)
             self.assertEqual(collection["implementation_ref"], implementation.to_dict())
+            unlinked = app.controller.store.write_json("revision-unlinked-result.json", {"status": "passed"},
+                kind="experiment_result", schema="experiment_result.v1", producer="test")
+            unlinked_collection_ref = app._write_supplement_collection(
+                3, {"seed": 6}, [(baseline_measured, unlinked)],
+            )
+            self.assertIsNone(app.controller.store.read_json(unlinked_collection_ref)["implementation_ref"])
 
     def test_real_code_task_modification_is_measured_by_application_once(self):
         self._exercise_code_task_lifecycle()

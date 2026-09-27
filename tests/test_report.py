@@ -402,24 +402,37 @@ class ReportSafetyTests(unittest.TestCase):
         self.assertEqual(normalized["open_questions"], ["How stable is the conclusion?"])
         self.assertEqual(normalized["limitations"], ["Evidence is incomplete."])
 
-    def test_short_reviewer_revision_replaces_prose_and_preserves_provenance(self) -> None:
+    def test_reviewer_revision_replaces_prose_and_stale_provenance(self) -> None:
         previous = ReportSectionDraft(
             section_id="methods",
             heading="Methods",
             draft_markdown=" ".join(["Existing evidence."] * 100),
+            used_sources=["paper:old"],
+            metric_ids=["old_metric"],
             citations=["P1"],
+            claims=[ClaimEvidenceRecord(claim_id="old", claim="Superseded claim")],
+            limitations=["Superseded limitation."],
         )
         revised = ReportSectionDraft(
             section_id="methods",
             heading="Methods",
             draft_markdown="Brief rewrite.",
+            used_sources=["paper:new"],
+            metric_ids=["new_metric"],
             citations=["P2"],
+            claims=[ClaimEvidenceRecord(claim_id="new", claim="Current claim")],
         )
 
         merged = _merge_revision_draft(previous, revised)
 
         self.assertEqual(merged.draft_markdown, revised.draft_markdown)
-        self.assertEqual(merged.citations, ["P1", "P2"])
+        self.assertEqual(merged.used_sources, ["paper:new"])
+        self.assertEqual(merged.metric_ids, ["new_metric"])
+        self.assertEqual(merged.citations, ["P2"])
+        self.assertEqual([claim.claim_id for claim in merged.claims], ["new"])
+        self.assertEqual(merged.limitations, [])
+        with self.assertRaises(ValueError):
+            _merge_revision_draft(previous, revised.model_copy(update={"section_id": "results"}))
 
     def test_substantive_reviewer_revision_replaces_prior_draft(self) -> None:
         previous = ReportSectionDraft(

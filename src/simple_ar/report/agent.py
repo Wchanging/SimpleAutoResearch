@@ -1850,53 +1850,14 @@ def _section_with_evidence(section: ReportSectionPlan, evidence_handles: list[st
     return section.model_copy(update={"evidence_handles": list(evidence_handles)})
 
 
-def _merge_draft_metadata(
-    previous: ReportSectionDraft,
-    candidate: ReportSectionDraft,
-) -> ReportSectionDraft:
-    """Merge provenance while leaving the caller responsible for prose policy."""
-    used_sources = _stable_union(previous.used_sources, candidate.used_sources)
-    metric_ids = _stable_union(previous.metric_ids, candidate.metric_ids)
-    citations = _stable_union(previous.citations, candidate.citations)
-    open_questions = _stable_union(previous.open_questions, candidate.open_questions)
-    limitations = _stable_union(previous.limitations, candidate.limitations)
-    claims = previous.claims[:]
-    claim_ids = {claim.claim_id for claim in claims}
-    for claim in candidate.claims:
-        if claim.claim_id in claim_ids:
-            continue
-        claims.append(claim)
-        claim_ids.add(claim.claim_id)
-    return previous.model_copy(
-        update={
-            "used_sources": used_sources,
-            "metric_ids": metric_ids,
-            "citations": citations,
-            "claims": claims,
-            "open_questions": open_questions,
-            "limitations": limitations,
-        }
-    )
-
-
 def _merge_revision_draft(
     previous: ReportSectionDraft,
     revised: ReportSectionDraft,
 ) -> ReportSectionDraft:
-    """Keep provenance and let the following review assess the corrected prose."""
-    merged = _merge_draft_metadata(previous, revised)
-    return merged.model_copy(update={"draft_markdown": revised.draft_markdown})
-
-
-def _stable_union(first: list[str], second: list[str]) -> list[str]:
-    merged: list[str] = []
-    seen: set[str] = set()
-    for item in first + second:
-        if not item or item in seen:
-            continue
-        merged.append(item)
-        seen.add(item)
-    return merged
+    """Use the complete revised section; old metadata is not evidence for its prose."""
+    if revised.section_id != previous.section_id:
+        raise ValueError("Report revision must preserve the section identity.")
+    return revised
 
 
 def _source_strategy_instruction(
