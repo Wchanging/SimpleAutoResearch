@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import tempfile
 from pathlib import Path
@@ -155,6 +156,22 @@ class LLMParsingTests(unittest.TestCase):
 
         with self.assertRaises(LLMError):
             LLMClient.ask_many(client, requests, max_workers=0)
+
+    def test_provider_worker_cap_applies_without_changing_batch_order(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key"))
+        requests = [LLMRequest("s", str(index)) for index in range(3)]
+        with patch.dict(os.environ, {"SIMPLE_AR_LLM_MAX_WORKERS": "1"}), patch.object(
+            client, "ask_json", side_effect=lambda system, user, label="": {"index": int(user)}
+        ), patch("simple_ar.integrations.llm.ThreadPoolExecutor", wraps=ThreadPoolExecutor) as pool:
+            result = client.ask_json_many(requests, max_workers=3)
+        self.assertEqual([row["index"] for row in result], [0, 1, 2])
+        self.assertEqual(pool.call_args.kwargs["max_workers"], 1)
+
+    def test_screening_worker_count_reflects_provider_cap(self) -> None:
+        from simple_ar.research.evidence.screening import _screening_workers
+
+        with patch.dict(os.environ, {"SIMPLE_AR_LLM_MAX_WORKERS": "1"}):
+            self.assertEqual(_screening_workers({"llm_max_workers": 8, "read_screening_workers": 3}), 1)
 
     def test_from_env_configures_provider_timeout(self) -> None:
         with patch.dict(

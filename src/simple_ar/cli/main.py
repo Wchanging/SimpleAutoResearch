@@ -298,6 +298,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--max-results, --max-chunks, and --idea-limit must be positive."
         )
+    if getattr(args, "research_max_pdf_pages", None) is not None and args.research_max_pdf_pages < 1:
+        raise SystemExit("research.max_pdf_pages must be positive.")
     if args.timeout_sec is not None and args.timeout_sec < 1:
         raise SystemExit("--timeout-sec must be positive when provided.")
     if args.max_review_iterations < 0:
@@ -475,6 +477,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
     }
     if getattr(args, "read_max_shortlist", None) is not None:
         config["research_read_max_shortlist"] = args.read_max_shortlist
+    if getattr(args, "research_max_pdf_pages", None) is not None:
+        config["research_max_pdf_pages"] = args.research_max_pdf_pages
     if resume_root is None:
         config["interaction"] = getattr(args, "interaction", None) or "checkpoints"
     if task_kind != "auto":
@@ -1004,6 +1008,9 @@ def _changed_resume_research_settings(
         "max_chunks": (args.max_chunks, app.services.max_chunks),
         "read_max_shortlist": (
             getattr(args, "read_max_shortlist", None), saved.get("research_read_max_shortlist"),
+        ),
+        "research_max_pdf_pages": (
+            getattr(args, "research_max_pdf_pages", None), saved.get("research_max_pdf_pages"),
         ),
         "idea_limit": (args.idea_limit, app.services.idea_limit),
         "max_research_iterations": (

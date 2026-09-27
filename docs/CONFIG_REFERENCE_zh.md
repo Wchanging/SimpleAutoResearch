@@ -37,7 +37,7 @@ CodeTask 专用选项仍通过下方 CodeTask TOML 复用。
 
 | 分区 | 字段 | 默认值 / 必填与条件约束 |
 | --- | --- | --- |
-| `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
+| `[research]` | `providers`、`queries`、`max_results`、`max_chunks`、`max_pdf_pages`、`read_max_shortlist`、`idea_limit`、`cache_dir` | 列表可省略；CLI 默认 `max_results = 10`、`max_chunks = 300`、`idea_limit = 3`。`max_pdf_pages` 是正整数，限制本地 PDF 最多提取页数（默认 `20`）；更改后应创建新会话，不能把已冻结的阅读证据当成新版本。`read_max_shortlist` 可选，显式提供的论文优先保留；若数量超过上限则显式报错。`cache_dir` 可选，未持久化，不能作为安全的恢复变更。 |
 | `[research]` | `use_fulltext`、`allow_pdf_download`、`keep_raw_pdf`、`materials_only` | 默认均为 false。`materials_only = true` 要求/使用 `[assets].papers` 并禁用 search，但仍允许模型阅读；全文获取失败时保留 abstract-only/unavailable 状态。 |
 | `[research]` | `max_iterations`、`interaction` | `max_iterations` 默认 `1`，`0` 表示首轮分析后停止。`interaction` 新 CLI 默认 `checkpoints`，可选 `assisted`、`checkpoints`、`autonomous`；硬事实和权限缺口在任何模式下都是阻塞。 |
 | `[assets]` | `papers` | 可选的本地 Markdown/text/PDF 路径列表；相对路径以 TOML 所在目录解析，作为只读输入。 |

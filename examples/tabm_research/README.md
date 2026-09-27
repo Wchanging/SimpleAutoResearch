@@ -4,7 +4,7 @@ This one-folder case tests the V2.9 research loop against the official [TabM cod
 
 The case files define the goal (`research.toml`), edit/evaluation boundary (`code_task.toml`), researcher requirements (`task.md`), and external measurement adapter (`run_tabm.py`). The project, paper PDF, data and Python environment are machine assets under `runs/assets`, not tracked example outputs or credentials in `.env`. A missing asset is a preflight failure. `runs/tabm-research` holds actual session records.
 
-The supplied PDF is a local reading input even with remote full-text fetching disabled. The default PDF reader extracts up to its first 20 pages, so appendix-only details may remain unread; the session must not claim it verified the entire 37-page paper without additional reading.
+The supplied PDF is a local reading input even with remote full-text fetching disabled. This case permits extraction of up to 40 pages and 140 text chunks so the available 37-page paper is not cut off by the generic 20-page parser default. Extraction is not the same as model review of every page; source coverage and appendix-only claims still need checking.
 
 ## Prepared-server run
 

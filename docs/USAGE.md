@@ -107,6 +107,9 @@ Notes:
   exponential backoff for transient provider errors such as connection resets,
   rate limits, timeouts, 5xx responses, and gateway errors such as Cloudflare
   524 origin timeouts.
+- `SIMPLE_AR_LLM_MAX_WORKERS` is an optional ceiling applied to each model-call
+  batch in the process. Leave it unset for per-stage defaults; set it to `1`
+  for a rate-limited provider without changing the research-session protocol.
 - Online research calls stop after the configured bounded provider retries and
   preserve the failed attempt. Research TOML has no `[llm].allow_fallback`
   switch; set `[model].name = ""` for deterministic offline processing, and do

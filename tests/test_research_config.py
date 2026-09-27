@@ -351,6 +351,29 @@ class ResearchConfigTests(unittest.TestCase):
             self.assertEqual(args.read_max_shortlist, 3)
             self.assertIn("read_max_shortlist", explicit)
 
+    def test_pdf_page_limit_reaches_source_parser_budget(self):
+        from simple_ar.research.documents.extractors import LocalDocumentParser
+        from simple_ar.research.sources.base import build_source_plan
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "research.toml"
+            path.write_text(
+                '[task]\ngoal="Read a supplied PDF"\n'
+                '[research]\nmax_pdf_pages=40\n', encoding="utf-8",
+            )
+            explicit = set()
+            argv = ["research-session", "--config", str(path)]
+            defaults = research_defaults(argv, explicit_destinations=explicit)
+            args = build_parser(research_defaults=defaults).parse_args(argv)
+            self.assertEqual(args.research_max_pdf_pages, 40)
+            self.assertIn("research_max_pdf_pages", explicit)
+            plan = build_source_plan(
+                topic=args.topic, problem_markdown="",
+                config={"research_max_pdf_pages": args.research_max_pdf_pages},
+                default_query=args.topic, default_max_results=args.max_results,
+            )
+            self.assertEqual(LocalDocumentParser.from_source_plan(plan).max_pdf_pages, 40)
+
     def test_config_can_record_an_explicit_idea_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "research.toml"

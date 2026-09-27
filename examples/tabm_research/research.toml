@@ -16,7 +16,8 @@ process_wall_seconds = 3600
 [research]
 providers = ["openalex", "semantic_scholar", "arxiv"]
 max_results = 12
-max_chunks = 80
+max_chunks = 140
+max_pdf_pages = 40
 idea_limit = 2
 use_fulltext = false
 allow_pdf_download = false

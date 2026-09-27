@@ -14,7 +14,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from simple_ar.integrations.llm import LLMRequest
+from simple_ar.integrations.llm import LLMRequest, llm_worker_limit
 from simple_ar.research.prompts import (
     READ_SYSTEM,
     paper_note_user_prompt,
@@ -384,7 +384,7 @@ def _llm_max_workers(config: Mapping[str, object]) -> int:
         workers = int(value)
     except (TypeError, ValueError):
         workers = 4
-    return max(1, min(32, workers))
+    return llm_worker_limit(max(1, min(32, workers)))
 
 
 def _batched(items: list[dict[str, Any]], batch_size: int) -> list[list[dict[str, Any]]]:

@@ -673,7 +673,7 @@ class LLMClient:
         if max_workers < 1:
             raise LLMError("max_workers must be at least 1")
 
-        worker_count = min(max_workers, len(requests))
+        worker_count = llm_worker_limit(min(max_workers, len(requests)))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [executor.submit(handler, request) for request in requests]
             results: list[T] = []
@@ -1128,6 +1128,18 @@ def _optional_positive_int(env_name: str, *, default: int | None) -> int | None:
     except ValueError:
         return default
     return parsed if parsed > 0 else None
+
+
+def llm_worker_limit(requested: int) -> int:
+    """Apply an optional process setting to each batch's worker count.
+
+    This is an operational transport limit, not a persisted research-protocol
+    choice. Leaving the environment unset preserves each caller's own bound.
+    """
+    if requested < 1:
+        raise ValueError("requested LLM workers must be at least 1")
+    configured = _positive_int("SIMPLE_AR_LLM_MAX_WORKERS", default=requested)
+    return min(requested, configured)
 
 
 def _boolean_env(env_name: str, *, default: bool) -> bool:

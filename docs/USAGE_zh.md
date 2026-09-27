@@ -82,6 +82,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 默认是每次 provider 尝试 180 秒；慢速服务商可以设置更大的正数，只有明确设为 `0` / `off` / `none` / `unlimited` 才不向 provider 传客户端超时。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传输出上限。只有你确实想限制模型输出长度时才设置正数。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时、5xx 响应和 Cloudflare 524 origin timeout。
+- `SIMPLE_AR_LLM_MAX_WORKERS` 可选，限制单进程内每批模型请求的并发数；不设置则保留各阶段默认并发。服务商限流时可设为 `1`，不改变研究会话协议。
 - 在线研究调用在有界 provider 重试耗尽后停止并保留失败 attempt。研究 TOML 没有
   `[llm].allow_fallback` 开关；要离线运行请设置 `[model].name = ""`，不能把确定性输出描述成
   模型生成的分析。`--no-llm` 只属于 CodeTask 原语命令，不是 research-session 参数。

@@ -96,18 +96,19 @@ class SuppliedPdfIngestTest(unittest.TestCase):
             config.write_text(
                 '[task]\ngoal="Summarize the supplied TabM method"\noutputs=["summary"]\noutput_root="out"\n'
                 '[model]\nname=""\n[research]\nproviders=["local_files"]\n'
-                'use_fulltext=false\nallow_pdf_download=false\n'
+                'use_fulltext=false\nallow_pdf_download=false\nmax_pdf_pages=5\n'
                 '[assets]\npapers=["method.pdf"]\n', encoding="utf-8",
             )
             console = io.StringIO()
             with patch(
                 "simple_ar.research.documents.extractors._read_pdf",
                 return_value="# Method\n\nTabM uses parameter-efficient ensembling.",
-            ), redirect_stdout(console):
+            ) as parse_pdf, redirect_stdout(console):
                 try:
                     main(["research-session", "--config", str(config)])
                 except SystemExit as exc:
                     self.fail(f"Session stopped: {exc}; console: {console.getvalue()}")
+            self.assertEqual(parse_pdf.call_args.kwargs["max_pages"], 5)
             session = next((root / "out").iterdir())
             app = load_session(session)
             self.assertEqual(len(app._local_documents()), 1)

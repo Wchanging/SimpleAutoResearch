@@ -119,6 +119,7 @@ def _budget(config: dict[str, object]) -> dict[str, object]:
         "research_max_follow_up_queries": "max_follow_up_queries",
         "research_max_fulltext_documents": "max_fulltext_documents",
         "research_max_pdf_mb": "max_pdf_mb",
+        "research_max_pdf_pages": "max_pdf_pages",
     }
     budget: dict[str, object] = {}
     for config_key, budget_key in keys.items():
