@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import os
+import sys
 from pathlib import Path
 
 from simple_ar.code_task.analysis.interfaces import (
@@ -16,10 +18,25 @@ from simple_ar.code_task.generation.common import safe_relative_path, string_lis
 from simple_ar.code_task.generation.review import review_generated_project
 from simple_ar.code_task.generation.writer import _response_self_reports_defect, write_generated_project
 from simple_ar.code_task import initialize_code_task, review_code_task_changes
+from simple_ar.code_task.execution.environment import resolve_code_task_command
 from simple_ar.core.artifacts import read_json, write_json, write_text
 
 
 class CodeTaskInterfaceTests(unittest.TestCase):
+    def test_external_python_preserves_virtualenv_symlink_entrypoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "env" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python")
+            executable.parent.mkdir(parents=True)
+            try:
+                executable.symlink_to(sys.executable)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"Symlink creation unavailable: {exc}")
+            command = resolve_code_task_command(
+                ["python", "-V"], env_mode="external", python_executable=executable,
+            )
+            self.assertEqual(command, [os.path.abspath(executable), "-V"])
+            self.assertNotEqual(command[0], str(executable.resolve()))
+
     def test_generation_common_helpers_normalize_paths_and_lists(self) -> None:
         self.assertEqual(safe_relative_path("pkg\\runner.py"), "pkg/runner.py")
         self.assertEqual(safe_relative_path("../escape.py"), "")

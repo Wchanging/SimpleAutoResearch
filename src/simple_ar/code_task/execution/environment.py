@@ -308,7 +308,10 @@ def _resolve_external_python(value: str) -> str:
     has_path_separator = any(sep and sep in value for sep in (os.sep, os.altsep))
     candidate = Path(value).expanduser()
     if candidate.is_absolute() or has_path_separator:
-        path = candidate.resolve()
+        # A virtualenv's bin/python is commonly a symlink to the base Python.
+        # realpath/Path.resolve() would discard the virtualenv entrypoint and
+        # silently run the base interpreter without its installed packages.
+        path = Path(os.path.abspath(candidate))
         if not path.exists():
             raise FileNotFoundError(f"External Python executable does not exist: {path}")
         if path.is_dir():
@@ -317,7 +320,7 @@ def _resolve_external_python(value: str) -> str:
     resolved = shutil.which(value)
     if not resolved:
         raise FileNotFoundError(f"External Python executable not found on PATH: {value}")
-    return str(Path(resolved).resolve())
+    return os.path.abspath(resolved)
 
 
 def _python_version_for_policy(mode: str, executable: str) -> str:
