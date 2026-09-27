@@ -308,6 +308,8 @@ def _print_research_session(args: argparse.Namespace) -> None:
 
     if getattr(args, "reanalyze", False) and not getattr(args, "session_root", None):
         raise SystemExit("--reanalyze requires --session-root.")
+    if getattr(args, "recover_interrupted", False) and not getattr(args, "session_root", None):
+        raise SystemExit("--recover-interrupted requires --session-root.")
     if args.max_results < 1 or args.max_chunks < 1 or args.idea_limit < 1:
         raise SystemExit(
             "--max-results, --max-chunks, and --idea-limit must be positive."
@@ -662,7 +664,15 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 continuation["additional_no_progress"],
             ))):
                 raise ResearchApplicationError("--reanalyze cannot be combined with input revisions or continuation allowances.")
-            if getattr(args, "reanalyze", False):
+            if getattr(args, "recover_interrupted", False):
+                if (getattr(args, "reanalyze", False) or brief_changed
+                    or revised_execution is not None or interaction_update is not None
+                    or decision_requested or report_overrides or continuation_requested):
+                    raise ResearchApplicationError(
+                        "Recover the interrupted attempt in a separate resume without input, budget, decision or report changes."
+                    )
+                app.recover_interrupted_attempt()
+            elif getattr(args, "reanalyze", False):
                 app.request_reanalysis()
             elif report_overrides and not delivery_revision:
                 app.request_report(
@@ -675,7 +685,7 @@ def _print_research_session(args: argparse.Namespace) -> None:
                 continuation["authorization_id"], continuation["authorization_reason"],
                 continuation["authorize_remaining"], continuation["additional_attempts"],
                 continuation["additional_no_progress"],
-            )) or (app.view().status != "completed" and not (
+            )) or (app.view().status in {"paused", "blocked", "failed"} and not (
                 has_pending_decision
             ))):
                 app.continue_session(

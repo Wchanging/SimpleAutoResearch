@@ -65,6 +65,10 @@ def build_parser(
     )
     session_parser.add_argument("--config", type=Path, help="Research TOML; explicit CLI options override file values.")
     session_parser.add_argument("--session-root", type=Path, help="Continue this session; unchanged evidence and measurements are reused, while explicitly revised inputs invalidate only dependent results.")
+    session_parser.add_argument(
+        "--recover-interrupted", action="store_true",
+        help="With --session-root, confirm the prior worker has stopped, close its running attempt with no result, then resume saved work. Never use while that worker is still active.",
+    )
     session_parser.add_argument("--reanalyze", action="store_true", help="With --session-root, reconsider existing measurements and resume the research decision; do not request a report or rerun experiments.")
     session_parser.add_argument("--authorization-id", default=None, help="Stable idempotency key required for explicit continuation allowances.")
     session_parser.add_argument("--authorization-reason", default=None, help="Human-readable reason recorded with a continuation allowance.")

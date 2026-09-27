@@ -124,6 +124,12 @@ Notes:
   use `simple-ar research-session --session-root PATH --model MODEL` without
   `--config` or `--topic`. The saved goal, evidence, execution, and budget are
   restored; explicit changes remain subject to the normal resume checks.
+- If the prior process was interrupted while an attempt was running and no
+  capability result was saved, first confirm that worker has stopped. Then use
+  `simple-ar research-session --session-root PATH --recover-interrupted --model MODEL`.
+  This records one failed attempt against the existing budget and continues
+  the saved plan; it does not erase completed evidence. Do not use this flag
+  while another worker may still be active or combine it with input revisions.
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` controls provider-native JSON mode for
   structured calls. The default `off` uses prompt-only parsing for broad
   provider compatibility. `auto` tries `response_format={"type":"json_object"}`

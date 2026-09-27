@@ -21,6 +21,48 @@ from simple_ar.research.workflow_contracts import ResearchBrief
 
 
 class ResearchApplicationTests(unittest.TestCase):
+    def test_explicit_interrupted_recovery_retries_current_step_without_losing_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Evidence\nA bounded source.\n", encoding="utf-8")
+            session = root / "session"
+            app = create_session(ResearchBrief(
+                request_text="Summarize the supplied evidence.",
+                requested_outputs=("summary",),
+                asset_requests=({"locator": str(paper), "role": "paper"},),
+            ), root=session, services=ResearchApplicationServices(
+                config={"research_materials_only": True},
+            ))
+            inputs = dict(app.view().state_refs)
+
+            def interrupt(**_):
+                raise KeyboardInterrupt()
+
+            app.controller.registry.register("plan", interrupt, replace=True)
+            with self.assertRaises(KeyboardInterrupt):
+                app.advance()
+            app = load_session(session)
+            self.assertEqual(app.view().status, "running")
+            self.assertEqual(app.view().next_action, "plan")
+            with self.assertRaisesRegex(ResearchApplicationError, "no persisted result"):
+                app.advance()
+            with self.assertRaisesRegex(ResearchApplicationError, "running/empty"):
+                app.continue_session()
+
+            recovered = app.recover_interrupted_attempt(reason="Confirmed stopped test worker.")
+            self.assertEqual(recovered.status, "running")
+            self.assertEqual(recovered.next_action, "plan")
+            self.assertEqual(recovered.budget["attempts"], 1)
+            self.assertEqual(recovered.attempts[0]["status"], "failed")
+            for name, ref in inputs.items():
+                self.assertEqual(recovered.state_refs[name], ref)
+            with self.assertRaisesRegex(ResearchApplicationError, "exactly one current running"):
+                app.recover_interrupted_attempt()
+            resumed = app.advance(max_actions=1)
+            self.assertEqual(resumed.attempts[1]["capability"], "plan")
+            self.assertIn("task_plan", resumed.state_refs)
+
     def test_uncertain_goal_uses_analysis_report_and_writer_recovery_keeps_measurement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

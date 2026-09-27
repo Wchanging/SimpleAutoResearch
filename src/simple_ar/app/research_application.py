@@ -357,6 +357,26 @@ class ResearchApplication:
             self._finish_available_work()
             return self.view()
 
+    def recover_interrupted_attempt(
+        self,
+        *,
+        reason: str = "Confirmed that the worker stopped before persisting a capability result.",
+    ) -> ResearchApplicationView:
+        """Close a confirmed orphaned attempt without discarding earlier work.
+
+        This is intentionally explicit: a running attempt may still belong to
+        a live worker. The core checks that no result envelope exists and
+        accounts for the failed attempt in the existing session budget.
+        """
+        with self.controller.mutation_scope():
+            running = [item for item in self.controller.list_attempts() if item.status == "running"]
+            if len(running) != 1 or self.controller.manifest.current_attempt != running[0].attempt_id:
+                raise ResearchApplicationError(
+                    "Interrupted recovery requires exactly one current running attempt."
+                )
+            self.controller.recover_interrupted(running[0].attempt_id, reason=reason)
+            return self.view()
+
     def continue_session(
         self,
         *,

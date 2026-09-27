@@ -249,6 +249,51 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.command_argv)
         self.assertIsNone(args.code_task_config)
 
+    def test_research_session_interrupted_recovery_requires_saved_session(self) -> None:
+        args = build_parser(allow_resume_without_topic=True).parse_args([
+            "research-session", "--session-root", "saved", "--recover-interrupted",
+        ])
+        self.assertTrue(args.recover_interrupted)
+        with self.assertRaisesRegex(SystemExit, "requires --session-root"):
+            main(["research-session", "--topic", "test", "--recover-interrupted"])
+
+    def test_research_session_cli_recovers_stopped_worker_and_resumes_saved_plan(self) -> None:
+        from simple_ar.app.research_application import (
+            ResearchApplicationServices, create_session, load_session,
+        )
+        from simple_ar.research.workflow_contracts import ResearchBrief
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            paper = root / "paper.md"
+            paper.write_text("# Evidence\nThis source contains a bounded claim.\n", encoding="utf-8")
+            session = root / "session"
+            app = create_session(ResearchBrief(
+                request_text="Summarize the supplied paper.",
+                objective="Summarize the supplied paper.",
+                requested_outputs=("summary",),
+                asset_requests=({"locator": str(paper), "role": "paper"},),
+            ), root=session, services=ResearchApplicationServices(
+                config={"research_materials_only": True},
+            ))
+
+            def interrupt(**_):
+                raise KeyboardInterrupt()
+
+            app.controller.registry.register("plan", interrupt, replace=True)
+            with self.assertRaises(KeyboardInterrupt):
+                app.advance()
+            with contextlib.redirect_stdout(io.StringIO()):
+                main(["research-session", "--session-root", str(session),
+                      "--recover-interrupted", "--no-report"])
+            resumed = load_session(session)
+            self.assertEqual(
+                sum(row["status"] == "failed" for row in resumed.view().attempts), 1,
+            )
+            self.assertIn("task_plan", resumed.view().state_refs)
+            self.assertEqual(resumed.view().budget["attempts"], len(resumed.view().attempts))
+
     def test_research_session_cli_without_command_stays_literature_only(self) -> None:
         TEST_ROOT.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
