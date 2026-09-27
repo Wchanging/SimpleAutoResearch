@@ -192,7 +192,7 @@ class ResearchDesignTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             source = ("x" * 2881 + "forward" + "x" * 3512 + "LinearEfficientEnsemble"
-                      + "x" * 1930 + "forward" + "x" * 10000
+                      + "x" * 1930 + "forward" + "x" * 7290 + "currently" + "x" * 2701
                       + "predictions = heads.mean(1)\n")
             (workspace / "model.py").write_text(source, encoding="utf-8")
             index = source_file_inventory(workspace)
@@ -202,7 +202,7 @@ class ResearchDesignTests(unittest.TestCase):
             ]
             found = requested_source_context(workspace, index,
                 {"files": ["model.py"], "symbols": ["Model.forward", "LinearEfficientEnsemble"],
-                 "query": "Where are predictions aggregated?"},
+                 "query": "How are predictions currently aggregated?"},
                 supplied=supplied, max_files=1, max_chars=6000)
             self.assertEqual(len(found), 1)
             self.assertIn("predictions = heads.mean(1)", found[0]["text"])

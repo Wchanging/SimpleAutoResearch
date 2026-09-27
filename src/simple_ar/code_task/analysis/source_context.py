@@ -69,7 +69,10 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
         previous.setdefault(item["path"], []).append((start, start + len(item["text"])))
     symbols = [symbol.rsplit(".", 1)[-1] for symbol in request.get("symbols", [])]
     query_terms = [term for term in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", request.get("query", ""))
-                   if len(term) >= 5 and term.lower() not in {"where", "which", "about", "their", "these", "those"}]
+                   if len(term) >= 5 and term.lower() not in {
+                       "where", "which", "about", "their", "these", "those", "current",
+                       "currently", "happen", "implementation", "source", "model", "method",
+                   }]
     result = []
     remaining = max_total_chars if max_total_chars is not None else max_files * max_chars
     workspace = workspace.resolve()
