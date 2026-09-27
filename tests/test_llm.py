@@ -259,6 +259,13 @@ class LLMParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(LLMResponseError, "reasoning content"):
                 client.ask("system", "user")
 
+    def test_length_response_without_reasoning_has_output_cap_hint(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat"))
+        response = {"choices": [{"finish_reason": "length", "message": {"content": ""}}]}
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response):
+            with self.assertRaisesRegex(LLMResponseError, "Increase the per-call output token cap"):
+                client.ask("system", "user")
+
     def test_ask_retries_transient_connection_error(self) -> None:
         usage: list[object] = []
         client = LLMClient(

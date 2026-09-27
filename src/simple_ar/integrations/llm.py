@@ -994,6 +994,8 @@ def _empty_response_message(response: object) -> str:
     message = "LLM response did not contain final text."
     if finish_reason:
         message += f" finish_reason={finish_reason!r}."
+    if finish_reason == "length":
+        message += " Increase the per-call output token cap or shorten the request context."
     return message
 
 
