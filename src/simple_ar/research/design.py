@@ -356,10 +356,12 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         "Return selected_idea_id and selection_rationale for that direction change; do not turn an "
         "untried idea into a measured claim. If no supplied alternative is defensible, return blocked "
         "with the exact missing evidence instead of inventing a new method. "
-        "For initial feasibility, ready must include target_paths:[workspace-relative paths to edit] "
-        "and source_quotes:[{path,quote}] with exact observed code from every target file "
-        "supporting where the behavior will change. When source_config is supplied, also quote "
-        "the active config. Target paths must satisfy the supplied CodeTask edit scope. "
+        "For initial feasibility, ready must include target_paths:[workspace-relative paths to edit]. "
+        "Use source_quotes:[{path,quote}] for exact observed code supporting the behavior and "
+        "quote at least one existing target when editing existing files. A newly created target "
+        "has no source to quote: instead explain how it integrates with observed existing code, "
+        "or why it is a standalone addition, and how it will be validated. When source_config "
+        "is supplied, quote the active config. Target paths must satisfy CodeTask edit scope. "
         "Return JSON {status: ready|blocked|inspect_source, implementation_spec:string, "
         "unresolved_questions:[string], context_request?:object, target_paths?:[string], "
         "source_quotes?:[{path:string,quote:string}], selected_idea_id?:string, selection_rationale?:string}. "
@@ -385,7 +387,9 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         trace.append({"response": response})
         if not isinstance(response, Mapping) or response.get("status") != "inspect_source":
             if isinstance(response, Mapping) and response.get("status") == "ready" and initial_feasibility:
-                issues = _initial_feasibility_issues(response, excerpts, code_task, source_config)
+                issues = _initial_feasibility_issues(
+                    response, excerpts, code_task, source_config, request.source_index,
+                )
                 if not issues:
                     issues = _review_initial_feasibility(
                         request, previous, response, excerpts, code_task, source_config, trace,
@@ -472,7 +476,7 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
 
 def _initial_feasibility_issues(
     response: Mapping[str, Any], excerpts: list[dict[str, Any]],
-    code_task: Mapping[str, Any], source_config: str,
+    code_task: Mapping[str, Any], source_config: str, source_index: Mapping[str, Any],
 ) -> list[str]:
     """Check source-backed edit authority without interpreting scientific merit."""
     from simple_ar.code_task.editing.scope import edit_scope_rejection_reason
@@ -500,18 +504,21 @@ def _initial_feasibility_issues(
             and row["quote"] in config_text for row in quotes
         ):
             issues.append(f"Ready design needs an exact observed source quote from active config {source_config!r}.")
-    if isinstance(paths, list):
+    indexed = {str(row["path"]) for row in source_index.get("files", [])}
+    existing_targets = (
+        [path for path in paths if isinstance(path, str) and path in indexed]
+        if isinstance(paths, list) else []
+    )
+    if existing_targets:
         quotes = response.get("source_quotes")
-        for path in paths:
-            if not isinstance(path, str):
-                continue
-            source_text = "\n".join(row["text"] for row in excerpts if row["path"] == path)
-            if not isinstance(quotes, list) or not any(
-                isinstance(row, Mapping) and row.get("path") == path
-                and isinstance(row.get("quote"), str) and len(row["quote"].strip()) >= 3
-                and row["quote"] in source_text for row in quotes
-            ):
-                issues.append(f"Ready design needs an exact observed source quote from target {path!r}.")
+        if not isinstance(quotes, list) or not any(
+            isinstance(row, Mapping) and row.get("path") in existing_targets
+            and isinstance(row.get("quote"), str) and len(row["quote"].strip()) >= 3
+            and any(excerpt["path"] == row["path"] and row["quote"] in excerpt["text"]
+                    for excerpt in excerpts)
+            for row in quotes
+        ):
+            issues.append("Ready design needs an exact observed source quote from at least one existing target.")
     return issues
 
 
@@ -536,6 +543,8 @@ def _review_initial_feasibility(
         "if the proposed edit path cannot implement the specified behavior without changing a protected file; "
         "or if the proposed edit would be dormant because the active config explicitly supplies a value. "
         "Do not require a proven research gain; this is feasibility, not result assessment. "
+        "For a new target file, do not demand a quote from a nonexistent file; check its "
+        "specified integration point or standalone purpose and validation instead. "
         "If source evidence is insufficient to establish a behavioral effect, request a specific "
         "read-only source inspection in the issues. Return JSON "
         "{verdict:accept|revise, issues:[short specific strings]}.\n\n"

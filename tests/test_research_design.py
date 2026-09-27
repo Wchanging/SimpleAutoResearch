@@ -265,7 +265,62 @@ class ResearchDesignTests(unittest.TestCase):
             ))
             self.assertEqual(result.status, "ready")
             self.assertEqual(client.ask_json.call_count, 4)
-            self.assertIn("exact observed source quote from target", client.ask_json.call_args_list[2].args[1])
+            self.assertIn("exact observed source quote from at least one existing target",
+                          client.ask_json.call_args_list[2].args[1])
+
+    def test_initial_feasibility_can_add_a_new_file_with_existing_integration_context(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "service.ts").write_text(
+                "export function invoiceTotal(lines) { return lines.reduce(sumLine, 0); }\n",
+                encoding="utf-8",
+            )
+            index = source_file_inventory(workspace)
+            self.assertEqual(index["files"][0]["role_tags"], ["source"])
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Add a bounded implementation."},
+                {"status": "ready", "implementation_spec":
+                    "Add a line calculator and call it from the existing invoice total; "
+                    "validate mixed taxable/exempt lines with a small fixture.",
+                 "unresolved_questions": [], "target_paths": ["service.ts", "line_calculator.ts"],
+                 "source_quotes": [{"path": "service.ts", "quote": "lines.reduce(sumLine, 0)"}]},
+                {"verdict": "accept", "issues": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace)}},
+                source_workspace=workspace, source_index=index,
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(client.ask_json.call_count, 3)
+
+    def test_initial_feasibility_can_plan_a_greenfield_source_file(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Start a small project."},
+                {"status": "ready", "implementation_spec":
+                    "Create a standalone parser with a fixture for input and output checks.",
+                 "unresolved_questions": [], "target_paths": ["parser.py"]},
+                {"verdict": "accept", "issues": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace)}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(client.ask_json.call_count, 3)
 
     def test_initial_feasibility_reserves_budget_for_three_source_followups(self):
         from unittest.mock import Mock

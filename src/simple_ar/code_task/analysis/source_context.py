@@ -9,6 +9,13 @@ from simple_ar.code_task.analysis.index import IGNORED_DIR_NAMES
 from simple_ar.code_task.editing.planning import select_relevant_files
 
 
+SOURCE_SUFFIXES = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs",
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".rb", ".r", ".jl", ".sh",
+}
+CONTEXT_SUFFIXES = SOURCE_SUFFIXES | {".toml", ".yaml", ".yml", ".md", ".txt", ".json", ".ini", ".cfg"}
+
+
 def source_file_inventory(
     workspace: Path, *, max_files: int = 400, required_paths: tuple[str, ...] = (),
 ) -> dict[str, Any]:
@@ -25,13 +32,12 @@ def source_file_inventory(
             if scanned > 10000:
                 break
             path = Path(current) / name
-            if name.startswith(".env") or path.suffix.lower() not in {
-                ".py", ".toml", ".yaml", ".yml", ".md", ".txt", ".json",
-            }:
+            suffix = path.suffix.lower()
+            if name.startswith(".env") or suffix not in CONTEXT_SUFFIXES:
                 continue
             files.append({"path": path.relative_to(workspace).as_posix(),
-                          "kind": "python" if path.suffix.lower() == ".py" else "text",
-                          "role_tags": ["source"] if path.suffix.lower() == ".py" else ["config"]})
+                          "kind": "python" if suffix == ".py" else "text",
+                          "role_tags": ["source"] if suffix in SOURCE_SUFFIXES else ["config"]})
         if scanned > 10000:
             break
     files.sort(key=lambda row: (row["kind"] != "python", row["path"]))
