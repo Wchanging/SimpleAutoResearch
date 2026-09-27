@@ -79,6 +79,7 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
   调用保持非流式。流式可以减少兼容网关的长时间非流式连接卡顿，但不会取消服务商或客户端超时。
 - `SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM` 可选地指定 Chat Completions 的输出参数名：`max_tokens` 或 `max_completion_tokens`；`auto` 会在可能时根据模型名选择。
 - `SIMPLE_AR_LLM_REASONING_EFFORT` 是可选的、由模型文档定义的推理强度，例如 `low` 或 `high`，只会通过 Chat Completions 的 provider 扩展字段转发。`SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` 仅在调用方和客户端均未设置输出上限时作为兜底上限，不会覆盖显式的单次调用上限。
+- `SIMPLE_AR_LLM_THINKING` 可选，通过 Chat Completions 的 `extra_body` 传入 `thinking.type=enabled` 或 `disabled`，默认不传。仅对明确支持该参数的模型启用；强制思考模型不能关闭，`disabled` 也不能同时设置 `SIMPLE_AR_LLM_REASONING_EFFORT`。
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` 默认是每次 provider 尝试 180 秒；慢速服务商可以设置更大的正数，只有明确设为 `0` / `off` / `none` / `unlimited` 才不向 provider 传客户端超时。
 - `SIMPLE_AR_MAX_OUTPUT_TOKENS` 是可选项；留空或设为 `0` / `off` / `none` / `unlimited` 时，不向 provider 传输出上限。只有你确实想限制模型输出长度时才设置正数。
 - `SIMPLE_AR_LLM_RETRY_ATTEMPTS` 和 retry delay 设置控制临时 provider 错误的有限指数退避重试，例如连接中断、限流、超时、5xx 响应和 Cloudflare 524 origin timeout。

@@ -97,6 +97,11 @@ Notes:
   provider extension field. `SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` supplies a
   fallback cap only when neither the caller nor client settings provide one;
   it never overrides an explicit per-call limit.
+- `SIMPLE_AR_LLM_THINKING` optionally sends `thinking.type=enabled` or
+  `thinking.type=disabled` through Chat Completions `extra_body`. It is unset
+  by default. Use it only with a provider/model that documents the switch;
+  forced-thinking models cannot be disabled. Do not combine `disabled` with
+  `SIMPLE_AR_LLM_REASONING_EFFORT`.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` defaults to 180 seconds per provider attempt.
   Set a larger positive value for a slow provider, or explicitly set
   `0`/`off`/`none` to disable the client-side timeout.

@@ -133,6 +133,25 @@ class LLMParsingTests(unittest.TestCase):
 
         self.assertTrue(client._settings.stream)
 
+    def test_optional_chat_thinking_switch_reaches_provider(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key", api_mode="chat", thinking_mode="disabled"))
+        response = {"choices": [{"message": {"content": "ok"}}]}
+        with patch("simple_ar.integrations.llm._call_openai_sdk", return_value=response) as call:
+            self.assertEqual(client.ask("system", "user"), "ok")
+        self.assertEqual(call.call_args.args[1]["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_thinking_switch_rejects_incompatible_api_or_effort(self) -> None:
+        for settings in (
+            LLMSettings(api_key="test-key", api_mode="responses", thinking_mode="disabled"),
+            LLMSettings(api_key="test-key", api_mode="chat", thinking_mode="disabled", reasoning_effort="low"),
+        ):
+            with self.subTest(settings=settings), self.assertRaises(LLMError):
+                LLMClient(settings).ask("system", "user")
+
+    def test_from_env_reads_optional_thinking_switch(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "SIMPLE_AR_LLM_THINKING": "disabled"}, clear=True):
+            self.assertEqual(LLMClient.from_env()._settings.thinking_mode, "disabled")
+
     def test_ask_json_many_preserves_input_order(self) -> None:
         client = object.__new__(LLMClient)
 

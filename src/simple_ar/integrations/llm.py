@@ -73,6 +73,9 @@ class LLMSettings:
             Leave empty unless the selected model/provider documents the
             option. This is a capability setting, not a provider-specific
             client branch.
+        thinking_mode: Optional provider-specific ``thinking.type`` value for
+            Chat Completions. Empty preserves provider defaults. Enable or
+            disable only when the selected model documents support for it.
         reasoning_output_tokens: Optional fallback output cap used only when
             ``reasoning_effort`` is configured and neither the caller nor the
             client settings provide a cap. An explicit caller cap always wins;
@@ -97,6 +100,7 @@ class LLMSettings:
     json_response_format: str = "off"
     chat_token_limit_param: str = "auto"
     reasoning_effort: str = ""
+    thinking_mode: str = ""
     reasoning_output_tokens: int | None = None
     stream: bool = False
 
@@ -247,6 +251,7 @@ class LLMClient:
             json_response_format=_json_response_format_mode("SIMPLE_AR_JSON_RESPONSE_FORMAT"),
             chat_token_limit_param=_chat_token_limit_param_mode("SIMPLE_AR_CHAT_TOKEN_LIMIT_PARAM"),
             reasoning_effort=_reasoning_effort_mode("SIMPLE_AR_LLM_REASONING_EFFORT"),
+            thinking_mode=_thinking_mode("SIMPLE_AR_LLM_THINKING"),
             reasoning_output_tokens=_optional_positive_int("SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS", default=None),
             stream=_boolean_env("SIMPLE_AR_LLM_STREAM", default=False),
         )
@@ -437,6 +442,7 @@ class LLMClient:
                 api_mode,
                 chat_token_limit_param=self._settings.chat_token_limit_param,
                 reasoning_effort=self._settings.reasoning_effort,
+                thinking_mode=self._settings.thinking_mode,
                 stream=self._settings.stream,
             )
             attempted = 0
@@ -1270,6 +1276,16 @@ def _reasoning_effort_mode(env_name: str) -> str:
     return ""
 
 
+def _thinking_mode(env_name: str) -> str:
+    """Read an optional provider-specific Chat thinking switch."""
+    value = os.environ.get(env_name, "").strip().lower()
+    if value in {"", "default", "auto"}:
+        return ""
+    if value in {"enabled", "disabled"}:
+        return value
+    raise LLMError(f"{env_name} must be default, enabled, or disabled.")
+
+
 def _chat_token_limit_param(mode: str, model: str) -> str:
     normalized = (mode or "auto").strip().lower().replace("-", "_")
     if normalized in {"max_tokens", "max_completion_tokens"}:
@@ -1343,15 +1359,19 @@ def _request_for_api_mode(
     *,
     chat_token_limit_param: str = "auto",
     reasoning_effort: str = "",
+    thinking_mode: str = "",
     stream: bool = False,
 ) -> dict[str, Any]:
     if api_mode == "responses":
+        if thinking_mode:
+            raise LLMError("Provider thinking.type is supported only with Chat Completions mode.")
         return _as_responses_request(request)
     if api_mode == "chat":
         converted = _as_chat_request(
             request,
             chat_token_limit_param=chat_token_limit_param,
             reasoning_effort=reasoning_effort,
+            thinking_mode=thinking_mode,
         )
         if stream:
             converted["stream"] = True
@@ -1407,6 +1427,7 @@ def _as_chat_request(
     *,
     chat_token_limit_param: str = "auto",
     reasoning_effort: str = "",
+    thinking_mode: str = "",
 ) -> dict[str, Any]:
     if "messages" in request:
         converted = dict(request)
@@ -1431,10 +1452,15 @@ def _as_chat_request(
         converted.pop("max_tokens", None)
         converted.pop("max_completion_tokens", None)
         converted[_chat_token_limit_param(chat_token_limit_param, str(converted.get("model") or ""))] = output_cap
-    if reasoning_effort:
+    if thinking_mode and reasoning_effort and thinking_mode == "disabled":
+        raise LLMError("Disable SIMPLE_AR_LLM_REASONING_EFFORT when provider thinking is disabled.")
+    if reasoning_effort or thinking_mode:
         provider_options = converted.get("extra_body")
         extra_body = dict(provider_options) if isinstance(provider_options, dict) else {}
-        extra_body["reasoning_effort"] = reasoning_effort
+        if reasoning_effort:
+            extra_body["reasoning_effort"] = reasoning_effort
+        if thinking_mode:
+            extra_body["thinking"] = {"type": thinking_mode}
         converted["extra_body"] = extra_body
     return _drop_none_values(converted)
 
