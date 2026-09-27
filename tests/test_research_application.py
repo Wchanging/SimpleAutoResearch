@@ -336,9 +336,9 @@ class ResearchApplicationTests(unittest.TestCase):
             seen = {}
             real = design_module.build_research_design
 
-            def capture(request):
+            def capture(request, **kwargs):
                 seen["boundary"] = dict(request.execution_boundary)
-                return real(request)
+                return real(request, **kwargs)
 
             app = create_session(
                 ResearchBrief(
@@ -983,8 +983,13 @@ class ResearchApplicationTests(unittest.TestCase):
                     "limitations": [],
                 }, kind="prepared_execution", schema="prepared_execution.v1", producer="test",
             )
+            implementation_ref = app.controller.store.write_json(
+                "inputs/implementation.json", {"status": "validated"},
+                kind="implementation_result", schema="research_implementation.v1", producer="test",
+            )
             app.controller.manifest.state_refs.update({
                 "design": design_ref, "decision": decision_ref, "preparation": preparation_ref,
+                "implementation": implementation_ref,
             })
             app.controller.save()
 
@@ -996,6 +1001,8 @@ class ResearchApplicationTests(unittest.TestCase):
             candidate = app.controller.store.read_json(candidate_ref)
             self.assertEqual(baseline["metrics"]["accuracy"], 0.5)
             self.assertEqual(candidate["metrics"]["accuracy"], 1.0)
+            self.assertNotIn("implementation_ref", baseline)
+            self.assertEqual(candidate["implementation_ref"], implementation_ref.to_dict())
             baseline_prep = app.controller.store.read_json(
                 app.controller.manifest.state_refs["preparation_supplement_1"]
             )
@@ -1119,8 +1126,9 @@ class ResearchApplicationTests(unittest.TestCase):
                 final = app.advance(max_actions=3)
             self.assertEqual(final.status, "completed", final.status_reason)
             report = app.controller.store.read_text(final.state_refs["report"])
-            for metric in context.metric_sources:
-                self.assertIn(metric.label, report)
+            self.assertIn("Aggregate Paired Metrics", report)
+            self.assertIn("`accuracy`", report)
+            self.assertNotIn("baseline:seed=0", report)
             audit = app.controller.store.read_json(final.state_refs["report_audit"])
             self.assertEqual(
                 set(audit["metric_audit"]["matched_metrics"]),

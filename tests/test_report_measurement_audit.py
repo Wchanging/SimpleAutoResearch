@@ -178,6 +178,11 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             store.write_text("attempts/implement-1/code_task/patch.diff", patch)
             ref = store.write_json("attempts/implement-1/implementation.json", {
                 "status": "validated", "asset_integrity": {"status": "observed_unchanged"},
+                "method_validation": {
+                    "status": "未检查",
+                    "reason": "No candidate-specific behavior check was recorded.",
+                    "planned_checks": ["Observe the changed behavior on the supplied fixture."],
+                },
                 "artifact_refs": {"patch": {"path": "code_task/patch.diff"}},
             })
             context = ReportContext(
@@ -195,6 +200,7 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             self.assertTrue(evidence["truncated"])
             self.assertEqual(evidence["artifact"], "attempts/implement-1/code_task/patch.diff")
             self.assertNotIn("review", implementation["evidence"])
+            self.assertEqual(implementation["method_validation"]["status"], "未检查")
             # Tool accessibility alone does not prove the agents received it.
             import json
             from simple_ar.report.agent import run_report_agent
@@ -234,6 +240,7 @@ class ReportMeasurementAuditTests(unittest.TestCase):
                 view = received[role]
                 self.assertEqual(view["evidence"]["patch"], evidence)
                 self.assertEqual(view["asset_integrity"], implementation["asset_integrity"])
+                self.assertEqual(view["method_validation"]["status"], "未检查")
             received.clear()
             retry_client = Client()
             retry_client.fail_first_draft = True
@@ -274,6 +281,7 @@ class ReportMeasurementAuditTests(unittest.TestCase):
             )
 
             implementation = context.results["implementation"]
+            self.assertEqual(implementation["method_validation"]["status"], "未检查")
             self.assertEqual(
                 [item["artifact"] for item in implementation["lineage"]],
                 ["attempts/implement-1/implementation.json", "attempts/implement-2/implementation.json"],

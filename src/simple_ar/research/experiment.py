@@ -208,6 +208,9 @@ def run_experiment_capability(
     execution to a failed capability result; it never turns a timeout into a
     successful experiment and never retries implicitly.
     """
+    implementation_refs = [ref for ref in context.inputs if ref.kind == "implementation_result"]
+    if len(implementation_refs) > 1:
+        raise ValueError("An experiment must name at most one producing implementation revision.")
     local_backend = backend is None or isinstance(backend, LocalExecutionBackend)
     if local_backend:
         request = replace(request, run=replace(
@@ -230,6 +233,8 @@ def run_experiment_capability(
         producer="research.experiment",
     )
     canonical = result.to_dict()
+    if implementation_refs:
+        canonical["implementation_ref"] = implementation_refs[0].to_dict()
     preparation_refs = [ref for ref in context.inputs if ref.kind == "prepared_execution"]
     if preparation_refs:
         preparation_ref = preparation_refs[0]

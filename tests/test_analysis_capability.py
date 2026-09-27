@@ -26,15 +26,29 @@ class AnalysisCapabilityTests(unittest.TestCase):
     def test_single_execution_analysis_receives_implementation_lineage(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ArtifactStore(Path(tmp))
-            result_ref = store.write_json(
-                "result.json",
-                {"status": "passed", "metrics": {"accuracy": 0.8}},
-                kind="experiment_result",
-            )
             implementation_ref = store.write_json(
                 "implementation.json",
-                {"status": "validated", "steps": [{"name": "patch", "status": "passed"}]},
+                {
+                    "status": "validated",
+                    "method_validation": {
+                        "status": "未检查",
+                        "reason": "No candidate-specific behavior check was recorded.",
+                    },
+                    "steps": [{"name": "patch", "status": "passed"}],
+                },
                 kind="implementation_result",
+            )
+            stale_ref = store.write_json(
+                "stale-implementation.json", {"status": "incomplete"}, kind="implementation_result",
+            )
+            result_ref = store.write_json(
+                "result.json",
+                {
+                    "status": "passed",
+                    "metrics": {"accuracy": 0.8},
+                    "implementation_ref": implementation_ref.to_dict(),
+                },
+                kind="experiment_result",
             )
             captured = {}
             analysis = AnalysisResult(readme_markdown="ok", status="passed")
@@ -44,7 +58,7 @@ class AnalysisCapabilityTests(unittest.TestCase):
                 return analysis
 
             with patch("simple_ar.research.analysis.analyze_results", side_effect=capture):
-                analyze_experiment_capability(
+                result = analyze_experiment_capability(
                     context=CapabilityContext(
                         store=store,
                         attempt=AttemptManifest(attempt_id="analysis-implementation"),
@@ -52,24 +66,57 @@ class AnalysisCapabilityTests(unittest.TestCase):
                     ),
                     result_ref=result_ref,
                     analysis_context={
-                        "project_results": {"implementation_ref": implementation_ref.to_dict()},
+                        "project_results": {"implementation_ref": stale_ref.to_dict()},
                     },
                 )
 
-            self.assertEqual(
-                captured["context"].project_results["implementation"]["status"],
-                "validated",
+            self.assertEqual(captured["context"].project_results["implementation"]["status"], "validated")
+            self.assertEqual(captured["context"].project_results["implementation"]["artifact_ref"], implementation_ref.to_dict())
+            self.assertNotIn("implementation_ref", captured["context"].project_results)
+            self.assertNotIn("steps", captured["context"].project_results["implementation"])
+            self.assertEqual(captured["context"].metadata["method_validation"]["status"], "未检查")
+            analysis_ref = next(ref for ref in result.artifacts if ref.kind == "analysis_result")
+            analysis_payload = store.read_json(analysis_ref)
+            self.assertTrue(any(
+                "Candidate method validation is 未检查" in item
+                for item in analysis_payload["analysis"]["audit"]["limitations"]
+            ))
+
+    def test_analysis_does_not_substitute_an_unregistered_implementation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ArtifactStore(Path(tmp))
+            implementation_ref = store.write_json(
+                "implementation.json", {"status": "validated"}, kind="implementation_result",
             )
+            result_ref = store.write_json(
+                "result.json",
+                {"status": "passed", "metrics": {"accuracy": 0.8},
+                 "implementation_ref": implementation_ref.to_dict()},
+                kind="experiment_result",
+            )
+            with self.assertRaisesRegex(ValueError, "not a declared analysis input"):
+                analyze_experiment_capability(
+                    context=CapabilityContext(
+                        store=store, attempt=AttemptManifest(attempt_id="analysis-missing-input"),
+                        inputs=(result_ref,),
+                    ),
+                    result_ref=result_ref,
+                    analysis_context={},
+                )
 
     def test_paired_summary_groups_conditions_and_preserves_singleton_uncertainty(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = ArtifactStore(Path(tmp))
+            implementation_ref = store.write_json(
+                "implementation.json", {"status": "validated"}, kind="implementation_result",
+            )
             pairs, inputs = [], []
             for seed, delta, epochs in ((0, 0.1, 1), (1, 0.3, 1), (2, 0.4, 2)):
                 pair = {"seed": seed}
                 for role, value in (("baseline", 0.5), ("candidate", 0.5 + delta)):
                     ref = store.write_json(f"{role}-{seed}.json", {
                         "status": "passed", "metrics": {"accuracy": value},
+                        **({"implementation_ref": implementation_ref.to_dict()} if role == "candidate" else {}),
                         "experiment_contract": {
                             "dataset_refs": [{"asset_id": "fixture"}],
                             "split_spec": {"split": "held-out"},
@@ -80,9 +127,11 @@ class AnalysisCapabilityTests(unittest.TestCase):
                     pair[role] = ref.to_dict()
                     inputs.append(ref)
                 pairs.append(pair)
-            collection = store.write_json("set.json", {"pairs": pairs}, kind="experiment_set")
+            collection = store.write_json("set.json", {
+                "pairs": pairs, "implementation_ref": implementation_ref.to_dict(),
+            }, kind="experiment_set")
             result = analyze_experiment_capability(context=CapabilityContext(store=store,
-                attempt=AttemptManifest(attempt_id="analysis-1"), inputs=(collection, *inputs)),
+                attempt=AttemptManifest(attempt_id="analysis-1"), inputs=(collection, *inputs, implementation_ref)),
                 result_ref=collection, analysis_context={"research_question": "Describe paired outcomes."})
             evidence = store.read_json(next(ref for ref in result.artifacts if ref.kind == "experiment_set_analysis"))
             summaries = evidence["paired_summary"]
@@ -94,6 +143,17 @@ class AnalysisCapabilityTests(unittest.TestCase):
             self.assertEqual(summaries[1]["n"], 1)
             self.assertIsNone(summaries[1]["delta_sample_std"])
             self.assertTrue(any("no significance" in text for text in evidence["limitations"]))
+            self.assertEqual(evidence["implementation_ref"], implementation_ref.to_dict())
+            other_ref = store.write_json("other-implementation.json", {}, kind="implementation_result")
+            mismatched = store.write_json("mismatched-set.json", {
+                "pairs": pairs, "implementation_ref": other_ref.to_dict(),
+            }, kind="experiment_set")
+            with self.assertRaisesRegex(ValueError, "disagrees with its candidate measurement lineage"):
+                analyze_experiment_capability(context=CapabilityContext(
+                    store=store, attempt=AttemptManifest(attempt_id="analysis-mismatched"),
+                    inputs=(mismatched, *inputs, implementation_ref)),
+                    result_ref=mismatched, analysis_context={},
+                )
 
     def test_collection_analysis_preserves_failed_and_missing_pairs_without_zero_fill(self):
         with tempfile.TemporaryDirectory() as tmp:

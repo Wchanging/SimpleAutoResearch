@@ -77,6 +77,21 @@ _PROCESS_RESPONSIBILITIES = {
     "summary": "Persist the requested evidence-backed source summary without creating measurements.",
     "report": "Assemble the requested report from accepted evidence and measurements without creating new evidence.",
 }
+_SEQUENTIAL_PREREQUISITES = {
+    "read": ("document_ingest",),
+    "synthesize": ("read",),
+    "summarize": ("synthesize",),
+    "assess_ideas": ("synthesize",),
+    "research_design": ("synthesize", "assess_ideas"),
+    "prepare_execution": ("research_design",),
+    "baseline": ("research_design",),
+    "experiment": ("research_design",),
+    "analysis": ("experiment",),
+    "matrix_analysis": ("matrix_candidate",),
+    "report_write": ("synthesize",),
+    "report": ("report_write",),
+    "report_audit": ("report",),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +206,8 @@ class TaskPlanResult:
 def build_task_plan(request: TaskPlanRequest, *, trace: list[dict[str, Any]] | None = None) -> TaskPlanResult:
     """Build, validate, and return the plan that the application will consume."""
 
+    if request.task_kind != "bug_fix" and _provided_materials_only(request) and not request.config.get("research_local_documents"):
+        raise ValueError("Provided-materials planning requires supplied local documents before model planning.")
     defaults = default_task_steps(request)
     mode = "deterministic"
     model = ""
@@ -224,7 +241,10 @@ The application will validate and execute the plan.""",
                     {key: value for key, value in row.items() if key not in {"capability", "state_name"}}
                     if isinstance(row, Mapping) else row for row in raw
                 ]
-                steps = _normalize_steps(rows)
+                proposed = _normalize_steps(rows)
+                steps, added = _complete_required_steps(request, proposed)
+                if added:
+                    record["compiler_added_actions"] = list(added)
                 _validate_sequence(request, steps)
             except ValueError as exc:
                 record["validation_error"] = str(exc)
@@ -234,6 +254,11 @@ The application will validate and execute the plan.""",
                 prompt = (_llm_prompt(request, defaults) + "\n\nCorrect this rejected proposal within the same permissions. "
                           "Return the complete steps array.\n" + json.dumps(record, ensure_ascii=False))
             else:
+                if added:
+                    diagnostics.append(
+                        "Plan compiler supplied required actions omitted by the model: "
+                        + ", ".join(added)
+                    )
                 break
         mode = "llm"
         model = str(getattr(client, "model", ""))
@@ -576,6 +601,76 @@ def _normalize_steps(rows: list[Any]) -> tuple[TaskPlanStep, ...]:
     return tuple(steps)
 
 
+def _required_output_actions(request: TaskPlanRequest) -> tuple[str, ...]:
+    """Required deliverables/checkpoints, never inferred from the model's prose."""
+
+    requested = {str(item).strip().lower() for item in request.requested_outputs}
+    if request.task_kind == "bug_fix":
+        return ()
+    actions: list[str] = []
+    if not requested or requested & {"summarize", "summary", "research_summary"}:
+        actions.append("summarize")
+    if requested & {"assessment", "idea_assessment", "idea_comparison"}:
+        actions.append("assess_ideas")
+    needs_execution = bool(requested & {"experiment", "experiments", "code", "code_task"})
+    if requested & {"design", "research_design"} or needs_execution and not request.execution_protocol_accepted:
+        actions.append("research_design")
+    if requested & {"report", "paper", "full_paper"} and not (needs_execution and not request.execution_protocol_accepted):
+        actions.append("report_audit")
+    if not actions and not request.execution_protocol_accepted:
+        actions.append("synthesize")
+    return tuple(actions)
+
+
+def _complete_required_steps(
+    request: TaskPlanRequest, proposed: tuple[TaskPlanStep, ...],
+) -> tuple[tuple[TaskPlanStep, ...], tuple[str, ...]]:
+    """Compile only unambiguous prerequisites; never erase or reorder a proposal.
+
+    This cannot legalize an unauthorized process, change a condition, invent a
+    material source, or repair a model's explicitly reversed ordering. The raw
+    proposal and the inserted actions remain visible in the attempt trace.
+    """
+
+    if request.task_kind == "bug_fix":
+        return proposed, ()
+    steps = list(proposed)
+    explicit = {step.action for step in steps}
+
+    def prerequisite(action: str) -> tuple[str, ...]:
+        if action == "document_ingest":
+            return () if "search" not in explicit and request.config.get("research_local_documents") else ("search",)
+        return _SEQUENTIAL_PREREQUISITES.get(action, ())
+
+    def before(action: str, index: int) -> int:
+        for dependency in prerequisite(action):
+            if dependency in explicit or dependency in {step.action for step in steps}:
+                continue
+            # Only a real supplied document can replace search. An explicitly
+            # materials-only task without one remains invalid, not upgraded to
+            # network access by the compiler.
+            if dependency == "search" and _provided_materials_only(request):
+                continue
+            index = before(dependency, index)
+            steps.insert(index, _normalize_steps([_row(dependency)])[0])
+            index += 1
+        return index
+
+    for action in _required_output_actions(request):
+        if action not in {step.action for step in steps}:
+            downstream = {
+                "assess_ideas": {"research_design", "report_write", "report", "report_audit"},
+                "research_design": {"report_write", "report", "report_audit"},
+            }.get(action, set())
+            index = next((index for index, step in enumerate(steps)
+                          if step.action in downstream), len(steps))
+            steps.insert(index, _normalize_steps([_row(action)])[0])
+    for step in tuple(steps):
+        index = steps.index(step)
+        before(step.action, index)
+    return tuple(steps), tuple(step.action for step in steps if step.action not in explicit)
+
+
 def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]) -> None:
     actions = [step.action for step in steps]
     if any(action.startswith(("refine_implementation:", "prepare_implementation:")) for action in actions):
@@ -607,28 +702,32 @@ def _validate_sequence(request: TaskPlanRequest, steps: tuple[TaskPlanStep, ...]
     requested = {str(item).strip().lower() for item in request.requested_outputs}
     if (not requested or requested & {"summarize", "summary", "research_summary"}) and "summarize" not in actions:
         errors.append("The requested research summary is missing from the accepted plan.")
-    dependencies = {
-        "document_ingest": () if provided_only else ("search",),
-        "read": ("document_ingest",), "synthesize": ("read",),
-        "summarize": ("synthesize",), "assess_ideas": ("synthesize",), "research_design": ("synthesize", "assess_ideas"),
-        "prepare_execution": ("research_design",), "baseline": ("research_design",), "experiment": ("research_design",),
-        "analysis": ("experiment",), "matrix_analysis": ("matrix_candidate",), "report_write": ("synthesize",),
-        "report": ("report_write",), "report_audit": ("report",),
-    }
     for index, step in enumerate(steps):
-        for dependency in dependencies.get(step.action, ()):
+        dependencies = () if step.action == "document_ingest" and provided_only else (
+            ("search",) if step.action == "document_ingest" else _SEQUENTIAL_PREREQUISITES.get(step.action, ())
+        )
+        for dependency in dependencies:
             if not any(_action_matches(item.action, dependency) for item in steps[:index]):
                 errors.append(f"Task plan action {step.action!r} is missing prerequisite {dependency!r}.")
     if errors:
         raise ValueError("\n".join(errors))
-    if requested & {"experiment", "experiments"} and not request.execution_protocol_accepted and "research_design" in actions:
+    if requested & {"experiment", "experiments", "code", "code_task"} and not request.execution_protocol_accepted and "research_design" in actions:
+        if actions[-1] != "research_design" or any(
+            step.action in {"report_write", "report", "report_audit"} for step in steps
+        ):
+            raise ValueError("Pre-design research plans must stop at research_design; execution and delivery are deferred.")
         return
+    if "research_design" in actions and "report_write" in actions and actions.index("report_write") < actions.index("research_design"):
+        raise ValueError("Report writing must follow the requested research design.")
     if requested & {"experiment", "experiments"} and not ("experiment" in actions or any(action.startswith("matrix_candidate") for action in actions)):
         raise ValueError("The requested experiment is missing from the accepted plan.")
-    if requested & {"report", "paper", "full_paper"} and not request.execution_protocol_accepted and "research_design" in actions:
-        return
     if requested & {"report", "paper", "full_paper"} and "report_audit" not in actions:
         raise ValueError("The requested report is missing its assembly/audit steps.")
+    if requested & {"report", "paper", "full_paper"} and any(
+        step.action in {"report_write", "report", "report_audit"} and step.condition
+        for step in steps
+    ):
+        raise ValueError("Requested report steps cannot be conditional.")
 
 
 def _provided_materials_only(request: TaskPlanRequest) -> bool:
@@ -837,7 +936,12 @@ def _llm_prompt(request: TaskPlanRequest, defaults: list[dict[str, Any]]) -> str
         "Do not invent dynamic indices, repair rounds, capabilities, processes, or parallel work. "
         "For provided_materials_only, begin with document_ingest over the supplied assets and do "
         "not add search. With supplied local documents you may omit search when the task calls "
-        "for analysing those materials. Inputs are bound by capability adapters; do not invent "
+        "for analysing those materials. Without supplied local documents, search is required before "
+        "document_ingest, read, and synthesize. research_design requires assess_ideas after synthesis. "
+        "For an experiment before protocol acceptance, stop at research_design; do not include "
+        "execution or delivery yet. Missing required prerequisites are recorded and compiled by "
+        "the application, but unauthorized actions and reversed explicit order are rejected. "
+        "Inputs are bound by capability adapters; do not invent "
         "input fields. Do not use `plan` or `task_plan` as a step: this planning attempt is "
         "already producing the accepted plan.\n\n"
         + json.dumps(boundary, ensure_ascii=False, indent=2, default=str)

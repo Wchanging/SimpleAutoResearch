@@ -78,6 +78,12 @@ def attach_implementation_evidence(
     revisions: list[dict[str, Any]] = []
     for ref in ordered_refs:
         record = store.read_json(ref)
+        method_validation = record.get("method_validation")
+        if not isinstance(method_validation, Mapping):
+            method_validation = {
+                "status": "未检查",
+                "reason": "No candidate-specific behavior criterion and observed result were recorded together.",
+            }
         evidence: dict[str, dict[str, Any]] = {}
         for name in ("patch", "validation", "review"):
             artifact_ref = record.get("artifact_refs", {}).get(name)
@@ -95,6 +101,7 @@ def attach_implementation_evidence(
             "status": record.get("status", "unknown"),
             "failure_ref": record.get("failure_ref"),
             "asset_integrity": record.get("asset_integrity", {}),
+            "method_validation": dict(method_validation),
             "evidence": evidence,
         })
 
@@ -114,11 +121,16 @@ def attach_implementation_evidence(
     context.results = {**context.results, "implementation": {
         "artifact": implementation_ref.path, "status": final["status"],
         "asset_integrity": final["asset_integrity"], "evidence": final_evidence,
+        "method_validation": final["method_validation"],
         "lineage": [
             {
                 "artifact": revision["artifact"],
                 "status": revision["status"],
                 "failure_ref": revision["failure_ref"],
+                "method_validation_status": (
+                    revision["method_validation"].get("status")
+                    if isinstance(revision["method_validation"], Mapping) else None
+                ),
                 "evidence_kinds": sorted(revision["evidence"]),
             }
             for revision in revisions

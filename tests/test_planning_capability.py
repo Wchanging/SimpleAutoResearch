@@ -18,9 +18,45 @@ from simple_ar.research.planning.capability import (
     build_research_plan,
     run_research_plan_capability,
 )
+from simple_ar.research.task_plan import TaskPlanRequest
 
 
 class PlanningCapabilityTests(unittest.TestCase):
+    def test_rejected_task_route_does_not_spend_a_query_planning_call(self) -> None:
+        class Client:
+            model = "fixture-planner"
+
+            def __init__(self) -> None:
+                self.labels: list[str] = []
+
+            def ask_json(self, _system, _prompt, *, label="", **_kwargs):
+                self.labels.append(label)
+                return {"steps": [{"action": "prepare_execution"}]}
+
+        client = Client()
+        task = TaskPlanRequest(
+            task_kind="research", goal="Compare a candidate", request_text="Compare a candidate",
+            requested_outputs=("experiments",),
+            execution={"command": ["python", "measure.py"]},
+            use_llm=True, llm_client=client,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            context = CapabilityContext(
+                store=ArtifactStore(Path(tmp)),
+                attempt=AttemptManifest(attempt_id="plan-invalid", capability="plan"),
+            )
+            with self.assertRaisesRegex(ValueError, "after one correction"):
+                run_research_plan_capability(
+                    context=context,
+                    request=ResearchPlanRequest(
+                        topic="candidate comparison", use_llm=True, llm_client=client,
+                        task_plan_request=task,
+                    ),
+                )
+            self.assertTrue((Path(tmp) / "task_plan_proposals.json").is_file())
+            self.assertFalse((Path(tmp) / "research_plan.json").exists())
+        self.assertEqual(client.labels, ["task-plan", "task-plan"])
+
     def test_caution_in_user_goal_does_not_exclude_the_research_topic(self) -> None:
         result = build_research_plan(ResearchPlanRequest(
             topic="continual learning",

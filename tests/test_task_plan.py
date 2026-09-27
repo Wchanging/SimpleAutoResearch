@@ -296,7 +296,7 @@ class TaskPlanTests(unittest.TestCase):
         build_task_plan(replace(request, config={"research_task_planning_max_output_tokens": 2048}))
         self.assertEqual(client.tokens, 2048)
 
-    def test_invalid_llm_sequence_is_corrected_without_silent_fallback(self) -> None:
+    def test_incomplete_llm_sequence_is_compiled_with_trace(self) -> None:
         request = TaskPlanRequest(
             task_kind="research",
             goal="Compare a supplied classifier.",
@@ -328,14 +328,132 @@ class TaskPlanTests(unittest.TestCase):
                     ]
                 }
 
-        result = build_task_plan(replace(request, use_llm=True, llm_client=Client()))
+        client = Client()
+        trace = []
+        result = build_task_plan(replace(request, use_llm=True, llm_client=client), trace=trace)
 
         self.assertEqual(result.mode, "llm")
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(trace[0]["compiler_added_actions"], ["synthesize"])
         self.assertTrue(result.diagnostics)
         self.assertIn("Use only the supplied benchmark.", result.assumptions)
         actions = [step.action for step in result.steps]
         self.assertLess(actions.index("synthesize"), actions.index("assess_ideas"))
         self.assertLess(actions.index("assess_ideas"), actions.index("research_design"))
+
+    def test_research_plan_compiles_missing_evidence_chain_without_inventing_processes(self) -> None:
+        request = TaskPlanRequest(
+            task_kind="research", goal="Improve a supplied project", request_text="Improve a supplied project",
+            requested_outputs=("experiments", "report"),
+            execution={"command": [sys.executable, "benchmark.py"]},
+        )
+
+        class Client:
+            model = "fixture-incomplete-planner"
+            calls = 0
+
+            def ask_json(self, *_args, **_kwargs):
+                self.calls += 1
+                return {"steps": [{"action": "research_design"}]}
+
+        client = Client()
+        trace = []
+        result = build_task_plan(replace(request, use_llm=True, llm_client=client), trace=trace)
+        actions = [step.action for step in result.steps]
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(actions, [
+            "search", "document_ingest", "read", "synthesize", "assess_ideas", "research_design",
+        ])
+        self.assertEqual(trace[0]["response"]["steps"], [{"action": "research_design"}])
+        self.assertEqual(set(trace[0]["compiler_added_actions"]), set(actions[:-1]))
+        self.assertIn("Plan compiler supplied", result.diagnostics[0])
+        self.assertNotIn("experiment", actions)
+        self.assertNotIn("report", actions)
+
+    def test_compiler_preserves_supplied_materials_boundary_and_rejects_missing_assets(self) -> None:
+        class Client:
+            calls = 0
+
+            def ask_json(self, *_args, **_kwargs):
+                self.calls += 1
+                return {"steps": [{"action": "research_design"}]}
+
+        supplied = TaskPlanRequest(
+            task_kind="research", goal="Use supplied evidence", request_text="Use supplied evidence",
+            requested_outputs=("experiments",),
+            config={"research_materials_only": True, "research_local_documents": ["note.md"]},
+            execution={"command": [sys.executable, "benchmark.py"]},
+        )
+        result = build_task_plan(replace(supplied, use_llm=True, llm_client=Client()))
+        self.assertEqual(result.steps[0].action, "document_ingest")
+        self.assertNotIn("search", [step.action for step in result.steps])
+
+        missing = replace(supplied, config={"research_materials_only": True})
+        client = Client()
+        with self.assertRaisesRegex(ValueError, "requires supplied local documents"):
+            build_task_plan(replace(missing, use_llm=True, llm_client=client))
+        self.assertEqual(client.calls, 0)
+
+    def test_compiler_does_not_reorder_explicit_steps_or_deliver_before_design(self) -> None:
+        request = TaskPlanRequest(
+            task_kind="research", goal="Measure a method", request_text="Measure a method",
+            requested_outputs=("experiments", "report"),
+            execution={"command": [sys.executable, "benchmark.py"]},
+        )
+
+        class Client:
+            def __init__(self, steps):
+                self.steps = steps
+
+            def ask_json(self, *_args, **_kwargs):
+                return {"steps": self.steps}
+
+        reversed_steps = [
+            {"action": "research_design"}, {"action": "search"},
+            {"action": "document_ingest"}, {"action": "read"},
+            {"action": "synthesize"}, {"action": "assess_ideas"},
+        ]
+        with self.assertRaisesRegex(ValueError, "missing prerequisite"):
+            build_task_plan(replace(request, use_llm=True, llm_client=Client(reversed_steps)))
+
+        early_delivery = [
+            {"action": "search"}, {"action": "document_ingest"}, {"action": "read"},
+            {"action": "synthesize"}, {"action": "assess_ideas"},
+            {"action": "report_write"}, {"action": "report"}, {"action": "report_audit"},
+            {"action": "research_design"},
+        ]
+        with self.assertRaisesRegex(ValueError, "Pre-design research plans must stop"):
+            build_task_plan(replace(request, use_llm=True, llm_client=Client(early_delivery)))
+
+    def test_requested_report_cannot_be_demoted_to_conditional_delivery(self) -> None:
+        request = TaskPlanRequest(
+            task_kind="survey", goal="Write a report", request_text="Write a report",
+            requested_outputs=("report",),
+        )
+
+        class Client:
+            def ask_json(self, *_args, **_kwargs):
+                return {"steps": [
+                    {"action": "report_audit", "condition": "on_request:report"},
+                ]}
+
+        with self.assertRaisesRegex(ValueError, "Requested report steps cannot be conditional"):
+            build_task_plan(replace(request, use_llm=True, llm_client=Client()))
+
+        design_and_report = replace(
+            request, task_kind="research", requested_outputs=("research_design", "report"),
+        )
+        with self.assertRaisesRegex(ValueError, "Requested report steps cannot be conditional"):
+            build_task_plan(replace(design_and_report, use_llm=True, llm_client=Client()))
+
+        class AuditOnly:
+            def ask_json(self, *_args, **_kwargs):
+                return {"steps": [{"action": "report_audit"}]}
+
+        compiled = build_task_plan(replace(design_and_report, use_llm=True, llm_client=AuditOnly()))
+        actions = [step.action for step in compiled.steps]
+        self.assertLess(actions.index("research_design"), actions.index("report_write"))
+        self.assertEqual(actions[-1], "report_audit")
 
     def test_pre_design_process_proposals_report_all_deferred_boundary_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -220,6 +220,24 @@ def run_research_plan_capability(
     artifacts = []
     usage: dict[str, Any] = {}
     result: ResearchPlanResult | None = None
+    task_plan = None
+    proposal_ref = None
+    if request.task_plan_request is not None:
+        # Reject an impossible task route before paying for query generation.
+        # The two plans are independent inputs; neither needs the other's
+        # output, and only a fully accepted attempt is dispatched.
+        task_request = request.task_plan_request
+        if task_request.use_llm and task_request.llm_client is None:
+            task_request = replace(task_request, llm_client=request.llm_client)
+        trace = []
+        try:
+            task_plan = build_task_plan(task_request, trace=trace)
+        finally:
+            if trace:
+                proposal_ref = context.store.write_json(
+                    "task_plan_proposals.json", {"proposals": trace},
+                    kind="task_plan_proposals", producer="research.task_planning",
+                )
     if not request.task_plan_only:
         result = build_requested_research_plan(request)
         output = context.store.write_json(
@@ -235,19 +253,9 @@ def run_research_plan_capability(
             "query_count": len(result.query_plan.queries),
             "source_count": len(result.source_plan.sources),
         })
-    if request.task_plan_request is not None:
-        task_request = request.task_plan_request
-        if task_request.use_llm and task_request.llm_client is None:
-            task_request = replace(task_request, llm_client=request.llm_client)
-        trace = []
-        try:
-            task_plan = build_task_plan(task_request, trace=trace)
-        finally:
-            if trace:
-                artifacts.append(context.store.write_json(
-                    "task_plan_proposals.json", {"proposals": trace},
-                    kind="task_plan_proposals", producer="research.task_planning",
-                ))
+    if proposal_ref is not None:
+        artifacts.append(proposal_ref)
+    if task_plan is not None:
         artifacts.append(context.store.write_json(
             "task_plan.json",
             task_plan.to_handoff_dict(),

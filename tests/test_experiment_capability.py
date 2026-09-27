@@ -81,6 +81,41 @@ class ExperimentCapabilityTests(unittest.TestCase):
             canonical = store.read_json(next(ref for ref in result.artifacts if ref.kind == "experiment_result"))
             self.assertEqual(canonical["artifacts"]["outputs"], output.path)
 
+    def test_measurement_records_its_declared_implementation_before_persisting(self):
+        from simple_ar.core.capabilities import ArtifactStore, AttemptManifest, CapabilityContext
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ArtifactStore(root / "attempt")
+            implementation = store.write_json(
+                "inputs/implementation.json", {"status": "validated"},
+                kind="implementation_result",
+            )
+            request = ExperimentRequest(run=RunRequest(
+                [sys.executable, "-c", "print('accuracy: 0.5')"], root, 5,
+            ))
+            context = CapabilityContext(
+                store=store,
+                attempt=AttemptManifest(attempt_id="candidate-1"),
+                inputs=(implementation,),
+            )
+            result = run_experiment_capability(context=context, request=request)
+            canonical = store.read_json(next(ref for ref in result.artifacts if ref.kind == "experiment_result"))
+            self.assertEqual(canonical["implementation_ref"], implementation.to_dict())
+
+            other = store.write_json(
+                "inputs/other-implementation.json", {"status": "validated"},
+                kind="implementation_result",
+            )
+            with self.assertRaisesRegex(ValueError, "at most one producing implementation"):
+                run_experiment_capability(
+                    context=CapabilityContext(
+                        store=store, attempt=AttemptManifest(attempt_id="candidate-2"),
+                        inputs=(implementation, other),
+                    ),
+                    request=request,
+                )
+
     def test_protected_file_changes_invalidate_measurement_without_losing_process_result(self):
         from simple_ar.experiment.execution.guards import evaluate_result_guard
         with tempfile.TemporaryDirectory() as tmp:
