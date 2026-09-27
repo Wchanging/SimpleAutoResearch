@@ -613,6 +613,26 @@ class TaskPlanTests(unittest.TestCase):
             "after_success:implementation_r1",
         )
 
+    def test_followup_persists_design_gate_and_multiple_supplement_pairs(self) -> None:
+        plan = TaskPlanResult(
+            status="accepted", mode="deterministic", task_kind="research",
+            goal="Bounded continuation.",
+            steps=(TaskPlanStep(
+                step_id="design", action="research_design", capability="research_design",
+                state_name="design", problem_solved="", observation="",
+            ),),
+        )
+        revised = append_research_followup(plan, 1, action="revise_candidate", revision_base="baseline")
+        self.assertEqual(revised.steps[1].action, "research_design_revision:1")
+        self.assertEqual(revised.steps[2].condition, "after_success:design_revision_1")
+        supplemented = append_research_followup(plan, 2, supplement_count=2)
+        actions = [step.action for step in supplemented.steps]
+        self.assertEqual(actions[1:5], [
+            "supplement_baseline:2_0", "supplement_baseline:2_1",
+            "supplement_candidate:2_0", "supplement_candidate:2_1",
+        ])
+        self.assertEqual(actions[-1], "reanalysis:2")
+
 
 if __name__ == "__main__":
     unittest.main()

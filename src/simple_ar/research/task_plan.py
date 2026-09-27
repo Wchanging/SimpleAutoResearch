@@ -55,6 +55,7 @@ _STEP_TEXT = {
     "supplement_baseline": ("Measure the unchanged baseline for an evidence-driven supplement.", "Supplement baseline measurement and diagnostics."),
     "supplement_candidate": ("Measure the current candidate under the newly accepted condition.", "Supplement candidate measurement and diagnostics."),
     "reanalysis": ("Re-analyze the supplement together with its explicit paired evidence.", "Updated analysis, decision basis, and limitations."),
+    "research_design_revision": ("Re-evaluate a rejected candidate using the supplied research alternatives and observed evidence.", "Revised research design contract or an explicit unresolved design limitation."),
     "prepare_candidate": ("Create a fresh isolated workspace from the recorded original project for a candidate revision.", "Revision workspace lineage and copy report."),
     "revise_candidate": ("Apply and validate the analysis-directed candidate revision in the isolated workspace.", "Candidate revision patch, validation, and lineage."),
     "research_candidate": ("Measure the analysis-directed candidate revision under the accepted comparison condition.", "Candidate revision measurement and diagnostics."),
@@ -63,8 +64,8 @@ _STEP_TEXT = {
 }
 _ACTION_RE = re.compile(
     r"^(?:repair:\d+|retest:\d+|matrix_repair_\d+|matrix_baseline_\d+|"
-    r"matrix_candidate(?:_r\d+)?_\d+|supplement_baseline:\d+|"
-    r"supplement_candidate:\d+|reanalysis:\d+|prepare_candidate:\d+|"
+    r"matrix_candidate(?:_r\d+)?_\d+|supplement_baseline:\d+(?:_\d+)?|"
+    r"supplement_candidate:\d+(?:_\d+)?|reanalysis:\d+|research_design_revision:\d+|prepare_candidate:\d+|"
     r"revise_candidate:\d+|research_candidate:\d+(?:_\d+)?|refine_implementation:\d+|prepare_implementation:\d+)$"
 )
 _PROCESS_CAPABILITIES = {"prepare_execution", "implement", "experiment"}
@@ -315,6 +316,8 @@ def append_research_followup(
     *,
     action: str = "supplement",
     pair_count: int = 0,
+    supplement_count: int = 1,
+    revision_base: str = "candidate",
 ) -> TaskPlanResult:
     """Extend one accepted plan with one analysis-authorized research action.
 
@@ -329,22 +332,40 @@ def append_research_followup(
         raise ValueError("Research follow-up action must be supplement or revise_candidate.")
     if type(pair_count) is not int or pair_count < 0:
         raise ValueError("Research follow-up pair_count must be a non-negative integer.")
+    if type(supplement_count) is not int or supplement_count < 1:
+        raise ValueError("Research supplement count must be a positive integer.")
+    if revision_base not in {"candidate", "baseline"}:
+        raise ValueError("Research revision_base must be candidate or baseline.")
     marker = f"reanalysis:{iteration}"
     if any(step.action == marker for step in plan.steps):
         return plan
     rows = [step.to_dict() for step in plan.steps]
     if action == "supplement":
-        followup_rows = (
-            _row(f"supplement_baseline:{iteration}", condition="on_decision:supplement"),
-            _row(
-                f"supplement_candidate:{iteration}",
-                condition=f"after_success:baseline_supplement_{iteration}",
-            ),
-            _row(
-                marker,
-                condition=f"after_success:experiment_supplement_{iteration}",
-            ),
+        baseline_actions = tuple(
+            f"supplement_baseline:{iteration}"
+            if supplement_count == 1 else f"supplement_baseline:{iteration}_{index}"
+            for index in range(supplement_count)
         )
+        candidate_actions = tuple(
+            f"supplement_candidate:{iteration}"
+            if supplement_count == 1 else f"supplement_candidate:{iteration}_{index}"
+            for index in range(supplement_count)
+        )
+        supplement_rows: list[dict[str, Any]] = []
+        previous = ""
+        for baseline_action in baseline_actions:
+            state = _state_name(baseline_action)
+            supplement_rows.append(_row(
+                baseline_action,
+                condition="on_decision:supplement" if not previous else f"after_success:{previous}",
+            ))
+            previous = state
+        for candidate_action in candidate_actions:
+            state = _state_name(candidate_action)
+            supplement_rows.append(_row(candidate_action, condition=f"after_success:{previous}"))
+            previous = state
+        supplement_rows.append(_row(marker, condition=f"after_success:{previous}"))
+        followup_rows = tuple(supplement_rows)
         message = f"Accepted one analysis-directed supplement round {iteration}."
     else:
         preparation = f"prepare_candidate:{iteration}"
@@ -358,8 +379,18 @@ def append_research_followup(
         for candidate_action in candidate_actions:
             candidate_rows.append(_row(candidate_action, condition=f"after_success:{previous}"))
             previous = _state_name(candidate_action)
+        design_revision = f"research_design_revision:{iteration}"
+        prefix_rows = (
+            (_row(design_revision, condition="on_decision:revise_candidate"),)
+            if revision_base == "baseline" else ()
+        )
+        preparation_condition = (
+            f"after_success:{_state_name(design_revision)}"
+            if revision_base == "baseline" else "on_decision:revise_candidate"
+        )
         followup_rows = (
-            _row(preparation, condition="on_decision:revise_candidate"),
+            *prefix_rows,
+            _row(preparation, condition=preparation_condition),
             _row(revision, condition=f"after_success:{_state_name(preparation)}"),
             *candidate_rows,
             _row(marker, condition=f"after_success:{previous}"),
@@ -677,6 +708,8 @@ def _capability(action: str) -> str:
         return "prepare_execution"
     if action.startswith("refine_implementation:"):
         return "research_design"
+    if action.startswith("research_design_revision:"):
+        return "research_design"
     if action.startswith("revise_candidate:"):
         return "implement"
     if action.startswith("research_candidate:"):
@@ -708,6 +741,8 @@ def _state_name(action: str) -> str:
         return f"baseline_supplement_{action.split(':', 1)[1]}"
     if action.startswith("supplement_candidate:"):
         return f"experiment_supplement_{action.split(':', 1)[1]}"
+    if action.startswith("research_design_revision:"):
+        return f"design_revision_{action.split(':', 1)[1]}"
     if action.startswith("prepare_candidate:"):
         return f"preparation_r{action.split(':', 1)[1]}"
     if action.startswith("revise_candidate:"):

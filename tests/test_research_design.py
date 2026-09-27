@@ -79,6 +79,29 @@ class ResearchDesignTests(unittest.TestCase):
         self.assertEqual(build_research_design(replace(request,
             synthesis=replace(synthesis, ideas=(different_data,)))).status, "blocked")
 
+    def test_measured_revision_cannot_reselect_a_tried_or_evidence_blocked_idea(self):
+        from unittest.mock import Mock
+
+        synthesis = self._synthesis()
+        original = build_research_design(ResearchDesignRequest(synthesis=synthesis))
+        alternate = replace(original.selected_idea, idea_id="alternate", title="Distinct candidate")
+        synthesis = replace(synthesis, ideas=(*synthesis.ideas, alternate))
+        client = Mock()
+        client.ask_json.return_value = {"status": "ready", "implementation_spec": "Implement the selected idea.",
+            "unresolved_questions": [], "selected_idea_id": "alternate", "selection_rationale": "Test a distinct direction."}
+        feedback = {"kind": "research_revision", "candidate_options": [
+            {"idea_id": original.selected_idea.idea_id, "selected": True, "tried": True, "assessment_status": "ready"},
+            {"idea_id": "alternate", "selected": False, "tried": False, "assessment_status": "ready"},
+        ]}
+        request = ResearchDesignRequest(synthesis=synthesis, previous_design=original.to_handoff_dict(),
+            implementation_feedback=feedback, use_llm=True, llm_client=client)
+        self.assertEqual(build_research_design(request).selected_idea.idea_id, "alternate")
+        client.ask_json.return_value["selected_idea_id"] = original.selected_idea.idea_id
+        self.assertEqual(build_research_design(request).status, "blocked")
+        client.ask_json.return_value["selected_idea_id"] = "alternate"
+        feedback["candidate_options"][1]["assessment_status"] = "needs_evidence"
+        self.assertEqual(build_research_design(replace(request, implementation_feedback=feedback)).status, "blocked")
+
     def test_implementation_refinement_preserves_contract_and_surfaces_missing_evidence(self):
         from unittest.mock import Mock
         original = build_research_design(ResearchDesignRequest(synthesis=self._synthesis()))

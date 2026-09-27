@@ -404,9 +404,15 @@ class ResearchApplicationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             app = create_session(ResearchBrief(request_text="Compare candidates."), root=Path(tmp))
-            original = app.controller.store.write_json("original.json", {"execution": {"cwd": "original"}},
+            original_workspace = Path(tmp) / "original"
+            revised_workspace = Path(tmp) / "revised"
+            original_workspace.mkdir()
+            revised_workspace.mkdir()
+            original = app.controller.store.write_json("original.json", {"workspace": str(original_workspace), "execution": {
+                "cwd": str(original_workspace), "code_task": {"code_root": str(original_workspace)}}},
                 kind="prepared_execution", schema="prepared_execution.v1", producer="test")
-            revised = app.controller.store.write_json("revised.json", {"execution": {"cwd": "revised"}},
+            revised = app.controller.store.write_json("revised.json", {"workspace": str(revised_workspace), "execution": {
+                "cwd": str(revised_workspace), "code_task": {"code_root": str(revised_workspace)}}},
                 kind="prepared_execution", schema="prepared_execution.v1", producer="test")
             app.controller.manifest.state_refs["preparation"] = original
             with patch.object(app.controller, "attempt_output_ref", return_value=revised):
@@ -424,11 +430,61 @@ class ResearchApplicationTests(unittest.TestCase):
                 schema="research_task_plan.v1", producer="test",
             )
             with patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="completed")):
-                self.assertEqual(app._effective_config()["execution"]["cwd"], "revised")
+                self.assertEqual(app._effective_config()["execution"]["cwd"], str(revised_workspace))
+                supplement, reason = app._code_task_supplement_candidate_config({
+                    "cwd": str(original_workspace), "code_task": {"code_root": str(original_workspace)},
+                })
+                self.assertEqual(reason, "")
+                self.assertEqual(supplement["cwd"], str(revised_workspace))
+                self.assertEqual(supplement["code_task"]["code_root"], str(revised_workspace))
             with patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="completed")):
                 self.assertTrue(app._state_succeeded("preparation_r1"))
             with patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="failed")):
                 self.assertFalse(app._state_succeeded("preparation_r1"))
+
+            index_path = Path(tmp) / "code_task_run" / "code_task" / "meta" / "codebase_index.json"
+            index_path.parent.mkdir(parents=True)
+            index_path.write_text(json.dumps({"files": [{"path": "learner.py"}]}), encoding="utf-8")
+            implementation = app.controller.store.write_json("implementation.json", {
+                "code_task_run_dir": str(index_path.parents[2]),
+            }, kind="implementation_result", schema="research_implementation.v1", producer="test")
+            design = app.controller.store.write_json("design.json", {"selected_idea": {"idea_id": "old"}},
+                kind="research_design", schema="research_design.v1", producer="test")
+            decision = app.controller.store.write_json("decision.json", {"decision_reason": "Try another direction."},
+                kind="research_decision", schema="research_decision.v1", producer="test")
+            app.controller.manifest.state_refs.update({"design": design, "decision": decision,
+                "implementation_r1": implementation})
+            for name in ("synthesis", "assessment"):
+                app.controller.manifest.state_refs[name] = app.controller.store.write_json(
+                    f"{name}.json", {}, kind=name, schema=f"{name}.v1", producer="test")
+            revised_plan = replace(plan, steps=(*plan.steps,
+                TaskPlanStep("revision-implementation", "revise_candidate:1", "implement", "implementation_r1", "Implement", "Validate."),
+            ))
+            app.controller.manifest.state_refs["task_plan"] = app.controller.store.write_json(
+                "planning/task_plan-revised.json", revised_plan.to_handoff_dict(), kind="task_plan",
+                schema="research_task_plan.v1", producer="test",
+            )
+            app.services = replace(app.services, llm_client=object())
+            with (patch.object(app, "_attempt_for_ref", return_value=SimpleNamespace(status="completed")),
+                  patch.object(app, "_step_completed", return_value=True),
+                  patch.object(app, "_analysis_candidate_options", return_value=[]),
+                  patch.object(app, "_research_history", return_value=[]),
+                  patch.object(app, "_load_synthesis", return_value=SimpleNamespace(ideas=())),
+                  patch.object(app, "_execute", return_value=True) as execute):
+                self.assertTrue(app._run_action("research_design_revision:2"))
+            request = execute.call_args.args[2]
+            self.assertEqual(request.source_workspace, revised_workspace)
+            self.assertEqual(request.source_index["files"][0]["path"], "learner.py")
+            self.assertIn(implementation, execute.call_args.args[3])
+            self.assertIn(revised, execute.call_args.args[3])
+            measured = app.controller.store.write_json("revision-result.json", {"status": "passed"},
+                kind="experiment_result", schema="experiment_result.v1", producer="test")
+            app.controller.manifest.state_refs["experiment_revision_1"] = measured
+            with patch.object(app, "_step_completed", return_value=True):
+                collection_ref = app._write_supplement_collection(2, {"seed": 5}, [(measured, measured)])
+            collection = app.controller.store.read_json(collection_ref)
+            self.assertEqual(collection["candidate_revision"], 1)
+            self.assertEqual(collection["implementation_ref"], implementation.to_dict())
 
     def test_real_code_task_modification_is_measured_by_application_once(self):
         self._exercise_code_task_lifecycle()
@@ -454,7 +510,10 @@ class ResearchApplicationTests(unittest.TestCase):
                 revise = self.analysis_count == 1
                 return json.dumps({"recommendation": {
                     "action": "revise_candidate" if revise else "stop",
+                    "task_disposition": "continue" if revise else "stop",
                     "reason": "Test a distinct candidate once." if revise else "The bounded comparison is complete.",
+                    "alternatives_considered": [] if revise else ["No additional supplied candidate is justified by this fixture."],
+                    "continuation_conditions": [] if revise else ["A new evidence-backed candidate would require an explicit revised task."],
                     "revision_intent": "Add lottery keyword support." if revise else "Report the measured comparison.",
                     "revision_constraints": ["Preserve the evaluator and existing API."],
                 }})
@@ -1182,7 +1241,7 @@ class ResearchApplicationTests(unittest.TestCase):
                         "research_max_iterations": 1,
                         "execution": execution,
                     },
-                    budget_limits={"process_invocations": 6, "process_wall_seconds": 60},
+                    budget_limits={"process_invocations": 8, "process_wall_seconds": 80},
                 ),
             )
             analysis_calls = []
@@ -1193,12 +1252,12 @@ class ResearchApplicationTests(unittest.TestCase):
                 if len(analysis_calls) == 1:
                     recommendation = AnalysisRecommendation(
                         action="supplement",
-                        reason="The first comparison needs one additional seed to check the observed directional gap.",
+                        reason="The first comparison needs two additional seeds to check the observed directional gap.",
                         evidence_refs=["paired_summary:accuracy"],
                         supplement={
-                            "seed": 2,
+                            "seeds": [2, 3],
                             "gap": "single-seed directional evidence",
-                            "conditions": "same evaluator and split under seed 2",
+                            "conditions": "same evaluator and split under seeds 2 and 3",
                             "metric": "accuracy",
                         },
                     )
@@ -1246,14 +1305,18 @@ class ResearchApplicationTests(unittest.TestCase):
             )
             self.assertIn("prior_decision_ref", decision)
             plan = app.controller.store.read_json(final.state_refs["task_plan"])
-            self.assertIn("supplement_baseline:1", [row["action"] for row in plan["steps"]])
+            self.assertIn("supplement_baseline:1_0", [row["action"] for row in plan["steps"]])
+            self.assertIn("supplement_baseline:1_1", [row["action"] for row in plan["steps"]])
             self.assertEqual(
                 (root / "calls.txt").read_text(encoding="utf-8").splitlines(),
-                ["baseline:0", "baseline:1", "candidate:0", "candidate:1", "baseline:2", "candidate:2"],
+                [
+                    "baseline:0", "baseline:1", "candidate:0", "candidate:1",
+                    "baseline:2", "baseline:3", "candidate:2", "candidate:3",
+                ],
             )
             history = app._research_history()
             supplement_history = next(
-                row for row in history if row["action"] == "baseline_supplement_1"
+                row for row in history if row["action"] == "baseline_supplement_1_0"
             )
             self.assertTrue(supplement_history.get("outputs"))
             blocked, reason = app._supplement_execution_config(
@@ -1271,7 +1334,10 @@ class ResearchApplicationTests(unittest.TestCase):
             self.assertEqual(len(resumed.attempts), attempts)
             self.assertEqual(
                 (root / "calls.txt").read_text(encoding="utf-8").splitlines(),
-                ["baseline:0", "baseline:1", "candidate:0", "candidate:1", "baseline:2", "candidate:2"],
+                [
+                    "baseline:0", "baseline:1", "candidate:0", "candidate:1",
+                    "baseline:2", "baseline:3", "candidate:2", "candidate:3",
+                ],
             )
 
     def test_same_condition_baseline_can_be_reused_after_plan_revision(self):

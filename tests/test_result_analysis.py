@@ -66,6 +66,36 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(client.ask.call_count, 2)
         self.assertIn("explicit integer seed", client.ask.call_args.args[1])
 
+    def test_missing_or_unknown_recommendation_is_undecided(self) -> None:
+        from simple_ar.result_analysis.schema import AnalysisRecommendation
+        from simple_ar.result_analysis.service import parse_recommendation
+
+        fallback = AnalysisRecommendation(action="request_input", reason="offline")
+        missing = parse_recommendation(None, fallback=fallback)
+        unknown = parse_recommendation({"action": "invented"}, fallback=fallback)
+        self.assertEqual(missing.action, "request_input")
+        self.assertEqual(unknown.action, "request_input")
+        self.assertEqual(missing.task_disposition, "undecided")
+        self.assertIn("no scientific stop was inferred", missing.reason.lower())
+
+    def test_research_stop_without_task_level_basis_is_repaired_once(self) -> None:
+        import json
+        from unittest.mock import Mock
+
+        context = AnalysisContext(task_id="negative-result", metrics={"accuracy": 0.4},
+            metadata={"research_goal": "Improve accuracy", "remaining_authorized_rounds": 1})
+        client = Mock()
+        client.ask.side_effect = [
+            json.dumps({"recommendation": {"action": "stop", "reason": "The current candidate failed."}}),
+            json.dumps({"recommendation": {"action": "stop", "task_disposition": "stop",
+                "reason": "The current candidate failed and no supported alternative remains.",
+                "alternatives_considered": ["The only other supplied candidate lacks the required dataset."]}}),
+        ]
+        result = run_result_analysis(context, client=client, use_llm=True)
+        self.assertEqual(client.ask.call_count, 2)
+        self.assertEqual(result.recommendation.task_disposition, "stop")
+        self.assertIn("task-level stop", client.ask.call_args.args[1])
+
     def test_fixed_command_cannot_turn_a_seed_suggestion_into_execution(self) -> None:
         from unittest.mock import Mock
 
@@ -84,6 +114,7 @@ class ResultAnalysisTests(unittest.TestCase):
             "analysis_audit": {},
             "recommendation": {
                 "action": "revise_candidate",
+                "task_disposition": "continue",
                 "reason": "The measured candidate leaves a documented objective gap.",
                 "evidence_refs": ["attempts/experiment-0010/results.json", "attempts/experiment-0012/results.json"],
                 "revision_intent": "Test one distinct candidate direction against the observed results.",

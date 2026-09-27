@@ -282,6 +282,12 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         "Explain interfaces/shapes, state lifecycle, exact objective/pseudocode and validation in implementation_spec. "
         "If source lookup fails, literature is insufficient, or authority is missing, return status=blocked "
         "with exact unresolved_questions, not a speculative implementation. "
+        "When feedback.kind is research_revision, treat the supplied measured negative result as a "
+        "candidate-level rejection rather than a task stop: inspect candidate_options and select one "
+        "previously untried, protocol-compatible idea only when its evidence and constraints support it. "
+        "Return selected_idea_id and selection_rationale for that direction change; do not turn an "
+        "untried idea into a measured claim. If no supplied alternative is defensible, return blocked "
+        "with the exact missing evidence instead of inventing a new method. "
         "Return JSON {status: ready|blocked|inspect_source, implementation_spec:string, "
         "unresolved_questions:[string], context_request?:object, selected_idea_id?:string, selection_rationale?:string}. "
         "Ready requires all questions resolved. This is design only, never permission to execute commands.\n\n"
@@ -327,6 +333,18 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
     if response["status"] == "blocked" and not diagnostics:
         diagnostics = ("Design evidence remains insufficient.",)
     selected_id = response.get("selected_idea_id")
+    if response["status"] == "ready" and request.implementation_feedback.get("kind") == "research_revision":
+        options = request.implementation_feedback.get("candidate_options", [])
+        available = {
+            row.get("idea_id"): row for row in options
+            if isinstance(row, Mapping) and isinstance(row.get("idea_id"), str)
+        } if isinstance(options, list) else {}
+        selected_option = available.get(selected_id)
+        if (not isinstance(selected_option, Mapping) or selected_option.get("tried")
+                or selected_option.get("selected")
+                or selected_option.get("assessment_status") in {"blocked", "needs_evidence"}):
+            return replace(previous, status="blocked", generation_mode="llm", diagnostics=(
+                "Research revision needs a supplied, untried candidate with sufficient evidence under the accepted protocol.",))
     if response["status"] == "ready" and selected_id and (
         previous.selected_idea is None or selected_id != previous.selected_idea.idea_id
     ):

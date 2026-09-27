@@ -11,6 +11,7 @@ Confidence = Literal["high", "medium", "low"]
 AnalysisStatus = Literal["passed", "failed", "incomplete", "blocked", "metric_below_target"]
 RecommendationAction = Literal["supplement", "revise_candidate", "stop", "request_input"]
 RevisionBase = Literal["candidate", "baseline"]
+TaskDisposition = Literal["continue", "stop", "undecided"]
 
 
 class _Model(BaseModel):
@@ -48,9 +49,12 @@ class AnalysisAudit(_Model):
 class AnalysisRecommendation(_Model):
     """A bounded scientific next-step proposal grounded in this analysis."""
 
-    action: RecommendationAction = "stop"
+    action: RecommendationAction = "request_input"
+    task_disposition: TaskDisposition = "undecided"
     reason: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
+    alternatives_considered: list[str] = Field(default_factory=list)
+    continuation_conditions: list[str] = Field(default_factory=list)
     revision_intent: str = ""
     revision_constraints: list[str] = Field(default_factory=list)
     revision_base: RevisionBase = "candidate"

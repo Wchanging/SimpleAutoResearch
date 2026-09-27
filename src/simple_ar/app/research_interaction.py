@@ -84,7 +84,7 @@ def apply_decision_response(
             cycle = dict(cycle) if isinstance(cycle, Mapping) else {}
             cycle.update({
                 "automatic_follow_up": True,
-                "next_step": (
+                "next_step": cycle.get("next_step") or (
                     f"supplement_baseline:{iteration}" if proposed == "supplement"
                     else f"prepare_candidate:{iteration}"
                 ),

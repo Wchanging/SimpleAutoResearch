@@ -98,14 +98,45 @@ def run_result_analysis(
 
 def _recommendation_error(response: Mapping[str, Any], context: AnalysisContext) -> str:
     recommendation = response.get("recommendation")
+    if context.metadata.get("research_goal"):
+        if not isinstance(recommendation, Mapping):
+            return "Provide a structured research recommendation or explicitly request_input; do not infer stop from a missing recommendation."
+        action = str(recommendation.get("action") or "").strip().lower().replace("-", "_")
+        action = {"revise": "revise_candidate", "revision": "revise_candidate"}.get(action, action)
+        disposition = str(recommendation.get("task_disposition") or "").strip().lower()
+        if action not in {"supplement", "revise_candidate", "stop", "request_input"}:
+            return "Choose a supported recommendation action: supplement, revise_candidate, stop, or request_input."
+        if action in {"supplement", "revise_candidate"} and disposition != "continue":
+            return "A bounded research follow-up must declare task_disposition=continue."
+        if action == "request_input" and disposition != "undecided":
+            return "A request for missing input must declare task_disposition=undecided."
+        if action == "stop":
+            if disposition != "stop" or not str(recommendation.get("reason") or "").strip():
+                return "A task-level stop needs task_disposition=stop and a concrete reason; rejecting one candidate is not enough."
+            if (context.metadata.get("remaining_authorized_rounds", 0) > 0
+                    and not normalize_string_list(recommendation.get("alternatives_considered"))
+                    and not normalize_string_list(recommendation.get("continuation_conditions"))):
+                return "With research rounds remaining, explain the alternatives considered or the conditions needed to continue before stopping the task."
     if not isinstance(recommendation, Mapping) or recommendation.get("action") != "supplement":
         return ""
     protocol = context.metadata.get("execution_protocol", {})
     if protocol.get("can_extend_seed_condition") is False:
         return "This fixed-command task cannot extend seeds. Choose a supported revision, stop, or request_input; do not invent a seed flag."
     supplement = recommendation.get("supplement")
-    if not isinstance(supplement, Mapping) or type(supplement.get("seed")) is not int:
-        return "supplement must be a JSON object with an explicit integer seed and evidence gap, not prose or an empty object."
+    if not isinstance(supplement, Mapping):
+        return "supplement must be a JSON object with one or more explicit integer seeds and an evidence gap, not prose or an empty object."
+    seed = supplement.get("seed")
+    seeds = supplement.get("seeds")
+    valid_single = type(seed) is int and seeds is None
+    valid_many = (
+        isinstance(seeds, list)
+        and bool(seeds)
+        and all(type(value) is int for value in seeds)
+        and len(set(seeds)) == len(seeds)
+        and seed is None
+    )
+    if not (valid_single or valid_many):
+        return "supplement must provide either one integer seed or a non-empty unique integer seeds list, plus an evidence gap."
     return ""
 
 
@@ -161,7 +192,8 @@ def deterministic_recommendation(context: AnalysisContext) -> AnalysisRecommenda
     refs = context.metadata.get("evidence_refs", [])
     evidence_refs = normalize_string_list(refs)[:12]
     return AnalysisRecommendation(
-        action="stop",
+        action="request_input",
+        task_disposition="undecided",
         reason=(
             "Deterministic result analysis does not choose a scientific follow-up; "
             "a model or explicit user decision must propose the next bounded action."
@@ -508,7 +540,7 @@ def build_prompt(
         "- rubric_coverage: list of objects with category, verdict, evidence, limitations. Use categories from rubric_categories.\n"
         "- claims: list of claim objects. Each needs claim_id, claim, verdict, evidence, metric_refs, limitations, confidence.\n"
         "- analysis_audit: object with missing_required_metrics, weak_metric_signals, unsupported_claims, limitations, notes.\n"
-        "- recommendation: object with action, reason, evidence_refs, revision_intent, revision_constraints, revision_base, supplement.\n\n"
+        "- recommendation: object with action, task_disposition, reason, evidence_refs, alternatives_considered, continuation_conditions, revision_intent, revision_constraints, revision_base, supplement.\n\n"
         "- goal_assessment: object with task_type (improvement/reproduction/evaluation/unknown), "
         "status (met/not_met/inconclusive), reason, evidence_refs, requested_delivery (auto/paper/analysis_report). "
         "Only set requested_delivery=paper when the user explicitly asks for a paper even with negative results; "
@@ -535,13 +567,16 @@ def build_prompt(
         "- Use unsupported when the measured evidence refutes a hypothesis; do not use not_evaluated for refuted hypotheses.\n"
         "- If metrics are weak, missing, all zero, or only resource signals, say so clearly.\n\n"
         "- recommendation.action must be one of supplement, revise_candidate, stop, request_input.\n"
-        "- supplement must be a JSON object, e.g. {\"seed\": 9, \"gap\": \"seed sensitivity\"}; "
+        "- task_disposition must be continue for supplement/revise_candidate, stop only when the entire research task should end, and undecided when the recommendation is not grounded enough.\n"
+        "- A task-level stop must include a concrete reason plus alternatives_considered or continuation_conditions; rejecting the current candidate alone is not a task stop.\n"
+        "- supplement must be a JSON object, e.g. {\"seed\": 9, \"gap\": \"seed sensitivity\"} or {\"seeds\": [9, 10], \"gap\": \"seed sensitivity\"}; "
         "the example is a shape, not a seed choice. Use {} for other actions.\n"
         "- Missing protocol documentation is not a measurement failure: repeating an unchanged command "
         "does not resolve missing metadata. Request the missing facts or stop with limitations.\n"
-        "- A supplement must name the evidence gap and a concrete bounded condition in supplement; "
+        "- A supplement must name the evidence gap and concrete bounded conditions in supplement; "
         "do not invent commands, files, datasets, permissions, or seed mechanisms. Use the accepted "
-        "context.metadata.execution_protocol as the authority: provide one explicit integer seed only "
+        "context.metadata.execution_protocol as the authority: provide one explicit integer seed or a "
+        "short explicit integer seeds list only "
         "when can_extend_seed_condition is true. If it is false, seed-based supplement is unavailable; "
         "this does not prohibit revise_candidate within an accepted CodeTask boundary. Never derive a "
         "seed from the iteration.\n"
@@ -670,29 +705,43 @@ def parse_recommendation(
     """Normalize the small model proposal without granting execution authority."""
 
     if not isinstance(value, Mapping):
-        return fallback
+        return AnalysisRecommendation(
+            action="request_input",
+            task_disposition="undecided",
+            reason="The analysis did not provide a structured research recommendation; no scientific stop was inferred.",
+            evidence_refs=fallback.evidence_refs,
+        )
     action = str(value.get("action") or "").strip().lower().replace("-", "_")
     aliases = {"revise": "revise_candidate", "revision": "revise_candidate"}
     action = aliases.get(action, action)
     if action not in {"supplement", "revise_candidate", "stop", "request_input"}:
         return AnalysisRecommendation(
-            action="stop",
-            reason=f"The analysis recommendation used unsupported action {action!r}; no follow-up was accepted.",
+            action="request_input",
+            task_disposition="undecided",
+            reason=f"The analysis recommendation used unsupported action {action!r}; a bounded follow-up decision is required.",
             evidence_refs=fallback.evidence_refs,
         )
+    disposition = str(value.get("task_disposition") or "undecided").strip().lower()
+    if disposition not in {"continue", "stop", "undecided"}:
+        disposition = "undecided"
     evidence_refs = normalize_string_list(value.get("evidence_refs"))[:12]
+    alternatives = normalize_string_list(value.get("alternatives_considered"))[:12]
+    continuation_conditions = normalize_string_list(value.get("continuation_conditions"))[:12]
     supplement = value.get("supplement")
     supplement = dict(supplement) if isinstance(supplement, Mapping) else {}
     # Commands and paths are application facts, not model-controlled fields.
     supplement = {
         key: supplement[key]
-        for key in ("seed", "gap", "conditions", "metric", "reason")
+        for key in ("seed", "seeds", "gap", "conditions", "metric", "reason")
         if key in supplement
     }
     return AnalysisRecommendation(
         action=action,
+        task_disposition=disposition,
         reason=str(value.get("reason") or "").strip(),
         evidence_refs=evidence_refs,
+        alternatives_considered=alternatives,
+        continuation_conditions=continuation_conditions,
         revision_intent=str(value.get("revision_intent") or "").strip(),
         revision_constraints=normalize_string_list(value.get("revision_constraints"))[:12],
         revision_base=(

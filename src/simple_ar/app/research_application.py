@@ -79,6 +79,8 @@ from simple_ar.research.synthesis import SynthesisRequest, SynthesisResult, allo
 from simple_ar.research.summary import SummaryRequest, run_summary_capability
 from simple_ar.research.workflow_contracts import Diagnostic, ResearchAsset, ResearchBrief
 from simple_ar.result_analysis.metrics import normalize_direction
+from simple_ar.result_analysis.schema import AnalysisRecommendation
+from simple_ar.result_analysis.service import parse_recommendation
 
 
 class ResearchApplicationError(RuntimeError):
@@ -1330,7 +1332,8 @@ class ResearchApplication:
             )
         if action.startswith(("refine_implementation:", "prepare_implementation:")):
             return self._run_implementation_refinement(action)
-        if action == "research_design":
+        if action == "research_design" or action.startswith("research_design_revision:"):
+            revision = action.startswith("research_design_revision:")
             execution_config = self._execution_config()
             execution = execution_config.get("execution")
             has_execution = isinstance(execution, Mapping)
@@ -1340,65 +1343,91 @@ class ResearchApplication:
                 if isinstance(configured_execution, Mapping)
                 else {}
             )
-            assessment = self.controller.store.read_json(self.controller.manifest.state_refs["assessment"])
-            selected = self._effective_config().get("research_selected_idea_id")
-            reason = "Explicit candidate selection from research_selected_idea_id."
-            if not selected:
-                # These optional fields are absent in the first v1 assessments.
-                selected = assessment.get("recommended_idea_id")
-                reason = assessment.get("recommendation_reason", "")
-            if (
-                not selected
-                and has_execution
-                and isinstance(execution.get("code_task"), Mapping)
-            ):
-                # A CodeTask is the repository-inspection boundary.  When the
-                # evidence assessor correctly refuses to invent a method before
-                # inspecting source, keep the task moving with the first
-                # execution-ready direction; implementation must still inspect,
-                # scope, patch, and validate it before any result is accepted.
-                candidates = assessment.get("assessments", [])
-                ready = [
-                    row for row in candidates
-                    if isinstance(row, Mapping)
-                    and row.get("status") == "ready"
-                    and str(row.get("idea_id") or "").strip()
-                ]
-                ready.sort(key=lambda row: int(row.get("readiness_rank", 10**9)))
-                if ready:
-                    selected = str(ready[0]["idea_id"])
-                    reason = (
-                        "The evidence assessor did not recommend a concrete method before "
-                        "repository inspection; selected the first execution-ready direction "
-                        "provisionally. CodeTask must inspect and validate the bounded change."
-                    )
-            if not selected and self.services.llm_client is not None:
-                details = " ".join(assessment.get("diagnostics", []))
-                self.controller.pause("No validated model recommendation is available. " + details + " Review idea_comparison before continuing.")
-                self._persist_application_views()
-                return False
-            if not selected:
-                reason = "Deterministic execution-readiness selection; scientific preference has not been assessed."
             entry_facts: dict[str, Any] = {}
-            if has_execution:
-                try:
-                    # Keep omitted policy fields omitted at the design
-                    # boundary.  _execution_config is normalized for running
-                    # commands, but its defaults must not become explicit
-                    # user choices that override the model's proposal.
-                    entry_facts = inspect_execution_entry(
-                        execution_boundary if execution_boundary else execution
-                    )
-                except (OSError, TypeError, ValueError) as exc:
-                    self.controller.pause(f"Could not inspect the supplied execution entry: {exc}")
+            selected = self._effective_config().get("research_selected_idea_id") if revision else None
+            reason = ""
+            previous_design: Mapping[str, Any] | None = None
+            implementation_feedback: Mapping[str, Any] = {}
+            source_workspace: Path | None = None
+            source_index: Mapping[str, Any] = {}
+            inputs = self._input_refs("synthesis", "assessment", "brief", "runtime_config")
+            if revision:
+                if self.services.llm_client is None:
+                    self.controller.pause("A research design revision needs the configured design model; no deterministic direction was inferred.")
                     self._persist_application_views()
                     return False
-                entry_facts["input_refs"] = [
-                    ref.to_dict()
-                    for ref in self._input_refs("brief", "assessment", "runtime_config")
-                ]
+                design_ref = self._implementation_design_ref()
+                decision_ref = self.controller.manifest.state_refs.get("decision")
+                analysis_ref = self._latest_analysis_ref()
+                try:
+                    previous_design = self.controller.store.read_json(design_ref)
+                    decision = self.controller.store.read_json(decision_ref) if decision_ref is not None else {}
+                    recommendation = decision.get("recommendation") if isinstance(decision, Mapping) else {}
+                    implementation_feedback = {
+                        "kind": "research_revision",
+                        "reason": str(decision.get("decision_reason") or "").strip()
+                        if isinstance(decision, Mapping) else "",
+                        "recommendation": dict(recommendation) if isinstance(recommendation, Mapping) else {},
+                        "candidate_options": self._analysis_candidate_options(),
+                        "history": self._research_history()[-8:],
+                    }
+                    inputs = [design_ref, *inputs]
+                    if analysis_ref is not None:
+                        inputs.append(analysis_ref)
+                    if decision_ref is not None:
+                        inputs.append(decision_ref)
+                    preparation_ref = self._active_preparation_ref()
+                    if preparation_ref is not None:
+                        prepared = self.controller.store.read_json(preparation_ref)
+                        workspace = prepared.get("workspace") if isinstance(prepared, Mapping) else None
+                        if isinstance(workspace, str) and Path(workspace).is_dir():
+                            source_workspace = Path(workspace)
+                            inputs.append(preparation_ref)
+                    implementation_ref = self._active_implementation_ref()
+                    if implementation_ref is not None:
+                        implementation = self.controller.store.read_json(implementation_ref)
+                        run_dir = implementation.get("code_task_run_dir") if isinstance(implementation, Mapping) else None
+                        if isinstance(run_dir, str):
+                            index_path = Path(run_dir) / "code_task" / "meta" / "codebase_index.json"
+                            if index_path.is_file():
+                                source_index = json.loads(index_path.read_text(encoding="utf-8"))
+                        inputs.append(implementation_ref)
+                except (OSError, TypeError, ValueError, KeyError) as exc:
+                    self.controller.pause(f"Research design revision could not load its evidence boundary: {exc}")
+                    self._persist_application_views()
+                    return False
+            else:
+                assessment = self.controller.store.read_json(self.controller.manifest.state_refs["assessment"])
+                selected = self._effective_config().get("research_selected_idea_id")
+                reason = "Explicit candidate selection from research_selected_idea_id."
+                if not selected:
+                    selected = assessment.get("recommended_idea_id")
+                    reason = assessment.get("recommendation_reason", "")
+                if not selected and has_execution and isinstance(execution.get("code_task"), Mapping):
+                    ready = [row for row in assessment.get("assessments", [])
+                             if isinstance(row, Mapping) and row.get("status") == "ready"
+                             and str(row.get("idea_id") or "").strip()]
+                    ready.sort(key=lambda row: int(row.get("readiness_rank", 10**9)))
+                    if ready:
+                        selected = str(ready[0]["idea_id"])
+                        reason = "Selected the first execution-ready direction provisionally; CodeTask must inspect and validate it."
+                if not selected and self.services.llm_client is not None:
+                    details = " ".join(assessment.get("diagnostics", []))
+                    self.controller.pause("No validated model recommendation is available. " + details + " Review idea_comparison before continuing.")
+                    self._persist_application_views()
+                    return False
+                if not selected:
+                    reason = "Deterministic execution-readiness selection; scientific preference has not been assessed."
+                if has_execution:
+                    try:
+                        entry_facts = inspect_execution_entry(execution_boundary if execution_boundary else execution)
+                    except (OSError, TypeError, ValueError) as exc:
+                        self.controller.pause(f"Could not inspect the supplied execution entry: {exc}")
+                        self._persist_application_views()
+                        return False
+                    entry_facts["input_refs"] = [ref.to_dict() for ref in self._input_refs("brief", "assessment", "runtime_config")]
             return self._execute(
-                "research_design", "design",
+                "research_design", action if revision else "design",
                 ResearchDesignRequest(
                     synthesis=self._load_synthesis(), topic=self.brief.objective or self.brief.request_text,
                     idea_id=str(selected) if selected else None, selection_rationale=reason,
@@ -1406,9 +1435,13 @@ class ResearchApplication:
                     execution_schema=execution.get("result_schema", {}) if has_execution else {},
                     execution_boundary=execution_boundary if execution_boundary else {},
                     entry_facts=entry_facts,
+                    previous_design=previous_design,
+                    implementation_feedback=implementation_feedback,
+                    source_workspace=source_workspace,
+                    source_index=source_index,
                     use_llm=self.services.llm_client is not None,
                     llm_client=self.services.llm_client,
-                ), self._input_refs("synthesis", "assessment", "brief", "runtime_config"), allow_partial=True,
+                ), inputs, allow_partial=True,
             )
         if action == "prepare_execution":
             execution = self._execution_config().get("execution")
@@ -1573,9 +1606,12 @@ class ResearchApplication:
             )
         if action.startswith(("supplement_baseline:", "supplement_candidate:")):
             try:
-                iteration = int(action.rsplit(":", 1)[1])
+                iteration, pair_index = self._supplement_action_parts(action)
+                supplement = self._decision_supplement()
+                count = self._supplement_count(supplement)
+                selected_pair = 0 if pair_index is None else pair_index
                 config, reason = self._supplement_execution_config(
-                    iteration, self._decision_supplement(), check_round_budget=False,
+                    iteration, supplement, pair_index=selected_pair, check_round_budget=False,
                 )
                 if config is None:
                     self.controller.pause(reason)
@@ -1596,7 +1632,7 @@ class ResearchApplication:
                             self._persist_application_views()
                             return False
                 request = execution_request(
-                    config, condition=condition, pair_index=0,
+                    config, condition=condition, pair_index=selected_pair,
                     task_text=self.brief.request_text,
                     contract=self._execution_contract(),
                 )
@@ -1607,20 +1643,23 @@ class ResearchApplication:
                 self.controller.pause(str(exc))
                 self._persist_application_views()
                 return False
-            inputs = list(self._input_refs("design", "runtime_config"))
+            inputs = [self._implementation_design_ref(), *self._input_refs("runtime_config")]
             if preparation_ref is not None:
                 inputs.append(preparation_ref)
             elif isinstance(config.get("code_task"), Mapping):
-                current_preparation = self.controller.manifest.state_refs.get("preparation")
+                current_preparation = self._active_preparation_ref()
                 if current_preparation is None:
                     raise ResearchApplicationError(
                         "A CodeTask supplement candidate requires the current prepared workspace."
                     )
                 inputs.append(current_preparation)
+                implementation_ref = self._active_implementation_ref()
+                if implementation_ref is not None:
+                    inputs.append(implementation_ref)
             inputs.extend(self._optional_refs("analysis", "decision"))
             if condition == "candidate":
                 baseline_ref = self.controller.manifest.state_refs.get(
-                    f"baseline_supplement_{iteration}"
+                    self._supplement_ref_name("baseline", iteration, selected_pair, count)
                 )
                 if baseline_ref is None:
                     raise ResearchApplicationError(
@@ -1628,8 +1667,8 @@ class ResearchApplication:
                     )
                 inputs.append(baseline_ref)
             state_name = (
-                f"baseline_supplement_{iteration}"
-                if condition == "baseline" else f"experiment_supplement_{iteration}"
+                self._supplement_ref_name("baseline", iteration, selected_pair, count)
+                if condition == "baseline" else self._supplement_ref_name("candidate", iteration, selected_pair, count)
             )
             return self._execute(
                 "experiment", state_name, request, tuple(inputs),
@@ -1691,11 +1730,47 @@ class ResearchApplication:
                     client=self.services.llm_client,
                 )
 
+            supplement = self._decision_supplement()
+            supplement_count = self._supplement_count(supplement)
+            if isinstance(supplement, Mapping) and ("seed" in supplement or "seeds" in supplement):
+                supplement_pairs: list[tuple[ArtifactRef, ArtifactRef]] = []
+                for index in range(supplement_count):
+                    baseline_ref = self.controller.manifest.state_refs.get(
+                        self._supplement_ref_name("baseline", iteration, index, supplement_count)
+                    )
+                    candidate_ref = self.controller.manifest.state_refs.get(
+                        self._supplement_ref_name("candidate", iteration, index, supplement_count)
+                    )
+                    if baseline_ref is None or candidate_ref is None:
+                        raise ResearchApplicationError(
+                            f"Reanalysis {iteration} requires both supplement measurements for condition {index}."
+                        )
+                    supplement_pairs.append((baseline_ref, candidate_ref))
+                if supplement_count > 1:
+                    collection_ref = self._write_supplement_collection(
+                        iteration, supplement, supplement_pairs,
+                    )
+                    inputs = [collection_ref]
+                    inputs.extend(ref for pair in supplement_pairs for ref in pair)
+                    previous = self._latest_analysis_ref()
+                    if previous is not None:
+                        inputs.append(previous)
+                    decision_ref = self.controller.manifest.state_refs.get("decision")
+                    if decision_ref is not None:
+                        inputs.append(decision_ref)
+                    return self._execute(
+                        "analysis", f"analysis_r{iteration}", None, tuple(inputs),
+                        allow_partial=True, result_ref=collection_ref,
+                        analysis_context=self._analysis_context(),
+                        use_llm=self.services.llm_client is not None,
+                        client=self.services.llm_client,
+                    )
+
             baseline_ref = self.controller.manifest.state_refs.get(
-                f"baseline_supplement_{iteration}"
+                self._supplement_ref_name("baseline", iteration, 0, 1)
             )
             candidate_ref = self.controller.manifest.state_refs.get(
-                f"experiment_supplement_{iteration}"
+                self._supplement_ref_name("candidate", iteration, 0, 1)
             )
             if baseline_ref is None or candidate_ref is None:
                 raise ResearchApplicationError(
@@ -1802,7 +1877,7 @@ class ResearchApplication:
             self.controller.pause(f"Candidate revision preparation is not executable: {exc}")
             self._persist_application_views()
             return False
-        inputs = list(self._input_refs("brief", "design", "runtime_config"))
+        inputs = [*self._input_refs("brief", "runtime_config"), self._implementation_design_ref()]
         inputs.extend(self._optional_refs(
             "preparation", "baseline", "matrix_results", "analysis", "decision",
         ))
@@ -1852,7 +1927,7 @@ class ResearchApplication:
             self.controller.pause(f"Candidate revision is not executable: {exc}")
             self._persist_application_views()
             return False
-        inputs = list(self._input_refs("brief", "design", "runtime_config", f"preparation_r{iteration}"))
+        inputs = [*self._input_refs("brief", "runtime_config", f"preparation_r{iteration}"), self._implementation_design_ref()]
         inputs.extend(baselines)
         inputs.extend(self._optional_refs("analysis", "decision"))
         return self._execute(
@@ -1876,7 +1951,7 @@ class ResearchApplication:
             self.controller.pause(f"Candidate revision measurement is not executable: {exc}")
             self._persist_application_views()
             return False
-        inputs = list(self._input_refs("design", "runtime_config", f"preparation_r{iteration}"))
+        inputs = [self._implementation_design_ref(), *self._input_refs("runtime_config", f"preparation_r{iteration}")]
         inputs.extend(self._optional_refs(f"implementation_r{iteration}", "analysis", "decision"))
         if pair_index is not None:
             inputs.extend(self._revision_baseline_refs())
@@ -2080,6 +2155,14 @@ class ResearchApplication:
                 return refs[step.state_name]
         return refs["design"]
 
+    def _active_implementation_ref(self) -> ArtifactRef | None:
+        refs = self.controller.manifest.state_refs
+        steps = self._load_task_plan().steps if "task_plan" in refs else ()
+        for step in reversed(steps):
+            if step.capability == "implement" and self._step_completed(step):
+                return refs[step.state_name]
+        return refs.get("implementation")
+
     def _schedule_implementation_refinement(self, state_name: str, attempt_id: str, result: Any) -> bool:
         """Route explicit design gaps; never infer research intent from error prose."""
         if result.status != "blocked" or self.services.llm_client is None or self._task_kind() == "bug_fix":
@@ -2238,6 +2321,8 @@ class ResearchApplication:
         })
         analysis_status = str(analysis.get("status") or "unknown")
         execution_status = str(handoff.get("execution_status") or "unknown")
+        analysis_audit = analysis.get("audit")
+        model_used = isinstance(analysis_audit, Mapping) and analysis_audit.get("llm_used") is True
         current_round = self._research_analysis_round(analysis_ref)
         maximum_rounds = self._research_iteration_limit()
         remaining_rounds = max(0, maximum_rounds - current_round)
@@ -2248,6 +2333,7 @@ class ResearchApplication:
             requested_action, requested_action,
         )
         reason = str(recommendation.get("reason") or "").strip()
+        task_disposition = str(recommendation.get("task_disposition") or "undecided").strip().lower()
         accepted_action = requested_action
         disposition = "deliver_observed_result"
         automatic_follow_up = False
@@ -2266,14 +2352,36 @@ class ResearchApplication:
             )
             options = [{"action": "technical_retry", "reason": "Inspect the failed attempt before retrying the technical fault."}]
         elif requested_action not in {"supplement", "revise_candidate", "stop", "request_input"}:
+            accepted_action = "request_input"
+            disposition = "await_input"
+            reason = f"The analysis proposed unsupported action {requested_action!r}; no scientific stop was inferred."
+            options = [{"action": "request_input", "reason": "Provide a supported bounded research decision."}]
+        elif requested_action == "request_input" and not model_used:
             accepted_action = "stop"
             disposition = "deliver_with_limits"
-            reason = f"The analysis proposed unsupported action {requested_action!r}; no follow-up was accepted."
-            options = [{"action": "request_input", "reason": "Provide a supported bounded research decision."}]
+            reason = reason or "No model or explicit scientific follow-up was available; the observed result is delivered with this limitation."
         elif requested_action == "stop":
-            accepted_action = "stop"
-            disposition = "deliver_observed_result" if comparison_payloads else "deliver_with_limits"
-            reason = reason or "The analysis found no justified bounded follow-up."
+            missing_stop_basis = (
+                model_used and (
+                    task_disposition != "stop"
+                    or not reason
+                    or (
+                        remaining_rounds > 0
+                        and not recommendation.get("alternatives_considered")
+                        and not recommendation.get("continuation_conditions")
+                    )
+                )
+            )
+            if missing_stop_basis:
+                accepted_action = "request_input"
+                disposition = "await_input"
+                reason = (
+                    reason + " " if reason else ""
+                ) + "A candidate rejection is not a task-level stop; provide the remaining evidence or an explicit stop basis."
+                options = [{"action": "request_input", "reason": "State the alternatives considered or the conditions for a bounded continuation."}]
+            else:
+                accepted_action = "stop"
+                disposition = "deliver_observed_result" if comparison_payloads else "deliver_with_limits"
         elif requested_action == "request_input":
             accepted_action = "request_input"
             disposition = "await_input"
@@ -2286,7 +2394,10 @@ class ResearchApplication:
             ) + "The authorized scientific-round limit is exhausted."
             options = [{"action": "request_input", "reason": "Continue only through an explicit revised task and unchanged session budget."}]
         elif requested_action == "supplement":
-            validation_reason = self._validate_supplement_recommendation(recommendation)
+            validation_reason = (
+                "A task-level stop cannot also request a supplement."
+                if task_disposition == "stop" else self._validate_supplement_recommendation(recommendation)
+            )
             if not validation_reason:
                 _, validation_reason = self._supplement_execution_config(
                     followup_iteration, recommendation.get("supplement"),
@@ -2305,7 +2416,10 @@ class ResearchApplication:
                 reason = reason or "The analysis proposed a concrete bounded evidence supplement."
                 options = [{"action": "stop", "reason": "Stop after the supplement and its re-analysis."}]
         elif requested_action == "revise_candidate":
-            validation_reason = self._validate_revision_recommendation(recommendation)
+            validation_reason = (
+                "A task-level stop cannot also request a candidate revision."
+                if task_disposition == "stop" else self._validate_revision_recommendation(recommendation)
+            )
             if not validation_reason:
                 execution = self._execution_config().get("execution")
                 if not isinstance(execution, Mapping):
@@ -2375,8 +2489,18 @@ class ResearchApplication:
             ]
 
         if automatic_follow_up:
-            extension_ref = self._append_research_followup(accepted_action, followup_iteration)
+            extension_ref = self._append_research_followup(
+                accepted_action,
+                followup_iteration,
+                revision_base=str(recommendation.get("revision_base") or "candidate"),
+                supplement_count=self._supplement_count(recommendation.get("supplement")),
+            )
 
+        cycle_action = (
+            proposed_action
+            if isinstance(interaction, Mapping) and interaction.get("stage") == "research_choice"
+            else accepted_action
+        )
         analysis_summary = {
             "status_reasons": [str(item) for item in analysis.get("status_reasons", [])[:4]]
             if isinstance(analysis.get("status_reasons"), list) else [],
@@ -2421,10 +2545,19 @@ class ResearchApplication:
                 "automatic_follow_up": automatic_follow_up,
                 "technical_retry_is_separate": True,
                 "next_step": (
-                    f"supplement_baseline:{followup_iteration}"
-                    if accepted_action == "supplement" and automatic_follow_up
-                    else f"prepare_candidate:{followup_iteration}"
-                    if accepted_action == "revise_candidate" and automatic_follow_up
+                    (
+                        f"supplement_baseline:{followup_iteration}"
+                        if self._supplement_count(recommendation.get("supplement")) == 1
+                        else f"supplement_baseline:{followup_iteration}_0"
+                    )
+                    if cycle_action == "supplement" and (automatic_follow_up or interaction is not None)
+                    else (
+                        f"research_design_revision:{followup_iteration}"
+                        if cycle_action == "revise_candidate"
+                        and str(recommendation.get("revision_base") or "candidate") == "baseline"
+                        else f"prepare_candidate:{followup_iteration}"
+                    )
+                    if cycle_action == "revise_candidate" and (automatic_follow_up or interaction is not None)
                     else None
                 ),
                 "plan_extension_ref": extension_ref.to_dict() if extension_ref is not None else None,
@@ -2446,15 +2579,23 @@ class ResearchApplication:
         refs["decision"] = decision_ref
         return decision_ref
 
-    def _append_research_followup(self, action: str, iteration: int) -> ArtifactRef | None:
+    def _append_research_followup(
+        self, action: str, iteration: int, *, revision_base: str | None = None,
+        supplement_count: int | None = None,
+    ) -> ArtifactRef | None:
         plan = self._load_task_plan()
         pair_count = 0
         if action == "revise_candidate":
             execution = self._execution_config().get("execution")
             if isinstance(execution, Mapping):
                 pair_count = len(execution_pairs(execution, task_text=self.brief.request_text))
+        if revision_base is None:
+            revision_base = self._revision_base()
+        if supplement_count is None:
+            supplement_count = self._supplement_count(self._decision_supplement())
         extended = append_research_followup(
             plan, iteration, action=action, pair_count=pair_count,
+            revision_base=revision_base, supplement_count=supplement_count,
         )
         if extended == plan:
             return None
@@ -2568,38 +2709,21 @@ class ResearchApplication:
     def _research_iteration_limit(self) -> int:
         value = self._effective_config().get("research_max_iterations", 1)
         maximum = value if type(value) is int and value >= 0 else 1
-        refinements = sum(step.action.startswith("refine_implementation:")
-                          for step in self._load_task_plan().steps) if "task_plan" in self.controller.manifest.state_refs else 0
-        return max(0, maximum - refinements)
+        # Design clarification is a technical handoff, not a scientific round.
+        return maximum
 
     def _recommendation_payload(self, analysis: Mapping[str, Any]) -> dict[str, Any]:
-        value = analysis.get("recommendation")
-        if not isinstance(value, Mapping):
-            return {
-                "action": "stop",
-                "reason": "Analysis did not provide a structured follow-up recommendation.",
-                "evidence_refs": [],
-                "revision_intent": "",
-                "revision_constraints": [],
-                "revision_base": "candidate",
-                "supplement": {},
-            }
-        return {
-            "action": str(value.get("action") or "stop").strip().lower(),
-            "reason": str(value.get("reason") or "").strip(),
-            "evidence_refs": [str(item) for item in value.get("evidence_refs", [])[:12]]
-            if isinstance(value.get("evidence_refs"), list) else [],
-            "revision_intent": str(value.get("revision_intent") or "").strip(),
-            "revision_constraints": [str(item) for item in value.get("revision_constraints", [])[:12]]
-            if isinstance(value.get("revision_constraints"), list) else [],
-            "revision_base": (
-                str(value.get("revision_base") or "candidate").strip().lower()
-                if str(value.get("revision_base") or "candidate").strip().lower() in {"candidate", "baseline"}
-                else "candidate"
-            ),
-            "supplement": dict(value.get("supplement"))
-            if isinstance(value.get("supplement"), Mapping) else {},
-        }
+        fallback = AnalysisRecommendation()
+        return parse_recommendation(analysis.get("recommendation"), fallback=fallback).model_dump(mode="json")
+
+    @staticmethod
+    def _supplement_count(supplement: object) -> int:
+        if not isinstance(supplement, Mapping):
+            return 1
+        seeds = supplement.get("seeds")
+        if isinstance(seeds, list) and seeds:
+            return len(seeds)
+        return 1
 
     def _decision_supplement(self) -> Mapping[str, Any] | None:
         ref = self.controller.manifest.state_refs.get("decision")
@@ -2617,8 +2741,20 @@ class ResearchApplication:
             return "A supplement must include an analysis reason."
         if not isinstance(supplement, Mapping):
             return "A supplement must name its bounded condition."
-        if type(supplement.get("seed")) is not int:
-            return "A supplement must provide one explicit integer seed."
+        seed = supplement.get("seed")
+        seeds = supplement.get("seeds")
+        if seed is not None and seeds is not None:
+            return "A supplement must use seed or seeds, not both."
+        if type(seed) is int:
+            seed_values = [seed]
+        elif isinstance(seeds, list) and seeds and all(type(value) is int for value in seeds):
+            seed_values = list(seeds)
+            if len(set(seed_values)) != len(seed_values):
+                return "A supplement seeds list must contain unique integers."
+        else:
+            return "A supplement must provide one integer seed or a non-empty unique integer seeds list."
+        if not seed_values:
+            return "A supplement must provide at least one seed."
         if not any(str(supplement.get(key) or "").strip() for key in ("gap", "conditions", "metric")):
             return "A supplement must identify the evidence gap or condition it addresses."
         return ""
@@ -2641,17 +2777,16 @@ class ResearchApplication:
             if attempt.capability not in relevant:
                 continue
             diagnostics: list[Any] = []
-            if attempt.status in {"failed", "blocked"}:
-                result_ref = self.controller.store.ref(
-                    Path("attempts") / attempt.attempt_id / "capability_result.json",
-                    kind="capability_result",
-                )
-                try:
-                    result = self.controller.store.read_json(result_ref)
-                except (OSError, ValueError):
-                    result = None
-                if isinstance(result, Mapping) and isinstance(result.get("diagnostics"), list):
-                    diagnostics = result["diagnostics"]
+            result_ref = self.controller.store.ref(
+                Path("attempts") / attempt.attempt_id / "capability_result.json",
+                kind="capability_result",
+            )
+            try:
+                result = self.controller.store.read_json(result_ref)
+            except (OSError, ValueError):
+                result = None
+            if isinstance(result, Mapping) and isinstance(result.get("diagnostics"), list):
+                diagnostics = result["diagnostics"]
             item: dict[str, Any] = {
                 "attempt_id": attempt.attempt_id,
                 "capability": attempt.capability,
@@ -2676,6 +2811,8 @@ class ResearchApplication:
                         "metrics": payload.get("metrics", {}),
                         "measurement": payload.get("measurement", {}),
                         "comparisons": payload.get("comparisons", []),
+                        "diagnostics": [str(value)[:400] for value in payload.get("diagnostics", [])[:4]]
+                        if isinstance(payload.get("diagnostics"), list) else [],
                     })
                     contract = payload.get("experiment_contract")
                     if isinstance(contract, Mapping):
@@ -2689,6 +2826,13 @@ class ResearchApplication:
                             "status": analysis.get("status"),
                             "status_reasons": analysis.get("status_reasons", [])[:4],
                             "recommendation": analysis.get("recommendation", {}),
+                            "analysis_diagnostics": [
+                                str(value)[:400]
+                                for key in ("limitations", "notes", "weak_metric_signals")
+                                for value in (analysis.get("audit", {}).get(key, [])
+                                              if isinstance(analysis.get("audit"), Mapping)
+                                              and isinstance(analysis.get("audit", {}).get(key, []), list) else [])
+                            ][:6],
                         })
                 elif ref.kind == "implementation_result":
                     compact.update({
@@ -2759,24 +2903,75 @@ class ResearchApplication:
             history.append(item)
         return history[-16:]
 
+    @staticmethod
+    def _supplement_ref_name(condition: str, iteration: int, pair_index: int, count: int) -> str:
+        suffix = str(iteration) if count == 1 else f"{iteration}_{pair_index}"
+        return f"{'baseline' if condition == 'baseline' else 'experiment'}_supplement_{suffix}"
+
+    @staticmethod
+    def _supplement_action_parts(action: str) -> tuple[int, int | None]:
+        value = action.rsplit(":", 1)[1]
+        parts = value.split("_")
+        if len(parts) not in {1, 2} or any(not item.isdigit() for item in parts):
+            raise ValueError(f"Invalid supplement action: {action}")
+        return int(parts[0]), int(parts[1]) if len(parts) == 2 else None
+
+    def _write_supplement_collection(
+        self, iteration: int, supplement: Mapping[str, Any],
+        pairs: Sequence[tuple[ArtifactRef, ArtifactRef]],
+    ) -> ArtifactRef:
+        raw_seeds = supplement.get("seeds")
+        seeds = [int(value) for value in raw_seeds] if isinstance(raw_seeds, list) else [int(supplement["seed"])]
+        refs = self.controller.manifest.state_refs
+        revisions = [
+            int(suffix.split("_", 1)[0])
+            for key in refs if key.startswith("experiment_revision_")
+            for suffix in (key.removeprefix("experiment_revision_"),)
+            if suffix.split("_", 1)[0].isdigit()
+        ]
+        matrix_ref = refs.get("matrix_results")
+        matrix = self.controller.store.read_json(matrix_ref) if matrix_ref is not None else {}
+        candidate_revision = max(revisions, default=0)
+        if type(matrix.get("candidate_revision")) is int:
+            candidate_revision = max(candidate_revision, matrix["candidate_revision"])
+        implementation_ref = self._active_implementation_ref()
+        return self.controller.store.write_json(
+            f"outputs/supplement-experiment-set-r{iteration}.json", {
+                "schema_version": "experiment_set.v1", "brief_revision": self.brief.revision,
+                "candidate_revision": candidate_revision,
+                "implementation_ref": implementation_ref.to_dict() if implementation_ref is not None else None,
+                "pairs": [{"seed": seed, "baseline": baseline.to_dict(), "candidate": candidate.to_dict()}
+                          for seed, (baseline, candidate) in zip(seeds, pairs)],
+                "supplement_iteration": iteration,
+            },
+            kind="experiment_set", schema="experiment_set.v1",
+            producer="research_application",
+        )
+
     def _supplement_execution_config(
-        self, iteration: int, supplement: Mapping[str, Any] | None = None, *, check_round_budget: bool = True,
+        self, iteration: int, supplement: Mapping[str, Any] | None = None, *,
+        pair_index: int | None = None, check_round_budget: bool = True,
     ) -> tuple[dict[str, Any] | None, str]:
         execution = self._execution_config().get("execution")
         if not isinstance(execution, Mapping):
             return None, "No accepted execution protocol is available for a research supplement."
-        if not isinstance(supplement, Mapping) or type(supplement.get("seed")) is not int:
-            return None, "The supplement must provide one explicit integer seed."
-        seed = int(supplement["seed"])
-        pending_baseline = self.controller.manifest.state_refs.get(
-            f"baseline_supplement_{iteration}"
-        )
-        pending_candidate = self.controller.manifest.state_refs.get(
-            f"experiment_supplement_{iteration}"
-        )
-        allow_pending_baseline = pending_baseline if pending_candidate is None else None
-        if seed in self._used_protocol_seeds(allow_pending_ref=allow_pending_baseline):
-            return None, f"Supplement seed {seed} was already measured or declared."
+        if not isinstance(supplement, Mapping):
+            return None, "The supplement must provide one integer seed or a non-empty unique integer seeds list."
+        raw_seed = supplement.get("seed")
+        raw_seeds = supplement.get("seeds")
+        if raw_seed is not None and raw_seeds is not None:
+            return None, "The supplement must use seed or seeds, not both."
+        if type(raw_seed) is int:
+            seeds = [int(raw_seed)]
+        elif isinstance(raw_seeds, list) and raw_seeds and all(type(value) is int for value in raw_seeds):
+            seeds = [int(value) for value in raw_seeds]
+            if len(set(seeds)) != len(seeds):
+                return None, "Supplement seeds must be unique integers."
+        else:
+            return None, "The supplement must provide one integer seed or a non-empty unique integer seeds list."
+        count = len(seeds)
+        if pair_index is not None and not 0 <= pair_index < count:
+            return None, f"Supplement pair index {pair_index} is outside the requested seed conditions."
         flag = str(execution.get("protocol_seed_flag") or "").strip()
         try:
             pairs = execution_pairs(execution, task_text=self.brief.request_text)
@@ -2787,13 +2982,25 @@ class ResearchApplication:
         timeout = execution.get("timeout_sec")
         if type(timeout) is not int or timeout < 1:
             return None, "The accepted protocol has no positive process timeout for a supplement."
+        indices = [pair_index] if pair_index is not None else list(range(count))
+        for index in indices:
+            pending_baseline = self.controller.manifest.state_refs.get(
+                self._supplement_ref_name("baseline", iteration, index, count)
+            )
+            pending_candidate = self.controller.manifest.state_refs.get(
+                self._supplement_ref_name("candidate", iteration, index, count)
+            )
+            allow_pending_baseline = pending_baseline if pending_candidate is None else None
+            if seeds[index] in self._used_protocol_seeds(allow_pending_ref=allow_pending_baseline):
+                return None, f"Supplement seed {seeds[index]} was already measured or declared."
         if check_round_budget:
             remaining_invocations = self.budget_ledger.remaining("process_invocations")
             remaining_wall = self.budget_ledger.remaining("process_wall_seconds")
-            if not isinstance(remaining_invocations, (int, float)) or isinstance(remaining_invocations, bool) or remaining_invocations < 2:
-                return None, "The remaining process invocation budget cannot cover baseline and candidate supplement measurements."
-            if not isinstance(remaining_wall, (int, float)) or isinstance(remaining_wall, bool) or remaining_wall < 2 * timeout:
-                return None, "The remaining process wall-time budget cannot cover two supplement measurements at the accepted timeout."
+            required_invocations = 2 * count
+            if not isinstance(remaining_invocations, (int, float)) or isinstance(remaining_invocations, bool) or remaining_invocations < required_invocations:
+                return None, "The remaining process invocation budget cannot cover the requested supplement measurements."
+            if not isinstance(remaining_wall, (int, float)) or isinstance(remaining_wall, bool) or remaining_wall < required_invocations * timeout:
+                return None, "The remaining process wall-time budget cannot cover the requested supplement measurements."
         first = pairs[0]
         raw = {
             key: execution[key]
@@ -2823,7 +3030,7 @@ class ResearchApplication:
                 return None, "The accepted protocol does not retain a reusable base baseline argv."
             raw["baseline"] = {"command": baseline_command[:-2], "label": "baseline"}
         raw.pop("pairs", None)
-        raw["seeds"] = [seed]
+        raw["seeds"] = seeds
         raw["seed_flag"] = flag
         raw["baseline_policy"] = "run"
         try:
@@ -2859,7 +3066,7 @@ class ResearchApplication:
             self.controller.pause(f"Supplement baseline preparation is not executable: {exc}")
             self._persist_application_views()
             return None
-        inputs = list(self._input_refs("brief", "design", "runtime_config"))
+        inputs = [*self._input_refs("brief", "runtime_config"), self._implementation_design_ref()]
         inputs.extend(self._optional_refs("analysis", "decision"))
         if not self._execute(
             "prepare_execution", name,
@@ -2881,7 +3088,7 @@ class ResearchApplication:
     def _code_task_supplement_candidate_config(
         self, config: Mapping[str, Any],
     ) -> tuple[dict[str, Any] | None, str]:
-        ref = self.controller.manifest.state_refs.get("preparation")
+        ref = self._active_preparation_ref()
         if ref is None:
             return None, "A CodeTask supplement candidate requires the current prepared workspace."
         try:
@@ -4399,12 +4606,12 @@ class ResearchApplication:
             prepared_execution = dict(self.controller.store.read_json(preparation)["execution"])
             configured = config.get("execution")
             if isinstance(configured, Mapping):
-                requested = dict(configured)
                 prepared_task = prepared_execution.get("code_task")
-                requested_task = requested.get("code_task")
+                requested_task = configured.get("code_task")
                 if isinstance(prepared_task, Mapping) and isinstance(requested_task, Mapping):
-                    # Preparation owns workspace identity and edit scope. Its
-                    # output is the executor contract, not the declarative spec.
+                    # Preparation owns the executable protocol as well as the
+                    # workspace. Re-merging the declarative seed settings would
+                    # mix compact seeds with its expanded literal pairs.
                     task = dict(prepared_task)
                     for key in (
                         "approval_note", "max_repairs", "budget_profile", "allow_large_edits",
@@ -4412,17 +4619,8 @@ class ResearchApplication:
                     ):
                         if key in requested_task:
                             task[key] = requested_task[key]
-                    requested["code_task"] = task
-                    requested.pop("cwd", None)
-                    prepared_baseline = prepared_execution.get("baseline")
-                    requested_baseline = requested.get("baseline")
-                    if isinstance(prepared_baseline, Mapping) and isinstance(requested_baseline, Mapping):
-                        baseline = {**prepared_baseline, **requested_baseline}
-                        baseline["cwd"] = prepared_baseline.get("cwd") or prepared_execution["cwd"]
-                        requested["baseline"] = baseline
-                config["execution"] = {**prepared_execution, **requested}
-            else:
-                config["execution"] = prepared_execution
+                    prepared_execution["code_task"] = task
+            config["execution"] = prepared_execution
         return config
 
     def _active_preparation_ref(self) -> ArtifactRef | None:
@@ -4576,6 +4774,16 @@ class ResearchApplication:
             "research_goal": objective,
             "hard_constraints": list(self.brief.hard_constraints),
             "research_history": history,
+            "candidate_options": self._analysis_candidate_options(),
+            "materials": [
+                {
+                    "asset_id": asset.asset_id,
+                    "role": asset.role,
+                    "availability": asset.availability,
+                }
+                for asset in self.assets
+                if asset.role in {"paper", "document", "reference", "dataset", "code"}
+            ],
             "remaining_authorized_rounds": remaining_rounds,
             "analysis_checkpoint": self._analysis_checkpoint(
                 self.latest_experiment_ref(), remaining_rounds=remaining_rounds,
@@ -4598,6 +4806,51 @@ class ResearchApplication:
                 }
         context["metadata"] = metadata
         return context
+
+    def _analysis_candidate_options(self) -> list[dict[str, Any]]:
+        """Expose supplied, protocol-compatible directions without inventing results."""
+
+        refs = self.controller.manifest.state_refs
+        try:
+            current = self.controller.store.read_json(self._implementation_design_ref()) if "design" in refs else {}
+            synthesis = self._load_synthesis()
+        except (OSError, ValueError, KeyError):
+            return []
+        selected = current.get("selected_idea") if isinstance(current, Mapping) else None
+        selected_id = str(selected.get("idea_id") or "").strip() if isinstance(selected, Mapping) else ""
+        tried: set[str] = set()
+        if "task_plan" in refs:
+            for step in self._load_task_plan().steps:
+                ref = refs.get(step.state_name)
+                if step.capability != "research_design" or ref is None or not self._step_completed(step):
+                    continue
+                try:
+                    row = self.controller.store.read_json(ref).get("selected_idea")
+                except (OSError, ValueError):
+                    continue
+                if isinstance(row, Mapping) and str(row.get("idea_id") or "").strip():
+                    tried.add(str(row["idea_id"]).strip())
+        assessment_rows: dict[str, Mapping[str, Any]] = {}
+        assessment_ref = refs.get("assessment")
+        if assessment_ref is not None:
+            try:
+                rows = self.controller.store.read_json(assessment_ref).get("assessments", [])
+            except (OSError, ValueError):
+                rows = []
+            if isinstance(rows, list):
+                assessment_rows = {str(row.get("idea_id")): row for row in rows
+                                   if isinstance(row, Mapping) and str(row.get("idea_id") or "").strip()}
+        return [{
+                "idea_id": idea.idea_id,
+                "title": idea.title[:240],
+                "hypothesis": idea.hypothesis[:600],
+                "proposed_change": idea.proposed_change[:600],
+                "metrics": list(idea.metrics)[:8],
+                "assessment_status": str(row.get("status") or "unassessed"),
+                "readiness_rank": row.get("readiness_rank"),
+                "selected": idea.idea_id == selected_id,
+                "tried": idea.idea_id in tried,
+            } for idea in synthesis.ideas for row in (assessment_rows.get(idea.idea_id, {}),)]
 
     def _analysis_checkpoint(
         self, current_candidate_ref: ArtifactRef | None, *, remaining_rounds: int,
