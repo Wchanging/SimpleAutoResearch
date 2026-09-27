@@ -211,6 +211,13 @@ class ReviewerFinding(ReportModel):
     suggested_action: str = ""
 
 
+# A model may label a factual defect "minor" even when it remains unresolved.
+# Keep revision and final audit aligned on which finding kinds need correction.
+FACTUAL_REVIEW_FINDING_TYPES = frozenset({
+    "metric_mismatch", "unsupported_claim", "citation_misuse",
+})
+
+
 class ReportContext(ReportModel):
     """Compact report input assembled from earlier pipeline stages."""
 

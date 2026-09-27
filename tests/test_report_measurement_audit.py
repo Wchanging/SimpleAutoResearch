@@ -12,10 +12,30 @@ from simple_ar.core import ArtifactStore
 from pathlib import Path
 import tempfile
 from simple_ar.report.audit import build_report_audit
-from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory, ReportSectionDraft
+from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory, ReportSectionDraft, ReviewerFinding
 
 
 class ReportMeasurementAuditTests(unittest.TestCase):
+    def test_unresolved_minor_factual_review_is_not_a_passed_report(self):
+        for mode in ("survey", "experiment"):
+            with self.subTest(mode=mode):
+                context = ReportContext(topic="Evidence review", report_mode=mode)
+                body = "# Evidence review\n\nThe observed comparison is described here.\n"
+                memory = ReportMemory(reviewer_findings=[ReviewerFinding(
+                    finding_id="known-discrepancy", type="metric_mismatch", severity="minor",
+                    message="A prose comparison conflicts with the recorded evidence.",
+                )])
+                audit = build_report_audit(
+                    report=body, report_body=body, context=context, memory=memory,
+                )
+                self.assertEqual(audit.status, "warning")
+                self.assertEqual(audit.semantic_review_status, "semantic_unchecked")
+                memory.reviewer_findings[0].severity = "info"
+                informational = build_report_audit(
+                    report=body, report_body=body, context=context, memory=memory,
+                )
+                self.assertEqual(informational.status, "passed")
+
     def test_verified_metrics_keep_declared_rows_and_link_full_execution_evidence(self):
         metric_names = ["accuracy", "macro_f1", "forgetting", "backward_transfer"] + [
             f"accuracy_after_task_{index}_on_task_{task}"

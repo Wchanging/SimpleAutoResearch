@@ -12,6 +12,7 @@ from simple_ar.report.assembler import assemble_report_sections
 from simple_ar.report.document_plan import resolve_document_plan, visual_requirements
 from simple_ar.report.editor import review_document
 from simple_ar.report.schema import (
+    FACTUAL_REVIEW_FINDING_TYPES,
     AgentReportResult,
     ReportContext,
     ReportIterationRecord,
@@ -33,10 +34,12 @@ Distinguish changes shown by the frozen patch from reused existing code and
 unimplemented proposals. Do not describe an invoked utility as modified unless
 its implementation appears in the patch.
 An unchanged protocol isolates the implemented candidate as a whole, not a
-unique causal mechanism. Without an ablation, do not attribute all differences
-to one loss term: extra forward passes, stored targets and other implementation
-effects remain possible contributors. Review such attribution as an unsupported
-claim requiring revision, not merely a style suggestion.
+unique causal mechanism. Without a relevant ablation or direct mechanism
+measurement, do not assign all differences to one component. Do not invent
+alternative implementation effects either: mention a plausible contributor
+only if it is present in the verified implementation evidence, and distinguish
+an untested explanation from an observed result. Review unsupported causal
+attribution as a factual issue, not merely a style suggestion.
 Means and sample standard deviations are descriptive: they do not establish
 statistical significance or rule out seed variance. Such claims require an
 actual appropriate statistical analysis in the supplied evidence.
@@ -2172,8 +2175,7 @@ def _needs_revision(review: ReportSectionReview) -> bool:
         finding.severity in {"major", "critical"}
         or (
             finding.severity == "minor"
-            and finding.type
-            in {"metric_mismatch", "unsupported_claim", "citation_misuse"}
+            and finding.type in FACTUAL_REVIEW_FINDING_TYPES
         )
         for finding in review.findings
     )

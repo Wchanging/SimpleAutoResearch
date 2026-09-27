@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
 from simple_ar.report.projection import _declared_report_metrics
 from simple_ar.report.schema import (
+    FACTUAL_REVIEW_FINDING_TYPES,
     CitationAudit,
     ClaimAudit,
     MetricAudit,
@@ -64,7 +65,11 @@ def build_report_audit(
     status = _overall_status([citation.status, metric.status, claim.status])
     if any(finding.severity == "critical" for finding in reviewer_findings):
         status = "failed"
-    elif any(finding.severity == "major" for finding in reviewer_findings) and status == "passed":
+    elif any(
+        finding.severity == "major"
+        or (finding.severity == "minor" and finding.type in FACTUAL_REVIEW_FINDING_TYPES)
+        for finding in reviewer_findings
+    ) and status == "passed":
         status = "warning"
     return ReportAudit(
         status=status,
