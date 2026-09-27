@@ -43,7 +43,6 @@ test_size = 4128
 split_source = "official TabM data archive"
 
 [execution.protocol.comparison_conditions]
-seed = 0
 source_config = "exp/tabm/california/0-evaluation/0.toml"
 primary_metric = "validation RMSE, lower is better"
 runtime_metric = "train_seconds, resource cost"

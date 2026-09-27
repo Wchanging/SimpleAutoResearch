@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 
 import numpy as np
@@ -18,6 +19,11 @@ _SPEC.loader.exec_module(_MODULE)
 
 
 class TabmAdapterTest(unittest.TestCase):
+    def test_case_keeps_seed_extension_available(self) -> None:
+        case = tomllib.loads((_ADAPTER.parent / "research.toml").read_text(encoding="utf-8"))
+        self.assertEqual(case["execution"]["seed_flag"], "--seed")
+        self.assertNotIn("seed", case["execution"]["protocol"]["comparison_conditions"])
+
     def test_regression_uses_fixed_validation_labels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
