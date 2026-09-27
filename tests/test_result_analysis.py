@@ -50,6 +50,34 @@ class ResultAnalysisTests(unittest.TestCase):
         self.assertEqual(result.goal_assessment.status, "not_met")
         self.assertIn("Reproduction does not require beating a baseline", client.user)
 
+    def test_invalid_goal_evidence_gets_one_correction_without_changing_verdict(self):
+        import json
+        from unittest.mock import Mock
+
+        context = AnalysisContext(
+            metrics={"accuracy": 0.8},
+            metadata={"research_goal": "Improve accuracy", "remaining_authorized_rounds": 0},
+        )
+        recommendation = {
+            "action": "stop", "task_disposition": "stop",
+            "reason": "The measured evidence is insufficient for a robust claim.",
+        }
+        client = Mock()
+        client.ask.side_effect = [
+            json.dumps({"recommendation": recommendation, "goal_assessment": {
+                "task_type": "improvement", "status": "inconclusive",
+                "reason": "Only one condition was observed.", "evidence_refs": ["invented"]}}),
+            json.dumps({"recommendation": recommendation, "goal_assessment": {
+                "task_type": "improvement", "status": "inconclusive",
+                "reason": "Only one condition was observed.", "evidence_refs": ["accuracy"]}}),
+        ]
+        result = run_result_analysis(context, client=client, use_llm=True)
+        self.assertEqual(client.ask.call_count, 2)
+        self.assertEqual(result.goal_assessment.status, "inconclusive")
+        self.assertEqual(result.goal_assessment.evidence_refs, ["accuracy"])
+        self.assertIn("Invalid refs", client.ask.call_args.args[1])
+        self.assertIn("accuracy", client.ask.call_args.args[1])
+
     def test_malformed_supplement_gets_one_model_correction(self) -> None:
         import json
         from unittest.mock import Mock

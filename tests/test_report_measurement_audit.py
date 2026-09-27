@@ -64,8 +64,16 @@ class ReportMeasurementAuditTests(unittest.TestCase):
         self.assertEqual(appended.metric_ids, [metric.metric_id for metric in sources])
 
         audit = build_report_audit(report=body, report_body=body, context=context, memory=ReportMemory())
+        self.assertEqual(audit.metric_audit.status, "passed")
+        self.assertEqual(audit.metric_audit.unmatched_metrics, [])
+
+        missing_required = body.replace("`macro_f1`", "`withheld_metric`")
+        audit = build_report_audit(
+            report=missing_required, report_body=missing_required,
+            context=context, memory=ReportMemory(),
+        )
         self.assertEqual(audit.metric_audit.status, "warning")
-        self.assertIn("metric:baseline:accuracy_after_task_0_on_task_0", audit.metric_audit.unmatched_metrics)
+        self.assertIn("metric:baseline:macro_f1", audit.metric_audit.unmatched_metrics)
 
         explicitly_required = "accuracy_after_task_0_on_task_0"
         required_context = ReportContext(

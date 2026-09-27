@@ -74,7 +74,9 @@ def run_result_analysis(
             label=label,
             output_dir=output_dir,
         )
-        error = _recommendation_error(raw_response, ctx)
+        error = _recommendation_error(raw_response, ctx) or _goal_assessment_error(
+            raw_response, ctx, metric_summary,
+        )
         if error:
             raw_response = request_json_with_diagnostics(
                 client, SYSTEM_PROMPT,
@@ -138,6 +140,37 @@ def _recommendation_error(response: Mapping[str, Any], context: AnalysisContext)
     if not (valid_single or valid_many):
         return "supplement must provide either one integer seed or a non-empty unique integer seeds list, plus an evidence gap."
     return ""
+
+
+def _goal_assessment_error(
+    response: Mapping[str, Any], context: AnalysisContext, metric_summary: Mapping[str, Any],
+) -> str:
+    """Offer one bounded correction for unresolvable goal evidence, not a new verdict."""
+    if not context.metadata.get("research_goal"):
+        return ""
+    assessment = response.get("goal_assessment")
+    if not isinstance(assessment, Mapping):
+        return ""
+    refs = normalize_string_list(assessment.get("evidence_refs"))
+    known = _known_goal_evidence(context, metric_summary)
+    invalid = [ref for ref in refs if ref not in known]
+    if not invalid and (refs or assessment.get("status") == "inconclusive"):
+        return ""
+    # A missing or malformed reference must not turn an inconclusive outcome
+    # into a failure or let the model invent evidence. The ordinary parser
+    # remains the conservative fallback if this one correction does not help.
+    # Lead with the compact facts the model can actually cite. Detailed
+    # per-condition IDs can be numerous and would otherwise crowd out every
+    # declared metric from a lexically sorted sample.
+    examples = list(sorted(set(context.metrics) | set(context.artifacts.values())))[:16]
+    examples.extend([ref for ref in sorted(known) if ref not in examples][:8])
+    return (
+        "Goal assessment evidence_refs must resolve to observed metric names, "
+        "result-table evidence_id values, or supplied artifact paths. "
+        f"Invalid refs: {invalid!r}. Available examples: {examples!r}. "
+        "Preserve the measured verdict and recommendation; if no relevant "
+        "evidence exists, use status=inconclusive instead of inventing a ref."
+    )
 
 
 def request_json_with_diagnostics(
@@ -680,11 +713,7 @@ def parse_goal_assessment(
     """Keep missing/ungrounded goal judgments uncertain, not silently successful."""
     if not isinstance(value, Mapping):
         return GoalAssessment()
-    known = set(context.metrics) | set(context.artifacts.values())
-    known.update(
-        str(row["evidence_id"]) for row in (metric_summary.get("result_tables") or {}).get("all_metric_rows", [])
-        if isinstance(row, Mapping) and row.get("evidence_id")
-    )
+    known = _known_goal_evidence(context, metric_summary)
     refs = normalize_string_list(value.get("evidence_refs"))
     status = str(value.get("status") or "inconclusive")
     task_type = str(value.get("task_type") or "unknown")
@@ -701,6 +730,16 @@ def parse_goal_assessment(
         delivery = "auto"
     return GoalAssessment(task_type=task_type, requested_delivery=delivery, status=status, reason=reason,
                           evidence_refs=[ref for ref in refs if ref in known])
+
+
+def _known_goal_evidence(context: AnalysisContext, metric_summary: Mapping[str, Any]) -> set[str]:
+    known = set(context.metrics) | set(context.artifacts.values())
+    known.update(
+        str(row["evidence_id"])
+        for row in (metric_summary.get("result_tables") or {}).get("all_metric_rows", [])
+        if isinstance(row, Mapping) and row.get("evidence_id")
+    )
+    return known
 
 
 def parse_recommendation(

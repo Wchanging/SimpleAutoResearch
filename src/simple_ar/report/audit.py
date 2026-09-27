@@ -7,6 +7,7 @@ from itertools import count
 from typing import Any, Mapping
 
 from simple_ar.core.capabilities import ArtifactRef, CapabilityContext, CapabilityResult
+from simple_ar.report.projection import _declared_report_metrics
 from simple_ar.report.schema import (
     CitationAudit,
     ClaimAudit,
@@ -339,23 +340,34 @@ def _metric_is_visible(report_body: str, lower_report: str, metric: Any) -> bool
 
 
 def _report_metric_sources(context: ReportContext) -> list[Any]:
-    """Audit compact paired summaries while retaining raw metrics in artifacts."""
+    """Audit report-level metrics, not every detailed measurement in the source."""
     summaries = context.results.get("paired_summary") if isinstance(context.results, Mapping) else None
-    if not isinstance(summaries, list) or not summaries:
-        return context.metric_sources
-    aggregate_names = {
-        str(row.get("metric") or "").strip()
-        for row in summaries
-        if isinstance(row, Mapping)
-        and str(row.get("metric") or "").strip()
-        and "_after_task_" not in str(row.get("metric") or "")
-    }
-    selected = [
-        metric for metric in context.metric_sources
-        if metric.label.startswith("paired_summary:")
-        and metric.name.split(".", 1)[0] in aggregate_names
-    ]
-    return selected or context.metric_sources
+    if isinstance(summaries, list) and summaries:
+        aggregate_names = {
+            str(row.get("metric") or "").strip()
+            for row in summaries
+            if isinstance(row, Mapping)
+            and str(row.get("metric") or "").strip()
+            and "_after_task_" not in str(row.get("metric") or "")
+        }
+        selected = [
+            metric for metric in context.metric_sources
+            if metric.label.startswith("paired_summary:")
+            and metric.name.split(".", 1)[0] in aggregate_names
+        ]
+        if selected:
+            return selected
+
+    # The report deliberately links detailed per-task results instead of
+    # reproducing every source row. Its own appendix uses the declared primary
+    # and required metrics, so the audit must check that same scope. Otherwise
+    # a concise, correctly linked report receives a spurious major finding.
+    _, declared = _declared_report_metrics(context)
+    if declared is not None:
+        selected = [metric for metric in context.metric_sources if metric.name in declared]
+        if selected:
+            return selected
+    return context.metric_sources
 
 
 def _metric_name_variants(name: str) -> set[str]:
