@@ -216,6 +216,30 @@ class SynthesisCapabilityTests(unittest.TestCase):
         self.assertIn('"allowed_motivation_refs"', context)
         self.assertIn("paper-1#chunk-1", context)
 
+    def test_llm_accepts_actual_source_chunk_not_repeated_on_a_card(self) -> None:
+        class FakeClient:
+            def ask_json(self, system: str, user: str, *, label: str = "") -> dict[str, object]:
+                self.user = user
+                return {
+                    "synthesis_markdown": "The source motivates a bounded experiment.",
+                    "hypothesis_markdown": "Test a bounded change.",
+                    "idea_candidates": [{
+                        "idea_id": "source-chunk-idea",
+                        "title": "Test a bounded change",
+                        "hypothesis": "The change improves validation.",
+                        "proposed_change": "Change the implementation.",
+                        "motivation_refs": ["paper-1#chunk-12"],
+                    }],
+                }
+
+        pack = {**_pack(), "evidence_refs": ["paper-1#chunk-12"]}
+        client = FakeClient()
+        result = synthesize_evidence(SynthesisRequest(
+            evidence_pack=pack, use_llm=True, llm_client=client,
+        ))
+        self.assertEqual(result.ideas[0].motivation_refs, ["paper-1#chunk-12"])
+        self.assertIn("paper-1#chunk-12", client.user)
+
     def test_llm_can_replace_rule_ideas_with_grounded_candidates(self) -> None:
         class FakeClient:
             model = "fake-synthesis-model"

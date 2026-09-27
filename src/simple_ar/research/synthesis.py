@@ -491,7 +491,10 @@ def _idea_string_list(
 def allowed_evidence_refs(pack: Mapping[str, Any]) -> set[str]:
     """Collect identifiers the model may cite in a candidate motivation."""
 
-    allowed: set[str] = set()
+    # Read's canonical handoff keeps the actual source-chunk IDs here, even
+    # when a bounded card summarizes only a subset of those chunks. These
+    # references are evidence, not new citations invented by synthesis.
+    allowed: set[str] = set(_row_string_list(pack.get("evidence_refs")))
     for key in (
         "papers",
         "chunks",

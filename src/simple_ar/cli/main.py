@@ -722,12 +722,18 @@ def _print_research_session(args: argparse.Namespace) -> None:
     print_line(f"Mode: {'llm' if llm_client is not None else 'deterministic'}")
     print_line(f"Next action: {view.next_action or 'none'}")
     print_line(f"Artifacts: {len(view.state_refs)}; attempts: {len(view.attempts)}")
+    # A bare --session-root restores the saved execution; do not describe a
+    # code/experiment session as literature-only just because no config was
+    # repeated on the resume command line.
+    display_execution = app.services.config.get("execution") if resume_root is not None else execution
+    display_outputs = set(app.brief.requested_outputs if resume_root is not None else requested_outputs)
+    display_task_kind = app._task_kind() if resume_root is not None else task_kind
     print_line(
         "Implementation: "
-         + ("bug-fix CodeTask" if task_kind == "bug_fix"
-            else "existing Code-Task backend" if code_task_spec is not None
-           else "explicit command" if execution is not None
-           else "preparation required" if outputs and "experiments" in outputs
+        + ("bug-fix CodeTask" if display_task_kind == "bug_fix"
+           else "existing Code-Task backend" if isinstance(display_execution, dict) and isinstance(display_execution.get("code_task"), dict)
+           else "explicit command" if display_execution is not None
+           else "preparation required" if "experiments" in display_outputs
            else "not requested (literature-only)")
     )
     display.finish(view)
