@@ -159,6 +159,48 @@ class ReportCheckpointTests(unittest.TestCase):
         self.assertEqual(len(labels), before)
         self.assertEqual(resumed.memory.reviewer_findings, result.memory.reviewer_findings)
 
+    def test_document_revision_is_rejected_even_if_verdict_passes_with_factual_issue(self):
+        context = ReportContext(topic="Evidence comparison", report_mode="experiment")
+        memory = ReportMemory(section_plan=[
+            ReportSectionPlan(section_id="method", heading="Method", goal="Describe protocol"),
+            ReportSectionPlan(section_id="results", heading="Results", goal="Describe evidence"),
+        ])
+        config = ReportRuntimeConfig(document_review=True, max_review_iterations=1)
+
+        class Client:
+            def ask_json(self, *args, label="", **kwargs):
+                if label == "report-document-reviewer":
+                    return {"section_reviews": [{
+                        "section_id": "results", "verdict": "revise_required",
+                        "findings": [{"finding_id": "inconsistent-result", "type": "metric_mismatch",
+                                      "severity": "minor", "message": "The result disagrees with the measurement."}],
+                    }]}
+                if label == "report-document-reviser-results":
+                    return {"section_id": "results", "heading": "Results",
+                            "draft_markdown": "Revised text with a new unsupported explanation."}
+                if label == "report-document-verifier-results":
+                    return {"section_id": "results", "verdict": "pass", "findings": [{
+                        "finding_id": "new-unsupported-explanation", "type": "unsupported_claim",
+                        "severity": "minor", "message": "The explanation is not in the evidence.",
+                    }]}
+                if "reviewer" in label:
+                    return {"verdict": "pass", "findings": []}
+                section_id = "results" if "results" in label else "method"
+                return {"section_id": section_id, "heading": section_id.title(),
+                        "draft_markdown": f"Original {section_id} text."}
+
+        result = run_report_agent(
+            client=Client(), context=context, memory=memory, config=config,
+            template=load_report_template_bundle(report_mode="experiment", config=config),
+            gateway=ReportToolGateway(context),
+        )
+        self.assertIn("Original results text.", result.report_body)
+        self.assertNotIn("new unsupported explanation", result.report_body)
+        self.assertEqual(
+            {finding.type for finding in result.memory.reviewer_findings},
+            {"metric_mismatch", "unsupported_claim"},
+        )
+
     def test_minor_factual_finding_is_revised_within_existing_limit(self):
         context = ReportContext(topic="Calibration", report_mode="experiment")
         memory = ReportMemory(section_plan=[ReportSectionPlan(section_id="method", heading="Method", goal="Describe evidence")])
