@@ -299,6 +299,17 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertEqual(result.status, "ready")
             self.assertEqual(client.ask_json.call_count, 3)
 
+    def test_source_inventory_keeps_non_python_code_ahead_of_config(self):
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "a.json").write_text('{"mode": "test"}', encoding="utf-8")
+            (workspace / "b.yaml").write_text("mode: test\n", encoding="utf-8")
+            (workspace / "service.ts").write_text("export const value = 1;\n", encoding="utf-8")
+            index = source_file_inventory(workspace, max_files=1)
+            self.assertEqual([row["path"] for row in index["files"]], ["service.ts"])
+
     def test_initial_feasibility_can_plan_a_greenfield_source_file(self):
         from unittest.mock import Mock
         from simple_ar.code_task.analysis.source_context import source_file_inventory

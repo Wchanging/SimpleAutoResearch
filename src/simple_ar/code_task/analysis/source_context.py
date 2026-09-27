@@ -40,7 +40,9 @@ def source_file_inventory(
                           "role_tags": ["source"] if suffix in SOURCE_SUFFIXES else ["config"]})
         if scanned > 10000:
             break
-    files.sort(key=lambda row: (row["kind"] != "python", row["path"]))
+    # The bounded inventory must not let configuration files crowd out source
+    # code, regardless of the project's implementation language.
+    files.sort(key=lambda row: ("source" not in row["role_tags"], row["path"]))
     selected = files[:max_files]
     # An explicitly declared active experiment config must not disappear in a
     # large Python project merely because the generic inventory is capped.
