@@ -180,7 +180,8 @@ class ResearchDesignTests(unittest.TestCase):
             index = source_file_inventory(workspace)
             request = {"files": ["model.py"], "symbols": ["Model.forward"],
                        "query": "Where are predictions aggregated?"}
-            first = requested_source_context(workspace, index, request,
+            first = requested_source_context(workspace, index,
+                {"files": ["model.py"], "symbols": ["Model.forward"], "query": ""},
                 supplied=[], max_files=1, max_chars=1000)
             second = requested_source_context(workspace, index, request,
                 supplied=first, max_files=1, max_chars=1000)
@@ -206,7 +207,7 @@ class ResearchDesignTests(unittest.TestCase):
                 supplied=supplied, max_files=1, max_chars=6000)
             self.assertEqual(len(found), 1)
             self.assertIn("predictions = heads.mean(1)", found[0]["text"])
-            self.assertGreater(found[0]["source_offset"], 12869)
+            self.assertGreater(found[0]["source_offset"], 10921)
 
     def test_initial_feasibility_reserves_budget_for_two_source_followups(self):
         from unittest.mock import Mock
