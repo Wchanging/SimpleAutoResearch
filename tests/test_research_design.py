@@ -209,7 +209,7 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertIn("predictions = heads.mean(1)", found[0]["text"])
             self.assertGreater(found[0]["source_offset"], 10921)
 
-    def test_initial_feasibility_reserves_budget_for_two_source_followups(self):
+    def test_initial_feasibility_reserves_budget_for_three_source_followups(self):
         from unittest.mock import Mock
         from simple_ar.code_task.analysis.source_context import source_file_inventory
 
@@ -217,7 +217,8 @@ class ResearchDesignTests(unittest.TestCase):
             workspace = Path(tmp)
             (workspace / "model.py").write_text(
                 "# prefix\n" * 800 + "def late_one():\n    pass\n"
-                + "# middle\n" * 800 + "def late_two():\n    return 2\n", encoding="utf-8",
+                + "# middle\n" * 800 + "def late_two():\n    return 2\n"
+                + "# more\n" * 800 + "def late_three():\n    return 3\n", encoding="utf-8",
             )
             (workspace / "helper.py").write_text(
                 "# prefix\n" * 800 + "def late_one():\n    return 1\n", encoding="utf-8",
@@ -230,7 +231,9 @@ class ResearchDesignTests(unittest.TestCase):
                     "symbols": ["late_one"], "query": ""}},
                 {"status": "inspect_source", "context_request": {"files": ["model.py"],
                     "symbols": ["late_two"], "query": ""}},
-                {"status": "ready", "implementation_spec": "Modify model.py at late_two.",
+                {"status": "inspect_source", "context_request": {"files": ["model.py"],
+                    "symbols": ["late_three"], "query": ""}},
+                {"status": "ready", "implementation_spec": "Modify model.py at late_three.",
                     "target_paths": ["model.py"],
                     "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}],
                     "unresolved_questions": []},
@@ -245,7 +248,7 @@ class ResearchDesignTests(unittest.TestCase):
                 use_llm=True, llm_client=client,
             ))
             self.assertEqual(result.status, "ready")
-            self.assertIn("late_two", client.ask_json.call_args_list[3].args[1])
+            self.assertIn("late_three", client.ask_json.call_args_list[4].args[1])
 
     def test_refinement_reads_real_source_and_persists_trace_on_provider_failure(self):
         from unittest.mock import Mock
