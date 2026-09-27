@@ -283,17 +283,44 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
     synthesis = request.normalized_synthesis() if request.synthesis else None
     trace = trace if trace is not None else []
     excerpts: list[dict[str, Any]] = []
+    initial_feasibility = request.implementation_feedback.get("kind") == "initial_feasibility"
+    code_task = request.execution_boundary.get("code_task")
+    code_task = code_task if isinstance(code_task, Mapping) else {}
+    protocol = request.execution_boundary.get("protocol")
+    conditions = protocol.get("comparison_conditions") if isinstance(protocol, Mapping) else None
+    source_config = conditions.get("source_config") if isinstance(conditions, Mapping) else None
+    source_config = source_config if isinstance(source_config, str) and source_config.strip() else ""
     if (request.implementation_feedback.get("kind") == "initial_feasibility"
             and request.source_workspace is not None and request.source_index):
         from simple_ar.code_task.editing.planning import select_relevant_files
+        from simple_ar.code_task.editing.scope import editable_paths
+        index = dict(request.source_index)
+        if source_config:
+            config_excerpt = requested_source_context(
+                request.source_workspace, index,
+                {"files": [source_config], "symbols": [], "query": ""},
+                supplied=[], max_files=1, max_chars=6000,
+            )
+            if not config_excerpt:
+                return replace(previous, status="blocked", generation_mode="llm", diagnostics=(
+                    f"Declared active source config is unavailable for bounded read-only inspection: {source_config}",))
+            excerpts.extend(config_excerpt)
+        allowed = code_task.get("allowed_patterns", [])
+        protected = code_task.get("protected_patterns", [])
+        eligible = editable_paths(
+            (str(row["path"]) for row in index.get("files", [])),
+            allowed_patterns=allowed if isinstance(allowed, list) else (),
+            protected_patterns=protected if isinstance(protected, list) else (),
+        )
+        editable_index = {"files": [row for row in index.get("files", []) if row["path"] in eligible]}
         likely_files = select_relevant_files(
-            dict(request.source_index), previous.contract.proposed_change, max_files=2,
+            editable_index, previous.contract.proposed_change, max_files=2,
         )
-        excerpts = requested_source_context(
-            request.source_workspace, dict(request.source_index),
+        excerpts.extend(requested_source_context(
+            request.source_workspace, index,
             {"files": likely_files, "symbols": [], "query": ""},
-            supplied=[], max_files=2, max_chars=4500, max_total_chars=9000,
-        )
+            supplied=excerpts, max_files=2, max_chars=6000, max_total_chars=12000,
+        ))
         trace.append({"initial_source_excerpts": excerpts})
     prompt = (
         "Resolve the implementation questions. Separate missing observable source facts, "
@@ -306,6 +333,9 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         "details as experimental choices, with validation; do not claim these were reported by a paper. "
         "For exact reproduction or a user-fixed method, missing method definitions are NOT delegated choices. "
         "Keep evaluation, data, commands, budget, edit scope and explicit user constraints unchanged. "
+        "The declared source_config is the active experimental configuration, not a default to guess. "
+        "Use its observed values when judging whether the proposed behavior will change; never describe a "
+        "hyperparameter-only edit to a protected config as implementable within source-only edit scope. "
         "If the current candidate is infeasible and the task permits choosing a method, you may reselect "
         "one of the supplied candidates by returning selected_idea_id and selection_rationale with status=ready. "
         "Do not reselect when an explicit fixed idea is supplied. Do not invent a new candidate or alter its hypothesis. "
@@ -323,8 +353,12 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
         "Return selected_idea_id and selection_rationale for that direction change; do not turn an "
         "untried idea into a measured claim. If no supplied alternative is defensible, return blocked "
         "with the exact missing evidence instead of inventing a new method. "
+        "For initial feasibility, ready must include target_paths:[workspace-relative paths to edit] "
+        "and, when source_config is supplied, source_quotes:[{path,quote}] with an exact nonempty "
+        "quote from the active config. Target paths must satisfy the supplied CodeTask edit scope. "
         "Return JSON {status: ready|blocked|inspect_source, implementation_spec:string, "
-        "unresolved_questions:[string], context_request?:object, selected_idea_id?:string, selection_rationale?:string}. "
+        "unresolved_questions:[string], context_request?:object, target_paths?:[string], "
+        "source_quotes?:[{path:string,quote:string}], selected_idea_id?:string, selection_rationale?:string}. "
         "Ready requires all questions resolved. This is design only, never permission to execute commands.\n\n"
     )
     for turn in range(3):
@@ -334,11 +368,28 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
                 "task": request.execution_context, "fixed_idea_id": request.idea_id,
                 "research_materials": synthesis.to_handoff_dict() if synthesis is not None else {},
                 "source_excerpts": excerpts, "source_reads_remaining": 2 - turn,
+                "code_task_edit_scope": {
+                    "allowed_patterns": code_task.get("allowed_patterns", []),
+                    "protected_patterns": code_task.get("protected_patterns", []),
+                },
+                "active_source_config": source_config,
                 "source_files": [row["path"] for row in request.source_index.get("files", [])][:400]},
                 ensure_ascii=False, default=str), label="research-design-refinement",
         )
         trace.append({"response": response})
         if not isinstance(response, Mapping) or response.get("status") != "inspect_source":
+            if isinstance(response, Mapping) and response.get("status") == "ready" and initial_feasibility:
+                issues = _initial_feasibility_issues(response, excerpts, code_task, source_config)
+                if not issues:
+                    issues = _review_initial_feasibility(
+                        request, previous, response, excerpts, code_task, source_config, trace,
+                    )
+                if issues:
+                    trace[-1]["validation_issues"] = issues
+                    if turn < 2:
+                        prompt += "\nCorrect the previous proposal before returning ready: " + "; ".join(issues) + "\n"
+                        continue
+                    return replace(previous, status="blocked", generation_mode="llm", diagnostics=tuple(issues))
             break
         if turn == 2 or request.source_workspace is None:
             return replace(previous, status="blocked", generation_mode="llm", diagnostics=(
@@ -402,6 +453,89 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
             selection_rationale=rationale.strip(), evidence_refs=tuple(selected.motivation_refs))
     return replace(previous, status=response["status"], implementation_spec=spec.strip(),
                    generation_mode="llm", diagnostics=diagnostics)
+
+
+def _initial_feasibility_issues(
+    response: Mapping[str, Any], excerpts: list[dict[str, Any]],
+    code_task: Mapping[str, Any], source_config: str,
+) -> list[str]:
+    """Check source-backed edit authority without interpreting scientific merit."""
+    from simple_ar.code_task.editing.scope import edit_scope_rejection_reason
+    issues: list[str] = []
+    paths = response.get("target_paths")
+    if not isinstance(paths, list) or not paths or any(not isinstance(path, str) for path in paths):
+        issues.append("Ready design needs nonempty target_paths.")
+    else:
+        allowed = code_task.get("allowed_patterns", [])
+        protected = code_task.get("protected_patterns", [])
+        for path in paths:
+            reason = edit_scope_rejection_reason(
+                path,
+                allowed_patterns=allowed if isinstance(allowed, list) else (),
+                protected_patterns=protected if isinstance(protected, list) else (),
+            )
+            if reason:
+                issues.append(f"Target path {path!r} is not editable: {reason}.")
+    if source_config:
+        quotes = response.get("source_quotes")
+        config_text = "\n".join(row["text"] for row in excerpts if row["path"] == source_config)
+        if not isinstance(quotes, list) or not any(
+            isinstance(row, Mapping) and row.get("path") == source_config
+            and isinstance(row.get("quote"), str) and len(row["quote"].strip()) >= 3
+            and row["quote"] in config_text for row in quotes
+        ):
+            issues.append(f"Ready design needs an exact observed source quote from active config {source_config!r}.")
+    return issues
+
+
+def _review_initial_feasibility(
+    request: ResearchDesignRequest, previous: ResearchDesignResult,
+    response: Mapping[str, Any], excerpts: list[dict[str, Any]],
+    code_task: Mapping[str, Any], source_config: str, trace: list[dict[str, Any]],
+) -> list[str]:
+    """Challenge the source-to-behavior inference once, before expensive execution."""
+    reviewed_idea = previous.selected_idea
+    proposed_id = response.get("selected_idea_id")
+    if isinstance(proposed_id, str) and proposed_id.strip() and request.synthesis:
+        synthesis = request.normalized_synthesis()
+        reviewed_idea = next(
+            (idea for idea in synthesis.ideas if idea.idea_id == proposed_id), reviewed_idea,
+        )
+    review = request.llm_client.ask_json(
+        RESEARCH_DESIGN_SYSTEM,
+        "Independently audit this proposed implementation before CodeTask or training. "
+        "Use only the provided source excerpts and accepted execution boundary. "
+        "Reject if an asserted default or baseline value contradicts the active source_config; "
+        "if the proposed edit path cannot implement the specified behavior without changing a protected file; "
+        "or if the proposed edit would be dormant because the active config explicitly supplies a value. "
+        "Do not require a proven research gain; this is feasibility, not result assessment. "
+        "If source evidence is insufficient to establish a behavioral effect, request a specific "
+        "read-only source inspection in the issues. Return JSON "
+        "{verdict:accept|revise, issues:[short specific strings]}.\n\n"
+        + json.dumps({
+            "selected_idea": reviewed_idea.to_row() if reviewed_idea else None,
+            "contract": previous.contract.to_row() if previous.contract else None,
+            "implementation_spec": response.get("implementation_spec"),
+            "target_paths": response.get("target_paths"),
+            "source_quotes": response.get("source_quotes"),
+            "active_source_config": source_config,
+            "code_task_edit_scope": {
+                "allowed_patterns": code_task.get("allowed_patterns", []),
+                "protected_patterns": code_task.get("protected_patterns", []),
+            },
+            "source_excerpts": excerpts,
+        }, ensure_ascii=False, default=str),
+        label="research-design-feasibility-review",
+    )
+    trace[-1]["feasibility_review"] = review
+    if not isinstance(review, Mapping) or review.get("verdict") not in {"accept", "revise"}:
+        raise LLMError("Feasibility review must return accept or revise.")
+    issues = review.get("issues")
+    if not isinstance(issues, list) or any(not isinstance(issue, str) for issue in issues):
+        raise LLMError("Feasibility review issues must be a list of strings.")
+    if review["verdict"] == "revise":
+        return issues or ["Feasibility reviewer rejected the implementation without a reason."]
+    return []
 
 
 def _apply_execution_boundary(

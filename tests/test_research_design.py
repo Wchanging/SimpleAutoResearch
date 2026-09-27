@@ -40,7 +40,8 @@ class ResearchDesignTests(unittest.TestCase):
                  "execution_protocol": {}},
                 {"status": "ready", "implementation_spec":
                     "Observe a changed forward output on a small input; keep the accepted evaluator.",
-                 "unresolved_questions": []},
+                 "unresolved_questions": [], "target_paths": ["model.py"]},
+                {"verdict": "accept", "issues": []},
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -51,6 +52,99 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertEqual(result.status, "ready")
             self.assertIn("changed forward output", result.implementation_spec)
             self.assertIn("def forward", client.ask_json.call_args.args[1])
+
+    def test_initial_design_reads_active_config_and_rejects_protected_targets(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text("def build(k):\n    return k\n", encoding="utf-8")
+            (workspace / "experiment.toml").write_text("[model]\nk = 32\n", encoding="utf-8")
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Try a bounded change."},
+                {"status": "ready", "implementation_spec": "Change protected config only.",
+                 "unresolved_questions": [], "target_paths": ["experiment.toml"],
+                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}]},
+                {"status": "ready", "implementation_spec": "Change model.py based on the active k=32.",
+                 "unresolved_questions": [], "target_paths": ["model.py"],
+                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}]},
+                {"verdict": "accept", "issues": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {
+                    "code_root": str(workspace), "allowed_patterns": ["model.py"],
+                    "protected_patterns": ["experiment.toml"]},
+                    "protocol": {"comparison_conditions": {"source_config": "experiment.toml"}}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(client.ask_json.call_count, 4)
+            self.assertIn("k = 32", client.ask_json.call_args.args[1])
+            self.assertIn("not editable", client.ask_json.call_args_list[2].args[1])
+
+    def test_initial_design_revises_when_review_finds_dormant_edit(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text("def build(k=5):\n    return k\n", encoding="utf-8")
+            (workspace / "experiment.toml").write_text("[model]\nk = 32\n", encoding="utf-8")
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Try a bounded change."},
+                {"status": "ready", "implementation_spec": "Change the default k=5 to 3.",
+                 "unresolved_questions": [], "target_paths": ["model.py"],
+                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}]},
+                {"verdict": "revise", "issues": ["Changing the default is dormant: active config supplies k=32."]},
+                {"status": "blocked", "implementation_spec": "", "unresolved_questions": [
+                    "A config-only change is outside the authorized edit scope."]},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace),
+                    "allowed_patterns": ["model.py"], "protected_patterns": ["experiment.toml"]},
+                    "protocol": {"comparison_conditions": {"source_config": "experiment.toml"}}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(client.ask_json.call_count, 4)
+            self.assertIn("dormant", client.ask_json.call_args_list[-1].args[1])
+
+    def test_initial_design_blocks_unreadable_active_config(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text("pass\n", encoding="utf-8")
+            client = Mock()
+            client.ask_json.return_value = {"selected_idea_id": "idea-002", "rationale": "Try it."}
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace)},
+                    "protocol": {"comparison_conditions": {"source_config": "missing.toml"}}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "blocked")
+            self.assertIn("source config", result.diagnostics[0])
+
+    def test_source_inventory_retains_declared_config_beyond_generic_limit(self):
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text("pass\n", encoding="utf-8")
+            (workspace / "experiment.toml").write_text("[model]\nk = 32\n", encoding="utf-8")
+            index = source_file_inventory(workspace, max_files=1,
+                                          required_paths=("experiment.toml", "../outside.toml"))
+            self.assertEqual([row["path"] for row in index["files"]], ["model.py", "experiment.toml"])
 
     def test_refinement_reads_real_source_and_persists_trace_on_provider_failure(self):
         from unittest.mock import Mock

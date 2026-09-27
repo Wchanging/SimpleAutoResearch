@@ -1455,7 +1455,13 @@ class ResearchApplication:
                         if isinstance(code_root, str) and Path(code_root).is_dir():
                             from simple_ar.code_task.analysis.source_context import source_file_inventory
                             source_workspace = Path(code_root)
-                            source_index = source_file_inventory(source_workspace)
+                            protocol = execution_boundary.get("protocol") if isinstance(execution_boundary, Mapping) else None
+                            conditions = protocol.get("comparison_conditions") if isinstance(protocol, Mapping) else None
+                            source_config = conditions.get("source_config") if isinstance(conditions, Mapping) else None
+                            source_index = source_file_inventory(
+                                source_workspace,
+                                required_paths=(source_config,) if isinstance(source_config, str) else (),
+                            )
                     except (OSError, TypeError, ValueError) as exc:
                         self.controller.pause(f"Could not inspect the supplied execution entry: {exc}")
                         self._persist_application_views()

@@ -8,7 +8,9 @@ from simple_ar.code_task.analysis.index import IGNORED_DIR_NAMES
 from simple_ar.code_task.editing.planning import select_relevant_files
 
 
-def source_file_inventory(workspace: Path, *, max_files: int = 400) -> dict[str, Any]:
+def source_file_inventory(
+    workspace: Path, *, max_files: int = 400, required_paths: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """List candidate source files for design lookup without hashing dataset assets."""
     files: list[dict[str, Any]] = []
     scanned = 0
@@ -32,7 +34,23 @@ def source_file_inventory(workspace: Path, *, max_files: int = 400) -> dict[str,
         if scanned > 10000:
             break
     files.sort(key=lambda row: (row["kind"] != "python", row["path"]))
-    return {"files": files[:max_files]}
+    selected = files[:max_files]
+    # An explicitly declared active experiment config must not disappear in a
+    # large Python project merely because the generic inventory is capped.
+    root = workspace.resolve()
+    known = {row["path"] for row in selected}
+    for relative in required_paths[:8]:
+        rel = Path(relative)
+        path = (root / rel).resolve()
+        normalized = rel.as_posix()
+        if (rel.is_absolute() or ".." in rel.parts or path.name.startswith(".env")
+                or not path.is_relative_to(root) or not path.is_file()
+                or path.suffix.lower() not in {".toml", ".yaml", ".yml", ".json", ".ini", ".txt"}
+                or path.stat().st_size > 500_000 or normalized in known):
+            continue
+        selected.append({"path": normalized, "kind": "text", "role_tags": ["config"]})
+        known.add(normalized)
+    return {"files": selected}
 
 
 def requested_source_context(workspace: Path, index: dict[str, Any], request: dict[str, Any],

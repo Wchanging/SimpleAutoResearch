@@ -73,8 +73,8 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     steps = []
     validation = None
     if request.failure_ref is None:
-        outcome = implement_code_task(
-            request.run_dir, approval_note=request.approval_note,
+        options = dict(
+            approval_note=request.approval_note,
             llm_client=request.llm_client, use_llm=True, allow_planning_fallback=False,
             budget_profile=request.budget_profile,
             allow_large_edits=request.allow_large_edits,
@@ -82,8 +82,9 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
             max_source_chars_per_file=IMPLEMENTATION_CONTEXT_MAX_SOURCE_CHARS,
             message_callback=request.message_callback,
         )
+        outcome, attempt_steps = _implement_with_patch_correction(request.run_dir, **options)
         stop_reason, next_action = outcome.stop_reason, outcome.next_action
-        steps = [asdict(step) for step in outcome.steps]
+        steps = [asdict(step) for step in attempt_steps]
     else:
         failed = context.read_input_json(request.failure_ref)
         failure_dir = context.resolve_input(request.failure_ref).parent
@@ -210,6 +211,23 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
             next_action, f"Asset integrity: {integrity['status']}",
         ),
     )
+
+
+def _implement_with_patch_correction(run_dir: Path, **options: Any) -> tuple[Any, tuple[Any, ...]]:
+    """Use CodeTask's one-shot exact-text correction without restarting research.
+
+    A rejected proposal does not change workspace files. CodeTask already
+    records the validation failure and can regenerate once from actual source;
+    research must make that existing correction reachable before pausing.
+    """
+    first = implement_code_task(run_dir, **options)
+    if first.stop_reason != "patch_apply_failed":
+        return first, tuple(first.steps)
+    callback = options.get("message_callback")
+    if callback is not None:
+        callback("Edit anchor did not match current source; retrying once with recorded failure context.")
+    second = implement_code_task(run_dir, **options)
+    return second, (*first.steps, *second.steps)
 
 
 def _prepare_research_task(
