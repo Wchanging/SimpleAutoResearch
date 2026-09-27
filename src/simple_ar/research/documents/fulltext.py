@@ -77,7 +77,9 @@ def build_fulltext_manifest(
 
     rows: list[dict[str, Any]] = []
     fetch_attempt_count = 0
+    selected_count = 0
     cached_count = 0
+    remote_cached_count = 0
     hint_count = 0
     for record in records:
         hints = _hints_for_record(record)
@@ -90,23 +92,29 @@ def build_fulltext_manifest(
                 require_fulltext=source_plan.require_fulltext,
                 allow_pdf_download=source_plan.allow_pdf_download,
                 fetch_attempt_count=fetch_attempt_count,
-                cached_count=cached_count,
+                cached_count=remote_cached_count,
                 max_documents=max_documents,
                 max_fetch_attempts=max_fetch_attempts,
                 max_pdf_bytes=max_pdf_bytes,
             )
             if planned.status == "selected":
-                fetch_attempt_count += 1
-                selected_for_fetch = True
-                if cache_dir is not None:
-                    planned = _cache_selected_hint(
-                        planned,
-                        cache_dir=cache_dir,
-                        max_pdf_bytes=max_pdf_bytes,
-                        keep_raw_pdf=keep_raw_pdf,
-                    )
+                selected_count += 1
+                if planned.local_path:
+                    planned = _cache_local_hint(planned)
+                else:
+                    fetch_attempt_count += 1
+                    selected_for_fetch = True
+                    if cache_dir is not None:
+                        planned = _cache_selected_hint(
+                            planned,
+                            cache_dir=cache_dir,
+                            max_pdf_bytes=max_pdf_bytes,
+                            keep_raw_pdf=keep_raw_pdf,
+                        )
             if planned.status == "cached":
                 cached_count += 1
+                if not planned.local_path:
+                    remote_cached_count += 1
             row_hints.append(planned.to_row())
         rows.append(
             {
@@ -127,7 +135,10 @@ def build_fulltext_manifest(
     )
     return {
         "schema_version": "research_fulltext_manifest.v1",
-        "enabled": source_plan.require_fulltext,
+        "enabled": source_plan.require_fulltext or any(
+            hint.get("status") == "cached" and hint.get("kind") == "pdf" and hint.get("local_path")
+            for row in rows for hint in row["hints"]
+        ),
         "allow_pdf_download": source_plan.allow_pdf_download,
         "cache_dir": str(cache_dir) if cache_dir else None,
         "budget": {
@@ -139,7 +150,7 @@ def build_fulltext_manifest(
         },
         "document_count": len(records),
         "hint_count": hint_count,
-        "selected_count": fetch_attempt_count,
+        "selected_count": selected_count,
         "fetch_attempt_count": fetch_attempt_count,
         "cached_count": cached_count,
         "status_counts": dict(sorted(status_counts.items())),
@@ -183,7 +194,7 @@ def _plan_hint(
     max_pdf_bytes: int,
 ) -> FulltextHint:
     if hint.local_path:
-        if not require_fulltext:
+        if not require_fulltext and hint.kind != "pdf":
             return _replace_hint(hint, status="hint_only", reason="fulltext_disabled")
         if hint.kind == "pdf" and max_pdf_bytes and hint.size_bytes and hint.size_bytes > max_pdf_bytes:
             return _replace_hint(hint, status="skipped", reason="local_pdf_exceeds_max_pdf_mb")

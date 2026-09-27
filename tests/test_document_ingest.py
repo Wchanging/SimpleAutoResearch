@@ -121,7 +121,7 @@ class DocumentIngestTests(unittest.TestCase):
             )
 
             self.assertEqual(len(bundle.records), 2)
-            self.assertEqual(bundle.records[1].extraction_status, "parsed")
+            self.assertEqual(bundle.records[0].extraction_status, "parsed")
             self.assertEqual(len(bundle.sections), 3)
             self.assertEqual(len(bundle.chunks), 1)
             self.assertEqual(bundle.fulltext_extraction["parsed_count"], 1)

@@ -42,6 +42,11 @@ File-relative paths resolve from the TOML directory; command argv remains litera
 | `[research]` | `max_iterations`, `interaction` | `max_iterations` defaults to `1`; `0` stops after the first analysis. `interaction` defaults to `checkpoints` for a new CLI session and accepts `assisted`, `checkpoints`, or `autonomous`. Critical facts and permissions block every mode. |
 | `[assets]` | `papers` | Optional list of local Markdown/text/PDF paths. Paths resolve from the TOML directory and are read-only inputs. |
 
+Explicitly supplied local PDFs are parsed best-effort (the default parser reads
+at most 20 pages) even when `use_fulltext = false`; that flag governs remote
+full-text retrieval. `allow_pdf_download = false` does not exclude a PDF already
+on disk. Parser failures remain diagnostics, not invented paper content.
+
 ### Execution and report
 
 | Section | Fields | Default / requirement / condition |

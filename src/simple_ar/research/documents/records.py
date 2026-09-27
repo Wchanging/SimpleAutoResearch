@@ -28,12 +28,14 @@ def build_document_records(
     Returns:
         Deduplicated document records. Metadata records are always preserved; local
         Markdown/text inputs are parsed into inspectable document records when
-        available. PDF inputs are recorded with extraction status and can be wired
-        to a stronger parser later without changing downstream schemas.
+        available. Supplied PDFs are passed to the bounded extraction stage so
+        parsing succeeds or fails once with an inspectable manifest row.
     """
     records: list[DocumentRecord] = []
+    # Explicitly supplied inputs get first access to a bounded chunk budget;
+    # retrieved metadata must not crowd out the paper the user actually gave us.
+    records.extend(_record_from_local_path(Path(path)) for path in source_plan.local_documents)
     records.extend(_record_from_paper(paper) for paper in papers)
-    records.extend(_record_from_local_path(Path(path), source_plan=source_plan) for path in source_plan.local_documents)
     return _deduplicate_records(records)
 
 
@@ -57,7 +59,7 @@ def build_cache_manifest(
         "source_counts": dict(sorted(source_counts.items())),
         "notes": [
             "Metadata records are stored without downloading restricted full text.",
-            "Local Markdown/text files are parsed locally; PDF parsing is optional and best-effort.",
+            "Local Markdown/text files are parsed locally; supplied PDFs use bounded best-effort parsing.",
         ],
     }
 
@@ -79,7 +81,7 @@ def _record_from_paper(paper: Paper) -> DocumentRecord:
     )
 
 
-def _record_from_local_path(path: Path, *, source_plan: SourcePlan) -> DocumentRecord:
+def _record_from_local_path(path: Path) -> DocumentRecord:
     suffix = path.suffix.lower()
     document_id = normalize_paper_id(f"local-{path.resolve() if path.exists() else path}")
     base = {
@@ -108,7 +110,7 @@ def _record_from_local_path(path: Path, *, source_plan: SourcePlan) -> DocumentR
             metadata={"suffix": suffix, "bytes": path.stat().st_size},
         )
     if suffix == ".pdf":
-        return _record_from_pdf(path, base=base, source_plan=source_plan)
+        return _record_from_pdf(path, base=base)
     return DocumentRecord(
         **base,
         content_hash=_sha256(path),
@@ -118,53 +120,16 @@ def _record_from_local_path(path: Path, *, source_plan: SourcePlan) -> DocumentR
     )
 
 
-def _record_from_pdf(path: Path, *, base: dict[str, Any], source_plan: SourcePlan) -> DocumentRecord:
-    if not source_plan.allow_pdf_download and not source_plan.require_fulltext:
-        return DocumentRecord(
-            **base,
-            content_hash=_sha256(path),
-            extraction_status="skipped",
-            parser="pdf_optional",
-            metadata={"suffix": ".pdf", "reason": "fulltext_disabled"},
-        )
-    try:
-        text = _read_pdf_with_optional_parser(path)
-    except Exception as exc:  # pragma: no cover - optional parser behavior varies by environment.
-        return DocumentRecord(
-            **base,
-            content_hash=_sha256(path),
-            extraction_status="failed",
-            parser="pypdf_optional",
-            metadata={"suffix": ".pdf", "error": str(exc)[:300]},
-        )
-    if not text.strip():
-        return DocumentRecord(
-            **base,
-            content_hash=_sha256(path),
-            extraction_status="failed",
-            parser="pypdf_optional",
-            metadata={"suffix": ".pdf", "error": "empty_extraction"},
-        )
+def _record_from_pdf(path: Path, *, base: dict[str, Any]) -> DocumentRecord:
+    # The extraction stage parses this once and records parser failures. A
+    # supplied PDF does not require permission to download remote full text.
     return DocumentRecord(
         **base,
-        abstract=_abstract(text),
         content_hash=_sha256(path),
-        extraction_status="parsed",
-        parser="pypdf_optional",
+        extraction_status="metadata_only",
+        parser="pdf_pending",
         metadata={"suffix": ".pdf", "bytes": path.stat().st_size},
     )
-
-
-def _read_pdf_with_optional_parser(path: Path) -> str:
-    try:
-        from pypdf import PdfReader  # type: ignore[import-not-found]
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("pypdf is not installed") from exc
-    reader = PdfReader(str(path))
-    parts: list[str] = []
-    for page in reader.pages[:20]:
-        parts.append(page.extract_text() or "")
-    return "\n".join(parts)
 
 
 def _deduplicate_records(records: list[DocumentRecord]) -> list[DocumentRecord]:

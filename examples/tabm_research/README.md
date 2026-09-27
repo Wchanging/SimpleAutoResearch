@@ -4,6 +4,8 @@ This one-folder case tests the V2.9 research loop against the official [TabM cod
 
 The case files define the goal (`research.toml`), edit/evaluation boundary (`code_task.toml`), researcher requirements (`task.md`), and external measurement adapter (`run_tabm.py`). The project, paper PDF, data and Python environment are machine assets under `runs/assets`, not tracked example outputs or credentials in `.env`. A missing asset is a preflight failure. `runs/tabm-research` holds actual session records.
 
+The supplied PDF is a local reading input even with remote full-text fetching disabled. The default PDF reader extracts up to its first 20 pages, so appendix-only details may remain unread; the session must not claim it verified the entire 37-page paper without additional reading.
+
 ## Prepared-server run
 
 The server's `runs/assets/tabm/paper` is a trimmed copy of upstream commit `28e47ae3` with the official California and Adult arrays from the [TabM data archive](https://huggingface.co/datasets/rototoHF/tabm-data/blob/main/data.tar). The prepared Python is `runs/assets/tabm-venv/bin/python`. These assets are ignored by Git: syncing the repository alone does not create them on a fresh machine. Do not run this configuration on an unprepared host or repoint it at arbitrary data and call the results comparable.

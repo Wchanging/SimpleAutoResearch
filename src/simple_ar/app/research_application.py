@@ -1259,7 +1259,7 @@ class ResearchApplication:
                     query_plan=plan.query_plan, max_documents=self._search_limit(plan),
                 ), allow_partial=True,
             )
-            if accepted and not self._load_search().selected_papers:
+            if accepted and not self._load_search().selected_papers and not self._local_documents():
                 self.controller.pause("Search returned no usable selected papers; revise the source or brief.")
                 return False
             return accepted
@@ -4626,7 +4626,7 @@ class ResearchApplication:
             if asset.availability != "missing"
             and asset.role in {"paper", "document", "reference"}
             and Path(asset.locator).is_file()
-            and Path(asset.locator).suffix.lower() in {".md", ".markdown", ".txt"}
+            and Path(asset.locator).suffix.lower() in {".md", ".markdown", ".txt", ".pdf"}
         ))
 
     def _cache_dir(self, name: str) -> Path:
