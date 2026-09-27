@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -49,9 +50,20 @@ def _measured_validation(project: Path, output: Path, dataset: str) -> float:
     return float(np.mean((predicted >= 0.5) == labels))
 
 
-def main() -> None:
-    import tomli_w
+def _config_with_seed(source: str, seed: int) -> str:
+    """Change only the official config's top-level seed, preserving all other TOML."""
+    parsed = tomllib.loads(source)
+    if isinstance(parsed.get("seed"), bool) or not isinstance(parsed.get("seed"), int):
+        raise ValueError("The official TabM config must declare an integer top-level seed.")
+    top_level = source.split("\n[", 1)[0]
+    matches = list(re.finditer(r"(?m)^(seed\s*=\s*)([+-]?\d+)([ \t]*(?:\#.*)?)$", top_level))
+    if len(matches) != 1:
+        raise ValueError("The official TabM config must contain exactly one editable top-level seed line.")
+    match = matches[0]
+    return source[:match.start(2)] + str(seed) + source[match.end(2):]
 
+
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=("california", "adult"), required=True)
     parser.add_argument("--seed", type=int, required=True)
@@ -70,13 +82,12 @@ def main() -> None:
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    config = tomllib.loads(source_config.read_text(encoding="utf-8"))
-    config["seed"] = args.seed
+    config_text = _config_with_seed(source_config.read_text(encoding="utf-8"), args.seed)
     # A fresh config path prevents a prior attempt's checkpoint from being read
     # as evidence for this candidate or seed.
     generated_config = output / f"official_{uuid4().hex}" / "0.toml"
     generated_config.parent.mkdir(parents=True)
-    generated_config.write_text(tomli_w.dumps(config), encoding="utf-8")
+    generated_config.write_text(config_text, encoding="utf-8")
     official_output = generated_config.with_suffix("")
     log_path = output / "training.log"
     environment = os.environ.copy()

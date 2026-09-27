@@ -19,6 +19,18 @@ _SPEC.loader.exec_module(_MODULE)
 
 
 class TabmAdapterTest(unittest.TestCase):
+    def test_seed_override_preserves_unrelated_toml(self) -> None:
+        original = 'seed = 0  # official\n[model]\nname = "tabm"\n'
+        changed = _MODULE._config_with_seed(original, 7)
+        self.assertEqual(changed, 'seed = 7  # official\n[model]\nname = "tabm"\n')
+        self.assertEqual(tomllib.loads(changed)["seed"], 7)
+
+    def test_seed_override_rejects_missing_or_ambiguous_seed(self) -> None:
+        for original in ('[model]\nname = "tabm"\n', 'seed = 0\nseed = 1\n'):
+            with self.subTest(original=original):
+                with self.assertRaises(ValueError):
+                    _MODULE._config_with_seed(original, 2)
+
     def test_case_keeps_seed_extension_available(self) -> None:
         case = tomllib.loads((_ADAPTER.parent / "research.toml").read_text(encoding="utf-8"))
         self.assertEqual(case["execution"]["seed_flag"], "--seed")
