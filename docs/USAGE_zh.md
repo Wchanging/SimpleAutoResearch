@@ -86,6 +86,9 @@ SIMPLE_AR_OUTPUT_PRICE_PER_1M=
 - 在线研究调用在有界 provider 重试耗尽后停止并保留失败 attempt。研究 TOML 没有
   `[llm].allow_fallback` 开关；要离线运行请设置 `[model].name = ""`，不能把确定性输出描述成
   模型生成的分析。`--no-llm` 只属于 CodeTask 原语命令，不是 research-session 参数。
+- 若配置文件后来已修改，而本次只想按保存的输入原样续跑，可使用
+  `simple-ar research-session --session-root PATH --model MODEL`，无需再次传入
+  `--config` 或 `--topic`。会话会恢复原目标、证据、执行条件与预算；显式修改仍须通过续跑检查。
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` 控制结构化 JSON 调用是否使用 provider 原生格式。默认 `off` 表示只靠 prompt 和本地解析，兼容性最好；`auto` 会尝试发送 `response_format={"type":"json_object"}`，仅在接口明确不支持时退回普通提示；`json_object` 表示强制发送。
 - 价格字段只影响 usage summary 中的费用估算；不填也会记录 token。
 

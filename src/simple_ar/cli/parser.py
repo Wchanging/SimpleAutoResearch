@@ -6,7 +6,10 @@ from pathlib import Path
 from simple_ar.code_task.runtime.config import CodeTaskConfigError, parse_metric_direction_arg
 
 
-def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentParser:
+def build_parser(
+    *, research_defaults: dict | None = None,
+    allow_resume_without_topic: bool = False,
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="simple-ar")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -75,7 +78,10 @@ def build_parser(*, research_defaults: dict | None = None) -> argparse.ArgumentP
     session_parser.add_argument("--decision-id", default=None, help="Id of the pending decision shown by research-session.")
     session_parser.add_argument("--decision-response", choices=("accept", "reject", "revise"), default=None)
     session_parser.add_argument("--decision-guidance", default=None, help="User-provided facts or revised direction; valid with --decision-response revise.")
-    session_parser.add_argument("--topic", required=not bool(research_defaults and research_defaults.get("topic")))
+    session_parser.add_argument(
+        "--topic",
+        required=not (allow_resume_without_topic or bool(research_defaults and research_defaults.get("topic"))),
+    )
     session_parser.add_argument(
         "--task-kind", choices=("auto", "survey", "bug_fix"), default="auto",
         help="Task-driven path: survey reuses evidence/report; bug_fix reuses isolated CodeTask patching and short validation.",

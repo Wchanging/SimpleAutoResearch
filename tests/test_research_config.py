@@ -12,6 +12,31 @@ from simple_ar.cli.research_config import research_defaults
 
 
 class ResearchConfigTests(unittest.TestCase):
+    def test_resume_without_config_restores_saved_goal_and_keeps_outputs(self):
+        from simple_ar.cli.main import main
+        from simple_ar.app.research_application import load_session
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "paper.md").write_text("# Supplied finding\nA bounded fact.\n", encoding="utf-8")
+            config = root / "research.toml"
+            config.write_text(
+                '[task]\ngoal="Summarize a supplied finding"\noutputs=["summary"]\noutput_root="out"\n'
+                '[model]\nname=""\n[research]\nmaterials_only=true\nproviders=["local_files"]\n'
+                '[assets]\npapers=["paper.md"]\n',
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                main(["research-session", "--config", str(config), "--interaction", "autonomous"])
+            session = next((root / "out").iterdir())
+            before = load_session(session).view()
+            with redirect_stdout(io.StringIO()):
+                main(["research-session", "--session-root", str(session)])
+            after = load_session(session).view()
+            self.assertEqual(after.status, "completed")
+            self.assertEqual(after.attempts, before.attempts)
+            self.assertEqual(after.state_refs, before.state_refs)
+
     def test_toml_interaction_and_decision_reply_reach_the_canonical_parser(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "research.toml"

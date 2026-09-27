@@ -77,11 +77,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     from simple_ar.cli.research_config import research_defaults
     explicit_config_destinations: set[str] = set()
+    session_options = arguments[:arguments.index("--command")] if "--command" in arguments else arguments
+    allow_resume_without_topic = bool(arguments and arguments[0] == "research-session") and any(
+        option == "--session-root" or option.startswith("--session-root=")
+        for option in session_options
+    )
     try:
         parser = build_parser(
             research_defaults=research_defaults(
                 arguments, explicit_destinations=explicit_config_destinations,
-            )
+            ),
+            allow_resume_without_topic=allow_resume_without_topic,
         )
     except (OSError, ValueError) as exc:
         raise SystemExit(f"Invalid research configuration: {exc}") from exc
@@ -291,6 +297,14 @@ def _print_research_session(args: argparse.Namespace) -> None:
     from simple_ar.app.research_intake import ResearchInputError
     from simple_ar.app.session_roots import new_research_session_root
     from simple_ar.research.workflow_contracts import ResearchBrief
+
+    if getattr(args, "session_root", None) is not None and not getattr(args, "topic", None):
+        from simple_ar.app.research_application import load_session
+
+        try:
+            args.topic = load_session(args.session_root).brief.objective
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise SystemExit(f"Could not restore the saved session goal: {exc}") from exc
 
     if getattr(args, "reanalyze", False) and not getattr(args, "session_root", None):
         raise SystemExit("--reanalyze requires --session-root.")

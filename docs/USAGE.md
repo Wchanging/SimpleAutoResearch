@@ -115,6 +115,10 @@ Notes:
   switch; set `[model].name = ""` for deterministic offline processing, and do
   not label its output as model-generated analysis. `--no-llm` is a CodeTask
   primitive option, not a research-session flag.
+- To resume unchanged saved inputs after a configuration file has been edited,
+  use `simple-ar research-session --session-root PATH --model MODEL` without
+  `--config` or `--topic`. The saved goal, evidence, execution, and budget are
+  restored; explicit changes remain subject to the normal resume checks.
 - `SIMPLE_AR_JSON_RESPONSE_FORMAT` controls provider-native JSON mode for
   structured calls. The default `off` uses prompt-only parsing for broad
   provider compatibility. `auto` tries `response_format={"type":"json_object"}`
