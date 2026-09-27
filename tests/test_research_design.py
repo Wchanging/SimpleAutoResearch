@@ -40,7 +40,8 @@ class ResearchDesignTests(unittest.TestCase):
                  "execution_protocol": {}},
                 {"status": "ready", "implementation_spec":
                     "Observe a changed forward output on a small input; keep the accepted evaluator.",
-                 "unresolved_questions": [], "target_paths": ["model.py"]},
+                 "unresolved_questions": [], "target_paths": ["model.py"],
+                 "source_quotes": [{"path": "model.py", "quote": "return x"}]},
                 {"verdict": "accept", "issues": []},
             ]
             result = build_research_design(ResearchDesignRequest(
@@ -69,7 +70,8 @@ class ResearchDesignTests(unittest.TestCase):
                  "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}]},
                 {"status": "ready", "implementation_spec": "Change model.py based on the active k=32.",
                  "unresolved_questions": [], "target_paths": ["model.py"],
-                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}]},
+                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"},
+                                   {"path": "model.py", "quote": "return k"}]},
                 {"verdict": "accept", "issues": []},
             ]
             result = build_research_design(ResearchDesignRequest(
@@ -99,7 +101,8 @@ class ResearchDesignTests(unittest.TestCase):
                 {"selected_idea_id": "idea-002", "rationale": "Try a bounded change."},
                 {"status": "ready", "implementation_spec": "Change the default k=5 to 3.",
                  "unresolved_questions": [], "target_paths": ["model.py"],
-                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}]},
+                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"},
+                                   {"path": "model.py", "quote": "def build(k=5)"}]},
                 {"verdict": "revise", "issues": ["Changing the default is dormant: active config supplies k=32."]},
                 {"status": "blocked", "implementation_spec": "", "unresolved_questions": [
                     "A config-only change is outside the authorized edit scope."]},
@@ -209,6 +212,61 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertIn("predictions = heads.mean(1)", found[0]["text"])
             self.assertGreater(found[0]["source_offset"], 10921)
 
+    def test_exact_source_lookup_reaches_a_downstream_consumer(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "producer.py").write_text(
+                "def forward(x):\n    return x\n" + "# pad\n" * 500, encoding="utf-8")
+            (workspace / "consumer.py").write_text(
+                "# pad\n" * 500 + "def evaluate(heads):\n    return heads.mean(1)\n",
+                encoding="utf-8")
+            index = source_file_inventory(workspace)
+            request = {"files": ["producer.py", "consumer.py"],
+                       "symbols": ["forward"], "query": "where does output change?",
+                       "literal": "heads.mean(1)"}
+            found = requested_source_context(workspace, index, request,
+                supplied=[], max_files=2, max_chars=500)
+            self.assertEqual([row["path"] for row in found], ["consumer.py"])
+            self.assertIn("heads.mean(1)", found[0]["text"])
+            self.assertGreater(found[0]["start_line"], 400)
+            self.assertGreaterEqual(found[0]["end_line"], found[0]["start_line"])
+            self.assertEqual(requested_source_context(workspace, index, request,
+                supplied=found, max_files=2, max_chars=500), [])
+
+    def test_initial_feasibility_requires_code_evidence_not_just_config(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "consumer.py").write_text(
+                "def score(heads):\n    return heads.mean(1)\n", encoding="utf-8")
+            (workspace / "experiment.toml").write_text("k = 32\n", encoding="utf-8")
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Try an in-scope change."},
+                {"status": "ready", "implementation_spec": "Change scoring aggregation.",
+                 "unresolved_questions": [], "target_paths": ["consumer.py"],
+                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}]},
+                {"status": "ready", "implementation_spec": "Change scoring aggregation.",
+                 "unresolved_questions": [], "target_paths": ["consumer.py"],
+                 "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"},
+                                   {"path": "consumer.py", "quote": "heads.mean(1)"}]},
+                {"verdict": "accept", "issues": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace)},
+                    "protocol": {"comparison_conditions": {"source_config": "experiment.toml"}}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(client.ask_json.call_count, 4)
+            self.assertIn("exact observed source quote from target", client.ask_json.call_args_list[2].args[1])
+
     def test_initial_feasibility_reserves_budget_for_three_source_followups(self):
         from unittest.mock import Mock
         from simple_ar.code_task.analysis.source_context import source_file_inventory
@@ -235,7 +293,8 @@ class ResearchDesignTests(unittest.TestCase):
                     "symbols": ["late_three"], "query": ""}},
                 {"status": "ready", "implementation_spec": "Modify model.py at late_three.",
                     "target_paths": ["model.py"],
-                    "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}],
+                    "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"},
+                                      {"path": "model.py", "quote": "def late_three()"}],
                     "unresolved_questions": []},
                 {"verdict": "accept", "issues": []},
             ]

@@ -57,7 +57,10 @@ def source_file_inventory(
 def requested_source_context(workspace: Path, index: dict[str, Any], request: dict[str, Any],
                              *, supplied: list[dict[str, str]], max_files: int, max_chars: int,
                              max_total_chars: int | None = None) -> list[dict[str, Any]]:
-    query = " ".join([request.get("query", ""), *request.get("symbols", [])]).strip()
+    literal = request.get("literal", "")
+    if not isinstance(literal, str) or len(literal) > 200:
+        raise ValueError("Source literal must be a string of at most 200 characters.")
+    query = " ".join([request.get("query", ""), *request.get("symbols", []), literal]).strip()
     known = {str(item["path"]) for item in index.get("files", [])}
     requested_files = request.get("files", [])
     candidates = [path for path in requested_files if path in known]
@@ -93,17 +96,22 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
             return list(dict.fromkeys(match.start() for term in terms if term
                 for match in re.finditer(re.escape(term), text, flags=re.IGNORECASE)))
 
-        symbol_positions = positions_for(symbols)
-        query_positions = positions_for(query_terms)
-        positions = symbol_positions + query_positions
+        literal_positions = ([match.start() for match in re.finditer(re.escape(literal), text)]
+                             if literal else [])
+        symbol_positions = positions_for(symbols) if not literal else []
+        query_positions = positions_for(query_terms) if not literal else []
+        positions = literal_positions + query_positions + symbol_positions
         unseen = lambda items: [pos for pos in items if not any(lo <= pos < hi for lo, hi in seen)]
+        if literal and not literal_positions:
+            continue
         # The query expresses the requested behavior; named symbols can be
         # implementation helpers or imports that appear far from that behavior.
-        starts = [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(query_positions)]
+        starts = [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(literal_positions)]
+        starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(query_positions)]
         starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(symbol_positions)]
         if not positions and not symbols and not query_terms:
             starts = [min(max((hi for _, hi in seen), default=0), max(0, len(text) - size))]
-        elif positions and not starts:
+        elif positions and not starts and not literal:
             # A requested method can start in an already supplied window but
             # continue beyond its clipped end. Return one adjacent window.
             starts = [min(hi, max(0, len(text) - size)) for lo, hi in seen
@@ -118,7 +126,10 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
             if novel < required_novel:
                 continue
             result.append({"path": relative, "access_role": "read_only", "text": excerpt,
-                           "source_offset": start, "truncated": start > 0 or start + len(excerpt) < len(text)})
+                           "source_offset": start,
+                           "start_line": text.count("\n", 0, start) + 1,
+                           "end_line": text.count("\n", 0, start + len(excerpt) - 1) + 1,
+                           "truncated": start > 0 or start + len(excerpt) < len(text)})
             remaining -= len(excerpt)
             break
         if len(result) >= max_files:
