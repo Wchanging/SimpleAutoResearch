@@ -167,6 +167,21 @@ class LLMParsingTests(unittest.TestCase):
         self.assertEqual([row["index"] for row in result], [0, 1, 2])
         self.assertEqual(pool.call_args.kwargs["max_workers"], 1)
 
+    def test_failed_batch_does_not_start_unsent_requests(self) -> None:
+        client = LLMClient(LLMSettings(api_key="test-key"))
+        calls: list[str] = []
+
+        def fail_first(system: str, user: str, *, label: str = "") -> dict[str, str]:
+            calls.append(user)
+            raise LLMError("rate limited")
+
+        requests = [LLMRequest("s", str(index), label=f"item-{index}") for index in range(3)]
+        with patch.dict(os.environ, {"SIMPLE_AR_LLM_MAX_WORKERS": "1"}), patch.object(
+            client, "ask_json", side_effect=fail_first
+        ), self.assertRaisesRegex(LLMError, "item-0"):
+            client.ask_json_many(requests, max_workers=3)
+        self.assertEqual(calls, ["0"])
+
     def test_screening_worker_count_reflects_provider_cap(self) -> None:
         from simple_ar.research.evidence.screening import _screening_workers
 

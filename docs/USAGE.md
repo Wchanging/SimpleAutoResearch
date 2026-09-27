@@ -94,9 +94,9 @@ Notes:
   name when possible.
 - `SIMPLE_AR_LLM_REASONING_EFFORT` is an optional documented model capability
   such as `low` or `high`, forwarded only to Chat Completions through the
-  provider extension field. `SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` can expand
-  an explicit per-call output cap to leave room for reasoning; it does not add
-  a cap when the caller has left output unlimited.
+  provider extension field. `SIMPLE_AR_LLM_REASONING_OUTPUT_TOKENS` supplies a
+  fallback cap only when neither the caller nor client settings provide one;
+  it never overrides an explicit per-call limit.
 - `SIMPLE_AR_LLM_TIMEOUT_SEC` defaults to 180 seconds per provider attempt.
   Set a larger positive value for a slow provider, or explicitly set
   `0`/`off`/`none` to disable the client-side timeout.

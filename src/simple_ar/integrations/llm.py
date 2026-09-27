@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import json
 import os
 import re
@@ -674,16 +674,34 @@ class LLMClient:
             raise LLMError("max_workers must be at least 1")
 
         worker_count = llm_worker_limit(min(max_workers, len(requests)))
+        remaining = iter(enumerate(requests))
+        results: dict[int, T] = {}
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(handler, request) for request in requests]
-            results: list[T] = []
-            for request, future in zip(requests, futures):
+            pending: dict[Future[T], tuple[int, LLMRequest]] = {}
+
+            def submit_next() -> bool:
                 try:
-                    results.append(future.result())
+                    index, request = next(remaining)
+                except StopIteration:
+                    return False
+                future = executor.submit(handler, request)
+                pending[future] = (index, request)
+                return True
+
+            for _ in range(worker_count):
+                submit_next()
+            while pending:
+                future = next(as_completed(tuple(pending)))
+                index, request = pending.pop(future)
+                try:
+                    results[index] = future.result()
                 except Exception as exc:
+                    for unfinished in pending:
+                        unfinished.cancel()
                     label = f" for {request.label}" if request.label else ""
                     raise LLMError(f"LLM batch request failed{label}: {exc}") from exc
-            return results
+                submit_next()
+        return [results[index] for index in range(len(requests))]
 
     def _record_usage(
         self,
