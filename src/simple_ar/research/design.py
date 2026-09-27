@@ -401,7 +401,7 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
             raise LLMError("Invalid design source context request.")
         found = requested_source_context(request.source_workspace, dict(request.source_index), query,
             supplied=excerpts, max_files=4, max_chars=6000,
-            max_total_chars=max(0, 24000 - sum(len(row["text"]) for row in excerpts)))
+            max_total_chars=min(12000, max(0, 36000 - sum(len(row["text"]) for row in excerpts))))
         trace[-1]["source_excerpts"] = found
         if not found:
             return replace(previous, status="blocked", generation_mode="llm", diagnostics=(

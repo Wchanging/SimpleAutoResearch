@@ -186,6 +186,44 @@ class ResearchDesignTests(unittest.TestCase):
                 supplied=first, max_files=1, max_chars=1000)
             self.assertIn("predictions = scores.mean(1)", second[0]["text"])
 
+    def test_initial_feasibility_reserves_budget_for_two_source_followups(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "model.py").write_text(
+                "# prefix\n" * 800 + "def late_one():\n    pass\n"
+                + "# middle\n" * 800 + "def late_two():\n    return 2\n", encoding="utf-8",
+            )
+            (workspace / "helper.py").write_text(
+                "# prefix\n" * 800 + "def late_one():\n    return 1\n", encoding="utf-8",
+            )
+            (workspace / "experiment.toml").write_text("[model]\nk = 32\n", encoding="utf-8")
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Inspect the implementation."},
+                {"status": "inspect_source", "context_request": {"files": ["model.py", "helper.py"],
+                    "symbols": ["late_one"], "query": ""}},
+                {"status": "inspect_source", "context_request": {"files": ["model.py"],
+                    "symbols": ["late_two"], "query": ""}},
+                {"status": "ready", "implementation_spec": "Modify model.py at late_two.",
+                    "target_paths": ["model.py"],
+                    "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"}],
+                    "unresolved_questions": []},
+                {"verdict": "accept", "issues": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace),
+                    "allowed_patterns": ["model.py", "helper.py"]},
+                    "protocol": {"comparison_conditions": {"source_config": "experiment.toml"}}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertIn("late_two", client.ask_json.call_args_list[3].args[1])
+
     def test_refinement_reads_real_source_and_persists_trace_on_provider_failure(self):
         from unittest.mock import Mock
         import json
