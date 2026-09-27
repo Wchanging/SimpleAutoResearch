@@ -591,6 +591,9 @@ def build_prompt(
         "existing CodeTask boundary, not an assertion that a patch was applied. Set revision_base to "
         "candidate when continuing the current candidate; set it to baseline only when the evidence "
         "requires a fresh direction from the original baseline.\n"
+        "- A technically validated patch and validation_hints do not prove the candidate method. "
+        "Use only candidate-specific execution evidence to describe mechanism fidelity; when its "
+        "method_validation is 未检查, retain that limitation separately from measured metric deltas.\n"
         "- stop is appropriate when the goal is met, evidence is insufficient, no justified change remains, "
         "or the configured round/budget boundary is exhausted.\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2, default=str)}"
@@ -610,6 +613,7 @@ def compact_task_contract_for_prompt(contract: dict[str, Any], *, max_task_chars
         "version_hash": contract.get("version_hash", ""),
         "task_kind": contract.get("task_kind", ""),
         "objective": contract.get("objective", ""),
+        "hard_constraints": normalize_string_list(contract.get("hard_constraints"))[:20],
         "task_excerpt": task[:max_task_chars],
         "success_criteria": normalize_string_list(contract.get("success_criteria"))[:20],
         "metric_contract": {

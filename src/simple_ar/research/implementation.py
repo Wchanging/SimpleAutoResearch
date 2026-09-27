@@ -55,7 +55,7 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     paths = code_task_paths(request.run_dir)
     if paths.workspace_dir.resolve() != request.cwd.resolve():
         raise ValueError("Candidate cwd must be the initialized CodeTask workspace.")
-    task_ref = _prepare_research_task(context, request, paths.task_dir)
+    task_ref, design = _prepare_research_task(context, request, paths.task_dir)
     before = snapshot_protocol_assets(request.protocol, request.cwd)
     protected = list(protected_patterns_from_manifest(manifest))
     for snapshot in before.values():
@@ -177,20 +177,30 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     proposal_path = paths.meta_dir / "proposed_edits.json"
     proposal = read_json(proposal_path) if proposal_path.is_file() else {}
     feedback = proposal.get("implementation_feedback") if stop_reason == "no_edits_proposed" else None
+    artifact_payload: dict[str, Any] = {
+        "schema_version": "research_implementation.v1",
+        "status": "validated" if finished else "incomplete",
+        "code_task_run_dir": str(request.run_dir), "workspace_dir": str(paths.workspace_dir),
+        "stop_reason": stop_reason, "next_action": next_action,
+        "steps": steps,
+        "implementation_feedback": feedback,
+        "failure_ref": request.failure_ref.to_dict() if request.failure_ref else None,
+        "asset_integrity": integrity,
+        "validation": validation_row,
+        "artifact_refs": {name: ref.to_dict() for name, ref in evidence.items()},
+        "artifact_base": "attempt",
+    }
+    if design is not None:
+        # A technically validated patch is not evidence that the proposed
+        # research mechanism survived implementation. Hints are not checks.
+        artifact_payload["method_validation"] = {
+            "status": "未检查",
+            "reason": "No candidate-specific behavior criterion and observed result were recorded together.",
+            "validation_hints": list(design.contract.validation_hints) if design.contract else [],
+        }
     artifact = context.store.write_json(
-        "implementation.json", {
-            "schema_version": "research_implementation.v1",
-            "status": "validated" if finished else "incomplete",
-            "code_task_run_dir": str(request.run_dir), "workspace_dir": str(paths.workspace_dir),
-            "stop_reason": stop_reason, "next_action": next_action,
-            "steps": steps,
-            "implementation_feedback": feedback,
-            "failure_ref": request.failure_ref.to_dict() if request.failure_ref else None,
-            "asset_integrity": integrity,
-            "validation": validation_row,
-            "artifact_refs": {name: ref.to_dict() for name, ref in evidence.items()},
-            "artifact_base": "attempt",
-        }, kind="implementation_result", schema="research_implementation.v1", producer="research.implementation",
+        "implementation.json", artifact_payload,
+        kind="implementation_result", schema="research_implementation.v1", producer="research.implementation",
     )
     capability_status = "completed" if finished else "partial" if validation is not None else "blocked"
     return CapabilityResult(
@@ -204,7 +214,7 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
 
 def _prepare_research_task(
     context: CapabilityContext, request: ImplementationRequest, task_dir: Path,
-) -> ArtifactRef:
+) -> tuple[ArtifactRef, ResearchDesignResult | None]:
     """Freeze consumed research context before planning; never reuse a stale plan."""
     design_ref = next((ref for ref in context.inputs if ref.kind == "research_design"), None)
     design = ResearchDesignResult.from_handoff_dict(context.read_input_json(design_ref)) if design_ref else None
@@ -316,5 +326,6 @@ def _prepare_research_task(
     task += "Implement and validate only; the research application owns benchmark execution.\n\n"
     task += "```json\n" + json.dumps(consumed, ensure_ascii=False, separators=(",", ":")) + "\n```\n"
     write_text(task_path, task)
-    return context.store.write_text("inputs/research_code_task.md", task, kind="task_input",
-                                    schema="markdown.v1", producer="research.implementation")
+    task_ref = context.store.write_text("inputs/research_code_task.md", task, kind="task_input",
+                                        schema="markdown.v1", producer="research.implementation")
+    return task_ref, design

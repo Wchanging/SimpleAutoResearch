@@ -1090,13 +1090,17 @@ class ResearchApplication:
             context, memory = attach_paired_report_measurements(context, memory, measurements,
                 comparisons=evidence["comparisons"], comparison_ref=evidence_ref, summaries=evidence.get("paired_summary", []))
             context.source_handles.append(SourceHandle(handle="artifact:paired_analysis", kind="experiment_set_analysis", artifact=evidence_ref.path))
-            if collection.get("implementation_ref") is not None:
-                implementation_ref = ArtifactRef.from_dict(collection["implementation_ref"])
+            if isinstance(evidence.get("implementation_ref"), Mapping):
+                implementation_ref = ArtifactRef.from_dict(evidence["implementation_ref"])
                 attach_implementation_evidence(
                     context,
                     self.controller.store,
                     implementation_ref,
                     lineage_refs=self._implementation_lineage_refs(implementation_ref),
+                )
+            elif collection.get("implementation_ref") is not None:
+                memory.limitations.append(
+                    "The collection's implementation revision was not confirmed by every candidate measurement."
                 )
             memory.source_handles = list(context.source_handles)
             return attach_report_read_evidence(context, memory, documents=self._load_documents(),
@@ -1132,12 +1136,7 @@ class ResearchApplication:
             handles.append(SourceHandle(handle="artifact:current_baseline", kind="experiment_result", artifact=baseline_ref.path))
         context.metric_sources, memory.metric_sources = metrics, metrics
         context.source_handles, memory.source_handles = handles, handles
-        implementation_ref = next(
-            (refs[str(row["state_name"])] for row in reversed(self._accepted_plan_steps())
-             if str(row.get("capability") or "") == "implement"
-             and str(row["state_name"]) in refs),
-            None,
-        )
+        implementation_ref = self._artifact_ref(execution.get("implementation_ref"))
         if implementation_ref is not None:
             attach_implementation_evidence(
                 context,
@@ -1146,6 +1145,10 @@ class ResearchApplication:
                 lineage_refs=self._implementation_lineage_refs(implementation_ref),
             )
             memory.source_handles = list(context.source_handles)
+        elif any(row.get("capability") == "implement" for row in self._accepted_plan_steps()):
+            memory.limitations.append(
+                "This measurement has no implementation revision reference; the current patch is not attributed to it."
+            )
         if "experiment_contract" in execution:
             context.experiment_plan = dict(execution["experiment_contract"])
             memory.key_decisions.append("Experiment protocol comes from the measured execution; research design records motivation, not proof of implementation.")
@@ -1594,6 +1597,8 @@ class ResearchApplication:
             if action.startswith("matrix_candidate_") and "implementation" in self.controller.manifest.state_refs:
                 revision = int(action.split("_r")[1].split("_")[0]) if "_r" in action else 0
                 inputs += self._input_refs(f"matrix_repair_{revision}" if revision else "implementation")
+            if action == "experiment":
+                inputs += tuple(self._optional_refs("implementation"))
             state_name = action
             if action.startswith("retest:"):
                 index = int(action.split(":")[1])
@@ -1653,6 +1658,7 @@ class ResearchApplication:
                         "A CodeTask supplement candidate requires the current prepared workspace."
                     )
                 inputs.append(current_preparation)
+            if condition == "candidate" and isinstance(config.get("code_task"), Mapping):
                 implementation_ref = self._active_implementation_ref()
                 if implementation_ref is not None:
                     inputs.append(implementation_ref)
@@ -1752,6 +1758,13 @@ class ResearchApplication:
                     )
                     inputs = [collection_ref]
                     inputs.extend(ref for pair in supplement_pairs for ref in pair)
+                    collection_payload = self.controller.store.read_json(collection_ref)
+                    implementation_ref = self._artifact_ref(
+                        collection_payload.get("implementation_ref")
+                        if isinstance(collection_payload, Mapping) else None
+                    )
+                    if implementation_ref is not None:
+                        inputs.append(implementation_ref)
                     previous = self._latest_analysis_ref()
                     if previous is not None:
                         inputs.append(previous)
@@ -1777,6 +1790,13 @@ class ResearchApplication:
                     f"Reanalysis {iteration} requires both supplement measurements."
                 )
             inputs = [baseline_ref, candidate_ref]
+            candidate_payload = self.controller.store.read_json(candidate_ref)
+            implementation_ref = self._artifact_ref(
+                candidate_payload.get("implementation_ref")
+                if isinstance(candidate_payload, Mapping) else None
+            )
+            if implementation_ref is not None:
+                inputs.append(implementation_ref)
             previous = self._latest_analysis_ref()
             if previous is not None:
                 inputs.append(previous)
@@ -1798,7 +1818,11 @@ class ResearchApplication:
             analysis_inputs = [result_ref]
             if baseline_ref is not None:
                 analysis_inputs.append(baseline_ref)
-            implementation_ref = self.controller.manifest.state_refs.get("implementation")
+            result_payload = self.controller.store.read_json(result_ref)
+            implementation_ref = self._artifact_ref(
+                result_payload.get("implementation_ref")
+                if isinstance(result_payload, Mapping) else None
+            )
             if implementation_ref is not None:
                 analysis_inputs.append(implementation_ref)
             return self._execute(
@@ -2934,7 +2958,19 @@ class ResearchApplication:
         candidate_revision = max(revisions, default=0)
         if type(matrix.get("candidate_revision")) is int:
             candidate_revision = max(candidate_revision, matrix["candidate_revision"])
-        implementation_ref = self._active_implementation_ref()
+        candidate_implementations = [
+            self._artifact_ref(self.controller.store.read_json(candidate).get("implementation_ref"))
+            for _, candidate in pairs
+        ]
+        if len({ref.path for ref in candidate_implementations if ref is not None}) > 1:
+            raise ResearchApplicationError(
+                "Supplement candidate measurements reference different implementation revisions."
+            )
+        implementation_ref = (
+            candidate_implementations[0]
+            if candidate_implementations and all(ref == candidate_implementations[0] for ref in candidate_implementations)
+            else None
+        )
         return self.controller.store.write_json(
             f"outputs/supplement-experiment-set-r{iteration}.json", {
                 "schema_version": "experiment_set.v1", "brief_revision": self.brief.revision,
@@ -4722,6 +4758,8 @@ class ResearchApplication:
                     ],
                     "expected_outcome": str(contract.get("expected_outcome") or ""),
                 }]
+            if self.brief.hard_constraints:
+                contract["hard_constraints"] = list(self.brief.hard_constraints)
             context["task_contract"] = contract
 
         names: list[str] = []
@@ -4753,17 +4791,6 @@ class ResearchApplication:
         }
         if directions:
             context["metric_directions"] = directions
-        implementation_ref = self.controller.manifest.state_refs.get("implementation")
-        revision_refs = [
-            (key, ref) for key, ref in self.controller.manifest.state_refs.items()
-            if key.startswith("implementation_r") and key.removeprefix("implementation_r").isdigit()
-        ]
-        if revision_refs:
-            implementation_ref = max(revision_refs, key=lambda item: int(item[0].removeprefix("implementation_r")))[1]
-        if implementation_ref is not None:
-            context["project_results"] = {
-                "implementation_ref": implementation_ref.to_dict(),
-            }
         history = self._research_history()
         latest_analysis = self._latest_analysis_ref()
         remaining_rounds = max(
@@ -4811,10 +4838,12 @@ class ResearchApplication:
         """Expose supplied, protocol-compatible directions without inventing results."""
 
         refs = self.controller.manifest.state_refs
+        if "synthesis" not in refs:
+            return []
         try:
             current = self.controller.store.read_json(self._implementation_design_ref()) if "design" in refs else {}
             synthesis = self._load_synthesis()
-        except (OSError, ValueError, KeyError):
+        except (ResearchApplicationError, OSError, ValueError, KeyError):
             return []
         selected = current.get("selected_idea") if isinstance(current, Mapping) else None
         selected_id = str(selected.get("idea_id") or "").strip() if isinstance(selected, Mapping) else ""
@@ -4868,7 +4897,7 @@ class ResearchApplication:
         refs = self.controller.manifest.state_refs
         measurements: list[dict[str, Any]] = []
         current_path = current_candidate_ref.path if current_candidate_ref is not None else ""
-        for index, step in enumerate(plan.steps):
+        for step in plan.steps:
             if step.capability != "experiment":
                 continue
             result_ref = refs.get(step.state_name)
@@ -4903,19 +4932,9 @@ class ResearchApplication:
             if isinstance(conditions, Mapping) and type(conditions.get("seed")) is int:
                 measurement["seed"] = conditions["seed"]
             if not is_baseline:
-                implementation_step = next(
-                    (
-                        prior for prior in reversed(plan.steps[:index])
-                        if prior.capability == "implement"
-                        and refs.get(prior.state_name) is not None
-                        and self._step_completed(prior)
-                    ),
-                    None,
-                )
-                if implementation_step is not None:
-                    measurement["implementation_ref"] = refs[
-                        implementation_step.state_name
-                    ].to_dict()
+                implementation_ref = result.get("implementation_ref")
+                if isinstance(implementation_ref, Mapping):
+                    measurement["implementation_ref"] = dict(implementation_ref)
             measurements.append(measurement)
 
         current = next(

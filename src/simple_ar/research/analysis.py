@@ -449,6 +449,7 @@ def _experiment_set_payload(context: CapabilityContext, collection: Mapping[str,
     comparisons, rows, missing, failed = [], [], [], []
     groups = {}
     statuses = []
+    candidate_implementations: list[Mapping[str, Any] | None] = []
     for pair in collection["pairs"]:
         measured = {}
         for role in ("baseline", "candidate"):
@@ -460,6 +461,11 @@ def _experiment_set_payload(context: CapabilityContext, collection: Mapping[str,
             result = context.read_input_json(ref)
             measured[role] = result
             statuses.append(result["status"])
+            if role == "candidate":
+                implementation_ref = result.get("implementation_ref")
+                candidate_implementations.append(
+                    dict(implementation_ref) if isinstance(implementation_ref, Mapping) else None
+                )
             # Failed runs remain in the set/comparison, never in valid metric rows.
             if result["status"] == "passed":
                 rows.append({"condition": role, "seed": pair["seed"], "metrics": result["metrics"],
@@ -495,15 +501,32 @@ def _experiment_set_payload(context: CapabilityContext, collection: Mapping[str,
                 "protocol": group["protocol"], "sources": [{"baseline_ref": pair["baseline_ref"],
                     "candidate_ref": pair["candidate_ref"]} for pair, _ in selected]})
     metrics = _unique_candidate_summary_metrics(summaries)
+    recorded_implementations = [ref for ref in candidate_implementations if ref is not None]
+    if recorded_implementations and any(ref != recorded_implementations[0] for ref in recorded_implementations):
+        raise ValueError("The paired candidate measurements contain different implementation revisions.")
+    collection_implementation = collection.get("implementation_ref")
+    if (isinstance(collection_implementation, Mapping) and recorded_implementations
+            and dict(collection_implementation) != recorded_implementations[0]):
+        raise ValueError("The result collection disagrees with its candidate measurement lineage.")
+    complete_lineage = (
+        bool(candidate_implementations)
+        and len(candidate_implementations) == len(collection["pairs"])
+        and all(ref is not None for ref in candidate_implementations)
+    )
+    limitations = [
+        "Paired summaries are descriptive, grouped by declared protocol and observed protected-file identity. "
+        "Only the current candidate revision is included; no significance test or population uncertainty is established."
+    ]
+    if collection_implementation is not None and not complete_lineage:
+        limitations.append("Candidate implementation lineage could not be verified for every measured pair.")
     return {"status": "passed" if statuses and not missing and all(s == "passed" for s in statuses) else "incomplete",
             "metrics": metrics, "comparisons": comparisons, "seed_evidence": rows,
             "paired_summary": summaries,
-            "implementation_ref": collection.get("implementation_ref"),
+            "implementation_ref": recorded_implementations[0] if complete_lineage else None,
             "candidate_revision": collection.get("candidate_revision", 0),
             "superseded_candidates": collection.get("superseded_candidates", []),
             "missing_measurements": missing, "failed_measurements": failed, "planned_pairs": len(collection["pairs"]),
-            "limitations": ["Paired summaries are descriptive, grouped by declared protocol and observed protected-file identity. "
-                "Only the current candidate revision is included; no significance test or population uncertainty is established."]}
+            "limitations": limitations}
 
 
 def _unique_candidate_summary_metrics(
@@ -593,15 +616,33 @@ def analyze_experiment_capability(
             }
         )
     project_results = dict(base_context.project_results)
+    project_results.pop("implementation_ref", None)  # Legacy global-active hint is not measurement lineage.
     project_results["execution_result"] = dict(payload)
-    implementation_ref = payload.get("implementation_ref") if is_collection else None
-    if not isinstance(implementation_ref, Mapping):
-        candidate_ref = project_results.get("implementation_ref")
-        implementation_ref = candidate_ref if isinstance(candidate_ref, Mapping) else None
+    # A measurement must carry the implementation revision that produced it.
+    # Do not fall back to the application's globally active implementation:
+    # that would let a later candidate's method evidence explain an older run.
+    implementation_ref = payload.get("implementation_ref")
+    method_validation = None
     if isinstance(implementation_ref, Mapping):
         implementation = ArtifactRef.from_dict(dict(implementation_ref))
-        if implementation in context.inputs:
-            project_results["implementation"] = context.read_input_json(implementation)
+        if implementation not in context.inputs:
+            raise ValueError("The measured implementation revision is not a declared analysis input.")
+        implementation_record = context.read_input_json(implementation)
+        if not isinstance(implementation_record, Mapping):
+            raise ValueError("Implementation result artifact must be a JSON object.")
+        recorded_check = implementation_record.get("method_validation")
+        method_validation = dict(recorded_check) if isinstance(recorded_check, Mapping) else {
+            "status": "未检查",
+            "reason": "This implementation predates candidate-specific method checks.",
+        }
+        project_results["implementation"] = {
+            "artifact_ref": implementation.to_dict(),
+            "status": implementation_record.get("status"),
+            "method_validation": method_validation,
+        }
+    analysis_metadata = dict(base_context.metadata)
+    if method_validation is not None:
+        analysis_metadata["method_validation"] = method_validation
     if is_collection:
         project_results["seed_evidence"] = payload["seed_evidence"]
         project_results["comparisons"] = payload["comparisons"]
@@ -609,13 +650,19 @@ def analyze_experiment_capability(
     analysis = analyze_results(
         AnalysisRequest(
             context=base_context.model_copy(
-                update={"metrics": metrics, "project_results": project_results}
+                update={"metrics": metrics, "project_results": project_results,
+                        "metadata": analysis_metadata}
             ),
             use_llm=use_llm,
             label=label,
         ),
         client=client,
     )
+    if method_validation is not None:
+        status = str(method_validation.get("status") or "未检查")
+        reason = str(method_validation.get("reason") or "No candidate-specific behavior check was recorded.")
+        limitation = f"Candidate method validation is {status}: {reason}"
+        analysis.audit.limitations = list(dict.fromkeys([*analysis.audit.limitations, limitation]))
     preparation = payload.get("preparation")
     if is_collection:
         limitations = payload["limitations"]

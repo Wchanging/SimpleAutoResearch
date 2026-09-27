@@ -175,7 +175,16 @@ class CodeTaskTests(unittest.TestCase):
                                            "protected_assets": [{"asset_id": "evaluator", "path": "evaluate.py"}]}},
             }, budget_limits={"llm_requests": 12, "total_tokens": 50000,
                               "process_invocations": (5 + int(late_failure) if repair_failure else 4) if paired else 3 if repair_failure else 2,
-                              "process_wall_seconds": 30 if paired else 15}))
+                               "process_wall_seconds": 30 if paired else 15}))
+            def advance_until(*actions):
+                for _ in range(6):
+                    view = app.view()
+                    if view.next_action in actions:
+                        return view
+                    self.assertEqual(view.status, "running", view.status_reason)
+                    app.advance(max_actions=1)
+                self.fail(f"Did not reach {actions!r}; next={app.view().next_action!r}")
+
             if prepare_source:
                 app.advance(max_actions=20 if protocol_gate else 8)
                 if protocol_gate:
@@ -186,6 +195,7 @@ class CodeTaskTests(unittest.TestCase):
                     self.assertFalse((project / "evaluation_count.txt").exists())
                     app.continue_session(decision_id=gate["id"], decision_response="accept")
                     app = load_session(root / "session")
+                advance_until("prepare_execution")
                 self.assertEqual(app.view().next_action, "prepare_execution")
                 with patch.object(app, "_persist_application_views", side_effect=RuntimeError("interrupted preparation")):
                     with self.assertRaisesRegex(RuntimeError, "interrupted preparation"):
@@ -202,6 +212,7 @@ class CodeTaskTests(unittest.TestCase):
                 app.advance(max_actions=9)
             if paired:
                 app.advance()
+            advance_until("implement")
             self.assertEqual(app.view().next_action, "implement", repr(app.view()))
             if baseline_failure:
                 stopped = app.advance()
@@ -285,7 +296,10 @@ class CodeTaskTests(unittest.TestCase):
                 for i in range(2):
                     self.assertEqual(app.controller.store.read_json(view.state_refs[f"matrix_baseline_{i}"])["metrics"]["accuracy"], 0.5)
                     key = f"matrix_candidate_r{revision}_{i}" if revision else f"matrix_candidate_{i}"
-                    self.assertEqual(app.controller.store.read_json(view.state_refs[key])["metrics"]["accuracy"], 1.0)
+                    candidate_result = app.controller.store.read_json(view.state_refs[key])
+                    self.assertEqual(candidate_result["metrics"]["accuracy"], 1.0)
+                    expected_revision = "matrix_repair_1" if revision else "implementation"
+                    self.assertEqual(candidate_result["implementation_ref"], view.state_refs[expected_revision].to_dict())
                 collection = app.controller.store.read_json(view.state_refs["matrix_results"])
                 self.assertEqual(collection["candidate_revision"], revision)
                 implementation_key = "matrix_repair_1" if revision else "implementation"
@@ -305,7 +319,13 @@ class CodeTaskTests(unittest.TestCase):
                 return
             self.assertEqual(view.status, "completed", view.status_reason)
             self.assertIn("implementation", view.state_refs)
+            implementation_payload = app.controller.store.read_json(view.state_refs["implementation"])
+            self.assertEqual(implementation_payload["status"], "validated")
+            self.assertEqual(implementation_payload["method_validation"]["status"], "未检查")
             final_key = "experiment_repair_1" if repair_failure else "experiment"
+            expected_implementation = view.state_refs["repair_1"] if repair_failure else view.state_refs["implementation"]
+            final_result = app.controller.store.read_json(view.state_refs[final_key])
+            self.assertEqual(final_result["implementation_ref"], expected_implementation.to_dict())
             self.assertEqual(app.latest_experiment_ref(), view.state_refs[final_key])
             delivery = next(row for row in view.work_plan["requested_outputs"] if row["name"] == "experiments")
             self.assertEqual(delivery["artifact"], view.state_refs[final_key].to_dict())
@@ -317,6 +337,17 @@ class CodeTaskTests(unittest.TestCase):
             comparison = app.controller.store.read_json(view.state_refs["comparison"])
             self.assertEqual(comparison["verdict"], "improved" if repair_succeeds else "inconclusive")
             report_context, report_memory = app.report_inputs()
+            self.assertEqual(report_context.results["implementation"]["artifact"], expected_implementation.path)
+            unrelated = app.controller.store.write_json(
+                "outputs/unrelated_implementation.json", {"status": "validated", "artifact_refs": {}},
+                kind="implementation_result",
+            )
+            app.controller.manifest.state_refs["unrelated_implementation"] = unrelated
+            with patch.object(app, "_accepted_plan_steps", return_value=[
+                {"capability": "implement", "state_name": "unrelated_implementation"},
+            ]):
+                measured_report, _ = app.report_inputs()
+            self.assertEqual(measured_report.results["implementation"]["artifact"], expected_implementation.path)
             self.assertEqual(report_context.results["execution_status"], "passed" if repair_succeeds else "failed")
             for metric in report_context.metric_sources:
                 expected_ref = view.state_refs["baseline"] if metric.label == "baseline" else (

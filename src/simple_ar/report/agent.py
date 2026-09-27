@@ -48,6 +48,11 @@ task or prepared context are declared conditions, not observed execution
 evidence. Unless verified_execution_results contains those details, describe
 them as requested or configured conditions and say that hardware was not
 recorded; do not write that the runs executed on that hardware.
+Technical implementation status such as `validated`, a passing static check,
+or an LLM review warning is not research-method evidence. If
+implementation.method_validation.status is `未检查`, state that the candidate
+mechanism was not independently checked; if it records execution evidence of
+contradiction, do not present the same candidate method as validated.
 Cite directly relevant original method papers when available in the supplied
 sources; surveys are not a substitute for attribution of the adopted method.
 """
@@ -1437,7 +1442,9 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
     implementation = _mapping(results.get("implementation"))
     if implementation is not None:
         compact["implementation"] = {
-            key: implementation[key] for key in ("artifact", "status", "asset_integrity", "interpretation")
+            key: implementation[key] for key in (
+                "artifact", "status", "asset_integrity", "method_validation", "interpretation",
+            )
             if key in implementation
         }
         integrity = _mapping(implementation.get("asset_integrity"))
@@ -1451,7 +1458,8 @@ def _compact_execution_results(results: Mapping[str, Any] | object) -> dict[str,
         if evidence is not None and "patch" in evidence:
             # Patches are already bounded at the artifact boundary. Keep the
             # cumulative lineage when a repair attempt stores only a delta;
-            # omit bulky validation/review logs.
+            # Keep bounded method-validation facts separately; omit bulky
+            # validation/review logs from the report prompt.
             compact_evidence: dict[str, Any] = {"patch": evidence["patch"]}
             patches = evidence.get("patches")
             if isinstance(patches, list):
