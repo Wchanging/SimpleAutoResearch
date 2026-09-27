@@ -85,16 +85,17 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
         size = min(max_chars, remaining)
         seen = previous.get(relative, [])
         def positions_for(terms: list[str]) -> list[int]:
-            return sorted({match.start() for term in terms if term
-                           for match in re.finditer(re.escape(term), text, flags=re.IGNORECASE)})
+            # Preserve the caller's term priority rather than selecting the
+            # earliest generic mention anywhere in the file.
+            return list(dict.fromkeys(match.start() for term in terms if term
+                for match in re.finditer(re.escape(term), text, flags=re.IGNORECASE)))
 
         symbol_positions = positions_for(symbols)
         query_positions = positions_for(query_terms)
         positions = symbol_positions + query_positions
-        novel_positions = [pos for pos in symbol_positions if not any(lo <= pos < hi for lo, hi in seen)]
-        if not novel_positions:
-            novel_positions = [pos for pos in query_positions if not any(lo <= pos < hi for lo, hi in seen)]
-        starts = [max(0, min(pos - size // 4, len(text) - size)) for pos in novel_positions]
+        unseen = lambda items: [pos for pos in items if not any(lo <= pos < hi for lo, hi in seen)]
+        starts = [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(symbol_positions)]
+        starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(query_positions)]
         if not positions and not symbols and not query_terms:
             starts = [min(max((hi for _, hi in seen), default=0), max(0, len(text) - size))]
         elif positions and not starts:
@@ -106,7 +107,10 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
             excerpt = text[start:start + size]
             novel = sum(not any(lo <= pos < hi for lo, hi in seen)
                         for pos in range(start, start + len(excerpt)))
-            if novel < min(256, max(1, len(excerpt) // 4)):
+            required_novel = min(1500, max(1, len(excerpt) // 4))
+            if start + len(excerpt) == len(text):
+                required_novel = min(required_novel, 256)
+            if novel < required_novel:
                 continue
             result.append({"path": relative, "access_role": "read_only", "text": excerpt,
                            "source_offset": start, "truncated": start > 0 or start + len(excerpt) < len(text)})

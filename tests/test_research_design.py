@@ -186,6 +186,28 @@ class ResearchDesignTests(unittest.TestCase):
                 supplied=first, max_files=1, max_chars=1000)
             self.assertIn("predictions = scores.mean(1)", second[0]["text"])
 
+    def test_source_followup_skips_near_duplicate_symbol_window(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source = ("x" * 2881 + "forward" + "x" * 3512 + "LinearEfficientEnsemble"
+                      + "x" * 1930 + "forward" + "x" * 10000
+                      + "predictions = heads.mean(1)\n")
+            (workspace / "model.py").write_text(source, encoding="utf-8")
+            index = source_file_inventory(workspace)
+            supplied = [
+                {"path": "model.py", "text": source[:6000], "source_offset": 0},
+                {"path": "model.py", "text": source[6869:12869], "source_offset": 6869},
+            ]
+            found = requested_source_context(workspace, index,
+                {"files": ["model.py"], "symbols": ["Model.forward", "LinearEfficientEnsemble"],
+                 "query": "Where are predictions aggregated?"},
+                supplied=supplied, max_files=1, max_chars=6000)
+            self.assertEqual(len(found), 1)
+            self.assertIn("predictions = heads.mean(1)", found[0]["text"])
+            self.assertGreater(found[0]["source_offset"], 12869)
+
     def test_initial_feasibility_reserves_budget_for_two_source_followups(self):
         from unittest.mock import Mock
         from simple_ar.code_task.analysis.source_context import source_file_inventory
