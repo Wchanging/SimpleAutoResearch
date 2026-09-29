@@ -138,6 +138,98 @@ class IdeaAssessmentTests(unittest.TestCase):
         self.assertEqual(result.generation_mode, "llm")
         self.assertEqual(result.recommended_idea_id, "a")
 
+    def test_pre_experiment_abstention_gets_one_model_review_without_forced_selection(self):
+        candidate = IdeaCandidate(
+            idea_id="a", title="Candidate", hypothesis="Effect",
+            proposed_change="Change", expected_outcome="Improvement",
+            motivation_refs=["c"], metrics=["accuracy"],
+        )
+        row = dict(
+            idea_id="a", relevance="Relevant", differentiation="Uncertain",
+            feasibility="Bounded", cost="One paired run", falsifiability="No gain",
+            recommendation="Test the hypothesis", supporting_evidence_refs=["c"],
+            counter_evidence_refs=[], unknowns=["Effect unmeasured"],
+        )
+
+        class Client:
+            calls = 0
+
+            def ask_json(self, system, user, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    self.asserted_system = system
+                    return dict(assessments=[row], recommended_idea_id=None,
+                                recommendation_reason="Baseline and candidate have not been measured.")
+                self.asserted_label = kwargs["label"]
+                self.asserted_review = user
+                return dict(assessments=[row], recommended_idea_id="a",
+                            recommendation_reason="Prior evidence warrants one bounded test.")
+
+        client = Client()
+        result = assess_ideas(IdeaAssessmentRequest(
+            candidates=(candidate,), available_evidence_refs=("c",),
+            evidence_chunks=(TextChunk(chunk_id="c", document_id="d", text="Evidence"),),
+            llm_client=client,
+        ))
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(client.asserted_label, "research-idea-assessment-selection-review")
+        self.assertIn("pre-experiment choice", client.asserted_system)
+        self.assertIn("outcomes to obtain", client.asserted_review)
+        self.assertEqual(result.recommended_idea_id, "a")
+        self.assertIsNone(result.model_initial_response["recommended_idea_id"])
+        self.assertEqual(result.model_response["recommended_idea_id"], "a")
+
+        class PersistentAbstention(Client):
+            def ask_json(self, system, user, **kwargs):
+                self.calls += 1
+                return dict(assessments=[row], recommended_idea_id=None,
+                            recommendation_reason="The source contradicts this mechanism.")
+
+        abstaining = PersistentAbstention()
+        retained = assess_ideas(IdeaAssessmentRequest(
+            candidates=(candidate,), available_evidence_refs=("c",),
+            evidence_chunks=(TextChunk(chunk_id="c", document_id="d", text="Evidence"),),
+            llm_client=abstaining,
+        ))
+        self.assertEqual(abstaining.calls, 2)
+        self.assertIsNone(retained.recommended_idea_id)
+        self.assertEqual(retained.generation_mode, "llm")
+
+    def test_invalid_selection_review_keeps_original_model_abstention(self):
+        candidate = IdeaCandidate(
+            idea_id="a", title="Candidate", hypothesis="Effect",
+            proposed_change="Change", expected_outcome="Improvement",
+            motivation_refs=["c"], metrics=["accuracy"],
+        )
+        row = dict(
+            idea_id="a", relevance="Relevant", differentiation="Uncertain",
+            feasibility="Bounded", cost="One run", falsifiability="No gain",
+            recommendation="Investigate", supporting_evidence_refs=["c"],
+            counter_evidence_refs=[], unknowns=[],
+        )
+
+        class Client:
+            calls = 0
+
+            def ask_json(self, *_args, **_kwargs):
+                self.calls += 1
+                return dict(
+                    assessments=[row],
+                    recommended_idea_id=None if self.calls == 1 else "unknown",
+                    recommendation_reason="Need a test." if self.calls == 1 else "Invalid idea.",
+                )
+
+        client = Client()
+        result = assess_ideas(IdeaAssessmentRequest(
+            candidates=(candidate,), available_evidence_refs=("c",),
+            evidence_chunks=(TextChunk(chunk_id="c", document_id="d", text="Evidence"),),
+            llm_client=client,
+        ))
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(result.generation_mode, "llm")
+        self.assertIsNone(result.recommended_idea_id)
+        self.assertIn("unknown or blocked", result.diagnostics[-1])
+
     def test_assessment_keeps_readiness_and_unknowns_explicit(self) -> None:
         strong = IdeaCandidate(
             idea_id="idea-strong",

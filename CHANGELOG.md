@@ -6,6 +6,8 @@ This file records user-visible project changes in reverse chronological order. P
 
 ## Unreleased (source-visible preview)
 
+- A model that abstains from selecting an otherwise design-ready idea now gets one bounded review of the pre-experiment decision boundary. Missing future measurements alone are not a reason to block hypothesis design; a continued abstention or invalid review is preserved rather than replaced with an automatic candidate choice. The V2.9 preview quickstart now checks out its actual branch.
+
 - Let bounded source inspection request exact line ranges, bridge short gaps between excerpts, and prioritize Python constructor call sites when asked where an object is built. Research design can carry specific low-level interface checks into the existing CodeTask handoff without treating missing experimental measurements as design blockers; missing authority or a known source contradiction still blocks. These changes have regression and source-replay evidence, not fresh end-to-end research acceptance.
 - Keep every accepted-plan measurement visible to report writing and the deterministic metric appendix, so a failed latest revision cannot erase an earlier successful candidate. Surface the captured failed-run diagnosis to analysis and reporting without treating missing metrics as zero.
 - Extend explicitly budgeted technical repair/retest to failed single-condition research revisions, preserving the original design handoff, measured implementation lineage, and no-duplicate-work recovery. Paired follow-up repair remains unsupported.

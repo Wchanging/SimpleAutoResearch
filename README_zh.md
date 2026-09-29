@@ -42,8 +42,10 @@
 
 准备 **Python 3.12+**、Git 和 [uv](https://docs.astral.sh/uv/)，然后在终端运行：
 
+V2.9 预览版目前在 `feat/v2.9-task-driven-research`，尚未合并到默认分支。试用本预览版时：
+
 ```bash
-git clone https://github.com/Wchanging/SimpleAutoResearch.git
+git clone --branch feat/v2.9-task-driven-research https://github.com/Wchanging/SimpleAutoResearch.git
 cd SimpleAutoResearch
 uv sync
 ```

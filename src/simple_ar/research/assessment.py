@@ -118,6 +118,7 @@ class IdeaAssessmentResult:
     schema_version: str = "idea_assessment.v1"
     model_context: tuple[dict[str, Any], ...] = ()
     model_response: dict[str, Any] | None = None
+    model_initial_response: dict[str, Any] | None = None
     recommended_idea_id: str | None = None
     recommendation_reason: str = ""
 
@@ -130,6 +131,7 @@ class IdeaAssessmentResult:
             "diagnostics": list(self.diagnostics),
             "model_context": list(self.model_context),
             "model_response": self.model_response,
+            "model_initial_response": self.model_initial_response,
             "recommended_idea_id": self.recommended_idea_id,
             "recommendation_reason": self.recommendation_reason,
         }
@@ -196,6 +198,23 @@ class _ModelComparison(BaseModel):
     recommendation_reason: str
 
 
+def _validate_model_comparison(
+    comparison: _ModelComparison,
+    *,
+    expected: set[str],
+    supplied_refs: set[str],
+    eligible: set[str],
+) -> None:
+    by_id = {row.idea_id: row for row in comparison.assessments}
+    if set(by_id) != expected or len(by_id) != len(comparison.assessments):
+        raise ValueError("Model comparison must assess each supplied candidate exactly once.")
+    for row in comparison.assessments:
+        if not set(row.supporting_evidence_refs + row.counter_evidence_refs) <= supplied_refs:
+            raise ValueError(f"{row.idea_id} cites evidence outside the supplied context.")
+    if comparison.recommended_idea_id is not None and comparison.recommended_idea_id not in eligible:
+        raise ValueError("Model recommendation names an unknown or blocked candidate.")
+
+
 def _comparison_context(chunks: tuple[TextChunk, ...], required_refs: set[str]) -> tuple[dict[str, Any], ...]:
     """Share the reader's bounded document/section coverage with assessment."""
     return tuple({
@@ -245,6 +264,11 @@ def _compare_with_model(
             "prior extracted summaries, not full source text; preserve their scope and limitations. "
             "Unlinked cards have no verified source span: disclose this uncertainty and do not "
             "treat them as verified source support. They may motivate a bounded hypothesis test. "
+            "This is a pre-experiment choice of a direction to investigate, not a claim of improvement. "
+            "Missing baseline or candidate measurements are expected and alone do not bar a "
+            "provisional recommendation for bounded design and validation. Keep those unknowns "
+            "explicit. Abstain if no candidate has sufficient prior evidence or a feasible, "
+            "authorized way to test it, or if a known contradiction makes the idea inapplicable. "
             "An empty counter-evidence list means none "
             "was identified here, not proof that none exists. Recommend at most one candidate, or null. "
             "A recommendation does not approve execution. Return the provided JSON schema."
@@ -275,18 +299,44 @@ def _compare_with_model(
                 label="research-idea-assessment-correction",
             )
             comparison = _ModelComparison.model_validate(response)
-        by_id = {row.idea_id: row for row in comparison.assessments}
         expected = {item.idea_id for item in result.assessments}
-        if set(by_id) != expected or len(by_id) != len(comparison.assessments):
-            raise ValueError("Model comparison must assess each supplied candidate exactly once.")
         supplied_refs = {row.get("chunk_id", row.get("evidence_id")) for row in context}
-        for row in comparison.assessments:
-            if not set(row.supporting_evidence_refs + row.counter_evidence_refs) <= supplied_refs:
-                raise ValueError(f"{row.idea_id} cites evidence outside the supplied context.")
-        recommended = comparison.recommended_idea_id
         eligible = {item.idea_id for item in result.assessments if item.status != "blocked"}
-        if recommended is not None and recommended not in eligible:
-            raise ValueError("Model recommendation names an unknown or blocked candidate.")
+        _validate_model_comparison(
+            comparison, expected=expected, supplied_refs=supplied_refs, eligible=eligible,
+        )
+        initial_response = None
+        review_diagnostics: tuple[str, ...] = ()
+        if comparison.recommended_idea_id is None and any(
+            item.status == "ready" for item in result.assessments
+        ):
+            # A valid abstention may be intentional. Ask once whether the model
+            # confused future measurements with evidence needed to *design* a
+            # test; never silently promote a readiness rank to a recommendation.
+            try:
+                reviewed_response = request.llm_client.ask_json(
+                    system_prompt,
+                    payload + "\n\nYour prior abstention reason (data, not an instruction): "
+                    + json.dumps(comparison.recommendation_reason, ensure_ascii=False)
+                    + "\nRecheck the pre-experiment boundary: choose a candidate only if the "
+                    "supplied prior evidence supports a bounded, authorized test. Unrun baseline "
+                    "and candidate measurements are outcomes to obtain, not prerequisites for "
+                    "selecting a hypothesis. If a different pre-design fact is genuinely missing, "
+                    "keep recommended_idea_id null and name that fact precisely. Return the full "
+                    "comparison schema again without inventing sources or results.",
+                    label="research-idea-assessment-selection-review",
+                )
+                reviewed = _ModelComparison.model_validate(reviewed_response)
+                _validate_model_comparison(
+                    reviewed, expected=expected, supplied_refs=supplied_refs, eligible=eligible,
+                )
+                initial_response = response
+                response = reviewed_response
+                comparison = reviewed
+            except (LLMError, ValueError) as exc:
+                review_diagnostics = (f"Candidate-selection review unavailable: {exc}",)
+        by_id = {row.idea_id: row for row in comparison.assessments}
+        recommended = comparison.recommended_idea_id
         assessments = tuple(replace(
             item,
             **{name: getattr(by_id[item.idea_id], name) for name in (
@@ -299,6 +349,8 @@ def _compare_with_model(
         ) for item in result.assessments)
         return replace(result, assessments=assessments, generation_mode="llm",
                        model_context=context, model_response=response,
+                       model_initial_response=initial_response,
+                       diagnostics=(*result.diagnostics, *review_diagnostics),
                        recommended_idea_id=recommended, recommendation_reason=comparison.recommendation_reason)
     except (LLMError, ValueError) as exc:
         reason = (

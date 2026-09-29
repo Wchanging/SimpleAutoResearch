@@ -53,8 +53,11 @@ required**. It does need network access and a working model API.
 
 Requirements: **Python 3.12+**, Git, and [uv](https://docs.astral.sh/uv/).
 
+The V2.9 preview is currently on `feat/v2.9-task-driven-research`, not the
+default branch. To try this preview:
+
 ```bash
-git clone https://github.com/Wchanging/SimpleAutoResearch.git
+git clone --branch feat/v2.9-task-driven-research https://github.com/Wchanging/SimpleAutoResearch.git
 cd SimpleAutoResearch
 uv sync
 ```
