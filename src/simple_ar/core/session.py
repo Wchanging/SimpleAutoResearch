@@ -263,7 +263,9 @@ class DecisionRecord:
             ),
             budget_attempts=int(data.get("budget_attempts", 0)),
             budget_no_progress=int(data.get("budget_no_progress", 0)),
-            created_at=str(data.get("created_at", _utcnow_iso())),
+            # Legacy records without a timestamp have unknown creation time;
+            # reading them must not manufacture a new time on every load.
+            created_at=str(data.get("created_at") or ""),
         )
 
 
@@ -390,8 +392,8 @@ class SessionManifest:
                 for item in data.get("decisions", [])
                 if isinstance(item, dict)
             ],
-            created_at=str(data.get("created_at", _utcnow_iso())),
-            updated_at=str(data.get("updated_at", _utcnow_iso())),
+            created_at=str(data.get("created_at") or ""),
+            updated_at=str(data.get("updated_at") or ""),
         )
 
 

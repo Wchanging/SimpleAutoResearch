@@ -5,10 +5,12 @@ import unittest
 from pathlib import Path
 
 from simple_ar.core import (
+    AttemptManifest,
     BudgetState,
     CapabilityContext,
     CapabilityRegistry,
     CapabilityResult,
+    DecisionRecord,
     SessionController,
     SessionManifest,
     lifecycle_profile_names,
@@ -17,6 +19,20 @@ from simple_ar.core import (
 
 
 class SessionTransitionTests(unittest.TestCase):
+    def test_legacy_missing_timestamps_remain_unknown_across_loads(self) -> None:
+        decision = {"capability": "analysis", "attempt_id": "analysis-001", "action": "accept"}
+        manifest = {"session_id": "legacy", "topic": "legacy", "decisions": [decision]}
+        attempt = {"attempt_id": "analysis-001"}
+        self.assertEqual(DecisionRecord.from_dict(decision).created_at, "")
+        self.assertEqual(AttemptManifest.from_dict(attempt).created_at, "")
+        self.assertEqual(AttemptManifest.from_dict(attempt).updated_at, "")
+        first = SessionManifest.from_dict(manifest)
+        second = SessionManifest.from_dict(manifest)
+        self.assertEqual(first.to_dict(), second.to_dict())
+        self.assertEqual(first.created_at, "")
+        self.assertEqual(first.updated_at, "")
+        self.assertEqual(first.decisions[0].created_at, "")
+
     def test_budget_attempt_record_is_idempotent(self) -> None:
         budget = BudgetState()
 

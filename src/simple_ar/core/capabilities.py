@@ -233,8 +233,8 @@ class AttemptManifest:
                 for item in data.get("outputs", [])
                 if isinstance(item, dict)
             ),
-            created_at=str(data.get("created_at", _utcnow_iso())),
-            updated_at=str(data.get("updated_at", _utcnow_iso())),
+            created_at=str(data.get("created_at") or ""),
+            updated_at=str(data.get("updated_at") or ""),
         )
 
 
