@@ -2543,13 +2543,22 @@ class ResearchApplicationTests(unittest.TestCase):
                 class Client:
                     calls = 0
                     selected = None
+                    first_response = None
+                    labels = None
 
                     def ask_json(self, system, user, **kwargs):
                         self.calls += 1
+                        if self.labels is None:
+                            self.labels = []
+                        self.labels.append(kwargs.get("label"))
                         if kwargs.get("label") == "research-design":
                             return dict(selected_idea_id=self.selected,
                                         rationale="Chosen from shared evidence",
                                         execution_protocol={"comparison_required": False, "baseline_policy": "skip"})
+                        if kwargs.get("label") == "research-idea-assessment-selection-review":
+                            assert self.first_response is not None
+                            assert "pre-experiment choice" in system
+                            return self.first_response
                         if recommend == "provider_error":
                             raise LLMError("provider unavailable")
                         payload = json.loads(user)
@@ -2563,8 +2572,11 @@ class ResearchApplicationTests(unittest.TestCase):
                                 recommendation="Check effect", supporting_evidence_refs=[payload["evidence"][0]["chunk_id"]],
                                 counter_evidence_refs=[], unknowns=["Effect uncertain"],
                             ))
-                        return dict(assessments=rows, recommended_idea_id=self.selected,
-                                    recommendation_reason="Chosen from shared evidence")
+                        self.first_response = dict(
+                            assessments=rows, recommended_idea_id=self.selected,
+                            recommendation_reason="Chosen from shared evidence",
+                        )
+                        return self.first_response
 
                 client = Client()
                 app.services = replace(app.services, llm_client=client)
@@ -2581,14 +2593,17 @@ class ResearchApplicationTests(unittest.TestCase):
                     view = app.advance(max_actions=2)
                 assessment = app.controller.store.read_json(view.state_refs["assessment"])
                 self.assertFalse(any("unresolved evidence refs" in item for item in assessment["diagnostics"]))
-                self.assertEqual(client.calls, 2 if recommend is True else 1)
+                self.assertEqual(client.calls, 1 if recommend == "provider_error" else 2)
                 self.assertIn("summary", view.state_refs)
                 if recommend is True:
+                    self.assertNotIn("research-idea-assessment-selection-review", client.labels)
                     self.assertEqual(view.status, "completed")
                     design = app.controller.store.read_json(view.state_refs["design"])
                     self.assertEqual(design["selected_idea"]["idea_id"], client.selected)
                     self.assertEqual(design["selection_rationale"], "Chosen from shared evidence")
                 else:
+                    if recommend is False:
+                        self.assertIn("research-idea-assessment-selection-review", client.labels)
                     self.assertEqual(view.status, "paused")
                     self.assertNotIn("design", view.state_refs)
 
