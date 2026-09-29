@@ -2844,6 +2844,51 @@ protected_patterns = ["pyproject.toml"]
             self.assertIn("compute_bins", client.ask_json.call_args.args[1])
             self.assertEqual(read_json(run_dir / "code_task/meta/dependency_api.json"), observed)
 
+    def test_edit_proposal_can_read_source_after_dependency_evidence(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "project"
+            _write_toy_project(code_root)
+            original = read_text(code_root / "spam_model.py")
+            write_text(code_root / "spam_model.py", "import example_embeddings\n" + "# padding\n" * 12 + original)
+            write_text(root / "task.md", "Improve spam prediction using example_embeddings.")
+            run_dir = root / "run"
+            initialize_code_task(
+                run_dir=run_dir, code_root=code_root, task_file=root / "task.md",
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"edits": [], "context_request": {"dependency_symbols": [
+                    {"module": "example_embeddings", "symbols": ["compute_bins"]},
+                ]}},
+                {"edits": [], "summary": "Need the remainder of the selected source."},
+                {"edits": [{
+                    "path": "spam_model.py",
+                    "old": "return 'spam' if 'win' in text.lower() else 'ham'",
+                    "new": "return 'spam' if 'prize' in text.lower() else 'ham'",
+                    "reason": "Use the requested keyword.",
+                }]},
+            ]
+            observed = {"status": "observed", "interfaces": [{
+                "module": "example_embeddings", "status": "observed",
+                "signatures": {"compute_bins": "(X, n_bins=48)"},
+            }]}
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task", return_value=client), patch(
+                "simple_ar.code_task.editing.patching.inspect_dependency_api", return_value=observed,
+            ):
+                result = propose_patch_edits(run_dir, use_llm=True, max_source_chars_per_file=180)
+            self.assertEqual(result.edit_count, 1)
+            self.assertEqual(client.ask_json.call_count, 3)
+            self.assertIn("def predict", client.ask_json.call_args_list[2].args[1])
+            followup = read_json(run_dir / "code_task/meta/edit_context_followup.json")
+            self.assertEqual(len(followup["rounds"]), 2)
+            self.assertEqual(followup["rounds"][0]["snippets"], [])
+            self.assertTrue(followup["rounds"][1]["snippets"])
+
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 main(
