@@ -2694,6 +2694,156 @@ protected_patterns = ["pyproject.toml"]
             self.assertEqual(manifest["layout"]["context_packs"], "code_task/context_packs")
             self.assertEqual(manifest["context_pack"]["status"], "completed")
 
+    def test_context_pack_preserves_required_config_over_similar_reports(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "toy_project"
+            _write_toy_project(code_root)
+            write_text(code_root / "config" / "active.toml", "seed = 0\n")
+            write_text(code_root / "config" / "old" / "report.json", '{"seed": 0}\n')
+            task_file = root / "task.md"
+            write_text(task_file, "Inspect spam_model.py using the accepted execution config.\n")
+            run_dir = root / "runs" / "code-task-run"
+            initialize_code_task(
+                run_dir=run_dir,
+                code_root=code_root,
+                task_file=task_file,
+                benchmark_command="python -m unittest discover -s tests",
+                edit_scope_allowed_patterns=("spam_model.py",),
+                edit_scope_protected_patterns=("config/active.toml",),
+            )
+            manifest = read_json(run_dir / "manifest.json")
+            manifest["context_requirements"] = {"read_only_paths": ["config/active.toml"]}
+            write_json(run_dir / "manifest.json", manifest)
+
+            result = build_code_task_context_pack(
+                run_dir,
+                top_k=4,
+                max_files=2,
+                max_source_chars_per_file=600,
+                max_total_chars=1200,
+            )
+
+            self.assertIn("spam_model.py", result.selected_files)
+            self.assertIn("config/active.toml", result.selected_files)
+            config = next(
+                row for row in read_jsonl(result.snippets_path)
+                if row["path"] == "config/active.toml"
+            )
+            self.assertEqual(config["access_role"], "read_only_evidence")
+            self.assertIn("required read-only context", config["reasons"])
+            self.assertEqual(
+                read_json(result.context_pack_path)["required_read_only_paths"],
+                ["config/active.toml"],
+            )
+
+    def test_explicit_task_path_matching_has_path_boundaries(self) -> None:
+        from simple_ar.code_task.analysis.locate import _mentions_workspace_path
+
+        self.assertTrue(_mentions_workspace_path("Use `config/active.toml`.", "config/active.toml"))
+        self.assertFalse(_mentions_workspace_path("Use config/active.toml.bak.", "config/active.toml"))
+        self.assertFalse(_mentions_workspace_path("Use other/config/active.toml.", "config/active.toml"))
+
+    def test_dependency_api_probe_only_accepts_imported_public_symbols(self) -> None:
+        from simple_ar.code_task.analysis.dependency_api import inspect_dependency_api
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            with patch("simple_ar.code_task.analysis.dependency_api.subprocess.run") as run:
+                run.return_value = SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps([{
+                        "module": "example_embeddings", "status": "observed",
+                        "signatures": {"compute_bins": "(X, n_bins=48)"},
+                    }]),
+                )
+                result = inspect_dependency_api(
+                    [
+                        {"module": "not_imported", "symbols": ["danger"]},
+                        {"module": "example_embeddings", "symbols": ["compute_bins", "__dict__"]},
+                    ],
+                    {"files": [{"path": "model.py", "python": {"imports": ["example_embeddings"]}}]},
+                    ["model.py"],
+                    python_executable=sys.executable,
+                    workspace_dir=Path(tmp),
+                )
+                self.assertEqual(result["status"], "observed")
+                self.assertEqual(result["request"], [
+                    {"module": "example_embeddings", "symbols": ["compute_bins"]},
+                ])
+                self.assertEqual(run.call_args.args[0][1], "-I")
+                self.assertEqual(run.call_args.kwargs["timeout"], 12)
+
+    def test_cached_context_rebuilds_when_protocol_adds_required_evidence(self) -> None:
+        from simple_ar.code_task.orchestration.execute import _ensure_context_pack_for_current_batch
+
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "project"
+            _write_toy_project(code_root)
+            write_text(code_root / "config" / "active.toml", "seed = 0\n")
+            write_text(root / "task.md", "Edit spam_model.py only.")
+            run_dir = root / "run"
+            initialize_code_task(
+                run_dir=run_dir, code_root=code_root, task_file=root / "task.md",
+                benchmark_command="python -m unittest discover -s tests",
+                edit_scope_allowed_patterns=("spam_model.py",),
+                edit_scope_protected_patterns=("config/active.toml",),
+            )
+            original = build_code_task_context_pack(run_dir, max_files=2)
+            self.assertNotIn("config/active.toml", original.selected_files)
+            manifest = read_json(run_dir / "manifest.json")
+            manifest["context_requirements"] = {"read_only_paths": ["config/active.toml"]}
+            write_json(run_dir / "manifest.json", manifest)
+
+            _ensure_context_pack_for_current_batch(
+                run_dir, max_files=2, max_source_chars_per_file=600,
+                message_callback=None,
+            )
+
+            latest = read_json(run_dir / "manifest.json")["context_pack"]["latest"]
+            self.assertNotEqual(latest, "code_task/context_packs/context-001/context_pack.json")
+            self.assertIn("config/active.toml", [
+                row["path"] for row in read_json(run_dir / latest)["selected_files"]
+            ])
+
+    def test_edit_proposal_can_request_bounded_dependency_evidence(self) -> None:
+        TEST_ROOT.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_ROOT) as tmp:
+            root = Path(tmp)
+            code_root = root / "project"
+            _write_toy_project(code_root)
+            write_text(code_root / "spam_model.py", "import example_embeddings\n" + read_text(code_root / "spam_model.py"))
+            write_text(root / "task.md", "Improve spam prediction using example_embeddings.")
+            run_dir = root / "run"
+            initialize_code_task(
+                run_dir=run_dir, code_root=code_root, task_file=root / "task.md",
+                benchmark_command="python -m unittest discover -s tests",
+            )
+            generate_patch_plan(run_dir, use_llm=False)
+            record_plan_decision(run_dir, decision="approve")
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"edits": [], "context_request": {"dependency_symbols": [
+                    {"module": "example_embeddings", "symbols": ["compute_bins"]},
+                ]}},
+                {"edits": [], "summary": "Observed interface does not fit the approved design."},
+            ]
+            observed = {"status": "observed", "interfaces": [{
+                "module": "example_embeddings", "status": "observed",
+                "signatures": {"compute_bins": "(X, n_bins=48)"},
+            }]}
+            with patch("simple_ar.code_task.editing.patching.LLMClient.for_task", return_value=client), patch(
+                "simple_ar.code_task.editing.patching.inspect_dependency_api", return_value=observed,
+            ) as probe:
+                propose_patch_edits(run_dir, use_llm=True)
+            self.assertEqual(client.ask_json.call_count, 2)
+            self.assertEqual(probe.call_count, 1)
+            self.assertIn("compute_bins", client.ask_json.call_args.args[1])
+            self.assertEqual(read_json(run_dir / "code_task/meta/dependency_api.json"), observed)
+
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 main(

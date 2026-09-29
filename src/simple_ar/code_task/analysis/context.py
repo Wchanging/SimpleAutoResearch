@@ -113,6 +113,12 @@ def build_code_task_context_pack(
     root = Path(run_dir)
     paths = code_task_paths(root)
     manifest = load_code_task_manifest(root)
+    requirements = manifest.get("context_requirements")
+    required_paths = (
+        [str(path) for path in requirements.get("read_only_paths", []) if isinstance(path, str)]
+        if isinstance(requirements, dict) and isinstance(requirements.get("read_only_paths"), list)
+        else []
+    )
     locate = locate_code_task_context(
         root,
         query=query,
@@ -123,6 +129,26 @@ def build_code_task_context_pack(
     locate_data = read_json(locate.results_path)
     if not isinstance(locate_data, dict):
         raise RuntimeError(f"Expected JSON object in {locate.results_path}")
+    repo_map = read_json(paths.meta_dir / "repo_map.json")
+    known_files = {
+        str(item.get("path")): item for item in repo_map.get("files", [])
+        if isinstance(item, dict)
+    } if isinstance(repo_map, dict) else {}
+    missing = [path for path in required_paths if path not in known_files]
+    if missing:
+        raise ValueError(f"Required code-task context is absent from the workspace index: {missing}")
+    if len(set(required_paths)) >= max_files:
+        raise ValueError("Context file budget cannot hold required evidence and an editable target.")
+    for path in required_paths:
+        target = workspace_file(paths.workspace_dir, path)
+        if (target is None or target.name.startswith(".env") or not target.is_file()
+                or target.stat().st_size > 500_000):
+            raise ValueError(f"Required code-task context is unsafe or unreadable: {path}")
+    required_candidates = [
+        {"path": path, "access_role": "read_only_evidence", "score": 0,
+         "reasons": ["required read-only context"]}
+        for path in dict.fromkeys(required_paths)
+    ]
 
     context_dir = _next_context_dir(paths.task_dir / "context_packs")
     snippets_path = context_dir / "selected_snippets.jsonl"
@@ -132,10 +158,14 @@ def build_code_task_context_pack(
     snippets, omitted = _collect_snippets(
         paths.workspace_dir,
         locate_data,
+        required_candidates=required_candidates,
         max_files=max_files,
         max_chars_per_file=max_source_chars_per_file,
         max_total_chars=max_total_chars,
     )
+    absent = [path for path in required_paths if path not in {row["path"] for row in snippets}]
+    if absent:
+        raise ValueError(f"Required code-task context could not be read: {absent}")
     context_pack = {
         "schema_version": 1,
         "generated_at": utcnow_iso(),
@@ -155,6 +185,7 @@ def build_code_task_context_pack(
             _snippet_manifest_row(row)
             for row in snippets
         ],
+        "required_read_only_paths": list(dict.fromkeys(required_paths)),
         "omitted": omitted,
         "artifacts": {
             "selected_snippets": "selected_snippets.jsonl",
@@ -272,11 +303,12 @@ def _collect_snippets(
     workspace_dir: Path,
     locate_data: dict[str, Any],
     *,
+    required_candidates: list[dict[str, Any]] | None = None,
     max_files: int,
     max_chars_per_file: int,
     max_total_chars: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    candidates = _ordered_candidates(locate_data)
+    candidates = _ordered_candidates(locate_data, required_candidates or [])
     snippets: list[dict[str, Any]] = []
     omitted = {
         "candidate_files": 0,
@@ -330,11 +362,15 @@ def _collect_snippets(
     return snippets, omitted
 
 
-def _ordered_candidates(locate_data: dict[str, Any]) -> list[dict[str, Any]]:
+def _ordered_candidates(
+    locate_data: dict[str, Any], required_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     editable = _object_list(locate_data.get("editable_targets"))
     evidence = _object_list(locate_data.get("read_only_evidence"))
     combined: list[dict[str, Any]] = []
-    combined.extend(editable)
+    combined.extend(editable[:1])
+    combined.extend(required_candidates)
+    combined.extend(editable[1:])
     combined.extend(evidence)
     return combined
 

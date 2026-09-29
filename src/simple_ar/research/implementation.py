@@ -18,7 +18,7 @@ from simple_ar.code_task.execution.runner import run_code_task_benchmark
 from simple_ar.code_task.execution.repair import RepairEvidence, propose_repair_edits
 from simple_ar.code_task.editing.patching import apply_patch_edits
 from simple_ar.code_task.analysis.context import load_latest_code_task_context_pack
-from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest, save_code_task_manifest
+from simple_ar.code_task.runtime.state import code_task_paths, load_code_task_manifest, save_code_task_manifest, workspace_file
 from simple_ar.code_task.editing.scope import protected_patterns_from_manifest
 from simple_ar.experiment.execution.measurement import snapshot_protocol_assets, reconcile_protocol_assets
 
@@ -58,6 +58,18 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
         raise ValueError("Candidate cwd must be the initialized CodeTask workspace.")
     task_ref, design = _prepare_research_task(context, request, paths.task_dir)
     before = snapshot_protocol_assets(request.protocol, request.cwd)
+    conditions = request.protocol.get("comparison_conditions", {}) if request.protocol else {}
+    source_config = conditions.get("source_config") if isinstance(conditions, Mapping) else None
+    if isinstance(source_config, str) and source_config.strip():
+        source_config = source_config.strip()
+        config_file = workspace_file(request.cwd, source_config)
+        if config_file is None or not config_file.is_file():
+            raise ValueError(f"Active source config is absent from the isolated workspace: {source_config}")
+        if "active_source_config" in before:
+            raise ValueError("Protocol asset ID active_source_config is reserved for the declared source config.")
+        before.update(snapshot_protocol_assets({"protected_assets": [
+            {"asset_id": "active_source_config", "path": source_config},
+        ]}, request.cwd))
     protected = list(protected_patterns_from_manifest(manifest))
     for snapshot in before.values():
         try:
@@ -69,6 +81,11 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     scope = dict(manifest.get("edit_scope", {}))
     scope["protected_patterns"] = protected
     manifest["edit_scope"] = scope
+    if isinstance(source_config, str) and source_config.strip():
+        manifest["context_requirements"] = {
+            "read_only_paths": [source_config.strip()],
+            "source": "accepted_experiment_protocol",
+        }
     save_code_task_manifest(request.run_dir, manifest)
     repair_paths = {}
     validation_repairs: list[dict[str, Any]] = []
@@ -224,6 +241,8 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
     # environments, checkpoints or the whole workspace into every attempt.
     evidence = {}
     source_context = load_latest_code_task_context_pack(request.run_dir)
+    proposal_path = paths.meta_dir / "proposed_edits.json"
+    proposal_data = read_json(proposal_path) if proposal_path.is_file() else {}
     for name, path in {
         "patch": paths.task_dir / "patch.diff",
         "validation": paths.meta_dir / "validation_report.json",
@@ -233,6 +252,8 @@ def run_implementation_capability(*, context: CapabilityContext, request: Implem
         "research_handoff": paths.task_dir / "research_handoff.json",
         "edit_proposal": paths.meta_dir / "proposed_edits.json",
         "context_followup": paths.meta_dir / "edit_context_followup.json",
+        **({"dependency_api": paths.meta_dir / "dependency_api.json"}
+           if isinstance(proposal_data, Mapping) and proposal_data.get("dependency_api") else {}),
         **({"source_context": source_context.prompt_context_path} if source_context is not None else {}),
         **repair_paths,
     }.items():

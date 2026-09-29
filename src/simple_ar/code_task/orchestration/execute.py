@@ -1394,7 +1394,18 @@ def _ensure_context_pack_for_current_batch(
     message_callback: MessageCallback | None,
 ) -> None:
     loaded = load_latest_code_task_context_pack(run_dir)
-    if loaded is not None and loaded.selected_files:
+    manifest = load_code_task_manifest(run_dir)
+    requirements = manifest.get("context_requirements")
+    required_paths = (
+        {path for path in requirements.get("read_only_paths", []) if isinstance(path, str)}
+        if isinstance(requirements, dict) and isinstance(requirements.get("read_only_paths"), list)
+        else set()
+    )
+    read_only_paths = {
+        str(row.get("path")) for row in loaded.context_pack.get("selected_files", [])
+        if isinstance(row, dict) and row.get("access_role") != "editable"
+    } if loaded is not None else set()
+    if loaded is not None and loaded.selected_files and required_paths.issubset(read_only_paths):
         _emit(message_callback, f"Using existing code-task context pack: {_relative_to_run(run_dir, loaded.context_pack_path)}")
         return
     latest_batch = load_latest_code_task_batch(run_dir)

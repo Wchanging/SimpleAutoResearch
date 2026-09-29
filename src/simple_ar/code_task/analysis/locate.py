@@ -205,6 +205,12 @@ def _rank_files(repo_map: dict[str, Any], query: str) -> list[dict[str, Any]]:
             continue
         symbol_rows = symbols.get(path, [])
         score, matched_terms, reasons = _score_file(file_row, symbol_rows, terms)
+        # An exact workspace path in the task is stronger evidence than token
+        # overlap with similarly named historical reports. Keep its existing
+        # access role; this only changes which bounded snippets are read.
+        if _mentions_workspace_path(query, path):
+            score += 100.0
+            reasons.insert(0, "explicit task path")
         role_tags = _string_list(file_row.get("role_tags"))
         access_role = str(file_row.get("access_role", "editable"))
         if "source" in role_tags and access_role == "editable":
@@ -235,6 +241,14 @@ def _rank_files(repo_map: dict[str, Any], query: str) -> list[dict[str, Any]]:
         )
     rows.sort(key=lambda row: (-float(row["score"]), str(row["path"])))
     return rows
+
+
+def _mentions_workspace_path(query: str, path: str) -> bool:
+    normalized_query = query.replace("\\", "/")
+    return re.search(
+        rf"(?<![A-Za-z0-9_./-]){re.escape(path)}(?![A-Za-z0-9_./-])",
+        normalized_query,
+    ) is not None
 
 
 def _score_file(

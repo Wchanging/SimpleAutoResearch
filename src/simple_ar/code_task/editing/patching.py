@@ -33,6 +33,7 @@ from simple_ar.code_task.analysis.context import (
 )
 from simple_ar.code_task.analysis.index import build_codebase_index
 from simple_ar.code_task.analysis.source_context import requested_source_context as _requested_source_context
+from simple_ar.code_task.analysis.dependency_api import inspect_dependency_api
 from simple_ar.code_task.editing.planning import select_relevant_files
 from simple_ar.code_task.analysis.repo_map import build_repo_map
 from simple_ar.code_task.memory import task_memory_context
@@ -286,6 +287,7 @@ def propose_patch_edits(
     mode = "offline"
     proposal: dict[str, Any] | None = None
     context_followup = None
+    dependency_api = None
     if use_llm:
         try:
             _emit(message_callback, "Calling LLM for controlled edit proposal.")
@@ -325,7 +327,8 @@ def propose_patch_edits(
                     request if isinstance(request, dict) else {}, _known_paths(index),
                 )
                 source_fallback = False
-                if not (request["files"] or request["query"] or request["symbols"]):
+                if not (request["files"] or request["query"] or request["symbols"]
+                        or request["dependency_symbols"]):
                     # A model can fail to name a useful source request even
                     # after one clarification. If an approved edit target was
                     # only partially shown, spend the remaining read budget
@@ -349,15 +352,28 @@ def propose_patch_edits(
                     max_chars=max_source_chars_per_file,
                     max_total_chars=max(0, total_chars - sum(len(item["text"]) for item in snippets)),
                     max_windows_per_file=2 if source_fallback else 1)
-                if extra:
+                if request["dependency_symbols"]:
+                    policy = manifest.get("environment", {}).get("policy", {})
+                    interpreter = policy.get("python_executable") if isinstance(policy, dict) else None
+                    dependency_api = (
+                        inspect_dependency_api(
+                            request["dependency_symbols"], index,
+                            [item["path"] for item in [*snippets, *reference_snippets]],
+                            python_executable=interpreter, workspace_dir=workspace_dir,
+                        ) if isinstance(interpreter, str) and interpreter else
+                        {"status": "unavailable", "interfaces": [], "reason": "project_python_not_configured"}
+                    )
+                    write_json(meta_dir / "dependency_api.json", dependency_api)
+                if extra or dependency_api is not None:
                     context_followup = {"request": request, "snippets": extra,
+                                        "dependency_api": dependency_api,
                                         "initial_summary": proposal.get("summary", ""),
                                         "initial_validation": proposal.get("validation", [])}
                     # Persist the request before the second call, including if
                     # the provider fails. At most one source expansion per call.
                     write_json(meta_dir / "edit_context_followup.json", context_followup)
-                    if extra:
-                        _emit(message_callback, "Reading requested source context before one edit-proposal retry.")
+                    if extra or dependency_api is not None:
+                        _emit(message_callback, "Resolving requested evidence before one edit-proposal retry.")
                         allowed_extra = [
                             {**item, "access_role": "editable"}
                             for item in extra if item["path"] in proposal_allowed_files
@@ -376,8 +392,9 @@ def propose_patch_edits(
                                 allowed_patterns=allowed_patterns, protected_patterns=protected_patterns,
                                 budget=budget, allowed_edit_files=proposal_allowed_files,
                                 batch_work_item=batch_constraints.get("work_item", {}),
-                                memory_context=memory_context,
-                            ) + "\nRequested source has been supplied as read-only evidence. "
+                                memory_context=memory_context, dependency_api=dependency_api,
+                            ) + "\nRequested evidence is included above where available; an unavailable "
+                            "interface is not a verified signature. "
                             "Resolve implementation details delegated by the accepted design. "
                             "If algorithmic requirements remain undefined, return no edits and "
                             "return implementation_feedback with kind=design_gap, reason and questions; do not invent "
@@ -409,6 +426,8 @@ def propose_patch_edits(
     normalized["context_pack"] = context_pack_ref
     if context_followup is not None:
         normalized["context_followup"] = "code_task/meta/edit_context_followup.json"
+    if dependency_api is not None:
+        normalized["dependency_api"] = "code_task/meta/dependency_api.json"
     normalized["batch"] = _batch_ref(root, batch)
     normalized["editor"] = editor_metadata(
         backend=CONTROLLED_PATCH_BACKEND,
@@ -659,7 +678,7 @@ def _should_retry_empty_context_request(
         context_request if isinstance(context_request, dict) else {}, known_paths,
     )
     return not (normalized_request["files"] or normalized_request["query"]
-                or normalized_request["symbols"])
+                or normalized_request["symbols"] or normalized_request["dependency_symbols"])
 
 
 def _edit_user_prompt(
@@ -676,6 +695,7 @@ def _edit_user_prompt(
     allowed_edit_files: list[str],
     batch_work_item: object,
     memory_context: str,
+    dependency_api: dict[str, Any] | None = None,
 ) -> str:
     compact_files = [
         {
@@ -719,7 +739,11 @@ def _edit_user_prompt(
     return (
         "Return JSON with fields: `summary` string, `edits` list, "
         "`validation` list of strings, `risks` list of strings, and optional "
-        "`context_request` object when more files/symbols are needed. If the method itself lacks "
+        "`context_request` object when more files/symbols are needed. For an installed "
+        "Python dependency interface, request `dependency_symbols`: "
+        "[{module: import_name, symbols: [public_attribute_names]}]; only imports "
+        "visible in supplied source can be inspected, with the configured project Python "
+        "and a short timeout. If the method itself lacks "
         "required design decisions, return empty edits and implementation_feedback: "
         "{kind: design_gap, reason: string, questions: [specific unresolved questions]}. "
         "Do not use design_gap for missing source or an ordinary coding failure.\n\n"
@@ -777,7 +801,9 @@ def _edit_user_prompt(
         f"{json.dumps(snippet_api_contract(snippets), indent=2, ensure_ascii=False)}\n\n"
         f"Selected source snippets:\n{snippet_text or 'No source snippets selected.'}\n\n"
         "Reference source snippets (read-only dependency context):\n"
-        f"{reference_snippet_text or 'No reference source snippets selected.'}"
+        f"{reference_snippet_text or 'No reference source snippets selected.'}\n\n"
+        "Requested installed API evidence (observational; unavailable is not a verified signature):\n"
+        f"{json.dumps(dependency_api or {}, indent=2, ensure_ascii=False)}"
     )
 
 
@@ -1130,10 +1156,24 @@ def _implementation_feedback(value: Any) -> dict[str, Any] | None:
 
 def _normalize_context_request(value: dict[str, Any], known_paths: set[str]) -> dict[str, Any]:
     files = [path for path in _string_list(value.get("files")) if path in known_paths]
+    raw_dependencies = value.get("dependency_symbols")
+    dependency_symbols = []
+    if isinstance(raw_dependencies, list):
+        for item in raw_dependencies[:2]:
+            if not isinstance(item, dict):
+                continue
+            module = item.get("module")
+            symbols = item.get("symbols")
+            if isinstance(module, str) and len(module) <= 100 and isinstance(symbols, list):
+                dependency_symbols.append({
+                    "module": module,
+                    "symbols": [name for name in symbols[:6] if isinstance(name, str) and len(name) <= 100],
+                })
     return {
         "query": _string(value.get("query")),
         "files": files,
         "symbols": _string_list(value.get("symbols"))[:20],
+        "dependency_symbols": dependency_symbols,
         "reason": _string(value.get("reason")),
     }
 
