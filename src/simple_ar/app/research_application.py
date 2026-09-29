@@ -1414,7 +1414,9 @@ class ResearchApplication:
                     limit=self.services.idea_limit,
                     objective=self.brief.objective or self.brief.request_text,
                     constraints={"hard_constraints": list(self.brief.hard_constraints),
-                                 "research_request": self._problem_markdown()},
+                                 "research_request": self._problem_markdown(),
+                                 "execution_boundary": _idea_assessment_execution_boundary(
+                                     self._execution_config().get("execution"))},
                     evidence_chunks=tuple(read.bundle.chunks),
                     evidence_cards=(*read.claim_cards, *read.method_cards),
                     llm_client=self.services.llm_client,
@@ -5536,6 +5538,56 @@ def _render_work_plan(plan: Mapping[str, Any]) -> str:
     if stop_reason:
         lines.extend(["", "## Stop reason", "", stop_reason])
     return "\n".join(lines) + "\n"
+
+
+def _idea_assessment_execution_boundary(execution: object) -> dict[str, Any]:
+    """Expose declared edit scope and a bounded active config before ranking ideas.
+
+    This is evidence for provisional feasibility, not a substitute for the
+    later source-to-behavior design audit. An unavailable config is reported,
+    never guessed or treated as permission to edit a protected path.
+    """
+    if not isinstance(execution, Mapping):
+        return {}
+    task = execution.get("code_task")
+    task = task if isinstance(task, Mapping) else {}
+    facts: dict[str, Any] = {
+        "edit_scope": {
+            "allowed_patterns": task.get("allowed_patterns", []),
+            "protected_patterns": task.get("protected_patterns", []),
+        },
+    }
+    protocol = execution.get("protocol")
+    conditions = protocol.get("comparison_conditions") if isinstance(protocol, Mapping) else None
+    source_config = conditions.get("source_config") if isinstance(conditions, Mapping) else None
+    if not isinstance(source_config, str) or not source_config.strip():
+        return facts
+    config_facts: dict[str, Any] = {"path": source_config, "status": "unavailable"}
+    facts["active_source_config"] = config_facts
+    code_root = task.get("code_root")
+    if not isinstance(code_root, str) or not Path(code_root).is_dir():
+        return facts
+    try:
+        from simple_ar.code_task.analysis.source_context import requested_source_context
+
+        root = Path(code_root).resolve()
+        relative = Path(source_config)
+        source_path = (root / relative).resolve()
+        if (relative.is_absolute() or ".." in relative.parts or not source_path.is_relative_to(root)
+                or not source_path.is_file() or source_path.name.startswith(".env")
+                or source_path.suffix.lower() not in {".toml", ".yaml", ".yml", ".json", ".ini", ".txt"}
+                or source_path.stat().st_size > 500_000):
+            return facts
+        excerpts = requested_source_context(
+            root, {"files": [{"path": source_config}]},
+            {"files": [source_config], "symbols": [], "query": ""},
+            supplied=[], max_files=1, max_chars=4000, max_total_chars=4000,
+        )
+        if excerpts:
+            config_facts.update({"status": "observed", "excerpts": excerpts})
+    except (OSError, TypeError, ValueError):
+        pass
+    return facts
 
 
 def _diagnostic_text(items: Any) -> str:
