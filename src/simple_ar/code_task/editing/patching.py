@@ -341,7 +341,8 @@ def propose_patch_edits(
                     if truncated_targets:
                         request = {
                             "files": truncated_targets[:max_files], "query": "", "symbols": [],
-                            "literal": "", "reason": "Bounded continuation of truncated editable source",
+                            "dependency_symbols": [], "literal": "",
+                            "reason": "Bounded continuation of truncated editable source",
                         }
                         source_fallback = True
                 total_chars = 2 * max_files * max_source_chars_per_file
@@ -352,7 +353,7 @@ def propose_patch_edits(
                     max_chars=max_source_chars_per_file,
                     max_total_chars=max(0, total_chars - sum(len(item["text"]) for item in snippets)),
                     max_windows_per_file=2 if source_fallback else 1)
-                if request["dependency_symbols"]:
+                if request.get("dependency_symbols"):
                     policy = manifest.get("environment", {}).get("policy", {})
                     interpreter = policy.get("python_executable") if isinstance(policy, dict) else None
                     dependency_api = (
