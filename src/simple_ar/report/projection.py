@@ -432,6 +432,11 @@ def attach_experiment_history(
             "status": status,
             "metrics": dict(measured) if isinstance(measured, Mapping) else {},
             "implementation_ref": result.get("implementation_ref"),
+            "measurement": {
+                key: value for key in ("condition_id", "protocol_fingerprint", "seed", "source_kind")
+                if isinstance(result.get("measurement"), Mapping)
+                and (value := result["measurement"].get(key)) is not None
+            },
         }
         history.append(row)
         handles.append(SourceHandle(
@@ -656,6 +661,19 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
                 f"{detail_reference}; this section shows the declared compact results.",
             ])
         return "\n".join(lines)
+    history = context.results.get("measurement_history") if isinstance(context.results, Mapping) else None
+    history_table = _paired_history_markdown(history, declared_metrics)
+    if history_table:
+        lines.extend(["", "### Recorded Paired Conditions", "", history_table])
+        lines.append(
+            "Rows pair one recorded baseline and one candidate by condition and protocol fingerprint. "
+            "Deltas are candidate minus baseline; this table does not certify the underlying assets "
+            "or establish statistical significance."
+        )
+        detail_reference = _detailed_measurement_reference(context)
+        if detail_reference:
+            lines.extend(["", f"Full measurement records are preserved in {detail_reference}."])
+        return "\n".join(lines)
     if isinstance(comparisons, list):
         rendered = False
         for comparison in comparisons:
@@ -702,6 +720,60 @@ def _verified_experiment_evidence(context: ReportContext) -> str:
         )
         lines.extend(["", f"{detail_note} {detail_reference}."])
     return "\n".join(lines)
+
+
+def _paired_history_markdown(history: object, declared_metrics: set[str] | None) -> str:
+    """Render unambiguous measured pairs, never infer pairs from action names."""
+
+    if not isinstance(history, list):
+        return ""
+    grouped: dict[tuple[str, str], dict[str, list[Mapping[str, Any]]]] = {}
+    for row in history:
+        if not isinstance(row, Mapping) or row.get("status") != "passed":
+            continue
+        measurement = row.get("measurement")
+        metrics = row.get("metrics")
+        if not isinstance(measurement, Mapping) or not isinstance(metrics, Mapping):
+            continue
+        condition_id = measurement.get("condition_id")
+        fingerprint = measurement.get("protocol_fingerprint")
+        if not isinstance(condition_id, str) or not isinstance(fingerprint, str):
+            continue
+        role, separator, condition = condition_id.partition(":")
+        if separator != ":" or not condition or role not in {"baseline", "candidate"}:
+            continue
+        if measurement.get("source_kind") != "measured":
+            continue
+        grouped.setdefault((fingerprint, condition), {"baseline": [], "candidate": []})[role].append(row)
+
+    lines: list[str] = []
+    complete_pairs = 0
+    for (_, condition), roles in grouped.items():
+        if len(roles["baseline"]) != 1 or len(roles["candidate"]) != 1:
+            continue  # Duplicates or incomplete pairs need explicit analysis.
+        complete_pairs += 1
+        baseline = roles["baseline"][0]["metrics"]
+        candidate = roles["candidate"][0]["metrics"]
+        for name in baseline:
+            if name not in candidate or (declared_metrics is not None and name not in declared_metrics):
+                continue
+            b_value, c_value = baseline[name], candidate[name]
+            if (isinstance(b_value, bool) or isinstance(c_value, bool)
+                    or not isinstance(b_value, (int, float))
+                    or not isinstance(c_value, (int, float))):
+                continue
+            lines.append(
+                f"| {condition.replace('|', '/')} | `{str(name).replace('|', '/')}` | "
+                f"{_format_report_metric(b_value)} | {_format_report_metric(c_value)} | "
+                f"{_format_report_metric(c_value - b_value)} |"
+            )
+    if not lines or complete_pairs < 2:
+        return ""
+    return "\n".join([
+        "| Condition | Metric | Baseline | Candidate | Delta |",
+        "| --- | --- | ---: | ---: | ---: |",
+        *lines,
+    ])
 
 
 def _declared_report_metrics(context: ReportContext) -> tuple[str, set[str] | None]:

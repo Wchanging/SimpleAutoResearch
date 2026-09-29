@@ -16,6 +16,63 @@ from simple_ar.report.schema import MetricSource, ReportContext, ReportMemory, R
 
 
 class ReportMeasurementAuditTests(unittest.TestCase):
+    def test_multi_condition_appendix_uses_measured_protocol_pairs(self):
+        history = []
+        sources = []
+        for seed, baseline, candidate in ((0, 0.4443464279, 0.4283993840),
+                                          (1, 0.4443523586, 0.4287708998)):
+            for role, value in (("baseline", baseline), ("candidate", candidate)):
+                history.append({
+                    "action": f"run-{role}-{seed}", "status": "passed",
+                    "artifact": f"attempts/{role}-{seed}/results.json",
+                    "metrics": {"rmse": value},
+                    "measurement": {
+                        "condition_id": f"{role}:seed={seed}",
+                        "protocol_fingerprint": f"protocol-{seed}",
+                        "source_kind": "measured", "seed": seed,
+                    },
+                })
+                sources.append(MetricSource(
+                    metric_id=f"{role}-{seed}", name="rmse", value=value,
+                    artifact=history[-1]["artifact"], label=role,
+                ))
+        context = ReportContext(
+            topic="Paired conditions", report_mode="experiment",
+            results={
+                "measurement_history": history,
+                "result_schema": {"primary_metric": "rmse", "required_metrics": ["rmse"]},
+                "comparisons": [{"metrics": [{"name": "rmse", "baseline": 0.4443523586,
+                                               "candidate": 0.4287708998,
+                                               "delta": 0.4287708998 - 0.4443523586}]}],
+            },
+            metric_sources=sources,
+        )
+        body = _verified_experiment_evidence(context)
+        self.assertIn("### Recorded Paired Conditions", body)
+        self.assertIn("| seed=0 | `rmse` | 0.444346 | 0.428399 |", body)
+        self.assertIn("| seed=1 | `rmse` | 0.444352 | 0.428771 |", body)
+        audit = build_report_audit(report=body, report_body=body, context=context, memory=ReportMemory())
+        self.assertEqual(audit.metric_audit.unmatched_metrics, [])
+
+    def test_multi_condition_appendix_does_not_pair_mismatched_or_duplicate_runs(self):
+        rows = [
+            {"status": "passed", "metrics": {"rmse": 0.4}, "measurement": {
+                "condition_id": "baseline:seed=0", "protocol_fingerprint": "a", "source_kind": "measured"}},
+            {"status": "passed", "metrics": {"rmse": 0.3}, "measurement": {
+                "condition_id": "candidate:seed=0", "protocol_fingerprint": "b", "source_kind": "measured"}},
+        ]
+        context = ReportContext(
+            topic="Unpaired", report_mode="experiment",
+            results={"measurement_history": rows},
+            metric_sources=[MetricSource(metric_id="baseline", name="rmse", value=0.4,
+                                         artifact="baseline.json", label="baseline")],
+        )
+        self.assertNotIn("Recorded Paired Conditions", _verified_experiment_evidence(context))
+        rows[1]["measurement"]["protocol_fingerprint"] = "a"
+        rows.extend([dict(rows[0]), dict(rows[1])])
+        context.results["measurement_history"] = rows
+        self.assertNotIn("Recorded Paired Conditions", _verified_experiment_evidence(context))
+
     def test_missing_paired_row_does_not_hide_individual_measurements(self):
         context = ReportContext(
             topic="Failed candidate", report_mode="experiment",
