@@ -24,6 +24,9 @@ from simple_ar.research.synthesis import SynthesisResult
 
 
 class ResearchDesignTests(unittest.TestCase):
+    _ALIGNED_REVIEW = {"verdict": "accept", "mechanism_alignment": "aligned",
+                       "mechanism_rationale": "The edit preserves the selected intervention.", "issues": []}
+
     def test_initial_research_design_clarifies_method_before_code_task(self):
         from unittest.mock import Mock
         from simple_ar.code_task.analysis.source_context import source_file_inventory
@@ -43,7 +46,7 @@ class ResearchDesignTests(unittest.TestCase):
                   "unresolved_questions": [], "target_paths": ["model.py"],
                   "code_task_questions": ["Check the input shape at the forward call site."],
                   "source_quotes": [{"path": "model.py", "quote": "return x"}]},
-                {"verdict": "accept", "issues": []},
+                self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -58,6 +61,46 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertEqual(ResearchDesignResult.from_handoff_dict(result.to_handoff_dict()).code_task_questions,
                              result.code_task_questions)
             self.assertIn("def forward", client.ask_json.call_args.args[1])
+
+    def test_initial_design_does_not_accept_missing_or_different_mechanism_review(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        for review in (
+            {"verdict": "accept", "issues": []},
+            {"verdict": "accept", "mechanism_alignment": "different",
+             "mechanism_rationale": "The edit changes a different model behavior.", "issues": []},
+            {"verdict": "accept", "mechanism_alignment": "aligned",
+             "mechanism_rationale": "The intervention appears aligned.",
+             "issues": ["The producer path still needs inspection."]},
+        ):
+            with self.subTest(review=review), tempfile.TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                (workspace / "model.py").write_text("def forward(x):\n    return x\n", encoding="utf-8")
+                client = Mock()
+                client.ask_json.side_effect = [
+                    {"selected_idea_id": "idea-002", "rationale": "Test a bounded mechanism."},
+                    {"status": "ready", "implementation_spec": "Change the observed forward output.",
+                     "unresolved_questions": [], "target_paths": ["model.py"],
+                     "source_quotes": [{"path": "model.py", "quote": "return x"}]},
+                    review,
+                    {"status": "blocked", "implementation_spec": "",
+                     "unresolved_questions": ["Cannot preserve the chosen mechanism."]},
+                ]
+                result = build_research_design(ResearchDesignRequest(
+                    synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                    execution_boundary={"code_task": {"code_root": str(workspace)}},
+                    source_workspace=workspace, source_index=source_file_inventory(workspace),
+                    use_llm=True, llm_client=client,
+                ))
+                self.assertEqual(result.status, "blocked")
+                self.assertEqual(client.ask_json.call_count, 4)
+                self.assertIn(
+                    "mechanism alignment" if not review.get("mechanism_alignment")
+                    or review.get("mechanism_alignment") == "different"
+                    else "producer path",
+                    client.ask_json.call_args.args[1],
+                )
 
     def test_delegated_code_questions_reach_existing_code_task_handoff(self):
         from simple_ar.research.implementation import ImplementationRequest, _prepare_research_task
@@ -102,7 +145,7 @@ class ResearchDesignTests(unittest.TestCase):
                  "unresolved_questions": [], "target_paths": ["model.py"],
                  "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"},
                                    {"path": "model.py", "quote": "return k"}]},
-                {"verdict": "accept", "issues": []},
+                self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -138,7 +181,7 @@ class ResearchDesignTests(unittest.TestCase):
                     "leave the accepted evaluator unchanged.",
                  "unresolved_questions": [], "target_paths": ["model.py"],
                  "source_quotes": [{"path": "model.py", "quote": "Model(**config['model'])"}]},
-                {"verdict": "accept", "issues": []},
+                self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -169,7 +212,9 @@ class ResearchDesignTests(unittest.TestCase):
                  "unresolved_questions": [], "target_paths": ["model.py"],
                  "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"},
                                    {"path": "model.py", "quote": "def build(k=5)"}]},
-                {"verdict": "revise", "issues": ["Changing the default is dormant: active config supplies k=32."]},
+                {"verdict": "revise", "mechanism_alignment": "different",
+                 "mechanism_rationale": "The default is overridden by active configuration.",
+                 "issues": ["Changing the default is dormant: active config supplies k=32."]},
                 {"status": "blocked", "implementation_spec": "", "unresolved_questions": [
                     "A config-only change is outside the authorized edit scope."]},
             ]
@@ -553,7 +598,7 @@ class ResearchDesignTests(unittest.TestCase):
                  "unresolved_questions": [], "target_paths": ["consumer.py"],
                  "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"},
                                    {"path": "consumer.py", "quote": "heads.mean(1)"}]},
-                {"verdict": "accept", "issues": []},
+                self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -587,7 +632,7 @@ class ResearchDesignTests(unittest.TestCase):
                     "validate mixed taxable/exempt lines with a small fixture.",
                  "unresolved_questions": [], "target_paths": ["service.ts", "line_calculator.ts"],
                  "source_quotes": [{"path": "service.ts", "quote": "lines.reduce(sumLine, 0)"}]},
-                {"verdict": "accept", "issues": []},
+                self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -621,7 +666,7 @@ class ResearchDesignTests(unittest.TestCase):
                 {"status": "ready", "implementation_spec":
                     "Create a standalone parser with a fixture for input and output checks.",
                  "unresolved_questions": [], "target_paths": ["parser.py"]},
-                {"verdict": "accept", "issues": []},
+                self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -661,7 +706,7 @@ class ResearchDesignTests(unittest.TestCase):
                     "source_quotes": [{"path": "experiment.toml", "quote": "k = 32"},
                                       {"path": "model.py", "quote": "def late_three()"}],
                     "unresolved_questions": []},
-                {"verdict": "accept", "issues": []},
+                self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
@@ -694,8 +739,10 @@ class ResearchDesignTests(unittest.TestCase):
             client.ask_json.side_effect = [
                 {"selected_idea_id": "idea-002", "rationale": "Inspect source first."},
                 inspect("first"), inspect("second"), inspect("third"), ready,
-                {"verdict": "revise", "issues": ["Inspect audit_target before editing."]},
-                inspect("audit_target"), ready, {"verdict": "accept", "issues": []},
+                {"verdict": "revise", "mechanism_alignment": "uncertain",
+                 "mechanism_rationale": "The relevant source is not yet visible.",
+                 "issues": ["Inspect audit_target before editing."]},
+                inspect("audit_target"), ready, self._ALIGNED_REVIEW,
             ]
             result = build_research_design(ResearchDesignRequest(
                 synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,

@@ -434,8 +434,8 @@ def _refine_implementation_design(request: ResearchDesignRequest, *, trace: list
                             "unrelated producer is not proof of the claimed effect. Either inspect a new "
                             "location, revise to a source-backed design, select an allowed alternative, "
                             "or return blocked. Do not substitute a related but different model change "
-                            "for the accepted candidate; distinguish ensemble size, adapter capacity, "
-                            "and other coupled quantities by their observed behavior. Audit issues: "
+                            "for the accepted candidate. Distinguish related mechanisms or "
+                            "parameters by their actual source-to-output behavior. Audit issues: "
                             + "; ".join(issues) + "\n")
                         continue
                     return replace(previous, status="blocked", generation_mode="llm", diagnostics=tuple(issues))
@@ -671,7 +671,7 @@ def _review_initial_feasibility(
         "Independently audit this proposed implementation before CodeTask or training. "
         "Use only the provided source excerpts and accepted execution boundary. "
         "Reject a design that substitutes a different mechanism or hyperparameter for the "
-        "selected idea, even if the two both increase model scale; require observed source "
+        "selected idea, even if both appear to address the same research goal; require observed source "
         "evidence before treating them as equivalent. "
         "Reject if an asserted default or baseline value contradicts the active source_config; "
         "if the proposed edit path cannot implement the specified behavior without changing a protected file; "
@@ -688,7 +688,10 @@ def _review_initial_feasibility(
         "contradiction, missing authority, or a speculative method. The experiment runner "
         "checks the declared metric artifacts after execution. If the proposal changes the "
         "prediction/output interface, inspect that impact before accepting. Return JSON "
-        "{verdict:accept|revise, issues:[short specific strings]}.\n\n"
+        "{verdict:accept|revise, mechanism_alignment:aligned|different|uncertain, "
+        "mechanism_rationale:string, issues:[short specific strings]}. "
+        "Compare the candidate's intervention with the proposed code behavior, not merely "
+        "their common research goal or metric.\n\n"
         + json.dumps({
             "selected_idea": reviewed_idea.to_row() if reviewed_idea else None,
             "contract": previous.contract.to_row() if previous.contract else None,
@@ -711,6 +714,14 @@ def _review_initial_feasibility(
     issues = review.get("issues")
     if not isinstance(issues, list) or any(not isinstance(issue, str) for issue in issues):
         raise LLMError("Feasibility review issues must be a list of strings.")
+    alignment = review.get("mechanism_alignment")
+    rationale = review.get("mechanism_rationale")
+    if alignment not in {"aligned", "different", "uncertain"} or not isinstance(rationale, str) or not rationale.strip():
+        return ["Feasibility review did not establish candidate-to-implementation mechanism alignment."]
+    if alignment != "aligned":
+        return [f"Candidate-to-implementation mechanism alignment is {alignment}: {rationale.strip()}", *issues]
+    if issues:
+        return issues
     if review["verdict"] == "revise":
         return issues or ["Feasibility reviewer rejected the implementation without a reason."]
     return []
