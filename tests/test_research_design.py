@@ -359,6 +359,34 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertIn("width = config['width']", found[0]["text"])
             self.assertIn("model = Predictor(width=width)", found[0]["text"])
 
+    def test_source_followup_continues_named_constructor_before_later_call_site(self):
+        from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source = (
+                "class Predictor:\n    def __init__(self, width):\n        self.width = width\n"
+                + "        self.width += 1\n" * 55
+                + "        self.embedding = make_embedding(width)\n"
+                + "\n# unrelated\n" * 400
+                + "model = Predictor(width=config['width'])\n"
+            )
+            (workspace / "model.py").write_text(source, encoding="utf-8")
+            index = source_file_inventory(workspace)
+            first = requested_source_context(
+                workspace, index, {"files": ["model.py"], "query": "", "symbols": []},
+                supplied=[], max_files=1, max_chars=1000,
+            )
+            followup = requested_source_context(
+                workspace, index,
+                {"files": ["model.py"], "symbols": ["Predictor.__init__"],
+                 "query": "Where is Predictor constructed and how is embedding enabled?"},
+                supplied=first, max_files=1, max_chars=1000,
+            )
+            self.assertEqual(followup[0]["source_offset"], 1000)
+            self.assertIn("self.embedding = make_embedding(width)", followup[0]["text"])
+            self.assertNotIn("model = Predictor(", followup[0]["text"])
+
     def test_bounded_line_range_fills_only_unseen_gap(self):
         from simple_ar.code_task.analysis.source_context import requested_source_context, source_file_inventory
 

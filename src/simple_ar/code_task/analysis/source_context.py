@@ -45,6 +45,44 @@ def _construction_call_positions(text: str, symbols: list[str], query: str) -> l
     return [position for name in names for position in sorted(calls[name])]
 
 
+def _unfinished_python_symbol_starts(
+    text: str, symbols: list[str], seen: list[tuple[int, int]],
+) -> list[int]:
+    """Continue a named definition whose signature was read but body was clipped.
+
+    A later call site is not a substitute for the unseen body of the requested
+    method. Only definitions named by the caller qualify; unrelated truncated
+    functions do not consume another source window.
+    """
+    if not symbols or not seen:
+        return []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    offsets = [0]
+    for line in text.splitlines(keepends=True):
+        offsets.append(offsets[-1] + len(line))
+    wanted = set(symbols)
+    starts: list[int] = []
+
+    def visit(nodes: list[ast.stmt], parents: tuple[str, ...] = ()) -> None:
+        for node in nodes:
+            if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            qualified = ".".join((*parents, node.name))
+            if qualified in wanted or (not parents and node.name in wanted):
+                begin = offsets[node.lineno - 1]
+                end = offsets[min(node.end_lineno or node.lineno, len(offsets) - 1)]
+                for lo, hi in seen:
+                    if lo <= begin < hi < end:
+                        starts.append(hi)
+            visit(node.body, (*parents, node.name))
+
+    visit(tree.body)
+    return list(dict.fromkeys(starts))
+
+
 def source_file_inventory(
     workspace: Path, *, max_files: int = 400, required_paths: tuple[str, ...] = (),
 ) -> dict[str, Any]:
@@ -185,6 +223,8 @@ def requested_source_context(workspace: Path, index: dict[str, Any], request: di
         # Exact matches often name a use site; include its preceding setup and
         # call arguments as well as the continuation after it.
         starts = [max(0, min(pos - size // 2, len(text) - size)) for pos in unseen(literal_positions)]
+        if not literal and path.suffix == ".py":
+            starts += _unfinished_python_symbol_starts(text, request.get("symbols", []), seen)
         starts += [max(0, min(pos - size // 2, len(text) - size)) for pos in unseen(call_positions)]
         starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(query_positions)]
         starts += [max(0, min(pos - size // 4, len(text) - size)) for pos in unseen(symbol_positions)]
