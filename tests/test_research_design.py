@@ -674,6 +674,40 @@ class ResearchDesignTests(unittest.TestCase):
             self.assertEqual(result.status, "ready")
             self.assertIn("late_three", client.ask_json.call_args_list[4].args[1])
 
+    def test_feasibility_audit_can_request_one_final_bounded_source_read(self):
+        from unittest.mock import Mock
+        from simple_ar.code_task.analysis.source_context import source_file_inventory
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            source = "def start():\n    return 1\n" + "# padding\n" * 500
+            for marker in ("first", "second", "third", "audit_target"):
+                source += f"# {marker}\n" + "# padding\n" * 500
+            (workspace / "model.py").write_text(source, encoding="utf-8")
+            inspect = lambda marker: {"status": "inspect_source", "context_request": {
+                "files": ["model.py"], "symbols": [], "query": "", "literal": marker}}
+            ready = {"status": "ready", "implementation_spec": "Change the observed source path.",
+                     "target_paths": ["model.py"],
+                     "source_quotes": [{"path": "model.py", "quote": "def start()"}],
+                     "unresolved_questions": []}
+            client = Mock()
+            client.ask_json.side_effect = [
+                {"selected_idea_id": "idea-002", "rationale": "Inspect source first."},
+                inspect("first"), inspect("second"), inspect("third"), ready,
+                {"verdict": "revise", "issues": ["Inspect audit_target before editing."]},
+                inspect("audit_target"), ready, {"verdict": "accept", "issues": []},
+            ]
+            result = build_research_design(ResearchDesignRequest(
+                synthesis=self._synthesis(), idea_id="idea-002", idea_id_is_fixed=False,
+                execution_boundary={"code_task": {"code_root": str(workspace),
+                    "allowed_patterns": ["model.py"]}},
+                source_workspace=workspace, source_index=source_file_inventory(workspace),
+                use_llm=True, llm_client=client,
+            ))
+            self.assertEqual(result.status, "ready")
+            self.assertEqual(client.ask_json.call_count, 9)
+            self.assertIn("audit_target", client.ask_json.call_args_list[7].args[1])
+
     def test_refinement_reads_real_source_and_persists_trace_on_provider_failure(self):
         from unittest.mock import Mock
         import json
